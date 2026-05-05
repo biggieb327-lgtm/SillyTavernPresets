@@ -33,10 +33,8 @@
     line-height: 1.5;
   }
 
-  /* ── Layout ── */
   .app { max-width: 480px; margin: 0 auto; padding: 0 0 100px; }
 
-  /* ── Header ── */
   .header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -74,7 +72,6 @@
   .week-range { font-size: 15px; font-weight: 600; }
   .week-sub { font-size: 12px; color: var(--text-muted); }
 
-  /* ── Tabs ── */
   .tabs {
     display: flex;
     border-top: 1px solid var(--border);
@@ -88,11 +85,9 @@
   .tab.active { color: var(--accent); border-top-color: var(--accent); }
   .tab:hover:not(.active) { color: var(--text-dim); }
 
-  /* ── Sections ── */
   .section { display: none; padding: 20px; }
   .section.active { display: block; }
 
-  /* ── Summary Card ── */
   .summary-card {
     background: linear-gradient(135deg, #166534 0%, #14532d 100%);
     border-radius: var(--radius);
@@ -107,14 +102,12 @@
   .summary-item .s-val { font-size: 16px; font-weight: 600; margin-top: 1px; }
   .summary-item .s-val.over { color: #fca5a5; }
 
-  /* ── Progress bar ── */
   .progress-wrap { height: 6px; background: rgba(255,255,255,.15); border-radius: 99px; overflow: hidden; margin: 10px 0 2px; }
   .progress-bar { height: 100%; border-radius: 99px; background: #4ade80; transition: width .4s ease; }
   .progress-bar.warn { background: var(--warn); }
   .progress-bar.over { background: var(--danger); }
   .progress-info { display: flex; justify-content: space-between; font-size: 11px; color: #86efac; opacity: .75; }
 
-  /* ── Category Cards ── */
   .cat-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -136,7 +129,6 @@
   .cat-remaining.over { color: var(--danger); }
   .cat-remaining.warn { color: var(--warn); }
 
-  /* ── Expense list ── */
   .expense-item {
     display: flex;
     align-items: center;
@@ -161,12 +153,10 @@
   }
   .exp-del:hover { color: var(--danger); background: var(--danger-dim); }
 
-  /* ── Empty state ── */
   .empty { text-align: center; padding: 40px 20px; color: var(--text-muted); }
   .empty-icon { font-size: 40px; margin-bottom: 12px; }
   .empty p { font-size: 14px; }
 
-  /* ── Forms ── */
   .form-group { margin-bottom: 16px; }
   .form-label { font-size: 12px; font-weight: 600; color: var(--text-dim); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 6px; display: block; }
   .form-input, .form-select {
@@ -182,7 +172,6 @@
   .amount-wrap .currency { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-dim); font-size: 15px; pointer-events: none; }
   .amount-wrap .form-input { padding-left: 26px; }
 
-  /* ── Buttons ── */
   .btn {
     display: block; width: 100%; padding: 12px; border-radius: var(--radius-sm);
     font-size: 15px; font-weight: 600; cursor: pointer; border: none;
@@ -197,7 +186,6 @@
   .btn-ghost:hover { background: var(--border); }
   .btn-sm { padding: 7px 12px; font-size: 13px; width: auto; display: inline-block; }
 
-  /* ── Section heading ── */
   .section-heading {
     font-size: 13px; font-weight: 700; color: var(--text-muted);
     text-transform: uppercase; letter-spacing: .08em;
@@ -205,7 +193,6 @@
     display: flex; align-items: center; justify-content: space-between;
   }
 
-  /* ── Settings modal ── */
   .modal-backdrop {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
     z-index: 200; align-items: flex-end; justify-content: center;
@@ -223,7 +210,6 @@
     cursor: pointer; font-size: 22px; line-height: 1; margin-top: -2px;
   }
 
-  /* ── Category editor ── */
   .cat-edit-row {
     display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
   }
@@ -236,7 +222,6 @@
   }
   .cat-del-btn:hover { color: var(--danger); }
 
-  /* ── Toast ── */
   .toast {
     position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%) translateY(20px);
     background: var(--surface2); border: 1px solid var(--border); border-radius: 99px;
@@ -246,11 +231,9 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  /* ── History group ── */
   .history-group { margin-bottom: 20px; }
   .history-date { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 
-  /* ── Balance card ── */
   .balance-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -260,34 +243,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    cursor: pointer;
-    transition: border-color .15s;
   }
-  .balance-card:hover { border-color: var(--accent); }
-  .balance-left { display: flex; align-items: center; gap: 10px; }
+  .balance-left { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .balance-left:hover .balance-amount { color: var(--accent); }
   .balance-icon { font-size: 22px; }
   .balance-label { font-size: 12px; color: var(--text-muted); }
-  .balance-amount { font-size: 20px; font-weight: 700; color: var(--text); margin-top: 1px; }
+  .balance-amount { font-size: 20px; font-weight: 700; color: var(--text); margin-top: 1px; transition: color .15s; }
   .balance-amount.unset { color: var(--text-muted); font-size: 14px; font-weight: 400; }
-  .balance-after { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-  .balance-edit { font-size: 16px; color: var(--text-muted); }
 
-  /* ── Savings card ── */
-  .savings-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px;
-    margin-bottom: 20px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .savings-label { font-size: 13px; color: var(--text-muted); }
-  .savings-amount { font-size: 22px; font-weight: 700; color: var(--accent); }
-  .savings-amount.neg { color: var(--danger); }
-
-  /* ── Insights ── */
   .insight-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -303,25 +266,6 @@
   .insight-text { color: var(--text-dim); line-height: 1.5; }
   .insight-text strong { color: var(--text); }
 
-  /* ── Nav bottom ── */
-  .bottom-nav {
-    position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
-    width: 100%; max-width: 480px;
-    background: var(--surface); border-top: 1px solid var(--border);
-    display: flex;
-    z-index: 100;
-  }
-  .nav-btn {
-    flex: 1; background: none; border: none; color: var(--text-muted);
-    padding: 12px 4px 16px; font-size: 10px; font-weight: 500; cursor: pointer;
-    display: flex; flex-direction: column; align-items: center; gap: 4px;
-    transition: color .15s;
-  }
-  .nav-btn .nav-icon { font-size: 20px; }
-  .nav-btn.active { color: var(--accent); }
-  .nav-btn:hover:not(.active) { color: var(--text-dim); }
-
-  /* ── Chip ── */
   .chip {
     display: inline-flex; align-items: center; gap: 4px;
     background: var(--surface2); border: 1px solid var(--border);
@@ -331,9 +275,6 @@
   }
   .chip.selected { border-color: var(--accent); color: var(--accent); background: rgba(74,222,128,.1); }
 
-  /* ── Scrollable areas ── */
-  .scroll-area { overflow-y: auto; }
-
   @media (max-width: 400px) {
     .summary-card .big-num { font-size: 30px; }
   }
@@ -342,7 +283,6 @@
 <body>
 
 <div class="app">
-  <!-- HEADER -->
   <div class="header">
     <div class="header-top">
       <span class="app-title">Weekly Budget</span>
@@ -364,18 +304,17 @@
     </div>
   </div>
 
-  <!-- OVERVIEW -->
   <div class="section active" id="tab-overview">
-    <div class="summary-card" id="summaryCard">
-      <div class="label">Remaining this week</div>
-      <div class="big-num" id="remaining">$0.00</div>
+    <div class="summary-card">
+      <div class="label">Remaining</div>
+      <div class="big-num" id="remaining">—</div>
       <div class="progress-wrap"><div class="progress-bar" id="mainProgress" style="width:0%"></div></div>
-      <div class="progress-info"><span id="spentLabel">$0 spent</span><span id="incomeLabel">of $0</span></div>
+      <div class="progress-info"><span id="spentLabel">$0 spent</span><span id="incomeLabel">set balance to start</span></div>
       <br>
       <div class="summary-row">
         <div class="summary-item">
-          <div class="s-label">Income</div>
-          <div class="s-val" id="sumIncome">$0</div>
+          <div class="s-label">Balance</div>
+          <div class="s-val" id="sumIncome">—</div>
         </div>
         <div class="summary-item">
           <div class="s-label">Budgeted</div>
@@ -386,34 +325,31 @@
           <div class="s-val" id="sumSpent">$0</div>
         </div>
         <div class="summary-item">
-          <div class="s-label">Saved</div>
-          <div class="s-val" id="sumSaved">$0</div>
+          <div class="s-label">Remaining</div>
+          <div class="s-val" id="sumSaved">—</div>
         </div>
       </div>
     </div>
 
-    <div class="balance-card" onclick="openBalanceEdit()" id="balanceCard">
-      <div class="balance-left">
+    <div class="balance-card" id="balanceCard">
+      <div class="balance-left" onclick="openBalanceEdit()" style="flex:1;min-width:0">
         <div class="balance-icon">🏦</div>
         <div>
-          <div class="balance-label">Bank Balance</div>
+          <div class="balance-label">Bank Balance <span style="font-size:13px">✏</span></div>
           <div class="balance-amount unset" id="balanceAmount">Tap to set</div>
-          <div class="balance-after" id="balanceAfter" style="display:none"></div>
         </div>
       </div>
-      <div class="balance-edit">✏</div>
+      <button class="btn btn-ghost btn-sm" id="paydayBtn" onclick="addIncome()" style="flex-shrink:0;display:none">+ Payday</button>
     </div>
 
     <div class="section-heading">Categories</div>
     <div id="categoryList"></div>
-
     <div id="noCats" class="empty" style="display:none">
       <div class="empty-icon">📂</div>
       <p>No categories yet. Open Settings to add some.</p>
     </div>
   </div>
 
-  <!-- ADD EXPENSE -->
   <div class="section" id="tab-add">
     <div class="section-heading">Add Expense</div>
     <form id="expenseForm" onsubmit="addExpense(event)">
@@ -440,7 +376,6 @@
     </form>
   </div>
 
-  <!-- HISTORY -->
   <div class="section" id="tab-history">
     <div class="section-heading">This Week's Expenses</div>
     <div id="historyList"></div>
@@ -450,21 +385,18 @@
     </div>
   </div>
 
-  <!-- INSIGHTS -->
   <div class="section" id="tab-insights">
     <div class="section-heading">Weekly Insights</div>
     <div id="insightsList"></div>
   </div>
 </div>
 
-<!-- SETTINGS MODAL -->
 <div class="modal-backdrop" id="settingsModal" onclick="closeSettings(event)">
   <div class="modal">
     <div class="modal-title">
       Settings
       <button class="modal-close" onclick="closeSettings(null, true)">×</button>
     </div>
-
     <div class="form-group">
       <label class="form-label">Weekly Take-Home Pay</label>
       <div class="amount-wrap">
@@ -472,7 +404,6 @@
         <input class="form-input" id="settingIncome" type="number" step="0.01" min="0" placeholder="500.00">
       </div>
     </div>
-
     <div class="form-group">
       <label class="form-label">Pay Day (week starts on)</label>
       <select class="form-select" id="settingPayday">
@@ -485,12 +416,10 @@
         <option value="6">Saturday</option>
       </select>
     </div>
-
     <div class="form-group">
       <label class="form-label">Currency Symbol</label>
       <input class="form-input" id="settingCurrency" type="text" maxlength="3" placeholder="$" style="width:80px">
     </div>
-
     <div style="margin-bottom: 20px;">
       <div class="section-heading" style="margin-bottom:10px">
         Budget Categories
@@ -498,13 +427,11 @@
       </div>
       <div id="catEditorList"></div>
     </div>
-
     <button class="btn btn-primary" onclick="saveSettings()" style="margin-bottom:12px">Save Settings</button>
     <button class="btn btn-danger" onclick="clearAllData()" style="margin-bottom:4px">Clear All Data</button>
   </div>
 </div>
 
-<!-- BALANCE EDIT MODAL -->
 <div class="modal-backdrop" id="balanceModal" onclick="closeBalanceEdit(event)">
   <div class="modal" style="padding-bottom:32px">
     <div class="modal-title">
@@ -523,14 +450,12 @@
   </div>
 </div>
 
-<!-- TOAST -->
 <div class="toast" id="toast"></div>
 
 <script>
-// ── State ──
 let state = {
   income: 500,
-  payday: 5,       // 0=Sun…6=Sat
+  payday: 5,
   currency: '$',
   categories: [
     { id: 'rent',    name: 'Rent / Housing',  icon: '🏠', budget: 150 },
@@ -542,27 +467,19 @@ let state = {
     { id: 'savings', name: 'Savings',          icon: '💰', budget: 60 },
     { id: 'other',   name: 'Other',            icon: '📦', budget: 50 },
   ],
-  expenses: [],   // { id, desc, amount, catId, date (ISO) }
-  weekOffset: 0,  // 0 = current week
-  balance: null,  // current bank account balance
+  expenses: [],
+  weekOffset: 0,
+  balance: null,
 };
 
-// ── Persistence ──
 function load() {
-  try {
-    const s = localStorage.getItem('wbApp');
-    if (s) state = { ...state, ...JSON.parse(s) };
-  } catch(_) {}
+  try { const s = localStorage.getItem('wbApp'); if (s) state = { ...state, ...JSON.parse(s) }; } catch(_) {}
 }
-function save() {
-  localStorage.setItem('wbApp', JSON.stringify(state));
-}
+function save() { localStorage.setItem('wbApp', JSON.stringify(state)); }
 
-// ── Week helpers ──
 function weekStart(offset = 0) {
   const now = new Date();
-  const day = now.getDay(); // 0=Sun…6=Sat
-  const diff = (day - state.payday + 7) % 7;
+  const diff = (now.getDay() - state.payday + 7) % 7;
   const start = new Date(now);
   start.setDate(now.getDate() - diff + offset * 7);
   start.setHours(0, 0, 0, 0);
@@ -574,12 +491,8 @@ function weekEnd(offset = 0) {
   end.setHours(23, 59, 59, 999);
   return end;
 }
-function fmtDate(d) {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-function fmtDay(d) {
-  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-}
+function fmtDate(d) { return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+function fmtDay(d) { return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }); }
 function isoToDate(s) { return new Date(s + 'T12:00:00'); }
 function todayISO() {
   const d = new Date();
@@ -589,162 +502,119 @@ function inCurrentWeek(isoDate) {
   const d = isoToDate(isoDate);
   return d >= weekStart(state.weekOffset) && d <= weekEnd(state.weekOffset);
 }
-
-// ── Format money ──
 function fmt(n) { return state.currency + n.toFixed(2); }
+function weekExpenses() { return state.expenses.filter(e => inCurrentWeek(e.date)); }
+function catSpent(catId) { return weekExpenses().filter(e => e.catId === catId).reduce((s, e) => s + e.amount, 0); }
+function totalSpent() { return weekExpenses().reduce((s, e) => s + e.amount, 0); }
 
-// ── Week expenses ──
-function weekExpenses() {
-  return state.expenses.filter(e => inCurrentWeek(e.date));
-}
-function catSpent(catId) {
-  return weekExpenses().filter(e => e.catId === catId).reduce((s, e) => s + e.amount, 0);
-}
-function totalSpent() {
-  return weekExpenses().reduce((s, e) => s + e.amount, 0);
-}
-
-// ── Render balance card ──
 function renderBalance() {
   const el = document.getElementById('balanceAmount');
-  const after = document.getElementById('balanceAfter');
   document.getElementById('balanceModalCurrency').textContent = state.currency;
+  const paydayBtn = document.getElementById('paydayBtn');
   if (state.balance === null) {
     el.textContent = 'Tap to set';
     el.className = 'balance-amount unset';
-    after.style.display = 'none';
+    paydayBtn.style.display = 'none';
   } else {
     el.textContent = fmt(state.balance);
     el.className = 'balance-amount';
-    const projected = state.balance - totalSpent();
-    after.textContent = fmt(projected) + ' after tracked spending';
-    after.style.display = '';
-    after.style.color = projected < 0 ? 'var(--danger)' : 'var(--text-muted)';
+    paydayBtn.style.display = state.income > 0 ? '' : 'none';
   }
 }
 
-// ── Balance modal ──
+function addIncome() {
+  if (state.income <= 0) return;
+  state.balance = (state.balance ?? 0) + state.income;
+  save();
+  render();
+  showToast(fmt(state.income) + ' added to balance ✓');
+}
+
 function openBalanceEdit() {
   document.getElementById('balanceInput').value = state.balance !== null ? state.balance : '';
   document.getElementById('balanceModal').classList.add('open');
   setTimeout(() => document.getElementById('balanceInput').focus(), 100);
 }
 function closeBalanceEdit(e, force) {
-  if (force || (e && e.target === document.getElementById('balanceModal'))) {
+  if (force || (e && e.target === document.getElementById('balanceModal')))
     document.getElementById('balanceModal').classList.remove('open');
-  }
 }
 function saveBalance() {
   const val = document.getElementById('balanceInput').value;
   state.balance = val === '' ? null : parseFloat(val);
   save();
-  renderBalance();
+  render();
   closeBalanceEdit(null, true);
   showToast('Balance updated ✓');
 }
 
-// ── Render overview ──
 function renderOverview() {
   const ws = weekStart(state.weekOffset);
-  const we = weekEnd(state.weekOffset);
   const isCurrentWeek = state.weekOffset === 0;
   const diffWeeks = -state.weekOffset;
 
-  document.getElementById('weekRange').textContent = `${fmtDate(ws)} – ${fmtDate(we)}`;
-  if (isCurrentWeek) {
-    document.getElementById('weekSub').textContent = 'Current week';
-  } else if (diffWeeks === 1) {
-    document.getElementById('weekSub').textContent = 'Last week';
-  } else if (diffWeeks > 1) {
-    document.getElementById('weekSub').textContent = `${diffWeeks} weeks ago`;
-  } else {
-    document.getElementById('weekSub').textContent = `${-diffWeeks} week${-diffWeeks>1?'s':''} ahead`;
-  }
+  document.getElementById('weekRange').textContent = `${fmtDate(ws)} – ${fmtDate(weekEnd(state.weekOffset))}`;
+  document.getElementById('weekSub').textContent =
+    isCurrentWeek ? 'Current week' :
+    diffWeeks === 1 ? 'Last week' :
+    diffWeeks > 1 ? `${diffWeeks} weeks ago` :
+    `${-diffWeeks} week${-diffWeeks > 1 ? 's' : ''} ahead`;
 
-  const income = state.income;
+  const balance = state.balance;
   const spent = totalSpent();
-  const remaining = income - spent;
-  const pct = income > 0 ? Math.min((spent / income) * 100, 100) : 0;
+  const remaining = balance !== null ? balance - spent : 0;
+  const pct = balance !== null && balance > 0 ? Math.min((spent / balance) * 100, 100) : 0;
 
-  document.getElementById('remaining').textContent = fmt(remaining);
+  document.getElementById('remaining').textContent = balance !== null ? fmt(remaining) : '—';
   document.getElementById('remaining').style.color = remaining < 0 ? '#fca5a5' : '';
   document.getElementById('spentLabel').textContent = fmt(spent) + ' spent';
-  document.getElementById('incomeLabel').textContent = 'of ' + fmt(income);
+  document.getElementById('incomeLabel').textContent = balance !== null ? 'of ' + fmt(balance) : 'set balance to start';
 
   const bar = document.getElementById('mainProgress');
   bar.style.width = pct + '%';
   bar.className = 'progress-bar' + (pct >= 100 ? ' over' : pct >= 80 ? ' warn' : '');
 
   const budgeted = state.categories.reduce((s, c) => s + c.budget, 0);
-  const saved = income - spent;
-  document.getElementById('sumIncome').textContent = fmt(income);
+  document.getElementById('sumIncome').textContent = balance !== null ? fmt(balance) : '—';
   document.getElementById('sumBudgeted').textContent = fmt(budgeted);
   document.getElementById('sumSpent').textContent = fmt(spent);
-  document.getElementById('sumSaved').textContent = fmt(saved);
-  document.getElementById('sumSaved').className = 's-val' + (saved < 0 ? ' over' : '');
+  document.getElementById('sumSaved').textContent = balance !== null ? fmt(remaining) : '—';
+  document.getElementById('sumSaved').className = 's-val' + (remaining < 0 ? ' over' : '');
 
   const list = document.getElementById('categoryList');
   const noCats = document.getElementById('noCats');
-
-  if (state.categories.length === 0) {
-    list.innerHTML = '';
-    noCats.style.display = '';
-    return;
-  }
+  if (state.categories.length === 0) { list.innerHTML = ''; noCats.style.display = ''; return; }
   noCats.style.display = 'none';
-
   list.innerHTML = state.categories.map(cat => {
-    const s = catSpent(cat.id);
-    const b = cat.budget;
+    const s = catSpent(cat.id), b = cat.budget;
     const pct = b > 0 ? Math.min((s / b) * 100, 100) : 0;
-    const rem = b - s;
-    const over = s > b;
-    const warn = !over && pct >= 80;
+    const rem = b - s, over = s > b, warn = !over && pct >= 80;
     return `<div class="cat-card">
       <div class="cat-header">
         <div class="cat-name"><span class="cat-icon">${cat.icon}</span>${escHtml(cat.name)}</div>
-        <div class="cat-amounts">
-          <div class="cat-spent">${fmt(s)}</div>
-          <div class="cat-budget">of ${fmt(b)}</div>
-        </div>
+        <div class="cat-amounts"><div class="cat-spent">${fmt(s)}</div><div class="cat-budget">of ${fmt(b)}</div></div>
       </div>
       <div class="cat-pbar-wrap"><div class="cat-pbar${over?' over':warn?' warn':''}" style="width:${pct}%"></div></div>
-      <div class="cat-remaining${over?' over':warn?' warn':''}">
-        ${over ? '⚠ ' + fmt(-rem) + ' over budget' : fmt(rem) + ' remaining'}
-      </div>
+      <div class="cat-remaining${over?' over':warn?' warn':''}">${over ? '⚠ '+fmt(-rem)+' over budget' : fmt(rem)+' remaining'}</div>
     </div>`;
   }).join('');
 }
 
-// ── Render history ──
 function renderHistory() {
   const exps = weekExpenses().slice().sort((a, b) => b.date.localeCompare(a.date));
   const el = document.getElementById('historyList');
   const none = document.getElementById('noHistory');
-
-  if (exps.length === 0) {
-    el.innerHTML = '';
-    none.style.display = '';
-    return;
-  }
+  if (exps.length === 0) { el.innerHTML = ''; none.style.display = ''; return; }
   none.style.display = 'none';
-
   const groups = {};
-  exps.forEach(e => {
-    if (!groups[e.date]) groups[e.date] = [];
-    groups[e.date].push(e);
-  });
-
+  exps.forEach(e => { if (!groups[e.date]) groups[e.date] = []; groups[e.date].push(e); });
   el.innerHTML = Object.entries(groups).map(([date, items]) => {
     const rows = items.map(e => {
       const cat = state.categories.find(c => c.id === e.catId) || { icon: '📦', name: 'Other' };
       return `<div class="expense-item">
         <div class="exp-left">
           <div class="exp-icon">${cat.icon}</div>
-          <div>
-            <div class="exp-desc">${escHtml(e.desc)}</div>
-            <div class="exp-meta">${escHtml(cat.name)}</div>
-          </div>
+          <div><div class="exp-desc">${escHtml(e.desc)}</div><div class="exp-meta">${escHtml(cat.name)}</div></div>
         </div>
         <div style="display:flex;align-items:center">
           <div class="exp-amount">−${fmt(e.amount)}</div>
@@ -752,124 +622,95 @@ function renderHistory() {
         </div>
       </div>`;
     }).join('');
-    return `<div class="history-group">
-      <div class="history-date">${fmtDay(isoToDate(date))}</div>
-      ${rows}
-    </div>`;
+    return `<div class="history-group"><div class="history-date">${fmtDay(isoToDate(date))}</div>${rows}</div>`;
   }).join('');
 }
 
-// ── Render insights ──
 function renderInsights() {
-  const exps = weekExpenses();
   const spent = totalSpent();
   const income = state.income;
-  const savingsRate = income > 0 ? ((income - spent) / income * 100) : 0;
+  const balance = state.balance;
   const insights = [];
 
-  if (income === 0) {
-    insights.push({ icon: '⚙', text: '<strong>Set your income</strong> in Settings to get personalized insights.' });
+  if (balance === null) {
+    insights.push({ icon: '🏦', text: '<strong>Set your bank balance</strong> on the Overview tab to get started.' });
   } else {
-    if (savingsRate >= 20) {
-      insights.push({ icon: '🌟', text: `You're saving <strong>${savingsRate.toFixed(0)}%</strong> of your income this week. Great work!` });
-    } else if (savingsRate > 0) {
-      insights.push({ icon: '💡', text: `You're saving <strong>${savingsRate.toFixed(0)}%</strong> of income. Aim for 20% for a healthy buffer.` });
-    } else if (savingsRate < 0) {
-      insights.push({ icon: '⚠', text: `You've spent <strong>${fmt(-savingsRate/100*income + income)}</strong> — that's <strong>${fmt(spent - income)}</strong> over your weekly income.` });
-    }
+    const remaining = balance - spent;
+    const savingsRate = income > 0 ? (remaining / income * 100) : 0;
+    if (income > 0 && savingsRate >= 20)
+      insights.push({ icon: '🌟', text: `You have <strong>${savingsRate.toFixed(0)}%</strong> of weekly income remaining. Great shape!` });
+    else if (remaining < 0)
+      insights.push({ icon: '⚠', text: `Your balance is <strong>${fmt(-remaining)}</strong> below your tracked spending.` });
   }
 
   const overCats = state.categories.filter(c => catSpent(c.id) > c.budget);
-  if (overCats.length > 0) {
+  if (overCats.length > 0)
     insights.push({ icon: '🔴', text: `Over budget in: <strong>${overCats.map(c => c.name).join(', ')}</strong>.` });
-  }
 
   const topCat = state.categories.slice().sort((a, b) => catSpent(b.id) - catSpent(a.id))[0];
-  if (topCat && catSpent(topCat.id) > 0) {
-    insights.push({ icon: '📊', text: `Biggest spend this week: <strong>${topCat.icon} ${topCat.name}</strong> at <strong>${fmt(catSpent(topCat.id))}</strong>.` });
-  }
+  if (topCat && catSpent(topCat.id) > 0)
+    insights.push({ icon: '📊', text: `Biggest spend: <strong>${topCat.icon} ${topCat.name}</strong> at <strong>${fmt(catSpent(topCat.id))}</strong>.` });
 
   const unbudgeted = income - state.categories.reduce((s, c) => s + c.budget, 0);
-  if (unbudgeted > 0) {
-    insights.push({ icon: '💸', text: `You have <strong>${fmt(unbudgeted)}</strong> of income not assigned to any category budget.` });
-  } else if (unbudgeted < 0) {
-    insights.push({ icon: '⚠', text: `Your category budgets exceed your income by <strong>${fmt(-unbudgeted)}</strong>. Consider reducing some budgets.` });
-  }
+  if (income > 0 && unbudgeted > 0)
+    insights.push({ icon: '💸', text: `<strong>${fmt(unbudgeted)}</strong> of weekly income not assigned to a category.` });
+  else if (income > 0 && unbudgeted < 0)
+    insights.push({ icon: '⚠', text: `Category budgets exceed income by <strong>${fmt(-unbudgeted)}</strong>.` });
 
-  if (exps.length === 0 && income > 0) {
+  if (weekExpenses().length === 0 && balance !== null)
     insights.push({ icon: '✅', text: 'No expenses recorded yet this week. Add your first expense!' });
-  }
 
   const el = document.getElementById('insightsList');
   if (insights.length === 0) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">💡</div><p>No insights yet — add expenses to get started.</p></div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">💡</div><p>No insights yet.</p></div>';
     return;
   }
-  el.innerHTML = insights.map(i => `
-    <div class="insight-card">
-      <div class="insight-icon">${i.icon}</div>
-      <div class="insight-text">${i.text}</div>
-    </div>`).join('');
+  el.innerHTML = insights.map(i =>
+    `<div class="insight-card"><div class="insight-icon">${i.icon}</div><div class="insight-text">${i.text}</div></div>`
+  ).join('');
 }
 
-// ── Render add form ──
 function renderAddForm() {
   const chips = document.getElementById('catChips');
   const selected = chips.querySelector('.chip.selected')?.dataset.id || state.categories[0]?.id || '';
   chips.innerHTML = state.categories.map(c =>
-    `<span class="chip${c.id === selected ? ' selected' : ''}" data-id="${c.id}" onclick="selectChip(this)">
-      ${c.icon} ${escHtml(c.name)}
-    </span>`
+    `<span class="chip${c.id === selected ? ' selected' : ''}" data-id="${c.id}" onclick="selectChip(this)">${c.icon} ${escHtml(c.name)}</span>`
   ).join('');
-  if (!chips.querySelector('.chip.selected') && chips.querySelector('.chip')) {
+  if (!chips.querySelector('.chip.selected') && chips.querySelector('.chip'))
     chips.querySelector('.chip').classList.add('selected');
-  }
   document.getElementById('expDate').value = todayISO();
 }
-
 function selectChip(el) {
   document.querySelectorAll('#catChips .chip').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
 }
 
-// ── Add expense ──
 function addExpense(e) {
   e.preventDefault();
   const desc = document.getElementById('expDesc').value.trim();
   const amount = parseFloat(document.getElementById('expAmount').value);
   const catId = document.querySelector('#catChips .chip.selected')?.dataset.id || '';
   const date = document.getElementById('expDate').value;
-
   if (!desc || isNaN(amount) || amount <= 0 || !date) return;
-
-  state.expenses.push({
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-    desc, amount, catId, date
-  });
-  save();
-  render();
+  state.expenses.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2), desc, amount, catId, date });
+  save(); render();
   document.getElementById('expDesc').value = '';
   document.getElementById('expAmount').value = '';
   showToast('Expense added ✓');
   switchTab('overview');
 }
 
-// ── Delete expense ──
 function deleteExpense(id) {
   state.expenses = state.expenses.filter(e => e.id !== id);
-  save();
-  render();
-  showToast('Expense deleted');
+  save(); render(); showToast('Expense deleted');
 }
 
-// ── Week navigation ──
 function shiftWeek(dir) {
   state.weekOffset += dir;
-  if (state.weekOffset > 0) state.weekOffset = 0; // don't go to future
+  if (state.weekOffset > 0) state.weekOffset = 0;
   render();
 }
 
-// ── Tabs ──
 function switchTab(name) {
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -877,11 +718,8 @@ function switchTab(name) {
   document.querySelector(`.tab[data-tab="${name}"]`).classList.add('active');
   if (name === 'add') renderAddForm();
 }
-document.querySelectorAll('.tab').forEach(t => {
-  t.addEventListener('click', () => switchTab(t.dataset.tab));
-});
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
-// ── Settings modal ──
 function openSettings() {
   document.getElementById('settingIncome').value = state.income;
   document.getElementById('settingPayday').value = state.payday;
@@ -890,16 +728,13 @@ function openSettings() {
   document.getElementById('settingsModal').classList.add('open');
 }
 function closeSettings(e, force) {
-  if (force || (e && e.target === document.getElementById('settingsModal'))) {
+  if (force || (e && e.target === document.getElementById('settingsModal')))
     document.getElementById('settingsModal').classList.remove('open');
-  }
 }
 function saveSettings() {
   state.income = parseFloat(document.getElementById('settingIncome').value) || 0;
   state.payday = parseInt(document.getElementById('settingPayday').value);
   state.currency = document.getElementById('settingCurrency').value || '$';
-
-  // Collect categories from editor
   const rows = document.querySelectorAll('#catEditorList .cat-edit-row');
   state.categories = Array.from(rows).map(row => ({
     id: row.dataset.id,
@@ -907,99 +742,70 @@ function saveSettings() {
     icon: row.querySelector('.cat-edit-icon').textContent.trim(),
     budget: parseFloat(row.querySelector('.budget-input').value) || 0,
   })).filter(c => c.name);
-
-  save();
-  closeSettings(null, true);
-  render();
-  showToast('Settings saved ✓');
+  save(); closeSettings(null, true); render(); showToast('Settings saved ✓');
 }
 function clearAllData() {
   if (!confirm('Delete all expenses and reset settings?')) return;
   localStorage.removeItem('wbApp');
   state = {
-    income: 500, payday: 5, currency: '$', weekOffset: 0,
+    income: 500, payday: 5, currency: '$', weekOffset: 0, balance: null,
     categories: [
-      { id: 'rent',    name: 'Rent / Housing',  icon: '🏠', budget: 150 },
-      { id: 'food',    name: 'Food',             icon: '🍔', budget: 100 },
-      { id: 'transit', name: 'Transport',        icon: '🚗', budget: 50 },
-      { id: 'util',    name: 'Utilities',        icon: '💡', budget: 30 },
-      { id: 'health',  name: 'Health',           icon: '💊', budget: 20 },
-      { id: 'fun',     name: 'Entertainment',    icon: '🎮', budget: 40 },
-      { id: 'savings', name: 'Savings',          icon: '💰', budget: 60 },
-      { id: 'other',   name: 'Other',            icon: '📦', budget: 50 },
+      { id: 'rent', name: 'Rent / Housing', icon: '🏠', budget: 150 },
+      { id: 'food', name: 'Food', icon: '🍔', budget: 100 },
+      { id: 'transit', name: 'Transport', icon: '🚗', budget: 50 },
+      { id: 'util', name: 'Utilities', icon: '💡', budget: 30 },
+      { id: 'health', name: 'Health', icon: '💊', budget: 20 },
+      { id: 'fun', name: 'Entertainment', icon: '🎮', budget: 40 },
+      { id: 'savings', name: 'Savings', icon: '💰', budget: 60 },
+      { id: 'other', name: 'Other', icon: '📦', budget: 50 },
     ],
     expenses: [],
-    balance: null,
   };
-  render();
-  closeSettings(null, true);
-  showToast('Data cleared');
+  render(); closeSettings(null, true); showToast('Data cleared');
 }
 
-// ── Category editor ──
 const ICON_OPTIONS = ['🏠','🍔','🚗','💡','💊','🎮','💰','📦','👗','🐶','☕','📱','✈','🎓','🏋','🛒','💄','🎵','🍺','🏥','💼','🎁','🛁','🧹'];
 function renderCatEditor() {
-  const list = document.getElementById('catEditorList');
-  list.innerHTML = state.categories.map(cat => catEditorRow(cat)).join('');
+  document.getElementById('catEditorList').innerHTML = state.categories.map(cat => catEditorRow(cat)).join('');
 }
 function catEditorRow(cat) {
   return `<div class="cat-edit-row" data-id="${cat.id}">
-    <span class="cat-edit-icon" title="Click to cycle icon" onclick="cycleIcon(this)">${cat.icon}</span>
+    <span class="cat-edit-icon" onclick="cycleIcon(this)">${cat.icon}</span>
     <input class="form-input cat-name-input" type="text" value="${escHtml(cat.name)}" placeholder="Category name">
     <div class="amount-wrap" style="width:90px">
       <span class="currency">${escHtml(state.currency)}</span>
       <input class="form-input budget-input" type="number" step="0.01" min="0" value="${cat.budget}" placeholder="0">
     </div>
-    <button class="cat-del-btn" onclick="removeCatRow(this)" title="Remove">🗑</button>
+    <button class="cat-del-btn" onclick="removeCatRow(this)">🗑</button>
   </div>`;
 }
 function addCategoryRow() {
-  const newCat = {
-    id: Date.now().toString(36),
-    name: '',
-    icon: '📦',
-    budget: 0,
-  };
+  const newCat = { id: Date.now().toString(36), name: '', icon: '📦', budget: 0 };
   const list = document.getElementById('catEditorList');
   const div = document.createElement('div');
   div.innerHTML = catEditorRow(newCat);
   list.appendChild(div.firstElementChild);
 }
-function removeCatRow(btn) {
-  btn.closest('.cat-edit-row').remove();
-}
+function removeCatRow(btn) { btn.closest('.cat-edit-row').remove(); }
 function cycleIcon(el) {
-  const cur = el.textContent.trim();
-  const idx = ICON_OPTIONS.indexOf(cur);
+  const idx = ICON_OPTIONS.indexOf(el.textContent.trim());
   el.textContent = ICON_OPTIONS[(idx + 1) % ICON_OPTIONS.length];
 }
 
-// ── Toast ──
 let toastTimer;
 function showToast(msg) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
+  t.textContent = msg; t.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
-
-// ── Escape HTML ──
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Render all ──
-function render() {
-  renderOverview();
-  renderBalance();
-  renderHistory();
-  renderInsights();
-}
+function render() { renderOverview(); renderBalance(); renderHistory(); renderInsights(); }
 
-// ── Boot ──
-load();
-render();
+load(); render();
 document.getElementById('expDate').value = todayISO();
 </script>
 </body>
