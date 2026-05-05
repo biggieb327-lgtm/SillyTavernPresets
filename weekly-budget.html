@@ -250,6 +250,28 @@
   .history-group { margin-bottom: 20px; }
   .history-date { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 
+  /* ── Balance card ── */
+  .balance-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .balance-card:hover { border-color: var(--accent); }
+  .balance-left { display: flex; align-items: center; gap: 10px; }
+  .balance-icon { font-size: 22px; }
+  .balance-label { font-size: 12px; color: var(--text-muted); }
+  .balance-amount { font-size: 20px; font-weight: 700; color: var(--text); margin-top: 1px; }
+  .balance-amount.unset { color: var(--text-muted); font-size: 14px; font-weight: 400; }
+  .balance-after { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .balance-edit { font-size: 16px; color: var(--text-muted); }
+
   /* ── Savings card ── */
   .savings-card {
     background: var(--surface);
@@ -370,6 +392,18 @@
       </div>
     </div>
 
+    <div class="balance-card" onclick="openBalanceEdit()" id="balanceCard">
+      <div class="balance-left">
+        <div class="balance-icon">🏦</div>
+        <div>
+          <div class="balance-label">Bank Balance</div>
+          <div class="balance-amount unset" id="balanceAmount">Tap to set</div>
+          <div class="balance-after" id="balanceAfter" style="display:none"></div>
+        </div>
+      </div>
+      <div class="balance-edit">✏</div>
+    </div>
+
     <div class="section-heading">Categories</div>
     <div id="categoryList"></div>
 
@@ -470,6 +504,25 @@
   </div>
 </div>
 
+<!-- BALANCE EDIT MODAL -->
+<div class="modal-backdrop" id="balanceModal" onclick="closeBalanceEdit(event)">
+  <div class="modal" style="padding-bottom:32px">
+    <div class="modal-title">
+      Update Balance
+      <button class="modal-close" onclick="closeBalanceEdit(null, true)">×</button>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Current Bank Balance</label>
+      <div class="amount-wrap">
+        <span class="currency" id="balanceModalCurrency">$</span>
+        <input class="form-input" id="balanceInput" type="number" step="0.01" placeholder="0.00"
+          onkeydown="if(event.key==='Enter')saveBalance()">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveBalance()">Save</button>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
@@ -491,6 +544,7 @@ let state = {
   ],
   expenses: [],   // { id, desc, amount, catId, date (ISO) }
   weekOffset: 0,  // 0 = current week
+  balance: null,  // current bank account balance
 };
 
 // ── Persistence ──
@@ -548,6 +602,45 @@ function catSpent(catId) {
 }
 function totalSpent() {
   return weekExpenses().reduce((s, e) => s + e.amount, 0);
+}
+
+// ── Render balance card ──
+function renderBalance() {
+  const el = document.getElementById('balanceAmount');
+  const after = document.getElementById('balanceAfter');
+  document.getElementById('balanceModalCurrency').textContent = state.currency;
+  if (state.balance === null) {
+    el.textContent = 'Tap to set';
+    el.className = 'balance-amount unset';
+    after.style.display = 'none';
+  } else {
+    el.textContent = fmt(state.balance);
+    el.className = 'balance-amount';
+    const projected = state.balance - totalSpent();
+    after.textContent = fmt(projected) + ' after tracked spending';
+    after.style.display = '';
+    after.style.color = projected < 0 ? 'var(--danger)' : 'var(--text-muted)';
+  }
+}
+
+// ── Balance modal ──
+function openBalanceEdit() {
+  document.getElementById('balanceInput').value = state.balance !== null ? state.balance : '';
+  document.getElementById('balanceModal').classList.add('open');
+  setTimeout(() => document.getElementById('balanceInput').focus(), 100);
+}
+function closeBalanceEdit(e, force) {
+  if (force || (e && e.target === document.getElementById('balanceModal'))) {
+    document.getElementById('balanceModal').classList.remove('open');
+  }
+}
+function saveBalance() {
+  const val = document.getElementById('balanceInput').value;
+  state.balance = val === '' ? null : parseFloat(val);
+  save();
+  renderBalance();
+  closeBalanceEdit(null, true);
+  showToast('Balance updated ✓');
 }
 
 // ── Render overview ──
@@ -836,6 +929,7 @@ function clearAllData() {
       { id: 'other',   name: 'Other',            icon: '📦', budget: 50 },
     ],
     expenses: [],
+    balance: null,
   };
   render();
   closeSettings(null, true);
@@ -898,6 +992,7 @@ function escHtml(s) {
 // ── Render all ──
 function render() {
   renderOverview();
+  renderBalance();
   renderHistory();
   renderInsights();
 }
