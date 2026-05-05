@@ -367,15 +367,15 @@
   <!-- OVERVIEW -->
   <div class="section active" id="tab-overview">
     <div class="summary-card" id="summaryCard">
-      <div class="label">Remaining this week</div>
+      <div class="label">Remaining</div>
       <div class="big-num" id="remaining">$0.00</div>
       <div class="progress-wrap"><div class="progress-bar" id="mainProgress" style="width:0%"></div></div>
       <div class="progress-info"><span id="spentLabel">$0 spent</span><span id="incomeLabel">of $0</span></div>
       <br>
       <div class="summary-row">
         <div class="summary-item">
-          <div class="s-label">Income</div>
-          <div class="s-val" id="sumIncome">$0</div>
+          <div class="s-label">Balance</div>
+          <div class="s-val" id="sumIncome">—</div>
         </div>
         <div class="summary-item">
           <div class="s-label">Budgeted</div>
@@ -386,22 +386,21 @@
           <div class="s-val" id="sumSpent">$0</div>
         </div>
         <div class="summary-item">
-          <div class="s-label">Saved</div>
+          <div class="s-label">Remaining</div>
           <div class="s-val" id="sumSaved">$0</div>
         </div>
       </div>
     </div>
 
-    <div class="balance-card" onclick="openBalanceEdit()" id="balanceCard">
-      <div class="balance-left">
+    <div class="balance-card" id="balanceCard">
+      <div class="balance-left" onclick="openBalanceEdit()" style="flex:1;min-width:0">
         <div class="balance-icon">🏦</div>
         <div>
-          <div class="balance-label">Bank Balance</div>
+          <div class="balance-label">Bank Balance <span style="font-size:13px">✏</span></div>
           <div class="balance-amount unset" id="balanceAmount">Tap to set</div>
-          <div class="balance-after" id="balanceAfter" style="display:none"></div>
         </div>
       </div>
-      <div class="balance-edit">✏</div>
+      <button class="btn btn-ghost btn-sm" id="paydayBtn" onclick="addIncome()" style="flex-shrink:0;display:none">+ Payday</button>
     </div>
 
     <div class="section-heading">Categories</div>
@@ -607,20 +606,26 @@ function totalSpent() {
 // ── Render balance card ──
 function renderBalance() {
   const el = document.getElementById('balanceAmount');
-  const after = document.getElementById('balanceAfter');
   document.getElementById('balanceModalCurrency').textContent = state.currency;
+  const paydayBtn = document.getElementById('paydayBtn');
   if (state.balance === null) {
     el.textContent = 'Tap to set';
     el.className = 'balance-amount unset';
-    after.style.display = 'none';
+    paydayBtn.style.display = 'none';
   } else {
     el.textContent = fmt(state.balance);
     el.className = 'balance-amount';
-    const projected = state.balance - totalSpent();
-    after.textContent = fmt(projected) + ' after tracked spending';
-    after.style.display = '';
-    after.style.color = projected < 0 ? 'var(--danger)' : 'var(--text-muted)';
+    paydayBtn.style.display = state.income > 0 ? '' : 'none';
   }
+}
+
+// ── Add income (payday) ──
+function addIncome() {
+  if (state.income <= 0) return;
+  state.balance = (state.balance ?? 0) + state.income;
+  save();
+  render();
+  showToast(fmt(state.income) + ' added to balance ✓');
 }
 
 // ── Balance modal ──
@@ -661,27 +666,26 @@ function renderOverview() {
     document.getElementById('weekSub').textContent = `${-diffWeeks} week${-diffWeeks>1?'s':''} ahead`;
   }
 
-  const income = state.income;
+  const balance = state.balance;
   const spent = totalSpent();
-  const remaining = income - spent;
-  const pct = income > 0 ? Math.min((spent / income) * 100, 100) : 0;
+  const remaining = balance !== null ? balance - spent : 0;
+  const pct = balance !== null && balance > 0 ? Math.min((spent / balance) * 100, 100) : 0;
 
-  document.getElementById('remaining').textContent = fmt(remaining);
+  document.getElementById('remaining').textContent = balance !== null ? fmt(remaining) : '—';
   document.getElementById('remaining').style.color = remaining < 0 ? '#fca5a5' : '';
   document.getElementById('spentLabel').textContent = fmt(spent) + ' spent';
-  document.getElementById('incomeLabel').textContent = 'of ' + fmt(income);
+  document.getElementById('incomeLabel').textContent = balance !== null ? 'of ' + fmt(balance) : 'set balance to start';
 
   const bar = document.getElementById('mainProgress');
   bar.style.width = pct + '%';
   bar.className = 'progress-bar' + (pct >= 100 ? ' over' : pct >= 80 ? ' warn' : '');
 
   const budgeted = state.categories.reduce((s, c) => s + c.budget, 0);
-  const saved = income - spent;
-  document.getElementById('sumIncome').textContent = fmt(income);
+  document.getElementById('sumIncome').textContent = balance !== null ? fmt(balance) : '—';
   document.getElementById('sumBudgeted').textContent = fmt(budgeted);
   document.getElementById('sumSpent').textContent = fmt(spent);
-  document.getElementById('sumSaved').textContent = fmt(saved);
-  document.getElementById('sumSaved').className = 's-val' + (saved < 0 ? ' over' : '');
+  document.getElementById('sumSaved').textContent = balance !== null ? fmt(remaining) : '—';
+  document.getElementById('sumSaved').className = 's-val' + (remaining < 0 ? ' over' : '');
 
   const list = document.getElementById('categoryList');
   const noCats = document.getElementById('noCats');
