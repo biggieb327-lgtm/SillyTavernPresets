@@ -135,6 +135,13 @@
   .cat-remaining { font-size: 11px; color: var(--text-muted); }
   .cat-remaining.over { color: var(--danger); }
   .cat-remaining.warn { color: var(--warn); }
+  .cat-stats { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .cat-stat-item { text-align: center; flex: 1; }
+  .cat-stat-label { display: block; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+  .cat-stat-val { font-size: 14px; font-weight: 700; }
+  .cat-stat-val.dim { color: var(--text-muted); font-weight: 400; }
+  .cat-stat-val.danger { color: var(--danger); }
+  .cat-pbar.unfunded { background: var(--border); }
 
   /* ── Expense list ── */
   .expense-item {
@@ -403,7 +410,10 @@
       <button class="btn btn-ghost btn-sm" id="paydayBtn" onclick="addIncome()" style="flex-shrink:0;display:none">+ Payday</button>
     </div>
 
-    <div class="section-heading">Categories</div>
+    <div class="section-heading">
+      Categories
+      <button class="btn btn-ghost btn-sm" onclick="fundAll()">Fund All</button>
+    </div>
     <div id="categoryList"></div>
 
     <div id="noCats" class="empty" style="display:none">
@@ -503,6 +513,27 @@
   </div>
 </div>
 
+<!-- FUND CATEGORY MODAL -->
+<div class="modal-backdrop" id="fundModal" onclick="closeFundModal(event)">
+  <div class="modal" style="padding-bottom:32px">
+    <div class="modal-title">
+      Add Funds
+      <button class="modal-close" onclick="closeFundModal(null,true)">×</button>
+    </div>
+    <div style="font-size:14px;color:var(--text-muted);margin-bottom:16px" id="fundModalLabel"></div>
+    <div class="form-group">
+      <label class="form-label">Amount to Add</label>
+      <div class="amount-wrap">
+        <span class="currency" id="fundModalCurrency">$</span>
+        <input class="form-input" id="fundInput" type="number" step="0.01" min="0.01" placeholder="0.00"
+          onkeydown="if(event.key==='Enter')saveFund()">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="saveFund()" style="margin-bottom:10px">Add Funds</button>
+    <button class="btn btn-ghost" onclick="fundFromBudget()" id="fundFromBudgetBtn">Use Budget Amount</button>
+  </div>
+</div>
+
 <!-- BALANCE EDIT MODAL -->
 <div class="modal-backdrop" id="balanceModal" onclick="closeBalanceEdit(event)">
   <div class="modal" style="padding-bottom:32px">
@@ -541,9 +572,10 @@ let state = {
     { id: 'savings', name: 'Savings',          icon: '💰', budget: 60 },
     { id: 'other',   name: 'Other',            icon: '📦', budget: 50 },
   ],
-  expenses: [],   // { id, desc, amount, catId, date (ISO) }
-  weekOffset: 0,  // 0 = current week
-  balance: null,  // current bank account balance
+  expenses: [],     // { id, desc, amount, catId, date }
+  allocations: [],  // { id, catId, amount, date }
+  weekOffset: 0,
+  balance: null,
 };
 
 // ── Persistence ──
@@ -601,6 +633,65 @@ function catSpent(catId) {
 }
 function totalSpent() {
   return weekExpenses().reduce((s, e) => s + e.amount, 0);
+}
+function weekAllocations() {
+  return state.allocations.filter(a => inCurrentWeek(a.date));
+}
+function catAllocated(catId) {
+  return weekAllocations().filter(a => a.catId === catId).reduce((s, a) => s + a.amount, 0);
+}
+function totalAllocated() {
+  return weekAllocations().reduce((s, a) => s + a.amount, 0);
+}
+
+// ── Fund modal ──
+let _fundCatId = null;
+function openFundModal(catId) {
+  _fundCatId = catId;
+  const cat = state.categories.find(c => c.id === catId);
+  document.getElementById('fundModalLabel').textContent = cat ? cat.icon + ' ' + cat.name : '';
+  document.getElementById('fundModalCurrency').textContent = state.currency;
+  document.getElementById('fundInput').value = '';
+  document.getElementById('fundFromBudgetBtn').textContent = cat ? 'Use Budget Amount (' + fmt(cat.budget) + ')' : 'Use Budget Amount';
+  document.getElementById('fundModal').classList.add('open');
+  setTimeout(() => document.getElementById('fundInput').focus(), 100);
+}
+function closeFundModal(e, force) {
+  if (force || (e && e.target === document.getElementById('fundModal')))
+    document.getElementById('fundModal').classList.remove('open');
+}
+function fundFromBudget() {
+  const cat = state.categories.find(c => c.id === _fundCatId);
+  if (cat) document.getElementById('fundInput').value = cat.budget;
+  document.getElementById('fundInput').focus();
+}
+function saveFund() {
+  const amount = parseFloat(document.getElementById('fundInput').value);
+  if (!_fundCatId || isNaN(amount) || amount <= 0) return;
+  state.allocations.push({
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+    catId: _fundCatId,
+    amount,
+    date: todayISO(),
+  });
+  save(); render();
+  closeFundModal(null, true);
+  showToast(fmt(amount) + ' added ✓');
+}
+function fundAll() {
+  const today = todayISO();
+  state.categories.forEach(cat => {
+    if (cat.budget > 0) {
+      state.allocations.push({
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+        catId: cat.id,
+        amount: cat.budget,
+        date: today,
+      });
+    }
+  });
+  save(); render();
+  showToast('All categories funded ✓');
 }
 
 // ── Render balance card ──
@@ -698,24 +789,29 @@ function renderOverview() {
   noCats.style.display = 'none';
 
   list.innerHTML = state.categories.map(cat => {
-    const s = catSpent(cat.id);
-    const b = cat.budget;
-    const pct = b > 0 ? Math.min((s / b) * 100, 100) : 0;
-    const rem = b - s;
-    const over = s > b;
-    const warn = !over && pct >= 80;
+    const funded = catAllocated(cat.id);
+    const spent = catSpent(cat.id);
+    const available = funded - spent;
+    const base = funded > 0 ? funded : cat.budget;
+    const pct = base > 0 ? Math.min((spent / base) * 100, 100) : 0;
+    const over = available < 0 && funded > 0;
+    const warn = !over && funded > 0 && pct >= 80;
+    const unfunded = funded === 0;
     return `<div class="cat-card">
       <div class="cat-header">
         <div class="cat-name"><span class="cat-icon">${cat.icon}</span>${escHtml(cat.name)}</div>
-        <div class="cat-amounts">
-          <div class="cat-spent">${fmt(s)}</div>
-          <div class="cat-budget">of ${fmt(b)}</div>
-        </div>
+        <button class="btn btn-ghost btn-sm" onclick="openFundModal('${cat.id}')" style="padding:4px 10px;font-size:12px">+ Fund</button>
       </div>
-      <div class="cat-pbar-wrap"><div class="cat-pbar${over?' over':warn?' warn':''}" style="width:${pct}%"></div></div>
-      <div class="cat-remaining${over?' over':warn?' warn':''}">
-        ${over ? '⚠ ' + fmt(-rem) + ' over budget' : fmt(rem) + ' remaining'}
+      <div class="cat-stats">
+        <span class="cat-stat-item"><span class="cat-stat-label">Funded</span><span class="cat-stat-val${unfunded?' dim':''}">${unfunded ? '—' : fmt(funded)}</span></span>
+        <span class="cat-stat-item"><span class="cat-stat-label">Spent</span><span class="cat-stat-val">${fmt(spent)}</span></span>
+        <span class="cat-stat-item"><span class="cat-stat-label">Available</span><span class="cat-stat-val${over?' danger':unfunded?' dim':''}">${unfunded ? '—' : fmt(available)}</span></span>
       </div>
+      <div class="cat-pbar-wrap"><div class="cat-pbar${over?' over':warn?' warn':unfunded?' unfunded':''}" style="width:${pct}%"></div></div>
+      ${unfunded ? `<div class="cat-remaining" style="color:var(--text-muted);font-style:italic">Target: ${fmt(cat.budget)} — tap + Fund to allocate</div>` :
+        `<div class="cat-remaining${over?' over':warn?' warn':''}">
+          ${over ? '⚠ ' + fmt(-available) + ' over funded amount' : fmt(available) + ' available'}
+        </div>`}
     </div>`;
   }).join('');
 }
@@ -933,6 +1029,7 @@ function clearAllData() {
       { id: 'other',   name: 'Other',            icon: '📦', budget: 50 },
     ],
     expenses: [],
+    allocations: [],
     balance: null,
   };
   render();
