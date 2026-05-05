@@ -374,10 +374,10 @@
   <!-- OVERVIEW -->
   <div class="section active" id="tab-overview">
     <div class="summary-card" id="summaryCard">
-      <div class="label">Remaining</div>
+      <div class="label">Unallocated</div>
       <div class="big-num" id="remaining">$0.00</div>
       <div class="progress-wrap"><div class="progress-bar" id="mainProgress" style="width:0%"></div></div>
-      <div class="progress-info"><span id="spentLabel">$0 spent</span><span id="incomeLabel">of $0</span></div>
+      <div class="progress-info"><span id="spentLabel">$0 allocated</span><span id="incomeLabel">of $0</span></div>
       <br>
       <div class="summary-row">
         <div class="summary-item">
@@ -393,7 +393,7 @@
           <div class="s-val" id="sumSpent">$0</div>
         </div>
         <div class="summary-item">
-          <div class="s-label">Remaining</div>
+          <div class="s-label">Unallocated</div>
           <div class="s-val" id="sumSaved">$0</div>
         </div>
       </div>
@@ -759,12 +759,13 @@ function renderOverview() {
 
   const balance = state.balance;
   const spent = totalSpent();
-  const remaining = balance !== null ? balance - spent : 0;
-  const pct = balance !== null && balance > 0 ? Math.min((spent / balance) * 100, 100) : 0;
+  const allocated = totalAllocated();
+  const remaining = balance !== null ? balance - allocated : 0;
+  const pct = balance !== null && balance > 0 ? Math.min((allocated / balance) * 100, 100) : 0;
 
   document.getElementById('remaining').textContent = balance !== null ? fmt(remaining) : '—';
   document.getElementById('remaining').style.color = remaining < 0 ? '#fca5a5' : '';
-  document.getElementById('spentLabel').textContent = fmt(spent) + ' spent';
+  document.getElementById('spentLabel').textContent = fmt(allocated) + ' allocated';
   document.getElementById('incomeLabel').textContent = balance !== null ? 'of ' + fmt(balance) : 'set balance to start';
 
   const bar = document.getElementById('mainProgress');
