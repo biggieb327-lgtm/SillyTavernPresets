@@ -35,7 +35,7 @@ NANOGPT_URL = "https://nano-gpt.com/api/v1/chat/completions"
 #   curl https://nano-gpt.com/api/v1/models \
 #     -H "Authorization: Bearer $NANOGPT_API_KEY" | grep -i glm
 # Then set MODEL to the id that comes back (it may or may not need ":thinking").
-MODEL = "zai-org/GLM-5.1:thinking"
+MODEL = "zai-org/glm-5:thinking"
 
 MAX_TOKENS = 8000             # thinking eats budget; raise if replies get cut off
 HTTP_TIMEOUT = 120.0          # seconds; thinking models are slow
