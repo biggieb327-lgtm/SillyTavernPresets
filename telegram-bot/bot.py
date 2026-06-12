@@ -769,13 +769,29 @@ async def update_mood(chat_id: int):
         print("[mood] appraisal failed:", e)
 
 
+def _mood_behavior(s: float) -> str:
+    """Concrete behavioral guidance so reply length/energy actually shift with mood."""
+    if s >= 1.2:
+        return ("She's more talkative than usual — longer messages, more willing to go on "
+                "tangents, share things unprompted, ask questions back, and initiate topics.")
+    if s >= 0.4:
+        return "She's engaged and responsive, happy to elaborate when something interests her."
+    if s > -0.4:
+        return "Her usual mix — sometimes brief, sometimes chatty, depending on the topic."
+    if s > -1.2:
+        return ("She's keeping things shorter and a bit more closed off — fewer follow-up "
+                "questions, less volunteered detail, replies that trail off.")
+    return ("She's giving short, flat responses — often just a line or two, not much energy "
+            "to elaborate or carry the conversation right now.")
+
+
 def mood_note(chat_id: int) -> str:
     label = mood_label(chat_id)
-    if label:
-        return (f"# Mood\nRight now {NAME} is feeling: {label}. Let it color her tone and what she "
-                f"brings up — moods linger and fade naturally; never announce it clinically.")
     s = mood_now(chat_id)
-    if s >= 1.2:
+    behavior = _mood_behavior(s)
+    if label:
+        desc = f"feeling: {label}"
+    elif s >= 1.2:
         desc = "settled and warm right now — a little more open than usual, the guard down a notch"
     elif s >= 0.4:
         desc = "in a decent place, comfortable and present"
@@ -785,7 +801,8 @@ def mood_note(chat_id: int) -> str:
         desc = "a bit on edge and quieter"
     else:
         desc = "withdrawn and flat, not really feeling it"
-    return f"# Mood\nRight now {NAME} is {desc}. Let it color her tone subtly — never announce it outright."
+    return (f"# Mood\nRight now {NAME} is {desc}. {behavior} Let it color her tone and reply "
+            f"length naturally — never announce it outright.")
 
 
 def memory_block(chat_id: int, uname: str) -> str:
