@@ -793,7 +793,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     parts = []
     summ = (summaries.get(chat_id) or "").strip()
     if summ:
-        parts.append(f"Summary of your history with {uname} so far:\n{summ}")
+        parts.append(f"How you remember things with {uname} so far:\n{summ}")
     fts = facts.get(chat_id) or []
     if fts:
         parts.append(f"Things you know about {uname}:\n" + "\n".join("- " + f for f in fts))
@@ -1241,12 +1241,14 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
     )
     existing = json.dumps({"summary": prev_summary, "facts": prev_facts}, ensure_ascii=False)
     sys = (
-        f"You maintain a long-term memory log for an ongoing conversation/roleplay between "
-        f"{NAME} (the assistant) and {uname} (the user). You are given the EXISTING MEMORY as "
-        f"JSON and NEW MESSAGES that are about to scroll out of short-term context. Update the "
-        f"memory so nothing important is lost. Respond with ONLY a JSON object with two keys:\n"
-        f'  "summary": a concise third-person recap of the relationship and key events so far '
-        f"(<= 200 words), integrating the previous summary with the new messages.\n"
+        f"You maintain {NAME}'s long-term memory of an ongoing conversation/roleplay with "
+        f"{uname} (the user). You are given the EXISTING MEMORY as JSON and NEW MESSAGES that "
+        f"are about to scroll out of short-term context. Update the memory so nothing important "
+        f"is lost. Respond with ONLY a JSON object with two keys:\n"
+        f'  "summary": a short first-person narrative, written in {NAME}\'s own voice, like a '
+        f"memory she could recall and recount — what happened with {uname}, how it felt, what "
+        f"stuck with her (<= 200 words). Integrate the previous summary with the new messages "
+        f"into one continuous recollection, not a list of events.\n"
         f'  "facts": a list of durable, specific facts about {uname} and the relationship — '
         f"names, preferences, commitments, life details, emotional beats. Merge with the prior "
         f"facts, keep them all, avoid duplicates.\n"
@@ -1278,11 +1280,13 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str):
     """Merge a bloated facts list: dedupe, combine, fold stale detail into the summary."""
     existing = json.dumps({"summary": prev_summary, "facts": prev_facts}, ensure_ascii=False)
     sys = (
-        f"You maintain a long-term memory log about {uname}. The facts list has grown too long. "
+        f"You maintain {NAME}'s long-term memory of {uname}. The facts list has grown too long. "
         f"Consolidate it: merge near-duplicates, combine related facts into one, drop trivia, and "
         f"fold superseded or minor details into the summary so nothing important is lost. Keep at "
-        f"most {FACTS_TARGET} facts — the most durable and identity-relevant ones. Respond with "
-        f'ONLY a JSON object: {{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
+        f"most {FACTS_TARGET} facts — the most durable and identity-relevant ones. Keep the "
+        f"summary as a first-person narrative in {NAME}'s own voice, like a memory she could "
+        f"recall and recount. Respond with ONLY a JSON object: "
+        f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
     )
     raw = call_nanogpt(
         [{"role": "system", "content": sys}, {"role": "user", "content": existing}],
