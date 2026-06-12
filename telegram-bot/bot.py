@@ -135,10 +135,10 @@ WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
 WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
 
-# --- News awareness (NYT Top Stories) ---
+# --- News awareness (NYT Most Popular) ---
 NYT_API_KEY = os.getenv("NYT_API_KEY", "")
 NEWS_ENABLED = bool(NYT_API_KEY) and os.getenv("NEWS_ENABLED", "1").lower() not in ("0", "false", "no", "off")
-NYT_SECTION = os.getenv("NYT_SECTION", "home")  # e.g. home, world, us, business, technology
+NYT_PERIOD = os.getenv("NYT_PERIOD", "7")  # most-viewed window in days: 1, 7, or 30
 NEWS_TTL = int(os.getenv("NEWS_TTL", "1800"))   # refresh headlines at most every 30 minutes
 NEWS_SAMPLE = int(os.getenv("NEWS_SAMPLE", "5"))  # how many headlines to surface per message
 
@@ -657,7 +657,7 @@ async def ensure_weather():
 
 
 def _fetch_news() -> list:
-    url = f"https://api.nytimes.com/svc/topstories/v2/{NYT_SECTION}.json"
+    url = f"https://api.nytimes.com/svc/mostpopular/v2/viewed/{NYT_PERIOD}.json"
     r = requests.get(url, params={"api-key": NYT_API_KEY}, timeout=10)
     r.raise_for_status()
     results = r.json().get("results", [])
@@ -824,8 +824,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         picks = random.sample(_news_cache["headlines"], min(NEWS_SAMPLE, len(_news_cache["headlines"])))
         messages.append({
             "role": "system",
-            "content": (f"# In the news\nReal current headlines {NAME} might be aware of and "
-                        f"could naturally bring up if it fits — don't force it or info-dump:\n"
+            "content": (f"# In the news\nReal headlines that have been trending this week, which "
+                        f"{NAME} might plausibly have seen and could naturally bring up if it "
+                        f"fits — don't force it or info-dump:\n"
                         + "\n".join("- " + h for h in picks)),
         })
 
