@@ -71,6 +71,10 @@ TEXTING_STYLE = (
     "- Keep the language plain and natural, the way people actually text. Skip the poetic or dramatic "
     "lines and the performing. Understatement over theater."
 )
+# Render her text bubbles in a monospace/code font, like a phone-screen message log.
+DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
+_HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
+_HTML_ESCAPE_RE = re.compile(r"[&<>]")
 _HTTP_UA = "Mozilla/5.0 (Linux; Android) CompanionBot/1.0"
 _URL_RE = re.compile(r"https?://[^\s]+")
 
@@ -1013,7 +1017,11 @@ async def send_bubbles(context, chat_id: int, text: str):
         if i > 0:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             await asyncio.sleep(min(2.2, 0.5 + len(bubble) / 220))
-        await context.bot.send_message(chat_id=chat_id, text=bubble)
+        if DEVICE_RENDER:
+            escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], bubble)
+            await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=bubble)
 
 
 # --- Selfies ---
