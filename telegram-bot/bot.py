@@ -135,6 +135,13 @@ WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
 WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
 
+# --- News awareness (NYT Top Stories) ---
+NYT_API_KEY = os.getenv("NYT_API_KEY", "")
+NEWS_ENABLED = bool(NYT_API_KEY) and os.getenv("NEWS_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+NYT_SECTION = os.getenv("NYT_SECTION", "home")  # e.g. home, world, us, business, technology
+NEWS_TTL = int(os.getenv("NEWS_TTL", "1800"))   # refresh headlines at most every 30 minutes
+NEWS_SAMPLE = int(os.getenv("NEWS_SAMPLE", "5"))  # how many headlines to surface per message
+
 try:
     from zoneinfo import ZoneInfo
     TZ = ZoneInfo(TIMEZONE)
@@ -177,6 +184,8 @@ WEATHER_CODES = {
 
 _weather_cache = {"text": None, "ts": 0.0}
 WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
+
+_news_cache = {"headlines": [], "ts": 0.0}
 
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
@@ -647,6 +656,27 @@ async def ensure_weather():
         print("[weather] fetch failed:", e)
 
 
+def _fetch_news() -> list:
+    url = f"https://api.nytimes.com/svc/topstories/v2/{NYT_SECTION}.json"
+    r = requests.get(url, params={"api-key": NYT_API_KEY}, timeout=10)
+    r.raise_for_status()
+    results = r.json().get("results", [])
+    return [item["title"].strip() for item in results if item.get("title")]
+
+
+async def ensure_news():
+    """Refresh the cached NYT headlines at most every NEWS_TTL seconds."""
+    if not NEWS_ENABLED:
+        return
+    if _news_cache["headlines"] and time.time() - _news_cache["ts"] < NEWS_TTL:
+        return
+    try:
+        _news_cache["headlines"] = await asyncio.to_thread(_fetch_news)
+        _news_cache["ts"] = time.time()
+    except Exception as e:
+        print("[news] fetch failed:", e)
+
+
 def environment_note() -> str:
     """Live context: the real current date, local time, and weather."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -788,6 +818,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": (f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
                         f"might naturally reference if it fits — don't force them, and don't "
                         f"invent fake businesses when a real area works: " + ", ".join(picks) + "."),
+        })
+
+    if NEWS_ENABLED and _news_cache["headlines"]:
+        picks = random.sample(_news_cache["headlines"], min(NEWS_SAMPLE, len(_news_cache["headlines"])))
+        messages.append({
+            "role": "system",
+            "content": (f"# In the news\nReal current headlines {NAME} might be aware of and "
+                        f"could naturally bring up if it fits — don't force it or info-dump:\n"
+                        + "\n".join("- " + h for h in picks)),
         })
 
     if selfie_ready():
@@ -1849,6 +1888,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await ensure_weather()
+        await ensure_news()
         content_for_model = user_message
         if LINK_READING:
             link = _URL_RE.search(user_message)
@@ -1893,6 +1933,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uname = user_names[chat_id]
         prompt = caption or f"{uname} just sent you this photo. React to it in character."
         await ensure_weather()
+        await ensure_news()
         messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
                                               model=VISION_MODEL, fallback=VISION_FALLBACK)
@@ -1921,6 +1962,7 @@ PROACTIVE_INSTRUCTION = (
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     await ensure_weather()
+    await ensure_news()
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
