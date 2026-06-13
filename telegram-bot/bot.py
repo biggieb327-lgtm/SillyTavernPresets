@@ -770,19 +770,25 @@ async def update_mood(chat_id: int):
 
 
 def _mood_behavior(s: float) -> str:
-    """Concrete behavioral guidance so reply length/energy actually shift with mood."""
+    """Concrete behavioral guidance so reply length/energy/texting style actually shift with mood."""
     if s >= 1.2:
         return ("She's more talkative than usual — longer messages, more willing to go on "
-                "tangents, share things unprompted, ask questions back, and initiate topics.")
+                "tangents, share things unprompted, ask questions back, and initiate topics. "
+                "Texting looser and warmer — extra exclamation points, stacked letters when "
+                "excited (\"yesss\", \"omg\"), maybe an emoji here and there.")
     if s >= 0.4:
-        return "She's engaged and responsive, happy to elaborate when something interests her."
+        return ("She's engaged and responsive, happy to elaborate when something interests her. "
+                "Normal texting — relaxed punctuation, occasional typo she doesn't bother fixing.")
     if s > -0.4:
-        return "Her usual mix — sometimes brief, sometimes chatty, depending on the topic."
+        return ("Her usual mix — sometimes brief, sometimes chatty, depending on the topic. "
+                "Normal texting, nothing notably off.")
     if s > -1.2:
         return ("She's keeping things shorter and a bit more closed off — fewer follow-up "
-                "questions, less volunteered detail, replies that trail off.")
+                "questions, less volunteered detail, replies that trail off. Texting gets "
+                "lower-effort — more lowercase, lighter punctuation, the occasional \"...\".")
     return ("She's giving short, flat responses — often just a line or two, not much energy "
-            "to elaborate or carry the conversation right now.")
+            "to elaborate or carry the conversation right now. Texting is minimal — lowercase, "
+            "barely any punctuation, one-word or clipped answers, typos left uncorrected.")
 
 
 def mood_note(chat_id: int) -> str:
@@ -2024,6 +2030,11 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         return
     if in_quiet_hours():
         print("[heartbeat] Quiet hours; skipping this tick.")
+        return
+    s = mood_now(owner)
+    skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
+    if skip_chance and random.random() < skip_chance:
+        print(f"[heartbeat] Mood is low ({s:+.1f}); not feeling it this tick.")
         return
     try:
         await send_proactive(context, owner)
