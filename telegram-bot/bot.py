@@ -7,9 +7,11 @@ import asyncio
 import time
 import base64
 import calendar
+import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse, unquote
 
 import requests
 from dotenv import load_dotenv
@@ -59,6 +61,8 @@ MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
+SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
 TEXTING_STYLE = (
     "# How you text\n"
@@ -76,6 +80,9 @@ DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "n
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 _HTML_ESCAPE_RE = re.compile(r"[&<>]")
 _HTTP_UA = "Mozilla/5.0 (Linux; Android) CompanionBot/1.0"
+# DuckDuckGo's HTML endpoint is picky about non-browser UAs.
+_SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _URL_RE = re.compile(r"https?://[^\s]+")
 
 # --- Selfies (NanoGPT image generation, img2img off a base portrait) ---
@@ -567,6 +574,53 @@ def _new_reminder_id() -> int:
     return (max((r["id"] for r in reminders), default=0)) + 1
 
 
+# --- Recurring tasks ("cron jobs") ---
+CRON_FILE = BASE_DIR / "cron_jobs.json"
+cron_jobs = []  # {"id":int, "chat_id":int, "schedule":{...}, "instruction":str}
+
+
+def load_cron_jobs():
+    global cron_jobs
+    if CRON_FILE.exists():
+        try:
+            cron_jobs = json.loads(CRON_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            print("[cron] load failed:", e)
+            cron_jobs = []
+
+
+def save_cron_jobs():
+    CRON_FILE.write_text(json.dumps(cron_jobs, indent=2), encoding="utf-8")
+
+
+load_cron_jobs()
+
+
+def _new_cron_id() -> int:
+    return (max((j["id"] for j in cron_jobs), default=0)) + 1
+
+
+def parse_cron_schedule(spec: str):
+    """Parse 'daily HH:MM' or 'every Nh'/'every Nm' into a schedule dict, or None."""
+    spec = spec.strip().lower()
+    m = re.fullmatch(r"daily\s+(\d{1,2}):(\d{2})", spec)
+    if m:
+        return {"type": "daily", "hour": int(m.group(1)), "minute": int(m.group(2))}
+    m = re.fullmatch(r"every\s+(\d+)\s*([mh])", spec)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        seconds = n * 60 if unit == "m" else n * 3600
+        return {"type": "interval", "seconds": seconds}
+    return None
+
+
+def describe_cron_schedule(sch: dict) -> str:
+    if sch["type"] == "daily":
+        return f"daily {sch['hour']:02d}:{sch['minute']:02d}"
+    secs = sch["seconds"]
+    return f"every {secs // 3600}h" if secs % 3600 == 0 else f"every {secs // 60}m"
+
+
 def parse_when(tokens):
     """Parse a leading time spec, return (due_datetime, message) or (None, None).
 
@@ -1037,6 +1091,12 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"[selfie: a short visual description — your pose, expression, surroundings]. Keep "
             f"it casual, in-character, SFW, and don't overuse it."
         )
+    if SEARCH_ENABLED:
+        cap_lines.append(
+            f"- Look something up online when it'd genuinely help — a fact, something "
+            f"{uname} mentioned, your own curiosity: [search: your query]. This pauses to fetch "
+            f"results before you reply, so only use it when it adds something real."
+        )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
     messages += [{"role": m["role"], "content": m["content"]} for m in history]  # drop internal ts
@@ -1155,6 +1215,32 @@ def extract_tags(text: str):
     if reaction or sm:
         text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), reaction, selfie_hint
+
+
+def _extract_search(text: str):
+    """Pull a [search: ..] tag out, if present."""
+    m = re.search(r"\[search:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
+
+
+async def maybe_search(context, chat_id: int, messages: list, ai_response: str, uname: str,
+                        model: str = None, fallback: str = None) -> str:
+    """If she asked to look something up, run the search and let her regenerate with results."""
+    if not SEARCH_ENABLED:
+        return ai_response
+    query = _extract_search(ai_response)
+    if not query:
+        return ai_response
+    results = await asyncio.to_thread(web_search, query)
+    messages.append({
+        "role": "system",
+        "content": (f"# Search results for \"{query}\"\n{results}\n\n"
+                    f"Now reply to {uname} naturally, weaving in whatever's useful (or saying "
+                    f"you looked and didn't find much) — don't dump raw results, list links, or "
+                    f"mention \"search results\"."),
+    })
+    return await reply_with_typing(context, chat_id, messages, model=model,
+                                   fallback=fallback or FALLBACK_MODEL)
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -2061,10 +2147,44 @@ def _fetch_generic(url: str) -> str:
                         timeout=LINK_FETCH_TIMEOUT).text
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
-    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
+    text = re.sub(r"(?is)<(script|style|nav|header|footer|aside|form|noscript).*?</\1>", " ", html)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return (f"Title: {title}\n\n" if title else "") + text
+
+
+def web_search(query: str) -> str:
+    """Quick text-only web search (DuckDuckGo HTML, no API key needed)."""
+    try:
+        r = requests.post(
+            "https://html.duckduckgo.com/html/", data={"q": query},
+            headers={"User-Agent": _SEARCH_UA}, timeout=LINK_FETCH_TIMEOUT,
+        )
+        r.raise_for_status()
+        page = r.text
+    except Exception as e:
+        print("[search] failed:", e)
+        return "(search failed — couldn't reach the search engine)"
+
+    def clean(s):
+        return _html_module.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+
+    titles = re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                         page, re.DOTALL)
+    snippets = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', page, re.DOTALL)
+
+    results = []
+    for i, (href, title) in enumerate(titles[:SEARCH_RESULTS]):
+        url = href
+        if "uddg=" in href:
+            qs = parse_qs(urlparse(href).query)
+            url = unquote(qs.get("uddg", [href])[0])
+        snippet = clean(snippets[i]) if i < len(snippets) else ""
+        line = f"- {clean(title)} ({url})"
+        if snippet:
+            line += f": {snippet}"
+        results.append(line)
+    return "\n".join(results) if results else "(no results found)"
 
 
 def fetch_link(url: str):
@@ -2108,6 +2228,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     content_for_model = user_message + "\n\n[You tried to open that link but couldn't.]"
         messages = assemble_messages(chat_id, content_for_model)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
         if REACTIONS_AUTO and not reacted:  # she didn't emit a tag — decide one cheaply
             asyncio.create_task(maybe_auto_react(update, user_message))
@@ -2143,6 +2264,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
                                               model=VISION_MODEL, fallback=VISION_FALLBACK)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=VISION_MODEL, fallback=VISION_FALLBACK)
 
         user_mem = f"[sent a photo] {caption}".strip()
         await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -2165,14 +2288,15 @@ PROACTIVE_INSTRUCTION = (
 )
 
 
-async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
+    """Generate and deliver an unprompted message from a [SYSTEM: ...] trigger (no user message to react to)."""
     uname = user_names.get(chat_id, "you")
     await ensure_weather()
     await ensure_news()
-    trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
-    clean, _reaction, selfie_hint = extract_tags(text)  # no message to react to here
+    text = await maybe_search(context, chat_id, messages, text, uname)
+    clean, _reaction, selfie_hint = extract_tags(text)
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
     if clean:
         await send_bubbles(context, chat_id, clean)
@@ -2181,6 +2305,99 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
     return text
+
+
+async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    uname = user_names.get(chat_id, "you")
+    trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
+    return await send_triggered(context, chat_id, trigger)
+
+
+# --- Recurring tasks ("cron jobs") ---
+CRON_INSTRUCTION = (
+    "[SYSTEM: scheduled task — {instruction}. Do this now (look things up if it helps) and "
+    "tell {user} about it in a short, natural, fully in-character message, 1-3 sentences. "
+    "Do not mention that this is automated or scheduled.]"
+)
+
+
+def schedule_cron_job(job_queue, job: dict):
+    sch = job["schedule"]
+    name = f"cron_{job['id']}"
+    if sch["type"] == "daily":
+        t = dtime(sch["hour"], sch["minute"], tzinfo=TZ) if TZ else dtime(sch["hour"], sch["minute"])
+        job_queue.run_daily(run_cron_job, time=t, data=job["id"], name=name, chat_id=job["chat_id"])
+    else:
+        job_queue.run_repeating(run_cron_job, interval=sch["seconds"], first=sch["seconds"],
+                                data=job["id"], name=name, chat_id=job["chat_id"])
+
+
+async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
+    job_id = context.job.data
+    job = next((j for j in cron_jobs if j["id"] == job_id), None)
+    if not job:
+        return
+    uname = user_names.get(job["chat_id"], "you")
+    trigger = CRON_INSTRUCTION.format(instruction=job["instruction"], user=uname)
+    try:
+        await send_triggered(context, job["chat_id"], trigger)
+        print(f"[cron #{job_id}] Ran: {job['instruction']}")
+    except Exception as e:
+        print(f"[cron #{job_id}] Error:", e)
+
+
+async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if len(args) < 3 or args[0].lower() not in ("daily", "every"):
+        await update.message.reply_text(
+            "Usage: /cron <schedule> <what to do>\n"
+            "Schedule is \"daily HH:MM\" or \"every Nh\"/\"every Nm\".\n\n"
+            "Example: /cron daily 08:00 check the news and tell me something interesting"
+        )
+        return
+    schedule = parse_cron_schedule(" ".join(args[:2]))
+    instruction = " ".join(args[2:]).strip()
+    if not schedule or not instruction:
+        await update.message.reply_text("Couldn't parse that. Try: /cron daily 08:00 <what to do>")
+        return
+    job = {"id": _new_cron_id(), "chat_id": chat_id, "schedule": schedule, "instruction": instruction}
+    cron_jobs.append(job)
+    save_cron_jobs()
+    if context.job_queue is not None:
+        schedule_cron_job(context.job_queue, job)
+    await update.message.reply_text(
+        f"⏰ Scheduled (#{job['id']}, {describe_cron_schedule(schedule)}): {instruction}"
+    )
+
+
+async def cron_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    jobs = [j for j in cron_jobs if j["chat_id"] == chat_id]
+    if not jobs:
+        await update.message.reply_text("No scheduled tasks. Add one with /cron.")
+        return
+    lines = [f"#{j['id']} ({describe_cron_schedule(j['schedule'])}): {j['instruction']}" for j in jobs]
+    await update.message.reply_text("⏰ Scheduled tasks:\n" + "\n".join(lines))
+
+
+async def cron_del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /crondel <id> (see /crons for ids)")
+        return
+    job_id = int(args[0])
+    job = next((j for j in cron_jobs if j["id"] == job_id and j["chat_id"] == chat_id), None)
+    if not job:
+        await update.message.reply_text("No scheduled task with that ID.")
+        return
+    cron_jobs.remove(job)
+    save_cron_jobs()
+    if context.job_queue is not None:
+        for jb in context.job_queue.get_jobs_by_name(f"cron_{job_id}"):
+            jb.schedule_removal()
+    await update.message.reply_text(f"🗑️ Removed #{job_id}.")
 
 
 def schedule_next_heartbeat(job_queue):
@@ -2319,6 +2536,9 @@ def main():
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("reminders", list_reminders))
     app.add_handler(CommandHandler("delreminder", delreminder))
+    app.add_handler(CommandHandler("cron", cron_add))
+    app.add_handler(CommandHandler("crons", cron_list_cmd))
+    app.add_handler(CommandHandler("crondel", cron_del_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -2341,6 +2561,10 @@ def main():
             schedule_reminder(app.job_queue, r)
         if reminders:
             print(f"⏰ Re-armed {len(reminders)} pending reminder(s).")
+        for j in cron_jobs:  # re-arm recurring tasks that survived a restart
+            schedule_cron_job(app.job_queue, j)
+        if cron_jobs:
+            print(f"🔁 Re-armed {len(cron_jobs)} scheduled task(s).")
     else:
         print('⚠️ JobQueue unavailable — scheduled features disabled. '
               'Install it with: pip install "python-telegram-bot[job-queue]"')
