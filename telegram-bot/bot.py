@@ -224,6 +224,16 @@ except Exception:
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
 
+# --- Nightly self-reflection (self-image + recommendation outcomes) ---
+REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
+try:
+    _RF_H, _RF_M = (int(x) for x in REFLECTION_TIME.split(":"))
+except Exception:
+    _RF_H, _RF_M = 3, 0
+BELIEF_TRAITS = int(os.getenv("BELIEF_TRAITS", "5"))      # how many core self-image traits to track
+BELIEF_DRIFT_MAX = float(os.getenv("BELIEF_DRIFT_MAX", "2.5"))  # max distance from her card-derived baseline
+RECS_MAX = int(os.getenv("RECS_MAX", "20"))  # cap on tracked recommendations/outcomes
+
 
 # --- Character card loading (SillyTavern v2) ---
 def fill(text: str, char: str, user: str) -> str:
@@ -299,6 +309,9 @@ user_names = {}     # chat_id -> the human's first name (for {{user}})
 summaries = {}      # chat_id -> rolling summary of older, scrolled-off conversation
 facts = {}          # chat_id -> list of durable facts she has learned about the user
 moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotional state
+beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
+recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
+rec_seq = {}        # chat_id -> next recommendation id
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 
 STATE_FILE = BASE_DIR / "state.json"
@@ -324,6 +337,12 @@ def load_state():
         facts[int(cid)] = fl
     for cid, mv in data.get("moods", {}).items():
         moods[int(cid)] = mv
+    for cid, bv in data.get("beliefs", {}).items():
+        beliefs[int(cid)] = bv
+    for cid, rl in data.get("recommendations", {}).items():
+        recommendations[int(cid)] = rl
+    for cid, sq in data.get("rec_seq", {}).items():
+        rec_seq[int(cid)] = sq
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
 
 
@@ -335,6 +354,9 @@ def save_state():
         "summaries": {str(k): v for k, v in summaries.items()},
         "facts": {str(k): v for k, v in facts.items()},
         "moods": {str(k): v for k, v in moods.items()},
+        "beliefs": {str(k): v for k, v in beliefs.items()},
+        "recommendations": {str(k): v for k, v in recommendations.items()},
+        "rec_seq": {str(k): v for k, v in rec_seq.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -808,6 +830,155 @@ def mood_note(chat_id: int) -> str:
             f"length naturally — never announce it outright.")
 
 
+# --- Self-image (core beliefs) + recommendation/outcome tracking ---
+def _today_messages(chat_id: int) -> list:
+    """Verbatim messages from conversation_history with a timestamp in the local 'today'."""
+    now = datetime.now(TZ) if TZ else datetime.now()
+    start = datetime.combine(now.date(), dtime(0, 0), tzinfo=TZ) if TZ else datetime.combine(now.date(), dtime(0, 0))
+    cutoff = start.timestamp()
+    return [m for m in conversation_history.get(chat_id, []) if m.get("ts", 0) >= cutoff]
+
+
+def _seed_beliefs() -> dict:
+    """Derive ~BELIEF_TRAITS core self-image traits + baseline (anchor) scores from the character card."""
+    sys = (
+        f"Based on this character description of {NAME}, identify {BELIEF_TRAITS} core "
+        f"personality traits that describe how {NAME} sees herself — single words or short "
+        f"phrases (e.g. \"guarded\", \"fiercely independent\", \"insecure about her work\"). "
+        f"For each, give a baseline score from 1-10 for how strongly that trait shows, based on "
+        f"the character description. Respond with ONLY a JSON object: "
+        f'{{"trait name": score, ...}}. No prose, no code fences.'
+    )
+    raw = call_nanogpt(
+        [{"role": "system", "content": sys}, {"role": "user", "content": SYSTEM_PROMPT_RAW[:4000]}],
+        model=SUMMARY_MODEL,
+    )
+    data = _extract_json(raw)
+    items = {}
+    for trait, score in data.items():
+        if not isinstance(trait, str) or not trait.strip():
+            continue
+        try:
+            v = max(1.0, min(10.0, float(score)))
+        except (TypeError, ValueError):
+            continue
+        items[trait.strip()[:60]] = {"score": round(v, 1), "anchor": round(v, 1)}
+        if len(items) >= BELIEF_TRAITS:
+            break
+    return items
+
+
+async def reflect(chat_id: int):
+    """Nightly: gently update her self-image (bounded by her card-derived baseline) and check
+    on past recommendations against today's conversation."""
+    uname = user_names.get(chat_id, "you")
+    items = beliefs.get(chat_id, {}).get("items")
+    if not items:
+        try:
+            items = await asyncio.to_thread(_seed_beliefs)
+        except Exception as e:
+            print("[reflect] belief seeding failed:", e)
+            items = {}
+        if items:
+            beliefs[chat_id] = {"items": items}
+            save_state()
+            print(f"[reflect] Seeded self-image for chat {chat_id}: {list(items)}")
+
+    todays = _today_messages(chat_id)
+    if not items or not todays:
+        return
+
+    convo = "\n".join(
+        f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in todays
+    )
+    open_recs = [r for r in recommendations.get(chat_id, []) if r["status"] == "open"]
+    belief_lines = "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items())
+    rec_lines = "\n".join(f"- (#{r['id']}) {r['text']}" for r in open_recs) or "(none)"
+
+    sys = (
+        f"You help {NAME} do a private nightly reflection on her day with {uname}. You're given "
+        f"her current self-image (a handful of traits she rates herself on, 1-10), any open "
+        f"things she's recommended or said she'd check on, and today's conversation. "
+        f"Update her self-image based on how she actually behaved today — small shifts only, "
+        f"not dramatic swings. Note any NEW recommendation or piece of advice she gave {uname} "
+        f"today that she'd plausibly want to follow up on later. For any OPEN item, say whether "
+        f"today's conversation reveals an outcome (good, bad, or still open/no update).\n\n"
+        f"Respond with ONLY a JSON object:\n"
+        f'{{"beliefs": {{"trait": score, ...}}, '
+        f'"new_recommendations": ["..."], '
+        f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}]}}\n'
+        f"Keep the exact same trait names as given. No prose, no code fences."
+    )
+    user = (f"SELF-IMAGE:\n{belief_lines}\n\nOPEN ITEMS:\n{rec_lines}\n\n"
+            f"TODAY'S CONVERSATION:\n{convo}")
+    raw = await asyncio.to_thread(
+        call_nanogpt, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
+        SUMMARY_MODEL,
+    )
+    data = _extract_json(raw)
+
+    new_scores = data.get("beliefs") or {}
+    for trait, d in items.items():
+        if trait not in new_scores:
+            continue
+        try:
+            v = float(new_scores[trait])
+        except (TypeError, ValueError):
+            continue
+        anchor = d["anchor"]
+        v = max(anchor - BELIEF_DRIFT_MAX, min(anchor + BELIEF_DRIFT_MAX, v))
+        d["score"] = round(max(1.0, min(10.0, v)), 1)
+
+    recs = recommendations.setdefault(chat_id, [])
+    seq = rec_seq.get(chat_id, 1)
+    for text in data.get("new_recommendations") or []:
+        if isinstance(text, str) and text.strip():
+            recs.append({"id": seq, "text": text.strip()[:200], "ts": time.time(),
+                         "status": "open", "outcome": None, "note": ""})
+            seq += 1
+    rec_seq[chat_id] = seq
+
+    by_id = {r["id"]: r for r in recs}
+    for item in data.get("resolved") or []:
+        try:
+            rid = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        r = by_id.get(rid)
+        if not r or r["status"] != "open":
+            continue
+        outcome = item.get("outcome")
+        if outcome in ("good", "bad"):
+            r["status"] = "resolved"
+            r["outcome"] = outcome
+            r["note"] = (item.get("note") or "")[:200]
+
+    if len(recs) > RECS_MAX:
+        open_ones = [r for r in recs if r["status"] == "open"]
+        resolved = sorted((r for r in recs if r["status"] != "open"), key=lambda r: r["ts"], reverse=True)
+        keep_resolved = max(0, RECS_MAX - len(open_ones))
+        recs[:] = sorted(open_ones + resolved[:keep_resolved], key=lambda r: r["ts"])
+
+    save_state()
+    print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
+
+
+def belief_note(chat_id: int) -> str:
+    items = beliefs.get(chat_id, {}).get("items")
+    if not items:
+        return ""
+    desc = ", ".join(f"{t} ({d['score']:.0f}/10)" for t, d in items.items())
+    note = (f"# Self-image\n{NAME}'s sense of herself lately: {desc}. This shapes how she carries "
+            f"herself day to day — don't recite it or the numbers, just let it inform her tone "
+            f"and reactions.")
+    open_recs = [r for r in recommendations.get(chat_id, []) if r["status"] == "open"]
+    if open_recs:
+        items_txt = "; ".join(r["text"] for r in open_recs[:3])
+        note += (f"\n\nThings she's been wondering how they turned out: {items_txt}. If it comes "
+                 f"up naturally, she might ask about it — but don't force it.")
+    return note
+
+
 def memory_block(chat_id: int, uname: str) -> str:
     """Long-term memory (rolling summary + durable facts) injected every request."""
     parts = []
@@ -854,31 +1025,33 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                         + "\n".join("- " + h for h in picks)),
         })
 
+    cap_lines = [
+        f"# Capabilities\nA couple of things you can do with tags, used naturally and "
+        f"sparingly — never announce them, just include the tag:",
+        f"- React to {uname}'s message with a single emoji, like tapping a chat bubble: "
+        f"[react: 👍]. Pick from: {REACTION_HINTS}.",
+    ]
     if selfie_ready():
-        messages.append({
-            "role": "system",
-            "content": ("# Selfies\nYou can send a selfie when it fits naturally (e.g. when "
-                        f"{uname} asks for a pic, or to share a moment). To do it, include a tag "
-                        "on its own: [selfie: a short visual description of the photo — your pose, "
-                        "expression, and surroundings]. Keep selfies casual, in-character, and "
-                        "SFW. Don't overuse them."),
-        })
+        cap_lines.append(
+            f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
+            f"[selfie: a short visual description — your pose, expression, surroundings]. Keep "
+            f"it casual, in-character, SFW, and don't overuse it."
+        )
+    messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
-    messages.append({
-        "role": "system",
-        "content": (f"# Reactions\nYou can react to {uname}'s message with a single emoji, like "
-                    f"tapping a chat bubble — sometimes instead of words, sometimes alongside "
-                    f"them. Include a tag: [react: 👍]. Use it naturally and sparingly. Pick from: "
-                    f"{REACTION_HINTS}."),
-    })
+    messages += [{"role": m["role"], "content": m["content"]} for m in history]  # drop internal ts
 
+    # Dynamic per-turn state kept close to the end, right before the final voice/style
+    # instructions, so it stays salient for this specific reply.
     mem = memory_block(chat_id, uname)
     if mem:
         messages.append({"role": "system", "content": mem})
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
-    messages += [{"role": m["role"], "content": m["content"]} for m in history]  # drop internal ts
+    bnote = belief_note(chat_id)
+    if bnote:
+        messages.append({"role": "system", "content": bnote})
 
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
     lore = triggered_lore(scan_text)
@@ -2058,6 +2231,44 @@ async def heartbeat_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Heartbeat failed: {str(e)}")
 
 
+async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
+    owner = get_owner()
+    if owner is None:
+        return
+    try:
+        await reflect(owner)
+    except Exception as e:
+        print("[reflect] Error:", e)
+
+
+async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        await reflect(chat_id)
+        await update.message.reply_text("🪞 Reflection done.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Reflection failed: {str(e)}")
+
+
+async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    items = beliefs.get(chat_id, {}).get("items") or {}
+    if not items:
+        await update.message.reply_text("Nothing yet — runs at the first nightly reflection.")
+        return
+    lines = [f"• {t}: {d['score']}/10 (baseline {d['anchor']}/10)" for t, d in items.items()]
+    recs = recommendations.get(chat_id, [])
+    open_recs = [r for r in recs if r["status"] == "open"]
+    resolved = [r for r in recs if r["status"] != "open"]
+    rec_lines = [f"• {r['text']}" for r in open_recs] or ["(none)"]
+    res_lines = [f"• {r['text']} — {r['outcome']}: {r['note']}" for r in resolved[-5:]] or ["(none)"]
+    await update.message.reply_text(
+        f"🪞 {NAME}'s self-image\n\n" + "\n".join(lines) +
+        "\n\nOpen (waiting on an outcome):\n" + "\n".join(rec_lines) +
+        "\n\nRecently resolved:\n" + "\n".join(res_lines)
+    )
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -2094,6 +2305,8 @@ def main():
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
+    app.add_handler(CommandHandler("selfimage", selfimage_cmd))
+    app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
         app.add_handler(CommandHandler("addpayment", addpayment))
         app.add_handler(CommandHandler("addevery", addevery))
@@ -2121,6 +2334,9 @@ def main():
         app.job_queue.run_daily(weekly_backup, time=backup_time)
         _bwd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][BACKUP_WEEKDAY % 7]
         print(f"💾 Weekly backup scheduled {BACKUP_TIME} on {_bwd}.")
+        reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
+        app.job_queue.run_daily(reflection_job, time=reflection_time)
+        print(f"🪞 Nightly reflection scheduled {REFLECTION_TIME}.")
         for r in reminders:  # re-arm reminders that survived a restart
             schedule_reminder(app.job_queue, r)
         if reminders:
