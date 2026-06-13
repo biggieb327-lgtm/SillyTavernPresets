@@ -140,18 +140,9 @@ REACTION_HINTS = "👍 ❤ 🔥 😁 🤔 😢 😍 🙏 👀 😭 🤣 💯 �
 def norm_emoji(e: str) -> str:
     return "".join(ch for ch in e if ch != "\ufe0f").strip()  # drop U+FE0F
 
-# --- Setting / live environment (where she lives now, weather, local time) ---
+# --- Setting / live environment (where she lives now, local time) ---
 WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Seattle")
-WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
-WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
 TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
-
-# --- News awareness (NYT Most Popular) ---
-NYT_API_KEY = os.getenv("NYT_API_KEY", "")
-NEWS_ENABLED = bool(NYT_API_KEY) and os.getenv("NEWS_ENABLED", "1").lower() not in ("0", "false", "no", "off")
-NYT_PERIOD = os.getenv("NYT_PERIOD", "7")  # most-viewed window in days: 1, 7, or 30
-NEWS_TTL = int(os.getenv("NEWS_TTL", "1800"))   # refresh headlines at most every 30 minutes
-NEWS_SAMPLE = int(os.getenv("NEWS_SAMPLE", "5"))  # how many headlines to surface per message
 
 try:
     from zoneinfo import ZoneInfo
@@ -178,25 +169,6 @@ elif not IS_NAMED_INSTANCE:
     SETTING = DEFAULT_SETTING   # Nora's home instance keeps the Seattle overlay
 else:
     SETTING = ""                # a named instance starts clean; use its card / setting.txt
-
-# WMO weather codes -> short human descriptions (Open-Meteo).
-WEATHER_CODES = {
-    0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
-    45: "foggy", 48: "freezing fog",
-    51: "light drizzle", 53: "drizzle", 55: "heavy drizzle",
-    56: "freezing drizzle", 57: "freezing drizzle",
-    61: "light rain", 63: "rain", 65: "heavy rain",
-    66: "freezing rain", 67: "freezing rain",
-    71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
-    80: "light rain showers", 81: "rain showers", 82: "heavy rain showers",
-    85: "snow showers", 86: "heavy snow showers",
-    95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail",
-}
-
-_weather_cache = {"text": None, "ts": 0.0}
-WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
-
-_news_cache = {"headlines": [], "ts": 0.0}
 
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
@@ -705,68 +677,14 @@ def triggered_lore(scan_text: str):
     return out
 
 
-def _fetch_weather() -> str:
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={WEATHER_LAT}&longitude={WEATHER_LON}"
-        "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
-        "&temperature_unit=fahrenheit&wind_speed_unit=mph"
-    )
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    c = r.json()["current"]
-    desc = WEATHER_CODES.get(c.get("weather_code"), "")
-    parts = [f"{round(c['temperature_2m'])}°F"]
-    if abs(c["apparent_temperature"] - c["temperature_2m"]) >= 4:
-        parts.append(f"feels like {round(c['apparent_temperature'])}°F")
-    if desc:
-        parts.append(desc)
-    parts.append(f"wind {round(c['wind_speed_10m'])}mph")
-    return ", ".join(parts)
-
-
-async def ensure_weather():
-    """Refresh the cached weather string at most every WEATHER_TTL seconds."""
-    if _weather_cache["text"] and time.time() - _weather_cache["ts"] < WEATHER_TTL:
-        return
-    try:
-        _weather_cache["text"] = await asyncio.to_thread(_fetch_weather)
-        _weather_cache["ts"] = time.time()
-    except Exception as e:
-        print("[weather] fetch failed:", e)
-
-
-def _fetch_news() -> list:
-    url = f"https://api.nytimes.com/svc/mostpopular/v2/viewed/{NYT_PERIOD}.json"
-    r = requests.get(url, params={"api-key": NYT_API_KEY}, timeout=10)
-    r.raise_for_status()
-    results = r.json().get("results", [])
-    return [item["title"].strip() for item in results if item.get("title")]
-
-
-async def ensure_news():
-    """Refresh the cached NYT headlines at most every NEWS_TTL seconds."""
-    if not NEWS_ENABLED:
-        return
-    if _news_cache["headlines"] and time.time() - _news_cache["ts"] < NEWS_TTL:
-        return
-    try:
-        _news_cache["headlines"] = await asyncio.to_thread(_fetch_news)
-        _news_cache["ts"] = time.time()
-    except Exception as e:
-        print("[news] fetch failed:", e)
-
-
 def environment_note() -> str:
-    """Live context: the real current date, local time, and weather."""
+    """Live context: the real current date and local time."""
     now = datetime.now(TZ) if TZ else datetime.now()
     hour12 = now.strftime("%I").lstrip("0") or "12"
     stamp = (now.strftime("%A, %B ") + str(now.day) + now.strftime(", %Y")
              + ", " + hour12 + now.strftime(":%M %p %Z")).rstrip()
     line = (f"Current real-world date and time where {NAME} lives "
             f"({WEATHER_LOCATION}): {stamp}. Treat this as the actual now.")
-    if _weather_cache["text"]:
-        line += f" Weather: {_weather_cache['text']}."
     return "[" + line + "]"
 
 
@@ -1067,16 +985,6 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": (f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
                         f"might naturally reference if it fits — don't force them, and don't "
                         f"invent fake businesses when a real area works: " + ", ".join(picks) + "."),
-        })
-
-    if NEWS_ENABLED and _news_cache["headlines"]:
-        picks = random.sample(_news_cache["headlines"], min(NEWS_SAMPLE, len(_news_cache["headlines"])))
-        messages.append({
-            "role": "system",
-            "content": (f"# In the news\nReal headlines that have been trending this week, which "
-                        f"{NAME} might plausibly have seen and could naturally bring up if it "
-                        f"fits — don't force it or info-dump:\n"
-                        + "\n".join("- " + h for h in picks)),
         })
 
     cap_lines = [
@@ -1412,8 +1320,6 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     else:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
     bits.append(f"Photo look: {random.choice(SELFIE_CAMERA)}.")
-    if _weather_cache["text"]:
-        bits.append(f"Lighting matches the weather and time of day: {_weather_cache['text']}.")
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
         "real lighting, unposed, not a studio photo. Fully clothed, SFW."
@@ -2218,8 +2124,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
 
     try:
-        await ensure_weather()
-        await ensure_news()
         content_for_model = user_message
         if LINK_READING:
             link = _URL_RE.search(user_message)
@@ -2264,8 +2168,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         uname = user_names[chat_id]
         prompt = caption or f"{uname} just sent you this photo. React to it in character."
-        await ensure_weather()
-        await ensure_news()
         messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
                                               model=VISION_MODEL, fallback=VISION_FALLBACK)
@@ -2286,18 +2188,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 PROACTIVE_INSTRUCTION = (
     "[SYSTEM: {name} has been quiet for a while. Reach out to {user} first, unprompted, "
     "with a short, natural, fully in-character message — a check-in, a passing thought, "
-    "a small specific thing that just happened in your day (work, the city, the weather, "
-    "something you read), or a continuation of your last conversation. 1-3 sentences. "
+    "a small specific thing that just happened in your day (work, the city, something you "
+    "read), or a continuation of your last conversation. 1-3 sentences. "
     "Do not mention that this "
     "message is automated.]"
 )
+
+# Occasionally nudge a proactive message toward checking the weather or local news first,
+# so those ambient details stay current without a dedicated API integration.
+PROACTIVE_AMBIENT_HINT = (
+    " Before replying, use [search: weather in {location} today] or [search: {location} news "
+    "today] (pick whichever fits the moment) and let whatever you find casually color what "
+    "you say — don't report it like a forecast or headline roundup."
+)
+PROACTIVE_AMBIENT_CHANCE = 0.25
 
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
     """Generate and deliver an unprompted message from a [SYSTEM: ...] trigger (no user message to react to)."""
     uname = user_names.get(chat_id, "you")
-    await ensure_weather()
-    await ensure_news()
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
@@ -2315,6 +2224,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
+    if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
+        trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     return await send_triggered(context, chat_id, trigger)
 
 
@@ -2439,7 +2350,6 @@ async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     hint = " ".join(context.args).strip() if context.args else ""
-    await ensure_weather()  # so the selfie reflects the current weather
     await send_selfie(context, chat_id, hint, announce_errors=True)
 
 
