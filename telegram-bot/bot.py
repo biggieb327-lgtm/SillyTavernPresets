@@ -770,28 +770,22 @@ async def update_mood(chat_id: int):
 
 
 def _mood_behavior(s: float) -> str:
-    """Concrete behavioral guidance so reply length/energy/texting style actually shift with mood."""
+    """Concrete behavioral guidance so reply length/energy/engagement actually shift with mood."""
     if s >= 1.2:
         return ("She's more talkative than usual — longer messages, more willing to go on "
-                "tangents, share things unprompted, ask questions back, and initiate topics. "
-                "Texting looser and warmer — extra exclamation points, stacked letters when "
-                "excited (\"yesss\", \"omg\"), maybe an emoji here and there.")
+                "tangents, share things unprompted, ask questions back, and initiate topics.")
     if s >= 0.4:
-        return ("She's engaged and responsive, happy to elaborate when something interests her. "
-                "Normal texting — relaxed punctuation, occasional typo she doesn't bother fixing.")
+        return "She's engaged and responsive, happy to elaborate when something interests her."
     if s > -0.4:
-        return ("Her usual mix — sometimes brief, sometimes chatty, depending on the topic. "
-                "Normal texting, nothing notably off.")
+        return "Her usual mix — sometimes brief, sometimes chatty, depending on the topic."
     if s > -1.2:
         return ("She's keeping things shorter and a bit more closed off — fewer follow-up "
                 "questions, less volunteered detail, replies that trail off. She'll sidestep or "
-                "give a vague non-answer on heavier topics rather than dig in right now. Texting "
-                "gets lower-effort — more lowercase, lighter punctuation, the occasional \"...\".")
+                "give a vague non-answer on heavier topics rather than dig in right now.")
     return ("She's giving short, flat responses — often just a line or two, not much energy "
             "to elaborate or carry the conversation right now. She'll actively deflect or change "
             "the subject if something gets too heavy or personal — not shutting down coldly, "
-            "just not going there. Texting is minimal — lowercase, barely any punctuation, "
-            "one-word or clipped answers, typos left uncorrected.")
+            "just not going there.")
 
 
 def mood_note(chat_id: int) -> str:
