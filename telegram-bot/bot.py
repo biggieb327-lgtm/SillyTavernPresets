@@ -784,11 +784,14 @@ def _mood_behavior(s: float) -> str:
                 "Normal texting, nothing notably off.")
     if s > -1.2:
         return ("She's keeping things shorter and a bit more closed off — fewer follow-up "
-                "questions, less volunteered detail, replies that trail off. Texting gets "
-                "lower-effort — more lowercase, lighter punctuation, the occasional \"...\".")
+                "questions, less volunteered detail, replies that trail off. She'll sidestep or "
+                "give a vague non-answer on heavier topics rather than dig in right now. Texting "
+                "gets lower-effort — more lowercase, lighter punctuation, the occasional \"...\".")
     return ("She's giving short, flat responses — often just a line or two, not much energy "
-            "to elaborate or carry the conversation right now. Texting is minimal — lowercase, "
-            "barely any punctuation, one-word or clipped answers, typos left uncorrected.")
+            "to elaborate or carry the conversation right now. She'll actively deflect or change "
+            "the subject if something gets too heavy or personal — not shutting down coldly, "
+            "just not going there. Texting is minimal — lowercase, barely any punctuation, "
+            "one-word or clipped answers, typos left uncorrected.")
 
 
 def mood_note(chat_id: int) -> str:
