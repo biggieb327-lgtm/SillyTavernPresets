@@ -1212,7 +1212,12 @@ def extract_tags(text: str):
     if sm:
         selfie_hint = sm.group(1).strip()
         text = re.sub(r"\[selfie:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
-    if reaction or sm:
+    # Safety net: a [search: ..] tag should already be consumed by maybe_search, but if a
+    # regenerated reply emits another one, strip it rather than leak the literal tag.
+    sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
+    if sr:
+        text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+    if reaction or sm or sr:
         text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), reaction, selfie_hint
 
@@ -1237,7 +1242,7 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
         "content": (f"# Search results for \"{query}\"\n{results}\n\n"
                     f"Now reply to {uname} naturally, weaving in whatever's useful (or saying "
                     f"you looked and didn't find much) — don't dump raw results, list links, or "
-                    f"mention \"search results\"."),
+                    f"mention \"search results\". Don't use [search:] again this turn."),
     })
     return await reply_with_typing(context, chat_id, messages, model=model,
                                    fallback=fallback or FALLBACK_MODEL)
