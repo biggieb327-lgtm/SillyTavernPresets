@@ -117,7 +117,10 @@ if _APPEARANCE_FILE.exists():
 elif not IS_NAMED_INSTANCE:
     SELFIE_APPEARANCE = _APPEARANCE_DEFAULT      # Nora's home instance keeps her look
 else:
-    SELFIE_APPEARANCE = "the same person as in the reference photo"
+    # No age/appearance details for this instance -- state an adult age explicitly anyway,
+    # since Gemini's image safety filter gets much stricter (and returns blacked-out images)
+    # for photos of women with no stated age in casual/intimate settings.
+    SELFIE_APPEARANCE = "an adult woman in her mid-20s, the same person as in the reference photo"
 
 CARD_NAME = os.getenv("CHARACTER_CARD", "nora.json")
 HEARTBEAT_MIN = float(os.getenv("HEARTBEAT_MIN_HOURS", "2")) * 3600  # random window low end
@@ -1392,8 +1395,16 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
         json=payload, timeout=IMAGE_TIMEOUT,
     )
     r.raise_for_status()
-    candidates = r.json().get("candidates", [])
-    for part in candidates[0].get("content", {}).get("parts", []) if candidates else []:
+    body = r.json()
+    candidates = body.get("candidates", [])
+    if not candidates:
+        raise RuntimeError(f"Gemini returned no candidates: {body.get('promptFeedback', body)}")
+    cand = candidates[0]
+    finish = cand.get("finishReason")
+    if finish and finish not in ("STOP", "MAX_TOKENS"):
+        raise RuntimeError(f"Gemini blocked the image (finishReason={finish}) — try again or "
+                           f"rephrase what she's doing/wearing.")
+    for part in cand.get("content", {}).get("parts", []):
         inline = part.get("inlineData") or part.get("inline_data")
         if inline and inline.get("data"):
             return base64.b64decode(inline["data"])
