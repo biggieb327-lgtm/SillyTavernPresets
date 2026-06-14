@@ -1322,8 +1322,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     framing = random.choice(SELFIE_FRAMINGS)
     expression = random.choice(SELFIE_EXPRESSIONS)
     bits = [
-        f"{framing} of this same woman — {NAME}, {SELFIE_APPEARANCE}",
-        "Keep her face, hair, and freckles identical to the reference image — clearly the same person.",
+        "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
+        "specific face, bone structure, hair color/texture, and freckles identical to the "
+        "reference image; this must be recognizably the same individual, just in a new "
+        f"pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
+        f"New shot: {framing}.",
         f"Expression: {expression}.",
     ]
     if chat_id is not None:
@@ -1339,7 +1342,8 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     bits.append(f"Photo look: {random.choice(SELFIE_CAMERA)}.")
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
-        "real lighting, unposed, not a studio photo. Fully clothed, SFW."
+        "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
+        "watermarks, or captions in the image."
     )
     return " ".join(bits)
 
@@ -1377,8 +1381,8 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
     payload = {
         "contents": [{
             "parts": [
-                {"text": prompt},
                 {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode()}},
+                {"text": prompt},
             ],
         }],
         "generationConfig": {"responseModalities": ["IMAGE"]},
