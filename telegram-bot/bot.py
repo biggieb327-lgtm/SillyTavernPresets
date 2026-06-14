@@ -1232,6 +1232,10 @@ async def send_bubbles(context, chat_id: int, text: str):
 
 # --- Selfies ---
 def selfie_ready() -> bool:
+    return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
+
+
+def _has_base_image() -> bool:
     return (BASE_DIR / SELFIE_BASE).exists()
 
 
@@ -1325,14 +1329,22 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     scene = hint.strip() if hint else (random.choice(ATLAS) if ATLAS else "")
     framing = random.choice(SELFIE_FRAMINGS)
     expression = random.choice(SELFIE_EXPRESSIONS)
-    bits = [
-        "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
-        "specific face, bone structure, hair color/texture, and freckles identical to the "
-        "reference image; this must be recognizably the same individual, just in a new "
-        f"pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
-        f"New shot: {framing}.",
-        f"Expression: {expression}.",
-    ]
+    if _has_base_image():
+        bits = [
+            "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
+            "specific face, bone structure, hair color/texture, and freckles identical to the "
+            "reference image; this must be recognizably the same individual, just in a new "
+            f"pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
+            f"New shot: {framing}.",
+            f"Expression: {expression}.",
+        ]
+    else:
+        bits = [
+            f"Generate a realistic phone selfie of {NAME}, {SELFIE_APPEARANCE} Keep her face, "
+            "features, and coloring consistent with that description.",
+            f"Shot: {framing}.",
+            f"Expression: {expression}.",
+        ]
     if chat_id is not None:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
@@ -1388,15 +1400,14 @@ def _get_with_retries(url, **kwargs):
 
 
 def _generate_selfie_gemini(prompt: str) -> bytes:
-    raw, mime = _base_image()
+    parts = []
+    if _has_base_image():
+        raw, mime = _base_image()
+        parts.append({"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode()}})
+    parts.append({"text": prompt})
     url = f"{GEMINI_IMAGE_URL}/{GEMINI_IMAGE_MODEL}:generateContent"
     payload = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode()}},
-                {"text": prompt},
-            ],
-        }],
+        "contents": [{"parts": parts}],
         "generationConfig": {"responseModalities": ["IMAGE"]},
     }
     r = _post_with_retries(
@@ -1463,7 +1474,9 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         if announce_errors:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"📷 No base image set. Drop one at ~/telegram-bot/{SELFIE_BASE} (≤4 MB) and restart.",
+                text=(f"📷 No reference photo or appearance.txt set. Drop a photo at "
+                      f"~/telegram-bot/{SELFIE_BASE} or write a description to "
+                      f"~/telegram-bot/appearance.txt and restart."),
             )
         return
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
