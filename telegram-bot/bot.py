@@ -770,7 +770,7 @@ def _mood_behavior(s: float) -> str:
     """Concrete behavioral guidance so reply length/energy/engagement actually shift with mood."""
     if s >= 1.2:
         return ("She's more talkative than usual — longer messages, more willing to go on "
-                "tangents, share things unprompted, ask questions back, and initiate topics.")
+                "tangents, share things unprompted, and bring up her own stuff.")
     if s >= 0.4:
         return "She's engaged and responsive, happy to elaborate when something interests her."
     if s > -0.4:
