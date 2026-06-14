@@ -1330,6 +1330,33 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     return " ".join(bits)
 
 
+# Mobile connections (Termux/cellular/wifi handoffs) sometimes drop mid-request with a low-level
+# "Connection aborted" error. Retry transient network errors a couple times before giving up.
+_IMAGE_RETRIES = 3
+
+
+def _post_with_retries(url, **kwargs):
+    for attempt in range(_IMAGE_RETRIES):
+        try:
+            return requests.post(url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt == _IMAGE_RETRIES - 1:
+                raise
+            print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
+            time.sleep(2 * (attempt + 1))
+
+
+def _get_with_retries(url, **kwargs):
+    for attempt in range(_IMAGE_RETRIES):
+        try:
+            return requests.get(url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt == _IMAGE_RETRIES - 1:
+                raise
+            print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
+            time.sleep(2 * (attempt + 1))
+
+
 def generate_selfie_image(prompt: str) -> bytes:
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -1341,13 +1368,13 @@ def generate_selfie_image(prompt: str) -> bytes:
         "guidance_scale": SELFIE_GUIDANCE,
         "num_inference_steps": SELFIE_STEPS,
     }
-    r = requests.post(NANOGPT_IMAGE_URL, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
+    r = _post_with_retries(NANOGPT_IMAGE_URL, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
     r.raise_for_status()
     item = r.json()["data"][0]
     if item.get("b64_json"):
         return base64.b64decode(item["b64_json"])
     if item.get("url"):  # in case response_format ever returns a URL
-        img = requests.get(item["url"], timeout=IMAGE_TIMEOUT)
+        img = _get_with_retries(item["url"], timeout=IMAGE_TIMEOUT)
         img.raise_for_status()
         return img.content
     raise RuntimeError("image response had neither b64_json nor url")
