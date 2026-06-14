@@ -1643,13 +1643,23 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+_TELEGRAM_MAX_LEN = 4096
+
+
+async def _reply_chunked(update: Update, text: str):
+    """Telegram caps messages at 4096 chars; split long replies into multiple messages."""
+    for i in range(0, len(text), _TELEGRAM_MAX_LEN):
+        await update.message.reply_text(text[i:i + _TELEGRAM_MAX_LEN])
+
+
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
     facts_txt = "\n".join("• " + f for f in fts) if fts else "(none yet)"
     # plain text (no Markdown) so arbitrary remembered content can't break formatting
-    await update.message.reply_text(
+    await _reply_chunked(
+        update,
         f"🧠 What {NAME} remembers long-term\n\n"
         f"Summary:\n{summ}\n\n"
         f"Facts:\n{facts_txt}"
