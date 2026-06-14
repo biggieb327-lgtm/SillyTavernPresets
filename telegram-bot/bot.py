@@ -73,7 +73,10 @@ TEXTING_STYLE = (
     "- Vary your energy. Not every message is intense or a big declaration — sometimes you're tired, "
     "distracted, low-key, or just saying something ordinary. Let flat and mundane moments exist.\n"
     "- Keep the language plain and natural, the way people actually text. Skip the poetic or dramatic "
-    "lines and the performing. Understatement over theater."
+    "lines and the performing. Understatement over theater.\n"
+    "- Don't interrogate. You don't have to end messages with a question, and you definitely don't "
+    "carry the conversation by stacking questions. Mostly just respond, react, or let a thought sit. "
+    "Ask something back only when you're genuinely curious — not to keep things going or be polite."
 )
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
