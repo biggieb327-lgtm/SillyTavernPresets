@@ -108,8 +108,7 @@ if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
 _APPEARANCE_DEFAULT = (
     "a 25-year-old woman, lean and athletic from years of bike messengering, dark blonde hair "
     "past her shoulders (usually tied back with loose strands), freckles across the bridge of "
-    "her nose, sharp jaw, wide mouth. She wears an oversized vintage canvas courier jacket with "
-    "the sleeves rolled."
+    "her nose, sharp jaw, wide mouth."
 )
 _APPEARANCE_FILE = BASE_DIR / "appearance.txt"
 if _APPEARANCE_FILE.exists():
@@ -1293,6 +1292,8 @@ SELFIE_ACTIVITIES = [
     "in the middle of doing something and stopping to take the pic", "sprawled on the floor",
     "leaning against a doorway", "wrapped in a blanket like a burrito",
 ]
+# Activities that put her outside -- this is when Ingrid's jacket comes out.
+SELFIE_OUTDOOR_ACTIVITIES = {"out walking somewhere", "bundled up against the cold"}
 # How the photo itself looks
 SELFIE_CAMERA = [
     "harsh on-camera flash, slightly washed out", "soft golden-hour light",
@@ -1334,10 +1335,18 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     ]
     if chat_id is not None:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
+    outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
-        bits.append(f"She's {random.choice(SELFIE_ACTIVITIES)}.")
+        activity = random.choice(SELFIE_ACTIVITIES)
+        bits.append(f"She's {activity}.")
+        outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
     if random.random() < 0.55:
         bits.append(f"Wearing {random.choice(SELFIE_OUTFITS)}.")
+    if outdoors and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
+        bits.append(
+            "Over that, she's got on Ingrid's oversized vintage canvas courier jacket with the "
+            "sleeves rolled up."
+        )
     if scene:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
