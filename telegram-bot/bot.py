@@ -38,6 +38,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NANOGPT_API_KEY = os.getenv("NANOGPT_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
@@ -88,14 +89,22 @@ _SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _URL_RE = re.compile(r"https?://[^\s]+")
 
-# --- Selfies (NanoGPT image generation, img2img off a base portrait) ---
+# --- Selfies (image-to-image off a base portrait) ---
+# SELFIE_PROVIDER picks the backend: "gemini" calls Google's Gemini API directly
+# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint.
+SELFIE_PROVIDER = os.getenv("SELFIE_PROVIDER", "gemini" if GEMINI_API_KEY else "nanogpt")
 NANOGPT_IMAGE_URL = os.getenv("NANOGPT_IMAGE_URL", "https://nano-gpt.com/v1/images/generations")
 SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
+GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "nora_base.png")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = float(os.getenv("SELFIE_GUIDANCE", "3.5"))
 SELFIE_STEPS = int(os.getenv("SELFIE_STEPS", "28"))
 IMAGE_TIMEOUT = int(os.getenv("IMAGE_TIMEOUT", "180"))
+
+if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
+    raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
 _APPEARANCE_DEFAULT = (
     "a 25-year-old woman, lean and athletic from years of bike messengering, dark blonde hair "
     "past her shoulders (usually tied back with loose strands), freckles across the bridge of "
@@ -1224,11 +1233,16 @@ def selfie_ready() -> bool:
     return (BASE_DIR / SELFIE_BASE).exists()
 
 
-def _base_data_url():
+def _base_image() -> tuple:
+    """Returns (raw bytes, mime type) for the selfie reference photo."""
     path = BASE_DIR / SELFIE_BASE
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-    b = base64.b64encode(path.read_bytes()).decode()
-    return f"data:{mime};base64,{b}"
+    return path.read_bytes(), mime
+
+
+def _base_data_url():
+    raw, mime = _base_image()
+    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
 
 
 def _daypart() -> str:
@@ -1357,7 +1371,32 @@ def _get_with_retries(url, **kwargs):
             time.sleep(2 * (attempt + 1))
 
 
-def generate_selfie_image(prompt: str) -> bytes:
+def _generate_selfie_gemini(prompt: str) -> bytes:
+    raw, mime = _base_image()
+    url = f"{GEMINI_IMAGE_URL}/{GEMINI_IMAGE_MODEL}:generateContent"
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode()}},
+            ],
+        }],
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    }
+    r = _post_with_retries(
+        url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json=payload, timeout=IMAGE_TIMEOUT,
+    )
+    r.raise_for_status()
+    candidates = r.json().get("candidates", [])
+    for part in candidates[0].get("content", {}).get("parts", []) if candidates else []:
+        inline = part.get("inlineData") or part.get("inline_data")
+        if inline and inline.get("data"):
+            return base64.b64decode(inline["data"])
+    raise RuntimeError("Gemini response had no image data")
+
+
+def _generate_selfie_nanogpt(prompt: str) -> bytes:
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": SELFIE_MODEL,
@@ -1378,6 +1417,12 @@ def generate_selfie_image(prompt: str) -> bytes:
         img.raise_for_status()
         return img.content
     raise RuntimeError("image response had neither b64_json nor url")
+
+
+def generate_selfie_image(prompt: str) -> bytes:
+    if SELFIE_PROVIDER == "gemini":
+        return _generate_selfie_gemini(prompt)
+    return _generate_selfie_nanogpt(prompt)
 
 
 async def _keep_uploading(bot, chat_id: int):
