@@ -2354,13 +2354,22 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
 
 
 def _fetch_reddit(url: str) -> str:
-    headers = {"User-Agent": _HTTP_UA}
+    # Reddit's anti-bot protection rejects generic UAs with a 403 -- use the
+    # browser-like UA that's already proven to work for DuckDuckGo.
+    headers = {"User-Agent": _SEARCH_UA}
     resolved = requests.get(url, headers=headers, timeout=LINK_FETCH_TIMEOUT,
                             allow_redirects=True).url  # resolve /s/ share links
     base = resolved.split("?")[0].rstrip("/")
     if not base.endswith(".json"):
         base += "/.json"
-    data = requests.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT).json()
+    resp = requests.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
+    if resp.status_code != 200:
+        # Fall back to old.reddit.com, which is less aggressively guarded.
+        old_base = base.replace("://www.reddit.com", "://old.reddit.com") \
+                       .replace("://reddit.com", "://old.reddit.com")
+        resp = requests.get(old_base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
     post = data[0]["data"]["children"][0]["data"]
     sub = post.get("subreddit_name_prefixed") or ("r/" + post.get("subreddit", ""))
     parts = [f'Reddit post in {sub} — "{post.get("title", "")}" '
