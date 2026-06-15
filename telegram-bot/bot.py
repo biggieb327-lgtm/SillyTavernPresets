@@ -52,8 +52,6 @@ VISION_MODEL = os.getenv("VISION_MODEL", NANOGPT_MODEL)    # must accept image i
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))  # seconds to wait on the API
-MULTIBUBBLE = os.getenv("MULTIBUBBLE", "1").lower() not in ("0", "false", "no", "off")
-MAX_BUBBLES = int(os.getenv("MAX_BUBBLES", "3"))
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -1317,30 +1315,15 @@ async def maybe_auto_react(update, user_message: str):
         print("[react-auto] failed:", e)
 
 
-def split_bubbles(text: str):
-    """Split a reply into up to MAX_BUBBLES message bubbles, like a person texting."""
-    if not MULTIBUBBLE:
-        return [text]
-    parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if len(parts) <= 1 and len(text) > 280:  # one long block -> split on sentences
-        parts = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text) if s.strip()]
-    if not parts:
-        parts = [text]
-    if len(parts) > MAX_BUBBLES:  # merge the overflow into the last bubble
-        parts = parts[:MAX_BUBBLES - 1] + [" ".join(parts[MAX_BUBBLES - 1:])]
-    return parts
-
-
 async def send_bubbles(context, chat_id: int, text: str):
-    for i, bubble in enumerate(split_bubbles(text)):
-        if i > 0:
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            await asyncio.sleep(min(2.2, 0.5 + len(bubble) / 220))
+    """Send a reply as a single message (chunked only if it exceeds Telegram's length limit)."""
+    for i in range(0, len(text), _TELEGRAM_MAX_LEN):
+        chunk = text[i:i + _TELEGRAM_MAX_LEN]
         if DEVICE_RENDER:
-            escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], bubble)
+            escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
             await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
         else:
-            await context.bot.send_message(chat_id=chat_id, text=bubble)
+            await context.bot.send_message(chat_id=chat_id, text=chunk)
 
 
 # --- Selfies ---
@@ -2551,6 +2534,14 @@ PROACTIVE_AMBIENT_HINT = (
 )
 PROACTIVE_AMBIENT_CHANCE = 0.25
 
+# Occasionally have her attach a selfie to a proactive message -- the model almost never
+# reaches for [selfie:] on its own when reaching out first, so nudge it explicitly.
+PROACTIVE_SELFIE_HINT = (
+    " Include a [selfie: ...] tag with this message -- a quick, casual pic of whatever "
+    "you're doing or wherever you are right now."
+)
+PROACTIVE_SELFIE_CHANCE = 0.15
+
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
     """Generate and deliver an unprompted message from a [SYSTEM: ...] trigger (no user message to react to)."""
@@ -2575,6 +2566,8 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
+    elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
+        trigger = trigger[:-1] + PROACTIVE_SELFIE_HINT + "]"
     return await send_triggered(context, chat_id, trigger)
 
 
