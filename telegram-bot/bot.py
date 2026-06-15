@@ -63,7 +63,7 @@ LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
-TEXTING_STYLE = (
+_DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
     "- Go very light on *asterisk actions* — use them only when a physical detail genuinely adds "
@@ -79,6 +79,12 @@ TEXTING_STYLE = (
     "nouns, and use periods/commas/question marks where they'd naturally fall. Casual phrasing and "
     "fragments are fine; sloppy typing (all lowercase, no punctuation) is not the goal."
 )
+# Per-bot preset: a small text file of extra system instructions (e.g. texting style),
+# editable without touching bot.py. Falls back to the default above if missing.
+PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
+_preset_path = BASE_DIR / PRESET_FILE
+TEXTING_STYLE = _preset_path.read_text(encoding="utf-8").strip() if _preset_path.exists() \
+    else _DEFAULT_TEXTING_STYLE
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
