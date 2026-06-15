@@ -1954,6 +1954,24 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args
 
+    if args and args[0].lower() == "search":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: `/setmodel search <term>`", parse_mode="Markdown")
+            return
+        term = " ".join(args[1:]).lower()
+        models, _ = await asyncio.to_thread(_nanogpt_subscription_models)
+        matches = [m for m in models if term in m.lower()]
+        if not matches:
+            await update.message.reply_text(f"No subscription models matching `{term}`.", parse_mode="Markdown")
+            return
+        _last_shown_models[chat_id] = matches
+        lines = [f"Models matching `{term}` — reply with the number to pick:"]
+        for i, m in enumerate(matches, 1):
+            lines.append(f"{i}. `{m}`")
+        lines.append("\nUsage: `/setmodel <role> <number>`")
+        await _reply_chunked(update, "\n".join(lines))
+        return
+
     if not args:
         lines = ["🤖 *Model roles*"]
         for role, var in MODEL_ROLES.items():
@@ -1962,9 +1980,8 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if models:
             _last_shown_models[chat_id] = models
             header = "subscription models" if filtered else "all available models (couldn't confirm subscription list)"
-            lines.append(f"\n*{header}* — reply with the number to pick:")
-            for i, m in enumerate(models, 1):
-                lines.append(f"{i}. `{m}`")
+            lines.append(f"\n*{len(models)} {header}* — too many to list here.")
+            lines.append("Use `/setmodel search <term>` to find one, or `/setmodel <role> <exact name>`.")
         else:
             lines.append("\n⚠️ Couldn't fetch the model list right now.")
         lines.append("\nUsage: `/setmodel <role> <name or number>`")
