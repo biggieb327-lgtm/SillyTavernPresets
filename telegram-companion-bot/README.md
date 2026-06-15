@@ -1,60 +1,47 @@
 # Telegram Companion Bot
 
-A self-hosted AI companion that lives in Telegram — built on a SillyTavern v2
-character card, with persistent memory, moods, proactive messages, selfies, web
-search, and link reading. Designed to run on an Android phone via Termux (or any
-Linux machine), entirely under your own control.
+A self-hosted AI companion that lives in your Telegram DMs. Powered by [NanoGPT](https://nano-gpt.com) (OpenAI-compatible API). Runs on a phone via Termux, a VPS, or a Mac.
+
+Includes an example character — Priya, a 26-year-old software engineer — designed for realistic, casual texting rather than assistant-style responses.
 
 ## Features
 
-- **Character-driven**: powered by a standard SillyTavern v2 character card
-  (`priya.json` is included as a working example)
-- **Two-tier memory**: a verbatim recent-conversation window, a rolling "recent
-  memory" summary, and durable long-term facts that persist indefinitely
-- **Proactive texting**: occasional unprompted messages within configurable
-  quiet hours, plus nightly reflection that sets a "next conversation goal"
-- **Mood**: drifts based on how often you talk, coloring tone and selfies
-- **Selfies**: img2img portraits via Gemini or NanoGPT, mood- and weather-aware
-- **Web search & link reading**: including Reddit posts (via Reddit's OAuth API)
-- **Live config**: change AI models and feature toggles from Telegram itself with
-  `/setmodel` and `/settings` — no restart needed
-- **Reminders & recurring tasks**: `/remindme`, `/cron`, and an optional weekly
-  payments-reminder digest
-- **Editable texting style**: `preset.txt` controls phrasing/punctuation rules
-  without touching the code
+- Persistent memory across conversations (rolling history + summarization + fact extraction)
+- Sends and receives photos, voice messages, documents, stickers, and location
+- Proactive check-ins (optional — the bot can message you first)
+- Reminders (`/remindme`, `/setreminder`)
+- Image generation and TTS via `/imagine` and `/tts`
+- Multi-instance support — run multiple characters simultaneously
+- Standard SillyTavern v2 character card format
+- Configurable models for chat, vision, and summarization
 
-## Getting started
+## Quick Start
 
-New to this? Follow [`SETUP_GUIDE.md`](./SETUP_GUIDE.md) — a beginner-friendly,
-step-by-step walkthrough (no programming experience needed, ~30-45 minutes).
+See **SETUP_GUIDE.md** for full installation instructions.
 
-Already set up? See [`OPS_MANUAL.md`](./OPS_MANUAL.md) for the full command
-reference, configuration knobs, and troubleshooting.
+```bash
+git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
+cd sillytavernpresets/telegram-companion-bot
+pip install -r requirements.txt
+cp .env.example .env
+# edit .env with your tokens
+bash run.sh
+```
 
-## What's included
+## Files
 
 | File | Purpose |
 |---|---|
-| `bot.py` | The bot itself — shared code, configured entirely via `.env` and per-character files |
-| `priya.json` | Example SillyTavern v2 character card — copy and adapt, or write your own |
-| `preset.txt` | Editable texting-style instructions |
-| `.env.example` | All configuration options, with comments |
+| `bot.py` | Main bot code |
+| `priya.json` | Example character card (SillyTavern v2 format) |
+| `preset.txt` | Texting style instructions (injected into every prompt) |
+| `.env.example` | Config template |
 | `requirements.txt` | Python dependencies |
-| `run.sh` / `run-bot.sh` | Auto-restarting launcher scripts for tmux |
-| `SETUP_GUIDE.md` | Step-by-step setup for beginners |
-| `OPS_MANUAL.md` | Command reference, configuration, and troubleshooting |
+| `run.sh` | Start script (Termux/tmux) |
+| `run-bot.sh` | Start script for named instances |
+| `SETUP_GUIDE.md` | Full setup walkthrough |
+| `OPS_MANUAL.md` | Day-to-day operation reference |
 
-## Bring your own character
+## License
 
-`priya.json` demonstrates the character card structure this bot expects: OCEAN
-personality trait blocks, a voice pack with concrete speech rules, system-prompt
-dialogue rules, and a lorebook (`character_book`) of background entries. You can
-build your own card from scratch in SillyTavern's character creator and export it
-as v2 JSON, or start from `priya.json` and adapt it.
-
-## Requirements
-
-- A Telegram bot token (free, via @BotFather)
-- A [NanoGPT](https://nano-gpt.com) API key (subscription recommended)
-- Optional: a Google Gemini API key for higher-quality selfies
-- Optional: Reddit API credentials for reading Reddit links
+MIT
