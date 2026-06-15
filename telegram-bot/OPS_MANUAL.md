@@ -9,8 +9,9 @@ Two Telegram companion bots running on Termux from one shared codebase:
 
 The **code** (`bot.py`, `run.sh`, `run-bot.sh`, the venv) lives only in `~/telegram-bot`.
 Each bot's **identity and data** live in its own folder: `.env` (token, models, knobs),
-character card json, `state.json` (memory/mood/overrides), `owner_chat.txt`, `bot.log`,
-`reminders.json`, selfie base image, optional `appearance.txt` / `setting.txt` / atlas.
+character card json, `preset.txt` (texting-style instructions), `state.json`
+(memory/mood/overrides), `owner_chat.txt`, `bot.log`, `reminders.json`, selfie base image,
+optional `appearance.txt` / `setting.txt` / atlas.
 Nora's folder also holds `payments.json`.
 
 ---
@@ -97,6 +98,16 @@ Example: `/cron daily 08:00 check the news and tell me something interesting`
 > such edit, **re-run `/payments`** to get the current numbers before making further edits
 > by number — otherwise `/editpayment 4 ...` may hit the wrong one. (The edit confirmation
 > message now reminds you when a change reorders the list.)
+
+---
+
+## Texting-style preset (`preset.txt`)
+
+Each bot's "how you text" system instructions live in `preset.txt` in its folder (plain
+text, no special format). Edit it to change phrasing/punctuation rules, asterisk-action
+usage, energy variation, etc. without touching `bot.py`. If the file is missing, bot.py
+falls back to its built-in default. Controlled by `TEXTING_REALISM` / `/settings
+texting_realism on|off`. Restart the bot after editing.
 
 ---
 
