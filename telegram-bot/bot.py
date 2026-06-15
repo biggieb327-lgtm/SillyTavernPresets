@@ -1015,9 +1015,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )
     if SEARCH_ENABLED:
         cap_lines.append(
-            f"- Look something up online when it'd genuinely help — a fact, something "
-            f"{uname} mentioned, your own curiosity: [search: your query]. This pauses to fetch "
-            f"results before you reply, so only use it when it adds something real."
+            f"- Look something up online when you genuinely don't know something and it'd "
+            f"help — a fact, something {uname} mentioned, your own curiosity. If it's the "
+            f"kind of thing you'd have to actually check, send a short in-character line "
+            f"first (like telling {uname} you'll look it up / give you a sec), then on its "
+            f"own line put [search: your query]. The lookup happens after that and you'll "
+            f"get a follow-up turn to reply with what you found — don't answer the question "
+            f"yet in that first message, just the \"let me check\" beat."
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
@@ -1152,17 +1156,24 @@ def _extract_search(text: str):
 
 async def maybe_search(context, chat_id: int, messages: list, ai_response: str, uname: str,
                         model: str = None, fallback: str = None) -> str:
-    """If she asked to look something up, run the search and let her regenerate with results."""
+    """If she asked to look something up, send any "let me check" lead-in now, run the
+    search, and let her regenerate a follow-up with results."""
     if not SEARCH_ENABLED:
         return ai_response
     query = _extract_search(ai_response)
     if not query:
         return ai_response
+    lead_in = re.sub(r"\[search:\s*.*?\]", "", ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
+    if lead_in:
+        clean, _reaction, _selfie_hint = extract_tags(lead_in)
+        if clean:
+            await send_bubbles(context, chat_id, clean)
+            remember(chat_id, "assistant", clean)
     results = await asyncio.to_thread(web_search, query)
     messages.append({
         "role": "system",
         "content": (f"# Search results for \"{query}\"\n{results}\n\n"
-                    f"Now reply to {uname} naturally, weaving in whatever's useful (or saying "
+                    f"Now send {uname} a follow-up message with whatever's useful (or saying "
                     f"you looked and didn't find much) — don't dump raw results, list links, or "
                     f"mention \"search results\". Don't use [search:] again this turn."),
     })
