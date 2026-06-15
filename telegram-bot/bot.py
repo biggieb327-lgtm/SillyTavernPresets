@@ -89,6 +89,31 @@ _SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 _URL_RE = re.compile(r"https?://[^\s]+")
 
+# Reddit blocks plain scraping behind a JS verification wall, so reading Reddit
+# links requires a (free) OAuth app: https://www.reddit.com/prefs/apps -> "script".
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "CompanionBot/1.0")
+_reddit_token = {"value": None, "exp": 0}
+
+
+def _reddit_access_token() -> str:
+    """Get a cached (or fresh) OAuth token via Reddit's client_credentials grant."""
+    if _reddit_token["value"] and time.time() < _reddit_token["exp"]:
+        return _reddit_token["value"]
+    resp = requests.post(
+        "https://www.reddit.com/api/v1/access_token",
+        data={"grant_type": "client_credentials"},
+        auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
+        headers={"User-Agent": REDDIT_USER_AGENT},
+        timeout=LINK_FETCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    _reddit_token["value"] = data["access_token"]
+    _reddit_token["exp"] = time.time() + data.get("expires_in", 3600) - 60
+    return _reddit_token["value"]
+
 # --- Selfies (image-to-image off a base portrait) ---
 # SELFIE_PROVIDER picks the backend: "gemini" calls Google's Gemini API directly
 # (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint.
@@ -2354,20 +2379,22 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
 
 
 def _fetch_reddit(url: str) -> str:
-    # Reddit's anti-bot protection rejects generic UAs with a 403 -- use the
-    # browser-like UA that's already proven to work for DuckDuckGo.
-    headers = {"User-Agent": _SEARCH_UA}
-    resolved = requests.get(url, headers=headers, timeout=LINK_FETCH_TIMEOUT,
-                            allow_redirects=True).url  # resolve /s/ share links
-    base = resolved.split("?")[0].rstrip("/")
+    # Plain scraping hits Reddit's JS verification wall regardless of headers,
+    # so go through the official OAuth API (oauth.reddit.com).
+    if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET):
+        raise RuntimeError("Reddit link reading needs REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET")
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Authorization": f"Bearer {_reddit_access_token()}",
+    }
+    path = urlparse(url).path  # e.g. /r/NecroMerger/s/UFZMQRrTYT
+    # Resolve share-link redirects (/s/<id>) to the real post path via the API host.
+    resolved = requests.get("https://oauth.reddit.com" + path, headers=headers,
+                            timeout=LINK_FETCH_TIMEOUT, allow_redirects=True)
+    base = "https://oauth.reddit.com" + urlparse(resolved.url).path.rstrip("/")
     if not base.endswith(".json"):
         base += "/.json"
     resp = requests.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
-    if resp.status_code != 200:
-        # Fall back to old.reddit.com, which is less aggressively guarded.
-        old_base = base.replace("://www.reddit.com", "://old.reddit.com") \
-                       .replace("://reddit.com", "://old.reddit.com")
-        resp = requests.get(old_base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     post = data[0]["data"]["children"][0]["data"]
