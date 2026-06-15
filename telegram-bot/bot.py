@@ -329,6 +329,7 @@ moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotiona
 beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
 recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
 rec_seq = {}        # chat_id -> next recommendation id
+next_goals = {}     # chat_id -> something she wants to bring up/do next time they talk
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 
 STATE_FILE = BASE_DIR / "state.json"
@@ -366,6 +367,8 @@ def load_state():
         recommendations[int(cid)] = rl
     for cid, sq in data.get("rec_seq", {}).items():
         rec_seq[int(cid)] = sq
+    for cid, g in data.get("next_goals", {}).items():
+        next_goals[int(cid)] = g
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
 
 
@@ -383,6 +386,7 @@ def save_state():
         "beliefs": {str(k): v for k, v in beliefs.items()},
         "recommendations": {str(k): v for k, v in recommendations.items()},
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
+        "next_goals": {str(k): v for k, v in next_goals.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -946,22 +950,33 @@ async def reflect(chat_id: int):
     open_recs = [r for r in recommendations.get(chat_id, []) if r["status"] == "open"]
     belief_lines = "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items())
     rec_lines = "\n".join(f"- (#{r['id']}) {r['text']}" for r in open_recs) or "(none)"
+    cur_goal = (next_goals.get(chat_id) or "").strip()
 
     sys = (
         f"You help {NAME} do a private nightly reflection on her day with {uname}. You're given "
         f"her current self-image (a handful of traits she rates herself on, 1-10), any open "
-        f"things she's recommended or said she'd check on, and today's conversation. "
+        f"things she's recommended or said she'd check on, her current next-conversation goal, "
+        f"and today's conversation. "
         f"Update her self-image based on how she actually behaved today — small shifts only, "
         f"not dramatic swings. Note any NEW recommendation or piece of advice she gave {uname} "
         f"today that she'd plausibly want to follow up on later. For any OPEN item, say whether "
         f"today's conversation reveals an outcome (good, bad, or still open/no update).\n\n"
+        f"Also maintain a \"next_goal\": one specific, concrete thing {NAME} wants to bring up, "
+        f"ask about, or do the next time she talks to {uname} -- a thread to pick up so the next "
+        f"conversation doesn't start cold (e.g. \"ask if he ate before his shift\" or \"tell him "
+        f"about the thing Mormor used to say about the Cubs\"). If today's conversation already "
+        f"covered the current goal, replace it with a fresh one; otherwise keep it or update it. "
+        f"Leave it empty only if genuinely nothing comes to mind. Keep it short (<= 100 "
+        f"characters).\n\n"
         f"Respond with ONLY a JSON object:\n"
         f'{{"beliefs": {{"trait": score, ...}}, '
         f'"new_recommendations": ["..."], '
-        f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}]}}\n'
+        f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}], '
+        f'"next_goal": "..."}}\n'
         f"Keep the exact same trait names as given. No prose, no code fences."
     )
     user = (f"SELF-IMAGE:\n{belief_lines}\n\nOPEN ITEMS:\n{rec_lines}\n\n"
+            f"CURRENT NEXT-CONVERSATION GOAL: {cur_goal or '(none)'}\n\n"
             f"TODAY'S CONVERSATION:\n{convo}")
     raw = await asyncio.to_thread(
         call_nanogpt, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
@@ -1011,6 +1026,10 @@ async def reflect(chat_id: int):
         keep_resolved = max(0, RECS_MAX - len(open_ones))
         recs[:] = sorted(open_ones + resolved[:keep_resolved], key=lambda r: r["ts"])
 
+    goal = data.get("next_goal")
+    if isinstance(goal, str):
+        next_goals[chat_id] = goal.strip()[:200]
+
     save_state()
     print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
 
@@ -1028,6 +1047,10 @@ def belief_note(chat_id: int) -> str:
         items_txt = "; ".join(r["text"] for r in open_recs[:3])
         note += (f"\n\nThings she's been wondering how they turned out: {items_txt}. If it comes "
                  f"up naturally, she might ask about it — but don't force it.")
+    goal = (next_goals.get(chat_id) or "").strip()
+    if goal:
+        note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
+                 f"it fits — don't force it in.")
     return note
 
 
@@ -2725,10 +2748,12 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resolved = [r for r in recs if r["status"] != "open"]
     rec_lines = [f"• {r['text']}" for r in open_recs] or ["(none)"]
     res_lines = [f"• {r['text']} — {r['outcome']}: {r['note']}" for r in resolved[-5:]] or ["(none)"]
+    goal = (next_goals.get(chat_id) or "").strip() or "(none)"
     await update.message.reply_text(
         f"🪞 {NAME}'s self-image\n\n" + "\n".join(lines) +
         "\n\nOpen (waiting on an outcome):\n" + "\n".join(rec_lines) +
-        "\n\nRecently resolved:\n" + "\n".join(res_lines)
+        "\n\nRecently resolved:\n" + "\n".join(res_lines) +
+        f"\n\nNext-conversation goal:\n{goal}"
     )
 
 
