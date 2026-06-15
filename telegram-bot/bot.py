@@ -354,6 +354,8 @@ recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "n
 rec_seq = {}        # chat_id -> next recommendation id
 next_goals = {}     # chat_id -> something she wants to bring up/do next time they talk
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
+model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
+setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -392,6 +394,8 @@ def load_state():
         rec_seq[int(cid)] = sq
     for cid, g in data.get("next_goals", {}).items():
         next_goals[int(cid)] = g
+    model_overrides.update(data.get("model_overrides", {}))
+    setting_overrides.update(data.get("setting_overrides", {}))
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
 
 
@@ -410,6 +414,8 @@ def save_state():
         "recommendations": {str(k): v for k, v in recommendations.items()},
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
         "next_goals": {str(k): v for k, v in next_goals.items()},
+        "model_overrides": model_overrides,
+        "setting_overrides": setting_overrides,
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -1887,6 +1893,190 @@ async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- Live-configurable models & settings (/setmodel, /settings) ---
+MODEL_ROLES = {
+    "chat": "NANOGPT_MODEL",
+    "summary": "SUMMARY_MODEL",
+    "reaction": "REACTION_MODEL",
+    "mood": "MOOD_MODEL",
+    "vision": "VISION_MODEL",
+    "fallback": "FALLBACK_MODEL",
+    "visionfallback": "VISION_FALLBACK",
+}
+
+_model_list_cache = {"value": None, "filtered": False, "ts": 0}
+_MODEL_LIST_TTL = 3600
+_last_shown_models = {}  # chat_id -> list of model ids shown by /setmodel (for numeric picks)
+
+
+def _nanogpt_subscription_models():
+    """Return (models, filtered) -- model ids covered by the NanoGPT subscription, if
+    detectable, else the full model list with filtered=False."""
+    now = time.time()
+    if _model_list_cache["value"] is not None and now - _model_list_cache["ts"] < _MODEL_LIST_TTL:
+        return _model_list_cache["value"], _model_list_cache["filtered"]
+
+    headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
+    models, filtered = [], False
+    try:
+        r = requests.get("https://nano-gpt.com/api/subscription/v1/models",
+                         headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("models") or data.get("data") or [] if isinstance(data, dict) else data
+        for m in items:
+            mid = (m.get("id") or m.get("model") or m.get("name")) if isinstance(m, dict) else m
+            if mid:
+                models.append(str(mid))
+        filtered = bool(models)
+    except Exception as e:
+        print("[models] subscription model list failed:", e)
+
+    if not models:
+        try:
+            r = requests.get(f"{NANOGPT_BASE_URL}/models", headers=headers, timeout=30)
+            r.raise_for_status()
+            for m in r.json().get("data", []):
+                if any(m.get(k) for k in ("subscription", "is_subscription", "subscription_only")):
+                    models.append(m["id"])
+            filtered = bool(models)
+            if not models:  # subscription flag not present -- fall back to the full list
+                models = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+        except Exception as e:
+            print("[models] general model list failed:", e)
+
+    models = sorted(set(models))
+    _model_list_cache.update(value=models, filtered=filtered, ts=now)
+    return models, filtered
+
+
+async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args
+
+    if not args:
+        lines = ["🤖 *Model roles*"]
+        for role, var in MODEL_ROLES.items():
+            lines.append(f"- {role}: `{globals()[var] or '(unset)'}`")
+        models, filtered = await asyncio.to_thread(_nanogpt_subscription_models)
+        if models:
+            _last_shown_models[chat_id] = models
+            header = "subscription models" if filtered else "all available models (couldn't confirm subscription list)"
+            lines.append(f"\n*{header}* — reply with the number to pick:")
+            for i, m in enumerate(models, 1):
+                lines.append(f"{i}. `{m}`")
+        else:
+            lines.append("\n⚠️ Couldn't fetch the model list right now.")
+        lines.append("\nUsage: `/setmodel <role> <name or number>`")
+        await _reply_chunked(update, "\n".join(lines))
+        return
+
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/setmodel <role> <name or number>`\nRoles: " + ", ".join(MODEL_ROLES),
+            parse_mode="Markdown")
+        return
+
+    role = args[0].lower()
+    if role not in MODEL_ROLES:
+        await update.message.reply_text("Unknown role. Roles: " + ", ".join(MODEL_ROLES))
+        return
+
+    choice = " ".join(args[1:])
+    if choice.isdigit():
+        models = _last_shown_models.get(chat_id)
+        if not models or not (1 <= int(choice) <= len(models)):
+            await update.message.reply_text(
+                "Run `/setmodel` with no args first to see the numbered list.", parse_mode="Markdown")
+            return
+        model_id = models[int(choice) - 1]
+    else:
+        model_id = choice
+
+    var = MODEL_ROLES[role]
+    globals()[var] = model_id
+    model_overrides[var] = model_id
+    save_state()
+    await update.message.reply_text(f"✅ {role} model set to `{model_id}`", parse_mode="Markdown")
+
+
+SETTINGS_INFO = {
+    "search": ("SEARCH_ENABLED", "bool"),
+    "links": ("LINK_READING", "bool"),
+    "reactions": ("REACTIONS_AUTO", "bool"),
+    "mood": ("MOOD_AUTO", "bool"),
+    "texting_realism": ("TEXTING_REALISM", "bool"),
+    "device_render": ("DEVICE_RENDER", "bool"),
+    "ambient_chance": ("PROACTIVE_AMBIENT_CHANCE", "float"),
+    "selfie_chance": ("PROACTIVE_SELFIE_CHANCE", "float"),
+}
+
+
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if not args:
+        lines = ["⚙️ *Settings*"]
+        for key, (var, kind) in SETTINGS_INFO.items():
+            val = globals()[var]
+            val = ("on" if val else "off") if kind == "bool" else val
+            lines.append(f"- {key}: `{val}`")
+        lines.append("\nUsage: `/settings <name> <value>`  (bools: on/off, chances: 0-1)")
+        lines.append("Names: " + ", ".join(SETTINGS_INFO))
+        await _reply_chunked(update, "\n".join(lines))
+        return
+
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/settings <name> <value>`\nNames: " + ", ".join(SETTINGS_INFO),
+            parse_mode="Markdown")
+        return
+
+    key = args[0].lower()
+    if key not in SETTINGS_INFO:
+        await update.message.reply_text("Unknown setting. Names: " + ", ".join(SETTINGS_INFO))
+        return
+
+    var, kind = SETTINGS_INFO[key]
+    raw = args[1].lower()
+    if kind == "bool":
+        if raw in ("on", "true", "1", "yes"):
+            value = True
+        elif raw in ("off", "false", "0", "no"):
+            value = False
+        else:
+            await update.message.reply_text("Use on/off.")
+            return
+    else:
+        try:
+            value = float(raw)
+            if not 0 <= value <= 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Use a number between 0 and 1.")
+            return
+
+    globals()[var] = value
+    setting_overrides[var] = value
+    save_state()
+    await update.message.reply_text(f"✅ {key} set to `{value}`", parse_mode="Markdown")
+
+
+CONFIGURABLE_MODELS = list(MODEL_ROLES.values())
+CONFIGURABLE_SETTINGS = [var for var, _ in SETTINGS_INFO.values()]
+
+
+def apply_overrides():
+    """Re-apply any /setmodel and /settings overrides saved from a previous run."""
+    g = globals()
+    for name, value in model_overrides.items():
+        if name in CONFIGURABLE_MODELS:
+            g[name] = value
+    for name, value in setting_overrides.items():
+        if name in CONFIGURABLE_SETTINGS:
+            g[name] = value
+
+
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversation_history[update.effective_chat.id] = []
     save_state()
@@ -2800,6 +2990,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    apply_overrides()
     app = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
@@ -2814,6 +3005,8 @@ def main():
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("model", model_info))
+    app.add_handler(CommandHandler("setmodel", setmodel_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(CommandHandler("usage", check_usage))
     app.add_handler(CommandHandler("chatid", chatid))
