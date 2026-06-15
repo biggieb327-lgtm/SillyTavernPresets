@@ -320,8 +320,11 @@ NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(
 conversation_history = {}   # chat_id -> recent messages (verbatim window)
 last_seen = {}      # chat_id -> unix timestamp of last user activity
 user_names = {}     # chat_id -> the human's first name (for {{user}})
-summaries = {}      # chat_id -> rolling summary of older, scrolled-off conversation
-facts = {}          # chat_id -> list of durable facts she has learned about the user
+summaries = {}      # chat_id -> long-term rolling summary (durable, identity-level)
+facts = {}          # chat_id -> list of durable, identity-level facts about the user
+recent_summaries = {}  # chat_id -> short-term summary covering roughly the last week
+recent_facts = {}      # chat_id -> list of recent/situational facts (last ~week)
+last_promotion = {}    # chat_id -> unix timestamp recent memory was last folded into long-term
 moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotional state
 beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
 recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
@@ -349,6 +352,12 @@ def load_state():
         summaries[int(cid)] = s
     for cid, fl in data.get("facts", {}).items():
         facts[int(cid)] = fl
+    for cid, s in data.get("recent_summaries", {}).items():
+        recent_summaries[int(cid)] = s
+    for cid, fl in data.get("recent_facts", {}).items():
+        recent_facts[int(cid)] = fl
+    for cid, ts in data.get("last_promotion", {}).items():
+        last_promotion[int(cid)] = ts
     for cid, mv in data.get("moods", {}).items():
         moods[int(cid)] = mv
     for cid, bv in data.get("beliefs", {}).items():
@@ -367,6 +376,9 @@ def save_state():
         "user_names": {str(k): v for k, v in user_names.items()},
         "summaries": {str(k): v for k, v in summaries.items()},
         "facts": {str(k): v for k, v in facts.items()},
+        "recent_summaries": {str(k): v for k, v in recent_summaries.items()},
+        "recent_facts": {str(k): v for k, v in recent_facts.items()},
+        "last_promotion": {str(k): v for k, v in last_promotion.items()},
         "moods": {str(k): v for k, v in moods.items()},
         "beliefs": {str(k): v for k, v in beliefs.items()},
         "recommendations": {str(k): v for k, v in recommendations.items()},
@@ -1020,7 +1032,9 @@ def belief_note(chat_id: int) -> str:
 
 
 def memory_block(chat_id: int, uname: str) -> str:
-    """Long-term memory (rolling summary + durable facts) injected every request."""
+    """Long-term (durable) + recent (last ~week) memory injected every request."""
+    blocks = []
+
     parts = []
     summ = (summaries.get(chat_id) or "").strip()
     if summ:
@@ -1028,9 +1042,20 @@ def memory_block(chat_id: int, uname: str) -> str:
     fts = facts.get(chat_id) or []
     if fts:
         parts.append(f"Things you know about {uname}:\n" + "\n".join("- " + f for f in fts))
-    if not parts:
-        return ""
-    return "# What you remember\n\n" + "\n\n".join(parts)
+    if parts:
+        blocks.append("# What you remember\n\n" + "\n\n".join(parts))
+
+    rparts = []
+    rsumm = (recent_summaries.get(chat_id) or "").strip()
+    if rsumm:
+        rparts.append(rsumm)
+    rfts = recent_facts.get(chat_id) or []
+    if rfts:
+        rparts.append("Recent specifics:\n" + "\n".join("- " + f for f in rfts))
+    if rparts:
+        blocks.append("# What's been going on lately\n\n" + "\n\n".join(rparts))
+
+    return "\n\n".join(blocks)
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
@@ -1604,22 +1629,23 @@ def _extract_json(raw: str) -> dict:
 
 
 def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
-    """Fold a batch of scrolled-off messages into the running summary + facts."""
+    """Fold a batch of scrolled-off messages into the rolling recent-memory summary + facts
+    (roughly the last week; periodically promoted into long-term memory)."""
     convo = "\n".join(
         f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in batch
     )
     existing = json.dumps({"summary": prev_summary, "facts": prev_facts}, ensure_ascii=False)
     sys = (
-        f"You maintain {NAME}'s long-term memory of an ongoing conversation/roleplay with "
-        f"{uname} (the user). You are given the EXISTING MEMORY as JSON and NEW MESSAGES that "
-        f"are about to scroll out of short-term context. Update the memory so nothing important "
-        f"is lost. Respond with ONLY a JSON object with two keys:\n"
+        f"You maintain {NAME}'s short-term memory (roughly the last week) of an ongoing "
+        f"conversation/roleplay with {uname} (the user). You are given the EXISTING RECENT "
+        f"MEMORY as JSON and NEW MESSAGES that are about to scroll out of immediate context. "
+        f"Update it so nothing recent is lost. Respond with ONLY a JSON object with two keys:\n"
         f'  "summary": a short first-person narrative, written in {NAME}\'s own voice, like a '
-        f"memory she could recall and recount — what happened with {uname}, how it felt, what "
-        f"stuck with her (<= 200 words). Integrate the previous summary with the new messages "
-        f"into one continuous recollection, not a list of events.\n"
-        f'  "facts": a list of durable, specific facts about {uname} and the relationship — '
-        f"names, preferences, commitments, life details, emotional beats. Merge with the prior "
+        f"memory she could recall and recount — what's been going on lately with {uname}, how it "
+        f"felt, what's current (<= 150 words). Integrate the previous summary with the new "
+        f"messages into one continuous recollection, not a list of events.\n"
+        f'  "facts": a list of specific, recent things about {uname} and what\'s going on -- '
+        f"events, jokes, current situations, things mentioned recently. Merge with the prior "
         f"facts, keep them all, avoid duplicates.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
@@ -1641,18 +1667,26 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
     return summary, cleaned
 
 
-FACTS_MAX = int(os.getenv("FACTS_MAX", "40"))      # consolidate when the list grows past this
-FACTS_TARGET = int(os.getenv("FACTS_TARGET", "30"))  # ...down to roughly this many
+# Recent (last ~week) facts list: consolidate when it grows past this, down to roughly this many.
+RECENT_FACTS_MAX = int(os.getenv("RECENT_FACTS_MAX", "30"))
+RECENT_FACTS_TARGET = int(os.getenv("RECENT_FACTS_TARGET", "20"))
+
+# Long-term (durable) facts list: same idea, but kept much smaller since it's permanent.
+LONG_FACTS_MAX = int(os.getenv("LONG_FACTS_MAX", "22"))
+LONG_FACTS_TARGET = int(os.getenv("LONG_FACTS_TARGET", "15"))
+
+# How often (days) recent memory gets reviewed and folded into long-term memory.
+PROMOTION_INTERVAL_DAYS = float(os.getenv("PROMOTION_INTERVAL_DAYS", "7"))
 
 
-def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str):
+def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: int):
     """Merge a bloated facts list: dedupe, combine, fold stale detail into the summary."""
     existing = json.dumps({"summary": prev_summary, "facts": prev_facts}, ensure_ascii=False)
     sys = (
-        f"You maintain {NAME}'s long-term memory of {uname}. The facts list has grown too long. "
+        f"You maintain {NAME}'s memory of {uname}. The facts list has grown too long. "
         f"Consolidate it: merge near-duplicates, combine related facts into one, drop trivia, and "
         f"fold superseded or minor details into the summary so nothing important is lost. Keep at "
-        f"most {FACTS_TARGET} facts — the most durable and identity-relevant ones. Keep the "
+        f"most {target} facts — the most durable and relevant ones. Keep the "
         f"summary as a first-person narrative in {NAME}'s own voice, like a memory she could "
         f"recall and recount. Respond with ONLY a JSON object: "
         f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
@@ -1675,7 +1709,9 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str):
 
 
 async def maintain_memory(chat_id: int):
-    """Distill messages out of short-term into long-term when they age out (time) or overflow (count)."""
+    """Distill messages out of short-term into recent (last ~week) memory when they age out
+    (time) or overflow (count). Recent memory is periodically promoted into long-term memory
+    by maintain_long_term_memory()."""
     if chat_id in summarizing:
         return
     drop_count = _short_term_overflow(chat_id)
@@ -1687,28 +1723,117 @@ async def maintain_memory(chat_id: int):
         uname = user_names.get(chat_id, "you")
         try:
             summary, new_facts = await asyncio.to_thread(
-                _summarize, summaries.get(chat_id, ""), facts.get(chat_id, []), batch, uname
+                _summarize, recent_summaries.get(chat_id, ""), recent_facts.get(chat_id, []),
+                batch, uname,
             )
-            summaries[chat_id] = summary
-            facts[chat_id] = new_facts
+            recent_summaries[chat_id] = summary
+            recent_facts[chat_id] = new_facts
         except Exception as e:
             print("[memory] summarize failed; dropping overflow without summary:", e)
         del conversation_history[chat_id][:drop_count]  # remove exactly what we summarized
         save_state()
         print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
 
-        if len(facts.get(chat_id, [])) > FACTS_MAX:
+        if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
             try:
                 summary, new_facts = await asyncio.to_thread(
-                    _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []), uname
+                    _consolidate_facts, recent_summaries.get(chat_id, ""),
+                    recent_facts.get(chat_id, []), uname, RECENT_FACTS_TARGET,
+                )
+                before = len(recent_facts.get(chat_id, []))
+                recent_summaries[chat_id] = summary
+                recent_facts[chat_id] = new_facts
+                save_state()
+                print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
+            except Exception as e:
+                print("[memory] recent fact consolidation failed (kept as-is):", e)
+    finally:
+        summarizing.discard(chat_id)
+
+
+def _promote_to_long_term(long_summary: str, long_facts: list, recent_summary: str,
+                           recent_facts_in: list, uname: str):
+    """Weekly: fold what's durable from recent memory into long-term memory, then clear recent."""
+    existing = json.dumps({
+        "long_term": {"summary": long_summary, "facts": long_facts},
+        "recent": {"summary": recent_summary, "facts": recent_facts_in},
+    }, ensure_ascii=False)
+    sys = (
+        f"You maintain {NAME}'s memory of {uname}, in two tiers. LONG_TERM is the durable "
+        f"relationship summary and identity-level facts (names, backstory, standing dynamics, "
+        f"recurring patterns) that {NAME} carries with her permanently. RECENT is the last "
+        f"week or so of more detailed, situational memory (what's been going on lately, current "
+        f"goings-on, recent jokes and events).\n\n"
+        f"It's time to fold RECENT into LONG_TERM. Decide what from RECENT is durable or "
+        f"identity-relevant enough to carry forward permanently, and merge it into the long-term "
+        f"summary and facts. Let situational, one-off detail that's run its course fade away "
+        f"rather than carrying it forward. Keep the long-term summary as a first-person "
+        f"narrative in {NAME}'s own voice (<= 200 words). Keep at most {LONG_FACTS_TARGET} "
+        f"long-term facts -- the most durable and identity-relevant ones.\n\n"
+        f"Respond with ONLY a JSON object: "
+        f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
+    )
+    raw = call_nanogpt(
+        [{"role": "system", "content": sys}, {"role": "user", "content": existing}],
+        model=SUMMARY_MODEL,
+    )
+    data = _extract_json(raw)
+    summary = (data.get("summary") or long_summary or "").strip()
+    new_facts = data.get("facts")
+    if not isinstance(new_facts, list) or not new_facts:
+        new_facts = long_facts
+    cleaned, seen = [], set()
+    for f in new_facts:
+        if isinstance(f, str) and f.strip() and f.strip().lower() not in seen:
+            seen.add(f.strip().lower())
+            cleaned.append(f.strip())
+    return summary, cleaned[:LONG_FACTS_TARGET]
+
+
+async def maintain_long_term_memory(chat_id: int):
+    """Periodically (PROMOTION_INTERVAL_DAYS) fold recent memory into long-term memory, and
+    keep the long-term facts list from growing without bound."""
+    if chat_id in summarizing:
+        return
+    last = last_promotion.get(chat_id, 0)
+    due = time.time() - last >= PROMOTION_INTERVAL_DAYS * 86400
+    has_recent = bool(recent_summaries.get(chat_id) or recent_facts.get(chat_id))
+    if not due and len(facts.get(chat_id, [])) <= LONG_FACTS_MAX:
+        return
+    summarizing.add(chat_id)
+    try:
+        uname = user_names.get(chat_id, "you")
+        if due and has_recent:
+            try:
+                summary, new_facts = await asyncio.to_thread(
+                    _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                    recent_summaries.get(chat_id, ""), recent_facts.get(chat_id, []), uname,
+                )
+                summaries[chat_id] = summary
+                facts[chat_id] = new_facts
+                recent_summaries[chat_id] = ""
+                recent_facts[chat_id] = []
+                save_state()
+                print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
+            except Exception as e:
+                print("[memory] promotion failed:", e)
+        if due:
+            last_promotion[chat_id] = time.time()
+            save_state()
+
+        if len(facts.get(chat_id, [])) > LONG_FACTS_MAX:
+            try:
+                summary, new_facts = await asyncio.to_thread(
+                    _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                    uname, LONG_FACTS_TARGET,
                 )
                 before = len(facts.get(chat_id, []))
                 summaries[chat_id] = summary
                 facts[chat_id] = new_facts
                 save_state()
-                print(f"[memory] Consolidated facts {before} -> {len(new_facts)} for chat {chat_id}.")
+                print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
-                print("[memory] fact consolidation failed (kept as-is):", e)
+                print("[memory] long-term fact consolidation failed (kept as-is):", e)
     finally:
         summarizing.discard(chat_id)
 
@@ -1757,12 +1882,19 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
     facts_txt = "\n".join("• " + f for f in fts) if fts else "(none yet)"
+    rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
+    rfts = recent_facts.get(chat_id) or []
+    rfacts_txt = "\n".join("• " + f for f in rfts) if rfts else "(none yet)"
     # plain text (no Markdown) so arbitrary remembered content can't break formatting
     await _reply_chunked(
         update,
         f"🧠 What {NAME} remembers long-term\n\n"
         f"Summary:\n{summ}\n\n"
-        f"Facts:\n{facts_txt}"
+        f"Facts:\n{facts_txt}\n\n"
+        f"---\n\n"
+        f"📅 What's been going on lately (last ~week)\n\n"
+        f"Summary:\n{rsumm}\n\n"
+        f"Facts:\n{rfacts_txt}"
     )
 
 
@@ -1783,8 +1915,10 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     summaries[chat_id] = ""
     facts[chat_id] = []
+    recent_summaries[chat_id] = ""
+    recent_facts[chat_id] = []
     save_state()
-    await update.message.reply_text("🧹 Long-term memory wiped (recent chat kept).")
+    await update.message.reply_text("🧹 Long-term and recent memory wiped (current chat kept).")
 
 
 async def addpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2564,6 +2698,10 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await reflect(owner)
     except Exception as e:
         print("[reflect] Error:", e)
+    try:
+        await maintain_long_term_memory(owner)
+    except Exception as e:
+        print("[memory] long-term promotion error:", e)
 
 
 async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
