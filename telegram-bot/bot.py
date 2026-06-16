@@ -942,16 +942,8 @@ def _read_phone_state() -> str:
         except Exception:
             pass
 
-    # Location (network/passive, low accuracy is fine for ambient context)
-    d = _run_termux(["termux-location", "-p", "network", "-r", "once"], timeout=10)
-    if d:
-        try:
-            lat = d.get("latitude")
-            lon = d.get("longitude")
-            if lat is not None and lon is not None:
-                parts.append(f"location: ~{lat:.3f}, {lon:.3f}")
-        except Exception:
-            pass
+    # Location via termux-location is broken on Android 16 (Termux:API bug in locationToJson).
+    # Location context comes from WEATHER_LOCATION in config instead.
 
     # Music
     d = _run_termux(["termux-media-player", "info"])
