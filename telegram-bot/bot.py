@@ -22,6 +22,7 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    MessageReactionHandler,
     ContextTypes,
     filters,
 )
@@ -64,6 +65,12 @@ LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+EMBEDDINGS_ENABLED = os.getenv("EMBEDDINGS_ENABLED", "0").lower() not in ("0", "false", "no", "off")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
+SEMANTIC_TOP_K = int(os.getenv("SEMANTIC_TOP_K", "3"))
+RSS_FEEDS = [f.strip() for f in os.getenv("RSS_FEEDS", "").split(",") if f.strip()]
+RSS_INJECT_CHANCE = float(os.getenv("RSS_INJECT_CHANCE", "0.3"))  # probability on each heartbeat
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -367,6 +374,12 @@ summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 active_personas = {}    # chat_id -> persona name ("" = default)
+_bot_messages: dict[int, dict[int, str]] = {}  # chat_id -> {message_id -> text}
+_BOT_MSG_STORE_MAX = 50
+known_entities: dict[int, dict[str, str]] = {}  # chat_id -> {name -> description}
+ENTITY_MAX = 40  # cap per chat
+_embeddings: dict[int, list] = {}  # chat_id -> [{text, vector, ts}]
+EMBEDDINGS_MAX = 200  # per chat
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -424,6 +437,8 @@ def load_state():
     setting_overrides.update(data.get("setting_overrides", {}))
     for cid, pn in data.get("active_personas", {}).items():
         active_personas[int(cid)] = pn
+    for cid, ents in data.get("known_entities", {}).items():
+        known_entities[int(cid)] = ents
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
 
 
@@ -445,6 +460,7 @@ def save_state():
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
         "active_personas": {str(k): v for k, v in active_personas.items()},
+        "known_entities": {str(k): v for k, v in known_entities.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -471,6 +487,28 @@ def save_ai_tasks():
 
 load_ai_tasks()
 PERSONAS_DIR.mkdir(exist_ok=True)
+
+
+# --- Embeddings: load/save ---
+def load_embeddings():
+    global _embeddings
+    if not EMBEDDINGS_FILE.exists():
+        return
+    try:
+        data = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
+        _embeddings = {int(k): v for k, v in data.items()}
+    except Exception as e:
+        print("[embeddings] load failed:", e)
+
+def save_embeddings():
+    try:
+        EMBEDDINGS_FILE.write_text(
+            json.dumps({str(k): v for k, v in _embeddings.items()}), encoding="utf-8"
+        )
+    except Exception as e:
+        print("[embeddings] save failed:", e)
+
+load_embeddings()
 
 
 # --- Payments: storage + date math ---
@@ -915,6 +953,43 @@ def _read_phone_state() -> str:
         except Exception:
             pass
 
+    # Music
+    d = _run_termux(["termux-media-player", "info"])
+    if d:
+        try:
+            title = d.get("title") or d.get("track")
+            artist = d.get("artist")
+            status = d.get("status", "").lower()
+            if title and status in ("playing", "started"):
+                music = title
+                if artist:
+                    music = f"{artist} - {title}"
+                parts.append(f"playing: {music}")
+        except Exception:
+            pass
+
+    # Calendar (upcoming events)
+    d = _run_termux(["termux-calendar-query", "-r", "7"], timeout=8)
+    if d and isinstance(d, list):
+        try:
+            events = []
+            for ev in d[:4]:
+                title = ev.get("title", "").strip()
+                begin = ev.get("dtstart", "")
+                if title and begin:
+                    try:
+                        dt = datetime.fromisoformat(begin.replace("Z", "+00:00"))
+                        if TZ:
+                            dt = dt.astimezone(TZ)
+                        label = dt.strftime("%a %-d %b %I:%M %p").lstrip("0")
+                    except Exception:
+                        label = begin[:16]
+                    events.append(f"{label}: {title}")
+            if events:
+                parts.append("upcoming: " + "; ".join(events))
+        except Exception:
+            pass
+
     return ", ".join(parts)
 
 
@@ -1298,6 +1373,113 @@ def _build_capabilities_block(uname: str) -> str:
     return "\n".join(cap_lines)
 
 
+def _get_embedding(text: str) -> list | None:
+    """Get embedding vector from NanoGPT. Returns None on failure."""
+    if not EMBEDDINGS_ENABLED:
+        return None
+    try:
+        response = requests.post(
+            f"{NANOGPT_BASE_URL}/embeddings",
+            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
+            json={"model": EMBEDDING_MODEL, "input": text[:2000]},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+    except Exception as e:
+        print("[embeddings] API call failed:", e)
+        return None
+
+
+def _cosine_sim(a: list, b: list) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb + 1e-9)
+
+
+def _semantic_search(chat_id: int, query: str, k: int = SEMANTIC_TOP_K) -> list[str]:
+    """Return top-k most semantically relevant stored texts for this query."""
+    if not EMBEDDINGS_ENABLED:
+        return []
+    q_vec = _get_embedding(query)
+    if q_vec is None:
+        return []
+    store = _embeddings.get(chat_id, [])
+    if not store:
+        return []
+    scored = [(e["text"], _cosine_sim(q_vec, e["vector"])) for e in store]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, s in scored[:k] if s > 0.75]
+
+
+async def _embed_and_store(chat_id: int, text: str):
+    """Compute embedding for text and store it."""
+    if not EMBEDDINGS_ENABLED or len(text) < 20:
+        return
+    vec = await asyncio.to_thread(_get_embedding, text)
+    if vec is None:
+        return
+    store = _embeddings.setdefault(chat_id, [])
+    store.append({"text": text[:500], "vector": vec, "ts": time.time()})
+    if len(store) > EMBEDDINGS_MAX:
+        store.pop(0)
+    save_embeddings()
+
+
+async def _extract_entities(chat_id: int, user_message: str):
+    """Extract named people/places/events from a user message and update known_entities."""
+    if len(user_message) < 20:
+        return
+    prompt = (
+        f"Extract named entities from this message. Return ONLY a JSON object mapping "
+        f"name -> one-sentence description. Only include specific proper names (people, "
+        f"places, events) — not generic nouns. If nothing notable, return {{}}.\n\n"
+        f"Message: {user_message[:500]}"
+    )
+    try:
+        raw = await asyncio.to_thread(
+            call_nanogpt, [{"role": "user", "content": prompt}],
+            model=REACTION_MODEL  # use the cheap/fast model
+        )
+        extracted = _extract_json(raw)
+        if not isinstance(extracted, dict):
+            return
+        store = known_entities.setdefault(chat_id, {})
+        for name, desc in extracted.items():
+            if isinstance(name, str) and isinstance(desc, str) and len(name) < 60:
+                store[name] = desc
+        # Trim if over cap
+        if len(store) > ENTITY_MAX:
+            keys = list(store.keys())
+            for k in keys[:len(store) - ENTITY_MAX]:
+                del store[k]
+        save_state()
+    except Exception as e:
+        print("[entities] extraction failed:", e)
+
+
+def _fetch_rss_headline() -> str | None:
+    """Fetch a random headline from a random configured RSS feed."""
+    if not RSS_FEEDS:
+        return None
+    import random as _random
+    feed_url = _random.choice(RSS_FEEDS)
+    try:
+        r = requests.get(feed_url, timeout=10, headers={"User-Agent": "CompanionBot/1.0"})
+        r.raise_for_status()
+        # Parse titles from RSS/Atom XML without feedparser dependency
+        import re as _re
+        titles = _re.findall(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", r.text, _re.DOTALL)
+        titles = [t.strip() for t in titles[1:] if t.strip() and len(t.strip()) > 10][:10]
+        if not titles:
+            return None
+        return _random.choice(titles)
+    except Exception as e:
+        print("[rss] fetch failed:", e)
+        return None
+
+
 def _build_ghost_message(chat_id: int, uname: str, latest_user_content: str, history: list) -> str:
     """Build the volatile ghost message injected just before the user turn."""
     parts = []
@@ -1315,6 +1497,18 @@ def _build_ghost_message(chat_id: int, uname: str, latest_user_content: str, his
     mem = memory_block(chat_id, uname)
     if mem:
         parts.append(mem)
+
+    # Known entities (people, places, events the user has mentioned)
+    ents = known_entities.get(chat_id, {})
+    if ents:
+        ent_lines = "\n".join(f"- {n}: {d}" for n, d in list(ents.items())[-20:])
+        parts.append(f"# People & places {uname} has mentioned\n{ent_lines}")
+
+    # Semantic memory (relevant past exchanges)
+    if EMBEDDINGS_ENABLED:
+        relevant = _semantic_search(chat_id, latest_user_content)
+        if relevant:
+            parts.append("# Relevant past context\n" + "\n".join(f"- {r}" for r in relevant))
 
     # Mood
     parts.append(mood_note(chat_id))
@@ -1764,9 +1958,14 @@ async def send_bubbles(context, chat_id: int, text: str):
         chunk = text[i:i + _TELEGRAM_MAX_LEN]
         if DEVICE_RENDER:
             escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
-            await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
+            sent = await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
         else:
-            await context.bot.send_message(chat_id=chat_id, text=chunk)
+            sent = await context.bot.send_message(chat_id=chat_id, text=chunk)
+        store = _bot_messages.setdefault(chat_id, {})
+        store[sent.message_id] = chunk
+        if len(store) > _BOT_MSG_STORE_MAX:
+            oldest = min(store)
+            del store[oldest]
 
 
 # --- Selfies ---
@@ -3008,6 +3207,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     )
     remember(chat_id, "user", user_memory_text)
     remember(chat_id, "assistant", placeholder)
+    asyncio.create_task(_extract_entities(chat_id, user_memory_text))
+    asyncio.create_task(_embed_and_store(chat_id, user_memory_text))
 
     reacted = False
     if reaction and reaction in ALLOWED_REACTIONS:
@@ -3355,6 +3556,13 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_SELFIE_HINT + "]"
+    elif RSS_FEEDS and random.random() < RSS_INJECT_CHANCE:
+        headline = await asyncio.to_thread(_fetch_rss_headline)
+        if headline:
+            trigger = trigger[:-1] + (
+                f" You just saw this headline: \"{headline}\" — "
+                f"react to it naturally if it fits your character, or ignore it if it doesn't.]"
+            )
     return await send_triggered(context, chat_id, trigger)
 
 
@@ -3659,6 +3867,37 @@ async def persona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎭 Switched to persona: {name}")
 
 
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """React to an emoji reaction the user put on one of the bot's messages."""
+    reaction_update = update.message_reaction
+    if not reaction_update or not reaction_update.new_reaction:
+        return
+    chat_id = reaction_update.chat.id
+    message_id = reaction_update.message_id
+    # Get the emoji(s) they added
+    new_emojis = []
+    for r in reaction_update.new_reaction:
+        if hasattr(r, "emoji"):
+            new_emojis.append(r.emoji)
+    if not new_emojis:
+        return
+    emoji_str = " ".join(new_emojis)
+    # Look up what message they reacted to
+    original = _bot_messages.get(chat_id, {}).get(message_id, "")
+    if original:
+        trigger = (
+            f"[SYSTEM: {user_names.get(chat_id, 'They')} just reacted to your message "
+            f"with {emoji_str}. Your message was: \"{original[:200]}\". "
+            f"React naturally in character — a brief reply or acknowledgment, not a full message.]"
+        )
+    else:
+        trigger = (
+            f"[SYSTEM: {user_names.get(chat_id, 'They')} just reacted to one of your messages "
+            f"with {emoji_str}. React naturally in character — a brief reply, not a full message.]"
+        )
+    await send_triggered(context, chat_id, trigger)
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -3725,6 +3964,7 @@ def main():
     app.add_handler(MessageHandler(
         filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageReactionHandler(handle_reaction))
 
     if app.job_queue is not None:
         schedule_next_heartbeat(app.job_queue)
