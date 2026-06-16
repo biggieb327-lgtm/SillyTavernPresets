@@ -380,6 +380,7 @@ known_entities: dict[int, dict[str, str]] = {}  # chat_id -> {name -> descriptio
 ENTITY_MAX = 40  # cap per chat
 _embeddings: dict[int, list] = {}  # chat_id -> [{text, vector, ts}]
 EMBEDDINGS_MAX = 200  # per chat
+_live_location: dict[int, dict] = {}  # chat_id -> {lat, lon, address, ts}
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -1000,6 +1001,28 @@ def phone_state_note() -> str:
         return _phone_state_cache["text"] or ""
 
 
+def _reverse_geocode(lat: float, lon: float) -> str:
+    """Reverse geocode via Nominatim (OpenStreetMap). Returns neighbourhood/city string."""
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "json", "zoom": 14},
+            headers={"User-Agent": "CompanionBot/1.0"},
+            timeout=8,
+        )
+        r.raise_for_status()
+        addr = r.json().get("address", {})
+        parts = []
+        for key in ("neighbourhood", "suburb", "city", "town", "village", "state"):
+            if addr.get(key):
+                parts.append(addr[key])
+                if len(parts) == 2:
+                    break
+        return ", ".join(parts) if parts else f"~{lat:.3f}, {lon:.3f}"
+    except Exception:
+        return f"~{lat:.3f}, {lon:.3f}"
+
+
 def environment_note() -> str:
     """Live context: the real current date, local time, and weather."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -1533,10 +1556,20 @@ def _build_ghost_message(chat_id: int, uname: str, latest_user_content: str, his
     # Environment (date/time/weather)
     parts.append(environment_note())
 
-    # Phone state (light, fold angle, battery, location) — gracefully absent if Termux:API unavailable
+    # Phone state (light, fold angle, battery) — gracefully absent if Termux:API unavailable
     phone = phone_state_note()
     if phone:
         parts.append(f"[Phone state — {uname}'s device: {phone}]")
+
+    # Live location (from Telegram location share)
+    loc = _live_location.get(chat_id)
+    if loc:
+        age_min = (time.time() - loc["ts"]) / 60
+        if age_min < 480:  # 8h max — live location duration
+            loc_note = f"{uname}'s location: {loc['address']}"
+            if age_min > 60:
+                loc_note += f" (shared {age_min:.0f} min ago)"
+            parts.append(f"[{loc_note}]")
 
     return "\n\n".join(p for p in parts if p)
 
@@ -3890,6 +3923,33 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_triggered(context, chat_id, trigger)
 
 
+# --- Live location handler ---
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle a Telegram location share (one-time or live) or a live location update."""
+    msg = update.message or update.edited_message
+    if not msg or not msg.location:
+        return
+    chat_id = msg.chat_id
+    loc = msg.location
+    lat, lon = loc.latitude, loc.longitude
+    is_update = update.edited_message is not None  # live location position update
+
+    address = await asyncio.to_thread(_reverse_geocode, lat, lon)
+    _live_location[chat_id] = {"lat": lat, "lon": lon, "address": address, "ts": time.time()}
+
+    if not is_update:
+        # First share — react in character
+        live = getattr(loc, "live_period", None)
+        duration = f" for the next {live // 60} minutes" if live else ""
+        trigger = (
+            f"[SYSTEM: {user_names.get(chat_id, 'They')} just shared their location with you"
+            f"{duration}. They're in {address}. React briefly and naturally in character — "
+            f"don't make a big deal of it, just acknowledge it the way you would.]"
+        )
+        await send_triggered(context, chat_id, trigger)
+    # Live updates: just store the new position silently — ghost message picks it up next turn
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -3955,6 +4015,9 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(
         filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION, handle_video))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(
+        filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageReactionHandler(handle_reaction))
 
