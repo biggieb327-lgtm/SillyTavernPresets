@@ -1300,10 +1300,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     # --- 5. User message ---
     if image_data_url:
-        messages.append({"role": "user", "content": [
-            {"type": "text", "text": latest_user_content},
-            {"type": "image_url", "image_url": {"url": image_data_url}},
-        ]})
+        urls = image_data_url if isinstance(image_data_url, list) else [image_data_url]
+        content = [{"type": "text", "text": latest_user_content}]
+        content += [{"type": "image_url", "image_url": {"url": u}} for u in urls]
+        messages.append({"role": "user", "content": content})
     else:
         messages.append({"role": "user", "content": latest_user_content})
     return messages
@@ -3093,6 +3093,81 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Couldn't look at that one: {str(e)}")
 
 
+VIDEO_FRAMES = int(os.getenv("VIDEO_FRAMES", "4"))  # frames sampled across a clip
+
+
+def _extract_video_frames(video_bytes: bytes, n: int = VIDEO_FRAMES) -> list:
+    """Write the video to a temp file and pull n evenly-spaced JPEG frames via ffmpeg.
+    Returns a list of base64 data URLs (empty if ffmpeg is missing or fails)."""
+    import tempfile, subprocess, shutil, glob
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not installed (run: pkg install ffmpeg)")
+    frames = []
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "clip")
+        with open(src, "wb") as f:
+            f.write(video_bytes)
+        # thumbnail filter picks n representative frames spread across the clip
+        out_pattern = os.path.join(td, "frame_%03d.jpg")
+        cmd = [
+            "ffmpeg", "-i", src,
+            "-vf", f"thumbnail,fps=1,scale=512:-1",
+            "-frames:v", str(n), "-y", out_pattern,
+        ]
+        subprocess.run(cmd, capture_output=True, timeout=60)
+        for fp in sorted(glob.glob(os.path.join(td, "frame_*.jpg"))):
+            with open(fp, "rb") as f:
+                frames.append("data:image/jpeg;base64," + base64.b64encode(f.read()).decode())
+    return frames
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+    caption = (update.message.caption or "").strip()
+
+    media = update.message.video or update.message.video_note or update.message.animation
+    if media is None:
+        return
+
+    try:
+        tg_file = await media.get_file()
+        raw = bytes(await tg_file.download_as_bytearray())
+        frames = _extract_video_frames(raw)
+        if not frames:
+            await update.message.reply_text("❌ Couldn't pull any frames from that clip.")
+            return
+
+        uname = user_names[chat_id]
+        prompt = caption or (
+            f"{uname} just sent you this short video. These are frames sampled across the clip, "
+            f"in order. React to what's happening in it, in character."
+        )
+        await ensure_weather()
+        messages = assemble_messages(chat_id, prompt, image_data_url=frames)
+        ai_response = await reply_with_typing(context, chat_id, messages,
+                                              model=VISION_MODEL, fallback=VISION_FALLBACK)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=VISION_MODEL, fallback=VISION_FALLBACK)
+
+        user_mem = f"[sent a video] {caption}".strip()
+        await _deliver(update, context, chat_id, user_mem, ai_response)
+    except RuntimeError as e:
+        await update.message.reply_text(f"⚠️ {e}")
+    except requests.exceptions.HTTPError as e:
+        await update.message.reply_text(
+            f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Couldn't watch that one: {str(e)}")
+
+
 # --- Proactive heartbeat ---
 PROACTIVE_INSTRUCTION = (
     "[SYSTEM: {name} has been quiet for a while. Reach out to {user} first, unprompted, "
@@ -3542,6 +3617,8 @@ def main():
     app.add_handler(CommandHandler("personas", personas_cmd))
     app.add_handler(CommandHandler("persona", persona_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(
+        filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     if app.job_queue is not None:
