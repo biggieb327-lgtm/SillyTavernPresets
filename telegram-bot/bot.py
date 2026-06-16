@@ -235,6 +235,9 @@ WEATHER_CODES = {
 _weather_cache = {"text": None, "ts": 0.0}
 WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
 
+_phone_state_cache = {"text": None, "ts": 0.0}
+PHONE_STATE_TTL = 120  # refresh phone sensors at most every 2 minutes
+
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
     "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
@@ -833,6 +836,103 @@ async def ensure_weather():
         print("[weather] fetch failed:", e)
 
 
+def _run_termux(cmd: list, timeout: int = 5) -> dict | None:
+    """Run a termux-api command and return parsed JSON, or None on failure."""
+    import subprocess, shutil
+    if shutil.which(cmd[0]) is None:
+        return None
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return json.loads(r.stdout) if r.stdout.strip() else None
+    except Exception:
+        return None
+
+
+def _read_phone_state() -> str:
+    """Read light, hinge angle, battery, and location via Termux:API. Returns a short summary."""
+    parts = []
+
+    # Ambient light
+    d = _run_termux(["termux-sensor", "-s", "Light Ambient Light Sensor", "-n", "1"])
+    if d:
+        try:
+            lux = d.get("Light Ambient Light Sensor", {}).get("values", [None])[0]
+            if lux is not None:
+                if lux < 5:
+                    label = "dark"
+                elif lux < 50:
+                    label = "dim"
+                elif lux < 500:
+                    label = "indoor light"
+                else:
+                    label = "bright"
+                parts.append(f"ambient light: {label} ({lux:.0f} lux)")
+        except Exception:
+            pass
+
+    # Hinge / fold angle
+    d = _run_termux(["termux-sensor", "-s", "hinge_angle", "-n", "1"])
+    if d:
+        try:
+            angle = d.get("hinge_angle", {}).get("values", [None])[0]
+            if angle is not None:
+                if angle < 10:
+                    label = "folded shut"
+                elif angle < 100:
+                    label = f"partially open ({angle:.0f}°)"
+                else:
+                    label = f"fully open ({angle:.0f}°)"
+                parts.append(f"phone fold: {label}")
+        except Exception:
+            pass
+
+    # Battery
+    d = _run_termux(["termux-battery-status"])
+    if d:
+        try:
+            pct = d.get("percentage")
+            status = d.get("status", "").lower()
+            temp = d.get("temperature")
+            b = f"battery: {pct}%"
+            if status == "charging":
+                b += " (charging)"
+            elif pct is not None and pct <= 15:
+                b += " (low)"
+            if temp is not None:
+                b += f", {temp:.0f}°C"
+            parts.append(b)
+        except Exception:
+            pass
+
+    # Location (network/passive, low accuracy is fine for ambient context)
+    d = _run_termux(["termux-location", "-p", "network", "-r", "once"], timeout=10)
+    if d:
+        try:
+            lat = d.get("latitude")
+            lon = d.get("longitude")
+            if lat is not None and lon is not None:
+                parts.append(f"location: ~{lat:.3f}, {lon:.3f}")
+        except Exception:
+            pass
+
+    return ", ".join(parts)
+
+
+def phone_state_note() -> str:
+    """Return cached phone state, refreshing if stale."""
+    if _phone_state_cache["text"] is not None and \
+            time.time() - _phone_state_cache["ts"] < PHONE_STATE_TTL:
+        return _phone_state_cache["text"]
+    try:
+        result = _read_phone_state()
+        _phone_state_cache["text"] = result
+        _phone_state_cache["ts"] = time.time()
+        return result
+    except Exception as e:
+        print("[phone_state] read failed:", e)
+        return _phone_state_cache["text"] or ""
+
+
 def environment_note() -> str:
     """Live context: the real current date, local time, and weather."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -1246,6 +1346,11 @@ def _build_ghost_message(chat_id: int, uname: str, latest_user_content: str, his
 
     # Environment (date/time/weather)
     parts.append(environment_note())
+
+    # Phone state (light, fold angle, battery, location) — gracefully absent if Termux:API unavailable
+    phone = phone_state_note()
+    if phone:
+        parts.append(f"[Phone state — {uname}'s device: {phone}]")
 
     return "\n\n".join(p for p in parts if p)
 
