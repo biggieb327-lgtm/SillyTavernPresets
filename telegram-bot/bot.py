@@ -1634,6 +1634,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
 
 # --- NanoGPT ---
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks and stray thinking tags from model output."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def _one_call(messages: list, model: str) -> str:
     payload = {"model": model, "messages": messages, "stream": False}
     response = requests.post(
@@ -1643,7 +1650,7 @@ def _one_call(messages: list, model: str) -> str:
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    return _strip_thinking(response.json()["choices"][0]["message"]["content"])
 
 
 def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
