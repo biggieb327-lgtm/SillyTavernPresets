@@ -380,6 +380,7 @@ _ai_task_seq = 0  # monotonic id counter
 
 # --- Self-Modifying Persona ---
 PERSONAS_DIR = BASE_DIR / "personas"
+JOURNAL_FILE = BASE_DIR / "continuity.log"
 
 
 def load_state():
@@ -1560,6 +1561,29 @@ def _extract_persona_tag(text: str):
     cleaned = re.sub(r"\[persona:[^\]]+\]", "", text, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
     return cleaned, persona_name
+
+
+def _append_journal(trigger: str, text: str):
+    """Append a triggered output to the continuity log with a timestamp."""
+    try:
+        now = datetime.now(tz=TZ) if TZ else datetime.now()
+        ts = now.strftime("%Y-%m-%d %H:%M")
+        short_trigger = trigger.replace("[SYSTEM: ", "").rstrip("]").strip()
+        entry = f"\n--- {ts} ---\n{short_trigger}\n\n{text}\n"
+        with open(JOURNAL_FILE, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception as e:
+        print("[journal] Write failed:", e)
+
+
+def _read_journal(n: int = 5) -> str:
+    """Return the last n entries from the continuity log as a string."""
+    if not JOURNAL_FILE.exists():
+        return ""
+    raw = JOURNAL_FILE.read_text(encoding="utf-8")
+    entries = [e.strip() for e in raw.split("\n---") if e.strip()]
+    recent = entries[-n:]
+    return "\n\n---".join(recent)
 
 
 def _extract_search(text: str):
@@ -3136,6 +3160,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
     if clean:
         await send_bubbles(context, chat_id, clean)
+        _append_journal(trigger, clean)
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     asyncio.create_task(maintain_memory(chat_id))
@@ -3332,6 +3357,20 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- Continuity journal command ---
+async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the last N entries from the continuity log."""
+    args = context.args or []
+    n = 5
+    if args and args[0].isdigit():
+        n = max(1, min(int(args[0]), 20))
+    text = _read_journal(n)
+    if not text:
+        await update.message.reply_text("No journal entries yet.")
+        return
+    await _reply_chunked(update, f"📖 Last {n} entries:\n\n---{text}")
+
+
 # --- AI Notepad command ---
 async def notepad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the current notepad contents to the user."""
@@ -3496,6 +3535,7 @@ def main():
     app.add_handler(CommandHandler("cron", cron_add))
     app.add_handler(CommandHandler("crons", cron_list_cmd))
     app.add_handler(CommandHandler("crondel", cron_del_cmd))
+    app.add_handler(CommandHandler("journal", journal_cmd))
     app.add_handler(CommandHandler("notepad", notepad_cmd))
     app.add_handler(CommandHandler("aitasks", aitasks_cmd))
     app.add_handler(CommandHandler("aitaskdel", aitaskdel_cmd))
