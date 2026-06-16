@@ -8,6 +8,7 @@ import time
 import base64
 import calendar
 import html as _html_module
+import threading
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
 from pathlib import Path
@@ -362,8 +363,23 @@ next_goals = {}     # chat_id -> something she wants to bring up/do next time th
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
+active_personas = {}    # chat_id -> persona name ("" = default)
 
 STATE_FILE = BASE_DIR / "state.json"
+
+# --- AI Notepad ---
+NOTEPAD_FILE = BASE_DIR / "notepad.txt"
+NOTEPAD_MAX_DISPLAY = 20  # lines shown to AI in ghost message
+_notepad_lock = threading.Lock()
+
+# --- AI-Scheduled Tasks ---
+AI_TASKS_FILE = BASE_DIR / "ai_tasks.json"
+AI_TASKS_MAX = 10
+ai_tasks = []  # list of {"id": int, "chat_id": int, "due_ts": float, "message": str}
+_ai_task_seq = 0  # monotonic id counter
+
+# --- Self-Modifying Persona ---
+PERSONAS_DIR = BASE_DIR / "personas"
 
 
 def load_state():
@@ -402,6 +418,8 @@ def load_state():
         next_goals[int(cid)] = g
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
+    for cid, pn in data.get("active_personas", {}).items():
+        active_personas[int(cid)] = pn
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
 
 
@@ -422,6 +440,7 @@ def save_state():
         "next_goals": {str(k): v for k, v in next_goals.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
+        "active_personas": {str(k): v for k, v in active_personas.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -429,6 +448,25 @@ def save_state():
 
 
 load_state()
+
+
+def load_ai_tasks():
+    global ai_tasks, _ai_task_seq
+    if AI_TASKS_FILE.exists():
+        try:
+            ai_tasks = json.loads(AI_TASKS_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            print("[ai_tasks] load failed:", e)
+            ai_tasks = []
+    _ai_task_seq = max((t["id"] for t in ai_tasks), default=0) + 1
+
+
+def save_ai_tasks():
+    AI_TASKS_FILE.write_text(json.dumps(ai_tasks, indent=2), encoding="utf-8")
+
+
+load_ai_tasks()
+PERSONAS_DIR.mkdir(exist_ok=True)
 
 
 # --- Payments: storage + date math ---
@@ -1116,28 +1154,8 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
-    """Build the OpenAI-style message list the way SillyTavern layers a card."""
-    uname = user_names.get(chat_id, "you")
-    history = conversation_history.get(chat_id, [])
-
-    messages = [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
-
-    if SETTING:
-        messages.append({
-            "role": "system",
-            "content": "# Current setting\n" + fill(SETTING, NAME, uname),
-        })
-
-    if ATLAS:
-        picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
-        messages.append({
-            "role": "system",
-            "content": (f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
-                        f"might naturally reference if it fits — don't force them, and don't "
-                        f"invent fake businesses when a real area works: " + ", ".join(picks) + "."),
-        })
-
+def _build_capabilities_block(uname: str) -> str:
+    """Build the stable capabilities/tag instructions block."""
     cap_lines = [
         f"# Capabilities\nA couple of things you can do with tags, used naturally and "
         f"sparingly — never announce them, just include the tag:",
@@ -1160,39 +1178,126 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"get a follow-up turn to reply with what you found — don't answer the question "
             f"yet in that first message, just the \"let me check\" beat."
         )
-    messages.append({"role": "system", "content": "\n".join(cap_lines)})
+    cap_lines.append(
+        "- Keep private notes to yourself using notepad tags (the notepad is only visible to you, "
+        "not to the user): [notepad:append:some text] to add a line, [notepad:delete:3] to remove "
+        "line 3, [notepad:clear] to wipe it, [notepad:read] to signal you're reading it (content "
+        "is already in your context). Use sparingly for things worth remembering between turns."
+    )
+    cap_lines.append(
+        "- Schedule a message to yourself for later with [schedule:WHEN:your note]. WHEN can be "
+        "5pm, in 2h, in 30m, tomorrow, tomorrow 9am, or 2026-07-01 14:30. Use this to remind "
+        "yourself of things to follow up on or bring up at a specific time."
+    )
+    cap_lines.append(
+        "- Switch your active persona overlay with [persona:name] — loads name.txt from the "
+        "personas directory and uses it as your setting for this chat going forward. Use only "
+        "if you genuinely want to adopt a different mode or context."
+    )
+    return "\n".join(cap_lines)
 
-    messages += [{"role": m["role"], "content": m["content"]} for m in history]  # drop internal ts
 
-    # Dynamic per-turn state kept close to the end, right before the final voice/style
-    # instructions, so it stays salient for this specific reply.
+def _build_ghost_message(chat_id: int, uname: str, latest_user_content: str, history: list) -> str:
+    """Build the volatile ghost message injected just before the user turn."""
+    parts = []
+
+    # Notepad
+    notepad_lines = read_notepad()
+    if notepad_lines:
+        displayed = notepad_lines[:NOTEPAD_MAX_DISPLAY]
+        numbered = "\n".join(f"{i+1}. {ln}" for i, ln in enumerate(displayed))
+        parts.append(f"# Your notepad\n{numbered}")
+    else:
+        parts.append("# Your notepad\n(empty)")
+
+    # Memory
     mem = memory_block(chat_id, uname)
     if mem:
-        messages.append({"role": "system", "content": mem})
+        parts.append(mem)
 
-    messages.append({"role": "system", "content": mood_note(chat_id)})
+    # Mood
+    parts.append(mood_note(chat_id))
 
+    # Self-image / beliefs
     bnote = belief_note(chat_id)
     if bnote:
-        messages.append({"role": "system", "content": bnote})
+        parts.append(bnote)
 
+    # Lorebook
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
     lore = triggered_lore(scan_text)
     if lore:
-        messages.append({
-            "role": "system",
-            "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
-        })
+        parts.append("# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname))
 
+    # Atlas
+    if ATLAS:
+        picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
+        parts.append(
+            f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
+            f"might naturally reference if it fits — don't force them, and don't "
+            f"invent fake businesses when a real area works: " + ", ".join(picks) + "."
+        )
+
+    # AI-scheduled tasks count
+    pending = [t for t in ai_tasks if t["chat_id"] == chat_id]
+    if pending:
+        parts.append(f"You have {len(pending)} pending scheduled task(s).")
+
+    # Environment (date/time/weather)
+    parts.append(environment_note())
+
+    return "\n\n".join(p for p in parts if p)
+
+
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
+    """Build the OpenAI-style message list (ghost-message architecture).
+
+    Layout:
+    1. ONE stable system message: character card + setting + capabilities
+    2. Conversation history
+    3. ONE stable post-history system message: POST_HISTORY_RAW + TEXTING_STYLE
+    4. ONE volatile ghost system message (memory, mood, lore, atlas, environment, notepad)
+    5. User message
+    """
+    uname = user_names.get(chat_id, "you")
+    history = conversation_history.get(chat_id, [])
+
+    # --- 1. Stable opening system message ---
+    stable_parts = [fill(SYSTEM_PROMPT_RAW, NAME, uname)]
+
+    # Per-chat persona overlay (or global SETTING)
+    persona_name = active_personas.get(chat_id, "")
+    setting_text = ""
+    if persona_name:
+        persona_file = PERSONAS_DIR / f"{persona_name}.txt"
+        if persona_file.exists():
+            setting_text = persona_file.read_text(encoding="utf-8").strip()
+    if not setting_text:
+        setting_text = SETTING
+    if setting_text:
+        stable_parts.append("# Current setting\n" + fill(setting_text, NAME, uname))
+
+    stable_parts.append(_build_capabilities_block(uname))
+    messages = [{"role": "system", "content": "\n\n".join(stable_parts)}]
+
+    # --- 2. Conversation history ---
+    messages += [{"role": m["role"], "content": m["content"]} for m in history]
+
+    # --- 3. Stable post-history system message ---
+    post_parts = []
     if POST_HISTORY_RAW:
-        messages.append({"role": "system", "content": fill(POST_HISTORY_RAW, NAME, uname)})
-
+        post_parts.append(fill(POST_HISTORY_RAW, NAME, uname))
     if TEXTING_REALISM:
-        messages.append({"role": "system", "content": TEXTING_STYLE})
+        post_parts.append(TEXTING_STYLE)
+    if post_parts:
+        messages.append({"role": "system", "content": "\n\n".join(post_parts)})
 
-    # Live context (local time + weather) kept near the end so it's salient.
-    messages.append({"role": "system", "content": environment_note()})
+    # --- 4. Volatile ghost message ---
+    ghost = _build_ghost_message(chat_id, uname, latest_user_content, history)
+    if ghost:
+        messages.append({"role": "system", "content": ghost})
 
+    # --- 5. User message ---
     if image_data_url:
         messages.append({"role": "user", "content": [
             {"type": "text", "text": latest_user_content},
@@ -1283,6 +1388,178 @@ def extract_tags(text: str):
     if reaction or sm or sr:
         text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), reaction, selfie_hint
+
+
+# --- AI Notepad ---
+def read_notepad() -> list:
+    """Return current notepad as a list of lines (may be empty)."""
+    with _notepad_lock:
+        if not NOTEPAD_FILE.exists():
+            return []
+        try:
+            lines = NOTEPAD_FILE.read_text(encoding="utf-8").splitlines()
+            return [ln for ln in lines if ln.strip()]
+        except Exception as e:
+            print("[notepad] read failed:", e)
+            return []
+
+
+def _write_notepad(lines: list):
+    """Write lines list to notepad file (caller holds lock)."""
+    NOTEPAD_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def _extract_notepad_ops(text: str):
+    """Pull [notepad:...] tags out of text; return (cleaned_text, ops_list).
+
+    Op shapes:
+      {"op": "append", "text": "..."}
+      {"op": "delete", "line": int}  # 1-indexed
+      {"op": "clear"}
+      {"op": "read"}  # no-op, just stripped
+    """
+    ops = []
+
+    def _handle(m):
+        inner = m.group(1).strip()
+        low = inner.lower()
+        if low == "clear":
+            ops.append({"op": "clear"})
+        elif low == "read":
+            ops.append({"op": "read"})
+        elif low.startswith("append:"):
+            content = inner[len("append:"):].strip()
+            if content:
+                ops.append({"op": "append", "text": content})
+        elif low.startswith("delete:"):
+            try:
+                n = int(inner[len("delete:"):].strip())
+                ops.append({"op": "delete", "line": n})
+            except ValueError:
+                pass
+        return ""  # strip the tag
+
+    cleaned = re.sub(r"\[notepad:(.*?)\]", _handle, text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned, ops
+
+
+def _apply_notepad_ops(ops: list):
+    """Apply a list of notepad ops with file locking."""
+    if not ops:
+        return
+    with _notepad_lock:
+        try:
+            lines = []
+            if NOTEPAD_FILE.exists():
+                lines = [ln for ln in NOTEPAD_FILE.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            for op in ops:
+                kind = op["op"]
+                if kind == "clear":
+                    lines = []
+                elif kind == "append":
+                    lines.append(op["text"])
+                elif kind == "delete":
+                    idx = op["line"] - 1  # convert 1-indexed to 0-indexed
+                    if 0 <= idx < len(lines):
+                        del lines[idx]
+                # "read" is a no-op
+            _write_notepad(lines)
+            print(f"[notepad] Applied {len(ops)} op(s); {len(lines)} line(s) remaining.")
+        except Exception as e:
+            print("[notepad] apply failed:", e)
+
+
+# --- AI-Scheduled Tasks ---
+def _new_ai_task_id() -> int:
+    global _ai_task_seq
+    _ai_task_seq += 1
+    return _ai_task_seq
+
+
+def _parse_schedule_when(when_str: str):
+    """Parse a WHEN string into a UTC float timestamp, or return None."""
+    when_str = when_str.strip()
+    now = datetime.now(TZ) if TZ else datetime.now()
+
+    # "in 2h" / "in 30m"
+    m = re.fullmatch(r"in\s+(\d+)\s*([mh])", when_str, re.IGNORECASE)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = timedelta(hours=n) if unit == "h" else timedelta(minutes=n)
+        due = now + delta
+        return due.timestamp()
+
+    # "5pm" / "9am" / "14:30"
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", when_str, re.IGNORECASE)
+    if m:
+        hh = int(m.group(1))
+        mm = int(m.group(2)) if m.group(2) else 0
+        ampm = (m.group(3) or "").lower()
+        if ampm == "pm" and hh != 12:
+            hh += 12
+        elif ampm == "am" and hh == 12:
+            hh = 0
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if due <= now:
+            due += timedelta(days=1)
+        return due.timestamp()
+
+    # "tomorrow" / "tomorrow 9am"
+    m = re.fullmatch(r"tomorrow(?:\s+(.+))?", when_str, re.IGNORECASE)
+    if m:
+        base = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+        rest = (m.group(1) or "").strip()
+        if rest:
+            t = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", rest, re.IGNORECASE)
+            if t:
+                hh = int(t.group(1))
+                mm = int(t.group(2)) if t.group(2) else 0
+                ampm = (t.group(3) or "").lower()
+                if ampm == "pm" and hh != 12:
+                    hh += 12
+                elif ampm == "am" and hh == 12:
+                    hh = 0
+                base = base.replace(hour=hh, minute=mm)
+        return base.timestamp()
+
+    # "2026-07-01" / "2026-07-01 14:30"
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})(?:\s+(\d{1,2}):(\d{2}))?", when_str)
+    if m:
+        d = date.fromisoformat(m.group(1))
+        hh = int(m.group(2)) if m.group(2) else 9
+        mm = int(m.group(3)) if m.group(3) else 0
+        due = datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ) if TZ else datetime(d.year, d.month, d.day, hh, mm)
+        return due.timestamp()
+
+    return None
+
+
+def _extract_schedule_tag(text: str):
+    """Pull [schedule:WHEN:message] tag from text.
+
+    Returns (cleaned_text, when_str, message) or (text, None, None).
+    """
+    m = re.search(r"\[schedule:([^:\]]+):([^\]]+)\]", text, re.IGNORECASE)
+    if not m:
+        return text, None, None
+    when_str = m.group(1).strip()
+    msg = m.group(2).strip()
+    cleaned = re.sub(r"\[schedule:[^\]]+\]", "", text, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned, when_str, msg
+
+
+# --- Self-Modifying Persona ---
+def _extract_persona_tag(text: str):
+    """Pull [persona:name] tag from text; return (cleaned_text, persona_name or None)."""
+    m = re.search(r"\[persona:([^\]]+)\]", text, re.IGNORECASE)
+    if not m:
+        return text, None
+    persona_name = m.group(1).strip().lower()
+    cleaned = re.sub(r"\[persona:[^\]]+\]", "", text, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned, persona_name
 
 
 def _extract_search(text: str):
@@ -2567,6 +2844,34 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
+    # Process notepad ops first (before extract_tags so tags are stripped cleanly)
+    ai_response, notepad_ops = _extract_notepad_ops(ai_response)
+    _apply_notepad_ops(notepad_ops)
+
+    # Process schedule tag
+    ai_response, when_str, sched_msg = _extract_schedule_tag(ai_response)
+    if when_str and sched_msg:
+        due_ts = _parse_schedule_when(when_str)
+        if due_ts is not None:
+            global _ai_task_seq
+            task = {"id": _new_ai_task_id(), "chat_id": chat_id,
+                    "due_ts": due_ts, "message": sched_msg}
+            if len(ai_tasks) >= AI_TASKS_MAX:
+                ai_tasks.sort(key=lambda t: t["due_ts"])
+                ai_tasks.pop(0)
+            ai_tasks.append(task)
+            save_ai_tasks()
+            print(f"[ai_tasks] Scheduled: '{sched_msg}' at {due_ts}")
+
+    # Process persona tag
+    ai_response, persona_name = _extract_persona_tag(ai_response)
+    if persona_name is not None:
+        persona_file = PERSONAS_DIR / f"{persona_name}.txt"
+        if persona_file.exists():
+            active_personas[chat_id] = persona_name
+            save_state()
+            print(f"[persona] Switched chat {chat_id} to '{persona_name}'")
+
     clean, reaction, selfie_hint = extract_tags(ai_response)
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
@@ -2799,6 +3104,34 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
+
+    # Process notepad ops
+    text, notepad_ops = _extract_notepad_ops(text)
+    _apply_notepad_ops(notepad_ops)
+
+    # Process schedule tag
+    text, when_str, sched_msg = _extract_schedule_tag(text)
+    if when_str and sched_msg:
+        due_ts = _parse_schedule_when(when_str)
+        if due_ts is not None:
+            task = {"id": _new_ai_task_id(), "chat_id": chat_id,
+                    "due_ts": due_ts, "message": sched_msg}
+            if len(ai_tasks) >= AI_TASKS_MAX:
+                ai_tasks.sort(key=lambda t: t["due_ts"])
+                ai_tasks.pop(0)
+            ai_tasks.append(task)
+            save_ai_tasks()
+            print(f"[ai_tasks] Scheduled: '{sched_msg}' at {due_ts}")
+
+    # Process persona tag
+    text, persona_name = _extract_persona_tag(text)
+    if persona_name is not None:
+        persona_file = PERSONAS_DIR / f"{persona_name}.txt"
+        if persona_file.exists():
+            active_personas[chat_id] = persona_name
+            save_state()
+            print(f"[persona] Switched chat {chat_id} to '{persona_name}'")
+
     clean, _reaction, selfie_hint = extract_tags(text)
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
     if clean:
@@ -2999,6 +3332,114 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- AI Notepad command ---
+async def notepad_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the current notepad contents to the user."""
+    lines = read_notepad()
+    if not lines:
+        await update.message.reply_text("Notepad is empty.")
+        return
+    numbered = "\n".join(f"{i+1}. {ln}" for i, ln in enumerate(lines))
+    await _reply_chunked(update, f"📝 Notepad:\n\n{numbered}")
+
+
+# --- AI-Scheduled Tasks commands ---
+async def check_ai_tasks_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic job: fire any AI tasks whose due_ts has passed."""
+    now = time.time()
+    due = [t for t in ai_tasks if t["due_ts"] <= now]
+    for task in due:
+        trigger = (
+            f"[SYSTEM: You scheduled a message to yourself at this time: {task['message']}. "
+            f"Follow through naturally.]"
+        )
+        try:
+            await send_triggered(context, task["chat_id"], trigger)
+            print(f"[ai_tasks] Fired task #{task['id']}: {task['message']}")
+        except Exception as e:
+            print(f"[ai_tasks] Error firing task #{task['id']}:", e)
+        if task in ai_tasks:
+            ai_tasks.remove(task)
+    if due:
+        save_ai_tasks()
+
+
+async def aitasks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List pending AI-scheduled tasks."""
+    chat_id = update.effective_chat.id
+    pending = sorted([t for t in ai_tasks if t["chat_id"] == chat_id], key=lambda t: t["due_ts"])
+    if not pending:
+        await update.message.reply_text("No pending scheduled tasks.")
+        return
+    lines = []
+    for i, t in enumerate(pending, 1):
+        due_dt = datetime.fromtimestamp(t["due_ts"], tz=TZ) if TZ else datetime.fromtimestamp(t["due_ts"])
+        lines.append(f"{i}. {fmt_due_dt(due_dt)} — {t['message']}  (id {t['id']})")
+    await _reply_chunked(update, "🗓️ Pending AI-scheduled tasks:\n\n" + "\n".join(lines))
+
+
+async def aitaskdel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete an AI-scheduled task by its 1-indexed position in /aitasks."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /aitaskdel <number from /aitasks>")
+        return
+    pending = sorted([t for t in ai_tasks if t["chat_id"] == chat_id], key=lambda t: t["due_ts"])
+    idx = int(args[0]) - 1
+    if not 0 <= idx < len(pending):
+        await update.message.reply_text("No task with that number. Run /aitasks to see the list.")
+        return
+    target = pending[idx]
+    ai_tasks.remove(target)
+    save_ai_tasks()
+    await update.message.reply_text(f"🗑️ Removed: {target['message']}")
+
+
+# --- Self-Modifying Persona commands ---
+async def personas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List available persona files."""
+    files = sorted(PERSONAS_DIR.glob("*.txt"))
+    if not files:
+        await update.message.reply_text(
+            "No persona files found. Drop name.txt files into the personas/ directory."
+        )
+        return
+    names = [f.stem for f in files]
+    await update.message.reply_text("🎭 Available personas:\n\n" + "\n".join(f"• {n}" for n in names))
+
+
+async def persona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch to a named persona or back to default."""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        current = active_personas.get(chat_id, "")
+        if current:
+            await update.message.reply_text(f"Current persona: {current}. Use /persona default to reset.")
+        else:
+            await update.message.reply_text(
+                "Using default setting. Use /persona <name> to switch.\n"
+                "Available: " + ", ".join(f.stem for f in sorted(PERSONAS_DIR.glob("*.txt"))) or "(none)"
+            )
+        return
+    name = args[0].lower()
+    if name == "default":
+        active_personas[chat_id] = ""
+        save_state()
+        await update.message.reply_text("🎭 Switched back to default setting.")
+        return
+    persona_file = PERSONAS_DIR / f"{name}.txt"
+    if not persona_file.exists():
+        await update.message.reply_text(
+            f"Persona '{name}' not found. Run /personas to see available ones."
+        )
+        return
+    active_personas[chat_id] = name
+    save_state()
+    await update.message.reply_text(f"🎭 Switched to persona: {name}")
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -3055,6 +3496,11 @@ def main():
     app.add_handler(CommandHandler("cron", cron_add))
     app.add_handler(CommandHandler("crons", cron_list_cmd))
     app.add_handler(CommandHandler("crondel", cron_del_cmd))
+    app.add_handler(CommandHandler("notepad", notepad_cmd))
+    app.add_handler(CommandHandler("aitasks", aitasks_cmd))
+    app.add_handler(CommandHandler("aitaskdel", aitaskdel_cmd))
+    app.add_handler(CommandHandler("personas", personas_cmd))
+    app.add_handler(CommandHandler("persona", persona_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -3081,6 +3527,8 @@ def main():
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
             print(f"🔁 Re-armed {len(cron_jobs)} scheduled task(s).")
+        app.job_queue.run_repeating(check_ai_tasks_job, interval=300, first=60)
+        print("🗓️ AI task checker: every 5 minutes.")
     else:
         print('⚠️ JobQueue unavailable — scheduled features disabled. '
               'Install it with: pip install "python-telegram-bot[job-queue]"')
