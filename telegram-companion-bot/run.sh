@@ -3,7 +3,7 @@
 # Usage: bash run.sh
 # To attach later: tmux attach -t priya
 
-SESSION="priya"
+SESSION="nora"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
