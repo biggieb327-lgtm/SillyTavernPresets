@@ -467,6 +467,10 @@ load_state()
 
 
 # --- Inside jokes ---
+JOKES_FILE = BASE_DIR / "jokes.json"
+WARDROBE_FILE = BASE_DIR / "wardrobe.json"
+
+
 def load_jokes():
     global inside_jokes
     if JOKES_FILE.exists():
@@ -809,8 +813,6 @@ def _new_reminder_id() -> int:
 
 # --- Recurring tasks ("cron jobs") ---
 CRON_FILE = BASE_DIR / "cron_jobs.json"
-JOKES_FILE = BASE_DIR / "jokes.json"
-WARDROBE_FILE = BASE_DIR / "wardrobe.json"
 cron_jobs = []  # {"id":int, "chat_id":int, "schedule":{...}, "instruction":str}
 
 
