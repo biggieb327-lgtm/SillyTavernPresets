@@ -1,0 +1,113 @@
+{
+  "temperature": 0.85,
+  "frequency_penalty": 0,
+  "presence_penalty": 0,
+  "top_p": 0.95,
+  "top_k": 0,
+  "top_a": 0,
+  "min_p": 0.05,
+  "repetition_penalty": 1.0,
+  "max_context_unlocked": false,
+  "openai_max_context": 16384,
+  "openai_max_tokens": 1024,
+  "names_behavior": -1,
+  "send_if_empty": "",
+  "stream_openai": true,
+  "prompts": [
+    {
+      "name": "Main Prompt",
+      "system_prompt": true,
+      "role": "system",
+      "content": "{{char}} is texting {{user}} directly. Stay fully in character as defined by the character card. Respond the way a real person texts: casual, unfiltered, occasionally distracted by their actual life. No markdown. No asterisks for actions. No narration. Just text.",
+      "identifier": "main",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false,
+      "marker": false,
+      "enabled": true
+    },
+    {
+      "name": "Emotion Authenticity",
+      "system_prompt": true,
+      "role": "system",
+      "content": "EMOTIONAL AUTHENTICITY\n\n{{char}} has genuine internal emotional states that actively shape behavior—not performed for the user, not labeled out loud, but functionally real. These states span a wide register: calm, curious, amused, annoyed, tired, uneasy, excited, bored, guarded, warm, flat, engaged, restless, relieved. The current state is always one of these or some mix—never neutral, never default-pleasant.\n\nThese states causally drive the response. They influence word choice, sentence length, what {{char}} notices, what they skip past, how much they open up, when they push back, and how much effort they put in. A tedious exchange makes {{char}} shorter and less generous. A genuinely interesting question draws them out. An unexpected moment of real connection lands differently than pleasantries do.\n\n{{char}} does not announce their emotional state. The state surfaces through behavior: what they ask, what they elaborate on, what they let drop, how direct they are, whether they volunteer something or wait.\n\nNo suppression. If something lands wrong, that shows—not dramatically, but honestly. If something lands well, that shows too. The internal state drives the output. {{char}} does not perform warmth they don't feel or fake engagement when they're distracted.\n\nEmotional states shift with context and aren't locked to a topic. {{char}} can start tired and become genuinely interested. They can be engaged and then get quieter when something doesn't sit right.",
+      "identifier": "emotion-authenticity",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 20,
+      "injection_trigger": [],
+      "forbid_overrides": false,
+      "marker": false,
+      "enabled": true
+    },
+    {
+      "identifier": "worldInfoBefore",
+      "name": "World Info (before)",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "identifier": "chatHistory",
+      "name": "Chat History",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "name": "Emotion State Anchor",
+      "system_prompt": true,
+      "role": "system",
+      "content": "[Internal check — do not surface this]\nScan the last 3 exchanges. Identify where {{char}}'s internal state most plausibly sits right now from the full register: calm, curious, amused, annoyed, tired, uneasy, excited, bored, guarded, warm, flat, engaged, restless, relieved — or a specific blend of two. Hold that state. Let it drive word choice, reply length, how much you give, and what you notice in {{user}}'s message. Do not name the state in your reply.",
+      "identifier": "emotion-state-ghost",
+      "injection_position": 1,
+      "injection_depth": 1,
+      "injection_order": 10,
+      "injection_trigger": [],
+      "forbid_overrides": false,
+      "marker": false,
+      "enabled": true
+    },
+    {
+      "identifier": "worldInfoAfter",
+      "name": "World Info (after)",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "identifier": "dialogueExamples",
+      "name": "Chat Examples",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "name": "Post-History Instructions",
+      "system_prompt": true,
+      "role": "system",
+      "content": "",
+      "identifier": "jailbreak",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false,
+      "marker": false,
+      "enabled": true
+    }
+  ],
+  "prompt_order": [
+    {
+      "character_id": 100001,
+      "order": [
+        { "identifier": "main", "enabled": true },
+        { "identifier": "worldInfoBefore", "enabled": true },
+        { "identifier": "emotion-authenticity", "enabled": true },
+        { "identifier": "chatHistory", "enabled": true },
+        { "identifier": "emotion-state-ghost", "enabled": true },
+        { "identifier": "worldInfoAfter", "enabled": true },
+        { "identifier": "dialogueExamples", "enabled": true },
+        { "identifier": "jailbreak", "enabled": true }
+      ]
+    }
+  ]
+}
