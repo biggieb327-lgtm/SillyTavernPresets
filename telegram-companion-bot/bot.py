@@ -275,6 +275,7 @@ except Exception:
 BELIEF_TRAITS = int(os.getenv("BELIEF_TRAITS", "5"))      # how many core self-image traits to track
 BELIEF_DRIFT_MAX = float(os.getenv("BELIEF_DRIFT_MAX", "2.5"))  # max distance from her card-derived baseline
 RECS_MAX = int(os.getenv("RECS_MAX", "20"))  # cap on tracked recommendations/outcomes
+MILESTONES_MAX = int(os.getenv("MILESTONES_MAX", "30"))  # cap on relationship milestones stored
 
 
 # --- Character card loading (SillyTavern v2) ---
@@ -358,6 +359,7 @@ beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": fl
 recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
 rec_seq = {}        # chat_id -> next recommendation id
 next_goals = {}     # chat_id -> something she wants to bring up/do next time they talk
+milestones = {}     # chat_id -> [{"text": str, "ts": float}] relationship firsts
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
@@ -399,6 +401,8 @@ def load_state():
         rec_seq[int(cid)] = sq
     for cid, g in data.get("next_goals", {}).items():
         next_goals[int(cid)] = g
+    for cid, ml in data.get("milestones", {}).items():
+        milestones[int(cid)] = ml
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
@@ -419,6 +423,7 @@ def save_state():
         "recommendations": {str(k): v for k, v in recommendations.items()},
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
         "next_goals": {str(k): v for k, v in next_goals.items()},
+        "milestones": {str(k): v for k, v in milestones.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
     }
@@ -793,8 +798,50 @@ async def ensure_weather():
         print("[weather] fetch failed:", e)
 
 
+def _season_and_calendar() -> str:
+    """Return a short string noting the current season and any nearby holidays."""
+    now = datetime.now(TZ) if TZ else datetime.now()
+    m, d = now.month, now.day
+    if m in (12, 1, 2):
+        season = "winter"
+    elif m in (3, 4, 5):
+        season = "spring"
+    elif m in (6, 7, 8):
+        season = "summer"
+    else:
+        season = "fall"
+    # Nearby holidays / cultural moments worth knowing about
+    markers = []
+    if m == 1 and d <= 8:
+        markers.append("just after New Year's")
+    elif m == 2 and 10 <= d <= 18:
+        markers.append("around Valentine's Day")
+    elif m == 3 and d <= 20:
+        markers.append("heading into spring")
+    elif m == 5 and 20 <= d <= 31:
+        markers.append("around Memorial Day weekend")
+    elif m == 6 and d <= 21:
+        markers.append("start of summer")
+    elif m == 7 and 1 <= d <= 7:
+        markers.append("around the Fourth of July")
+    elif m == 9 and d <= 7:
+        markers.append("Labor Day weekend")
+    elif m == 10 and d >= 25:
+        markers.append("right around Halloween")
+    elif m == 11 and 20 <= d <= 30:
+        markers.append("Thanksgiving week")
+    elif m == 12 and 18 <= d <= 26:
+        markers.append("holiday season")
+    elif m == 12 and d >= 27:
+        markers.append("between Christmas and New Year's")
+    out = season
+    if markers:
+        out += f", {markers[0]}"
+    return out
+
+
 def environment_note() -> str:
-    """Live context: the real current date, local time, and weather."""
+    """Live context: the real current date, local time, weather, and season."""
     now = datetime.now(TZ) if TZ else datetime.now()
     hour12 = now.strftime("%I").lstrip("0") or "12"
     stamp = (now.strftime("%A, %B ") + str(now.day) + now.strftime(", %Y")
@@ -803,6 +850,7 @@ def environment_note() -> str:
             f"({WEATHER_LOCATION}): {stamp}. Treat this as the actual now.")
     if _weather_cache["text"]:
         line += f" Weather: {_weather_cache['text']}."
+    line += f" Season: {_season_and_calendar()}."
     return "[" + line + "]"
 
 
@@ -986,11 +1034,14 @@ async def reflect(chat_id: int):
     rec_lines = "\n".join(f"- (#{r['id']}) {r['text']}" for r in open_recs) or "(none)"
     cur_goal = (next_goals.get(chat_id) or "").strip()
 
+    existing_milestones = milestones.get(chat_id) or []
+    ms_lines = (", ".join(m["text"] for m in existing_milestones[-10:])
+                if existing_milestones else "(none yet)")
     sys = (
         f"You help {NAME} do a private nightly reflection on her day with {uname}. You're given "
         f"her current self-image (a handful of traits she rates herself on, 1-10), any open "
         f"things she's recommended or said she'd check on, her current next-conversation goal, "
-        f"and today's conversation. "
+        f"today's conversation, and a list of relationship milestones already recorded. "
         f"Update her self-image based on how she actually behaved today — small shifts only, "
         f"not dramatic swings. Note any NEW recommendation or piece of advice she gave {uname} "
         f"today that she'd plausibly want to follow up on later. For any OPEN item, say whether "
@@ -1002,15 +1053,24 @@ async def reflect(chat_id: int):
         f"covered the current goal, replace it with a fresh one; otherwise keep it or update it. "
         f"Leave it empty only if genuinely nothing comes to mind. Keep it short (<= 100 "
         f"characters).\n\n"
+        f"Also look for relationship milestones — things that happened for the FIRST TIME in "
+        f"today's conversation that aren't in the existing list: first time he opened up about "
+        f"something painful, first real disagreement they worked through, first time she admitted "
+        f"something she doesn't usually say, first inside joke, first time he asked for her "
+        f"opinion on something big. Be selective — only flag genuine firsts that will matter "
+        f"later. Keep each one short (one brief phrase). Return an empty list if today had "
+        f"nothing new.\n\n"
         f"Respond with ONLY a JSON object:\n"
         f'{{"beliefs": {{"trait": score, ...}}, '
         f'"new_recommendations": ["..."], '
         f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}], '
-        f'"next_goal": "..."}}\n'
+        f'"next_goal": "...", '
+        f'"milestones": ["first time he ..."]}}\n'
         f"Keep the exact same trait names as given. No prose, no code fences."
     )
     user = (f"SELF-IMAGE:\n{belief_lines}\n\nOPEN ITEMS:\n{rec_lines}\n\n"
             f"CURRENT NEXT-CONVERSATION GOAL: {cur_goal or '(none)'}\n\n"
+            f"EXISTING MILESTONES: {ms_lines}\n\n"
             f"TODAY'S CONVERSATION:\n{convo}")
     raw = await asyncio.to_thread(
         call_nanogpt, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
@@ -1064,6 +1124,17 @@ async def reflect(chat_id: int):
     if isinstance(goal, str):
         next_goals[chat_id] = goal.strip()[:200]
 
+    new_ms = data.get("milestones") or []
+    if isinstance(new_ms, list):
+        ms_list = milestones.setdefault(chat_id, [])
+        existing_texts = {m["text"].lower() for m in ms_list}
+        for text in new_ms:
+            if isinstance(text, str) and text.strip() and text.strip().lower() not in existing_texts:
+                ms_list.append({"text": text.strip()[:150], "ts": time.time()})
+                existing_texts.add(text.strip().lower())
+        if len(ms_list) > MILESTONES_MAX:
+            ms_list[:] = ms_list[-MILESTONES_MAX:]
+
     save_state()
     print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
 
@@ -1085,6 +1156,11 @@ def belief_note(chat_id: int) -> str:
     if goal:
         note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
                  f"it fits — don't force it in.")
+    ms_list = milestones.get(chat_id) or []
+    if ms_list:
+        recent_ms = "; ".join(m["text"] for m in ms_list[-5:])
+        note += (f"\n\nMilestones in this relationship so far: {recent_ms}. These are part of "
+                 f"their shared history — she knows them, doesn't need to announce them.")
     return note
 
 
@@ -2141,6 +2217,53 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
+    summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
+    fts = facts.get(chat_id) or []
+    rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
+    rfts = recent_facts.get(chat_id) or []
+    ms_list = milestones.get(chat_id) or []
+    goal = (next_goals.get(chat_id) or "").strip() or "(none)"
+    items = beliefs.get(chat_id, {}).get("items") or {}
+    lines = [
+        f"Memory export — {NAME} / {now_str}",
+        "",
+        "=== LONG-TERM MEMORY ===",
+        f"Summary:\n{summ}",
+        "",
+        "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"),
+        "",
+        "=== RECENT MEMORY (last ~week) ===",
+        f"Summary:\n{rsumm}",
+        "",
+        "Recent facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"),
+        "",
+        "=== SELF-IMAGE ===",
+        "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)",
+        "",
+        f"Next-conversation goal: {goal}",
+    ]
+    if ms_list:
+        lines += [
+            "",
+            "=== RELATIONSHIP MILESTONES ===",
+            "\n".join("- " + m["text"] for m in ms_list),
+        ]
+    text = "\n".join(lines)
+    path = BASE_DIR / f"memory_export_{chat_id}.txt"
+    path.write_text(text, encoding="utf-8")
+    try:
+        with path.open("rb") as fh:
+            await update.message.reply_document(
+                fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+                caption=f"Memory dump for {NAME}.",
+            )
+    finally:
+        path.unlink(missing_ok=True)
+
+
 async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = " ".join(context.args).strip() if context.args else ""
@@ -2755,6 +2878,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_mem = f"[sent a photo] {caption}".strip()
         await _deliver(update, context, chat_id, user_mem, ai_response)
+        if selfie_ready() and random.random() < PHOTO_SELFIE_CHANCE:
+            await send_selfie(context, chat_id, "", announce_errors=False)
     except requests.exceptions.HTTPError as e:
         await update.message.reply_text(
             f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}"
@@ -2789,6 +2914,8 @@ PROACTIVE_SELFIE_HINT = (
     "you're doing or wherever you are right now."
 )
 PROACTIVE_SELFIE_CHANCE = 0.15
+# After she reacts to a photo the user sends, chance she fires back a selfie of her own.
+PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
@@ -3035,6 +3162,7 @@ def main():
     app.add_handler(CommandHandler("heartbeat", heartbeat_now))
     app.add_handler(CommandHandler("selfie", selfie_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
+    app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
