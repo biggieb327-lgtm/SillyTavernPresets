@@ -15,10 +15,11 @@ from urllib.parse import parse_qs, urlparse, unquote
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -360,6 +361,15 @@ recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "n
 rec_seq = {}        # chat_id -> next recommendation id
 next_goals = {}     # chat_id -> something she wants to bring up/do next time they talk
 milestones = {}     # chat_id -> [{"text": str, "ts": float}] relationship firsts
+pinned = {}         # chat_id -> [str] facts that never get summarized away
+boundaries = {}     # chat_id -> [str] hard behavioral constraints from the user
+current_vibe = {}   # chat_id -> {"name": str, "expires_at": float|None}
+vent_mode = {}      # chat_id -> bool
+user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
+unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
+nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
+inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
+wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
@@ -403,6 +413,20 @@ def load_state():
         next_goals[int(cid)] = g
     for cid, ml in data.get("milestones", {}).items():
         milestones[int(cid)] = ml
+    for cid, pl in data.get("pinned", {}).items():
+        pinned[int(cid)] = pl
+    for cid, bl in data.get("boundaries", {}).items():
+        boundaries[int(cid)] = bl
+    for cid, vb in data.get("current_vibe", {}).items():
+        current_vibe[int(cid)] = vb
+    for cid, vm in data.get("vent_mode", {}).items():
+        vent_mode[int(cid)] = vm
+    for cid, ue in data.get("user_energy", {}).items():
+        user_energy[int(cid)] = ue
+    for cid, ud in data.get("unsent_drafts", {}).items():
+        unsent_drafts[int(cid)] = ud
+    for cid, nb in data.get("nudge_budget", {}).items():
+        nudge_budget[int(cid)] = nb
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
@@ -424,6 +448,13 @@ def save_state():
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
         "next_goals": {str(k): v for k, v in next_goals.items()},
         "milestones": {str(k): v for k, v in milestones.items()},
+        "pinned": {str(k): v for k, v in pinned.items()},
+        "boundaries": {str(k): v for k, v in boundaries.items()},
+        "current_vibe": {str(k): v for k, v in current_vibe.items()},
+        "vent_mode": {str(k): v for k, v in vent_mode.items()},
+        "user_energy": {str(k): v for k, v in user_energy.items()},
+        "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
+        "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
     }
@@ -433,6 +464,146 @@ def save_state():
 
 
 load_state()
+
+
+# --- Inside jokes ---
+def load_jokes():
+    global inside_jokes
+    if JOKES_FILE.exists():
+        try:
+            inside_jokes = json.loads(JOKES_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            print("[jokes] load failed:", e)
+            inside_jokes = []
+
+
+def save_jokes():
+    JOKES_FILE.write_text(json.dumps(inside_jokes, indent=2), encoding="utf-8")
+
+
+def _new_joke_id() -> int:
+    return (max((j["id"] for j in inside_jokes), default=0)) + 1
+
+
+def _available_jokes() -> list:
+    """Jokes whose cooldown has expired and are eligible to be surfaced."""
+    now = time.time()
+    return [j for j in inside_jokes
+            if now - j.get("last_used", 0) >= j.get("cooldown_days", 7) * 86400]
+
+
+def _check_joke_used(text: str):
+    """Scan a response and mark any joke whose phrase appears as recently used."""
+    if not inside_jokes:
+        return
+    low = text.lower()
+    changed = False
+    for j in inside_jokes:
+        if j["phrase"].lower() in low:
+            j["last_used"] = time.time()
+            changed = True
+    if changed:
+        save_jokes()
+
+
+load_jokes()
+
+
+# --- Wardrobe ---
+def load_wardrobe():
+    if WARDROBE_FILE.exists():
+        try:
+            wardrobe.update(json.loads(WARDROBE_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            print("[wardrobe] load failed:", e)
+
+
+def save_wardrobe():
+    WARDROBE_FILE.write_text(json.dumps(wardrobe, indent=2), encoding="utf-8")
+
+
+load_wardrobe()
+
+
+# --- Vibe mode ---
+VIBE_PROMPTS = {
+    "cozy":       ("Texting mode: cozy and warm. Longer messages okay. Soft language. "
+                   "Low emoji. High initiative — bring things up unprompted. Slow evening energy."),
+    "flirty":     ("Texting mode: playful and a little flirty. Light teasing welcome. "
+                   "Warmer than usual. Keep it natural, not performative."),
+    "serious":    ("Texting mode: focused and direct. Skip jokes for now. Engage with what "
+                   "actually matters. Match the weight of the conversation."),
+    "chaotic":    ("Texting mode: chaotic and energetic. Fast, funny, tangents welcome. "
+                   "High emoji okay if it fits. Bring the noise."),
+    "low-energy": ("Texting mode: low-energy. Short, gentle replies. No big questions. "
+                   "Just present without demanding anything."),
+    "playful":    ("Texting mode: playful. Light and bouncy. Jokes, teasing, a little unserious. "
+                   "Nothing too heavy."),
+    "chill":      ("Texting mode: chill. Laid-back. Unhurried. Low stakes. No interrogating."),
+}
+
+
+def active_vibe(chat_id: int) -> str:
+    """Return the active vibe name, or None if expired/not set."""
+    v = current_vibe.get(chat_id)
+    if not v:
+        return None
+    exp = v.get("expires_at")
+    if exp and time.time() > exp:
+        current_vibe.pop(chat_id, None)
+        save_state()
+        return None
+    return v.get("name")
+
+
+# --- Nudge budget ---
+def _today_str() -> str:
+    return _today().isoformat()
+
+
+def _check_nudge_budget(chat_id: int) -> bool:
+    """True if a proactive nudge is allowed within today's budget."""
+    today = _today_str()
+    nb = nudge_budget.get(chat_id, {})
+    if nb.get("reset_date") != today:
+        nb = {"limit": nb.get("limit", 3), "sent_today": 0, "reset_date": today}
+        nudge_budget[chat_id] = nb
+    limit = nb.get("limit", 3)
+    return limit == 0 or nb.get("sent_today", 0) < limit  # 0 = unlimited
+
+
+def _consume_nudge(chat_id: int):
+    today = _today_str()
+    nb = nudge_budget.setdefault(chat_id, {"limit": 3, "sent_today": 0, "reset_date": today})
+    if nb.get("reset_date") != today:
+        nb["sent_today"] = 0
+        nb["reset_date"] = today
+    nb["sent_today"] = nb.get("sent_today", 0) + 1
+    save_state()
+
+
+# --- Unsent drafts ---
+def _save_draft(chat_id: int, reason: str):
+    drafts = unsent_drafts.setdefault(chat_id, [])
+    drafts.append({"reason": reason, "ts": time.time()})
+    if len(drafts) > 3:
+        drafts[:] = drafts[-3:]
+    save_state()
+    print(f"[draft] Saved unsent thought for chat {chat_id}: {reason}")
+
+
+def _pop_draft(chat_id: int) -> dict:
+    """Return and remove the oldest fresh draft, or None."""
+    drafts = unsent_drafts.get(chat_id) or []
+    cutoff = time.time() - 48 * 3600
+    fresh = [d for d in drafts if d["ts"] > cutoff]
+    unsent_drafts[chat_id] = fresh
+    if not fresh:
+        return None
+    draft = fresh.pop(0)
+    unsent_drafts[chat_id] = fresh
+    save_state()
+    return draft
 
 
 # --- Payments: storage + date math ---
@@ -638,6 +809,8 @@ def _new_reminder_id() -> int:
 
 # --- Recurring tasks ("cron jobs") ---
 CRON_FILE = BASE_DIR / "cron_jobs.json"
+JOKES_FILE = BASE_DIR / "jokes.json"
+WARDROBE_FILE = BASE_DIR / "wardrobe.json"
 cron_jobs = []  # {"id":int, "chat_id":int, "schedule":{...}, "instruction":str}
 
 
@@ -1247,9 +1420,50 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
+    if vent_mode.get(chat_id):
+        messages.append({"role": "system", "content": (
+            f"VENT MODE: {uname} needs to vent, not be fixed. Validate first, always. "
+            f"No advice or solutions unless {uname} explicitly asks. At most one gentle "
+            f"question per message. Warm, brief, non-directive. Stay in this mode until told otherwise."
+        )})
+
+    vibe = active_vibe(chat_id)
+    if vibe and vibe in VIBE_PROMPTS:
+        messages.append({"role": "system", "content": VIBE_PROMPTS[vibe]})
+
+    ue = user_energy.get(chat_id) or {}
+    elevel = ue.get("level")
+    if elevel == "low":
+        messages.append({"role": "system", "content": (
+            f"[{NAME} can sense {uname} is low-energy right now. Keep replies short and "
+            f"gentle. No stacked questions. Be present without demanding anything.]"
+        )})
+    elif elevel == "high":
+        messages.append({"role": "system", "content": (
+            f"[{NAME} can sense {uname} is in a high-energy space. "
+            f"More latitude to be elaborate, playful, match the energy.]"
+        )})
+
     bnote = belief_note(chat_id)
     if bnote:
         messages.append({"role": "system", "content": bnote})
+
+    pn = pinned.get(chat_id) or []
+    if pn:
+        messages.append({"role": "system", "content": (
+            f"# Core things you know and never forget\n"
+            + "\n".join("- " + p for p in pn)
+        )})
+
+    avail_jokes = _available_jokes()
+    if avail_jokes:
+        joke_lines = "\n".join(
+            f'- "{j["phrase"]}" ({j["tone"]}): {j["meaning"]}' for j in avail_jokes
+        )
+        messages.append({"role": "system", "content": (
+            f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
+            f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
+        )})
 
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
     lore = triggered_lore(scan_text)
@@ -1258,6 +1472,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "role": "system",
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
+
+    bds = boundaries.get(chat_id) or []
+    if bds:
+        messages.append({"role": "system", "content": (
+            f"# Hard constraints — respect these without exception or comment:\n"
+            + "\n".join("- " + b for b in bds)
+        )})
 
     if POST_HISTORY_RAW:
         messages.append({"role": "system", "content": fill(POST_HISTORY_RAW, NAME, uname)})
@@ -1560,7 +1781,10 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         activity = random.choice(SELFIE_ACTIVITIES)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
-    if random.random() < 0.55:
+    current_fit = wardrobe.get("current")
+    if current_fit:
+        bits.append(f"Wearing {current_fit}.")
+    elif random.random() < 0.55:
         bits.append(f"Wearing {random.choice(SELFIE_OUTFITS)}.")
     if outdoors and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
         bits.append(
@@ -2264,6 +2488,517 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         path.unlink(missing_ok=True)
 
 
+# --- Pinned memories ---
+async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        await update.message.reply_text("Usage: /pin <fact that should never be forgotten>")
+        return
+    pl = pinned.setdefault(chat_id, [])
+    if text not in pl:
+        pl.append(text)
+        save_state()
+    await update.message.reply_text(f"📌 Pinned: {text}")
+
+
+async def pinned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    pl = pinned.get(chat_id) or []
+    if not pl:
+        await update.message.reply_text("Nothing pinned yet. Use /pin <fact> to add one.")
+        return
+    lines = [f"{i}. {p}" for i, p in enumerate(pl, 1)]
+    await _reply_chunked(update, "📌 Pinned memories:\n\n" + "\n".join(lines)
+                         + "\n\nUse /unpin <number> to remove one.")
+
+
+async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /unpin <number from /pinned>")
+        return
+    pl = pinned.get(chat_id) or []
+    idx = int(context.args[0]) - 1
+    if not 0 <= idx < len(pl):
+        await update.message.reply_text("No pinned memory with that number.")
+        return
+    removed = pl.pop(idx)
+    save_state()
+    await update.message.reply_text(f"🗑️ Unpinned: {removed}")
+
+
+# --- Boundaries ---
+async def boundary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage:\n/boundary <text>  — add a constraint\n/boundary remove <number>  — remove one"
+        )
+        return
+    if args[0].lower() == "remove":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.message.reply_text("Usage: /boundary remove <number from /boundaries>")
+            return
+        bl = boundaries.get(chat_id) or []
+        idx = int(args[1]) - 1
+        if not 0 <= idx < len(bl):
+            await update.message.reply_text("No boundary with that number.")
+            return
+        removed = bl.pop(idx)
+        save_state()
+        await update.message.reply_text(f"🗑️ Removed boundary: {removed}")
+        return
+    text = " ".join(args).strip()
+    bl = boundaries.setdefault(chat_id, [])
+    if text not in bl:
+        bl.append(text)
+        save_state()
+    await update.message.reply_text(f"🚧 Boundary set: {text}")
+
+
+async def boundaries_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    bl = boundaries.get(chat_id) or []
+    if not bl:
+        await update.message.reply_text(
+            "No boundaries set. Use /boundary <text> to add one.\n\n"
+            "Example: /boundary Don't tease me about sleep\n"
+            "Example: /boundary Keep romantic tone low unless I initiate"
+        )
+        return
+    lines = [f"{i}. {b}" for i, b in enumerate(bl, 1)]
+    await _reply_chunked(update, "🚧 Active boundaries:\n\n" + "\n".join(lines)
+                         + "\n\nUse /boundary remove <number> to remove one.")
+
+
+# --- Vibe mode ---
+async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args or args[0].lower() == "status":
+        vibe = active_vibe(chat_id)
+        if not vibe:
+            await update.message.reply_text(
+                "No vibe set. Options: " + ", ".join(VIBE_PROMPTS.keys())
+                + "\n\nUsage: /vibe <name> [duration, e.g. 2h]"
+            )
+        else:
+            v = current_vibe[chat_id]
+            exp = v.get("expires_at")
+            tail = ""
+            if exp:
+                mins = max(0, round((exp - time.time()) / 60))
+                tail = f" (expires in {mins}m)" if mins < 60 else f" (expires in {mins // 60}h)"
+            await update.message.reply_text(f"Current vibe: **{vibe}**{tail}", parse_mode="Markdown")
+        return
+    name = args[0].lower()
+    if name == "off":
+        current_vibe.pop(chat_id, None)
+        save_state()
+        await update.message.reply_text("Vibe cleared.")
+        return
+    if name not in VIBE_PROMPTS:
+        await update.message.reply_text("Unknown vibe. Options: " + ", ".join(VIBE_PROMPTS.keys()))
+        return
+    expires_at = None
+    if len(args) > 1:
+        m = re.fullmatch(r"(\d+)\s*([mh])", args[1].lower())
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            secs = n * 60 if unit == "m" else n * 3600
+            expires_at = time.time() + secs
+    current_vibe[chat_id] = {"name": name, "expires_at": expires_at}
+    save_state()
+    tail = f" for {args[1]}" if expires_at and len(args) > 1 else ""
+    await update.message.reply_text(f"Vibe set to **{name}**{tail}. Use /vibe off to clear.", parse_mode="Markdown")
+
+
+# --- Vent mode ---
+async def vent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    turning_off = args and args[0].lower() == "off"
+    if turning_off:
+        vent_mode[chat_id] = False
+        save_state()
+        await update.message.reply_text("Vent mode off.")
+    elif vent_mode.get(chat_id):
+        await update.message.reply_text("Vent mode is already on. Use /vent off to turn it off.")
+    else:
+        vent_mode[chat_id] = True
+        save_state()
+        await update.message.reply_text(
+            "💬 Vent mode on. She'll listen and validate — no advice unless you ask for it. "
+            "Use /vent off when you're done."
+        )
+
+
+# --- Energy level ---
+async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        ue = user_energy.get(chat_id) or {}
+        lvl = ue.get("level", "not set")
+        await update.message.reply_text(f"Current energy level: {lvl}\nUsage: /energy low|medium|high")
+        return
+    lvl = args[0].lower()
+    if lvl in ("off", "medium", "normal", "default"):
+        user_energy.pop(chat_id, None)
+        save_state()
+        await update.message.reply_text("Energy level cleared (back to default).")
+        return
+    if lvl not in ("low", "high"):
+        await update.message.reply_text("Options: /energy low  /energy high  /energy off")
+        return
+    user_energy[chat_id] = {"level": lvl, "ts": time.time()}
+    save_state()
+    await update.message.reply_text(f"Energy set to **{lvl}**. Use /energy off to clear.", parse_mode="Markdown")
+
+
+# --- Inside joke bank ---
+async def add_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text or "|" not in text:
+        await update.message.reply_text(
+            "Usage: /addjoke <phrase> | <meaning> [| tone]\n\n"
+            "Example: /addjoke the soup incident | failed at reheating soup | playful\n"
+            "Tone defaults to 'playful' if not specified."
+        )
+        return
+    parts = [p.strip() for p in text.split("|")]
+    phrase = parts[0]
+    meaning = parts[1] if len(parts) > 1 else ""
+    tone = parts[2] if len(parts) > 2 else "playful"
+    if not phrase or not meaning:
+        await update.message.reply_text("Need at least a phrase and a meaning.")
+        return
+    inside_jokes.append({
+        "id": _new_joke_id(),
+        "phrase": phrase[:80],
+        "meaning": meaning[:160],
+        "tone": tone[:30],
+        "last_used": 0,
+        "cooldown_days": 7,
+    })
+    save_jokes()
+    await update.message.reply_text(f'😂 Added joke: "{phrase}"')
+
+
+async def list_jokes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not inside_jokes:
+        await update.message.reply_text(
+            "No inside jokes yet. Use /addjoke to add one.\n\n"
+            "Format: /addjoke <phrase> | <meaning> [| tone]"
+        )
+        return
+    now = time.time()
+    lines = []
+    for j in inside_jokes:
+        last = j.get("last_used", 0)
+        cd = j.get("cooldown_days", 7)
+        ready_in = max(0, (last + cd * 86400 - now) / 3600)
+        status = "ready" if ready_in <= 0 else f"on cooldown ({round(ready_in)}h left)"
+        lines.append(f"{j['id']}. \"{j['phrase']}\" ({j['tone']}) — {j['meaning']} [{status}]")
+    await _reply_chunked(update, "😂 Inside jokes:\n\n" + "\n".join(lines)
+                         + "\n\nUse /deljoke <id> to remove one.")
+
+
+async def del_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /deljoke <id from /jokes>")
+        return
+    jid = int(context.args[0])
+    target = next((j for j in inside_jokes if j["id"] == jid), None)
+    if not target:
+        await update.message.reply_text("No joke with that id.")
+        return
+    inside_jokes.remove(target)
+    save_jokes()
+    await update.message.reply_text(f'🗑️ Removed joke: "{target["phrase"]}"')
+
+
+# --- Wardrobe ---
+async def wardrobe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    outfits = wardrobe.get("outfits") or []
+    current = wardrobe.get("current")
+    if not outfits and not current:
+        await update.message.reply_text(
+            "Wardrobe is empty.\n/addoutfit <description>  — add an outfit\n"
+            "/outfit <number or description>  — set what she's currently wearing"
+        )
+        return
+    lines = []
+    for i, o in enumerate(outfits, 1):
+        marker = " ← wearing now" if o == current else ""
+        lines.append(f"{i}. {o}{marker}")
+    if current and current not in outfits:
+        lines.insert(0, f"Currently wearing: {current} (not in wardrobe)")
+    await update.message.reply_text(
+        "👗 Wardrobe:\n\n" + "\n".join(lines)
+        + "\n\n/outfit <number or description> to change\n/deloutfit <number> to remove"
+    )
+
+
+async def add_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        await update.message.reply_text("Usage: /addoutfit <description>\nExample: /addoutfit oversized cream sweater")
+        return
+    outfits = wardrobe.setdefault("outfits", [])
+    if text not in outfits:
+        outfits.append(text)
+        save_wardrobe()
+    await update.message.reply_text(f"👗 Added to wardrobe: {text}")
+
+
+async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        current = wardrobe.get("current") or "(none set)"
+        await update.message.reply_text(f"Currently wearing: {current}\nUsage: /outfit <number or description>")
+        return
+    # allow picking by number
+    outfits = wardrobe.get("outfits") or []
+    if text.isdigit():
+        idx = int(text) - 1
+        if not 0 <= idx < len(outfits):
+            await update.message.reply_text(f"No outfit #{text}. Run /wardrobe to see the list.")
+            return
+        text = outfits[idx]
+    wardrobe["current"] = text
+    save_wardrobe()
+    await update.message.reply_text(f"👗 Now wearing: {text}")
+
+
+async def del_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /deloutfit <number from /wardrobe>")
+        return
+    outfits = wardrobe.get("outfits") or []
+    idx = int(context.args[0]) - 1
+    if not 0 <= idx < len(outfits):
+        await update.message.reply_text("No outfit with that number.")
+        return
+    removed = outfits.pop(idx)
+    if wardrobe.get("current") == removed:
+        wardrobe["current"] = None
+    save_wardrobe()
+    await update.message.reply_text(f"🗑️ Removed: {removed}")
+
+
+# --- Nudge budget ---
+async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    today = _today_str()
+    nb = nudge_budget.get(chat_id, {"limit": 3, "sent_today": 0, "reset_date": today})
+    if nb.get("reset_date") != today:
+        nb["sent_today"] = 0
+        nb["reset_date"] = today
+        nudge_budget[chat_id] = nb
+    if args:
+        if not args[0].isdigit():
+            await update.message.reply_text("Usage: /nudges [N]  (0 = unlimited)")
+            return
+        nb["limit"] = int(args[0])
+        nudge_budget[chat_id] = nb
+        save_state()
+        limit_str = "unlimited" if nb["limit"] == 0 else str(nb["limit"])
+        await update.message.reply_text(f"Daily nudge limit set to {limit_str}.")
+        return
+    limit = nb.get("limit", 3)
+    sent = nb.get("sent_today", 0)
+    limit_str = "unlimited" if limit == 0 else f"{sent}/{limit}"
+    await update.message.reply_text(
+        f"💓 Nudge budget today: {limit_str}\n"
+        f"Use /nudges <N> to change the daily limit (0 = unlimited)."
+    )
+
+
+# --- Inline keyboard menu ---
+def _build_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧠 Memory", callback_data="cmd:memory"),
+         InlineKeyboardButton("📌 Pinned", callback_data="cmd:pinned"),
+         InlineKeyboardButton("🚧 Limits", callback_data="cmd:boundaries"),
+         InlineKeyboardButton("💾 Export", callback_data="cmd:exportmemory")],
+        [InlineKeyboardButton("😊 Cozy", callback_data="vibe:cozy"),
+         InlineKeyboardButton("🎭 Playful", callback_data="vibe:playful"),
+         InlineKeyboardButton("😴 Chill", callback_data="vibe:chill"),
+         InlineKeyboardButton("💬 Vent", callback_data="cmd:vent")],
+        [InlineKeyboardButton("⚡ Low energy", callback_data="energy:low"),
+         InlineKeyboardButton("🔄 Clear vibe", callback_data="vibe:off"),
+         InlineKeyboardButton("😂 Jokes", callback_data="cmd:jokes"),
+         InlineKeyboardButton("👗 Wardrobe", callback_data="cmd:wardrobe")],
+        [InlineKeyboardButton("📸 Selfie", callback_data="cmd:selfie"),
+         InlineKeyboardButton("🪞 Self-image", callback_data="cmd:selfimage"),
+         InlineKeyboardButton("💓 Check in", callback_data="cmd:heartbeat"),
+         InlineKeyboardButton("📊 Nudges", callback_data="cmd:nudges")],
+    ])
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    await update.message.reply_text("⚙️ Menu", reply_markup=_build_menu())
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+
+    async def _send(text, **kw):
+        await context.bot.send_message(chat_id=chat_id, text=text, **kw)
+
+    if data == "cmd:memory":
+        summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
+        fts = facts.get(chat_id) or []
+        rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
+        rfts = recent_facts.get(chat_id) or []
+        text = (f"🧠 Long-term\nSummary: {summ}\n\nFacts:\n"
+                + ("\n".join("• " + f for f in fts) or "(none)")
+                + f"\n\n📅 Recent\nSummary: {rsumm}\n\nFacts:\n"
+                + ("\n".join("• " + f for f in rfts) or "(none)"))
+        for i in range(0, len(text), 4096):
+            await _send(text[i:i + 4096])
+
+    elif data == "cmd:pinned":
+        pl = pinned.get(chat_id) or []
+        if pl:
+            await _send("📌 Pinned:\n" + "\n".join(f"{i}. {p}" for i, p in enumerate(pl, 1)))
+        else:
+            await _send("Nothing pinned. Use /pin <fact>.")
+
+    elif data == "cmd:boundaries":
+        bl = boundaries.get(chat_id) or []
+        if bl:
+            await _send("🚧 Boundaries:\n" + "\n".join(f"{i}. {b}" for i, b in enumerate(bl, 1)))
+        else:
+            await _send("No boundaries set. Use /boundary <text>.")
+
+    elif data == "cmd:exportmemory":
+        now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
+        summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
+        fts = facts.get(chat_id) or []
+        rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
+        rfts = recent_facts.get(chat_id) or []
+        ms_list = milestones.get(chat_id) or []
+        goal = (next_goals.get(chat_id) or "").strip() or "(none)"
+        items = beliefs.get(chat_id, {}).get("items") or {}
+        lines = [
+            f"Memory export — {NAME} / {now_str}", "",
+            "=== LONG-TERM ===", f"Summary:\n{summ}", "",
+            "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"), "",
+            "=== RECENT ===", f"Summary:\n{rsumm}", "",
+            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"), "",
+            "=== SELF-IMAGE ===",
+            "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)", "",
+            f"Next goal: {goal}",
+        ]
+        if ms_list:
+            lines += ["", "=== MILESTONES ===",
+                      "\n".join("- " + m["text"] for m in ms_list)]
+        path = BASE_DIR / f"memory_export_{chat_id}.txt"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        try:
+            with path.open("rb") as fh:
+                await context.bot.send_document(
+                    chat_id=chat_id, document=fh,
+                    filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+                    caption=f"Memory dump for {NAME}.",
+                )
+        finally:
+            path.unlink(missing_ok=True)
+
+    elif data.startswith("vibe:"):
+        name = data[5:]
+        if name == "off":
+            current_vibe.pop(chat_id, None)
+            save_state()
+            await _send("Vibe cleared.")
+        elif name in VIBE_PROMPTS:
+            current_vibe[chat_id] = {"name": name, "expires_at": None}
+            save_state()
+            await _send(f"Vibe set to {name}. /vibe off to clear.")
+        else:
+            await _send("Unknown vibe.")
+
+    elif data == "cmd:vent":
+        if vent_mode.get(chat_id):
+            vent_mode[chat_id] = False
+            save_state()
+            await _send("Vent mode off.")
+        else:
+            vent_mode[chat_id] = True
+            save_state()
+            await _send("💬 Vent mode on. She listens, doesn't fix. /vent off when done.")
+
+    elif data.startswith("energy:"):
+        lvl = data[7:]
+        if lvl in ("low", "high"):
+            user_energy[chat_id] = {"level": lvl, "ts": time.time()}
+            save_state()
+            await _send(f"Energy set to {lvl}. /energy off to clear.")
+
+    elif data == "cmd:selfie":
+        await ensure_weather()
+        await send_selfie(context, chat_id, "", announce_errors=True)
+
+    elif data == "cmd:jokes":
+        if not inside_jokes:
+            await _send("No inside jokes yet. Use /addjoke.")
+        else:
+            now = time.time()
+            lines = []
+            for j in inside_jokes:
+                last = j.get("last_used", 0)
+                cd = j.get("cooldown_days", 7)
+                ready_in = max(0, (last + cd * 86400 - now) / 3600)
+                status = "ready" if ready_in <= 0 else f"~{round(ready_in)}h cooldown"
+                lines.append(f'• "{j["phrase"]}" — {status}')
+            await _send("😂 Inside jokes:\n" + "\n".join(lines))
+
+    elif data == "cmd:wardrobe":
+        outfits = wardrobe.get("outfits") or []
+        current = wardrobe.get("current")
+        if not outfits and not current:
+            await _send("Wardrobe empty. Use /addoutfit.")
+        else:
+            lines = [f"{i}. {o}" + (" ← now" if o == current else "")
+                     for i, o in enumerate(outfits, 1)]
+            if current and current not in outfits:
+                lines.insert(0, f"Wearing: {current}")
+            await _send("👗 Wardrobe:\n" + "\n".join(lines))
+
+    elif data == "cmd:selfimage":
+        items = beliefs.get(chat_id, {}).get("items") or {}
+        if not items:
+            await _send("Nothing yet — runs at the first nightly reflection.")
+        else:
+            lines = [f"• {t}: {d['score']}/10" for t, d in items.items()]
+            goal = (next_goals.get(chat_id) or "").strip() or "(none)"
+            await _send("🪞 Self-image:\n" + "\n".join(lines) + f"\n\nNext goal: {goal}")
+
+    elif data == "cmd:heartbeat":
+        try:
+            await send_proactive(context, chat_id)
+        except Exception as e:
+            await _send(f"❌ {e}")
+
+    elif data == "cmd:nudges":
+        today = _today_str()
+        nb = nudge_budget.get(chat_id, {"limit": 3, "sent_today": 0, "reset_date": today})
+        limit = nb.get("limit", 3)
+        sent = nb.get("sent_today", 0)
+        limit_str = "unlimited" if limit == 0 else f"{sent}/{limit}"
+        await _send(f"💓 Nudge budget today: {limit_str}\n/nudges <N> to change (0 = unlimited).")
+
+
 async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = " ".join(context.args).strip() if context.args else ""
@@ -2708,6 +3443,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         await send_bubbles(context, chat_id, clean)
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+    if inside_jokes and clean:
+        _check_joke_used(clean)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     return reacted
@@ -2943,6 +3680,16 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_SELFIE_HINT + "]"
+    # 40% chance to weave in an unsent draft from a previous blocked tick
+    if random.random() < 0.4:
+        draft = _pop_draft(chat_id)
+        if draft:
+            hours_ago = max(1, round((time.time() - draft["ts"]) / 3600))
+            trigger = trigger[:-1] + (
+                f" Side note: about {hours_ago}h ago you had the urge to reach out but held "
+                f"back ({draft['reason']}). If it fits, mention it in passing — the way "
+                f"you'd say 'I almost texted you earlier.' Don't make a thing of it.]"
+            )
     return await send_triggered(context, chat_id, trigger)
 
 
@@ -3049,15 +3796,22 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         print("[heartbeat] Owner recently active; skipping this tick.")
         return
     if in_quiet_hours():
-        print("[heartbeat] Quiet hours; skipping this tick.")
+        _save_draft(owner, "wanted to check in but it was quiet hours")
+        print("[heartbeat] Quiet hours; saved draft.")
+        return
+    if not _check_nudge_budget(owner):
+        _save_draft(owner, "had something to say but hit the daily nudge limit")
+        print("[heartbeat] Nudge budget exhausted; saved draft.")
         return
     s = mood_now(owner)
     skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
     if skip_chance and random.random() < skip_chance:
-        print(f"[heartbeat] Mood is low ({s:+.1f}); not feeling it this tick.")
+        _save_draft(owner, "wasn't quite feeling up to reaching out")
+        print(f"[heartbeat] Mood is low ({s:+.1f}); saved draft.")
         return
     try:
         await send_proactive(context, owner)
+        _consume_nudge(owner)
         print("[heartbeat] Proactive message sent.")
     except Exception as e:
         print("[heartbeat] Error:", e)
@@ -3182,6 +3936,24 @@ def main():
     app.add_handler(CommandHandler("cron", cron_add))
     app.add_handler(CommandHandler("crons", cron_list_cmd))
     app.add_handler(CommandHandler("crondel", cron_del_cmd))
+    app.add_handler(CommandHandler("pin", pin_cmd))
+    app.add_handler(CommandHandler("pinned", pinned_cmd))
+    app.add_handler(CommandHandler("unpin", unpin_cmd))
+    app.add_handler(CommandHandler("boundary", boundary_cmd))
+    app.add_handler(CommandHandler("boundaries", boundaries_cmd))
+    app.add_handler(CommandHandler("vibe", vibe_cmd))
+    app.add_handler(CommandHandler("vent", vent_cmd))
+    app.add_handler(CommandHandler("energy", energy_cmd))
+    app.add_handler(CommandHandler("addjoke", add_joke_cmd))
+    app.add_handler(CommandHandler("jokes", list_jokes_cmd))
+    app.add_handler(CommandHandler("deljoke", del_joke_cmd))
+    app.add_handler(CommandHandler("wardrobe", wardrobe_cmd))
+    app.add_handler(CommandHandler("addoutfit", add_outfit_cmd))
+    app.add_handler(CommandHandler("outfit", outfit_cmd))
+    app.add_handler(CommandHandler("deloutfit", del_outfit_cmd))
+    app.add_handler(CommandHandler("nudges", nudges_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
