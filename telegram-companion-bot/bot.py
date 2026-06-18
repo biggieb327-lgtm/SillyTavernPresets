@@ -2333,12 +2333,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines += [
             "",
             "*Payments*",
-            "/addpayment <desc> | <amount> | <due> — add a bill",
-            "/addevery <desc> | <amount> | <day> — add a recurring bill",
-            "/payments — list bills",
+            "/addpayment <name> <amount> <day> [xN] — add a monthly bill (e.g. /addpayment Rent 800 5)",
+            "/addevery <name> <amount> <days> — add a recurring bill every N days",
+            "/payments — list all bills",
             "/delpayment <n> — remove a bill",
-            "/editpayment <n> <field> <value> — edit a bill",
+            "/editpayment <n> <field> <value> — edit a bill field",
             "/week — payment summary for this week",
+            "/remindpayments — trigger payment reminder now",
         ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
