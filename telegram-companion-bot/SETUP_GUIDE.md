@@ -1,14 +1,14 @@
-# Setup Guide: Your Own AI Companion on Telegram
+# Setup Guide: AI Companion Bot on Telegram
 
-This guide walks through setting up the companion bot from scratch on an Android phone using Termux. It also covers running it on a Linux VPS or Mac if you prefer.
+This guide walks through setting up the companion bot from scratch on Android (Termux). Also covers Linux VPS and Mac.
 
 ---
 
 ## What You'll Need
 
 - A Telegram account
-- A NanoGPT account and API key (https://nano-gpt.com) — this is what powers the AI
-- Either: an Android phone (for Termux), a Linux VPS, or a Mac
+- A NanoGPT account and API key (https://nano-gpt.com) — powers the AI
+- Android (Termux), a Linux VPS, or a Mac
 - About 15–20 minutes
 
 ---
@@ -17,9 +17,8 @@ This guide walks through setting up the companion bot from scratch on an Android
 
 1. Open Telegram and search for **@BotFather**
 2. Send `/newbot`
-3. Follow the prompts — pick a name (e.g. "Priya") and a username (e.g. `priya_companion_bot`)
-4. BotFather will give you a **bot token** that looks like `7123456789:AAFxxxxx...`
-5. Save that token — you'll need it in a moment
+3. Pick a name (e.g. "Nora") and a username (e.g. `nora_companion_bot`)
+4. BotFather gives you a **bot token** like `7123456789:AAFxxxxx...` — save it
 
 ---
 
@@ -27,173 +26,162 @@ This guide walks through setting up the companion bot from scratch on an Android
 
 1. Go to https://nano-gpt.com and create an account
 2. Add some credits (a few dollars goes a long way)
-3. Go to your account settings and copy your API key
+3. Copy your API key from account settings
 
 ---
 
 ## Step 3: Get Your Telegram User ID
 
-You'll want to restrict the bot to only respond to you.
+1. Send `/chatid` to your bot after setting it up, **or**
+2. Message **@userinfobot** on Telegram — it replies with your numeric user ID
 
-1. Message **@userinfobot** on Telegram
-2. It will reply with your numeric user ID (e.g. `123456789`)
-3. Save this — you'll add it to `.env` as `ALLOWED_USERS`
+Save this — you'll add it to `.env` as `ALLOWED_USERS` to lock the bot to only you.
 
 ---
 
-## Step 4: Install the Bot
+## Step 4: Install
 
-### Option A: Android (Termux) — Recommended for always-on
+### Option A: Android (Termux) — Recommended
 
-1. Install **Termux** from F-Droid (not the Play Store version — it's outdated)
-   - https://f-droid.org/packages/com.termux/
+1. Install **Termux** from F-Droid (not the Play Store — it's outdated):
+   https://f-droid.org/packages/com.termux/
 
-2. Open Termux and run:
+2. Open Termux and install dependencies:
 ```bash
 pkg update && pkg upgrade -y
 pkg install python git tmux -y
 ```
 
-3. Clone the repo:
+3. Create the bot directory and download the files:
 ```bash
-git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
-cd sillytavernpresets/telegram-companion-bot
+mkdir ~/telegram-bot && cd ~/telegram-bot
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run.sh -o run.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o run-bot.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/preset.txt -o preset.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json -o nora.json
 ```
 
-4. Install Python dependencies:
+4. Set up a virtual environment:
 ```bash
-pip install -r requirements.txt
+python -m venv venv
+source venv/bin/activate
+pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
 ```
 
-5. Copy and fill in the config:
+5. Configure the bot:
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-At minimum, set:
+At minimum set:
 ```
 TELEGRAM_BOT_TOKEN=your-token-here
 NANOGPT_API_KEY=your-key-here
 ALLOWED_USERS=your-telegram-user-id
+CHARACTER_CARD=nora.json
+BOT_TIMEZONE=America/New_York
 ```
 
 6. Start the bot:
 ```bash
+source venv/bin/activate
 bash run.sh
 ```
 
-You should see `Starting Priya bot...` in the terminal. Message your bot on Telegram — it should respond.
+You should see the startup log lines. Message your bot on Telegram — she should respond.
 
-7. Detach from the terminal so the bot keeps running:
-   - Press `Ctrl+B`, then `D`
-   - The bot continues running in the background
+7. Detach so the bot keeps running in the background:
+   Press `Ctrl+B`, then `D`
 
 ---
 
 ### Option B: Linux VPS (Ubuntu/Debian)
 
 ```bash
-sudo apt update && sudo apt install python3 python3-pip git tmux -y
-git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
-cd sillytavernpresets/telegram-companion-bot
-pip3 install -r requirements.txt
-cp .env.example .env
-nano .env   # fill in your tokens
+sudo apt update && sudo apt install python3 python3-pip python3-venv git tmux -y
+mkdir ~/telegram-bot && cd ~/telegram-bot
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run.sh -o run.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/preset.txt -o preset.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json -o nora.json
+python3 -m venv venv
+source venv/bin/activate
+pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
+cp .env.example .env && nano .env
 bash run.sh
 ```
 
-For a VPS, you may want to use a systemd service instead of tmux for auto-restart on reboot — see the ops manual for details.
+Alternatively, use Docker (see Dockerfile + docker-compose.yml in the repo).
 
 ---
 
 ### Option C: Mac
 
 ```bash
-brew install tmux  # if you don't have it
-git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
-cd sillytavernpresets/telegram-companion-bot
-pip3 install -r requirements.txt
-cp .env.example .env
-nano .env
+brew install tmux python
+mkdir ~/telegram-bot && cd ~/telegram-bot
+# download files as above (same curl commands)
+python3 -m venv venv
+source venv/bin/activate
+pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
+cp .env.example .env && nano .env
 bash run.sh
 ```
 
 ---
 
-## Step 5: Test It
+## Step 5: Add a Character Photo (for selfies)
 
-1. Open Telegram and find your bot (search by the username you gave it)
-2. Send `/start` — the bot should send Priya's opening message
-3. Send a regular message — she should respond naturally
-
-If it doesn't respond, check the logs:
+Drop a reference photo in the bot directory:
 ```bash
-tmux attach -t priya
+# Example — copy a photo named nora_base.png into the folder
 ```
+
+Then set it in `.env`:
+```
+SELFIE_BASE=nora_base.png
+SELFIE_PROVIDER=gemini
+GEMINI_API_KEY=your-gemini-key-here
+```
+
+Restart the bot, then try `/selfie`.
 
 ---
 
-## Step 6: Customize the Character (Optional)
+## Step 6: Run a Second Character (e.g. Bonnie)
 
-The character card is `priya.json`. It's a standard SillyTavern v2 character card — you can:
-
-- Edit `description`, `personality`, `scenario`, and `first_mes` to change who she is
-- Swap in a completely different character card (rename it to `priya.json` or update `card_path` in `bot.py`)
-- Import any character from ChubAI or similar and drop the JSON into the folder
-
-Additional texting style instructions live in `preset.txt`. Edit that to change how she formats responses.
-
----
-
-## Step 7: Enable Proactive Messages (Optional)
-
-The bot can send occasional unprompted check-ins. To enable:
-
-1. Edit `.env`:
-```
-PROACTIVE_USER_ID=your-telegram-user-id
-PROACTIVE_HOUR_START=9
-PROACTIVE_HOUR_END=21
-BOT_TIMEZONE=America/New_York
-```
-
-2. Restart the bot.
-
-The bot will check every 30 minutes and has a ~30% chance of sending a message — so you'll get roughly one per day during your waking hours.
-
----
-
-## Running a Second Character
-
-Want to run Luna alongside Priya? Each character needs:
-- A separate Telegram bot token (create another bot via @BotFather)
-- A separate folder with its own `.env` and character card
+Each character needs its own folder with its own `.env` and a separate bot token from @BotFather:
 
 ```bash
-mkdir ~/luna-bot
-cp .env ~/luna-bot/.env
-cp yourcard.json ~/luna-bot/priya.json   # or whatever name you use
-# edit ~/luna-bot/.env with Luna's bot token
-bash run-bot.sh ~/luna-bot luna
+mkdir ~/bonnie-bot
+cp ~/telegram-bot/.env ~/bonnie-bot/.env
+# edit ~/bonnie-bot/.env — change TELEGRAM_BOT_TOKEN and CHARACTER_CARD=bonnie.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie.json -o ~/bonnie-bot/bonnie.json
+
+source ~/telegram-bot/venv/bin/activate
+bash ~/telegram-bot/run-bot.sh ~/bonnie-bot bonnie
 ```
 
 ---
 
-## Staying On (Android)
+## Step 7: Keep Android from Killing It
 
-Termux can be killed by Android's battery optimizer. To prevent this:
+Termux can be killed by Android's battery optimizer:
 
-1. Go to **Settings → Apps → Termux → Battery**
-2. Set to **Unrestricted** (or "Don't optimize")
-3. Some phones also need you to lock the Termux app in the recent apps view
+1. **Settings → Apps → Termux → Battery → Unrestricted**
+2. Lock Termux in the recent apps view (long-press the card and pin it)
 
-Alternatively, run the bot on a cheap VPS ($3–5/month on Hetzner, DigitalOcean, etc.) and SSH in from your phone.
+Or run on a VPS instead ($3–5/month on Hetzner or DigitalOcean).
 
 ---
 
 ## Next Steps
 
-- Read the **OPS_MANUAL.md** for day-to-day commands, memory management, and troubleshooting
-- Check the available bot commands with the `/status`, `/summary`, and `/note` commands
-- Explore NanoGPT's model list to try different AI models
+- `/help` in the bot chat shows all available commands
+- Read **OPS_MANUAL.md** for day-to-day operation and troubleshooting
+- Edit `preset.txt` to change texting style and behavioral rules
+- Edit the character card JSON to change personality, backstory, and scenario

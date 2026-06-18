@@ -1,115 +1,211 @@
 # Companion Bot — Operations Manual
 
-This covers day-to-day operation once your bot is running.
+Day-to-day operation reference for a running bot.
 
 ---
 
 ## Starting & Stopping
 
-### Start (Termux)
+### Start (Termux — default instance)
 ```bash
+cd ~/telegram-bot
+source venv/bin/activate
 bash run.sh
 ```
-This opens (or attaches to) a tmux session named `priya`.
+Opens (or attaches to) a tmux session named `nora`.
+
+### Start a second instance (e.g. Bonnie)
+```bash
+source ~/telegram-bot/venv/bin/activate
+bash ~/telegram-bot/run-bot.sh ~/bonnie-bot bonnie
+```
 
 ### Attach to a running session
 ```bash
-tmux attach -t priya
+tmux attach -t nora
+tmux attach -t bonnie
 ```
 
-### Detach (leave bot running in background)
+### Detach (leave bot running)
 Press `Ctrl+B`, then `D`.
 
 ### Stop the bot
-Attach to the session, then press `Ctrl+C`.
+```bash
+tmux kill-session -t nora
+```
+
+### Update the bot
+```bash
+cd ~/telegram-bot
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
+tmux kill-session -t nora 2>/dev/null
+bash run.sh
+```
 
 ---
 
 ## Commands Reference
 
+### Conversation
 | Command | What it does |
 |---|---|
-| `/start` | Sends the character's opening message |
-| `/reset` | Clears all history, summary, and facts for your user |
-| `/summary` | Shows the current rolling summary and extracted facts |
-| `/note <text>` | Save a personal note that gets injected into every prompt |
-| `/note` | View current note |
-| `/model` | Shows which models are active (chat, summary, vision) |
-| `/retry` | Re-generates the last bot reply |
-| `/edit <text>` | Replaces the last bot reply with your text (for steering) |
-| `/undo` | Removes the last user + bot exchange from history |
-| `/status` | Shows memory stats: history length, fact count, turn count |
-| `/time` | Shows current time in the bot's configured timezone |
-| `/remindme <min> <msg>` | One-off reminder after N minutes |
-| `/setreminder <HH:MM> <msg>` | Daily reminder at a specific time |
-| `/imagine <desc>` | Generate an image (requires model that supports image gen) |
-| `/tts <text>` | Text-to-speech voice message |
+| `/start` | Reset history and send the character's opening message |
+| `/clear` | Wipe conversation history (keeps long-term memory) |
+| `/help` | Show all available commands |
+| `/menu` | Open the inline button shortcut menu |
+
+### Memory
+| Command | What it does |
+|---|---|
+| `/memory` | View long-term and recent memory summaries + facts |
+| `/remember <fact>` | Save a fact to long-term memory |
+| `/forget` | Wipe all memory for your chat |
+| `/exportmemory` | Download a full memory export as text |
+| `/pin <fact>` | Pin something that's always in context |
+| `/pinned` | List pinned memories |
+| `/unpin <n>` | Remove a pinned memory by number |
+| `/boundary <text>` | Add a soft boundary note |
+| `/boundaries` | List boundaries |
+
+### Mood & Modes
+| Command | What it does |
+|---|---|
+| `/vibe <name> [Xh]` | Set a timed vibe: cozy / flirty / serious / chaotic / low-energy / playful / chill |
+| `/vent` | Toggle vent mode (listening only, no fixing or advice) |
+| `/vent off` | Turn off vent mode |
+| `/energy <level>` | Set your energy: high / low / crash |
+
+### Inside Jokes
+| Command | What it does |
+|---|---|
+| `/addjoke phrase \| meaning \| tone` | Add an inside joke |
+| `/jokes` | List inside jokes |
+| `/deljoke <id>` | Remove a joke by ID |
+
+### Selfie & Wardrobe
+| Command | What it does |
+|---|---|
+| `/selfie [hint]` | Generate a selfie (optional scene hint) |
+| `/wardrobe` | List saved outfits |
+| `/addoutfit <desc>` | Add an outfit description |
+| `/outfit <n>` | Set current outfit (used in selfie generation) |
+| `/deloutfit <n>` | Remove an outfit |
+| `/selfimage` | View the character's current self-image traits |
+| `/reflect` | Trigger the nightly self-reflection now |
+
+### Reminders
+| Command | What it does |
+|---|---|
+| `/remindme <when> <msg>` | One-off reminder. When: `30m`, `2h`, `18:30`, `tomorrow 9:00`, `2026-07-01 14:30` |
+| `/setreminder HH:MM <msg>` | Daily recurring reminder at a fixed time |
+| `/reminders` | List all pending reminders |
+| `/delreminder <n>` | Cancel a reminder by list number |
+
+### Recurring Tasks (Cron)
+| Command | What it does |
+|---|---|
+| `/cron <schedule> \| <instruction>` | Add a recurring task. Schedule: `daily HH:MM`, `weekly Mon HH:MM`, `monthly 1 HH:MM` |
+| `/crons` | List recurring tasks |
+| `/crondel <id>` | Remove a recurring task |
+
+### Proactive Messages
+| Command | What it does |
+|---|---|
+| `/heartbeat` | Trigger a proactive check-in now |
+| `/nudges` | Show today's proactive message budget |
+
+### Payments (if enabled)
+| Command | What it does |
+|---|---|
+| `/addpayment <desc> \| <amount> \| <due>` | Add a bill |
+| `/addevery <desc> \| <amount> \| <day>` | Add a monthly recurring bill |
+| `/payments` | List all bills |
+| `/delpayment <n>` | Remove a bill |
+| `/editpayment <n> <field> <value>` | Edit a bill field |
+| `/week` | Payment summary for the current week |
+
+### Settings & Info
+| Command | What it does |
+|---|---|
+| `/model` | Show active models |
+| `/setmodel <field> <value>` | Change a model (fields: chat, summary, vision, reaction, mood, fallback, visionfallback) |
+| `/settings` | Show current settings |
+| `/usage` | NanoGPT token usage stats |
+| `/chatid` | Show your Telegram user ID |
+| `/backup` | Download a memory backup file |
 
 ---
 
 ## Memory System
 
-The bot maintains three layers of memory:
+The bot maintains two tiers of memory:
 
-1. **Rolling history** — the last N messages (controlled by `CONTEXT_LIMIT`). Always in context.
-2. **Summary** — a condensed narrative of older conversation, regenerated every `SUMMARY_EVERY` turns. Injected at the top of the system prompt.
-3. **Facts** — short extracted facts about the user (name, preferences, relationships, etc.). Extracted every ~10 turns. Injected into the system prompt.
+**Long-term memory** (`summaries`, `facts`)
+- A condensed narrative of the full conversation history
+- Extracted facts about you (name, preferences, relationships, etc.)
+- Promoted from recent memory during nightly reflection
 
-All memory lives in `memory.json` in the bot's base directory. Back it up if you care about continuity.
+**Recent memory** (`recent_summaries`, `recent_facts`)
+- A shorter window summarizing the last ~20 turns
+- Extracted facts from recent conversation
+- Refreshed more frequently
 
-### Viewing memory
+All memory lives in `state.json` in the bot's base directory. Back it up with `/backup` or:
 ```bash
-cat memory.json | python3 -m json.tool
+cp ~/telegram-bot/state.json ~/telegram-bot/state.backup.$(date +%Y%m%d).json
 ```
 
-### Clearing memory for a user
-Either use `/reset` in the chat, or manually edit `memory.json` and delete the user's entry.
+### Viewing memory
+```
+/memory
+```
 
 ### Editing facts directly
 ```bash
-nano memory.json
+nano ~/telegram-bot/state.json
 ```
-Find your user ID key, edit the `"facts"` array. Save. Changes take effect on the next message.
+Find your chat ID key, edit the `facts` array. Changes take effect on the next message.
 
 ---
 
-## Changing the Character
+## Character Configuration
 
-The character card is `priya.json` (or whatever you named it). The bot reads it at startup.
+The character card is set by `CHARACTER_CARD` in `.env` (e.g. `nora.json`).
 
-To change character mid-run: edit `priya.json` (or swap in a new card), then restart the bot. Memory from the previous character will still be loaded—use `/reset` to clear it if you want a clean slate.
+Texting style and behavioral rules live in `preset.txt`. Edit that to change how she formats responses.
 
-To point the bot at a differently named card, change `card_path` in `bot.py`:
-```python
-card_path = BASE_DIR / "yourcard.json"
-```
+To swap characters mid-run: change `CHARACTER_CARD` in `.env` and restart. Use `/forget` if you want a clean memory slate.
 
 ---
 
 ## Running Multiple Characters
 
-Each character needs:
-- Its own folder with a `.env` file (separate `TELEGRAM_BOT_TOKEN`)
-- Its own character card
-- Its own `memory.json` (auto-created)
+Each character needs its own folder with a `.env` and character card:
 
-Run each instance:
 ```bash
-bash run-bot.sh ~/luna-bot luna
-bash run-bot.sh ~/priya-bot priya
+# Nora (default instance in ~/telegram-bot)
+bash run.sh
+
+# Bonnie
+bash ~/telegram-bot/run-bot.sh ~/bonnie-bot bonnie
 ```
 
-Each gets its own tmux session.
+Each instance gets its own tmux session and its own state files.
 
 ---
 
-## Proactive Messages
+## Proactive Messages (Heartbeat)
 
-If `PROACTIVE_USER_ID` is set in `.env`, the bot will occasionally send unprompted check-ins during the configured hour range.
+The bot sends unprompted check-ins on a random timer (default 2–6 hours) during quiet hours.
 
-This runs every 30 minutes with a ~30% chance of firing, capped at once per day.
-
-To disable: remove `PROACTIVE_USER_ID` from `.env` and restart.
+Configure in `.env`:
+```
+HEARTBEAT_MIN=2        # minimum hours between heartbeats
+HEARTBEAT_MAX=6        # maximum hours
+PROACTIVE_HOUR_START=9 # don't send before this hour (local time)
+PROACTIVE_HOUR_END=21  # don't send after this hour
+NUDGE_MAX=3            # max proactive messages per day
+```
 
 ---
 
@@ -117,41 +213,8 @@ To disable: remove `PROACTIVE_USER_ID` from `.env` and restart.
 
 Logs go to `bot.log` in the bot's base directory (when launched via `run.sh`).
 
-To tail logs:
 ```bash
-tail -f bot.log
-```
-
-Common log prefixes:
-- `[bot]` — startup
-- `[summary]` — summarization events
-- `[facts]` — fact extraction
-- `[proactive]` — proactive message events
-- `[error]` — caught errors
-- `[nanogpt]` — fallback model events
-- `[vision]` — vision model events
-- `[card]` — card loading errors
-
----
-
-## Backups
-
-The only file you need to back up regularly is `memory.json`. Everything else is config.
-
-```bash
-cp memory.json memory.backup.$(date +%Y%m%d).json
-```
-
-Or sync to a private git repo, Dropbox, etc.
-
----
-
-## Updating the Bot
-
-```bash
-git pull
-pip install -r requirements.txt
-# restart the bot
+tail -f ~/telegram-bot/bot.log
 ```
 
 ---
@@ -159,22 +222,29 @@ pip install -r requirements.txt
 ## Troubleshooting
 
 **Bot doesn't respond**
-- Check the tmux session is running: `tmux ls`
-- Check logs: `tail -f bot.log`
-- Verify `.env` has valid tokens
+- Check if the session is running: `tmux ls`
+- Check logs: `tail -f ~/telegram-bot/bot.log`
+- Run in foreground to see errors: `python ~/telegram-bot/bot.py`
 
 **`TELEGRAM_BOT_TOKEN not found`**
 - Make sure `.env` exists in the bot's directory (not just `.env.example`)
 - Check for typos in the key name
 
-**Model errors / 5xx**
-- NanoGPT may be having issues; check their status
-- Set `FALLBACK_MODEL` in `.env` to automatically retry with a different model
+**`ModuleNotFoundError`**
+- Activate the venv first: `source ~/telegram-bot/venv/bin/activate`
 
-**Summaries not triggering**
-- Check `SUMMARY_EVERY` in `.env` — default is 20 turns
-- Check logs for `[summary]` entries
+**Model errors / 5xx**
+- Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically
+- Check NanoGPT status if failures are widespread
+
+**Vision / selfie errors (503)**
+- The vision or image model is temporarily down on the provider's side
+- Set `VISION_FALLBACK` in `.env` to automatically try a backup model
 
 **Reminders not firing**
-- The job queue requires `python-telegram-bot[job-queue]` — make sure you installed with the extra
-- APScheduler must be installed: `pip install apscheduler`
+- Requires `python-telegram-bot[job-queue]` — install with `pip install "python-telegram-bot[job-queue]"`
+- Check that `BOT_TIMEZONE` in `.env` is set correctly
+
+**State file corrupted on startup**
+- The bot renames `state.json` to `state.json.corrupted` and starts fresh
+- Restore from a backup: `cp state.json.corrupted state.json` after fixing the JSON

@@ -76,7 +76,7 @@ def _rate_ok(user_id: int) -> bool:
     _last_request[user_id] = now
     return True
 
-NANOGPT_BASE_URL = "https://nano-gpt.com/api/v1"
+NANOGPT_BASE_URL = os.getenv("NANOGPT_BASE", "https://nano-gpt.com/api/v1").rstrip("/")
 NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "zai-org/glm-5:thinking")
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a faster model
 VISION_MODEL = os.getenv("VISION_MODEL", NANOGPT_MODEL)    # must accept image input
@@ -88,6 +88,7 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
@@ -2269,7 +2270,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reflect — trigger nightly reflection now",
         "",
         "*Reminders & tasks*",
-        "/remindme <time> <task> — set a one-off reminder",
+        "/remindme <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
+        "/setreminder HH:MM <task> — daily recurring reminder",
         "/reminders — list reminders",
         "/delreminder <n> — remove a reminder",
         "/cron <schedule> | <instruction> — recurring task",
@@ -3433,21 +3435,25 @@ async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
         print(f"[backup] Weekly backup sent: {sent}")
 
 
-# --- One-off reminders ---
+# --- One-off and daily reminders ---
 async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     rid = context.job.data
     r = next((x for x in reminders if x["id"] == rid), None)
     if not r:
         return  # was cancelled
-    try:
-        await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
-    finally:
+    await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
+    if not r.get("daily"):
         if r in reminders:
             reminders.remove(r)
             save_reminders()
 
 
 def schedule_reminder(job_queue, r: dict):
+    if r.get("daily"):
+        h, m = [int(x) for x in r["due"].split(":")]
+        t = dtime(h, m, tzinfo=TZ) if TZ else dtime(h, m)
+        job_queue.run_daily(fire_reminder, time=t, data=r["id"])
+        return
     due = datetime.fromisoformat(r["due"])
     now = datetime.now(TZ) if TZ else datetime.now()
     # If the bot was down when it was due, deliver shortly after startup instead of dropping it.
@@ -3506,6 +3512,79 @@ async def delreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminders.remove(target)
     save_reminders()
     await update.message.reply_text(f"🗑️ Cancelled: {target['text']}")
+
+
+async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /setreminder HH:MM message\n"
+            "Example: /setreminder 08:30 take meds\n\n"
+            "Sets a reminder that fires every day at that time.\n"
+            "Use /reminders to list and /delreminder to cancel."
+        )
+        return
+    try:
+        h, m = [int(x) for x in args[0].split(":")]
+        assert 0 <= h < 24 and 0 <= m < 60
+    except Exception:
+        await update.message.reply_text("Time must be HH:MM (e.g. 08:30 or 14:00)")
+        return
+    text = " ".join(args[1:])
+    rid = _new_reminder_id()
+    r = {"id": rid, "chat_id": update.effective_chat.id,
+         "due": f"{h:02d}:{m:02d}", "text": text, "daily": True}
+    reminders.append(r)
+    save_reminders()
+    schedule_reminder(context.job_queue, r)
+    await update.message.reply_text(f"⏰ Got it — I'll remind you daily at {h:02d}:{m:02d}: {text}")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not _rate_ok(update.effective_user.id):
+        return
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    try:
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        voice_bytes = await voice_file.download_as_bytearray()
+        resp = requests.post(
+            f"{NANOGPT_BASE_URL}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+            files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
+            data={"model": WHISPER_MODEL},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        transcript = resp.json().get("text", "").strip()
+    except Exception as e:
+        log.warning("Voice transcription failed: %s", e)
+        await context.bot.send_message(chat_id=chat_id,
+                                       text="[couldn't make out that voice note]")
+        return
+
+    if not transcript:
+        return
+
+    try:
+        content = f"[voice message]: {transcript}"
+        messages = assemble_messages(chat_id, content)
+        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
+        await _deliver(update, context, chat_id, transcript, ai_response)
+    except Exception as e:
+        log.error("Voice handler error: %s", e)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4048,6 +4127,7 @@ def main():
         app.add_handler(CommandHandler("week", remind_payments_now))
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
+    app.add_handler(CommandHandler("setreminder", setreminder_cmd))
     app.add_handler(CommandHandler("reminders", list_reminders))
     app.add_handler(CommandHandler("delreminder", delreminder))
     app.add_handler(CommandHandler("cron", cron_add))
@@ -4072,6 +4152,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     def _shutdown(sig, frame):
