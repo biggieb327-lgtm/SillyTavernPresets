@@ -89,6 +89,9 @@ MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
+TTS_VOICE = os.getenv("TTS_VOICE", "nova")
+TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
@@ -399,6 +402,7 @@ vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
+voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
@@ -463,6 +467,8 @@ def load_state():
         unsent_drafts[int(cid)] = ud
     for cid, nb in data.get("nudge_budget", {}).items():
         nudge_budget[int(cid)] = nb
+    for cid, vr in data.get("voice_reply", {}).items():
+        voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     log.info("Loaded history for %d chat(s).", len(conversation_history))
@@ -491,6 +497,7 @@ def save_state():
         "user_energy": {str(k): v for k, v in user_energy.items()},
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
+        "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
     }
@@ -2312,6 +2319,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Nudges*",
         "/nudges — view today's proactive message budget",
         "/heartbeat — trigger a proactive message now",
+        "/voice — toggle voice replies on/off (30% chance when on)",
         "",
         "*Settings*",
         "/model — show current model",
@@ -2962,6 +2970,48 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Inline keyboard menu ---
+async def _send_voice_reply(context, chat_id: int, text: str):
+    """Generate TTS audio and send as a Telegram voice message."""
+    try:
+        resp = await asyncio.to_thread(
+            lambda: requests.post(
+                f"{NANOGPT_BASE_URL}/audio/speech",
+                headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+                json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
+                timeout=60,
+            )
+        )
+        resp.raise_for_status()
+        await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(resp.content))
+    except Exception as e:
+        log.warning("TTS failed: %s", e)
+
+
+async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    arg = args[0].lower() if args else ""
+    if arg in ("off", "disable", "no"):
+        voice_reply[chat_id] = False
+        save_state()
+        await update.message.reply_text("🔇 Voice replies off.")
+        return
+    if arg in ("on", "enable", "yes"):
+        voice_reply[chat_id] = True
+        save_state()
+        await update.message.reply_text(f"🔊 Voice replies on ({int(TTS_CHANCE * 100)}% chance per message).")
+        return
+    current = voice_reply.get(chat_id, False)
+    if current:
+        voice_reply[chat_id] = False
+        save_state()
+        await update.message.reply_text("🔇 Voice replies off.")
+    else:
+        voice_reply[chat_id] = True
+        save_state()
+        await update.message.reply_text(f"🔊 Voice replies on ({int(TTS_CHANCE * 100)}% chance per message).")
+
+
 def _build_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧠 Memory", callback_data="cmd:memory"),
@@ -3661,6 +3711,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             print("[react] failed:", e)
     if clean:
         await send_bubbles(context, chat_id, clean)
+        if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
+            asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if inside_jokes and clean:
@@ -4180,6 +4232,7 @@ def main():
     app.add_handler(CommandHandler("outfit", outfit_cmd))
     app.add_handler(CommandHandler("deloutfit", del_outfit_cmd))
     app.add_handler(CommandHandler("nudges", nudges_cmd))
+    app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
