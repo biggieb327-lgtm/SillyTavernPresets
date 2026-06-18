@@ -367,7 +367,7 @@ def load_character(path: Path):
 
     # Lorebook (character_book) entries -> keyword-triggered world info.
     lore = []
-    book = data.get("character_book", {})
+    book = data.get("character_book") or {}
     for entry in book.get("entries", []):
         if not entry.get("enabled", True):
             continue
