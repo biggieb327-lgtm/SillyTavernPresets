@@ -1576,6 +1576,20 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
 
 # --- NanoGPT ---
+_THINK_RE = re.compile(r"(?s)<think>.*?</think>")
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models."""
+    return _THINK_RE.sub("", text).strip()
+
+def _extract_content(choice: dict) -> str:
+    """Pull the reply text from a choices entry, falling back to reasoning_content."""
+    msg = choice.get("message", {})
+    text = (msg.get("content") or "").strip()
+    if not text:
+        text = (msg.get("reasoning_content") or "").strip()
+    return _strip_thinking(text)
+
 def _one_call(messages: list, model: str) -> str:
     payload = {"model": model, "messages": messages, "stream": False}
     response = requests.post(
@@ -1585,7 +1599,7 @@ def _one_call(messages: list, model: str) -> str:
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    return _extract_content(response.json()["choices"][0])
 
 
 def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
@@ -4171,7 +4185,18 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     ))
 
 
+def _acquire_termux_wake_lock():
+    import shutil, subprocess
+    if shutil.which("termux-wake-lock"):
+        try:
+            subprocess.run(["termux-wake-lock"], check=True, timeout=5)
+            log.info("Termux wake lock acquired.")
+        except Exception as e:
+            log.warning("Could not acquire Termux wake lock: %s", e)
+
+
 def main():
+    _acquire_termux_wake_lock()
     apply_overrides()
     app = (
         ApplicationBuilder()
