@@ -1588,9 +1588,38 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 # --- NanoGPT ---
 _THINK_RE = re.compile(r"(?s)<think>.*?</think>")
 
+# Hollow openers that mark AI sycophancy / assistant-speak.
+# Stripped from the start of every response before delivery.
+_SLOP_OPENER_RE = re.compile(
+    r"^("
+    r"Absolutely[!,.]?\s*|"
+    r"Certainly[!,.]?\s*|"
+    r"Of course[!,.]?\s*|"
+    r"Sure thing[!,.]?\s*|"
+    r"Sure[!,.]?\s*|"
+    r"Great question[!,.]?\s*|"
+    r"That'?s? a great (question|point)[!,.]?\s*|"
+    r"Good question[!,.]?\s*|"
+    r"Totally[!,.]?\s*|"
+    r"Absolutely[!,.]?\s*|"
+    r"I'?d be happy to\s*[,.]?\s*|"
+    r"Feel free to\s*[,.]?\s*|"
+    r"I'?m here (for you|to help)\s*[,.]?\s*|"
+    r"I can (help|assist) (with that|you)\s*[,.]?\s*|"
+    r"(That|This) makes sense[!,.]?\s*|"
+    r"I (get|understand) that[!,.]?\s*|"
+    r"I understand[!,.]?\s*"
+    r")+",
+    re.IGNORECASE,
+)
+
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks emitted by reasoning models."""
     return _THINK_RE.sub("", text).strip()
+
+def _strip_slop(text: str) -> str:
+    """Remove hollow AI openers from the start of a response."""
+    return _SLOP_OPENER_RE.sub("", text).strip()
 
 def _extract_content(choice: dict) -> str:
     """Pull the reply text from a choices entry, falling back to reasoning_content."""
@@ -3720,6 +3749,8 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
     clean, reaction, selfie_hint = extract_tags(ai_response)
+    if clean:
+        clean = _strip_slop(clean)
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
         (f"[reacted {reaction}]" if reaction else "")
