@@ -9,6 +9,7 @@ import base64
 import calendar
 import logging
 import signal
+import tempfile
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
@@ -99,6 +100,7 @@ MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
@@ -3722,6 +3724,125 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
+async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    return await proc.communicate()
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not _rate_ok(update.effective_user.id):
+        return
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+
+    video = update.message.video or update.message.video_note
+    if not video:
+        return
+
+    if video.file_size and video.file_size > VIDEO_MAX_SIZE_MB * 1024 * 1024:
+        await context.bot.send_message(chat_id=chat_id,
+            text=f"[video's too big — max {VIDEO_MAX_SIZE_MB}MB]")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    caption = (getattr(update.message, "caption", None) or "").strip()
+
+    frame_data_url = None
+    transcript = None
+
+    try:
+        tg_file = await context.bot.get_file(video.file_id)
+        video_bytes = bytes(await tg_file.download_as_bytearray())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "video.mp4")
+            frame_path = os.path.join(tmpdir, "frame.jpg")
+            audio_path = os.path.join(tmpdir, "audio.ogg")
+
+            with open(video_path, "wb") as f:
+                f.write(video_bytes)
+
+            # Extract frame and audio in parallel
+            frame_res, audio_res = await asyncio.gather(
+                _run_ffmpeg("-y", "-i", video_path, "-ss", "00:00:01",
+                            "-vframes", "1", "-f", "image2", frame_path),
+                _run_ffmpeg("-y", "-i", video_path, "-vn", "-acodec",
+                            "libopus", audio_path),
+                return_exceptions=True,
+            )
+
+            if not isinstance(frame_res, Exception) and os.path.exists(frame_path):
+                with open(frame_path, "rb") as f:
+                    frame_data_url = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+            else:
+                log.warning("Video frame extraction failed: %s", frame_res)
+
+            if not isinstance(audio_res, Exception) and os.path.exists(audio_path):
+                with open(audio_path, "rb") as f:
+                    audio_bytes = f.read()
+                try:
+                    resp = _session.post(
+                        f"{NANOGPT_BASE_URL}/audio/transcriptions",
+                        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+                        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+                        data={"model": WHISPER_MODEL},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    transcript = resp.json().get("text", "").strip() or None
+                except Exception as e:
+                    log.warning("Video transcription failed: %s", e)
+            else:
+                log.warning("Video audio extraction failed: %s", audio_res)
+
+    except Exception as e:
+        log.error("Video processing error: %s", e)
+        await context.bot.send_message(chat_id=chat_id,
+            text=f"❌ Couldn't process that video: {e}")
+        return
+
+    if not frame_data_url and not transcript:
+        await context.bot.send_message(chat_id=chat_id, text="[couldn't read that video]")
+        return
+
+    uname = user_names[chat_id]
+    parts = []
+    if caption:
+        parts.append(caption)
+    if transcript:
+        parts.append(f"[audio transcript: {transcript}]")
+    if not parts:
+        parts.append(f"{uname} just sent you a video. React to it in character.")
+    prompt = " ".join(parts)
+    user_mem = f"[sent a video] {caption} {transcript or ''}".strip()
+
+    try:
+        await ensure_weather()
+        model = VISION_MODEL if frame_data_url else NANOGPT_MODEL
+        fallback = VISION_FALLBACK if frame_data_url else FALLBACK_MODEL
+        messages = assemble_messages(chat_id, prompt, image_data_url=frame_data_url)
+        ai_response = await reply_with_typing(context, chat_id, messages,
+                                              model=model, fallback=fallback)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=model, fallback=fallback)
+        await _deliver(update, context, chat_id, user_mem, ai_response)
+    except Exception as e:
+        log.error("Video handler reply error: %s", e)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+
+
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     response = _session.get(
@@ -4304,6 +4425,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     def _shutdown(sig, frame):
