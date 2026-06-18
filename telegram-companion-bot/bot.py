@@ -499,6 +499,37 @@ def save_state():
     tmp.replace(STATE_FILE)  # atomic, so a crash mid-write can't corrupt the file
 
 
+# --- PID lock: prevent duplicate instances ---
+_PID_FILE = BASE_DIR / "bot.pid"
+
+def _acquire_pid_lock():
+    if _PID_FILE.exists():
+        try:
+            existing_pid = int(_PID_FILE.read_text().strip())
+            # Check if that process is still alive
+            os.kill(existing_pid, 0)
+            raise SystemExit(
+                f"Another instance is already running (PID {existing_pid}).\n"
+                f"Kill it first: kill {existing_pid}\n"
+                f"Or force-remove the lock: rm {_PID_FILE}"
+            )
+        except ProcessLookupError:
+            pass  # stale PID file — process is gone, safe to continue
+        except ValueError:
+            pass  # corrupt PID file — ignore it
+    _PID_FILE.write_text(str(os.getpid()))
+
+def _release_pid_lock():
+    try:
+        _PID_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+_acquire_pid_lock()
+import atexit
+atexit.register(_release_pid_lock)
+
+
 load_state()
 
 
