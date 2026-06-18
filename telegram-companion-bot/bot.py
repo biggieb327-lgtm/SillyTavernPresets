@@ -16,6 +16,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Persistent session with connection pooling — reuses TCP connections across calls.
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(
+    max_retries=Retry(total=0),  # we handle retries ourselves where needed
+    pool_connections=4,
+    pool_maxsize=10,
+))
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import NetworkError, TimedOut
@@ -142,7 +152,7 @@ def _reddit_access_token() -> str:
     """Get a cached (or fresh) OAuth token via Reddit's client_credentials grant."""
     if _reddit_token["value"] and time.time() < _reddit_token["exp"]:
         return _reddit_token["value"]
-    resp = requests.post(
+    resp = _session.post(
         "https://www.reddit.com/api/v1/access_token",
         data={"grant_type": "client_credentials"},
         auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
@@ -1023,7 +1033,7 @@ def _fetch_weather() -> str:
         "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
         "&temperature_unit=fahrenheit&wind_speed_unit=mph"
     )
-    r = requests.get(url, timeout=10)
+    r = _session.get(url, timeout=10)
     r.raise_for_status()
     c = r.json()["current"]
     desc = WEATHER_CODES.get(c.get("weather_code"), "")
@@ -1592,7 +1602,7 @@ def _extract_content(choice: dict) -> str:
 
 def _one_call(messages: list, model: str) -> str:
     payload = {"model": model, "messages": messages, "stream": False}
-    response = requests.post(
+    response = _session.post(
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
         json=payload,
@@ -1904,7 +1914,7 @@ _IMAGE_RETRIES = 3
 def _post_with_retries(url, **kwargs):
     for attempt in range(_IMAGE_RETRIES):
         try:
-            return requests.post(url, **kwargs)
+            return _session.post(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt == _IMAGE_RETRIES - 1:
                 raise
@@ -1915,7 +1925,7 @@ def _post_with_retries(url, **kwargs):
 def _get_with_retries(url, **kwargs):
     for attempt in range(_IMAGE_RETRIES):
         try:
-            return requests.get(url, **kwargs)
+            return _session.get(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt == _IMAGE_RETRIES - 1:
                 raise
@@ -2390,7 +2400,7 @@ def _nanogpt_subscription_models():
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     models, filtered = [], False
     try:
-        r = requests.get("https://nano-gpt.com/api/subscription/v1/models",
+        r = _session.get("https://nano-gpt.com/api/subscription/v1/models",
                          headers=headers, timeout=30)
         r.raise_for_status()
         data = r.json()
@@ -2405,7 +2415,7 @@ def _nanogpt_subscription_models():
 
     if not models:
         try:
-            r = requests.get(f"{NANOGPT_BASE_URL}/models", headers=headers, timeout=30)
+            r = _session.get(f"{NANOGPT_BASE_URL}/models", headers=headers, timeout=30)
             r.raise_for_status()
             for m in r.json().get("data", []):
                 if any(m.get(k) for k in ("subscription", "is_subscription", "subscription_only")):
@@ -2989,7 +2999,7 @@ async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
     try:
         resp = await asyncio.to_thread(
-            lambda: requests.post(
+            lambda: _session.post(
                 f"{NANOGPT_BASE_URL}/audio/speech",
                 headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
                 json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
@@ -3654,7 +3664,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
-        resp = requests.post(
+        resp = _session.post(
             f"{NANOGPT_BASE_URL}/audio/transcriptions",
             headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
             files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
@@ -3685,7 +3695,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
-    response = requests.get(
+    response = _session.get(
         "https://nano-gpt.com/api/subscription/v1/usage",
         headers=headers,
         timeout=30,
@@ -3748,12 +3758,12 @@ def _fetch_reddit(url: str) -> str:
     }
     path = urlparse(url).path  # e.g. /r/NecroMerger/s/UFZMQRrTYT
     # Resolve share-link redirects (/s/<id>) to the real post path via the API host.
-    resolved = requests.get("https://oauth.reddit.com" + path, headers=headers,
+    resolved = _session.get("https://oauth.reddit.com" + path, headers=headers,
                             timeout=LINK_FETCH_TIMEOUT, allow_redirects=True)
     base = "https://oauth.reddit.com" + urlparse(resolved.url).path.rstrip("/")
     if not base.endswith(".json"):
         base += "/.json"
-    resp = requests.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
+    resp = _session.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     post = data[0]["data"]["children"][0]["data"]
@@ -3778,7 +3788,7 @@ def _fetch_reddit(url: str) -> str:
 
 
 def _fetch_generic(url: str) -> str:
-    html = requests.get(url, headers={"User-Agent": _HTTP_UA},
+    html = _session.get(url, headers={"User-Agent": _HTTP_UA},
                         timeout=LINK_FETCH_TIMEOUT).text
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
@@ -3791,7 +3801,7 @@ def _fetch_generic(url: str) -> str:
 def web_search(query: str) -> str:
     """Quick text-only web search (DuckDuckGo HTML, no API key needed)."""
     try:
-        r = requests.post(
+        r = _session.post(
             "https://html.duckduckgo.com/html/", data={"q": query},
             headers={"User-Agent": _SEARCH_UA}, timeout=LINK_FETCH_TIMEOUT,
         )
