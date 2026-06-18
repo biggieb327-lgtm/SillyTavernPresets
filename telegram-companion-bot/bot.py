@@ -7,6 +7,8 @@ import asyncio
 import time
 import base64
 import calendar
+import logging
+import signal
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
@@ -45,6 +47,34 @@ if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
 if not NANOGPT_API_KEY:
     raise SystemExit("NANOGPT_API_KEY not found in .env at " + str(env_path))
+
+# --- Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("companion")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+
+# --- Access control ---
+_allowed_raw = os.getenv("ALLOWED_USERS", "")
+ALLOWED_USERS: set[int] = {int(x) for x in _allowed_raw.split(",") if x.strip().lstrip("-").isdigit()}
+
+# --- Rate limiting ---
+_last_request: dict[int, float] = {}
+RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "2"))
+
+def _is_allowed(user_id: int) -> bool:
+    return not ALLOWED_USERS or user_id in ALLOWED_USERS
+
+def _rate_ok(user_id: int) -> bool:
+    now = time.time()
+    if now - _last_request.get(user_id, 0) < RATE_LIMIT_SECONDS:
+        return False
+    _last_request[user_id] = now
+    return True
 
 NANOGPT_BASE_URL = "https://nano-gpt.com/api/v1"
 NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "zai-org/glm-5:thinking")
@@ -383,7 +413,12 @@ def load_state():
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception as e:
-        print("[state] Could not load state:", e)
+        backup = STATE_FILE.with_suffix(".corrupted")
+        try:
+            STATE_FILE.rename(backup)
+        except Exception:
+            pass
+        log.error("State file corrupted, moved to %s: %s", backup, e)
         return
     for cid, hist in data.get("conversation_history", {}).items():
         conversation_history[int(cid)] = hist
@@ -429,7 +464,7 @@ def load_state():
         nudge_budget[int(cid)] = nb
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
-    print(f"[state] Loaded history for {len(conversation_history)} chat(s).")
+    log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
 def save_state():
@@ -2194,6 +2229,79 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(greeting)
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = [
+        f"*{NAME} — available commands*",
+        "",
+        "*Conversation*",
+        "/start — reset and restart",
+        "/clear — wipe conversation history",
+        "/menu — open the inline button menu",
+        "",
+        "*Memory*",
+        "/memory — view what I remember",
+        "/remember <fact> — save a fact",
+        "/forget — wipe all memory",
+        "/exportmemory — export full memory as text",
+        "/pin <fact> — pin something I always carry",
+        "/pinned — list pinned memories",
+        "/unpin <n> — remove a pinned memory",
+        "/boundary <text> — add a soft boundary note",
+        "/boundaries — list boundaries",
+        "",
+        "*Mood & modes*",
+        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
+        "/vent — toggle vent mode (listening only)",
+        "/energy <high|low|crash> — set your energy level",
+        "",
+        "*Inside jokes & wardrobe*",
+        "/addjoke phrase | meaning | tone — add an inside joke",
+        "/jokes — list inside jokes",
+        "/deljoke <id> — remove a joke",
+        "/wardrobe — list outfits",
+        "/addoutfit <desc> — add an outfit",
+        "/outfit <n> — set current outfit (used in selfies)",
+        "/deloutfit <n> — remove an outfit",
+        "",
+        "*Selfie*",
+        "/selfie [hint] — generate a selfie",
+        "/selfimage — view her current self-image",
+        "/reflect — trigger nightly reflection now",
+        "",
+        "*Reminders & tasks*",
+        "/remindme <time> <task> — set a one-off reminder",
+        "/reminders — list reminders",
+        "/delreminder <n> — remove a reminder",
+        "/cron <schedule> | <instruction> — recurring task",
+        "/crons — list recurring tasks",
+        "/crondel <id> — remove a recurring task",
+        "",
+        "*Nudges*",
+        "/nudges — view today's proactive message budget",
+        "/heartbeat — trigger a proactive message now",
+        "",
+        "*Settings*",
+        "/model — show current model",
+        "/setmodel <field> <value> — change a model setting",
+        "/settings — show current settings",
+        "/usage — token usage stats",
+        "/chatid — show your chat ID",
+        "/backup — download a memory backup",
+    ]
+    if PAYMENTS_ENABLED:
+        lines += [
+            "",
+            "*Payments*",
+            "/addpayment <desc> | <amount> | <due> — add a bill",
+            "/addevery <desc> | <amount> | <day> — add a recurring bill",
+            "/payments — list bills",
+            "/delpayment <n> — remove a bill",
+            "/editpayment <n> <field> <value> — edit a bill",
+            "/week — payment summary for this week",
+        ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 Character: *{NAME}*\nModel: `{NANOGPT_MODEL}`", parse_mode="Markdown"
@@ -3553,6 +3661,10 @@ def fetch_link(url: str):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not _rate_ok(update.effective_user.id):
+        return
     user_message = update.message.text
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
@@ -3591,6 +3703,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -3908,6 +4022,7 @@ def main():
     )
 
     app.add_error_handler(on_error)
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
@@ -3959,34 +4074,44 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    def _shutdown(sig, frame):
+        log.info("Received signal %s — saving state and shutting down.", sig)
+        save_state()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     if app.job_queue is not None:
         schedule_next_heartbeat(app.job_queue)
-        print(f"💓 Heartbeat: random, every {HEARTBEAT_MIN / 3600:.0f}–{HEARTBEAT_MAX / 3600:.0f}h.")
+        log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:
             reminder_time = dtime(_REM_H, _REM_M, tzinfo=TZ) if TZ else dtime(_REM_H, _REM_M)
             app.job_queue.run_daily(payments_reminder, time=reminder_time)
             _wd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][REMINDER_WEEKDAY % 7]
-            print(f"💸 Payment reminder scheduled {REMINDER_TIME} on {_wd}.")
+            log.info("Payment reminder scheduled %s on %s.", REMINDER_TIME, _wd)
         backup_time = dtime(_BK_H, _BK_M, tzinfo=TZ) if TZ else dtime(_BK_H, _BK_M)
         app.job_queue.run_daily(weekly_backup, time=backup_time)
         _bwd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][BACKUP_WEEKDAY % 7]
-        print(f"💾 Weekly backup scheduled {BACKUP_TIME} on {_bwd}.")
+        log.info("Weekly backup scheduled %s on %s.", BACKUP_TIME, _bwd)
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
         app.job_queue.run_daily(reflection_job, time=reflection_time)
-        print(f"🪞 Nightly reflection scheduled {REFLECTION_TIME}.")
-        for r in reminders:  # re-arm reminders that survived a restart
+        log.info("Nightly reflection scheduled %s.", REFLECTION_TIME)
+        for r in reminders:
             schedule_reminder(app.job_queue, r)
         if reminders:
-            print(f"⏰ Re-armed {len(reminders)} pending reminder(s).")
-        for j in cron_jobs:  # re-arm recurring tasks that survived a restart
+            log.info("Re-armed %d pending reminder(s).", len(reminders))
+        for j in cron_jobs:
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
-            print(f"🔁 Re-armed {len(cron_jobs)} scheduled task(s).")
+            log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
     else:
-        print('⚠️ JobQueue unavailable — scheduled features disabled. '
-              'Install it with: pip install "python-telegram-bot[job-queue]"')
+        log.warning('JobQueue unavailable — scheduled features disabled. '
+                    'Install with: pip install "python-telegram-bot[job-queue]"')
 
-    print(f"🚀 {NAME} is running... (home: {BASE_DIR})")
+    log.info("%s is running (home: %s)", NAME, BASE_DIR)
+    if ALLOWED_USERS:
+        log.info("Access restricted to user IDs: %s", ALLOWED_USERS)
     app.run_polling()
 
 
