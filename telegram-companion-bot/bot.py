@@ -101,6 +101,7 @@ MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
+DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
@@ -3843,6 +3844,102 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
+def _format_json_for_prompt(data: dict, fname: str) -> str:
+    """Return a readable text block describing a JSON file for the character."""
+    # Detect SillyTavern chara_card_v2
+    if data.get("spec") in ("chara_card_v2", "chara_card_v3"):
+        card = data.get("data", data)
+        name = card.get("name", "Unknown")
+        parts = [f"[Character card: {name}]"]
+        for field, label in (
+            ("description", "Description"),
+            ("personality", "Personality"),
+            ("scenario", "Scenario"),
+            ("system_prompt", "System prompt"),
+            ("first_mes", "First message"),
+            ("mes_example", "Example dialogue"),
+            ("post_history_instructions", "Post-history instructions"),
+            ("creator_notes", "Creator notes"),
+        ):
+            val = (card.get(field) or "").strip()
+            if val:
+                parts.append(f"\n{label}:\n{val}")
+        tags = card.get("tags") or []
+        if tags:
+            parts.append(f"\nTags: {', '.join(tags)}")
+        return "\n".join(parts)
+
+    # Generic JSON: pretty-print with truncation
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    max_chars = 12000
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n\n[... truncated at {max_chars} chars]"
+    return f"[JSON file: {fname}]\n{text}"
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not _rate_ok(update.effective_user.id):
+        return
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    if doc.file_size and doc.file_size > DOCUMENT_MAX_SIZE_MB * 1024 * 1024:
+        await context.bot.send_message(chat_id=chat_id,
+            text=f"[file's too big — max {DOCUMENT_MAX_SIZE_MB}MB for JSON]")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    fname = doc.file_name or "file.json"
+    caption = (getattr(update.message, "caption", None) or "").strip()
+
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        raw_bytes = bytes(await tg_file.download_as_bytearray())
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        await context.bot.send_message(chat_id=chat_id,
+            text=f"[couldn't parse that JSON: {e}]")
+        return
+    except Exception as e:
+        log.error("Document download error: %s", e)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that file: {e}")
+        return
+
+    formatted = _format_json_for_prompt(data, fname)
+    uname = user_names[chat_id]
+
+    if caption:
+        prompt = f"{caption}\n\n{formatted}"
+    else:
+        prompt = (
+            f"{uname} sent you a JSON file called \"{fname}\". "
+            f"Read it and engage with what's in it.\n\n{formatted}"
+        )
+    user_mem = f"[sent JSON file: {fname}]{' — ' + caption if caption else ''}"
+
+    try:
+        await ensure_weather()
+        messages = assemble_messages(chat_id, prompt)
+        ai_response = await reply_with_typing(context, chat_id, messages)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname)
+        await _deliver(update, context, chat_id, user_mem, ai_response)
+    except Exception as e:
+        log.error("Document handler reply error: %s", e)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+
+
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     response = _session.get(
@@ -4426,6 +4523,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("json"), handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     def _shutdown(sig, frame):
