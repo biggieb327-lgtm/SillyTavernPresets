@@ -3879,6 +3879,13 @@ def _format_json_for_prompt(data: dict, fname: str) -> str:
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    doc = update.message.document
+    fname = (doc.file_name or "") if doc else ""
+    log.info("Document received: %s (mime: %s)", fname, getattr(doc, "mime_type", "?"))
+
+    if not fname.lower().endswith(".json"):
+        return  # not a JSON file — let it fall through silently
+
     if not _is_allowed(update.effective_user.id):
         return
     if not _rate_ok(update.effective_user.id):
@@ -3890,8 +3897,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if get_owner() is None:
         set_owner(chat_id)
         save_state()
-
-    doc = update.message.document
     if not doc:
         return
 
@@ -3901,7 +3906,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-    fname = doc.file_name or "file.json"
+    if not fname:
+        fname = "file.json"
     caption = (getattr(update.message, "caption", None) or "").strip()
 
     try:
@@ -4539,7 +4545,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("json"), handle_document))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     def _shutdown(sig, frame):
