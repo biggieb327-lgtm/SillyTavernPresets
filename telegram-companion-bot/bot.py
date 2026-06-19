@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import math
 import random
 import asyncio
 import time
@@ -284,6 +285,14 @@ WEATHER_CODES = {
 _weather_cache = {"text": None, "ts": 0.0}
 WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
 
+# --- WSDOT Traffic (Western Washington) ---
+WSDOT_API_KEY       = os.getenv("WSDOT_API_KEY", "")
+TRAFFIC_ENABLED     = bool(WSDOT_API_KEY)
+TRAFFIC_RADIUS_MILES = float(os.getenv("TRAFFIC_RADIUS_MILES", "10"))
+TRAFFIC_POLL_MINUTES = int(os.getenv("TRAFFIC_POLL_MINUTES", "10"))
+_WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
+_WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
     "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
@@ -424,6 +433,8 @@ wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
+user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
+seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -487,6 +498,10 @@ def load_state():
         voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
+    for cid, lv in data.get("user_location", {}).items():
+        user_location[int(cid)] = lv
+    for cid, ids in data.get("seen_incidents", {}).items():
+        seen_incidents[int(cid)] = set(ids)
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -516,6 +531,8 @@ def save_state():
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
+        "user_location": {str(k): v for k, v in user_location.items()},
+        "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -2393,6 +2410,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cron <schedule> | <instruction> — recurring task",
         "/crons — list recurring tasks",
         "/crondel <id> — remove a recurring task",
+        "",
+        "*Traffic (Western Washington)*",
+        "/traffic — current congestion (near you if location shared)",
+        "/incidents — active incidents (near you if location shared)",
         "",
         "*Nudges*",
         "/nudges — view today's proactive message budget",
@@ -4467,6 +4488,204 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- WSDOT Traffic integration ---
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in miles between two lat/lon points."""
+    R = 3958.8
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _fetch_wsdot_alerts() -> list:
+    try:
+        r = _session.get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json().get("Alerts") or []
+    except Exception as e:
+        log.warning("[traffic] alerts fetch failed: %s", e)
+        return []
+
+
+def _fetch_wsdot_times() -> list:
+    try:
+        r = _session.get(_WSDOT_TIMES_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.warning("[traffic] travel times fetch failed: %s", e)
+        return []
+
+
+def _alert_loc(alert: dict):
+    loc = alert.get("StartRoadwayLocation") or {}
+    return loc.get("Latitude"), loc.get("Longitude")
+
+
+def _filter_nearby(alerts: list, lat: float, lon: float, radius: float) -> list:
+    out = []
+    for a in alerts:
+        alat, alon = _alert_loc(a)
+        if alat is not None and alon is not None and _haversine(lat, lon, alat, alon) <= radius:
+            out.append(a)
+    return out
+
+
+def _format_alert(a: dict) -> str:
+    loc = a.get("StartRoadwayLocation") or {}
+    headline = a.get("HeadlineDescription") or "Incident"
+    desc = loc.get("Description", "")
+    priority = a.get("Priority", "")
+    icon = {"Low": "🟡", "Medium": "🟠", "High": "🔴"}.get(priority, "⚠️")
+    return f"{icon} {headline}" + (f"\n   📍 {desc}" if desc else "")
+
+
+def _congestion_icon(current, average) -> str:
+    if not average:
+        return "⚪"
+    r = current / average
+    if r >= 1.5:
+        return "🔴"
+    if r >= 1.2:
+        return "🟠"
+    if r >= 1.05:
+        return "🟡"
+    return "🟢"
+
+
+def _format_travel_times(times: list, lat=None, lon=None) -> str:
+    if lat is not None:
+        # Include routes whose start or end is within 3x the alert radius of the user
+        radius = TRAFFIC_RADIUS_MILES * 3
+        times = [
+            t for t in times
+            if any(
+                (p.get("Latitude") is not None and
+                 _haversine(lat, lon, p["Latitude"], p["Longitude"]) <= radius)
+                for p in [t.get("StartPoint") or {}, t.get("EndPoint") or {}]
+            )
+        ] or times[:10]
+    else:
+        times = times[:12]
+
+    lines = []
+    for t in times:
+        name = t.get("Name", "Unknown route")
+        current = t.get("CurrentTime")
+        average = t.get("AverageTime")
+        if current is None:
+            continue
+        icon = _congestion_icon(current, average)
+        delay = f" (+{current - average} min)" if average and current > average else ""
+        lines.append(f"{icon} {name}: {current} min{delay}")
+    return "\n".join(lines) if lines else "No travel time data available."
+
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store the user's location (static or live); acknowledge with a brief in-character note."""
+    if not TRAFFIC_ENABLED:
+        return
+    chat_id = update.effective_chat.id
+    loc = (update.message or update.edited_message).location
+
+    live_until = None
+    if loc.live_period:
+        live_until = time.time() + loc.live_period
+
+    user_location[chat_id] = {
+        "lat": loc.latitude,
+        "lon": loc.longitude,
+        "ts": time.time(),
+        "live_until": live_until,
+    }
+    save_state()
+
+    if update.message:  # only reply on the initial share, not every live update
+        if loc.live_period:
+            await update.message.reply_text(
+                "📍 Got your live location. I'll keep an eye on traffic around you "
+                "and give you a heads-up if anything pops up nearby."
+            )
+        else:
+            await update.message.reply_text(
+                "📍 Got it. Use /traffic or /incidents to check what's around there."
+            )
+
+
+async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TRAFFIC_ENABLED:
+        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        return
+    chat_id = update.effective_chat.id
+    loc = user_location.get(chat_id)
+    times = await asyncio.to_thread(_fetch_wsdot_times)
+    if loc:
+        header = f"🚗 Traffic near you (within {TRAFFIC_RADIUS_MILES:.0f} mi)"
+        body = _format_travel_times(times, lat=loc["lat"], lon=loc["lon"])
+    else:
+        header = "🚗 Western Washington traffic"
+        body = _format_travel_times(times)
+    await update.message.reply_text(f"{header}\n\n{body}")
+
+
+async def incidents_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TRAFFIC_ENABLED:
+        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        return
+    chat_id = update.effective_chat.id
+    alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
+    open_alerts = [a for a in alerts if (a.get("EventStatus") or "").lower() == "open"]
+
+    loc = user_location.get(chat_id)
+    if loc:
+        to_show = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
+        header = f"⚠️ Incidents within {TRAFFIC_RADIUS_MILES:.0f} mi of you"
+        footer = ""
+    else:
+        to_show = open_alerts[:15]
+        header = "⚠️ Western Washington incidents"
+        footer = "\n\nShare your location to see incidents near you."
+
+    if not to_show:
+        await update.message.reply_text(f"{header}\n\nNo active incidents.{footer}")
+        return
+    lines = [_format_alert(a) for a in to_show[:15]]
+    await update.message.reply_text(f"{header}\n\n" + "\n\n".join(lines))
+
+
+async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs every TRAFFIC_POLL_MINUTES — sends proactive alert for new nearby incidents."""
+    if not TRAFFIC_ENABLED:
+        return
+    alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
+    open_alerts = [a for a in alerts if (a.get("EventStatus") or "").lower() == "open"]
+
+    for chat_id, loc in list(user_location.items()):
+        live_until = loc.get("live_until")
+        if not live_until or time.time() > live_until:
+            continue  # only proactive alerts when live location is active
+
+        nearby = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
+        known = seen_incidents.get(chat_id, set())
+        new = [a for a in nearby if str(a.get("AlertID", "")) not in known]
+        if not new:
+            continue
+
+        seen_incidents.setdefault(chat_id, set()).update(str(a["AlertID"]) for a in new)
+        lines = [_format_alert(a) for a in new[:5]]
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ New incident(s) near you:\n\n" + "\n\n".join(lines),
+            )
+        except Exception as e:
+            log.warning("[traffic] alert send failed for %s: %s", chat_id, e)
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -4570,6 +4789,11 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    if TRAFFIC_ENABLED:
+        app.add_handler(CommandHandler("traffic", traffic_cmd))
+        app.add_handler(CommandHandler("incidents", incidents_cmd))
+        app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+        app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
 
     def _shutdown(sig, frame):
         log.info("Received signal %s — saving state and shutting down.", sig)
@@ -4602,6 +4826,10 @@ def main():
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
             log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
+        if TRAFFIC_ENABLED:
+            interval = TRAFFIC_POLL_MINUTES * 60
+            app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
+            log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)
     else:
         log.warning('JobQueue unavailable — scheduled features disabled. '
                     'Install with: pip install "python-telegram-bot[job-queue]"')
