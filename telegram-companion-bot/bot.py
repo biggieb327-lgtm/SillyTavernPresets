@@ -102,6 +102,9 @@ MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
+# Separate model for document/card analysis — should be an instruction model,
+# not a roleplay-tuned one, so it won't perform the character it's reading about.
+DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "meta-llama/llama-3.3-70b-instruct")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
@@ -3861,12 +3864,14 @@ def _format_json_for_prompt(data: dict, fname: str) -> str:
         card = data.get("data", data)
         name = card.get("name", "Unknown")
         parts = [f"CHARACTER CARD: {name}"]
-        # Descriptive fields only — system_prompt/post_history/first_mes/mes_example
-        # are excluded because roleplay-tuned models treat them as live instructions.
         for field, label in (
             ("description", "Description"),
             ("personality", "Personality"),
             ("scenario", "Scenario"),
+            ("system_prompt", "System prompt"),
+            ("first_mes", "First message"),
+            ("mes_example", "Example dialogue"),
+            ("post_history_instructions", "Post-history instructions"),
             ("creator_notes", "Creator notes"),
         ):
             val = (card.get(field) or "").strip()
@@ -3955,8 +3960,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await ensure_weather()
         messages = assemble_messages(chat_id, user_prompt)
-        ai_response = await reply_with_typing(context, chat_id, messages)
-        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname)
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)
     except Exception as e:
         log.error("Document handler reply error: %s", e)
