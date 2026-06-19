@@ -1641,32 +1641,40 @@ def _one_call(messages: list, model: str) -> str:
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
         json=payload,
-        timeout=REQUEST_TIMEOUT,
+        timeout=(10, REQUEST_TIMEOUT),  # (connect timeout, read timeout)
     )
     response.raise_for_status()
     return _extract_content(response.json()["choices"][0])
 
 
+_CHAT_RETRIES = 3        # attempts per model before moving to the next
+_RETRY_BACKOFF = (2, 4)  # seconds to wait between retries (2s then 4s)
+
 def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
-    """Try the model; on a transient server error (5xx / timeout / network) try the fallback."""
+    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
         models.append(fallback)
     last_err = None
     for i, m in enumerate(models):
-        try:
-            return _one_call(messages, m)
-        except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError) as e:
-            last_err = e
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            # 5xx/timeout/network, or 429 rate-limit — a different model may succeed.
-            transient = status is None or status == 429 or 500 <= status < 600
-            if transient and i < len(models) - 1:
-                print(f"[model] {m} failed ({status or e.__class__.__name__}); "
-                      f"falling back to {models[i + 1]}")
-                continue
-            raise
+        for attempt in range(_CHAT_RETRIES):
+            try:
+                return _one_call(messages, m)
+            except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as e:
+                last_err = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                transient = status is None or status == 429 or 500 <= status < 600
+                if not transient:
+                    raise
+                if attempt < _CHAT_RETRIES - 1:
+                    wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                    print(f"[model] {m} transient error ({status or e.__class__.__name__}), "
+                          f"retry {attempt + 1}/{_CHAT_RETRIES - 1} in {wait}s...")
+                    time.sleep(wait)
+                elif i < len(models) - 1:
+                    print(f"[model] {m} failed after {_CHAT_RETRIES} attempts; "
+                          f"falling back to {models[i + 1]}")
     raise last_err
 
 
