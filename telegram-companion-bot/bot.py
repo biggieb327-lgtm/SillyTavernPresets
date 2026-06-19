@@ -4199,11 +4199,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if selfie_ready() and random.random() < PHOTO_SELFIE_CHANCE:
             await send_selfie(context, chat_id, "", announce_errors=False)
     except requests.exceptions.HTTPError as e:
-        await update.message.reply_text(
-            f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}"
-        )
+        await send_bubbles(context, chat_id,
+            f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Couldn't look at that one: {str(e)}")
+        await send_bubbles(context, chat_id, f"❌ Couldn't look at that one: {str(e)}")
 
 
 # --- Proactive heartbeat ---
