@@ -3920,18 +3920,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     formatted = _format_json_for_prompt(data, fname)
     uname = user_names[chat_id]
 
+    # The user_prompt is kept brief; the actual file content goes in as a system
+    # message injected just before the user turn so the model sees it as ground truth,
+    # not as something it needs to "open."
+    file_system_msg = (
+        f"[{uname} just shared a file: \"{fname}\". "
+        f"The complete contents are below — this is everything in the file, fully readable. "
+        f"Engage with it directly.]\n\n{formatted}"
+    )
     if caption:
-        prompt = f"{caption}\n\n{formatted}"
+        user_prompt = caption
     else:
-        prompt = (
-            f"{uname} sent you a JSON file called \"{fname}\". "
-            f"Read it and engage with what's in it.\n\n{formatted}"
-        )
+        user_prompt = f"Sent you \"{fname}\"."
     user_mem = f"[sent JSON file: {fname}]{' — ' + caption if caption else ''}"
 
     try:
         await ensure_weather()
-        messages = assemble_messages(chat_id, prompt)
+        messages = assemble_messages(chat_id, user_prompt)
+        # Inject the file contents as a system message just before the final user turn
+        messages.insert(-1, {"role": "system", "content": file_system_msg})
         ai_response = await reply_with_typing(context, chat_id, messages)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname)
         await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -4439,9 +4446,18 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         print(f"[net] transient: {err.__class__.__name__}: {err}")  # one quiet line
         return
     import traceback
-    print("[error] " + "".join(
-        traceback.format_exception(type(err), err, err.__traceback__)
-    ))
+    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    print("[error] " + tb)
+    # Surface the error to the user so button failures aren't silent
+    try:
+        if update and hasattr(update, "callback_query") and update.callback_query:
+            await update.callback_query.message.reply_text(f"❌ {type(err).__name__}: {err}")
+        elif update and hasattr(update, "effective_chat") and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=f"❌ {type(err).__name__}: {err}"
+            )
+    except Exception:
+        pass
 
 
 def _acquire_termux_wake_lock():
