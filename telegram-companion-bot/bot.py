@@ -3861,12 +3861,12 @@ def _format_json_for_prompt(data: dict, fname: str) -> str:
         card = data.get("data", data)
         name = card.get("name", "Unknown")
         parts = [f"CHARACTER CARD: {name}"]
+        # Descriptive fields only — system_prompt/post_history/first_mes/mes_example
+        # are excluded because roleplay-tuned models treat them as live instructions.
         for field, label in (
             ("description", "Description"),
             ("personality", "Personality"),
             ("scenario", "Scenario"),
-            ("system_prompt", "System prompt"),
-            ("post_history_instructions", "Post-history instructions"),
             ("creator_notes", "Creator notes"),
         ):
             val = (card.get(field) or "").strip()
