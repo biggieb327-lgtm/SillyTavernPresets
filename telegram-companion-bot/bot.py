@@ -1674,9 +1674,13 @@ async def generate_reply(messages: list, model: str = None, fallback: str = None
 
 async def _keep_typing(bot, chat_id: int):
     # Telegram's "typing..." only lasts ~5s, so refresh it while the model thinks.
+    # Swallow transient network errors so a momentary blip doesn't kill the loop.
     try:
         while True:
-            await bot.send_chat_action(chat_id=chat_id, action="typing")
+            try:
+                await bot.send_chat_action(chat_id=chat_id, action="typing")
+            except Exception:
+                pass
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
@@ -1784,11 +1788,18 @@ async def send_bubbles(context, chat_id: int, text: str):
     """Send a reply as a single message (chunked only if it exceeds Telegram's length limit)."""
     for i in range(0, len(text), _TELEGRAM_MAX_LEN):
         chunk = text[i:i + _TELEGRAM_MAX_LEN]
-        if DEVICE_RENDER:
-            escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
-            await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=chunk)
+        for attempt in range(3):
+            try:
+                if DEVICE_RENDER:
+                    escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
+                    await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=chunk)
+                break
+            except (NetworkError, TimedOut) as e:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
 
 
 # --- Selfies ---
