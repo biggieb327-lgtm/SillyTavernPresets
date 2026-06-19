@@ -3943,9 +3943,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_card:
         card_name = (data.get("data") or data).get("name", "unknown")
         lead = (
-            f"Here's a character card for {card_name}. "
-            f"Give me your take on the character design — what's working, what isn't, what you'd sharpen. "
-            f"Respond as yourself, not as {card_name}."
+            f"Here's {card_name}'s character card. Read it and give me your honest take — "
+            f"what's working, what's weak, what you'd change. "
+            f"Don't ask me what the problem is. Just tell me what you see."
         )
     else:
         lead = f"Here's a JSON file — {fname}. Take a look."
