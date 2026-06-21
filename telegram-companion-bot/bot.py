@@ -2049,6 +2049,27 @@ async def _keep_uploading(bot, chat_id: int):
         pass
 
 
+async def _selfie_caption(hint: str, chat_id: int) -> str:
+    """Generate a short in-character text to accompany a selfie."""
+    uname = user_names.get(chat_id, "you")
+    ctx = f"Mood right now: {_mood_vibe(chat_id)}."
+    if hint:
+        ctx += f" The selfie is from: {hint}."
+    messages = [
+        {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)},
+        {"role": "user", "content": (
+            f"You just took a selfie and you're sending it. {ctx} "
+            "Write one short casual text to go with it — 1-2 sentences max. "
+            "Don't describe the photo. Don't open with 'here' or 'here you go'. "
+            "Don't announce that you're sending a photo. Just be yourself."
+        )},
+    ]
+    try:
+        return (await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)).strip()
+    except Exception:
+        return ""
+
+
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
@@ -2062,8 +2083,11 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
         prompt = build_selfie_prompt(hint, chat_id)
+        caption_task = asyncio.create_task(_selfie_caption(hint, chat_id))
         img = await asyncio.to_thread(generate_selfie_image, prompt)
-        await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img))
+        caption = await caption_task
+        await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img),
+                                     caption=caption or None)
     except Exception as e:
         print("[selfie] failed:", e)
         if announce_errors:
