@@ -3858,6 +3858,28 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
+PDF_MAX_SIZE_MB = int(os.getenv("PDF_MAX_SIZE_MB", "20"))
+PDF_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "16000"))
+
+
+def _extract_pdf_text(raw_bytes: bytes) -> str:
+    """Extract plain text from a PDF using pypdf. Returns empty string on failure."""
+    try:
+        from pypdf import PdfReader
+        from io import BytesIO
+        reader = PdfReader(BytesIO(raw_bytes))
+        pages = []
+        for page in reader.pages:
+            t = (page.extract_text() or "").strip()
+            if t:
+                pages.append(t)
+        return "\n\n".join(pages)
+    except ImportError:
+        raise RuntimeError("pypdf is not installed — run: pip install pypdf")
+    except Exception as e:
+        raise RuntimeError(f"PDF read failed: {e}")
+
+
 def _format_json_for_prompt(data: dict, fname: str) -> str:
     """Return a readable text block describing a JSON file."""
     if data.get("spec") in ("chara_card_v2", "chara_card_v3"):
@@ -3896,8 +3918,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fname = (doc.file_name or "") if doc else ""
     log.info("Document received: %s (mime: %s)", fname, getattr(doc, "mime_type", "?"))
 
-    if not fname.lower().endswith(".json"):
-        return  # not a JSON file — let it fall through silently
+    is_pdf  = fname.lower().endswith(".pdf") or getattr(doc, "mime_type", "") == "application/pdf"
+    is_json = fname.lower().endswith(".json")
+
+    if not is_pdf and not is_json:
+        return  # unsupported file type — let it fall through silently
 
     if not _is_allowed(update.effective_user.id):
         return
@@ -3913,6 +3938,49 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         return
 
+    caption = (getattr(update.message, "caption", None) or "").strip()
+    uname = user_names[chat_id]
+
+    # --- PDF branch ---
+    if is_pdf:
+        if not fname:
+            fname = "document.pdf"
+        size_limit = PDF_MAX_SIZE_MB * 1024 * 1024
+        if doc.file_size and doc.file_size > size_limit:
+            await context.bot.send_message(chat_id=chat_id,
+                text=f"[that PDF is too big — max {PDF_MAX_SIZE_MB} MB]")
+            return
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        try:
+            tg_file = await context.bot.get_file(doc.file_id)
+            raw_bytes = bytes(await tg_file.download_as_bytearray())
+            pdf_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
+        except Exception as e:
+            log.error("PDF download/read error: %s", e)
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
+            return
+        if not pdf_text.strip():
+            await context.bot.send_message(chat_id=chat_id,
+                text="[couldn't extract any text from that PDF — it may be image-only or encrypted]")
+            return
+        if len(pdf_text) > PDF_MAX_CHARS:
+            pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
+        lead = caption or f"I sent you a PDF — {fname}. Take a look."
+        user_prompt = f"{lead}\n\n[PDF contents]\n{pdf_text}"
+        user_mem = f"[sent PDF: {fname}] {caption}".strip()
+        try:
+            await ensure_weather()
+            messages = assemble_messages(chat_id, user_prompt)
+            ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+            ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                             model=DOCUMENT_MODEL)
+            await _deliver(update, context, chat_id, user_mem, ai_response)
+        except Exception as e:
+            log.error("PDF handler reply error: %s", e)
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        return
+
+    # --- JSON branch ---
     if doc.file_size and doc.file_size > DOCUMENT_MAX_SIZE_MB * 1024 * 1024:
         await context.bot.send_message(chat_id=chat_id,
             text=f"[file's too big — max {DOCUMENT_MAX_SIZE_MB}MB for JSON]")
@@ -3921,7 +3989,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     if not fname:
         fname = "file.json"
-    caption = (getattr(update.message, "caption", None) or "").strip()
 
     try:
         tg_file = await context.bot.get_file(doc.file_id)
@@ -3937,7 +4004,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     formatted = _format_json_for_prompt(data, fname)
-    uname = user_names[chat_id]
 
     is_card = data.get("spec") in ("chara_card_v2", "chara_card_v3")
     if is_card:
@@ -3952,10 +4018,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if caption:
         lead = caption
 
-    # Full content goes in as the user message so it's saved to history
-    # and available in follow-up turns without re-sending the file.
     user_prompt = f"{lead}\n\n{formatted}"
-    user_mem = user_prompt  # persists full content in conversation history
+    user_mem = user_prompt
 
     try:
         await ensure_weather()
