@@ -1597,11 +1597,20 @@ def assemble_messages_dual(chat_id: int, for_char: str, latest_user_content: str
 
     messages = [{"role": "system", "content": fill(sys_raw, char_name, uname)}]
 
+    if SETTING:
+        messages.append({
+            "role": "system",
+            "content": "# Current setting\n" + fill(SETTING, char_name, uname),
+        })
+
     messages.append({"role": "system", "content": (
         f"You are texting with {uname} and {other_name} in a group chat. "
-        f"Stay fully in character as {char_name}. Respond naturally to whoever last spoke — "
+        f"Stay fully in character as {char_name}. Respond to whoever last spoke — "
         f"{uname}, {other_name}, or both. "
-        f"Do not prefix your message with your own name."
+        f"Do not prefix your message with your own name. "
+        f"Each message must move the conversation forward — add a new angle, question, "
+        f"observation, or reaction. Do not repeat or rephrase what was just said. "
+        f"Do not simply agree and affirm. Let the conversation go somewhere."
     )})
 
     if mem:
