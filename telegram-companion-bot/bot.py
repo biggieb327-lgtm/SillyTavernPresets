@@ -1979,7 +1979,19 @@ def _get_with_retries(url, **kwargs):
             time.sleep(2 * (attempt + 1))
 
 
+_GEMINI_STRIP = re.compile(
+    r"\b(no\s+bra|braless|no\s+underwear|without\s+a?\s*bra|topless|bare\s+chest(ed)?|"
+    r"nipples?\s+visible|see[\s-]?through\s+top|sheer\s+top)\b",
+    re.IGNORECASE,
+)
+
+
+def _gemini_safe(prompt: str) -> str:
+    return _GEMINI_STRIP.sub("", prompt).strip()
+
+
 def _generate_selfie_gemini(prompt: str) -> bytes:
+    prompt = _gemini_safe(prompt)
     parts = []
     if _has_base_image():
         raw, mime = _base_image()
