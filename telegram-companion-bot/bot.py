@@ -28,7 +28,7 @@ _session.mount("https://", HTTPAdapter(
     pool_maxsize=10,
 ))
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
@@ -4555,6 +4555,67 @@ def _acquire_termux_wake_lock():
             log.warning("Could not acquire Termux wake lock: %s", e)
 
 
+_BASE_COMMANDS = [
+    BotCommand("help", "Show all commands"),
+    BotCommand("start", "Reset and restart"),
+    BotCommand("clear", "Wipe conversation history"),
+    BotCommand("menu", "Open the inline button menu"),
+    BotCommand("memory", "View what I remember"),
+    BotCommand("remember", "Save a fact"),
+    BotCommand("forget", "Wipe all memory"),
+    BotCommand("exportmemory", "Export full memory as text"),
+    BotCommand("pin", "Pin something I always carry"),
+    BotCommand("pinned", "List pinned memories"),
+    BotCommand("unpin", "Remove a pinned memory"),
+    BotCommand("boundary", "Add a soft boundary note"),
+    BotCommand("boundaries", "List boundaries"),
+    BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
+    BotCommand("vent", "Toggle vent mode (listening only)"),
+    BotCommand("energy", "Set your energy level (high/low/crash)"),
+    BotCommand("selfie", "Generate a selfie"),
+    BotCommand("selfimage", "View current self-image"),
+    BotCommand("reflect", "Trigger nightly reflection now"),
+    BotCommand("addjoke", "Add an inside joke"),
+    BotCommand("jokes", "List inside jokes"),
+    BotCommand("deljoke", "Remove a joke"),
+    BotCommand("wardrobe", "List outfits"),
+    BotCommand("addoutfit", "Add an outfit"),
+    BotCommand("outfit", "Set current outfit"),
+    BotCommand("deloutfit", "Remove an outfit"),
+    BotCommand("remindme", "One-off reminder (30m, 2h, 18:30…)"),
+    BotCommand("setreminder", "Daily recurring reminder"),
+    BotCommand("reminders", "List reminders"),
+    BotCommand("delreminder", "Remove a reminder"),
+    BotCommand("cron", "Add a recurring scheduled task"),
+    BotCommand("crons", "List recurring tasks"),
+    BotCommand("crondel", "Remove a recurring task"),
+    BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("heartbeat", "Trigger a proactive message now"),
+    BotCommand("voice", "Toggle voice replies on/off"),
+    BotCommand("model", "Show current model"),
+    BotCommand("setmodel", "Change a model setting"),
+    BotCommand("settings", "Show current settings"),
+    BotCommand("usage", "Token usage stats"),
+    BotCommand("chatid", "Show your chat ID"),
+    BotCommand("backup", "Download a memory backup"),
+]
+
+_PAYMENT_COMMANDS = [
+    BotCommand("addpayment", "Add a monthly bill"),
+    BotCommand("addevery", "Add a recurring bill every N days"),
+    BotCommand("payments", "List all bills"),
+    BotCommand("delpayment", "Remove a bill"),
+    BotCommand("editpayment", "Edit a bill field"),
+    BotCommand("week", "Payment summary for this week"),
+    BotCommand("remindpayments", "Trigger payment reminder now"),
+]
+
+
+async def _register_commands(application):
+    cmds = _BASE_COMMANDS + (_PAYMENT_COMMANDS if PAYMENTS_ENABLED else [])
+    await application.bot.set_my_commands(cmds)
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -4566,6 +4627,7 @@ def main():
         .write_timeout(30)
         .pool_timeout(30)
         .get_updates_read_timeout(40)
+        .post_init(_register_commands)
         .build()
     )
 
