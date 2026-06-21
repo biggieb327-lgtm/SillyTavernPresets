@@ -2053,6 +2053,9 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
     """Generate a short in-character text to accompany a selfie."""
     uname = user_names.get(chat_id, "you")
     ctx = f"Mood right now: {_mood_vibe(chat_id)}."
+    outfit = wardrobe.get("current")
+    if outfit:
+        ctx += f" Currently wearing: {outfit}."
     if hint:
         ctx += f" The selfie is from: {hint}."
     messages = [
