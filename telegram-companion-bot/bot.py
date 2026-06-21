@@ -203,10 +203,6 @@ else:
     SELFIE_APPEARANCE = "an adult woman in her late 20s, the same person as in the reference photo"
 
 CARD_NAME = os.getenv("CHARACTER_CARD", "priya.json")
-CHAR2_CARD = os.getenv("CHARACTER_CARD_2", "")   # enables dual-character mode when set
-DUAL_MAX_TURNS = int(os.getenv("DUAL_MAX_TURNS", "8"))  # auto back-and-forth turns per user message
-CHAR1_STATE_SEED = os.getenv("CHAR1_STATE_SEED", "")    # path to another bot's state.json to seed char1 memory
-DUAL_MODE = bool(CHAR2_CARD)
 HEARTBEAT_MIN = float(os.getenv("HEARTBEAT_MIN_HOURS", "2")) * 3600  # random window low end
 HEARTBEAT_MAX = float(os.getenv("HEARTBEAT_MAX_HOURS", "6")) * 3600  # random window high end
 OWNER_CHAT_ID_ENV = os.getenv("OWNER_CHAT_ID")
@@ -400,19 +396,6 @@ if not card_path.exists():
 
 NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
 
-if DUAL_MODE:
-    card2_path = BASE_DIR / CHAR2_CARD
-    if not card2_path.exists():
-        available = [p.name for p in BASE_DIR.glob("*.json")]
-        raise SystemExit(
-            f"CHARACTER_CARD_2 '{CHAR2_CARD}' not found in {BASE_DIR}.\n"
-            f"Available .json files: {available}"
-        )
-    NAME2, SYSTEM_PROMPT2_RAW, POST_HISTORY2_RAW, LORE2, FIRST_MES2_RAW = load_character(card2_path)
-else:
-    NAME2 = SYSTEM_PROMPT2_RAW = POST_HISTORY2_RAW = FIRST_MES2_RAW = ""
-    LORE2 = []
-
 # --- State (in-memory, mirrored to disk so the character remembers across restarts) ---
 conversation_history = {}   # chat_id -> recent messages (verbatim window)
 last_seen = {}      # chat_id -> unix timestamp of last user activity
@@ -441,14 +424,6 @@ wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
-# Dual-character mode state
-dual_history: dict = {}            # chat_id -> [{character, content, ts}]
-dual_auto_turns: dict = {}         # chat_id -> int remaining auto-turns this round
-char2_summaries: dict = {}         # chat_id -> long-term summary for char2
-char2_facts: dict = {}             # chat_id -> durable facts for char2
-char2_recent_summaries: dict = {}  # chat_id -> recent summary for char2
-char2_recent_facts: dict = {}      # chat_id -> recent facts for char2
-char2_milestones: dict = {}        # chat_id -> milestones for char2
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -512,18 +487,6 @@ def load_state():
         voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
-    for cid, dh in data.get("dual_history", {}).items():
-        dual_history[int(cid)] = dh
-    for cid, s in data.get("char2_summaries", {}).items():
-        char2_summaries[int(cid)] = s
-    for cid, fl in data.get("char2_facts", {}).items():
-        char2_facts[int(cid)] = fl
-    for cid, s in data.get("char2_recent_summaries", {}).items():
-        char2_recent_summaries[int(cid)] = s
-    for cid, fl in data.get("char2_recent_facts", {}).items():
-        char2_recent_facts[int(cid)] = fl
-    for cid, ml in data.get("char2_milestones", {}).items():
-        char2_milestones[int(cid)] = ml
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -553,12 +516,6 @@ def save_state():
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
-        "dual_history": {str(k): v for k, v in dual_history.items()},
-        "char2_summaries": {str(k): v for k, v in char2_summaries.items()},
-        "char2_facts": {str(k): v for k, v in char2_facts.items()},
-        "char2_recent_summaries": {str(k): v for k, v in char2_recent_summaries.items()},
-        "char2_recent_facts": {str(k): v for k, v in char2_recent_facts.items()},
-        "char2_milestones": {str(k): v for k, v in char2_milestones.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -597,37 +554,6 @@ atexit.register(_release_pid_lock)
 
 
 load_state()
-
-
-def _apply_char1_seed():
-    """One-time: copy summary/facts/milestones from another bot's state.json into char1's memory.
-    Only runs when this bot has no existing memory (fresh instance) and CHAR1_STATE_SEED is set."""
-    if not CHAR1_STATE_SEED or summaries:
-        return
-    seed_path = Path(CHAR1_STATE_SEED).expanduser().resolve()
-    if not seed_path.exists():
-        log.warning("CHAR1_STATE_SEED path not found: %s", seed_path)
-        return
-    try:
-        seed = json.loads(seed_path.read_text(encoding="utf-8"))
-        for cid, s in seed.get("summaries", {}).items():
-            summaries[int(cid)] = s
-        for cid, fl in seed.get("facts", {}).items():
-            facts[int(cid)] = fl
-        for cid, s in seed.get("recent_summaries", {}).items():
-            recent_summaries[int(cid)] = s
-        for cid, fl in seed.get("recent_facts", {}).items():
-            recent_facts[int(cid)] = fl
-        for cid, ml in seed.get("milestones", {}).items():
-            milestones[int(cid)] = ml
-        save_state()
-        log.info("Seeded char1 memory from %s for %d chat(s).", seed_path, len(summaries))
-    except Exception as e:
-        log.warning("Could not apply CHAR1_STATE_SEED: %s", e)
-
-
-if DUAL_MODE:
-    _apply_char1_seed()
 
 
 # --- Inside jokes ---
@@ -708,11 +634,6 @@ VIBE_PROMPTS = {
     "playful":    ("Texting mode: playful. Light and bouncy. Jokes, teasing, a little unserious. "
                    "Nothing too heavy."),
     "chill":      ("Texting mode: chill. Laid-back. Unhurried. Low stakes. No interrogating."),
-    "in-person":  ("In-person mode: you are physically present with {{user}}, not texting. "
-                   "Physical presence matters — body language, eye contact, the space between you, "
-                   "the room. *Asterisk actions* are appropriate and welcome here. "
-                   "Dialogue flows naturally in real time, not in message bursts. "
-                   "Let the scene breathe. React to what you see and feel, not just what's said."),
 }
 
 
@@ -1533,224 +1454,6 @@ def memory_block(chat_id: int, uname: str) -> str:
         blocks.append("# What's been going on lately\n\n" + "\n\n".join(rparts))
 
     return "\n\n".join(blocks)
-
-
-# --- Dual-character mode helpers ---
-
-def dual_remember(chat_id: int, character: str, content: str):
-    """Append an entry to the dual conversation history."""
-    hist = dual_history.setdefault(chat_id, [])
-    hist.append({"character": character, "content": content, "ts": time.time()})
-    hard_cap = MAX_HISTORY * 4
-    if len(hist) > hard_cap:
-        del hist[:-hard_cap]
-    save_state()
-
-
-def _char2_memory_block(chat_id: int, uname: str) -> str:
-    """Memory block for char2, parallel to memory_block()."""
-    blocks = []
-    parts = []
-    summ = (char2_summaries.get(chat_id) or "").strip()
-    if summ:
-        parts.append(f"How you remember things with {uname} so far:\n{summ}")
-    fts = char2_facts.get(chat_id) or []
-    if fts:
-        parts.append(f"Things you know about {uname}:\n" + "\n".join("- " + f for f in fts))
-    if parts:
-        blocks.append("# What you remember\n\n" + "\n\n".join(parts))
-    rparts = []
-    rsumm = (char2_recent_summaries.get(chat_id) or "").strip()
-    if rsumm:
-        rparts.append(rsumm)
-    rfts = char2_recent_facts.get(chat_id) or []
-    if rfts:
-        rparts.append("Recent specifics:\n" + "\n".join("- " + f for f in rfts))
-    if rparts:
-        blocks.append("# What's been going on lately\n\n" + "\n\n".join(rparts))
-    return "\n\n".join(blocks)
-
-
-def _merge_same_role(msgs: list) -> list:
-    """Collapse consecutive same-role messages (OpenAI requires alternating user/assistant)."""
-    merged = []
-    for msg in msgs:
-        if merged and merged[-1]["role"] == msg["role"]:
-            merged[-1]["content"] += "\n\n" + msg["content"]
-        else:
-            merged.append({"role": msg["role"], "content": msg["content"]})
-    return merged
-
-
-def assemble_messages_dual(chat_id: int, for_char: str, latest_user_content: str = None):
-    """Build the OpenAI message list for one character's turn in a dual-character session.
-
-    for_char: 'char1' or 'char2'
-    latest_user_content: set on the user-triggered first turn; None for auto-turns
-    """
-    uname = user_names.get(chat_id, "you")
-    history = dual_history.get(chat_id, [])
-
-    if for_char == "char1":
-        sys_raw, post_raw, lore_list = SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE
-        char_name, other_name = NAME, NAME2
-        mem = memory_block(chat_id, uname)
-    else:
-        sys_raw, post_raw, lore_list = SYSTEM_PROMPT2_RAW, POST_HISTORY2_RAW, LORE2
-        char_name, other_name = NAME2, NAME
-        mem = _char2_memory_block(chat_id, uname)
-
-    messages = [{"role": "system", "content": fill(sys_raw, char_name, uname)}]
-
-    if SETTING:
-        messages.append({
-            "role": "system",
-            "content": "# Current setting\n" + fill(SETTING, char_name, uname),
-        })
-
-    messages.append({"role": "system", "content": (
-        f"You are texting with {uname} and {other_name} in a group chat. "
-        f"Stay fully in character as {char_name}. Respond to whoever last spoke — "
-        f"{uname}, {other_name}, or both. "
-        f"Do not prefix your message with your own name. "
-        f"Each message must move the conversation forward — add a new angle, question, "
-        f"observation, or reaction. Do not repeat or rephrase what was just said. "
-        f"Do not simply agree and affirm. Let the conversation go somewhere."
-    )})
-
-    if mem:
-        messages.append({"role": "system", "content": mem})
-
-    # Build history from this character's perspective:
-    # own messages → assistant; everything else (user + other char) → user with name label
-    raw_hist = []
-    for entry in history:
-        character = entry.get("character", "user")
-        content = entry.get("content", "")
-        if character == for_char:
-            raw_hist.append({"role": "assistant", "content": content})
-        elif character == "user":
-            raw_hist.append({"role": "user", "content": f"[{uname}]: {content}"})
-        else:
-            raw_hist.append({"role": "user", "content": f"[{other_name}]: {content}"})
-
-    messages.extend(_merge_same_role(raw_hist))
-
-    # Keyword-triggered lore
-    if lore_list and (history or latest_user_content):
-        scan = (latest_user_content or "") + " " + " ".join(
-            e.get("content", "") for e in history[-4:]
-        )
-        triggered = [e["content"] for e in lore_list
-                     if e.get("constant") or any(k in scan.lower() for k in e.get("keys", []))]
-        if triggered:
-            messages.append({"role": "system", "content":
-                             "# Relevant background\n\n" + fill("\n\n".join(triggered), char_name, uname)})
-
-    if post_raw:
-        messages.append({"role": "system", "content": fill(post_raw, char_name, uname)})
-
-    vibe = active_vibe(chat_id)
-    if vibe and vibe in VIBE_PROMPTS:
-        messages.append({"role": "system",
-                         "content": fill(VIBE_PROMPTS[vibe], char_name, uname)})
-
-    # Anti-repetition: show this character their own recent lines so they can avoid repeating them.
-    own_recent = [e["content"] for e in history[-8:] if e.get("character") == for_char]
-    if own_recent:
-        recent_txt = "\n".join(f'- "{c[:120]}"' for c in own_recent[-3:])
-        messages.append({"role": "system", "content": (
-            f"Your last {'message was' if len(own_recent) == 1 else 'messages were'}:\n{recent_txt}\n\n"
-            f"Do not repeat or rephrase these. Your next message must say something different — "
-            f"a new angle, a question you haven't asked, an observation you haven't made."
-        )})
-
-    if TEXTING_REALISM:
-        messages.append({"role": "system", "content": TEXTING_STYLE})
-
-    messages.append({"role": "system", "content": environment_note()})
-
-    if latest_user_content:
-        messages.append({"role": "user", "content": f"[{uname}]: {latest_user_content}"})
-
-    return messages
-
-
-async def _dual_auto_turn(context, chat_id: int, for_char: str):
-    """Generate and deliver one auto-turn in a dual-character session."""
-    remaining = dual_auto_turns.get(chat_id, 0)
-    if remaining <= 0:
-        return
-
-    char_name = NAME if for_char == "char1" else NAME2
-    next_char = "char2" if for_char == "char1" else "char1"
-
-    try:
-        messages = assemble_messages_dual(chat_id, for_char)
-        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
-        clean, _, _ = extract_tags(ai_response)
-        clean = _strip_slop(clean)
-        if not clean:
-            return
-        await context.bot.send_message(chat_id=chat_id, text=f"*{char_name}*",
-                                       parse_mode="Markdown")
-        await send_bubbles(context, chat_id, clean)
-        dual_remember(chat_id, for_char, clean)
-    except Exception as e:
-        log.error("[dual] %s auto-turn failed: %s", char_name, e)
-        return
-
-    dual_auto_turns[chat_id] = remaining - 1
-    if remaining - 1 > 0:
-        asyncio.create_task(_dual_auto_turn(context, chat_id, next_char))
-
-
-async def handle_message_dual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Message handler for dual-character (two-persona) mode."""
-    chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not _rate_ok(update.effective_user.id):
-        return
-
-    user_message = update.message.text
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
-
-    # Reset auto-turn counter; user message interrupts any in-progress auto round.
-    dual_auto_turns[chat_id] = DUAL_MAX_TURNS
-
-    try:
-        await ensure_weather()
-        # Char1 responds first (not yet in history — added after, matching the single-char pattern)
-        messages = assemble_messages_dual(chat_id, "char1", user_message)
-        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
-        clean, _, _ = extract_tags(ai_response)
-        clean = _strip_slop(clean)
-        # Record both user message and char1's reply before triggering char2
-        dual_remember(chat_id, "user", user_message)
-        dual_remember(chat_id, "char1", clean or ai_response)
-        if clean:
-            await context.bot.send_message(chat_id=chat_id, text=f"*{NAME}*",
-                                           parse_mode="Markdown")
-            await send_bubbles(context, chat_id, clean)
-        # Remaining turns alternate starting with char2.
-        # In-person vibe suppresses char2's auto-turns — user is in a private scene with char1.
-        dual_auto_turns[chat_id] = DUAL_MAX_TURNS - 1
-        in_person = active_vibe(chat_id) == "in-person"
-        if DUAL_MAX_TURNS > 1 and not in_person:
-            asyncio.create_task(_dual_auto_turn(context, chat_id, "char2"))
-    except requests.exceptions.HTTPError as e:
-        await update.message.reply_text(
-            f"⚠️ API Error: {e.response.status_code} — {e.response.text[:200]}"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Something went wrong: {str(e)}")
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
@@ -2627,24 +2330,12 @@ async def maintain_long_term_memory(chat_id: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     conversation_history[chat_id] = []
-    if DUAL_MODE:
-        dual_history[chat_id] = []
-        dual_auto_turns[chat_id] = 0
     last_seen[chat_id] = time.time()
     user_names[chat_id] = update.effective_user.first_name or "you"
     set_owner(chat_id)  # whoever starts becomes the heartbeat recipient
     save_state()
-    if DUAL_MODE:
-        uname = user_names[chat_id]
-        g1 = fill(FIRST_MES_RAW, NAME, uname) or f"Hi, I'm {NAME}."
-        g2 = fill(FIRST_MES2_RAW, NAME2, uname) or f"Hi, I'm {NAME2}."
-        await context.bot.send_message(chat_id=chat_id, text=f"*{NAME}*", parse_mode="Markdown")
-        await update.message.reply_text(g1)
-        await context.bot.send_message(chat_id=chat_id, text=f"*{NAME2}*", parse_mode="Markdown")
-        await update.message.reply_text(g2)
-    else:
-        greeting = fill(FIRST_MES_RAW, NAME, user_names[chat_id]) or f"Hi, I'm {NAME}."
-        await update.message.reply_text(greeting)
+    greeting = fill(FIRST_MES_RAW, NAME, user_names[chat_id]) or f"Hi, I'm {NAME}."
+    await update.message.reply_text(greeting)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2668,7 +2359,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/boundaries — list boundaries",
         "",
         "*Mood & modes*",
-        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill/in-person)",
+        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
         "",
@@ -4434,8 +4125,6 @@ def fetch_link(url: str):
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if DUAL_MODE:
-        return await handle_message_dual(update, context)
     chat_id = update.effective_chat.id
     if not _is_allowed(update.effective_user.id):
         return
