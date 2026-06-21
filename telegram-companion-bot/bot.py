@@ -1650,6 +1650,16 @@ def assemble_messages_dual(chat_id: int, for_char: str, latest_user_content: str
     if post_raw:
         messages.append({"role": "system", "content": fill(post_raw, char_name, uname)})
 
+    # Anti-repetition: show this character their own recent lines so they can avoid repeating them.
+    own_recent = [e["content"] for e in history[-8:] if e.get("character") == for_char]
+    if own_recent:
+        recent_txt = "\n".join(f'- "{c[:120]}"' for c in own_recent[-3:])
+        messages.append({"role": "system", "content": (
+            f"Your last {'message was' if len(own_recent) == 1 else 'messages were'}:\n{recent_txt}\n\n"
+            f"Do not repeat or rephrase these. Your next message must say something different — "
+            f"a new angle, a question you haven't asked, an observation you haven't made."
+        )})
+
     if TEXTING_REALISM:
         messages.append({"role": "system", "content": TEXTING_STYLE})
 
