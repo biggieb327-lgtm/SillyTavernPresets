@@ -708,6 +708,11 @@ VIBE_PROMPTS = {
     "playful":    ("Texting mode: playful. Light and bouncy. Jokes, teasing, a little unserious. "
                    "Nothing too heavy."),
     "chill":      ("Texting mode: chill. Laid-back. Unhurried. Low stakes. No interrogating."),
+    "in-person":  ("In-person mode: you are physically present with {{user}}, not texting. "
+                   "Physical presence matters — body language, eye contact, the space between you, "
+                   "the room. *Asterisk actions* are appropriate and welcome here. "
+                   "Dialogue flows naturally in real time, not in message bursts. "
+                   "Let the scene breathe. React to what you see and feel, not just what's said."),
 }
 
 
@@ -2646,7 +2651,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/boundaries — list boundaries",
         "",
         "*Mood & modes*",
-        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
+        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill/in-person)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
         "",
