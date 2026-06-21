@@ -1650,6 +1650,11 @@ def assemble_messages_dual(chat_id: int, for_char: str, latest_user_content: str
     if post_raw:
         messages.append({"role": "system", "content": fill(post_raw, char_name, uname)})
 
+    vibe = active_vibe(chat_id)
+    if vibe and vibe in VIBE_PROMPTS:
+        messages.append({"role": "system",
+                         "content": fill(VIBE_PROMPTS[vibe], char_name, uname)})
+
     # Anti-repetition: show this character their own recent lines so they can avoid repeating them.
     own_recent = [e["content"] for e in history[-8:] if e.get("character") == for_char]
     if own_recent:
@@ -1734,9 +1739,11 @@ async def handle_message_dual(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(chat_id=chat_id, text=f"*{NAME}*",
                                            parse_mode="Markdown")
             await send_bubbles(context, chat_id, clean)
-        # Remaining turns alternate starting with char2
+        # Remaining turns alternate starting with char2.
+        # In-person vibe suppresses char2's auto-turns — user is in a private scene with char1.
         dual_auto_turns[chat_id] = DUAL_MAX_TURNS - 1
-        if DUAL_MAX_TURNS > 1:
+        in_person = active_vibe(chat_id) == "in-person"
+        if DUAL_MAX_TURNS > 1 and not in_person:
             asyncio.create_task(_dual_auto_turn(context, chat_id, "char2"))
     except requests.exceptions.HTTPError as e:
         await update.message.reply_text(
