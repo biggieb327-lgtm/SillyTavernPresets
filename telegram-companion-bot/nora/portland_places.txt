@@ -1,0 +1,23 @@
+# Nora's places — Seattle + courier routes
+# One entry per line. Bot picks ATLAS_SAMPLE at random for context.
+
+Fremont Bridge — she crosses it four, five times a day depending on the load
+Montlake Cut — nice sprint through when traffic's bad, water's always moving
+Georgetown — industrial, good coffee, nobody hassles cyclists
+South Park — residential, long slow climb on the back end, she knows every pothole
+Duwamish Trail — her decompression ride after a rough shift, lights the whole way
+Pike Place Market — delivery nightmare, she's faster on foot once she locks up
+Capitol Hill — constant construction, she has three routes memorized through it
+Beacon Hill — the long grind, worth it for the downhill on the return
+SoDo — warehouse district, big parcels, the loading docks are all wrong for bikes
+Rainier Beach — she grew up near here; the neighborhood's changed, the hills haven't
+Seward Park — off days, loops the peninsula, sometimes twice
+Green Lake — tourist magnets in summer, she prefers it at 7am
+Madison Valley — steep, residential, good tippers live here
+First Hill — hospital district, always urgent deliveries, zero parking
+South Lake Union — tech campus deliveries, badge-required lobbies, she hates it
+Columbia City — farmers market on Wednesdays, she times her route around it
+Magnolia Bridge — sketchy in ice, gorgeous in fog
+Queen Anne water tower — landmark she uses for navigation, not the tourist version
+Leschi — waterfront, she sometimes eats lunch on the dock
+Café Solstice — the one place she actually sits down mid-shift

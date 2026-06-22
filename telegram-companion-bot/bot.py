@@ -1997,11 +1997,12 @@ async def maybe_auto_react(update, user_message: str):
 
 
 def _typing_delay_secs(text: str) -> float:
-    """Simulated typing delay: word count at TYPING_WPM, clamped to [min, max]."""
+    """Simulated typing delay: word count at TYPING_WPM, clamped to [min, max], ±20% jitter."""
     if not TYPING_DELAY:
         return 0.0
     words = max(1, len(text.split()))
     secs = (words / TYPING_WPM) * 60
+    secs *= random.uniform(0.8, 1.2)
     return max(TYPING_DELAY_MIN, min(TYPING_DELAY_MAX, secs))
 
 
@@ -2701,6 +2702,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/selfie [hint] — generate a selfie",
         "/selfimage — view her current self-image",
         "/reflect — trigger nightly reflection now",
+        "",
+        "*Day context*",
+        "/today <note> — append a mid-day note so she knows what's going on",
+        "/note <text> — manually add something to what she knows about you",
         "",
         "*Reminders & tasks*",
         "/remindme <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
@@ -3985,6 +3990,31 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         "\n(Save these — restore by copying them back into the bot folder.)")
     else:
         await update.message.reply_text("Nothing to back up yet.")
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Append a mid-day note to day.txt so the character picks it up in context."""
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        current = DAY_FILE.read_text(encoding="utf-8").strip() if DAY_FILE.exists() else "(empty)"
+        await update.message.reply_text(f"Current day context:\n{current}\n\nUsage: /today <note>")
+        return
+    with DAY_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"\n{text}")
+    _day_cache["text"] = None  # invalidate so next read picks it up
+    await update.message.reply_text(f"Added to today's context: {text}")
+
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually append a note about yourself to user_notes.txt."""
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        current = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else "(empty)"
+        await update.message.reply_text(f"Your notes:\n{current}\n\nUsage: /note <something you have going on>")
+        return
+    _append_user_note(text)
+    _user_notes_cache["text"] = None  # invalidate cache
+    await update.message.reply_text(f"Noted: {text}")
 
 
 async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
@@ -5453,6 +5483,8 @@ def main():
         app.add_handler(CommandHandler("remindpayments", remind_payments_now))
         app.add_handler(CommandHandler("week", remind_payments_now))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("setreminder", setreminder_cmd))
     app.add_handler(CommandHandler("reminders", list_reminders))
