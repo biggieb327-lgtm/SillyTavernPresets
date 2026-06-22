@@ -714,6 +714,10 @@ VIBE_PROMPTS = {
     "playful":    ("Texting mode: playful. Light and bouncy. Jokes, teasing, a little unserious. "
                    "Nothing too heavy."),
     "chill":      ("Texting mode: chill. Laid-back. Unhurried. Low stakes. No interrogating."),
+    "in-person":  ("Scene mode: you're physically in the same space right now, not texting. "
+                   "Write with action beats, body language, and sensory detail — what you're doing, "
+                   "how you react, the texture of being in the room together. "
+                   "Longer, more immersive responses are welcome."),
 }
 
 
@@ -2577,7 +2581,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         "*Mood & modes*",
         "/mood — check her current mood",
-        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
+        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill/in-person)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
         "",
