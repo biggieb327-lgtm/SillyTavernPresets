@@ -100,6 +100,8 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
+INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
+INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -1695,7 +1697,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None):
     """Build the OpenAI-style message list the way SillyTavern layers a card."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
@@ -1877,6 +1879,12 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         ]})
     else:
         messages.append({"role": "user", "content": latest_user_content})
+
+    if inner_voice:
+        messages.append({"role": "system", "content": (
+            f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
+        )})
+
     return messages
 
 
@@ -2042,6 +2050,39 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
     })
     return await reply_with_typing(context, chat_id, messages, model=model,
                                    fallback=fallback or FALLBACK_MODEL)
+
+
+async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> str:
+    """Private inner monologue — what the character notices and decides before she replies.
+    Deliberately isolated from the mood system: emotion acts subconsciously, not through here."""
+    recent = conversation_history.get(chat_id, [])[-6:]
+    history_snippet = "\n".join(
+        f"{'you' if m['role'] == 'assistant' else uname}: {m['content'][:150].strip()}"
+        for m in recent
+    )
+    sys_msg = (
+        f"You are {NAME}'s private inner voice — the layer behind the words, never seen by {uname}. "
+        f"Write 2-4 sentences of what {NAME} is privately noticing, weighing, or deciding "
+        f"after reading {uname}'s message. "
+        f"Perceptions and intentions only — not narrated feelings. "
+        f"What does she read in what he said? What does she want from this moment? "
+        f"What is she choosing to do or not do, and why? "
+        f"Be specific to who {NAME} is. Don't perform depth — just be in her head."
+    )
+    ctx_parts = [f"{NAME}'s character:\n{SYSTEM_PROMPT_RAW[:600]}"]
+    if history_snippet:
+        ctx_parts.append(f"Recent exchange:\n{history_snippet}")
+    ctx_parts.append(f"{uname} just said: {user_message}")
+    try:
+        result = await asyncio.to_thread(
+            call_nanogpt,
+            [{"role": "system", "content": sys_msg},
+             {"role": "user", "content": "\n\n".join(ctx_parts)}],
+            model=INNER_VOICE_MODEL,
+        )
+        return result.strip()
+    except Exception:
+        return ""
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -5088,7 +5129,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        messages = assemble_messages(chat_id, content_for_model)
+        inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id]) if INNER_VOICE_ENABLED else ""
+        messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
