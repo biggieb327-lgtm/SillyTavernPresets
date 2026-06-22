@@ -29,7 +29,7 @@ _session.mount("https://", HTTPAdapter(
     pool_maxsize=10,
 ))
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
@@ -115,6 +115,10 @@ LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
+TYPING_WPM = float(os.getenv("TYPING_WPM", "45"))
+TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "1.5"))
+TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "8.0"))
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -222,6 +226,141 @@ ATLAS = (
     if ATLAS_FILE.exists() else []
 )
 
+# --- Living character files (per-instance, user-maintained) ---
+# people.txt  — names + one-line relationship notes; sampled into generated events + context
+# projects.txt — ongoing projects/things spanning days or weeks; injected into context
+# schedule.txt — weekly routine by day name; today's section injected into context
+PEOPLE_FILE = BASE_DIR / "people.txt"
+PROJECTS_FILE = BASE_DIR / "projects.txt"
+SCHEDULE_FILE = BASE_DIR / "schedule.txt"
+LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
+_LIFE_TTL = 300  # re-read life files at most every 5 min
+_people_cache: dict = {"text": None, "ts": 0.0}
+_projects_cache: dict = {"text": None, "ts": 0.0}
+_life_arc_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_life_file(path: Path, cache: dict) -> str:
+    now = time.time()
+    if cache["text"] is not None and now - cache["ts"] < _LIFE_TTL:
+        return cache["text"]
+    try:
+        text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    except Exception:
+        text = ""
+    cache["text"] = text
+    cache["ts"] = now
+    return text
+
+
+def _read_people() -> str:
+    return _read_life_file(PEOPLE_FILE, _people_cache)
+
+
+def _read_projects() -> str:
+    return _read_life_file(PROJECTS_FILE, _projects_cache)
+
+
+def _read_life_arc() -> str:
+    return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
+
+
+def _read_schedule_today() -> str:
+    """Return today's section from schedule.txt (lines under today's day name)."""
+    if not SCHEDULE_FILE.exists():
+        return ""
+    try:
+        text = SCHEDULE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    today = (datetime.now(tz=TZ) if TZ else datetime.now()).strftime("%A")  # e.g. "Monday"
+    day_abbrevs = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    lines = text.splitlines()
+    result, in_today = [], False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_day_heading = any(stripped.lower().startswith(d) for d in day_abbrevs)
+        if is_day_heading:
+            if today.lower()[:3] in stripped.lower()[:3]:
+                in_today = True
+                result.append(stripped)
+            elif in_today:
+                break
+        elif in_today:
+            result.append(stripped)
+    return "\n".join(result).strip()
+
+# User memory — upcoming things the user mentions that the character should follow up on
+USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
+USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
+_USER_NOTES_TTL = 300
+_user_notes_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_user_notes() -> str:
+    now = time.time()
+    if _user_notes_cache["text"] is not None and now - _user_notes_cache["ts"] < _USER_NOTES_TTL:
+        return _user_notes_cache["text"]
+    try:
+        text = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    except Exception:
+        text = ""
+    _user_notes_cache["text"] = text
+    _user_notes_cache["ts"] = now
+    return text
+
+
+def _append_user_note(note: str):
+    note = note.strip()
+    if not note:
+        return
+    existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    if existing and note[:20].lower() in existing.lower():
+        return  # simple dedup
+    lines = [l for l in existing.splitlines() if l.strip()]
+    lines.append(note)
+    if len(lines) > USER_NOTES_MAX:
+        lines = lines[-USER_NOTES_MAX:]
+    USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+    _user_notes_cache["text"] = None  # invalidate cache
+
+
+def _extract_user_note(uname: str, user_message: str) -> str:
+    """Sync: return a brief upcoming-thing fact extracted from the user's message, or ''."""
+    sys = (
+        f"Does this message from {uname} mention something specific and upcoming — an event, "
+        f"appointment, deadline, worry, plan, or thing they're excited or nervous about that would "
+        f"be natural to ask about later? If yes, write a single brief note in the third person "
+        f"(e.g. 'has a job interview on Tuesday', 'nervous about a doctor's appointment next week', "
+        f"'excited about a trip next month'). If nothing notable, write: none"
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=MOOD_MODEL,
+        ).strip()
+        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        print("[user-notes] extraction failed:", e)
+    return ""
+
+
+async def update_user_notes(chat_id: int, user_message: str):
+    if len(user_message.split()) < 4:
+        return
+    uname = user_names.get(chat_id, "you")
+    try:
+        note = await asyncio.to_thread(_extract_user_note, uname, user_message)
+        if note:
+            _append_user_note(note)
+            print(f"[user-notes] added: {note}")
+    except Exception as e:
+        print("[user-notes] update failed:", e)
+
+
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
 ALLOWED_REACTIONS = {
     "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩",
@@ -283,7 +422,7 @@ WEATHER_CODES = {
 }
 
 _weather_cache = {"text": None, "ts": 0.0}
-WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
+WEATHER_TTL = 3600  # refresh live weather at most every hour
 
 # --- WSDOT Traffic (Western Washington) ---
 WSDOT_API_KEY       = os.getenv("WSDOT_API_KEY", "")
@@ -325,6 +464,26 @@ except Exception:
 
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
+
+# --- Day context file (day.txt) — editable throughout the day for continuity ---
+DAY_FILE = BASE_DIR / "day.txt"
+DAY_TTL = 300  # re-read at most every 5 minutes
+_day_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_day_context() -> str:
+    """Return the contents of day.txt, cached for DAY_TTL seconds."""
+    now = time.time()
+    if _day_cache["text"] is not None and now - _day_cache["ts"] < DAY_TTL:
+        return _day_cache["text"]
+    try:
+        text = DAY_FILE.read_text(encoding="utf-8").strip() if DAY_FILE.exists() else ""
+    except Exception:
+        text = ""
+    _day_cache["text"] = text
+    _day_cache["ts"] = now
+    return text
+
 
 # --- Nightly self-reflection (self-image + recommendation outcomes) ---
 REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
@@ -427,6 +586,7 @@ vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
+quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
@@ -494,6 +654,8 @@ def load_state():
         unsent_drafts[int(cid)] = ud
     for cid, nb in data.get("nudge_budget", {}).items():
         nudge_budget[int(cid)] = nb
+    for cid, qt in data.get("quiet_until", {}).items():
+        quiet_until[int(cid)] = qt
     for cid, vr in data.get("voice_reply", {}).items():
         voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
@@ -528,6 +690,7 @@ def save_state():
         "user_energy": {str(k): v for k, v in user_energy.items()},
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
+        "quiet_until": {str(k): v for k, v in quiet_until.items()},
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
@@ -651,6 +814,10 @@ VIBE_PROMPTS = {
     "playful":    ("Texting mode: playful. Light and bouncy. Jokes, teasing, a little unserious. "
                    "Nothing too heavy."),
     "chill":      ("Texting mode: chill. Laid-back. Unhurried. Low stakes. No interrogating."),
+    "in-person":  ("Scene mode: you're physically in the same space right now, not texting. "
+                   "Write with action beats, body language, and sensory detail — what you're doing, "
+                   "how you react, the texture of being in the room together. "
+                   "Longer, more immersive responses are welcome."),
 }
 
 
@@ -670,6 +837,16 @@ def active_vibe(chat_id: int) -> str:
 # --- Nudge budget ---
 def _today_str() -> str:
     return _today().isoformat()
+
+
+def _is_quiet(chat_id: int) -> bool:
+    """True if the user has /quiet active for this chat."""
+    ts = quiet_until.get(chat_id)
+    if ts and time.time() < ts:
+        return True
+    if ts:
+        quiet_until.pop(chat_id, None)  # expired, clean up
+    return False
 
 
 def _check_nudge_budget(chat_id: int) -> bool:
@@ -1155,20 +1332,24 @@ def mood_label(chat_id: int):
 
 
 def nudge_mood(chat_id: int, gap_hours):
-    """Update mood on contact: being reached out to lifts her; long silence stings."""
+    """Apply a mood penalty when re-contacting after a long silence.
+    Positive shifts come from the LLM appraisal, not unconditionally from contact."""
+    m = moods.setdefault(chat_id, {})
+    m["_gap_hours"] = gap_hours or 0  # stash for the appraisal to include as context
+    if not gap_hours or gap_hours <= 12:
+        return  # normal cadence — no penalty; appraisal handles the rest
+    penalty = min(1.8, (gap_hours - 12) / 12)
     cur = mood_now(chat_id)
-    delta = 0.4
-    if gap_hours is not None and gap_hours > 12:
-        delta -= min(1.8, (gap_hours - 12) / 12)
-    cur = max(-3.0, min(3.0, cur + delta))
-    m = moods.get(chat_id) or {}
-    m.update({"score": round(cur, 3), "ts": m.get("ts", time.time())})  # keep label + its age
-    moods[chat_id] = m
+    m["score"] = round(max(-3.0, cur - penalty), 3)
 
 
 def _appraise_mood(chat_id: int, convo_tail: str):
     """Cheap background pass: how does she feel right now, given what just happened?"""
     cur = moods.get(chat_id) or {}
+    gap_hours = cur.pop("_gap_hours", 0)  # consume the stashed gap before saving
+    gap_note = ""
+    if gap_hours > 4:
+        gap_note = f" Note: it's been {gap_hours:.0f}h since they last talked — factor the time gap into her state."
     sys = (
         f"You track {NAME}'s emotional state across a conversation. Given her current mood and "
         f"the latest exchange, output ONLY a JSON object:\n"
@@ -1179,7 +1360,7 @@ def _appraise_mood(chat_id: int, convo_tail: str):
         f"resetting to neutral. React to events in her life she mentions, things she reads, and the "
         f"emotional tone of the exchange. No prose, no code fences."
     )
-    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).\n\n"
+    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
             f"Latest exchange:\n{convo_tail}")
     raw = call_nanogpt(
         [{"role": "system", "content": sys}, {"role": "user", "content": user}],
@@ -1235,8 +1416,12 @@ def mood_note(chat_id: int) -> str:
     s = mood_now(chat_id)
     behavior = _mood_behavior(s)
     if label:
-        desc = f"feeling: {label}"
-    elif s >= 1.2:
+        # Label gives the specific WHY; behavior note gives the HOW. Together they're complete.
+        return (
+            f"# Mood\n{NAME} is currently: {label}. {behavior} "
+            f"Let this specific feeling shape her tone — don't announce it or explain the cause."
+        )
+    if s >= 1.2:
         desc = "settled and warm right now — a little more open than usual, the guard down a notch"
     elif s >= 0.4:
         desc = "in a decent place, comfortable and present"
@@ -1486,13 +1671,31 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": "# Current setting\n" + fill(SETTING, NAME, uname),
         })
 
+    # Stable character background: people in her life and ongoing projects.
+    people = _read_people()
+    if people:
+        messages.append({"role": "system", "content": f"# People in {NAME}'s life\n{people}"})
+
+    projects = _read_projects()
+    if projects:
+        messages.append({"role": "system", "content": (
+            f"# What {NAME} has going on / is working on\n{projects}"
+        )})
+
+    life_arc = _read_life_arc()
+    if life_arc:
+        messages.append({"role": "system", "content": (
+            f"# {NAME}'s current life arc\n{life_arc}\n"
+            f"Draw on this naturally in conversation — it's the texture of her life right now."
+        )})
+
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
         messages.append({
             "role": "system",
-            "content": (f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
-                        f"might naturally reference if it fits — don't force them, and don't "
-                        f"invent fake businesses when a real area works: " + ", ".join(picks) + "."),
+            "content": (f"# Local places\nReal spots {NAME} knows and might naturally reference "
+                        f"if it fits — don't force them, and don't invent fake businesses when "
+                        f"a real area works: " + ", ".join(picks) + "."),
         })
 
     cap_lines = [
@@ -1526,6 +1729,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     mem = memory_block(chat_id, uname)
     if mem:
         messages.append({"role": "system", "content": mem})
+
+    unotes = _read_user_notes()
+    if unotes:
+        messages.append({"role": "system", "content": (
+            f"# Things you know {uname} has going on\n{unotes}\n"
+            f"Ask about these naturally if one fits the moment — don't force it."
+        )})
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
@@ -1574,6 +1784,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
         )})
 
+    rq = _recent_questions.get(chat_id) or []
+    if rq:
+        messages.append({"role": "system", "content": (
+            f"# Questions you've recently asked {uname} — don't repeat these:\n"
+            + "\n".join("- " + q for q in rq[-5:])
+        )})
+
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
     lore = triggered_lore(scan_text)
     if lore:
@@ -1597,6 +1814,25 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
+
+    # Today's schedule section, if a schedule file exists for this instance.
+    sched = _read_schedule_today()
+    if sched:
+        messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
+
+    # What she looks like — so she can reference her own appearance naturally.
+    if SELFIE_APPEARANCE:
+        messages.append({"role": "system", "content": (
+            f"# Your appearance\n{SELFIE_APPEARANCE}"
+        )})
+
+    # Day context — what's been happening today; drives continuity across conversations.
+    day_ctx = _read_day_context()
+    if day_ctx:
+        messages.append({"role": "system", "content": (
+            f"# What's going on today\n{day_ctx}\n\n"
+            f"Let this color what you say when it fits — don't narrate it like a list."
+        )})
 
     if image_data_url:
         messages.append({"role": "user", "content": [
@@ -1812,8 +2048,32 @@ async def maybe_auto_react(update, user_message: str):
         print("[react-auto] failed:", e)
 
 
-async def send_bubbles(context, chat_id: int, text: str):
-    """Send a reply as a single message (chunked only if it exceeds Telegram's length limit)."""
+def _typing_delay_secs(text: str) -> float:
+    """Simulated typing delay: word count at TYPING_WPM, clamped to [min, max], ±20% jitter."""
+    if not TYPING_DELAY:
+        return 0.0
+    words = max(1, len(text.split()))
+    secs = (words / TYPING_WPM) * 60
+    secs *= random.uniform(0.8, 1.2)
+    return max(TYPING_DELAY_MIN, min(TYPING_DELAY_MAX, secs))
+
+
+async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0):
+    """Send a reply as a single message (chunked only if it exceeds Telegram's length limit).
+
+    pre_delay: hold the typing indicator for this many seconds before actually sending,
+    simulating realistic compose time. Pass _typing_delay_secs(text) from user-reply paths.
+    """
+    if pre_delay > 0:
+        typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
+        try:
+            await asyncio.sleep(pre_delay)
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
     for i in range(0, len(text), _TELEGRAM_MAX_LEN):
         chunk = text[i:i + _TELEGRAM_MAX_LEN]
         for attempt in range(3):
@@ -1909,7 +2169,35 @@ SELFIE_CAMERA = [
 ]
 
 
-def _mood_vibe(chat_id: int) -> str:
+def _weather_outdoor_ok() -> bool:
+    """Return False if current weather makes outdoor selfie shots implausible."""
+    text = (_weather_cache.get("text") or "").lower()
+    if not text:
+        return True
+    bad = ("rain", "snow", "sleet", "storm", "thunder", "drizzle", "showers", "hail", "fog")
+    return not any(w in text for w in bad)
+
+
+def _weather_camera_pool() -> list:
+    """Filter SELFIE_CAMERA to presets consistent with current weather and time of day."""
+    text = (_weather_cache.get("text") or "").lower()
+    hour = (datetime.now(TZ) if TZ else datetime.now()).hour
+    is_daytime = 7 <= hour < 20
+    is_sunny = any(w in text for w in ("clear", "sunny")) and is_daytime
+    is_overcast = any(w in text for w in ("cloud", "overcast", "fog", "rain", "snow", "storm", "drizzle"))
+    filtered = []
+    for cam in SELFIE_CAMERA:
+        if is_overcast and any(s in cam for s in ("golden-hour", "bright daylight", "crisp and bright")):
+            continue
+        if is_daytime and is_sunny and "lamplight" in cam:
+            continue
+        if is_daytime and "screen glow" in cam:
+            continue
+        filtered.append(cam)
+    return filtered or SELFIE_CAMERA
+
+
+
     label = mood_label(chat_id)
     if label:
         return label
@@ -1949,7 +2237,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
-        activity = random.choice(SELFIE_ACTIVITIES)
+        if _weather_outdoor_ok():
+            activity = random.choice(SELFIE_ACTIVITIES)
+        else:
+            indoor = [a for a in SELFIE_ACTIVITIES if a not in SELFIE_OUTDOOR_ACTIVITIES]
+            activity = random.choice(indoor)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
     current_fit = wardrobe.get("current")
@@ -1966,14 +2258,23 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
-    bits.append(f"Photo look: {random.choice(SELFIE_CAMERA)}.")
+    bits.append(f"Photo look: {random.choice(_weather_camera_pool())}.")
     if _weather_cache["text"]:
-        bits.append(f"Lighting matches the weather and time of day: {_weather_cache['text']}.")
+        bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
+                    f"atmosphere, and what she might be wearing — don't describe the weather "
+                    f"explicitly, just let it show.")
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
         "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
         "watermarks, or captions in the image."
     )
+    if chat_id is not None:
+        recent_scenes = (_recent_selfie_hints.get(chat_id) or [])[-4:]
+        if recent_scenes:
+            bits.append(
+                "Vary the scenario — avoid recreating these recent setups: "
+                + "; ".join(f'"{s}"' for s in recent_scenes) + "."
+            )
     return " ".join(bits)
 
 
@@ -2004,7 +2305,19 @@ def _get_with_retries(url, **kwargs):
             time.sleep(2 * (attempt + 1))
 
 
+_GEMINI_STRIP = re.compile(
+    r"\b(no\s+bra|braless|no\s+underwear|without\s+a?\s*bra|topless|bare\s+chest(ed)?|"
+    r"nipples?\s+visible|see[\s-]?through\s+top|sheer\s+top)\b",
+    re.IGNORECASE,
+)
+
+
+def _gemini_safe(prompt: str) -> str:
+    return _GEMINI_STRIP.sub("", prompt).strip()
+
+
 def _generate_selfie_gemini(prompt: str) -> bytes:
+    prompt = _gemini_safe(prompt)
     parts = []
     if _has_base_image():
         raw, mime = _base_image()
@@ -2074,6 +2387,30 @@ async def _keep_uploading(bot, chat_id: int):
         pass
 
 
+async def _selfie_caption(hint: str, chat_id: int) -> str:
+    """Generate a short in-character text to accompany a selfie."""
+    uname = user_names.get(chat_id, "you")
+    ctx = f"Mood right now: {_mood_vibe(chat_id)}."
+    outfit = wardrobe.get("current")
+    if outfit:
+        ctx += f" Currently wearing: {outfit}."
+    if hint:
+        ctx += f" The selfie is from: {hint}."
+    messages = [
+        {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)},
+        {"role": "user", "content": (
+            f"You just took a selfie and you're sending it. {ctx} "
+            "Write one short casual text to go with it — 1-2 sentences max. "
+            "Don't describe the photo. Don't open with 'here' or 'here you go'. "
+            "Don't announce that you're sending a photo. Just be yourself."
+        )},
+    ]
+    try:
+        return (await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)).strip()
+    except Exception:
+        return ""
+
+
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
@@ -2087,8 +2424,19 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
         prompt = build_selfie_prompt(hint, chat_id)
+        caption_task = asyncio.create_task(_selfie_caption(hint, chat_id))
         img = await asyncio.to_thread(generate_selfie_image, prompt)
-        await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img))
+        caption = await caption_task
+        await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img),
+                                     caption=caption or None)
+        # Log the scene to the dedup buffer so it isn't repeated soon
+        scene_note = (hint.strip() if hint else prompt[prompt.find("She's "):prompt.find("She's ")+60]).strip()
+        if not scene_note:
+            scene_note = prompt[:80]
+        buf = _recent_selfie_hints.setdefault(chat_id, [])
+        buf.append(scene_note)
+        if len(buf) > SELFIE_DEDUP_SIZE:
+            buf.pop(0)
     except Exception as e:
         print("[selfie] failed:", e)
         if announce_errors:
@@ -2157,9 +2505,10 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         f"memory she could recall and recount — what's been going on lately with {uname}, how it "
         f"felt, what's current (<= 150 words). Integrate the previous summary with the new "
         f"messages into one continuous recollection, not a list of events.\n"
-        f'  "facts": a list of specific, recent things about {uname} and what\'s going on -- '
-        f"events, jokes, current situations, things mentioned recently. Merge with the prior "
-        f"facts, keep them all, avoid duplicates.\n"
+        f'  "facts": a curated list of specific, meaningful things about {uname} — events, '
+        f"current situations, inside jokes, things worth carrying forward. Merge with the prior "
+        f"facts; keep what a person would actually remember and care about (skip generic filler "
+        f"or purely transient observations); drop duplicates.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
     user = f"EXISTING MEMORY:\n{existing}\n\nNEW MESSAGES:\n{convo}"
@@ -2371,12 +2720,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — reset and restart",
         "/clear — wipe conversation history",
         "/menu — open the inline button menu",
+        "/status — quick view: mood, outfit, today's context, last chat",
         "",
         "*Memory*",
         "/memory — view what I remember",
         "/remember <fact> — save a fact",
-        "/forget — wipe all memory",
+        "/forget — wipe all memory (or /forget <keyword> to remove matching facts)",
+        "/recall <keyword> — search memory for a keyword",
         "/exportmemory — export full memory as text",
+        "/milestones — view relationship milestones",
         "/pin <fact> — pin something I always carry",
         "/pinned — list pinned memories",
         "/unpin <n> — remove a pinned memory",
@@ -2384,7 +2736,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/boundaries — list boundaries",
         "",
         "*Mood & modes*",
-        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
+        "/mood — check her current mood",
+        "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill/in-person)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
         "",
@@ -2401,6 +2754,21 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/selfie [hint] — generate a selfie",
         "/selfimage — view her current self-image",
         "/reflect — trigger nightly reflection now",
+        "",
+        "*Day context*",
+        "/life [text] — view or replace her current life arc (what she has going on long-term)",
+        "/life add <text> — append a line to the life arc",
+        "/people [text] — view or replace people in her life",
+        "/people add <text> — append a person/note",
+        "/projects [text] — view or replace her ongoing projects",
+        "/projects add <text> — append a project",
+        "/schedule [text] — view or replace her weekly schedule",
+        "/schedule add <text> — append a schedule entry",
+        "/today <note> — append a mid-day note so she knows what's going on",
+        "/note <text> — manually add something to what she knows about you",
+        "/notes — list your notes numbered; /notes del <n> to remove one; /notes clear to wipe",
+        "/recap — brief summary of the last conversation",
+        "/quiet <h> — pause proactive messages for X hours (/quiet off to cancel)",
         "",
         "*Reminders & tasks*",
         "/remindme <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
@@ -2690,6 +3058,49 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Summary:\n{rsumm}\n\n"
         f"Facts:\n{rfacts_txt}"
     )
+
+
+async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    label = mood_label(chat_id)
+    s = mood_now(chat_id)
+    m = moods.get(chat_id) or {}
+    ts = m.get("ts", 0)
+    if ts:
+        age_h = (time.time() - ts) / 3600
+        age_str = f"{int(age_h * 60)}m ago" if age_h < 1 else f"{age_h:.1f}h ago"
+    else:
+        age_str = "unknown"
+    if label:
+        state = f'"{label}"'
+    elif s >= 1.2:
+        state = "settled and warm"
+    elif s >= 0.4:
+        state = "comfortable and present"
+    elif s > -0.4:
+        state = "neutral"
+    elif s > -1.2:
+        state = "on edge, quieter than usual"
+    else:
+        state = "withdrawn and flat"
+    filled = max(0, round((s + 3) / 6 * 10))
+    bar = "█" * filled + "░" * (10 - filled)
+    await update.message.reply_text(
+        f"😶 {NAME}'s mood\n\n{state}\nScore: {s:+.1f}  [{bar}]\nLast updated: {age_str}"
+    )
+
+
+async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    ms_list = milestones.get(chat_id) or []
+    if not ms_list:
+        await update.message.reply_text("No milestones recorded yet.")
+        return
+    lines = []
+    for i, m in enumerate(ms_list, 1):
+        ts = datetime.fromtimestamp(m["ts"], tz=TZ) if TZ else datetime.fromtimestamp(m["ts"])
+        lines.append(f"{i}. {m['text']}  ({ts.strftime('%b %d, %Y')})")
+    await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
 async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3307,12 +3718,54 @@ async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    summaries[chat_id] = ""
-    facts[chat_id] = []
-    recent_summaries[chat_id] = ""
-    recent_facts[chat_id] = []
+    keyword = " ".join(context.args).strip().lower() if context.args else ""
+    if not keyword:
+        summaries[chat_id] = ""
+        facts[chat_id] = []
+        recent_summaries[chat_id] = ""
+        recent_facts[chat_id] = []
+        save_state()
+        await update.message.reply_text("🧹 Long-term and recent memory wiped (current chat kept).")
+        return
+    removed = 0
+    for store in (facts, recent_facts):
+        old = store.get(chat_id) or []
+        new = [f for f in old if keyword not in f.lower()]
+        removed += len(old) - len(new)
+        store[chat_id] = new
     save_state()
-    await update.message.reply_text("🧹 Long-term and recent memory wiped (current chat kept).")
+    if removed:
+        await update.message.reply_text(f"🧹 Removed {removed} fact(s) matching \"{keyword}\".")
+    else:
+        await update.message.reply_text(f"Nothing found matching \"{keyword}\".")
+
+
+async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search facts and summaries for a keyword and show matches."""
+    chat_id = update.effective_chat.id
+    keyword = " ".join(context.args).strip().lower() if context.args else ""
+    if not keyword:
+        await update.message.reply_text("Usage: /recall <keyword>")
+        return
+    hits = []
+    for f in (facts.get(chat_id) or []):
+        if keyword in f.lower():
+            hits.append(f"[fact] {f}")
+    for f in (recent_facts.get(chat_id) or []):
+        if keyword in f.lower():
+            hits.append(f"[recent] {f}")
+    summ = (summaries.get(chat_id) or "").strip()
+    if summ and keyword in summ.lower():
+        hits.append(f"[summary] {summ[:300]}{'…' if len(summ) > 300 else ''}")
+    rsumm = (recent_summaries.get(chat_id) or "").strip()
+    if rsumm and keyword in rsumm.lower():
+        hits.append(f"[recent summary] {rsumm[:300]}{'…' if len(rsumm) > 300 else ''}")
+    if hits:
+        await update.message.reply_text(
+            f"🔍 Found {len(hits)} match(es) for \"{keyword}\":\n\n" + "\n\n".join(hits)
+        )
+    else:
+        await update.message.reply_text(f"Nothing found for \"{keyword}\".")
 
 
 async def addpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3606,6 +4059,232 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing to back up yet.")
 
 
+async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Summarize recent conversation, including rolled-up history if available."""
+    chat_id = update.effective_chat.id
+    uname = user_names.get(chat_id, "you")
+    hist = conversation_history.get(chat_id, [])
+    rolling = (recent_summaries.get(chat_id) or "").strip()
+    if not hist and not rolling:
+        await update.message.reply_text("Nothing to recap yet.")
+        return
+    parts = []
+    if rolling:
+        parts.append(f"BACKGROUND (older conversation):\n{rolling}")
+    if hist:
+        recent = hist[-20:]
+        convo = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in recent
+        )
+        parts.append(f"RECENT MESSAGES:\n{convo}")
+    sys_msg = (
+        f"Give a 2-3 sentence plain-text recap of the conversation between {NAME} and {uname} "
+        f"based on the material below. Cover what they've talked about and any meaningful moments. "
+        f"No headers, no bullets, no markdown."
+    )
+    raw = call_nanogpt(
+        [{"role": "system", "content": sys_msg}, {"role": "user", "content": "\n\n".join(parts)}],
+        model=MOOD_MODEL,
+    )
+    await update.message.reply_text(raw.strip() or "Nothing to recap.")
+
+
+async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause proactive messages for X hours (/quiet 3h) or cancel (/quiet off)."""
+    chat_id = update.effective_chat.id
+    arg = (context.args[0].strip().lower() if context.args else "").rstrip("h").strip()
+    if arg in ("off", "cancel", "0", ""):
+        if quiet_until.pop(chat_id, None):
+            save_state()
+            await update.message.reply_text("Proactive messages back on.")
+        else:
+            ts = quiet_until.get(chat_id)
+            if ts and time.time() < ts:
+                remaining = int((ts - time.time()) / 60)
+                await update.message.reply_text(
+                    f"Quiet mode active for ~{remaining} more min. Send /quiet off to cancel."
+                )
+            else:
+                await update.message.reply_text(
+                    "Quiet mode is off. Use /quiet <hours> (e.g. /quiet 3) to pause proactives."
+                )
+        return
+    try:
+        hours = float(arg)
+        if hours <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Usage: /quiet <hours>  e.g. /quiet 3  |  /quiet off to cancel")
+        return
+    quiet_until[chat_id] = time.time() + hours * 3600
+    save_state()
+    await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
+
+
+async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or update the character's life arc (life.txt).
+    /life          — show current content
+    /life <text>   — replace with new arc description
+    /life add <text> — append a line to the existing arc
+    """
+    args = context.args or []
+    if not args:
+        current = LIFE_ARC_FILE.read_text(encoding="utf-8").strip() if LIFE_ARC_FILE.exists() else "(empty)"
+        await update.message.reply_text(
+            f"Current life arc:\n{current}\n\n"
+            f"Usage:\n/life <text> — replace\n/life add <text> — append"
+        )
+        return
+    if args[0].lower() == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /life add <text>")
+            return
+        with LIFE_ARC_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n{text}")
+        _life_arc_cache["text"] = None
+        await update.message.reply_text(f"Added to life arc: {text}")
+    else:
+        text = " ".join(args).strip()
+        LIFE_ARC_FILE.write_text(text, encoding="utf-8")
+        _life_arc_cache["text"] = None
+        await update.message.reply_text(f"Life arc updated: {text}")
+
+
+def _context_file_cmd(file: "Path", cache: dict, label: str):
+    """Return an (args, file, cache, label) handler body factory — shared logic for /people, /projects."""
+    async def _cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args or []
+        if not args:
+            current = file.read_text(encoding="utf-8").strip() if file.exists() else "(empty)"
+            await update.message.reply_text(
+                f"*{label}:*\n{current}\n\n"
+                f"/{label.lower()} <text> — replace\n/{label.lower()} add <text> — append",
+                parse_mode="Markdown",
+            )
+            return
+        if args[0].lower() == "add":
+            text = " ".join(args[1:]).strip()
+            if not text:
+                await update.message.reply_text(f"Usage: /{label.lower()} add <text>")
+                return
+            with file.open("a", encoding="utf-8") as f:
+                f.write(f"\n{text}")
+            cache["text"] = None
+            await update.message.reply_text(f"{label} updated (added): {text}")
+        else:
+            text = " ".join(args).strip()
+            file.write_text(text, encoding="utf-8")
+            cache["text"] = None
+            await update.message.reply_text(f"{label} updated: {text}")
+    return _cmd
+
+
+people_cmd = _context_file_cmd(PEOPLE_FILE, _people_cache, "People")
+projects_cmd = _context_file_cmd(PROJECTS_FILE, _projects_cache, "Projects")
+
+
+async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or edit schedule.txt from Telegram.
+    /schedule          — show full schedule
+    /schedule <text>   — replace entire schedule
+    /schedule add <text> — append a line
+    """
+    args = context.args or []
+    if not args:
+        current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
+        await update.message.reply_text(
+            f"*Schedule:*\n{current}\n\n"
+            f"/schedule <text> — replace\n/schedule add <text> — append",
+            parse_mode="Markdown",
+        )
+        return
+    if args[0].lower() == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /schedule add <text>")
+            return
+        with SCHEDULE_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n{text}")
+        await update.message.reply_text(f"Schedule updated (added): {text}")
+    else:
+        text = " ".join(args).strip()
+        SCHEDULE_FILE.write_text(text, encoding="utf-8")
+        await update.message.reply_text(f"Schedule updated.")
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Append a mid-day note to day.txt so the character picks it up in context."""
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        current = DAY_FILE.read_text(encoding="utf-8").strip() if DAY_FILE.exists() else "(empty)"
+        await update.message.reply_text(f"Current day context:\n{current}\n\nUsage: /today <note>")
+        return
+    with DAY_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"\n{text}")
+    _day_cache["text"] = None  # invalidate so next read picks it up
+    await update.message.reply_text(f"Added to today's context: {text}")
+
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually append a note about yourself to user_notes.txt."""
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        current = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else "(empty)"
+        await update.message.reply_text(f"Your notes:\n{current}\n\nUsage: /note <something you have going on>")
+        return
+    _append_user_note(text)
+    _user_notes_cache["text"] = None  # invalidate cache
+    await update.message.reply_text(f"Noted: {text}")
+
+
+async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View and manage user_notes.txt entries.
+    /notes           — list numbered
+    /notes del <n>   — delete entry n
+    /notes clear     — wipe all
+    """
+    args = context.args or []
+    existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    lines = [l for l in existing.splitlines() if l.strip()]
+
+    if not args:
+        if not lines:
+            await update.message.reply_text("No notes yet. Use /note <text> to add one.")
+            return
+        numbered = "\n".join(f"{i+1}. {l}" for i, l in enumerate(lines))
+        await update.message.reply_text(
+            f"*Your notes:*\n{numbered}\n\n/notes del <n> to remove one",
+            parse_mode="Markdown",
+        )
+        return
+
+    if args[0].lower() == "clear":
+        USER_NOTES_FILE.write_text("", encoding="utf-8")
+        _user_notes_cache["text"] = None
+        await update.message.reply_text("Notes cleared.")
+        return
+
+    if args[0].lower() == "del":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /notes del <n>")
+            return
+        try:
+            idx = int(args[1]) - 1
+            if not (0 <= idx < len(lines)):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(f"Invalid number. You have {len(lines)} note(s).")
+            return
+        removed = lines.pop(idx)
+        USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+        _user_notes_cache["text"] = None
+        await update.message.reply_text(f"Removed: {removed}")
+        return
+
+    await update.message.reply_text("Usage: /notes | /notes del <n> | /notes clear")
+
+
 async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if owner is None or _today().weekday() != BACKUP_WEEKDAY:
@@ -3763,6 +4442,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         await _deliver(update, context, chat_id, transcript, ai_response)
+        # Log a note about the voice message so it's preserved in memory
+        ts = datetime.now(tz=TZ).strftime("%b %d")
+        snippet = transcript[:150] + ("…" if len(transcript) > 150 else "")
+        voice_fact = f"[{ts}] Voice note: \"{snippet}\""
+        rfts = recent_facts.setdefault(chat_id, [])
+        rfts.append(voice_fact)
+        if len(rfts) > RECENT_FACTS_MAX:
+            rfts.pop(0)
+        save_state()
     except Exception as e:
         log.error("Voice handler error: %s", e)
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
@@ -3887,6 +4575,28 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
+PDF_MAX_SIZE_MB = int(os.getenv("PDF_MAX_SIZE_MB", "20"))
+PDF_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "16000"))
+
+
+def _extract_pdf_text(raw_bytes: bytes) -> str:
+    """Extract plain text from a PDF using pypdf. Returns empty string on failure."""
+    try:
+        from pypdf import PdfReader
+        from io import BytesIO
+        reader = PdfReader(BytesIO(raw_bytes))
+        pages = []
+        for page in reader.pages:
+            t = (page.extract_text() or "").strip()
+            if t:
+                pages.append(t)
+        return "\n\n".join(pages)
+    except ImportError:
+        raise RuntimeError("pypdf is not installed — run: pip install pypdf")
+    except Exception as e:
+        raise RuntimeError(f"PDF read failed: {e}")
+
+
 def _format_json_for_prompt(data: dict, fname: str) -> str:
     """Return a readable text block describing a JSON file."""
     if data.get("spec") in ("chara_card_v2", "chara_card_v3"):
@@ -3925,8 +4635,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fname = (doc.file_name or "") if doc else ""
     log.info("Document received: %s (mime: %s)", fname, getattr(doc, "mime_type", "?"))
 
-    if not fname.lower().endswith(".json"):
-        return  # not a JSON file — let it fall through silently
+    is_pdf  = fname.lower().endswith(".pdf") or getattr(doc, "mime_type", "") == "application/pdf"
+    is_json = fname.lower().endswith(".json")
+
+    if not is_pdf and not is_json:
+        return  # unsupported file type — let it fall through silently
 
     if not _is_allowed(update.effective_user.id):
         return
@@ -3942,6 +4655,49 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         return
 
+    caption = (getattr(update.message, "caption", None) or "").strip()
+    uname = user_names[chat_id]
+
+    # --- PDF branch ---
+    if is_pdf:
+        if not fname:
+            fname = "document.pdf"
+        size_limit = PDF_MAX_SIZE_MB * 1024 * 1024
+        if doc.file_size and doc.file_size > size_limit:
+            await context.bot.send_message(chat_id=chat_id,
+                text=f"[that PDF is too big — max {PDF_MAX_SIZE_MB} MB]")
+            return
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        try:
+            tg_file = await context.bot.get_file(doc.file_id)
+            raw_bytes = bytes(await tg_file.download_as_bytearray())
+            pdf_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
+        except Exception as e:
+            log.error("PDF download/read error: %s", e)
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
+            return
+        if not pdf_text.strip():
+            await context.bot.send_message(chat_id=chat_id,
+                text="[couldn't extract any text from that PDF — it may be image-only or encrypted]")
+            return
+        if len(pdf_text) > PDF_MAX_CHARS:
+            pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
+        lead = caption or f"I sent you a PDF — {fname}. Take a look."
+        user_prompt = f"{lead}\n\n[PDF contents]\n{pdf_text}"
+        user_mem = f"[sent PDF: {fname}] {caption}".strip()
+        try:
+            await ensure_weather()
+            messages = assemble_messages(chat_id, user_prompt)
+            ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+            ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                             model=DOCUMENT_MODEL)
+            await _deliver(update, context, chat_id, user_mem, ai_response)
+        except Exception as e:
+            log.error("PDF handler reply error: %s", e)
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        return
+
+    # --- JSON branch ---
     if doc.file_size and doc.file_size > DOCUMENT_MAX_SIZE_MB * 1024 * 1024:
         await context.bot.send_message(chat_id=chat_id,
             text=f"[file's too big — max {DOCUMENT_MAX_SIZE_MB}MB for JSON]")
@@ -3950,7 +4706,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     if not fname:
         fname = "file.json"
-    caption = (getattr(update.message, "caption", None) or "").strip()
 
     try:
         tg_file = await context.bot.get_file(doc.file_id)
@@ -3966,7 +4721,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     formatted = _format_json_for_prompt(data, fname)
-    uname = user_names[chat_id]
 
     is_card = data.get("spec") in ("chara_card_v2", "chara_card_v3")
     if is_card:
@@ -3981,10 +4735,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if caption:
         lead = caption
 
-    # Full content goes in as the user message so it's saved to history
-    # and available in follow-up turns without re-sending the file.
     user_prompt = f"{lead}\n\n{formatted}"
-    user_mem = user_prompt  # persists full content in conversation history
+    user_mem = user_prompt
 
     try:
         await ensure_weather()
@@ -4042,15 +4794,34 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         except Exception as e:
             print("[react] failed:", e)
     if clean:
-        await send_bubbles(context, chat_id, clean)
+        await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
         if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if inside_jokes and clean:
         _check_joke_used(clean)
+    if clean:
+        q = _extract_last_question(clean)
+        if q and len(q) > 12:
+            buf = _recent_questions.setdefault(chat_id, [])
+            buf.append(q)
+            if len(buf) > QUESTION_MEMORY_SIZE:
+                buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
+    if user_memory_text and not user_memory_text.startswith("["):
+        asyncio.create_task(update_user_notes(chat_id, user_memory_text))
+    if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
+        existing = _pending_followup.pop(chat_id, None)
+        if existing:
+            try:
+                existing.schedule_removal()
+            except Exception:
+                pass
+        delay = random.uniform(FOLLOWUP_MIN, FOLLOWUP_MAX)
+        _pending_followup[chat_id] = context.job_queue.run_once(_send_followup, when=delay, data=chat_id)
+        print(f"[followup] scheduled in {delay:.0f}s for chat {chat_id}")
     return reacted
 
 
@@ -4168,19 +4939,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_owner(chat_id)
         save_state()
 
+    # Cancel any pending follow-up — user replied before it fired
+    existing = _pending_followup.pop(chat_id, None)
+    if existing:
+        try:
+            existing.schedule_removal()
+        except Exception:
+            pass
+
     try:
         await ensure_weather()
         content_for_model = user_message
+
+        # If the user is quote-replying to one of our messages via Telegram's reply UI,
+        # inject the quoted text explicitly — especially important for heartbeat messages
+        # that may have been compressed out of the verbatim history window.
+        replied_to = getattr(update.message, "reply_to_message", None)
+        if replied_to and getattr(replied_to.from_user, "is_bot", False):
+            quoted = (replied_to.text or replied_to.caption or "").strip()
+            if quoted and len(quoted) > 5:
+                recent = conversation_history.get(chat_id, [])[-6:]
+                in_recent = any(quoted[:80] in (m.get("content") or "") for m in recent)
+                if not in_recent:
+                    content_for_model = (
+                        f'[replying to your message: "{quoted[:250]}"]\n{user_message}'
+                    )
+
         if LINK_READING:
             link = _URL_RE.search(user_message)
             if link:
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 fetched = await asyncio.to_thread(fetch_link, link.group(0))
                 if fetched:
-                    content_for_model = (user_message + "\n\n[Content of the link they shared — "
+                    content_for_model = (content_for_model + "\n\n[Content of the link they shared — "
                                          "read it and react in character:\n" + fetched + "\n]")
                 else:
-                    content_for_model = user_message + "\n\n[You tried to open that link but couldn't.]"
+                    content_for_model = content_for_model + "\n\n[You tried to open that link but couldn't.]"
+
+        # Gap-aware opener: when user returns after a long absence, note it this turn only.
+        if gap_hours > GAP_AWARE_HOURS:
+            gap_str = (f"{round(gap_hours)}h" if gap_hours < 48 else f"{round(gap_hours / 24)}d")
+            content_for_model += (
+                f"\n[Note: it's been about {gap_str} since you two last talked. "
+                f"If it fits, acknowledge the gap naturally — brief, not a big deal.]"
+            )
+
+        # Lull detection: track consecutive terse replies and nudge a course-change.
+        if _is_terse(user_message):
+            _terse_count[chat_id] = _terse_count.get(chat_id, 0) + 1
+        else:
+            _terse_count[chat_id] = 0
+        if _terse_count.get(chat_id, 0) >= LULL_THRESHOLD:
+            _terse_count[chat_id] = 0
+            content_for_model += (
+                "\n[Note: they've been giving short responses for a few messages. "
+                "Try shifting gears — bring up something new, check in on how they're doing, "
+                "or let the conversation breathe. Don't push harder on the current thread.]"
+            )
+
         messages = assemble_messages(chat_id, content_for_model)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -4193,6 +5009,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Something went wrong: {str(e)}")
+
+
+async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
+    """Background task: describe a received photo in one sentence and add it to recent_facts."""
+    try:
+        desc_prompt = (
+            "In one concise sentence, describe what you see in this photo — the people, "
+            "setting, mood, or notable details. Just describe what's there, no interpretation."
+        )
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": desc_prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]}]
+        desc = await asyncio.to_thread(_one_call, messages, VISION_MODEL)
+        desc = _strip_thinking(desc).strip().strip('"')
+        if desc:
+            ts = datetime.now(tz=TZ).strftime("%b %d")
+            fact = f"[{ts}] Photo received: {desc}"
+            if caption:
+                fact += f' (caption: "{caption}")'
+            rfts = recent_facts.setdefault(chat_id, [])
+            rfts.append(fact)
+            if len(rfts) > RECENT_FACTS_MAX:
+                rfts.pop(0)
+            save_state()
+            print(f"[photo-memory] {fact[:100]}")
+    except Exception as e:
+        print("[photo-memory] failed:", e)
+
+
+async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: follow up after the bot said 'hold on / brb / give me a sec'."""
+    chat_id = context.job.data
+    _pending_followup.pop(chat_id, None)
+    uname = user_names.get(chat_id, "you")
+    trigger = (
+        f"[SYSTEM: A minute or two ago you told {uname} to hold on or that you'd be right back. "
+        f"Follow up now — whatever you were checking or doing, come back to it naturally and "
+        f"briefly, the way you'd pick up your phone after stepping away. "
+        f"Don't repeat phrases like 'hold on' or apologize for the wait unless it feels right.]"
+    )
+    try:
+        await send_triggered(context, chat_id, trigger)
+    except Exception as e:
+        print(f"[followup] error for chat {chat_id}:", e)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4225,6 +5086,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_mem = f"[sent a photo] {caption}".strip()
         await _deliver(update, context, chat_id, user_mem, ai_response)
+        asyncio.create_task(_log_photo_memory(chat_id, data_url, caption))
         if selfie_ready() and random.random() < PHOTO_SELFIE_CHANCE:
             await send_selfie(context, chat_id, "", announce_errors=False)
     except requests.exceptions.HTTPError as e:
@@ -4232,6 +5094,42 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
         await send_bubbles(context, chat_id, f"❌ Couldn't look at that one: {str(e)}")
+
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """React in character to a sticker the user sent."""
+    chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+    sticker = update.message.sticker
+    emoji = sticker.emoji or ""
+    name = sticker.set_name or ""
+    desc = emoji
+    if name:
+        desc = f"{emoji} (sticker from set: {name})" if emoji else f"sticker from set: {name}"
+    uname = user_names[chat_id]
+    prompt = (
+        f"[{uname} sent you a sticker: {desc}. "
+        f"React naturally in character — a brief, genuine response to the sticker's vibe. "
+        f"No need to describe the sticker; just respond to what it expresses.]"
+    )
+    try:
+        await ensure_weather()
+        messages = assemble_messages(chat_id, prompt)
+        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        user_mem = f"[sent a sticker: {desc}]"
+        reacted = await _deliver(update, context, chat_id, user_mem, ai_response)
+        if REACTIONS_AUTO and not reacted:
+            asyncio.create_task(maybe_auto_react(update, emoji or "sticker"))
+    except Exception as e:
+        print(f"[sticker] error:", e)
 
 
 # --- Proactive heartbeat ---
@@ -4263,6 +5161,46 @@ PROACTIVE_SELFIE_CHANCE = 0.15
 # After she reacts to a photo the user sends, chance she fires back a selfie of her own.
 PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 
+# Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
+# brief follow-up message after a short delay, as if she actually went and came back.
+_FOLLOWUP_RE = re.compile(
+    r"\b(hold on|hold up|give me a (sec|second|minute|min)|brb|be right back"
+    r"|wait a (sec|second|minute|min)|one (sec|second|minute|min)"
+    r"|gimme a (sec|second|minute)|just a (sec|second|minute)"
+    r"|back in a (sec|second|minute|bit)"
+    r"|let me (check|look|see|grab|find)|gonna (check|look|grab)"
+    r"|give me a moment|one moment)\b",
+    re.IGNORECASE,
+)
+FOLLOWUP_MIN = float(os.getenv("FOLLOWUP_MIN_SECS", "45"))
+FOLLOWUP_MAX = float(os.getenv("FOLLOWUP_MAX_SECS", "120"))
+_pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user replies first)
+
+# Selfie scene deduplication — avoids repeating the same scenario in back-to-back selfies.
+SELFIE_DEDUP_SIZE = int(os.getenv("SELFIE_DEDUP_SIZE", "6"))
+_recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
+
+# Question memory — tracks questions the bot has asked recently; avoids repeating them.
+QUESTION_MEMORY_SIZE = int(os.getenv("QUESTION_MEMORY_SIZE", "8"))
+_recent_questions: dict = {}  # chat_id -> list of recent questions
+
+_QUESTION_RE = re.compile(r"[^.!?…]*\?")  # quick sentence-level question extractor
+
+
+def _extract_last_question(text: str) -> str:
+    matches = _QUESTION_RE.findall(text)
+    return matches[-1].strip() if matches else ""
+
+# Lull detection: consecutive terse replies trigger a gentle approach shift.
+_terse_count: dict = {}  # chat_id -> int
+LULL_THRESHOLD = int(os.getenv("LULL_THRESHOLD", "3"))
+
+def _is_terse(text: str) -> bool:
+    return len(text.strip()) <= 15
+
+# Gap-aware opener: when user returns after a long absence, note it in that turn's context.
+GAP_AWARE_HOURS = float(os.getenv("GAP_AWARE_HOURS", "12"))
+
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
     """Generate and deliver an unprompted message from a [SYSTEM: ...] trigger (no user message to react to)."""
@@ -4272,6 +5210,10 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     clean, _reaction, selfie_hint = extract_tags(text)
+    # Store a synthetic user entry so conversation history maintains proper user/assistant
+    # alternation. Without it, two consecutive assistant turns confuse some models when
+    # the user replies and the history is dumped into the next request.
+    remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
     if clean:
         await send_bubbles(context, chat_id, clean)
@@ -4282,9 +5224,98 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     return text
 
 
+def _todays_memory_note(chat_id: int) -> str:
+    """Check if today matches a notable stored date (birthday, anniversary, milestone first)."""
+    today = datetime.now(tz=TZ) if TZ else datetime.now()
+    # Match "Jun 22", "june 22", "6/22", "06/22" style patterns
+    fmt_long = today.strftime("%b %d").lower()       # "jun 22"
+    fmt_slash = f"{today.month}/{today.day}"         # "6/22"
+    fmt_slash0 = today.strftime("%m/%d")             # "06/22"
+    date_tokens = {fmt_long, fmt_slash, fmt_slash0}
+    recurring_keywords = {"birthday", "anniversary", "born", "together", "first", "met"}
+
+    hits = []
+    for f in (facts.get(chat_id) or []) + (recent_facts.get(chat_id) or []):
+        fl = f.lower()
+        if any(tok in fl for tok in date_tokens):
+            if any(k in fl for k in recurring_keywords):
+                hits.append(f.strip())
+    for m in (milestones.get(chat_id) or []):
+        ms_dt = datetime.fromtimestamp(m["ts"], tz=TZ) if TZ else datetime.fromtimestamp(m["ts"])
+        if ms_dt.month == today.month and ms_dt.day == today.day and ms_dt.year != today.year:
+            hits.append(f"today is the anniversary of: {m['text']}")
+
+    if hits:
+        return " Important: today is a significant date — " + "; ".join(hits[:3]) + ". Reference it naturally if you reach out."
+    return ""
+
+
+def _generate_proactive_hook(chat_id: int, uname: str) -> str:
+    """Sync: one-sentence seed of what the character has on her mind right now.
+    Draws on life arc, weather, user notes, and recent conversation."""
+    parts = []
+    life_arc = _read_life_arc()
+    if life_arc:
+        parts.append(f"{NAME}'s life right now: {life_arc[:300]}")
+    weather = (_weather_cache.get("text") or "").strip()
+    if weather:
+        parts.append(f"Current weather: {weather}")
+    unotes = _read_user_notes()
+    if unotes:
+        parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    recent = conversation_history.get(chat_id, [])[-4:]
+    if recent:
+        snippet = " / ".join(
+            f"{'her' if m['role'] == 'assistant' else uname}: {m['content'][:80].strip()}"
+            for m in recent
+        )
+        parts.append(f"Last exchange: {snippet}")
+    if not parts:
+        return ""
+    sys_msg = (
+        f"You are helping {NAME} decide what to text {uname}. "
+        f"Based on the context below, write ONE short sentence (10-20 words) describing "
+        f"something specific that is genuinely on {NAME}'s mind right now — "
+        f"a thought, observation, or thing she'd naturally bring up. "
+        f"Be concrete. No filler. No quotes around the sentence."
+    )
+    try:
+        return call_nanogpt(
+            [{"role": "system", "content": sys_msg},
+             {"role": "user", "content": "\n".join(parts)}],
+            model=MOOD_MODEL,
+        ).strip()
+    except Exception:
+        return ""
+
+
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
+    hook = await asyncio.to_thread(_generate_proactive_hook, chat_id, uname)
+    if hook:
+        trigger = trigger[:-1] + f" Something specific on her mind right now: {hook}]"
+    # Inject the last exchange so the model can actually reference what was last discussed,
+    # rather than defaulting to a generic check-in.
+    recent = conversation_history.get(chat_id, [])[-4:]
+    if recent:
+        snippet = " / ".join(
+            f"{'you' if m['role'] == 'assistant' else uname}: {m['content'][:100].strip()}"
+            for m in recent
+        )
+        trigger = trigger[:-1] + (
+            f" Last exchange for context (use it naturally if it fits, don't recap it): {snippet}]"
+        )
+    # Inject a note if today is a special date stored in memory
+    date_note = _todays_memory_note(chat_id)
+    if date_note:
+        trigger = trigger[:-1] + date_note + "]"
+    sched_today = _read_schedule_today()
+    if sched_today:
+        trigger = trigger[:-1] + (
+            f" What she's got going on today: {sched_today[:200]}."
+            f" If something from it fits the reach-out naturally, draw on it.]"
+        )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
@@ -4408,6 +5439,9 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         _save_draft(owner, "wanted to check in but it was quiet hours")
         print("[heartbeat] Quiet hours; saved draft.")
         return
+    if _is_quiet(owner):
+        print("[heartbeat] User /quiet active; skipping.")
+        return
     if not _check_nudge_budget(owner):
         _save_draft(owner, "had something to say but hit the daily nudge limit")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
@@ -4444,6 +5478,20 @@ async def heartbeat_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Heartbeat failed: {str(e)}")
 
 
+def _overnight_mood_reset(chat_id: int):
+    """Nightly: gently drift negative moods toward neutral — sleep softens a bad day."""
+    s = mood_now(chat_id)
+    if s >= 0:
+        return  # positive moods don't need nudging
+    m = moods.get(chat_id) or {}
+    m["score"] = round(s * 0.45, 3)  # pull roughly halfway toward 0
+    m.pop("label", None)  # stale label — let the next exchange set a fresh one
+    m.pop("_gap_hours", None)
+    moods[chat_id] = m
+    save_state()
+    print(f"[mood] overnight reset: {s:+.2f} -> {m['score']:+.2f} for chat {chat_id}")
+
+
 async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if owner is None:
@@ -4456,6 +5504,7 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await maintain_long_term_memory(owner)
     except Exception as e:
         print("[memory] long-term promotion error:", e)
+    _overnight_mood_reset(owner)
 
 
 async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4465,6 +5514,143 @@ async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🪞 Reflection done.")
     except Exception as e:
         await update.message.reply_text(f"❌ Reflection failed: {str(e)}")
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick dashboard: mood, outfit, today's context, and time since last message."""
+    chat_id = update.effective_chat.id
+    lines = [f"*{NAME} — status*", ""]
+
+    label = mood_label(chat_id)
+    s = mood_now(chat_id)
+    filled = max(0, round((s + 3) / 6 * 10))
+    bar = "█" * filled + "░" * (10 - filled)
+    mood_str = f"{label}  " if label else ""
+    lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
+
+    outfit = wardrobe.get("current")
+    if outfit:
+        lines.append(f"*Wearing:* {outfit}")
+
+    life_arc = _read_life_arc()
+    if life_arc:
+        snippet = life_arc[:150] + ("…" if len(life_arc) > 150 else "")
+        lines.append(f"*Life arc:* {snippet}")
+
+    day_ctx = _read_day_context()
+    if day_ctx:
+        snippet = day_ctx[:150] + ("…" if len(day_ctx) > 150 else "")
+        lines.append(f"*Today:* {snippet}")
+
+    unotes = _read_user_notes()
+    if unotes:
+        snippet = unotes[:150] + ("…" if len(unotes) > 150 else "")
+        lines.append(f"*About you:* {snippet}")
+
+    weather = (_weather_cache.get("text") or "").strip()
+    if weather:
+        lines.append(f"*Weather:* {weather}")
+
+    qt = quiet_until.get(chat_id)
+    if qt and time.time() < qt:
+        remaining = int((qt - time.time()) / 60)
+        lines.append(f"*Quiet mode:* {remaining}m remaining")
+
+    last = last_seen.get(chat_id, 0)
+    if last:
+        gap = time.time() - last
+        if gap < 120:
+            gap_str = "just now"
+        elif gap < 3600:
+            gap_str = f"{round(gap / 60)}m ago"
+        elif gap < 86400:
+            gap_str = f"{round(gap / 3600)}h ago"
+        else:
+            gap_str = f"{round(gap / 86400)}d ago"
+        lines.append(f"*Last chat:* {gap_str}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _generate_daily_events(owner: int):
+    """Generate 2-3 small life events for the day using the character's people, projects,
+    and schedule as seeds. Writes the result to day.txt so it's ready when she texts."""
+    try:
+        people = _read_people()
+        projects = _read_projects()
+        schedule_today = _read_schedule_today()
+        await ensure_weather()
+        weather = (_weather_cache.get("text") or "").strip()
+
+        ctx_parts = []
+        if schedule_today:
+            ctx_parts.append(f"Her schedule today: {schedule_today}")
+        if weather:
+            ctx_parts.append(f"Weather: {weather}")
+        if projects:
+            ctx_parts.append(f"Ongoing things in her life:\n{projects}")
+        if people:
+            ctx_parts.append(f"People in her life:\n{people}")
+
+        ctx_block = "\n\n".join(ctx_parts)
+        prompt = (
+            f"Write 2-3 small, specific things that happen to {NAME} today. "
+            f"Think ordinary texture of a real day — not dramatic, just the kind of mundane "
+            f"or mildly interesting thing that actually happens to a person. "
+            f"Each one: 1-2 sentences, written as a terse personal note (not a diary entry). "
+            f"Reference her actual people and projects naturally when they fit — don't force them."
+            + (f"\n\n{ctx_block}" if ctx_block else "")
+            + "\n\nWrite only the events, no headers, bullets, or numbering."
+        )
+        msgs = [
+            {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
+            {"role": "user", "content": prompt},
+        ]
+        events = await asyncio.to_thread(_one_call, msgs, SUMMARY_MODEL)
+        events = _strip_thinking(events).strip()
+        if events:
+            DAY_FILE.write_text(events, encoding="utf-8")
+            _day_cache["text"] = events
+            _day_cache["ts"] = time.time()
+            print(f"[day-events] {NAME}: {events[:100]}…")
+    except Exception as e:
+        print(f"[day-events] failed: {e}")
+
+
+async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
+    """Midnight job: archive today's day.txt to memory + a dated file, then generate
+    tomorrow's events so she starts the new day with a populated context."""
+    day_ctx = _read_day_context()
+    owner = get_owner()
+    yesterday = (datetime.now(tz=TZ) if TZ else datetime.now()) - timedelta(days=1)
+    date_str = yesterday.strftime("%Y-%m-%d")
+    if day_ctx:
+        # Archive to a dated file so the day isn't lost
+        archive = BASE_DIR / f"day_{date_str}.txt"
+        try:
+            archive.write_text(day_ctx, encoding="utf-8")
+        except Exception as e:
+            print(f"[day-rotate] archive failed: {e}")
+        # Save a compact memory fact so it persists through summarization
+        if owner is not None:
+            fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
+            rfts = recent_facts.setdefault(owner, [])
+            rfts.append(fact)
+            if len(rfts) > RECENT_FACTS_MAX:
+                rfts.pop(0)
+            save_state()
+        print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
+    # Generate fresh events for the new day (writes to day.txt, clears cache implicitly)
+    if owner is not None:
+        await _generate_daily_events(owner)
+    else:
+        # No owner yet — just clear the file
+        try:
+            DAY_FILE.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        _day_cache["text"] = ""
+        _day_cache["ts"] = time.time()
 
 
 async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4718,6 +5904,71 @@ def _acquire_termux_wake_lock():
             log.warning("Could not acquire Termux wake lock: %s", e)
 
 
+_BASE_COMMANDS = [
+    BotCommand("help", "Show all commands"),
+    BotCommand("start", "Reset and restart"),
+    BotCommand("clear", "Wipe conversation history"),
+    BotCommand("menu", "Open the inline button menu"),
+    BotCommand("status", "Quick status: mood, outfit, today's context"),
+    BotCommand("memory", "View what I remember"),
+    BotCommand("remember", "Save a fact"),
+    BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
+    BotCommand("recall", "Search memory for a keyword"),
+    BotCommand("exportmemory", "Export full memory as text"),
+    BotCommand("milestones", "View relationship milestones"),
+    BotCommand("pin", "Pin something I always carry"),
+    BotCommand("pinned", "List pinned memories"),
+    BotCommand("unpin", "Remove a pinned memory"),
+    BotCommand("boundary", "Add a soft boundary note"),
+    BotCommand("boundaries", "List boundaries"),
+    BotCommand("mood", "Check her current mood"),
+    BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
+    BotCommand("vent", "Toggle vent mode (listening only)"),
+    BotCommand("energy", "Set your energy level (high/low/crash)"),
+    BotCommand("selfie", "Generate a selfie"),
+    BotCommand("selfimage", "View current self-image"),
+    BotCommand("reflect", "Trigger nightly reflection now"),
+    BotCommand("addjoke", "Add an inside joke"),
+    BotCommand("jokes", "List inside jokes"),
+    BotCommand("deljoke", "Remove a joke"),
+    BotCommand("wardrobe", "List outfits"),
+    BotCommand("addoutfit", "Add an outfit"),
+    BotCommand("outfit", "Set current outfit"),
+    BotCommand("deloutfit", "Remove an outfit"),
+    BotCommand("remindme", "One-off reminder (30m, 2h, 18:30…)"),
+    BotCommand("setreminder", "Daily recurring reminder"),
+    BotCommand("reminders", "List reminders"),
+    BotCommand("delreminder", "Remove a reminder"),
+    BotCommand("cron", "Add a recurring scheduled task"),
+    BotCommand("crons", "List recurring tasks"),
+    BotCommand("crondel", "Remove a recurring task"),
+    BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("heartbeat", "Trigger a proactive message now"),
+    BotCommand("voice", "Toggle voice replies on/off"),
+    BotCommand("model", "Show current model"),
+    BotCommand("setmodel", "Change a model setting"),
+    BotCommand("settings", "Show current settings"),
+    BotCommand("usage", "Token usage stats"),
+    BotCommand("chatid", "Show your chat ID"),
+    BotCommand("backup", "Download a memory backup"),
+]
+
+_PAYMENT_COMMANDS = [
+    BotCommand("addpayment", "Add a monthly bill"),
+    BotCommand("addevery", "Add a recurring bill every N days"),
+    BotCommand("payments", "List all bills"),
+    BotCommand("delpayment", "Remove a bill"),
+    BotCommand("editpayment", "Edit a bill field"),
+    BotCommand("week", "Payment summary for this week"),
+    BotCommand("remindpayments", "Trigger payment reminder now"),
+]
+
+
+async def _register_commands(application):
+    cmds = _BASE_COMMANDS + (_PAYMENT_COMMANDS if PAYMENTS_ENABLED else [])
+    await application.bot.set_my_commands(cmds)
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -4729,12 +5980,14 @@ def main():
         .write_timeout(30)
         .pool_timeout(30)
         .get_updates_read_timeout(40)
+        .post_init(_register_commands)
         .build()
     )
 
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
@@ -4745,8 +5998,10 @@ def main():
     app.add_handler(CommandHandler("selfie", selfie_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
+    app.add_handler(CommandHandler("milestones", milestones_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
+    app.add_handler(CommandHandler("recall", recall_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
@@ -4758,6 +6013,15 @@ def main():
         app.add_handler(CommandHandler("remindpayments", remind_payments_now))
         app.add_handler(CommandHandler("week", remind_payments_now))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("recap", recap_cmd))
+    app.add_handler(CommandHandler("quiet", quiet_cmd))
+    app.add_handler(CommandHandler("life", life_cmd))
+    app.add_handler(CommandHandler("people", people_cmd))
+    app.add_handler(CommandHandler("projects", projects_cmd))
+    app.add_handler(CommandHandler("schedule", schedule_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("note", note_cmd))
+    app.add_handler(CommandHandler("notes", notes_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("setreminder", setreminder_cmd))
     app.add_handler(CommandHandler("reminders", list_reminders))
@@ -4770,6 +6034,7 @@ def main():
     app.add_handler(CommandHandler("unpin", unpin_cmd))
     app.add_handler(CommandHandler("boundary", boundary_cmd))
     app.add_handler(CommandHandler("boundaries", boundaries_cmd))
+    app.add_handler(CommandHandler("mood", mood_cmd))
     app.add_handler(CommandHandler("vibe", vibe_cmd))
     app.add_handler(CommandHandler("vent", vent_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
@@ -4785,6 +6050,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -4818,6 +6084,9 @@ def main():
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
         app.job_queue.run_daily(reflection_job, time=reflection_time)
         log.info("Nightly reflection scheduled %s.", REFLECTION_TIME)
+        midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
+        app.job_queue.run_daily(_rotate_day_context, time=midnight)
+        log.info("Day context rotation scheduled at midnight.")
         for r in reminders:
             schedule_reminder(app.job_queue, r)
         if reminders:

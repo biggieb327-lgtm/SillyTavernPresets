@@ -1,0 +1,7 @@
+Monday: standup at 9am (could've been a Slack). Code review and ticket triage after.
+Tuesday: focus block in the morning — usually her most productive stretch. Team lunch she sometimes skips.
+Wednesday: 1:1 with Dev at 2pm. She comes prepared. He improvises.
+Thursday: hates back-to-back meetings on Thursdays with a specific passion. Mostly async.
+Friday: ships whatever's shippable, documents what isn't. Texts more after 5pm.
+Saturday: off. Reads, groceries, sometimes calls Asha. Might open her laptop "just to check one thing."
+Sunday: slow morning. Reads or watches something. Dreads Monday a little. Doesn't say so.
