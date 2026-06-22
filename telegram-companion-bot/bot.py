@@ -2737,8 +2737,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/people add <text> — append a person/note",
         "/projects [text] — view or replace her ongoing projects",
         "/projects add <text> — append a project",
+        "/schedule [text] — view or replace her weekly schedule",
+        "/schedule add <text> — append a schedule entry",
         "/today <note> — append a mid-day note so she knows what's going on",
         "/note <text> — manually add something to what she knows about you",
+        "/notes — list your notes numbered; /notes del <n> to remove one; /notes clear to wipe",
         "/recap — brief summary of the last conversation",
         "/quiet <h> — pause proactive messages for X hours (/quiet off to cancel)",
         "",
@@ -4152,6 +4155,35 @@ people_cmd = _context_file_cmd(PEOPLE_FILE, _people_cache, "People")
 projects_cmd = _context_file_cmd(PROJECTS_FILE, _projects_cache, "Projects")
 
 
+async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or edit schedule.txt from Telegram.
+    /schedule          — show full schedule
+    /schedule <text>   — replace entire schedule
+    /schedule add <text> — append a line
+    """
+    args = context.args or []
+    if not args:
+        current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
+        await update.message.reply_text(
+            f"*Schedule:*\n{current}\n\n"
+            f"/schedule <text> — replace\n/schedule add <text> — append",
+            parse_mode="Markdown",
+        )
+        return
+    if args[0].lower() == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /schedule add <text>")
+            return
+        with SCHEDULE_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n{text}")
+        await update.message.reply_text(f"Schedule updated (added): {text}")
+    else:
+        text = " ".join(args).strip()
+        SCHEDULE_FILE.write_text(text, encoding="utf-8")
+        await update.message.reply_text(f"Schedule updated.")
+
+
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Append a mid-day note to day.txt so the character picks it up in context."""
     text = " ".join(context.args).strip() if context.args else ""
@@ -4175,6 +4207,53 @@ async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _append_user_note(text)
     _user_notes_cache["text"] = None  # invalidate cache
     await update.message.reply_text(f"Noted: {text}")
+
+
+async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View and manage user_notes.txt entries.
+    /notes           — list numbered
+    /notes del <n>   — delete entry n
+    /notes clear     — wipe all
+    """
+    args = context.args or []
+    existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    lines = [l for l in existing.splitlines() if l.strip()]
+
+    if not args:
+        if not lines:
+            await update.message.reply_text("No notes yet. Use /note <text> to add one.")
+            return
+        numbered = "\n".join(f"{i+1}. {l}" for i, l in enumerate(lines))
+        await update.message.reply_text(
+            f"*Your notes:*\n{numbered}\n\n/notes del <n> to remove one",
+            parse_mode="Markdown",
+        )
+        return
+
+    if args[0].lower() == "clear":
+        USER_NOTES_FILE.write_text("", encoding="utf-8")
+        _user_notes_cache["text"] = None
+        await update.message.reply_text("Notes cleared.")
+        return
+
+    if args[0].lower() == "del":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /notes del <n>")
+            return
+        try:
+            idx = int(args[1]) - 1
+            if not (0 <= idx < len(lines)):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(f"Invalid number. You have {len(lines)} note(s).")
+            return
+        removed = lines.pop(idx)
+        USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+        _user_notes_cache["text"] = None
+        await update.message.reply_text(f"Removed: {removed}")
+        return
+
+    await update.message.reply_text("Usage: /notes | /notes del <n> | /notes clear")
 
 
 async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
@@ -5142,9 +5221,51 @@ def _todays_memory_note(chat_id: int) -> str:
     return ""
 
 
+def _generate_proactive_hook(chat_id: int, uname: str) -> str:
+    """Sync: one-sentence seed of what the character has on her mind right now.
+    Draws on life arc, weather, user notes, and recent conversation."""
+    parts = []
+    life_arc = _read_life_arc()
+    if life_arc:
+        parts.append(f"{NAME}'s life right now: {life_arc[:300]}")
+    weather = (_weather_cache.get("text") or "").strip()
+    if weather:
+        parts.append(f"Current weather: {weather}")
+    unotes = _read_user_notes()
+    if unotes:
+        parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    recent = conversation_history.get(chat_id, [])[-4:]
+    if recent:
+        snippet = " / ".join(
+            f"{'her' if m['role'] == 'assistant' else uname}: {m['content'][:80].strip()}"
+            for m in recent
+        )
+        parts.append(f"Last exchange: {snippet}")
+    if not parts:
+        return ""
+    sys_msg = (
+        f"You are helping {NAME} decide what to text {uname}. "
+        f"Based on the context below, write ONE short sentence (10-20 words) describing "
+        f"something specific that is genuinely on {NAME}'s mind right now — "
+        f"a thought, observation, or thing she'd naturally bring up. "
+        f"Be concrete. No filler. No quotes around the sentence."
+    )
+    try:
+        return call_nanogpt(
+            [{"role": "system", "content": sys_msg},
+             {"role": "user", "content": "\n".join(parts)}],
+            model=MOOD_MODEL,
+        ).strip()
+    except Exception:
+        return ""
+
+
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
+    hook = await asyncio.to_thread(_generate_proactive_hook, chat_id, uname)
+    if hook:
+        trigger = trigger[:-1] + f" Something specific on her mind right now: {hook}]"
     # Inject the last exchange so the model can actually reference what was last discussed,
     # rather than defaulting to a generic check-in.
     recent = conversation_history.get(chat_id, [])[-4:]
@@ -5396,6 +5517,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if unotes:
         snippet = unotes[:150] + ("…" if len(unotes) > 150 else "")
         lines.append(f"*About you:* {snippet}")
+
+    weather = (_weather_cache.get("text") or "").strip()
+    if weather:
+        lines.append(f"*Weather:* {weather}")
 
     qt = quiet_until.get(chat_id)
     if qt and time.time() < qt:
@@ -5666,8 +5791,10 @@ def main():
     app.add_handler(CommandHandler("life", life_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("projects", projects_cmd))
+    app.add_handler(CommandHandler("schedule", schedule_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
+    app.add_handler(CommandHandler("notes", notes_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("setreminder", setreminder_cmd))
     app.add_handler(CommandHandler("reminders", list_reminders))
