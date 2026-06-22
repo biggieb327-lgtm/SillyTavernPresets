@@ -415,7 +415,7 @@ WEATHER_CODES = {
 }
 
 _weather_cache = {"text": None, "ts": 0.0}
-WEATHER_TTL = 900  # refresh live weather at most every 15 minutes
+WEATHER_TTL = 3600  # refresh live weather at most every hour
 
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
