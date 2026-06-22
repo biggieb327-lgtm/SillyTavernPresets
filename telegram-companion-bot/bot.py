@@ -2731,6 +2731,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reflect — trigger nightly reflection now",
         "",
         "*Day context*",
+        "/life [text] — view or replace her current life arc (what she has going on long-term)",
+        "/life add <text> — append a line to the life arc",
         "/today <note> — append a mid-day note so she knows what's going on",
         "/note <text> — manually add something to what she knows about you",
         "/recap — brief summary of the last conversation",
@@ -4075,6 +4077,36 @@ async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiet_until[chat_id] = time.time() + hours * 3600
     save_state()
     await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
+
+
+async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or update the character's life arc (life.txt).
+    /life          — show current content
+    /life <text>   — replace with new arc description
+    /life add <text> — append a line to the existing arc
+    """
+    args = context.args or []
+    if not args:
+        current = LIFE_ARC_FILE.read_text(encoding="utf-8").strip() if LIFE_ARC_FILE.exists() else "(empty)"
+        await update.message.reply_text(
+            f"Current life arc:\n{current}\n\n"
+            f"Usage:\n/life <text> — replace\n/life add <text> — append"
+        )
+        return
+    if args[0].lower() == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /life add <text>")
+            return
+        with LIFE_ARC_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n{text}")
+        _life_arc_cache["text"] = None
+        await update.message.reply_text(f"Added to life arc: {text}")
+    else:
+        text = " ".join(args).strip()
+        LIFE_ARC_FILE.write_text(text, encoding="utf-8")
+        _life_arc_cache["text"] = None
+        await update.message.reply_text(f"Life arc updated: {text}")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5573,6 +5605,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("quiet", quiet_cmd))
+    app.add_handler(CommandHandler("life", life_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
