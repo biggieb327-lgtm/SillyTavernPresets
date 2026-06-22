@@ -5254,11 +5254,11 @@ PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
 _FOLLOWUP_RE = re.compile(
-    r"\b(hold on|hold up|give me a (sec|second|minute|min)|brb|be right back"
-    r"|wait a (sec|second|minute|min)|one (sec|second|minute|min)"
+    r"\b(hold on|hold up|brb|be right back"
+    r"|give me a (sec|second|minute|min)"
+    r"|wait a (sec|second|minute|min)"
     r"|gimme a (sec|second|minute)|just a (sec|second|minute)"
     r"|back in a (sec|second|minute|bit)"
-    r"|let me (check|look|see|grab|find)|gonna (check|look|grab)"
     r"|give me a moment|one moment)\b",
     re.IGNORECASE,
 )
