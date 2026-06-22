@@ -317,6 +317,26 @@ except Exception:
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
 
+# --- Day context file (day.txt) — editable throughout the day for continuity ---
+DAY_FILE = BASE_DIR / "day.txt"
+DAY_TTL = 300  # re-read at most every 5 minutes
+_day_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_day_context() -> str:
+    """Return the contents of day.txt, cached for DAY_TTL seconds."""
+    now = time.time()
+    if _day_cache["text"] is not None and now - _day_cache["ts"] < DAY_TTL:
+        return _day_cache["text"]
+    try:
+        text = DAY_FILE.read_text(encoding="utf-8").strip() if DAY_FILE.exists() else ""
+    except Exception:
+        text = ""
+    _day_cache["text"] = text
+    _day_cache["ts"] = now
+    return text
+
+
 # --- Nightly self-reflection (self-image + recommendation outcomes) ---
 REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
 try:
@@ -1589,6 +1609,20 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
 
+    # What she looks like — so she can reference her own appearance naturally.
+    if SELFIE_APPEARANCE:
+        messages.append({"role": "system", "content": (
+            f"# Your appearance\n{SELFIE_APPEARANCE}"
+        )})
+
+    # Day context — what's been happening today; drives continuity across conversations.
+    day_ctx = _read_day_context()
+    if day_ctx:
+        messages.append({"role": "system", "content": (
+            f"# What's going on today\n{day_ctx}\n\n"
+            f"Let this color what you say when it fits — don't narrate it like a list."
+        )})
+
     if image_data_url:
         messages.append({"role": "user", "content": [
             {"type": "text", "text": latest_user_content},
@@ -2432,7 +2466,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Memory*",
         "/memory — view what I remember",
         "/remember <fact> — save a fact",
-        "/forget — wipe all memory",
+        "/forget — wipe all memory (or /forget <keyword> to remove matching facts)",
+        "/recall <keyword> — search memory for a keyword",
         "/exportmemory — export full memory as text",
         "/milestones — view relationship milestones",
         "/pin <fact> — pin something I always carry",
@@ -3405,12 +3440,54 @@ async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    summaries[chat_id] = ""
-    facts[chat_id] = []
-    recent_summaries[chat_id] = ""
-    recent_facts[chat_id] = []
+    keyword = " ".join(context.args).strip().lower() if context.args else ""
+    if not keyword:
+        summaries[chat_id] = ""
+        facts[chat_id] = []
+        recent_summaries[chat_id] = ""
+        recent_facts[chat_id] = []
+        save_state()
+        await update.message.reply_text("🧹 Long-term and recent memory wiped (current chat kept).")
+        return
+    removed = 0
+    for store in (facts, recent_facts):
+        old = store.get(chat_id) or []
+        new = [f for f in old if keyword not in f.lower()]
+        removed += len(old) - len(new)
+        store[chat_id] = new
     save_state()
-    await update.message.reply_text("🧹 Long-term and recent memory wiped (current chat kept).")
+    if removed:
+        await update.message.reply_text(f"🧹 Removed {removed} fact(s) matching \"{keyword}\".")
+    else:
+        await update.message.reply_text(f"Nothing found matching \"{keyword}\".")
+
+
+async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search facts and summaries for a keyword and show matches."""
+    chat_id = update.effective_chat.id
+    keyword = " ".join(context.args).strip().lower() if context.args else ""
+    if not keyword:
+        await update.message.reply_text("Usage: /recall <keyword>")
+        return
+    hits = []
+    for f in (facts.get(chat_id) or []):
+        if keyword in f.lower():
+            hits.append(f"[fact] {f}")
+    for f in (recent_facts.get(chat_id) or []):
+        if keyword in f.lower():
+            hits.append(f"[recent] {f}")
+    summ = (summaries.get(chat_id) or "").strip()
+    if summ and keyword in summ.lower():
+        hits.append(f"[summary] {summ[:300]}{'…' if len(summ) > 300 else ''}")
+    rsumm = (recent_summaries.get(chat_id) or "").strip()
+    if rsumm and keyword in rsumm.lower():
+        hits.append(f"[recent summary] {rsumm[:300]}{'…' if len(rsumm) > 300 else ''}")
+    if hits:
+        await update.message.reply_text(
+            f"🔍 Found {len(hits)} match(es) for \"{keyword}\":\n\n" + "\n\n".join(hits)
+        )
+    else:
+        await update.message.reply_text(f"Nothing found for \"{keyword}\".")
 
 
 async def addpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4213,6 +4290,10 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         _check_joke_used(clean)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
+    if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
+        delay = random.uniform(FOLLOWUP_MIN, FOLLOWUP_MAX)
+        context.job_queue.run_once(_send_followup, when=delay, data=chat_id)
+        print(f"[followup] scheduled in {delay:.0f}s for chat {chat_id}")
     return reacted
 
 
@@ -4357,6 +4438,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Something went wrong: {str(e)}")
 
 
+async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
+    """Background task: describe a received photo in one sentence and add it to recent_facts."""
+    try:
+        desc_prompt = (
+            "In one concise sentence, describe what you see in this photo — the people, "
+            "setting, mood, or notable details. Just describe what's there, no interpretation."
+        )
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": desc_prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]}]
+        desc = await asyncio.to_thread(_one_call, messages, VISION_MODEL)
+        desc = _strip_thinking(desc).strip().strip('"')
+        if desc:
+            ts = datetime.now(tz=TZ).strftime("%b %d")
+            fact = f"[{ts}] Photo received: {desc}"
+            if caption:
+                fact += f' (caption: "{caption}")'
+            rfts = recent_facts.setdefault(chat_id, [])
+            rfts.append(fact)
+            if len(rfts) > RECENT_FACTS_MAX:
+                rfts.pop(0)
+            save_state()
+            print(f"[photo-memory] {fact[:100]}")
+    except Exception as e:
+        print("[photo-memory] failed:", e)
+
+
+async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
+    """Scheduled job: follow up after the bot said 'hold on / brb / give me a sec'."""
+    chat_id = context.job.data
+    uname = user_names.get(chat_id, "you")
+    trigger = (
+        f"[SYSTEM: A minute or two ago you told {uname} to hold on or that you'd be right back. "
+        f"Follow up now — whatever you were checking or doing, come back to it naturally and "
+        f"briefly, the way you'd pick up your phone after stepping away. "
+        f"Don't repeat phrases like 'hold on' or apologize for the wait unless it feels right.]"
+    )
+    try:
+        await send_triggered(context, chat_id, trigger)
+    except Exception as e:
+        print(f"[followup] error for chat {chat_id}:", e)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _is_allowed(update.effective_user.id):
@@ -4387,6 +4512,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_mem = f"[sent a photo] {caption}".strip()
         await _deliver(update, context, chat_id, user_mem, ai_response)
+        asyncio.create_task(_log_photo_memory(chat_id, data_url, caption))
         if selfie_ready() and random.random() < PHOTO_SELFIE_CHANCE:
             await send_selfie(context, chat_id, "", announce_errors=False)
     except requests.exceptions.HTTPError as e:
@@ -4394,6 +4520,42 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
         await send_bubbles(context, chat_id, f"❌ Couldn't look at that one: {str(e)}")
+
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """React in character to a sticker the user sent."""
+    chat_id = update.effective_chat.id
+    if not _is_allowed(update.effective_user.id):
+        return
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+    sticker = update.message.sticker
+    emoji = sticker.emoji or ""
+    name = sticker.set_name or ""
+    desc = emoji
+    if name:
+        desc = f"{emoji} (sticker from set: {name})" if emoji else f"sticker from set: {name}"
+    uname = user_names[chat_id]
+    prompt = (
+        f"[{uname} sent you a sticker: {desc}. "
+        f"React naturally in character — a brief, genuine response to the sticker's vibe. "
+        f"No need to describe the sticker; just respond to what it expresses.]"
+    )
+    try:
+        await ensure_weather()
+        messages = assemble_messages(chat_id, prompt)
+        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        user_mem = f"[sent a sticker: {desc}]"
+        reacted = await _deliver(update, context, chat_id, user_mem, ai_response)
+        if REACTIONS_AUTO and not reacted:
+            asyncio.create_task(maybe_auto_react(update, emoji or "sticker"))
+    except Exception as e:
+        print(f"[sticker] error:", e)
 
 
 # --- Proactive heartbeat ---
@@ -4424,6 +4586,20 @@ PROACTIVE_SELFIE_HINT = (
 PROACTIVE_SELFIE_CHANCE = 0.15
 # After she reacts to a photo the user sends, chance she fires back a selfie of her own.
 PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
+
+# Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
+# brief follow-up message after a short delay, as if she actually went and came back.
+_FOLLOWUP_RE = re.compile(
+    r"\b(hold on|hold up|give me a (sec|second|minute|min)|brb|be right back"
+    r"|wait a (sec|second|minute|min)|one (sec|second|minute|min)"
+    r"|gimme a (sec|second|minute)|just a (sec|second|minute)"
+    r"|back in a (sec|second|minute|bit)"
+    r"|let me (check|look|see|grab|find)|gonna (check|look|grab)"
+    r"|give me a moment|one moment)\b",
+    re.IGNORECASE,
+)
+FOLLOWUP_MIN = float(os.getenv("FOLLOWUP_MIN_SECS", "45"))
+FOLLOWUP_MAX = float(os.getenv("FOLLOWUP_MAX_SECS", "120"))
 
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
@@ -4715,7 +4891,8 @@ _BASE_COMMANDS = [
     BotCommand("menu", "Open the inline button menu"),
     BotCommand("memory", "View what I remember"),
     BotCommand("remember", "Save a fact"),
-    BotCommand("forget", "Wipe all memory"),
+    BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
+    BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
     BotCommand("pin", "Pin something I always carry"),
@@ -4802,6 +4979,7 @@ def main():
     app.add_handler(CommandHandler("milestones", milestones_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
+    app.add_handler(CommandHandler("recall", recall_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
@@ -4841,6 +5019,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
