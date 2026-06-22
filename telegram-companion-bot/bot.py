@@ -114,6 +114,10 @@ LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
+TYPING_WPM = float(os.getenv("TYPING_WPM", "45"))
+TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "1.5"))
+TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "8.0"))
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -280,6 +284,75 @@ def _read_schedule_today() -> str:
         elif in_today:
             result.append(stripped)
     return "\n".join(result).strip()
+
+# User memory — upcoming things the user mentions that the character should follow up on
+USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
+USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
+_USER_NOTES_TTL = 300
+_user_notes_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_user_notes() -> str:
+    now = time.time()
+    if _user_notes_cache["text"] is not None and now - _user_notes_cache["ts"] < _USER_NOTES_TTL:
+        return _user_notes_cache["text"]
+    try:
+        text = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    except Exception:
+        text = ""
+    _user_notes_cache["text"] = text
+    _user_notes_cache["ts"] = now
+    return text
+
+
+def _append_user_note(note: str):
+    note = note.strip()
+    if not note:
+        return
+    existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+    if existing and note[:20].lower() in existing.lower():
+        return  # simple dedup
+    lines = [l for l in existing.splitlines() if l.strip()]
+    lines.append(note)
+    if len(lines) > USER_NOTES_MAX:
+        lines = lines[-USER_NOTES_MAX:]
+    USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+    _user_notes_cache["text"] = None  # invalidate cache
+
+
+def _extract_user_note(uname: str, user_message: str) -> str:
+    """Sync: return a brief upcoming-thing fact extracted from the user's message, or ''."""
+    sys = (
+        f"Does this message from {uname} mention something specific and upcoming — an event, "
+        f"appointment, deadline, worry, plan, or thing they're excited or nervous about that would "
+        f"be natural to ask about later? If yes, write a single brief note in the third person "
+        f"(e.g. 'has a job interview on Tuesday', 'nervous about a doctor's appointment next week', "
+        f"'excited about a trip next month'). If nothing notable, write: none"
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=MOOD_MODEL,
+        ).strip()
+        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        print("[user-notes] extraction failed:", e)
+    return ""
+
+
+async def update_user_notes(chat_id: int, user_message: str):
+    if len(user_message.split()) < 4:
+        return
+    uname = user_names.get(chat_id, "you")
+    try:
+        note = await asyncio.to_thread(_extract_user_note, uname, user_message)
+        if note:
+            _append_user_note(note)
+            print(f"[user-notes] added: {note}")
+    except Exception as e:
+        print("[user-notes] update failed:", e)
+
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
 ALLOWED_REACTIONS = {
@@ -1613,6 +1686,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if mem:
         messages.append({"role": "system", "content": mem})
 
+    unotes = _read_user_notes()
+    if unotes:
+        messages.append({"role": "system", "content": (
+            f"# Things you know {uname} has going on\n{unotes}\n"
+            f"Ask about these naturally if one fits the moment — don't force it."
+        )})
+
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
     if vent_mode.get(chat_id):
@@ -1916,8 +1996,31 @@ async def maybe_auto_react(update, user_message: str):
         print("[react-auto] failed:", e)
 
 
-async def send_bubbles(context, chat_id: int, text: str):
-    """Send a reply as a single message (chunked only if it exceeds Telegram's length limit)."""
+def _typing_delay_secs(text: str) -> float:
+    """Simulated typing delay: word count at TYPING_WPM, clamped to [min, max]."""
+    if not TYPING_DELAY:
+        return 0.0
+    words = max(1, len(text.split()))
+    secs = (words / TYPING_WPM) * 60
+    return max(TYPING_DELAY_MIN, min(TYPING_DELAY_MAX, secs))
+
+
+async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0):
+    """Send a reply as a single message (chunked only if it exceeds Telegram's length limit).
+
+    pre_delay: hold the typing indicator for this many seconds before actually sending,
+    simulating realistic compose time. Pass _typing_delay_secs(text) from user-reply paths.
+    """
+    if pre_delay > 0:
+        typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
+        try:
+            await asyncio.sleep(pre_delay)
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
     for i in range(0, len(text), _TELEGRAM_MAX_LEN):
         chunk = text[i:i + _TELEGRAM_MAX_LEN]
         for attempt in range(3):
@@ -4393,7 +4496,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         except Exception as e:
             print("[react] failed:", e)
     if clean:
-        await send_bubbles(context, chat_id, clean)
+        await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
         if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
@@ -4409,6 +4512,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
+    if user_memory_text and not user_memory_text.startswith("["):
+        asyncio.create_task(update_user_notes(chat_id, user_memory_text))
     if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
@@ -4865,6 +4970,12 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     date_note = _todays_memory_note(chat_id)
     if date_note:
         trigger = trigger[:-1] + date_note + "]"
+    sched_today = _read_schedule_today()
+    if sched_today:
+        trigger = trigger[:-1] + (
+            f" What she's got going on today: {sched_today[:200]}."
+            f" If something from it fits the reach-out naturally, draw on it.]"
+        )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
