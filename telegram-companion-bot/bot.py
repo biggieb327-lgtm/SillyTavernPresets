@@ -1739,7 +1739,8 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         f"# Capabilities\nA couple of things you can do with tags, used naturally and "
         f"sparingly — never announce them, just include the tag:",
         f"- React to {uname}'s message with a single emoji, like tapping a chat bubble: "
-        f"[react: 👍]. Pick from: {REACTION_HINTS}.",
+        f"[react: 👍]. Pick from: {REACTION_HINTS}. Always include your text reply too — "
+        f"a reaction never replaces a message, it goes with it.",
     ]
     if selfie_ready():
         cap_lines.append(
@@ -1750,12 +1751,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if SEARCH_ENABLED:
         cap_lines.append(
             f"- Look something up online when you genuinely don't know something and it'd "
-            f"help — a fact, something {uname} mentioned, your own curiosity. If it's the "
-            f"kind of thing you'd have to actually check, send a short in-character line "
-            f"first (like telling {uname} you'll look it up / give you a sec), then on its "
-            f"own line put [search: your query]. The lookup happens after that and you'll "
-            f"get a follow-up turn to reply with what you found — don't answer the question "
-            f"yet in that first message, just the \"let me check\" beat."
+            f"help — a fact, something {uname} mentioned, your own curiosity. Add "
+            f"[search: your query] at the end of your reply on its own line. Don't write a "
+            f"separate lead-in about looking it up — just reply naturally and include the tag; "
+            f"the result will come back and you can follow up then."
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
@@ -2033,12 +2032,6 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
     query = _extract_search(ai_response)
     if not query:
         return ai_response
-    lead_in = re.sub(r"\[search:\s*.*?\]", "", ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
-    if lead_in:
-        clean, _reaction, _selfie_hint = extract_tags(lead_in)
-        if clean:
-            await send_bubbles(context, chat_id, clean)
-            remember(chat_id, "assistant", clean)
     results = await asyncio.to_thread(web_search, query)
     messages.append({
         "role": "system",
