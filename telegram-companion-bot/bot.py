@@ -2462,6 +2462,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — reset and restart",
         "/clear — wipe conversation history",
         "/menu — open the inline button menu",
+        "/status — quick view: mood, outfit, today's context, last chat",
         "",
         "*Memory*",
         "/memory — view what I remember",
@@ -3938,6 +3939,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         await _deliver(update, context, chat_id, transcript, ai_response)
+        # Log a note about the voice message so it's preserved in memory
+        ts = datetime.now(tz=TZ).strftime("%b %d")
+        snippet = transcript[:150] + ("…" if len(transcript) > 150 else "")
+        voice_fact = f"[{ts}] Voice note: \"{snippet}\""
+        rfts = recent_facts.setdefault(chat_id, [])
+        rfts.append(voice_fact)
+        if len(rfts) > RECENT_FACTS_MAX:
+            rfts.pop(0)
+        save_state()
     except Exception as e:
         log.error("Voice handler error: %s", e)
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
@@ -4291,8 +4301,14 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
+        existing = _pending_followup.pop(chat_id, None)
+        if existing:
+            try:
+                existing.schedule_removal()
+            except Exception:
+                pass
         delay = random.uniform(FOLLOWUP_MIN, FOLLOWUP_MAX)
-        context.job_queue.run_once(_send_followup, when=delay, data=chat_id)
+        _pending_followup[chat_id] = context.job_queue.run_once(_send_followup, when=delay, data=chat_id)
         print(f"[followup] scheduled in {delay:.0f}s for chat {chat_id}")
     return reacted
 
@@ -4411,19 +4427,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_owner(chat_id)
         save_state()
 
+    # Cancel any pending follow-up — user replied before it fired
+    existing = _pending_followup.pop(chat_id, None)
+    if existing:
+        try:
+            existing.schedule_removal()
+        except Exception:
+            pass
+
     try:
         await ensure_weather()
         content_for_model = user_message
+
+        # If the user is quote-replying to one of our messages via Telegram's reply UI,
+        # inject the quoted text explicitly — especially important for heartbeat messages
+        # that may have been compressed out of the verbatim history window.
+        replied_to = getattr(update.message, "reply_to_message", None)
+        if replied_to and getattr(replied_to.from_user, "is_bot", False):
+            quoted = (replied_to.text or replied_to.caption or "").strip()
+            if quoted and len(quoted) > 5:
+                recent = conversation_history.get(chat_id, [])[-6:]
+                in_recent = any(quoted[:80] in (m.get("content") or "") for m in recent)
+                if not in_recent:
+                    content_for_model = (
+                        f'[replying to your message: "{quoted[:250]}"]\n{user_message}'
+                    )
+
         if LINK_READING:
             link = _URL_RE.search(user_message)
             if link:
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
                 fetched = await asyncio.to_thread(fetch_link, link.group(0))
                 if fetched:
-                    content_for_model = (user_message + "\n\n[Content of the link they shared — "
+                    content_for_model = (content_for_model + "\n\n[Content of the link they shared — "
                                          "read it and react in character:\n" + fetched + "\n]")
                 else:
-                    content_for_model = user_message + "\n\n[You tried to open that link but couldn't.]"
+                    content_for_model = content_for_model + "\n\n[You tried to open that link but couldn't.]"
+
+        # Gap-aware opener: when user returns after a long absence, note it this turn only.
+        if gap_hours > GAP_AWARE_HOURS:
+            gap_str = (f"{round(gap_hours)}h" if gap_hours < 48 else f"{round(gap_hours / 24)}d")
+            content_for_model += (
+                f"\n[Note: it's been about {gap_str} since you two last talked. "
+                f"If it fits, acknowledge the gap naturally — brief, not a big deal.]"
+            )
+
+        # Lull detection: track consecutive terse replies and nudge a course-change.
+        if _is_terse(user_message):
+            _terse_count[chat_id] = _terse_count.get(chat_id, 0) + 1
+        else:
+            _terse_count[chat_id] = 0
+        if _terse_count.get(chat_id, 0) >= LULL_THRESHOLD:
+            _terse_count[chat_id] = 0
+            content_for_model += (
+                "\n[Note: they've been giving short responses for a few messages. "
+                "Try shifting gears — bring up something new, check in on how they're doing, "
+                "or let the conversation breathe. Don't push harder on the current thread.]"
+            )
+
         messages = assemble_messages(chat_id, content_for_model)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -4469,6 +4530,7 @@ async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
 async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
     """Scheduled job: follow up after the bot said 'hold on / brb / give me a sec'."""
     chat_id = context.job.data
+    _pending_followup.pop(chat_id, None)
     uname = user_names.get(chat_id, "you")
     trigger = (
         f"[SYSTEM: A minute or two ago you told {uname} to hold on or that you'd be right back. "
@@ -4600,6 +4662,17 @@ _FOLLOWUP_RE = re.compile(
 )
 FOLLOWUP_MIN = float(os.getenv("FOLLOWUP_MIN_SECS", "45"))
 FOLLOWUP_MAX = float(os.getenv("FOLLOWUP_MAX_SECS", "120"))
+_pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user replies first)
+
+# Lull detection: consecutive terse replies trigger a gentle approach shift.
+_terse_count: dict = {}  # chat_id -> int
+LULL_THRESHOLD = int(os.getenv("LULL_THRESHOLD", "3"))
+
+def _is_terse(text: str) -> bool:
+    return len(text.strip()) <= 15
+
+# Gap-aware opener: when user returns after a long absence, note it in that turn's context.
+GAP_AWARE_HOURS = float(os.getenv("GAP_AWARE_HOURS", "12"))
 
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
@@ -4610,6 +4683,10 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     clean, _reaction, selfie_hint = extract_tags(text)
+    # Store a synthetic user entry so conversation history maintains proper user/assistant
+    # alternation. Without it, two consecutive assistant turns confuse some models when
+    # the user replies and the history is dumped into the next request.
+    remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
     if clean:
         await send_bubbles(context, chat_id, clean)
@@ -4618,6 +4695,32 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
     return text
+
+
+def _todays_memory_note(chat_id: int) -> str:
+    """Check if today matches a notable stored date (birthday, anniversary, milestone first)."""
+    today = datetime.now(tz=TZ) if TZ else datetime.now()
+    # Match "Jun 22", "june 22", "6/22", "06/22" style patterns
+    fmt_long = today.strftime("%b %d").lower()       # "jun 22"
+    fmt_slash = f"{today.month}/{today.day}"         # "6/22"
+    fmt_slash0 = today.strftime("%m/%d")             # "06/22"
+    date_tokens = {fmt_long, fmt_slash, fmt_slash0}
+    recurring_keywords = {"birthday", "anniversary", "born", "together", "first", "met"}
+
+    hits = []
+    for f in (facts.get(chat_id) or []) + (recent_facts.get(chat_id) or []):
+        fl = f.lower()
+        if any(tok in fl for tok in date_tokens):
+            if any(k in fl for k in recurring_keywords):
+                hits.append(f.strip())
+    for m in (milestones.get(chat_id) or []):
+        ms_dt = datetime.fromtimestamp(m["ts"], tz=TZ) if TZ else datetime.fromtimestamp(m["ts"])
+        if ms_dt.month == today.month and ms_dt.day == today.day and ms_dt.year != today.year:
+            hits.append(f"today is the anniversary of: {m['text']}")
+
+    if hits:
+        return " Important: today is a significant date — " + "; ".join(hits[:3]) + ". Reference it naturally if you reach out."
+    return ""
 
 
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -4634,6 +4737,10 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         trigger = trigger[:-1] + (
             f" Last exchange for context (use it naturally if it fits, don't recap it): {snippet}]"
         )
+    # Inject a note if today is a special date stored in memory
+    date_note = _todays_memory_note(chat_id)
+    if date_note:
+        trigger = trigger[:-1] + date_note + "]"
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
@@ -4831,6 +4938,75 @@ async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Reflection failed: {str(e)}")
 
 
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick dashboard: mood, outfit, today's context, and time since last message."""
+    chat_id = update.effective_chat.id
+    lines = [f"*{NAME} — status*", ""]
+
+    label = mood_label(chat_id)
+    s = mood_now(chat_id)
+    filled = max(0, round((s + 3) / 6 * 10))
+    bar = "█" * filled + "░" * (10 - filled)
+    mood_str = f"{label}  " if label else ""
+    lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
+
+    outfit = wardrobe.get("current")
+    if outfit:
+        lines.append(f"*Wearing:* {outfit}")
+
+    day_ctx = _read_day_context()
+    if day_ctx:
+        snippet = day_ctx[:150] + ("…" if len(day_ctx) > 150 else "")
+        lines.append(f"*Today:* {snippet}")
+
+    last = last_seen.get(chat_id, 0)
+    if last:
+        gap = time.time() - last
+        if gap < 120:
+            gap_str = "just now"
+        elif gap < 3600:
+            gap_str = f"{round(gap / 60)}m ago"
+        elif gap < 86400:
+            gap_str = f"{round(gap / 3600)}h ago"
+        else:
+            gap_str = f"{round(gap / 86400)}d ago"
+        lines.append(f"*Last chat:* {gap_str}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
+    """Midnight job: archive today's day.txt to memory and a dated file, then clear it."""
+    day_ctx = _read_day_context()
+    if not day_ctx:
+        return
+    owner = get_owner()
+    yesterday = (datetime.now(tz=TZ) if TZ else datetime.now()) - timedelta(days=1)
+    date_str = yesterday.strftime("%Y-%m-%d")
+    # Archive to a dated file so the day isn't lost
+    archive = BASE_DIR / f"day_{date_str}.txt"
+    try:
+        archive.write_text(day_ctx, encoding="utf-8")
+    except Exception as e:
+        print(f"[day-rotate] archive failed: {e}")
+    # Save a compact memory fact so it persists through summarization
+    if owner is not None:
+        fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
+        rfts = recent_facts.setdefault(owner, [])
+        rfts.append(fact)
+        if len(rfts) > RECENT_FACTS_MAX:
+            rfts.pop(0)
+        save_state()
+    # Clear the current day file for the new day
+    try:
+        DAY_FILE.write_text("", encoding="utf-8")
+    except Exception as e:
+        print(f"[day-rotate] clear failed: {e}")
+    _day_cache["text"] = ""
+    _day_cache["ts"] = time.time()
+    print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
+
+
 async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     items = beliefs.get(chat_id, {}).get("items") or {}
@@ -4889,6 +5065,7 @@ _BASE_COMMANDS = [
     BotCommand("start", "Reset and restart"),
     BotCommand("clear", "Wipe conversation history"),
     BotCommand("menu", "Open the inline button menu"),
+    BotCommand("status", "Quick status: mood, outfit, today's context"),
     BotCommand("memory", "View what I remember"),
     BotCommand("remember", "Save a fact"),
     BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
@@ -4966,6 +5143,7 @@ def main():
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
@@ -5048,6 +5226,9 @@ def main():
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
         app.job_queue.run_daily(reflection_job, time=reflection_time)
         log.info("Nightly reflection scheduled %s.", REFLECTION_TIME)
+        midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
+        app.job_queue.run_daily(_rotate_day_context, time=midnight)
+        log.info("Day context rotation scheduled at midnight.")
         for r in reminders:
             schedule_reminder(app.job_queue, r)
         if reminders:
