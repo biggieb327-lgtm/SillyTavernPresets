@@ -564,6 +564,34 @@ if not card_path.exists():
 
 NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
 
+# Raw card data kept in memory so /setcard can update individual fields without a restart.
+_card_json: dict = json.loads(card_path.read_text(encoding="utf-8"))
+_card_data: dict = _card_json.get("data", _card_json)  # reference into the live dict
+
+_CARD_FIELDS = {
+    "name":         "name",
+    "description":  "description",
+    "personality":  "personality",
+    "scenario":     "scenario",
+    "first_mes":    "first_mes",
+    "mes_example":  "mes_example",
+    "system_prompt":         "system_prompt",
+    "post_history":          "post_history_instructions",
+    "creator_notes":         "creator_notes",
+}
+
+
+def _save_and_reload_card():
+    """Write _card_data back to disk and recompile card globals in place."""
+    global NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW
+    if "data" not in _card_json:
+        out = {"spec": "chara_card_v2", "spec_version": "2.0", "data": _card_data}
+    else:
+        out = _card_json
+    card_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
+
+
 # --- State (in-memory, mirrored to disk so the character remembers across restarts) ---
 conversation_history = {}   # chat_id -> recent messages (verbatim window)
 last_seen = {}      # chat_id -> unix timestamp of last user activity
@@ -2788,6 +2816,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/heartbeat — trigger a proactive message now",
         "/voice — toggle voice replies on/off (30% chance when on)",
         "",
+        "*Character card*",
+        "/card — view all card fields",
+        "/setcard <field> <value> — update a field (name, description, personality, scenario, first_mes, system_prompt, post_history, mes_example)",
+        "/setcard <field> clear — empty a field",
+        "",
         "*Settings*",
         "/model — show current model",
         "/setmodel <field> <value> — change a model setting",
@@ -2809,6 +2842,54 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/remindpayments — trigger payment reminder now",
         ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the current character card fields."""
+    lines = [f"*Character card — {NAME}*", ""]
+    for label, key in _CARD_FIELDS.items():
+        val = (_card_data.get(key) or "").strip()
+        if val:
+            preview = val[:120].replace("\n", " ")
+            suffix = f"… ({len(val)} chars)" if len(val) > 120 else ""
+            lines.append(f"*{label}:* {preview}{suffix}")
+        else:
+            lines.append(f"*{label}:* (empty)")
+    lines += ["", "Use `/setcard <field> <value>` to update.",
+              "Fields: " + ", ".join(_CARD_FIELDS)]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update a character card field in memory and on disk.
+    /setcard <field> <value>
+    /setcard <field> clear  — empty the field
+    """
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/setcard <field> <value>`\n"
+            "Fields: " + ", ".join(_CARD_FIELDS) + "\n"
+            "Send `/setcard <field> clear` to empty a field.",
+            parse_mode="Markdown",
+        )
+        return
+    field = args[0].lower()
+    if field not in _CARD_FIELDS:
+        await update.message.reply_text(
+            f"Unknown field `{field}`. Fields: " + ", ".join(_CARD_FIELDS),
+            parse_mode="Markdown",
+        )
+        return
+    value = "" if args[1].lower() == "clear" and len(args) == 2 else " ".join(args[1:])
+    json_key = _CARD_FIELDS[field]
+    _card_data[json_key] = value
+    _save_and_reload_card()
+    if value:
+        preview = value[:200] + ("…" if len(value) > 200 else "")
+        await update.message.reply_text(f"*{field}* updated:\n{preview}", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"*{field}* cleared.", parse_mode="Markdown")
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5988,6 +6069,8 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("card", card_cmd))
+    app.add_handler(CommandHandler("setcard", setcard_cmd))
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
