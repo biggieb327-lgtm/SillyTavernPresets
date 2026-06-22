@@ -1676,9 +1676,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
         messages.append({
             "role": "system",
-            "content": (f"# Local places\nReal spots around {WEATHER_LOCATION} that {NAME} "
-                        f"might naturally reference if it fits — don't force them, and don't "
-                        f"invent fake businesses when a real area works: " + ", ".join(picks) + "."),
+            "content": (f"# Local places\nReal spots {NAME} knows and might naturally reference "
+                        f"if it fits — don't force them, and don't invent fake businesses when "
+                        f"a real area works: " + ", ".join(picks) + "."),
         })
 
     cap_lines = [
@@ -2733,6 +2733,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Day context*",
         "/life [text] — view or replace her current life arc (what she has going on long-term)",
         "/life add <text> — append a line to the life arc",
+        "/people [text] — view or replace people in her life",
+        "/people add <text> — append a person/note",
+        "/projects [text] — view or replace her ongoing projects",
+        "/projects add <text> — append a project",
         "/today <note> — append a mid-day note so she knows what's going on",
         "/note <text> — manually add something to what she knows about you",
         "/recap — brief summary of the last conversation",
@@ -4024,24 +4028,30 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Summarize the last N messages of conversation in a couple of sentences."""
+    """Summarize recent conversation, including rolled-up history if available."""
     chat_id = update.effective_chat.id
     uname = user_names.get(chat_id, "you")
     hist = conversation_history.get(chat_id, [])
-    if not hist:
+    rolling = (recent_summaries.get(chat_id) or "").strip()
+    if not hist and not rolling:
         await update.message.reply_text("Nothing to recap yet.")
         return
-    recent = hist[-20:]
-    convo = "\n".join(
-        f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in recent
-    )
+    parts = []
+    if rolling:
+        parts.append(f"BACKGROUND (older conversation):\n{rolling}")
+    if hist:
+        recent = hist[-20:]
+        convo = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in recent
+        )
+        parts.append(f"RECENT MESSAGES:\n{convo}")
     sys_msg = (
-        f"Give a 2-3 sentence plain-text recap of the following conversation between {NAME} "
-        f"and {uname}. Focus on what they talked about and any meaningful moments. No headers, "
-        f"no bullets, no markdown."
+        f"Give a 2-3 sentence plain-text recap of the conversation between {NAME} and {uname} "
+        f"based on the material below. Cover what they've talked about and any meaningful moments. "
+        f"No headers, no bullets, no markdown."
     )
     raw = call_nanogpt(
-        [{"role": "system", "content": sys_msg}, {"role": "user", "content": convo}],
+        [{"role": "system", "content": sys_msg}, {"role": "user", "content": "\n\n".join(parts)}],
         model=MOOD_MODEL,
     )
     await update.message.reply_text(raw.strip() or "Nothing to recap.")
@@ -4107,6 +4117,39 @@ async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LIFE_ARC_FILE.write_text(text, encoding="utf-8")
         _life_arc_cache["text"] = None
         await update.message.reply_text(f"Life arc updated: {text}")
+
+
+def _context_file_cmd(file: "Path", cache: dict, label: str):
+    """Return an (args, file, cache, label) handler body factory — shared logic for /people, /projects."""
+    async def _cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args or []
+        if not args:
+            current = file.read_text(encoding="utf-8").strip() if file.exists() else "(empty)"
+            await update.message.reply_text(
+                f"*{label}:*\n{current}\n\n"
+                f"/{label.lower()} <text> — replace\n/{label.lower()} add <text> — append",
+                parse_mode="Markdown",
+            )
+            return
+        if args[0].lower() == "add":
+            text = " ".join(args[1:]).strip()
+            if not text:
+                await update.message.reply_text(f"Usage: /{label.lower()} add <text>")
+                return
+            with file.open("a", encoding="utf-8") as f:
+                f.write(f"\n{text}")
+            cache["text"] = None
+            await update.message.reply_text(f"{label} updated (added): {text}")
+        else:
+            text = " ".join(args).strip()
+            file.write_text(text, encoding="utf-8")
+            cache["text"] = None
+            await update.message.reply_text(f"{label} updated: {text}")
+    return _cmd
+
+
+people_cmd = _context_file_cmd(PEOPLE_FILE, _people_cache, "People")
+projects_cmd = _context_file_cmd(PROJECTS_FILE, _projects_cache, "Projects")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5339,10 +5382,25 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if outfit:
         lines.append(f"*Wearing:* {outfit}")
 
+    life_arc = _read_life_arc()
+    if life_arc:
+        snippet = life_arc[:150] + ("…" if len(life_arc) > 150 else "")
+        lines.append(f"*Life arc:* {snippet}")
+
     day_ctx = _read_day_context()
     if day_ctx:
         snippet = day_ctx[:150] + ("…" if len(day_ctx) > 150 else "")
         lines.append(f"*Today:* {snippet}")
+
+    unotes = _read_user_notes()
+    if unotes:
+        snippet = unotes[:150] + ("…" if len(unotes) > 150 else "")
+        lines.append(f"*About you:* {snippet}")
+
+    qt = quiet_until.get(chat_id)
+    if qt and time.time() < qt:
+        remaining = int((qt - time.time()) / 60)
+        lines.append(f"*Quiet mode:* {remaining}m remaining")
 
     last = last_seen.get(chat_id, 0)
     if last:
@@ -5606,6 +5664,8 @@ def main():
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("quiet", quiet_cmd))
     app.add_handler(CommandHandler("life", life_cmd))
+    app.add_handler(CommandHandler("people", people_cmd))
+    app.add_handler(CommandHandler("projects", projects_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
