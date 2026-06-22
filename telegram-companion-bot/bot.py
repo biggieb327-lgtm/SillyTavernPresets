@@ -2186,10 +2186,12 @@ SELFIE_OUTFITS = [
 ]
 # What she's doing in the shot
 SELFIE_ACTIVITIES = [
-    "mid-snack with food in frame", "just woke up, hair a mess", "curled up on the couch",
-    "making coffee in the kitchen", "out walking somewhere", "bundled up against the cold",
-    "lying in bed under the covers", "at her desk surrounded by clutter", "stretching, just got up",
-    "holding a drink up to the camera", "fresh out of the shower with damp hair",
+    "mid-snack, food resting on the counter or beside her (not held)", "just woke up, hair a mess",
+    "curled up on the couch", "making coffee in the kitchen", "out walking somewhere",
+    "bundled up against the cold", "lying in bed under the covers",
+    "at her desk surrounded by clutter", "stretching, just got up",
+    "with a coffee or drink on the table nearby — not holding it up",
+    "fresh out of the shower with damp hair",
     "in the middle of doing something and stopping to take the pic", "sprawled on the floor",
     "leaning against a doorway", "wrapped in a blanket like a burrito",
 ]
@@ -2300,6 +2302,12 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
                     f"atmosphere, and what she might be wearing — don't describe the weather "
                     f"explicitly, just let it show.")
+    bits.append(
+        "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
+        "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
+        "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
+        "it. No extra limbs."
+    )
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
         "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
