@@ -4902,7 +4902,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if user_memory_text and not user_memory_text.startswith("["):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
-    if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
+    if clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
             try:
