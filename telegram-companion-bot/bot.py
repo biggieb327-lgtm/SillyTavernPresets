@@ -1884,7 +1884,35 @@ SELFIE_CAMERA = [
 ]
 
 
-def _mood_vibe(chat_id: int) -> str:
+def _weather_outdoor_ok() -> bool:
+    """Return False if current weather makes outdoor selfie shots implausible."""
+    text = (_weather_cache.get("text") or "").lower()
+    if not text:
+        return True
+    bad = ("rain", "snow", "sleet", "storm", "thunder", "drizzle", "showers", "hail", "fog")
+    return not any(w in text for w in bad)
+
+
+def _weather_camera_pool() -> list:
+    """Filter SELFIE_CAMERA to presets consistent with current weather and time of day."""
+    text = (_weather_cache.get("text") or "").lower()
+    hour = (datetime.now(TZ) if TZ else datetime.now()).hour
+    is_daytime = 7 <= hour < 20
+    is_sunny = any(w in text for w in ("clear", "sunny")) and is_daytime
+    is_overcast = any(w in text for w in ("cloud", "overcast", "fog", "rain", "snow", "storm", "drizzle"))
+    filtered = []
+    for cam in SELFIE_CAMERA:
+        if is_overcast and any(s in cam for s in ("golden-hour", "bright daylight", "crisp and bright")):
+            continue
+        if is_daytime and is_sunny and "lamplight" in cam:
+            continue
+        if is_daytime and "screen glow" in cam:
+            continue
+        filtered.append(cam)
+    return filtered or SELFIE_CAMERA
+
+
+
     label = mood_label(chat_id)
     if label:
         return label
@@ -1924,7 +1952,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
-        activity = random.choice(SELFIE_ACTIVITIES)
+        if _weather_outdoor_ok():
+            activity = random.choice(SELFIE_ACTIVITIES)
+        else:
+            indoor = [a for a in SELFIE_ACTIVITIES if a not in SELFIE_OUTDOOR_ACTIVITIES]
+            activity = random.choice(indoor)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
     current_fit = wardrobe.get("current")
@@ -1941,9 +1973,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
-    bits.append(f"Photo look: {random.choice(SELFIE_CAMERA)}.")
+    bits.append(f"Photo look: {random.choice(_weather_camera_pool())}.")
     if _weather_cache["text"]:
-        bits.append(f"Lighting matches the weather and time of day: {_weather_cache['text']}.")
+        bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
+                    f"atmosphere, and what she might be wearing — don't describe the weather "
+                    f"explicitly, just let it show.")
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
         "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
@@ -2171,9 +2205,10 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         f"memory she could recall and recount — what's been going on lately with {uname}, how it "
         f"felt, what's current (<= 150 words). Integrate the previous summary with the new "
         f"messages into one continuous recollection, not a list of events.\n"
-        f'  "facts": a list of specific, recent things about {uname} and what\'s going on -- '
-        f"events, jokes, current situations, things mentioned recently. Merge with the prior "
-        f"facts, keep them all, avoid duplicates.\n"
+        f'  "facts": a curated list of specific, meaningful things about {uname} — events, '
+        f"current situations, inside jokes, things worth carrying forward. Merge with the prior "
+        f"facts; keep what a person would actually remember and care about (skip generic filler "
+        f"or purely transient observations); drop duplicates.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
     user = f"EXISTING MEMORY:\n{existing}\n\nNEW MESSAGES:\n{convo}"
@@ -2391,6 +2426,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/remember <fact> — save a fact",
         "/forget — wipe all memory",
         "/exportmemory — export full memory as text",
+        "/milestones — view relationship milestones",
         "/pin <fact> — pin something I always carry",
         "/pinned — list pinned memories",
         "/unpin <n> — remove a pinned memory",
@@ -2700,6 +2736,19 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Summary:\n{rsumm}\n\n"
         f"Facts:\n{rfacts_txt}"
     )
+
+
+async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    ms_list = milestones.get(chat_id) or []
+    if not ms_list:
+        await update.message.reply_text("No milestones recorded yet.")
+        return
+    lines = []
+    for i, m in enumerate(ms_list, 1):
+        ts = datetime.fromtimestamp(m["ts"], tz=TZ) if TZ else datetime.fromtimestamp(m["ts"])
+        lines.append(f"{i}. {m['text']}  ({ts.strftime('%b %d, %Y')})")
+    await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
 async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4359,6 +4408,17 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
+    # Inject the last exchange so the model can actually reference what was last discussed,
+    # rather than defaulting to a generic check-in.
+    recent = conversation_history.get(chat_id, [])[-4:]
+    if recent:
+        snippet = " / ".join(
+            f"{'you' if m['role'] == 'assistant' else uname}: {m['content'][:100].strip()}"
+            for m in recent
+        )
+        trigger = trigger[:-1] + (
+            f" Last exchange for context (use it naturally if it fits, don't recap it): {snippet}]"
+        )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
@@ -4603,6 +4663,7 @@ _BASE_COMMANDS = [
     BotCommand("remember", "Save a fact"),
     BotCommand("forget", "Wipe all memory"),
     BotCommand("exportmemory", "Export full memory as text"),
+    BotCommand("milestones", "View relationship milestones"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -4683,6 +4744,7 @@ def main():
     app.add_handler(CommandHandler("selfie", selfie_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
+    app.add_handler(CommandHandler("milestones", milestones_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
