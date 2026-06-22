@@ -1138,20 +1138,24 @@ def mood_label(chat_id: int):
 
 
 def nudge_mood(chat_id: int, gap_hours):
-    """Update mood on contact: being reached out to lifts her; long silence stings."""
+    """Apply a mood penalty when re-contacting after a long silence.
+    Positive shifts come from the LLM appraisal, not unconditionally from contact."""
+    m = moods.setdefault(chat_id, {})
+    m["_gap_hours"] = gap_hours or 0  # stash for the appraisal to include as context
+    if not gap_hours or gap_hours <= 12:
+        return  # normal cadence — no penalty; appraisal handles the rest
+    penalty = min(1.8, (gap_hours - 12) / 12)
     cur = mood_now(chat_id)
-    delta = 0.4
-    if gap_hours is not None and gap_hours > 12:
-        delta -= min(1.8, (gap_hours - 12) / 12)
-    cur = max(-3.0, min(3.0, cur + delta))
-    m = moods.get(chat_id) or {}
-    m.update({"score": round(cur, 3), "ts": m.get("ts", time.time())})  # keep label + its age
-    moods[chat_id] = m
+    m["score"] = round(max(-3.0, cur - penalty), 3)
 
 
 def _appraise_mood(chat_id: int, convo_tail: str):
     """Cheap background pass: how does she feel right now, given what just happened?"""
     cur = moods.get(chat_id) or {}
+    gap_hours = cur.pop("_gap_hours", 0)  # consume the stashed gap before saving
+    gap_note = ""
+    if gap_hours > 4:
+        gap_note = f" Note: it's been {gap_hours:.0f}h since they last talked — factor the time gap into her state."
     sys = (
         f"You track {NAME}'s emotional state across a conversation. Given her current mood and "
         f"the latest exchange, output ONLY a JSON object:\n"
@@ -1162,7 +1166,7 @@ def _appraise_mood(chat_id: int, convo_tail: str):
         f"resetting to neutral. React to events in her life she mentions, things she reads, and the "
         f"emotional tone of the exchange. No prose, no code fences."
     )
-    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).\n\n"
+    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
             f"Latest exchange:\n{convo_tail}")
     raw = call_nanogpt(
         [{"role": "system", "content": sys}, {"role": "user", "content": user}],
@@ -1218,8 +1222,12 @@ def mood_note(chat_id: int) -> str:
     s = mood_now(chat_id)
     behavior = _mood_behavior(s)
     if label:
-        desc = f"feeling: {label}"
-    elif s >= 1.2:
+        # Label gives the specific WHY; behavior note gives the HOW. Together they're complete.
+        return (
+            f"# Mood\n{NAME} is currently: {label}. {behavior} "
+            f"Let this specific feeling shape her tone — don't announce it or explain the cause."
+        )
+    if s >= 1.2:
         desc = "settled and warm right now — a little more open than usual, the guard down a notch"
     elif s >= 0.4:
         desc = "in a decent place, comfortable and present"
@@ -2434,6 +2442,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/boundaries — list boundaries",
         "",
         "*Mood & modes*",
+        "/mood — check her current mood",
         "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
@@ -2735,6 +2744,36 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 What's been going on lately (last ~week)\n\n"
         f"Summary:\n{rsumm}\n\n"
         f"Facts:\n{rfacts_txt}"
+    )
+
+
+async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    label = mood_label(chat_id)
+    s = mood_now(chat_id)
+    m = moods.get(chat_id) or {}
+    ts = m.get("ts", 0)
+    if ts:
+        age_h = (time.time() - ts) / 3600
+        age_str = f"{int(age_h * 60)}m ago" if age_h < 1 else f"{age_h:.1f}h ago"
+    else:
+        age_str = "unknown"
+    if label:
+        state = f'"{label}"'
+    elif s >= 1.2:
+        state = "settled and warm"
+    elif s >= 0.4:
+        state = "comfortable and present"
+    elif s > -0.4:
+        state = "neutral"
+    elif s > -1.2:
+        state = "on edge, quieter than usual"
+    else:
+        state = "withdrawn and flat"
+    filled = max(0, round((s + 3) / 6 * 10))
+    bar = "█" * filled + "░" * (10 - filled)
+    await update.message.reply_text(
+        f"😶 {NAME}'s mood\n\n{state}\nScore: {s:+.1f}  [{bar}]\nLast updated: {age_str}"
     )
 
 
@@ -4578,6 +4617,20 @@ async def heartbeat_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Heartbeat failed: {str(e)}")
 
 
+def _overnight_mood_reset(chat_id: int):
+    """Nightly: gently drift negative moods toward neutral — sleep softens a bad day."""
+    s = mood_now(chat_id)
+    if s >= 0:
+        return  # positive moods don't need nudging
+    m = moods.get(chat_id) or {}
+    m["score"] = round(s * 0.45, 3)  # pull roughly halfway toward 0
+    m.pop("label", None)  # stale label — let the next exchange set a fresh one
+    m.pop("_gap_hours", None)
+    moods[chat_id] = m
+    save_state()
+    print(f"[mood] overnight reset: {s:+.2f} -> {m['score']:+.2f} for chat {chat_id}")
+
+
 async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if owner is None:
@@ -4590,6 +4643,7 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await maintain_long_term_memory(owner)
     except Exception as e:
         print("[memory] long-term promotion error:", e)
+    _overnight_mood_reset(owner)
 
 
 async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4669,6 +4723,7 @@ _BASE_COMMANDS = [
     BotCommand("unpin", "Remove a pinned memory"),
     BotCommand("boundary", "Add a soft boundary note"),
     BotCommand("boundaries", "List boundaries"),
+    BotCommand("mood", "Check her current mood"),
     BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
@@ -4770,6 +4825,7 @@ def main():
     app.add_handler(CommandHandler("unpin", unpin_cmd))
     app.add_handler(CommandHandler("boundary", boundary_cmd))
     app.add_handler(CommandHandler("boundaries", boundaries_cmd))
+    app.add_handler(CommandHandler("mood", mood_cmd))
     app.add_handler(CommandHandler("vibe", vibe_cmd))
     app.add_handler(CommandHandler("vent", vent_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
