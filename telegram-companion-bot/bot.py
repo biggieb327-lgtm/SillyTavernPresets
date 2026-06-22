@@ -232,9 +232,11 @@ ATLAS = (
 PEOPLE_FILE = BASE_DIR / "people.txt"
 PROJECTS_FILE = BASE_DIR / "projects.txt"
 SCHEDULE_FILE = BASE_DIR / "schedule.txt"
+LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
 _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
+_life_arc_cache: dict = {"text": None, "ts": 0.0}
 
 
 def _read_life_file(path: Path, cache: dict) -> str:
@@ -256,6 +258,10 @@ def _read_people() -> str:
 
 def _read_projects() -> str:
     return _read_life_file(PROJECTS_FILE, _projects_cache)
+
+
+def _read_life_arc() -> str:
+    return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
 
 
 def _read_schedule_today() -> str:
@@ -571,6 +577,7 @@ vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
+quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
@@ -636,6 +643,8 @@ def load_state():
         unsent_drafts[int(cid)] = ud
     for cid, nb in data.get("nudge_budget", {}).items():
         nudge_budget[int(cid)] = nb
+    for cid, qt in data.get("quiet_until", {}).items():
+        quiet_until[int(cid)] = qt
     for cid, vr in data.get("voice_reply", {}).items():
         voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
@@ -666,6 +675,7 @@ def save_state():
         "user_energy": {str(k): v for k, v in user_energy.items()},
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
+        "quiet_until": {str(k): v for k, v in quiet_until.items()},
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
@@ -810,6 +820,16 @@ def active_vibe(chat_id: int) -> str:
 # --- Nudge budget ---
 def _today_str() -> str:
     return _today().isoformat()
+
+
+def _is_quiet(chat_id: int) -> bool:
+    """True if the user has /quiet active for this chat."""
+    ts = quiet_until.get(chat_id)
+    if ts and time.time() < ts:
+        return True
+    if ts:
+        quiet_until.pop(chat_id, None)  # expired, clean up
+    return False
 
 
 def _check_nudge_budget(chat_id: int) -> bool:
@@ -1643,6 +1663,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if projects:
         messages.append({"role": "system", "content": (
             f"# What {NAME} has going on / is working on\n{projects}"
+        )})
+
+    life_arc = _read_life_arc()
+    if life_arc:
+        messages.append({"role": "system", "content": (
+            f"# {NAME}'s current life arc\n{life_arc}\n"
+            f"Draw on this naturally in conversation — it's the texture of her life right now."
         )})
 
     if ATLAS:
@@ -2706,6 +2733,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Day context*",
         "/today <note> — append a mid-day note so she knows what's going on",
         "/note <text> — manually add something to what she knows about you",
+        "/recap — brief summary of the last conversation",
+        "/quiet <h> — pause proactive messages for X hours (/quiet off to cancel)",
         "",
         "*Reminders & tasks*",
         "/remindme <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
@@ -3992,6 +4021,62 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Nothing to back up yet.")
 
 
+async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Summarize the last N messages of conversation in a couple of sentences."""
+    chat_id = update.effective_chat.id
+    uname = user_names.get(chat_id, "you")
+    hist = conversation_history.get(chat_id, [])
+    if not hist:
+        await update.message.reply_text("Nothing to recap yet.")
+        return
+    recent = hist[-20:]
+    convo = "\n".join(
+        f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in recent
+    )
+    sys_msg = (
+        f"Give a 2-3 sentence plain-text recap of the following conversation between {NAME} "
+        f"and {uname}. Focus on what they talked about and any meaningful moments. No headers, "
+        f"no bullets, no markdown."
+    )
+    raw = call_nanogpt(
+        [{"role": "system", "content": sys_msg}, {"role": "user", "content": convo}],
+        model=MOOD_MODEL,
+    )
+    await update.message.reply_text(raw.strip() or "Nothing to recap.")
+
+
+async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pause proactive messages for X hours (/quiet 3h) or cancel (/quiet off)."""
+    chat_id = update.effective_chat.id
+    arg = (context.args[0].strip().lower() if context.args else "").rstrip("h").strip()
+    if arg in ("off", "cancel", "0", ""):
+        if quiet_until.pop(chat_id, None):
+            save_state()
+            await update.message.reply_text("Proactive messages back on.")
+        else:
+            ts = quiet_until.get(chat_id)
+            if ts and time.time() < ts:
+                remaining = int((ts - time.time()) / 60)
+                await update.message.reply_text(
+                    f"Quiet mode active for ~{remaining} more min. Send /quiet off to cancel."
+                )
+            else:
+                await update.message.reply_text(
+                    "Quiet mode is off. Use /quiet <hours> (e.g. /quiet 3) to pause proactives."
+                )
+        return
+    try:
+        hours = float(arg)
+        if hours <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Usage: /quiet <hours>  e.g. /quiet 3  |  /quiet off to cancel")
+        return
+    quiet_until[chat_id] = time.time() + hours * 3600
+    save_state()
+    await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
+
+
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Append a mid-day note to day.txt so the character picks it up in context."""
     text = " ".join(context.args).strip() if context.args else ""
@@ -5129,6 +5214,9 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         _save_draft(owner, "wanted to check in but it was quiet hours")
         print("[heartbeat] Quiet hours; saved draft.")
         return
+    if _is_quiet(owner):
+        print("[heartbeat] User /quiet active; skipping.")
+        return
     if not _check_nudge_budget(owner):
         _save_draft(owner, "had something to say but hit the daily nudge limit")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
@@ -5483,6 +5571,8 @@ def main():
         app.add_handler(CommandHandler("remindpayments", remind_payments_now))
         app.add_handler(CommandHandler("week", remind_payments_now))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("recap", recap_cmd))
+    app.add_handler(CommandHandler("quiet", quiet_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
