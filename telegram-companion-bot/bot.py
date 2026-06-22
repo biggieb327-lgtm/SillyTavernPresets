@@ -4902,7 +4902,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if user_memory_text and not user_memory_text.startswith("["):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
-    if clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
+    if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
             try:
@@ -5253,6 +5253,8 @@ PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
+# Disabled by default — set FOLLOWUP_ENABLED=true in .env to turn on.
+FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() == "true"
 _FOLLOWUP_RE = re.compile(
     r"\b(hold on|hold up|brb|be right back"
     r"|give me a (sec|second|minute|min)"

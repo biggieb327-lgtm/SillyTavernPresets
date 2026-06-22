@@ -20,7 +20,7 @@ bash "$BOT_SRC/run.sh"
 echo "    nora: restarted"
 
 # Named instances — run-bot.sh <instance-dir> <session-name>
-for entry in "bonnie-bot:bonnie" "cass-bot:cass" "emily-bot:emily"; do
+for entry in "bonnie-bot:bonnie" "cass-bot:cass" "emily-bot:emily" "priya-bot:priya"; do
   dir="$HOME/${entry%%:*}"
   session="${entry##*:}"
   if [ -d "$dir" ]; then
