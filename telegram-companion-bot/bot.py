@@ -1359,6 +1359,15 @@ def mood_label(chat_id: int):
     return None
 
 
+def _mood_vibe(chat_id: int) -> str:
+    """Combine mood label and active vibe into a short descriptive string for prompts."""
+    label = mood_label(chat_id)
+    vibe = active_vibe(chat_id)
+    if label and vibe:
+        return f"{label} [vibe: {vibe}]"
+    return label or vibe or "neutral"
+
+
 def nudge_mood(chat_id: int, gap_hours):
     """Apply a mood penalty when re-contacting after a long silence.
     Positive shifts come from the LLM appraisal, not unconditionally from contact."""
