@@ -16,8 +16,8 @@ echo "==> Restarting bots..."
 
 # Nora — default instance; session may be named "nora" or "telegram-bot" depending
 # on how it was first started, so kill both before restarting with the supervisor.
-tmux kill-session -t nora 2>/dev/null
-tmux kill-session -t telegram-bot 2>/dev/null
+tmux kill-session -t nora 2>/dev/null || true
+tmux kill-session -t telegram-bot 2>/dev/null || true
 bash "$BOT_SRC/run-bot.sh" "$BOT_SRC" nora
 echo "    nora: restarted"
 
