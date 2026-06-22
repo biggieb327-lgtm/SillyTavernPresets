@@ -221,6 +221,66 @@ ATLAS = (
     if ATLAS_FILE.exists() else []
 )
 
+# --- Living character files (per-instance, user-maintained) ---
+# people.txt  — names + one-line relationship notes; sampled into generated events + context
+# projects.txt — ongoing projects/things spanning days or weeks; injected into context
+# schedule.txt — weekly routine by day name; today's section injected into context
+PEOPLE_FILE = BASE_DIR / "people.txt"
+PROJECTS_FILE = BASE_DIR / "projects.txt"
+SCHEDULE_FILE = BASE_DIR / "schedule.txt"
+_LIFE_TTL = 300  # re-read life files at most every 5 min
+_people_cache: dict = {"text": None, "ts": 0.0}
+_projects_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _read_life_file(path: Path, cache: dict) -> str:
+    now = time.time()
+    if cache["text"] is not None and now - cache["ts"] < _LIFE_TTL:
+        return cache["text"]
+    try:
+        text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    except Exception:
+        text = ""
+    cache["text"] = text
+    cache["ts"] = now
+    return text
+
+
+def _read_people() -> str:
+    return _read_life_file(PEOPLE_FILE, _people_cache)
+
+
+def _read_projects() -> str:
+    return _read_life_file(PROJECTS_FILE, _projects_cache)
+
+
+def _read_schedule_today() -> str:
+    """Return today's section from schedule.txt (lines under today's day name)."""
+    if not SCHEDULE_FILE.exists():
+        return ""
+    try:
+        text = SCHEDULE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    today = (datetime.now(tz=TZ) if TZ else datetime.now()).strftime("%A")  # e.g. "Monday"
+    day_abbrevs = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    lines = text.splitlines()
+    result, in_today = [], False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_day_heading = any(stripped.lower().startswith(d) for d in day_abbrevs)
+        if is_day_heading:
+            if today.lower()[:3] in stripped.lower()[:3]:
+                in_today = True
+                result.append(stripped)
+            elif in_today:
+                break
+        elif in_today:
+            result.append(stripped)
+    return "\n".join(result).strip()
+
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
 ALLOWED_REACTIONS = {
     "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩",
@@ -1497,6 +1557,17 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": "# Current setting\n" + fill(SETTING, NAME, uname),
         })
 
+    # Stable character background: people in her life and ongoing projects.
+    people = _read_people()
+    if people:
+        messages.append({"role": "system", "content": f"# People in {NAME}'s life\n{people}"})
+
+    projects = _read_projects()
+    if projects:
+        messages.append({"role": "system", "content": (
+            f"# What {NAME} has going on / is working on\n{projects}"
+        )})
+
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
         messages.append({
@@ -1585,6 +1656,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
         )})
 
+    rq = _recent_questions.get(chat_id) or []
+    if rq:
+        messages.append({"role": "system", "content": (
+            f"# Questions you've recently asked {uname} — don't repeat these:\n"
+            + "\n".join("- " + q for q in rq[-5:])
+        )})
+
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
     lore = triggered_lore(scan_text)
     if lore:
@@ -1608,6 +1686,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
+
+    # Today's schedule section, if a schedule file exists for this instance.
+    sched = _read_schedule_today()
+    if sched:
+        messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
 
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
@@ -2025,6 +2108,13 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
         "watermarks, or captions in the image."
     )
+    if chat_id is not None:
+        recent_scenes = (_recent_selfie_hints.get(chat_id) or [])[-4:]
+        if recent_scenes:
+            bits.append(
+                "Vary the scenario — avoid recreating these recent setups: "
+                + "; ".join(f'"{s}"' for s in recent_scenes) + "."
+            )
     return " ".join(bits)
 
 
@@ -2179,6 +2269,14 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         caption = await caption_task
         await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img),
                                      caption=caption or None)
+        # Log the scene to the dedup buffer so it isn't repeated soon
+        scene_note = (hint.strip() if hint else prompt[prompt.find("She's "):prompt.find("She's ")+60]).strip()
+        if not scene_note:
+            scene_note = prompt[:80]
+        buf = _recent_selfie_hints.setdefault(chat_id, [])
+        buf.append(scene_note)
+        if len(buf) > SELFIE_DEDUP_SIZE:
+            buf.pop(0)
     except Exception as e:
         print("[selfie] failed:", e)
         if announce_errors:
@@ -4298,6 +4396,13 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if inside_jokes and clean:
         _check_joke_used(clean)
+    if clean:
+        q = _extract_last_question(clean)
+        if q and len(q) > 12:
+            buf = _recent_questions.setdefault(chat_id, [])
+            buf.append(q)
+            if len(buf) > QUESTION_MEMORY_SIZE:
+                buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
@@ -4664,6 +4769,21 @@ FOLLOWUP_MIN = float(os.getenv("FOLLOWUP_MIN_SECS", "45"))
 FOLLOWUP_MAX = float(os.getenv("FOLLOWUP_MAX_SECS", "120"))
 _pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user replies first)
 
+# Selfie scene deduplication — avoids repeating the same scenario in back-to-back selfies.
+SELFIE_DEDUP_SIZE = int(os.getenv("SELFIE_DEDUP_SIZE", "6"))
+_recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
+
+# Question memory — tracks questions the bot has asked recently; avoids repeating them.
+QUESTION_MEMORY_SIZE = int(os.getenv("QUESTION_MEMORY_SIZE", "8"))
+_recent_questions: dict = {}  # chat_id -> list of recent questions
+
+_QUESTION_RE = re.compile(r"[^.!?…]*\?")  # quick sentence-level question extractor
+
+
+def _extract_last_question(text: str) -> str:
+    matches = _QUESTION_RE.findall(text)
+    return matches[-1].strip() if matches else ""
+
 # Lull detection: consecutive terse replies trigger a gentle approach shift.
 _terse_count: dict = {}  # chat_id -> int
 LULL_THRESHOLD = int(os.getenv("LULL_THRESHOLD", "3"))
@@ -4975,36 +5095,85 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def _generate_daily_events(owner: int):
+    """Generate 2-3 small life events for the day using the character's people, projects,
+    and schedule as seeds. Writes the result to day.txt so it's ready when she texts."""
+    try:
+        people = _read_people()
+        projects = _read_projects()
+        schedule_today = _read_schedule_today()
+        await ensure_weather()
+        weather = (_weather_cache.get("text") or "").strip()
+
+        ctx_parts = []
+        if schedule_today:
+            ctx_parts.append(f"Her schedule today: {schedule_today}")
+        if weather:
+            ctx_parts.append(f"Weather: {weather}")
+        if projects:
+            ctx_parts.append(f"Ongoing things in her life:\n{projects}")
+        if people:
+            ctx_parts.append(f"People in her life:\n{people}")
+
+        ctx_block = "\n\n".join(ctx_parts)
+        prompt = (
+            f"Write 2-3 small, specific things that happen to {NAME} today. "
+            f"Think ordinary texture of a real day — not dramatic, just the kind of mundane "
+            f"or mildly interesting thing that actually happens to a person. "
+            f"Each one: 1-2 sentences, written as a terse personal note (not a diary entry). "
+            f"Reference her actual people and projects naturally when they fit — don't force them."
+            + (f"\n\n{ctx_block}" if ctx_block else "")
+            + "\n\nWrite only the events, no headers, bullets, or numbering."
+        )
+        msgs = [
+            {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
+            {"role": "user", "content": prompt},
+        ]
+        events = await asyncio.to_thread(_one_call, msgs, SUMMARY_MODEL)
+        events = _strip_thinking(events).strip()
+        if events:
+            DAY_FILE.write_text(events, encoding="utf-8")
+            _day_cache["text"] = events
+            _day_cache["ts"] = time.time()
+            print(f"[day-events] {NAME}: {events[:100]}…")
+    except Exception as e:
+        print(f"[day-events] failed: {e}")
+
+
 async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
-    """Midnight job: archive today's day.txt to memory and a dated file, then clear it."""
+    """Midnight job: archive today's day.txt to memory + a dated file, then generate
+    tomorrow's events so she starts the new day with a populated context."""
     day_ctx = _read_day_context()
-    if not day_ctx:
-        return
     owner = get_owner()
     yesterday = (datetime.now(tz=TZ) if TZ else datetime.now()) - timedelta(days=1)
     date_str = yesterday.strftime("%Y-%m-%d")
-    # Archive to a dated file so the day isn't lost
-    archive = BASE_DIR / f"day_{date_str}.txt"
-    try:
-        archive.write_text(day_ctx, encoding="utf-8")
-    except Exception as e:
-        print(f"[day-rotate] archive failed: {e}")
-    # Save a compact memory fact so it persists through summarization
+    if day_ctx:
+        # Archive to a dated file so the day isn't lost
+        archive = BASE_DIR / f"day_{date_str}.txt"
+        try:
+            archive.write_text(day_ctx, encoding="utf-8")
+        except Exception as e:
+            print(f"[day-rotate] archive failed: {e}")
+        # Save a compact memory fact so it persists through summarization
+        if owner is not None:
+            fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
+            rfts = recent_facts.setdefault(owner, [])
+            rfts.append(fact)
+            if len(rfts) > RECENT_FACTS_MAX:
+                rfts.pop(0)
+            save_state()
+        print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
+    # Generate fresh events for the new day (writes to day.txt, clears cache implicitly)
     if owner is not None:
-        fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
-        rfts = recent_facts.setdefault(owner, [])
-        rfts.append(fact)
-        if len(rfts) > RECENT_FACTS_MAX:
-            rfts.pop(0)
-        save_state()
-    # Clear the current day file for the new day
-    try:
-        DAY_FILE.write_text("", encoding="utf-8")
-    except Exception as e:
-        print(f"[day-rotate] clear failed: {e}")
-    _day_cache["text"] = ""
-    _day_cache["ts"] = time.time()
-    print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
+        await _generate_daily_events(owner)
+    else:
+        # No owner yet — just clear the file
+        try:
+            DAY_FILE.write_text("", encoding="utf-8")
+        except Exception:
+            pass
+        _day_cache["text"] = ""
+        _day_cache["ts"] = time.time()
 
 
 async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
