@@ -100,7 +100,7 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
-INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
+INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
@@ -118,9 +118,9 @@ SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", 
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
 TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
-TYPING_WPM = float(os.getenv("TYPING_WPM", "45"))
-TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "1.5"))
-TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "8.0"))
+TYPING_WPM = float(os.getenv("TYPING_WPM", "120"))
+TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.5"))
+TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
