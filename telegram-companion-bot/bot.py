@@ -2478,8 +2478,14 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         ctx += f" Currently wearing: {outfit}."
     if hint:
         ctx += f" The selfie is from: {hint}."
+    if _weather_cache["text"]:
+        ctx += f" Current weather: {_weather_cache['text']}."
     recent = [m for m in conversation_history.get(chat_id, [])[-8:] if isinstance(m.get("content"), str)]
-    history = [{"role": m["role"], "content": m["content"][:300]} for m in recent]
+    mem = memory_block(chat_id, uname)
+    history = (
+        ([{"role": "system", "content": mem}] if mem else [])
+        + [{"role": m["role"], "content": m["content"][:300]} for m in recent]
+    )
     messages = (
         [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
         + history
@@ -2498,24 +2504,30 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
 
 async def _infer_scene(chat_id: int) -> str:
     """Infer current scene location from recent conversation for selfie context."""
+    uname = user_names.get(chat_id, "you")
     recent = [m for m in conversation_history.get(chat_id, [])[-10:] if isinstance(m.get("content"), str)]
-    if not recent:
+    ctx_parts = []
+    mem = memory_block(chat_id, uname)
+    if mem:
+        ctx_parts.append(mem)
+    if recent:
+        ctx_parts.append("Recent messages:\n" + "\n".join(
+            f"{'her' if m['role'] == 'assistant' else 'him'}: {m['content'][:200].strip()}"
+            for m in recent
+        ))
+    if not ctx_parts:
         return ""
-    snippet = "\n".join(
-        f"{'her' if m['role'] == 'assistant' else 'him'}: {m['content'][:200].strip()}"
-        for m in recent
-    )
     try:
         result = await asyncio.to_thread(
             call_nanogpt,
             [
                 {"role": "system", "content": (
-                    f"Based on this conversation, where is {NAME} right now? "
+                    f"Based on this context, where is {NAME} right now? "
                     f"Reply with a single brief location phrase only — e.g. 'her apartment kitchen', "
                     f"'a coffee shop', 'outside on a walk', 'her bedroom'. "
                     f"If the location hasn't been established, reply with: unclear"
                 )},
-                {"role": "user", "content": snippet},
+                {"role": "user", "content": "\n\n".join(ctx_parts)},
             ],
             model=INNER_VOICE_MODEL,
         )
