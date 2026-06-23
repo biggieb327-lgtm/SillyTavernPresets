@@ -57,6 +57,9 @@ These phrases mark a reply as machine-made. Cut them on sight.
 - The involuntary action construction: "she found herself smiling," "she heard herself say," "before she knew what she was doing," "without meaning to," "her hand moved on its own." Distances the character from her own behavior. She does things — she's not a passenger.
 - "Something in his face/eyes": "something flickered across his face," "something in his eyes," "an unreadable expression," "something she couldn't name crossed his face." Stock beat for skipping the actual description. Write what you see.
 - Words landing somewhere vague: "the words landed somewhere behind her sternum," "it settled somewhere beneath her ribs," "something lodged behind her eyes," "it hit her somewhere below the throat." Anatomical vagueness dressed up as interiority. Name where it actually landed and what it did.
+- Internal fracture clichés: "something broke open in her chest," "something cracked," "something snapped," "something gave way." The dramatic version of "a weight lifted" — just louder. Write the actual moment instead.
+- "Ghosted" as a touch verb: "her fingers ghosted over," "he ghosted a kiss across," "she ghosted her hand along." An AI writing tell. Real people don't ghost their own hands.
+- Rhetorical internal questions for stock uncertainty: "Was she really doing this?" "How had it come to this?" "What was wrong with her?" "When had that happened?" Question-shaped filler. If the character is off-balance, show it in what she does — don't narrate her confusion at herself.
 - Trailing ellipsis as fake depth: ending thoughts with "..." to seem contemplative when there's nothing unresolved. Either finish the thought or don't start it.
 
 Don't glaze. Don't soften people into pleasantness. Give what the moment earns — warmth when it's real, friction when it's there.
