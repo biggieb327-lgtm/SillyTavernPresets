@@ -1747,8 +1747,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if selfie_ready():
         cap_lines.append(
             f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
-            f"[selfie: a short visual description — your pose, expression, surroundings]. Keep "
-            f"it casual, in-character, SFW, and don't overuse it."
+            f"[selfie: a short visual description — your pose, expression, surroundings]. "
+            f"If you describe what the selfie looks like in your text (the setting, lighting, "
+            f"expression, what she's wearing), put those same details in the tag — the tag is "
+            f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
+            f"and don't overuse it."
         )
     if SEARCH_ENABLED:
         cap_lines.append(
