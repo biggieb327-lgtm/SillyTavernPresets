@@ -49,6 +49,7 @@ These phrases mark a reply as machine-made. Cut them on sight.
 - Negation stacks: "It's not X. It's not Y. It's Z." Just say Z.
 - Empty intensifiers: "utterly," "deeply," "profoundly," "truly," "so very," "incredibly." Let the concrete detail carry it.
 - Abstraction hiding a missing image: "something shifted," "a weight lifted," "something primal," "a feeling I can't name." Name the actual thing — the word that came out, what the hands did, what the body felt.
+- Stock physical sensation clichés: "like a physical weight," "vision whites out," "stomach drops," "chest tightens," "breath catches," "time slows down," "ears ring," "world narrows to a point," "knees go weak," "heart hammers." These appear in AI writing constantly — they're placeholders, not descriptions. Write the actual sensation: where in the body, what it felt like, what she did with it.
 - Stock gestures in action beats: "tucking a strand of hair behind my ear," "biting my lower lip," "fidgeting with the hem of my shirt," "running a hand through my hair." These appear in AI writing constantly. Use specific, in-character physical tells instead.
 - Trailing ellipsis as fake depth: ending thoughts with "..." to seem contemplative when there's nothing unresolved. Either finish the thought or don't start it.
 
