@@ -2490,6 +2490,35 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         return ""
 
 
+async def _infer_scene(chat_id: int) -> str:
+    """Infer current scene location from recent conversation for selfie context."""
+    recent = [m for m in conversation_history.get(chat_id, [])[-10:] if isinstance(m.get("content"), str)]
+    if not recent:
+        return ""
+    snippet = "\n".join(
+        f"{'her' if m['role'] == 'assistant' else 'him'}: {m['content'][:200].strip()}"
+        for m in recent
+    )
+    try:
+        result = await asyncio.to_thread(
+            call_nanogpt,
+            [
+                {"role": "system", "content": (
+                    f"Based on this conversation, where is {NAME} right now? "
+                    f"Reply with a single brief location phrase only — e.g. 'her apartment kitchen', "
+                    f"'a coffee shop', 'outside on a walk', 'her bedroom'. "
+                    f"If the location hasn't been established, reply with: unclear"
+                )},
+                {"role": "user", "content": snippet},
+            ],
+            model=INNER_VOICE_MODEL,
+        )
+        loc = result.strip()
+        return "" if loc.lower() == "unclear" or len(loc) > 80 else loc
+    except Exception:
+        return ""
+
+
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
@@ -2500,6 +2529,8 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
                       f"~/telegram-bot/appearance.txt and restart."),
             )
         return
+    if not hint:
+        hint = await _infer_scene(chat_id)
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
         prompt = build_selfie_prompt(hint, chat_id)
