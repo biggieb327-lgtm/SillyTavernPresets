@@ -2478,15 +2478,18 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         ctx += f" Currently wearing: {outfit}."
     if hint:
         ctx += f" The selfie is from: {hint}."
-    messages = [
-        {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)},
-        {"role": "user", "content": (
+    recent = [m for m in conversation_history.get(chat_id, [])[-8:] if isinstance(m.get("content"), str)]
+    history = [{"role": m["role"], "content": m["content"][:300]} for m in recent]
+    messages = (
+        [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
+        + history
+        + [{"role": "user", "content": (
             f"You just took a selfie and you're sending it. {ctx} "
             "Write one short casual text to go with it — 1-2 sentences max. "
             "Don't describe the photo. Don't open with 'here' or 'here you go'. "
             "Don't announce that you're sending a photo. Just be yourself."
-        )},
-    ]
+        )}]
+    )
     try:
         return (await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)).strip()
     except Exception:
