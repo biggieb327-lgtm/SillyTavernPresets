@@ -2523,6 +2523,8 @@ async def _infer_scene(chat_id: int) -> str:
             [
                 {"role": "system", "content": (
                     f"Based on this context, where is {NAME} right now? "
+                    f"She currently lives in {WEATHER_LOCATION} — ignore any historical or "
+                    f"background references to other cities; only infer her current location. "
                     f"Reply with a single brief location phrase only — e.g. 'her apartment kitchen', "
                     f"'a coffee shop', 'outside on a walk', 'her bedroom'. "
                     f"If the location hasn't been established, reply with: unclear"
@@ -5364,6 +5366,10 @@ _pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user 
 SELFIE_DEDUP_SIZE = int(os.getenv("SELFIE_DEDUP_SIZE", "6"))
 _recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
 
+# Proactive hook dedup — avoids repeating the same pattern in back-to-back heartbeats.
+PROACTIVE_HOOK_DEDUP_SIZE = int(os.getenv("PROACTIVE_HOOK_DEDUP_SIZE", "8"))
+_recent_proactive_hooks: dict = {}  # chat_id -> list of recent hook sentences
+
 # Question memory — tracks questions the bot has asked recently; avoids repeating them.
 QUESTION_MEMORY_SIZE = int(os.getenv("QUESTION_MEMORY_SIZE", "8"))
 _recent_questions: dict = {}  # chat_id -> list of recent questions
@@ -5456,19 +5462,35 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
         parts.append(f"Last exchange: {snippet}")
     if not parts:
         return ""
+    recent_hooks = (_recent_proactive_hooks.get(chat_id) or [])[-PROACTIVE_HOOK_DEDUP_SIZE:]
+    avoid = ""
+    if recent_hooks:
+        avoid = (
+            f"\n\nAvoid repeating the mood, topic, or type of hook from these recent ones:\n"
+            + "\n".join(f"- {h}" for h in recent_hooks)
+        )
     sys_msg = (
         f"You are helping {NAME} decide what to text {uname}. "
         f"Based on the context below, write ONE short sentence (10-20 words) describing "
         f"something specific that is genuinely on {NAME}'s mind right now — "
-        f"a thought, observation, or thing she'd naturally bring up. "
-        f"Be concrete. No filler. No quotes around the sentence."
+        f"could be a passing thought, something she noticed, a memory, something annoying her, "
+        f"something she's curious about, a thing from her day, or nothing in particular. "
+        f"Vary the register — not every message is a check-in or an observation about the city. "
+        f"Be concrete and specific to who she is. No filler. No quotes around the sentence."
+        + avoid
     )
     try:
-        return call_nanogpt(
+        result = call_nanogpt(
             [{"role": "system", "content": sys_msg},
              {"role": "user", "content": "\n".join(parts)}],
             model=MOOD_MODEL,
         ).strip()
+        if result:
+            buf = _recent_proactive_hooks.setdefault(chat_id, [])
+            buf.append(result)
+            if len(buf) > PROACTIVE_HOOK_DEDUP_SIZE:
+                buf.pop(0)
+        return result
     except Exception:
         return ""
 
