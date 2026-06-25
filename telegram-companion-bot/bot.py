@@ -4760,6 +4760,48 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 PDF_MAX_SIZE_MB = int(os.getenv("PDF_MAX_SIZE_MB", "20"))
 PDF_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "16000"))
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "4"))
+
+
+async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
+                            fname: str, caption: str, uname: str) -> None:
+    """Render image-only PDF pages via mutool and pass to the vision model."""
+    import glob, shutil, subprocess, tempfile
+    home = os.path.expanduser("~")
+    tmp_dir = tempfile.mkdtemp(dir=home, prefix="bot_pdf_")
+    try:
+        pdf_path = os.path.join(tmp_dir, "input.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(raw_bytes)
+        out_pattern = os.path.join(tmp_dir, "page-%d.png")
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["mutool", "draw", "-o", out_pattern, "-r", "150", pdf_path],
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode(errors="replace")[:200]
+            raise RuntimeError(f"mutool failed: {err}")
+        pages = sorted(glob.glob(os.path.join(tmp_dir, "page-*.png")))[:PDF_OCR_MAX_PAGES]
+        if not pages:
+            raise RuntimeError("mutool produced no pages")
+        lead = caption or f"I sent you a PDF — {fname}. Read it and respond."
+        content: list = [{"type": "text", "text": lead}]
+        for p in pages:
+            with open(p, "rb") as f:
+                data_url = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+            content.append({"type": "image_url", "image_url": {"url": data_url}})
+        await ensure_weather()
+        base_msgs = assemble_messages(chat_id, "_")
+        if base_msgs and base_msgs[-1].get("role") == "user":
+            base_msgs = base_msgs[:-1]
+        messages = base_msgs + [{"role": "user", "content": content}]
+        ai_response = await reply_with_typing(context, chat_id, messages,
+                                              model=VISION_MODEL, fallback=VISION_FALLBACK)
+        user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
+        await _deliver(update, context, chat_id, user_mem, ai_response)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _extract_pdf_text(raw_bytes: bytes) -> str:
@@ -4860,8 +4902,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
             return
         if not pdf_text.strip():
-            await context.bot.send_message(chat_id=chat_id,
-                text="[couldn't extract any text from that PDF — it may be image-only or encrypted]")
+            try:
+                await _pdf_ocr_fallback(context, update, chat_id, raw_bytes, fname, caption, uname)
+            except FileNotFoundError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="[image-only PDF — install mupdf-tools to enable vision fallback: pkg install mupdf-tools]",
+                )
+            except Exception as e:
+                log.error("PDF OCR fallback failed: %s", e)
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"[couldn't read that PDF as an image either: {e}]",
+                )
             return
         if len(pdf_text) > PDF_MAX_CHARS:
             pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
