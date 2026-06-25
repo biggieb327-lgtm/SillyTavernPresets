@@ -5260,7 +5260,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_url = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
 
         uname = user_names[chat_id]
-        prompt = caption or f"{uname} just sent you this photo. React to it in character."
+        loc_ctx = ""
+        loc = user_location.get(chat_id)
+        if loc and (time.time() - loc["ts"]) < 4 * 3600:
+            place = await asyncio.to_thread(_reverse_geocode_sync, loc["lat"], loc["lon"])
+            if place:
+                loc_ctx = f" They're near {place} ({loc['lat']:.4f}, {loc['lon']:.4f})."
+        prompt = caption or f"{uname} just sent you this photo.{loc_ctx} React to it in character."
         await ensure_weather()
         messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
@@ -5880,6 +5886,25 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- Reverse geocoding (OSM Nominatim — free, no key required) ---
+
+def _reverse_geocode_sync(lat: float, lon: float) -> str:
+    """Return a region name for coordinates, or '' on failure. Call via asyncio.to_thread."""
+    try:
+        url = (f"https://nominatim.openstreetmap.org/reverse"
+               f"?lat={lat}&lon={lon}&format=json&zoom=10")
+        r = _session.get(url, headers={"User-Agent": "SillyTavernBot/1.0"}, timeout=5)
+        r.raise_for_status()
+        addr = r.json().get("address", {})
+        parts = [p for p in [
+            addr.get("county") or addr.get("city"),
+            addr.get("state"),
+        ] if p]
+        return ", ".join(parts)
+    except Exception:
+        return ""
+
+
 # --- WSDOT Traffic integration ---
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -5978,9 +6003,7 @@ def _format_travel_times(times: list, lat=None, lon=None) -> str:
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store the user's location (static or live); acknowledge with a brief in-character note."""
-    if not TRAFFIC_ENABLED:
-        return
+    """Store the user's location (static or live); for traffic-enabled bots, acknowledge it."""
     chat_id = update.effective_chat.id
     loc = (update.message or update.edited_message).location
 
@@ -5996,7 +6019,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     save_state()
 
-    if update.message:  # only reply on the initial share, not every live update
+    if TRAFFIC_ENABLED and update.message:  # only reply on the initial share, not every live update
         if loc.live_period:
             await update.message.reply_text(
                 "📍 Got your live location. I'll keep an eye on traffic around you "
@@ -6263,11 +6286,11 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
-        app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-        app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
 
     def _shutdown(sig, frame):
         log.info("Received signal %s — saving state and shutting down.", sig)
