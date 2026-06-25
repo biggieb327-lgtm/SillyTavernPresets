@@ -4785,20 +4785,35 @@ async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
         pages = sorted(glob.glob(os.path.join(tmp_dir, "page-*.png")))[:PDF_OCR_MAX_PAGES]
         if not pages:
             raise RuntimeError("mutool produced no pages")
-        lead = caption or f"I sent you a PDF — {fname}. Read it and respond."
-        content: list = [{"type": "text", "text": lead}]
+        page_data_urls = []
         for p in pages:
             with open(p, "rb") as f:
-                data_url = "data:image/png;base64," + base64.b64encode(f.read()).decode()
-            content.append({"type": "image_url", "image_url": {"url": data_url}})
-        await ensure_weather()
-        base_msgs = assemble_messages(chat_id, "_")
-        if base_msgs and base_msgs[-1].get("role") == "user":
-            base_msgs = base_msgs[:-1]
-        messages = base_msgs + [{"role": "user", "content": content}]
-        ai_response = await reply_with_typing(context, chat_id, messages,
-                                              model=VISION_MODEL, fallback=VISION_FALLBACK)
+                page_data_urls.append("data:image/png;base64," + base64.b64encode(f.read()).decode())
+
+        # Step 1: extract text via vision model — clear extraction task, no character voice
+        extract_content: list = [{"type": "text", "text":
+            f"Transcribe all text content from these {len(pages)} scanned document page(s). "
+            f"Ignore any app watermarks, scanner logos, or branding. "
+            f"Output only the document text, formatted clearly."}]
+        for data_url in page_data_urls:
+            extract_content.append({"type": "image_url", "image_url": {"url": data_url}})
+        extract_msgs = [
+            {"role": "system", "content": "You are a document text extractor. Transcribe all visible text from the provided images, ignoring watermarks and logos."},
+            {"role": "user", "content": extract_content},
+        ]
+        extracted_text = await asyncio.to_thread(call_nanogpt, extract_msgs, VISION_MODEL)
+        if not extracted_text.strip():
+            raise RuntimeError("vision model couldn't read any content from the pages")
+
+        # Step 2: character responds to extracted text via DOCUMENT_MODEL (same path as text PDFs)
+        lead = caption or f"I sent you a PDF — {fname}. Take a look."
+        user_prompt = f"{lead}\n\n[PDF contents]\n{extracted_text}"
         user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
+        await ensure_weather()
+        messages = assemble_messages(chat_id, user_prompt)
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
