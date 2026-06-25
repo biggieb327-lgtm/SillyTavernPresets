@@ -597,6 +597,7 @@ def _save_and_reload_card():
 # --- State (in-memory, mirrored to disk so the character remembers across restarts) ---
 conversation_history = {}   # chat_id -> recent messages (verbatim window)
 last_seen = {}      # chat_id -> unix timestamp of last user activity
+_pdf_in_flight: set = set()  # (chat_id, file_unique_id) — prevents duplicate processing
 user_names = {}     # chat_id -> the human's first name (for {{user}})
 summaries = {}      # chat_id -> long-term rolling summary (durable, identity-level)
 facts = {}          # chat_id -> list of durable, identity-level facts about the user
@@ -4907,44 +4908,53 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id,
                 text=f"[that PDF is too big — max {PDF_MAX_SIZE_MB} MB]")
             return
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        try:
-            tg_file = await context.bot.get_file(doc.file_id)
-            raw_bytes = bytes(await tg_file.download_as_bytearray())
-            pdf_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
-        except Exception as e:
-            log.error("PDF download/read error: %s", e)
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
+        key = (chat_id, doc.file_unique_id)
+        if key in _pdf_in_flight:
+            await context.bot.send_message(chat_id=chat_id,
+                text="[already working on that PDF — give me a sec]")
             return
-        if not pdf_text.strip():
+        _pdf_in_flight.add(key)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             try:
-                await _pdf_ocr_fallback(context, update, chat_id, raw_bytes, fname, caption, uname)
-            except FileNotFoundError:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="[image-only PDF — install mupdf-tools to enable vision fallback: pkg install mupdf-tools]",
-                )
+                tg_file = await context.bot.get_file(doc.file_id)
+                raw_bytes = bytes(await tg_file.download_as_bytearray())
+                pdf_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
             except Exception as e:
-                log.error("PDF OCR fallback failed: %s", e)
-                await context.bot.send_message(
-                    chat_id=chat_id, text=f"[couldn't read that PDF as an image either: {e}]",
-                )
-            return
-        if len(pdf_text) > PDF_MAX_CHARS:
-            pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
-        lead = caption or f"I sent you a PDF — {fname}. Take a look."
-        user_prompt = f"{lead}\n\n[PDF contents]\n{pdf_text}"
-        user_mem = f"[sent PDF: {fname}] {caption}".strip()
-        try:
-            await ensure_weather()
-            messages = assemble_messages(chat_id, user_prompt)
-            ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
-            ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
-                                             model=DOCUMENT_MODEL)
-            await _deliver(update, context, chat_id, user_mem, ai_response)
-        except Exception as e:
-            log.error("PDF handler reply error: %s", e)
-            await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+                log.error("PDF download/read error: %s", e)
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
+                return
+            if not pdf_text.strip():
+                try:
+                    await _pdf_ocr_fallback(context, update, chat_id, raw_bytes, fname, caption, uname)
+                except FileNotFoundError:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="[image-only PDF — install mupdf-tools to enable vision fallback: pkg install mupdf-tools]",
+                    )
+                except Exception as e:
+                    log.error("PDF OCR fallback failed: %s", e)
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=f"[couldn't read that PDF as an image either: {e}]",
+                    )
+                return
+            if len(pdf_text) > PDF_MAX_CHARS:
+                pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
+            lead = caption or f"I sent you a PDF — {fname}. Take a look."
+            user_prompt = f"{lead}\n\n[PDF contents]\n{pdf_text}"
+            user_mem = f"[sent PDF: {fname}] {caption}".strip()
+            try:
+                await ensure_weather()
+                messages = assemble_messages(chat_id, user_prompt)
+                ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+                ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                                 model=DOCUMENT_MODEL)
+                await _deliver(update, context, chat_id, user_mem, ai_response)
+            except Exception as e:
+                log.error("PDF handler reply error: %s", e)
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        finally:
+            _pdf_in_flight.discard(key)
         return
 
     # --- JSON branch ---
