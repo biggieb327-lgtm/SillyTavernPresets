@@ -4805,6 +4805,9 @@ async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
         extracted_text = await asyncio.to_thread(call_nanogpt, extract_msgs, VISION_MODEL)
         if not extracted_text.strip():
             raise RuntimeError("vision model couldn't read any content from the pages")
+        _WATERMARK_NAMES = ("camscanner", "adobe scan", "microsoft lens", "genius scan", "tiny scanner")
+        if len(extracted_text.strip()) < 80 or any(w in extracted_text.lower() for w in _WATERMARK_NAMES):
+            raise RuntimeError("only got a scanner watermark — no document content visible")
 
         # Step 2: character responds to extracted text via DOCUMENT_MODEL (same path as text PDFs)
         lead = caption or f"I sent you a PDF — {fname}. Take a look."
