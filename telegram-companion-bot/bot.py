@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import math
 import random
 import asyncio
 import time
@@ -99,6 +100,8 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
+INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() == "true"
+INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -115,9 +118,9 @@ SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", 
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
 TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
-TYPING_WPM = float(os.getenv("TYPING_WPM", "45"))
-TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "1.5"))
-TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "8.0"))
+TYPING_WPM = float(os.getenv("TYPING_WPM", "120"))
+TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.5"))
+TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -423,6 +426,14 @@ WEATHER_CODES = {
 _weather_cache = {"text": None, "ts": 0.0}
 WEATHER_TTL = 3600  # refresh live weather at most every hour
 
+# --- WSDOT Traffic (Western Washington) ---
+WSDOT_API_KEY       = os.getenv("WSDOT_API_KEY", "")
+TRAFFIC_ENABLED     = bool(WSDOT_API_KEY)
+TRAFFIC_RADIUS_MILES = float(os.getenv("TRAFFIC_RADIUS_MILES", "10"))
+TRAFFIC_POLL_MINUTES = int(os.getenv("TRAFFIC_POLL_MINUTES", "10"))
+_WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
+_WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
     "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
@@ -555,6 +566,34 @@ if not card_path.exists():
 
 NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
 
+# Raw card data kept in memory so /setcard can update individual fields without a restart.
+_card_json: dict = json.loads(card_path.read_text(encoding="utf-8"))
+_card_data: dict = _card_json.get("data", _card_json)  # reference into the live dict
+
+_CARD_FIELDS = {
+    "name":         "name",
+    "description":  "description",
+    "personality":  "personality",
+    "scenario":     "scenario",
+    "first_mes":    "first_mes",
+    "mes_example":  "mes_example",
+    "system_prompt":         "system_prompt",
+    "post_history":          "post_history_instructions",
+    "creator_notes":         "creator_notes",
+}
+
+
+def _save_and_reload_card():
+    """Write _card_data back to disk and recompile card globals in place."""
+    global NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW
+    if "data" not in _card_json:
+        out = {"spec": "chara_card_v2", "spec_version": "2.0", "data": _card_data}
+    else:
+        out = _card_json
+    card_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
+
+
 # --- State (in-memory, mirrored to disk so the character remembers across restarts) ---
 conversation_history = {}   # chat_id -> recent messages (verbatim window)
 last_seen = {}      # chat_id -> unix timestamp of last user activity
@@ -584,6 +623,8 @@ wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
+user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
+seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 
 STATE_FILE = BASE_DIR / "state.json"
 
@@ -649,6 +690,10 @@ def load_state():
         voice_reply[int(cid)] = vr
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
+    for cid, lv in data.get("user_location", {}).items():
+        user_location[int(cid)] = lv
+    for cid, ids in data.get("seen_incidents", {}).items():
+        seen_incidents[int(cid)] = set(ids)
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -679,6 +724,8 @@ def save_state():
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
+        "user_location": {str(k): v for k, v in user_location.items()},
+        "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -1314,6 +1361,15 @@ def mood_label(chat_id: int):
     return None
 
 
+def _mood_vibe(chat_id: int) -> str:
+    """Combine mood label and active vibe into a short descriptive string for prompts."""
+    label = mood_label(chat_id)
+    vibe = active_vibe(chat_id)
+    if label and vibe:
+        return f"{label} [vibe: {vibe}]"
+    return label or vibe or "neutral"
+
+
 def nudge_mood(chat_id: int, gap_hours):
     """Apply a mood penalty when re-contacting after a long silence.
     Positive shifts come from the LLM appraisal, not unconditionally from contact."""
@@ -1641,7 +1697,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None):
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None):
     """Build the OpenAI-style message list the way SillyTavern layers a card."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
@@ -1685,23 +1741,25 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         f"# Capabilities\nA couple of things you can do with tags, used naturally and "
         f"sparingly — never announce them, just include the tag:",
         f"- React to {uname}'s message with a single emoji, like tapping a chat bubble: "
-        f"[react: 👍]. Pick from: {REACTION_HINTS}.",
+        f"[react: 👍]. Pick from: {REACTION_HINTS}. Always include your text reply too — "
+        f"a reaction never replaces a message, it goes with it.",
     ]
     if selfie_ready():
         cap_lines.append(
             f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
-            f"[selfie: a short visual description — your pose, expression, surroundings]. Keep "
-            f"it casual, in-character, SFW, and don't overuse it."
+            f"[selfie: a short visual description — your pose, expression, surroundings]. "
+            f"If you describe what the selfie looks like in your text (the setting, lighting, "
+            f"expression, what she's wearing), put those same details in the tag — the tag is "
+            f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
+            f"and don't overuse it."
         )
     if SEARCH_ENABLED:
         cap_lines.append(
             f"- Look something up online when you genuinely don't know something and it'd "
-            f"help — a fact, something {uname} mentioned, your own curiosity. If it's the "
-            f"kind of thing you'd have to actually check, send a short in-character line "
-            f"first (like telling {uname} you'll look it up / give you a sec), then on its "
-            f"own line put [search: your query]. The lookup happens after that and you'll "
-            f"get a follow-up turn to reply with what you found — don't answer the question "
-            f"yet in that first message, just the \"let me check\" beat."
+            f"help — a fact, something {uname} mentioned, your own curiosity. Add "
+            f"[search: your query] at the end of your reply on its own line. Don't write a "
+            f"separate lead-in about looking it up — just reply naturally and include the tag; "
+            f"the result will come back and you can follow up then."
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
@@ -1824,6 +1882,12 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         ]})
     else:
         messages.append({"role": "user", "content": latest_user_content})
+
+    if inner_voice:
+        messages.append({"role": "system", "content": (
+            f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
+        )})
+
     return messages
 
 
@@ -1877,32 +1941,40 @@ def _one_call(messages: list, model: str) -> str:
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
         json=payload,
-        timeout=REQUEST_TIMEOUT,
+        timeout=(10, REQUEST_TIMEOUT),  # (connect timeout, read timeout)
     )
     response.raise_for_status()
     return _extract_content(response.json()["choices"][0])
 
 
+_CHAT_RETRIES = 3        # attempts per model before moving to the next
+_RETRY_BACKOFF = (2, 4)  # seconds to wait between retries (2s then 4s)
+
 def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
-    """Try the model; on a transient server error (5xx / timeout / network) try the fallback."""
+    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
         models.append(fallback)
     last_err = None
     for i, m in enumerate(models):
-        try:
-            return _one_call(messages, m)
-        except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError) as e:
-            last_err = e
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            # 5xx/timeout/network, or 429 rate-limit — a different model may succeed.
-            transient = status is None or status == 429 or 500 <= status < 600
-            if transient and i < len(models) - 1:
-                print(f"[model] {m} failed ({status or e.__class__.__name__}); "
-                      f"falling back to {models[i + 1]}")
-                continue
-            raise
+        for attempt in range(_CHAT_RETRIES):
+            try:
+                return _one_call(messages, m)
+            except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as e:
+                last_err = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                transient = status is None or status == 429 or 500 <= status < 600
+                if not transient:
+                    raise
+                if attempt < _CHAT_RETRIES - 1:
+                    wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                    print(f"[model] {m} transient error ({status or e.__class__.__name__}), "
+                          f"retry {attempt + 1}/{_CHAT_RETRIES - 1} in {wait}s...")
+                    time.sleep(wait)
+                elif i < len(models) - 1:
+                    print(f"[model] {m} failed after {_CHAT_RETRIES} attempts; "
+                          f"falling back to {models[i + 1]}")
     raise last_err
 
 
@@ -1971,12 +2043,6 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
     query = _extract_search(ai_response)
     if not query:
         return ai_response
-    lead_in = re.sub(r"\[search:\s*.*?\]", "", ai_response, flags=re.IGNORECASE | re.DOTALL).strip()
-    if lead_in:
-        clean, _reaction, _selfie_hint = extract_tags(lead_in)
-        if clean:
-            await send_bubbles(context, chat_id, clean)
-            remember(chat_id, "assistant", clean)
     results = await asyncio.to_thread(web_search, query)
     messages.append({
         "role": "system",
@@ -1987,6 +2053,39 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
     })
     return await reply_with_typing(context, chat_id, messages, model=model,
                                    fallback=fallback or FALLBACK_MODEL)
+
+
+async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> str:
+    """Private inner monologue — what the character notices and decides before she replies.
+    Deliberately isolated from the mood system: emotion acts subconsciously, not through here."""
+    recent = conversation_history.get(chat_id, [])[-6:]
+    history_snippet = "\n".join(
+        f"{'you' if m['role'] == 'assistant' else uname}: {m['content'][:150].strip()}"
+        for m in recent
+    )
+    sys_msg = (
+        f"You are {NAME}'s private inner voice — the layer behind the words, never seen by {uname}. "
+        f"Write 2-4 sentences of what {NAME} is privately noticing, weighing, or deciding "
+        f"after reading {uname}'s message. "
+        f"Perceptions and intentions only — not narrated feelings. "
+        f"What does she read in what he said? What does she want from this moment? "
+        f"What is she choosing to do or not do, and why? "
+        f"Be specific to who {NAME} is. Don't perform depth — just be in her head."
+    )
+    ctx_parts = [f"{NAME}'s character:\n{SYSTEM_PROMPT_RAW[:600]}"]
+    if history_snippet:
+        ctx_parts.append(f"Recent exchange:\n{history_snippet}")
+    ctx_parts.append(f"{uname} just said: {user_message}")
+    try:
+        result = await asyncio.to_thread(
+            call_nanogpt,
+            [{"role": "system", "content": sys_msg},
+             {"role": "user", "content": "\n\n".join(ctx_parts)}],
+            model=INNER_VOICE_MODEL,
+        )
+        return result.strip()
+    except Exception:
+        return ""
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -2124,10 +2223,12 @@ SELFIE_OUTFITS = [
 ]
 # What she's doing in the shot
 SELFIE_ACTIVITIES = [
-    "mid-snack with food in frame", "just woke up, hair a mess", "curled up on the couch",
-    "making coffee in the kitchen", "out walking somewhere", "bundled up against the cold",
-    "lying in bed under the covers", "at her desk surrounded by clutter", "stretching, just got up",
-    "holding a drink up to the camera", "fresh out of the shower with damp hair",
+    "mid-snack, food resting on the counter or beside her (not held)", "just woke up, hair a mess",
+    "curled up on the couch", "making coffee in the kitchen", "out walking somewhere",
+    "bundled up against the cold", "lying in bed under the covers",
+    "at her desk surrounded by clutter", "stretching, just got up",
+    "with a coffee or drink on the table nearby — not holding it up",
+    "fresh out of the shower with damp hair",
     "in the middle of doing something and stopping to take the pic", "sprawled on the floor",
     "leaning against a doorway", "wrapped in a blanket like a burrito",
 ]
@@ -2238,6 +2339,12 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
                     f"atmosphere, and what she might be wearing — don't describe the weather "
                     f"explicitly, just let it show.")
+    bits.append(
+        "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
+        "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
+        "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
+        "it. No extra limbs."
+    )
     bits.append(
         "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
         "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
@@ -2371,17 +2478,63 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         ctx += f" Currently wearing: {outfit}."
     if hint:
         ctx += f" The selfie is from: {hint}."
-    messages = [
-        {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)},
-        {"role": "user", "content": (
+    if _weather_cache["text"]:
+        ctx += f" Current weather: {_weather_cache['text']}."
+    recent = [m for m in conversation_history.get(chat_id, [])[-8:] if isinstance(m.get("content"), str)]
+    mem = memory_block(chat_id, uname)
+    history = (
+        ([{"role": "system", "content": mem}] if mem else [])
+        + [{"role": m["role"], "content": m["content"][:300]} for m in recent]
+    )
+    messages = (
+        [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
+        + history
+        + [{"role": "user", "content": (
             f"You just took a selfie and you're sending it. {ctx} "
             "Write one short casual text to go with it — 1-2 sentences max. "
             "Don't describe the photo. Don't open with 'here' or 'here you go'. "
             "Don't announce that you're sending a photo. Just be yourself."
-        )},
-    ]
+        )}]
+    )
     try:
         return (await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)).strip()
+    except Exception:
+        return ""
+
+
+async def _infer_scene(chat_id: int) -> str:
+    """Infer current scene location from recent conversation for selfie context."""
+    uname = user_names.get(chat_id, "you")
+    recent = [m for m in conversation_history.get(chat_id, [])[-10:] if isinstance(m.get("content"), str)]
+    ctx_parts = []
+    mem = memory_block(chat_id, uname)
+    if mem:
+        ctx_parts.append(mem)
+    if recent:
+        ctx_parts.append("Recent messages:\n" + "\n".join(
+            f"{'her' if m['role'] == 'assistant' else 'him'}: {m['content'][:200].strip()}"
+            for m in recent
+        ))
+    if not ctx_parts:
+        return ""
+    try:
+        result = await asyncio.to_thread(
+            call_nanogpt,
+            [
+                {"role": "system", "content": (
+                    f"Based on this context, where is {NAME} right now? "
+                    f"She currently lives in {WEATHER_LOCATION} — ignore any historical or "
+                    f"background references to other cities; only infer her current location. "
+                    f"Reply with a single brief location phrase only — e.g. 'her apartment kitchen', "
+                    f"'a coffee shop', 'outside on a walk', 'her bedroom'. "
+                    f"If the location hasn't been established, reply with: unclear"
+                )},
+                {"role": "user", "content": "\n\n".join(ctx_parts)},
+            ],
+            model=INNER_VOICE_MODEL,
+        )
+        loc = result.strip()
+        return "" if loc.lower() == "unclear" or len(loc) > 80 else loc
     except Exception:
         return ""
 
@@ -2396,6 +2549,8 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
                       f"~/telegram-bot/appearance.txt and restart."),
             )
         return
+    if not hint:
+        hint = await _infer_scene(chat_id)
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
         prompt = build_selfie_prompt(hint, chat_id)
@@ -2754,10 +2909,19 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/crons — list recurring tasks",
         "/crondel <id> — remove a recurring task",
         "",
+        "*Traffic (Western Washington)*",
+        "/traffic — current congestion (near you if location shared)",
+        "/incidents — active incidents (near you if location shared)",
+        "",
         "*Nudges*",
         "/nudges — view today's proactive message budget",
         "/heartbeat — trigger a proactive message now",
         "/voice — toggle voice replies on/off (30% chance when on)",
+        "",
+        "*Character card*",
+        "/card — view all card fields",
+        "/setcard <field> <value> — update a field (name, description, personality, scenario, first_mes, system_prompt, post_history, mes_example)",
+        "/setcard <field> clear — empty a field",
         "",
         "*Settings*",
         "/model — show current model",
@@ -2780,6 +2944,54 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/remindpayments — trigger payment reminder now",
         ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the current character card fields."""
+    lines = [f"*Character card — {NAME}*", ""]
+    for label, key in _CARD_FIELDS.items():
+        val = (_card_data.get(key) or "").strip()
+        if val:
+            preview = val[:120].replace("\n", " ")
+            suffix = f"… ({len(val)} chars)" if len(val) > 120 else ""
+            lines.append(f"*{label}:* {preview}{suffix}")
+        else:
+            lines.append(f"*{label}:* (empty)")
+    lines += ["", "Use `/setcard <field> <value>` to update.",
+              "Fields: " + ", ".join(_CARD_FIELDS)]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update a character card field in memory and on disk.
+    /setcard <field> <value>
+    /setcard <field> clear  — empty the field
+    """
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: `/setcard <field> <value>`\n"
+            "Fields: " + ", ".join(_CARD_FIELDS) + "\n"
+            "Send `/setcard <field> clear` to empty a field.",
+            parse_mode="Markdown",
+        )
+        return
+    field = args[0].lower()
+    if field not in _CARD_FIELDS:
+        await update.message.reply_text(
+            f"Unknown field `{field}`. Fields: " + ", ".join(_CARD_FIELDS),
+            parse_mode="Markdown",
+        )
+        return
+    value = "" if args[1].lower() == "clear" and len(args) == 2 else " ".join(args[1:])
+    json_key = _CARD_FIELDS[field]
+    _card_data[json_key] = value
+    _save_and_reload_card()
+    if value:
+        preview = value[:200] + ("…" if len(value) > 200 else "")
+        await update.message.reply_text(f"*{field}* updated:\n{preview}", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"*{field}* cleared.", parse_mode="Markdown")
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4548,6 +4760,63 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 PDF_MAX_SIZE_MB = int(os.getenv("PDF_MAX_SIZE_MB", "20"))
 PDF_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "16000"))
+PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "4"))
+
+
+async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
+                            fname: str, caption: str, uname: str) -> None:
+    """Render image-only PDF pages via mutool and pass to the vision model."""
+    import glob, shutil, subprocess, tempfile
+    home = os.path.expanduser("~")
+    tmp_dir = tempfile.mkdtemp(dir=home, prefix="bot_pdf_")
+    try:
+        pdf_path = os.path.join(tmp_dir, "input.pdf")
+        with open(pdf_path, "wb") as f:
+            f.write(raw_bytes)
+        out_pattern = os.path.join(tmp_dir, "page-%d.png")
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["mutool", "draw", "-o", out_pattern, "-r", "150", pdf_path],
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode(errors="replace")[:200]
+            raise RuntimeError(f"mutool failed: {err}")
+        pages = sorted(glob.glob(os.path.join(tmp_dir, "page-*.png")))[:PDF_OCR_MAX_PAGES]
+        if not pages:
+            raise RuntimeError("mutool produced no pages")
+        page_data_urls = []
+        for p in pages:
+            with open(p, "rb") as f:
+                page_data_urls.append("data:image/png;base64," + base64.b64encode(f.read()).decode())
+
+        # Step 1: extract text via vision model — clear extraction task, no character voice
+        extract_content: list = [{"type": "text", "text":
+            f"Transcribe all text content from these {len(pages)} scanned document page(s). "
+            f"Ignore any app watermarks, scanner logos, or branding. "
+            f"Output only the document text, formatted clearly."}]
+        for data_url in page_data_urls:
+            extract_content.append({"type": "image_url", "image_url": {"url": data_url}})
+        extract_msgs = [
+            {"role": "system", "content": "You are a document text extractor. Transcribe all visible text from the provided images, ignoring watermarks and logos."},
+            {"role": "user", "content": extract_content},
+        ]
+        extracted_text = await asyncio.to_thread(call_nanogpt, extract_msgs, VISION_MODEL)
+        if not extracted_text.strip():
+            raise RuntimeError("vision model couldn't read any content from the pages")
+
+        # Step 2: character responds to extracted text via DOCUMENT_MODEL (same path as text PDFs)
+        lead = caption or f"I sent you a PDF — {fname}. Take a look."
+        user_prompt = f"{lead}\n\n[PDF contents]\n{extracted_text}"
+        user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
+        await ensure_weather()
+        messages = assemble_messages(chat_id, user_prompt)
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
+                                         model=DOCUMENT_MODEL)
+        await _deliver(update, context, chat_id, user_mem, ai_response)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _extract_pdf_text(raw_bytes: bytes) -> str:
@@ -4563,7 +4832,7 @@ def _extract_pdf_text(raw_bytes: bytes) -> str:
                 pages.append(t)
         return "\n\n".join(pages)
     except ImportError:
-        raise RuntimeError("pypdf is not installed — run: pip install pypdf")
+        return ""  # pypdf not installed; OCR fallback will handle it
     except Exception as e:
         raise RuntimeError(f"PDF read failed: {e}")
 
@@ -4648,8 +4917,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
             return
         if not pdf_text.strip():
-            await context.bot.send_message(chat_id=chat_id,
-                text="[couldn't extract any text from that PDF — it may be image-only or encrypted]")
+            try:
+                await _pdf_ocr_fallback(context, update, chat_id, raw_bytes, fname, caption, uname)
+            except FileNotFoundError:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="[image-only PDF — install mupdf-tools to enable vision fallback: pkg install mupdf-tools]",
+                )
+            except Exception as e:
+                log.error("PDF OCR fallback failed: %s", e)
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"[couldn't read that PDF as an image either: {e}]",
+                )
             return
         if len(pdf_text) > PDF_MAX_CHARS:
             pdf_text = pdf_text[:PDF_MAX_CHARS] + f"\n\n[... truncated at {PDF_MAX_CHARS} chars]"
@@ -4783,7 +5062,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if user_memory_text and not user_memory_text.startswith("["):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
-    if clean and context.job_queue and _FOLLOWUP_RE.search(clean):
+    if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
             try:
@@ -4968,7 +5247,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        messages = assemble_messages(chat_id, content_for_model)
+        inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id]) if INNER_VOICE_ENABLED else ""
+        messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -5047,7 +5327,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_url = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
 
         uname = user_names[chat_id]
-        prompt = caption or f"{uname} just sent you this photo. React to it in character."
+        loc_ctx = ""
+        loc = user_location.get(chat_id)
+        if loc and (time.time() - loc["ts"]) < 4 * 3600:
+            place = await asyncio.to_thread(_reverse_geocode_sync, loc["lat"], loc["lon"])
+            if place:
+                loc_ctx = f" They're near {place} ({loc['lat']:.4f}, {loc['lon']:.4f})."
+        prompt = caption or f"{uname} just sent you this photo.{loc_ctx} React to it in character."
         await ensure_weather()
         messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
@@ -5134,12 +5420,14 @@ PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
+# Disabled by default — set FOLLOWUP_ENABLED=true in .env to turn on.
+FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() == "true"
 _FOLLOWUP_RE = re.compile(
-    r"\b(hold on|hold up|give me a (sec|second|minute|min)|brb|be right back"
-    r"|wait a (sec|second|minute|min)|one (sec|second|minute|min)"
+    r"\b(hold on|hold up|brb|be right back"
+    r"|give me a (sec|second|minute|min)"
+    r"|wait a (sec|second|minute|min)"
     r"|gimme a (sec|second|minute)|just a (sec|second|minute)"
     r"|back in a (sec|second|minute|bit)"
-    r"|let me (check|look|see|grab|find)|gonna (check|look|grab)"
     r"|give me a moment|one moment)\b",
     re.IGNORECASE,
 )
@@ -5150,6 +5438,10 @@ _pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user 
 # Selfie scene deduplication — avoids repeating the same scenario in back-to-back selfies.
 SELFIE_DEDUP_SIZE = int(os.getenv("SELFIE_DEDUP_SIZE", "6"))
 _recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
+
+# Proactive hook dedup — avoids repeating the same pattern in back-to-back heartbeats.
+PROACTIVE_HOOK_DEDUP_SIZE = int(os.getenv("PROACTIVE_HOOK_DEDUP_SIZE", "8"))
+_recent_proactive_hooks: dict = {}  # chat_id -> list of recent hook sentences
 
 # Question memory — tracks questions the bot has asked recently; avoids repeating them.
 QUESTION_MEMORY_SIZE = int(os.getenv("QUESTION_MEMORY_SIZE", "8"))
@@ -5243,19 +5535,35 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
         parts.append(f"Last exchange: {snippet}")
     if not parts:
         return ""
+    recent_hooks = (_recent_proactive_hooks.get(chat_id) or [])[-PROACTIVE_HOOK_DEDUP_SIZE:]
+    avoid = ""
+    if recent_hooks:
+        avoid = (
+            f"\n\nAvoid repeating the mood, topic, or type of hook from these recent ones:\n"
+            + "\n".join(f"- {h}" for h in recent_hooks)
+        )
     sys_msg = (
         f"You are helping {NAME} decide what to text {uname}. "
         f"Based on the context below, write ONE short sentence (10-20 words) describing "
         f"something specific that is genuinely on {NAME}'s mind right now — "
-        f"a thought, observation, or thing she'd naturally bring up. "
-        f"Be concrete. No filler. No quotes around the sentence."
+        f"could be a passing thought, something she noticed, a memory, something annoying her, "
+        f"something she's curious about, a thing from her day, or nothing in particular. "
+        f"Vary the register — not every message is a check-in or an observation about the city. "
+        f"Be concrete and specific to who she is. No filler. No quotes around the sentence."
+        + avoid
     )
     try:
-        return call_nanogpt(
+        result = call_nanogpt(
             [{"role": "system", "content": sys_msg},
              {"role": "user", "content": "\n".join(parts)}],
             model=MOOD_MODEL,
         ).strip()
+        if result:
+            buf = _recent_proactive_hooks.setdefault(chat_id, [])
+            buf.append(result)
+            if len(buf) > PROACTIVE_HOOK_DEDUP_SIZE:
+                buf.pop(0)
+        return result
     except Exception:
         return ""
 
@@ -5645,6 +5953,221 @@ async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- Reverse geocoding (OSM Nominatim — free, no key required) ---
+
+def _reverse_geocode_sync(lat: float, lon: float) -> str:
+    """Return a region name for coordinates, or '' on failure. Call via asyncio.to_thread."""
+    try:
+        url = (f"https://nominatim.openstreetmap.org/reverse"
+               f"?lat={lat}&lon={lon}&format=json&zoom=10")
+        r = _session.get(url, headers={"User-Agent": "SillyTavernBot/1.0"}, timeout=5)
+        r.raise_for_status()
+        addr = r.json().get("address", {})
+        parts = [p for p in [
+            addr.get("county") or addr.get("city"),
+            addr.get("state"),
+        ] if p]
+        return ", ".join(parts)
+    except Exception:
+        return ""
+
+
+# --- WSDOT Traffic integration ---
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return distance in miles between two lat/lon points."""
+    R = 3958.8
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _fetch_wsdot_alerts() -> list:
+    try:
+        r = _session.get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json().get("Alerts") or []
+    except Exception as e:
+        log.warning("[traffic] alerts fetch failed: %s", e)
+        return []
+
+
+def _fetch_wsdot_times() -> list:
+    try:
+        r = _session.get(_WSDOT_TIMES_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.warning("[traffic] travel times fetch failed: %s", e)
+        return []
+
+
+def _alert_loc(alert: dict):
+    loc = alert.get("StartRoadwayLocation") or {}
+    return loc.get("Latitude"), loc.get("Longitude")
+
+
+def _filter_nearby(alerts: list, lat: float, lon: float, radius: float) -> list:
+    out = []
+    for a in alerts:
+        alat, alon = _alert_loc(a)
+        if alat is not None and alon is not None and _haversine(lat, lon, alat, alon) <= radius:
+            out.append(a)
+    return out
+
+
+def _format_alert(a: dict) -> str:
+    loc = a.get("StartRoadwayLocation") or {}
+    headline = a.get("HeadlineDescription") or "Incident"
+    desc = loc.get("Description", "")
+    priority = a.get("Priority", "")
+    icon = {"Low": "🟡", "Medium": "🟠", "High": "🔴"}.get(priority, "⚠️")
+    return f"{icon} {headline}" + (f"\n   📍 {desc}" if desc else "")
+
+
+def _congestion_icon(current, average) -> str:
+    if not average:
+        return "⚪"
+    r = current / average
+    if r >= 1.5:
+        return "🔴"
+    if r >= 1.2:
+        return "🟠"
+    if r >= 1.05:
+        return "🟡"
+    return "🟢"
+
+
+def _format_travel_times(times: list, lat=None, lon=None) -> str:
+    if lat is not None:
+        # Include routes whose start or end is within 3x the alert radius of the user
+        radius = TRAFFIC_RADIUS_MILES * 3
+        times = [
+            t for t in times
+            if any(
+                (p.get("Latitude") is not None and
+                 _haversine(lat, lon, p["Latitude"], p["Longitude"]) <= radius)
+                for p in [t.get("StartPoint") or {}, t.get("EndPoint") or {}]
+            )
+        ] or times[:10]
+    else:
+        times = times[:12]
+
+    lines = []
+    for t in times:
+        name = t.get("Name", "Unknown route")
+        current = t.get("CurrentTime")
+        average = t.get("AverageTime")
+        if current is None:
+            continue
+        icon = _congestion_icon(current, average)
+        delay = f" (+{current - average} min)" if average and current > average else ""
+        lines.append(f"{icon} {name}: {current} min{delay}")
+    return "\n".join(lines) if lines else "No travel time data available."
+
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Store the user's location (static or live); for traffic-enabled bots, acknowledge it."""
+    chat_id = update.effective_chat.id
+    loc = (update.message or update.edited_message).location
+
+    live_until = None
+    if loc.live_period:
+        live_until = time.time() + loc.live_period
+
+    user_location[chat_id] = {
+        "lat": loc.latitude,
+        "lon": loc.longitude,
+        "ts": time.time(),
+        "live_until": live_until,
+    }
+    save_state()
+
+    if TRAFFIC_ENABLED and update.message:  # only reply on the initial share, not every live update
+        if loc.live_period:
+            await update.message.reply_text(
+                "📍 Got your live location. I'll keep an eye on traffic around you "
+                "and give you a heads-up if anything pops up nearby."
+            )
+        else:
+            await update.message.reply_text(
+                "📍 Got it. Use /traffic or /incidents to check what's around there."
+            )
+
+
+async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TRAFFIC_ENABLED:
+        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        return
+    chat_id = update.effective_chat.id
+    loc = user_location.get(chat_id)
+    times = await asyncio.to_thread(_fetch_wsdot_times)
+    if loc:
+        header = f"🚗 Traffic near you (within {TRAFFIC_RADIUS_MILES:.0f} mi)"
+        body = _format_travel_times(times, lat=loc["lat"], lon=loc["lon"])
+    else:
+        header = "🚗 Western Washington traffic"
+        body = _format_travel_times(times)
+    await update.message.reply_text(f"{header}\n\n{body}")
+
+
+async def incidents_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TRAFFIC_ENABLED:
+        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        return
+    chat_id = update.effective_chat.id
+    alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
+    open_alerts = [a for a in alerts if (a.get("EventStatus") or "").lower() == "open"]
+
+    loc = user_location.get(chat_id)
+    if loc:
+        to_show = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
+        header = f"⚠️ Incidents within {TRAFFIC_RADIUS_MILES:.0f} mi of you"
+        footer = ""
+    else:
+        to_show = open_alerts[:15]
+        header = "⚠️ Western Washington incidents"
+        footer = "\n\nShare your location to see incidents near you."
+
+    if not to_show:
+        await update.message.reply_text(f"{header}\n\nNo active incidents.{footer}")
+        return
+    lines = [_format_alert(a) for a in to_show[:15]]
+    await update.message.reply_text(f"{header}\n\n" + "\n\n".join(lines))
+
+
+async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs every TRAFFIC_POLL_MINUTES — sends proactive alert for new nearby incidents."""
+    if not TRAFFIC_ENABLED:
+        return
+    alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
+    open_alerts = [a for a in alerts if (a.get("EventStatus") or "").lower() == "open"]
+
+    for chat_id, loc in list(user_location.items()):
+        live_until = loc.get("live_until")
+        if not live_until or time.time() > live_until:
+            continue  # only proactive alerts when live location is active
+
+        nearby = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
+        known = seen_incidents.get(chat_id, set())
+        new = [a for a in nearby if str(a.get("AlertID", "")) not in known]
+        if not new:
+            continue
+
+        seen_incidents.setdefault(chat_id, set()).update(str(a["AlertID"]) for a in new)
+        lines = [_format_alert(a) for a in new[:5]]
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ New incident(s) near you:\n\n" + "\n\n".join(lines),
+            )
+        except Exception as e:
+            log.warning("[traffic] alert send failed for %s: %s", chat_id, e)
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -5761,6 +6284,8 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("card", card_cmd))
+    app.add_handler(CommandHandler("setcard", setcard_cmd))
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
@@ -5828,6 +6353,11 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
+    if TRAFFIC_ENABLED:
+        app.add_handler(CommandHandler("traffic", traffic_cmd))
+        app.add_handler(CommandHandler("incidents", incidents_cmd))
 
     def _shutdown(sig, frame):
         log.info("Received signal %s — saving state and shutting down.", sig)
@@ -5863,6 +6393,10 @@ def main():
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
             log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
+        if TRAFFIC_ENABLED:
+            interval = TRAFFIC_POLL_MINUTES * 60
+            app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
+            log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)
     else:
         log.warning('JobQueue unavailable — scheduled features disabled. '
                     'Install with: pip install "python-telegram-bot[job-queue]"')
