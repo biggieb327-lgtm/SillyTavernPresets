@@ -4832,7 +4832,7 @@ def _extract_pdf_text(raw_bytes: bytes) -> str:
                 pages.append(t)
         return "\n\n".join(pages)
     except ImportError:
-        raise RuntimeError("pypdf is not installed — run: pip install pypdf")
+        return ""  # pypdf not installed; OCR fallback will handle it
     except Exception as e:
         raise RuntimeError(f"PDF read failed: {e}")
 
