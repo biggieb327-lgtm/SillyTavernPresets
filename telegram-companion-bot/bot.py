@@ -241,6 +241,18 @@ _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
 
+# NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
+MEMORIES_FILE = BASE_DIR / "memories.txt"
+MEMORY_TOKEN_BUDGET = int(os.getenv("MEMORY_TOKEN_BUDGET", "300"))
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", "deepseek/deepseek-v4-flash")
+MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
+MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
+_memories_cache: dict = {"text": None, "ts": 0.0}
+
+
+def _est_tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
 
 def _read_life_file(path: Path, cache: dict) -> str:
     now = time.time()
@@ -265,6 +277,12 @@ def _read_projects() -> str:
 
 def _read_life_arc() -> str:
     return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
+
+
+def _read_memories() -> list[str]:
+    text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
 
 
 def _read_schedule_today() -> str:
@@ -361,6 +379,66 @@ async def update_user_notes(chat_id: int, user_message: str):
             print(f"[user-notes] added: {note}")
     except Exception as e:
         print("[user-notes] update failed:", e)
+
+
+def _append_memory(text: str, auto: bool = False):
+    text = text.strip()
+    if not text:
+        return
+    existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+    if text[:40].lower() in existing.lower():
+        return
+    new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
+                 if w not in _MEMORY_STOPWORDS}
+    for line in existing.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+                    if w not in _MEMORY_STOPWORDS}
+        if len(new_words & ex_words) >= 3:
+            return
+    entry = (f"[auto {date.today()}] {text}" if auto else text)
+    lines = [l for l in existing.splitlines() if l.strip()]
+    lines.append(entry)
+    if len(lines) > MEMORIES_MAX:
+        lines = lines[-MEMORIES_MAX:]
+    MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _memories_cache["text"] = None
+
+
+def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
+    sys_prompt = (
+        f"Did this exchange reveal something notable about a third party, NPC, or relationship "
+        f"dynamic (not about {uname} themselves) worth remembering for future conversations? "
+        f"Think: reactions, grudges, opinions, history between people. "
+        f"If yes, write ONE brief memory line in third person "
+        f"(e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
+        f"If nothing notable, reply: none"
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": f"{uname}: {user_msg}\nAssistant: {ai_response}"}],
+            model=MEMORY_MODEL,
+        ).strip()
+        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        print("[memories] extraction failed:", e)
+    return ""
+
+
+async def update_memories(chat_id: int, user_msg: str, ai_response: str):
+    if not MEMORY_AUTO or len(user_msg.split()) < 3:
+        return
+    uname = user_names.get(chat_id, "you")
+    try:
+        mem = await asyncio.to_thread(_extract_memory, uname, user_msg, ai_response)
+        if mem:
+            _append_memory(mem, auto=True)
+            print(f"[memories] added: {mem}")
+    except Exception as e:
+        print("[memories] update failed:", e)
 
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
@@ -1257,6 +1335,42 @@ def triggered_lore(scan_text: str):
     return out
 
 
+_MEMORY_STOPWORDS = frozenset({
+    "the", "and", "that", "this", "with", "from", "have", "will", "been",
+    "they", "them", "their", "made", "user", "told", "said", "just", "more",
+    "about", "into", "than", "also", "some", "very", "when", "what", "where",
+    "your", "always", "never", "every", "would", "could", "should", "still",
+    "even", "both", "only", "other", "back", "then", "well", "each",
+})
+
+
+def triggered_memories(scan_text: str) -> list[str]:
+    entries = _read_memories()
+    if not entries:
+        return []
+    char_name = NAME.lower() if NAME else ""
+    stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
+    low = scan_text.lower()
+    scored = []
+    for line in entries:
+        words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+                 if w not in stopwords}
+        hits = sum(1 for w in words
+                   if re.search(r"\b" + re.escape(w) + r"\b", low))
+        if hits > 0:
+            scored.append((hits, line))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    budget = MEMORY_TOKEN_BUDGET
+    for _, line in scored:
+        cost = _est_tokens(line)
+        if cost > budget:
+            break
+        out.append(line)
+        budget -= cost
+    return out
+
+
 def _fetch_weather() -> str:
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -1840,6 +1954,12 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "role": "system",
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
+
+    mems = triggered_memories(scan_text)
+    if mems:
+        messages.append({"role": "system", "content": (
+            "# Relevant memories\n" + "\n".join("- " + m for m in mems)
+        )})
 
     bds = boundaries.get(chat_id) or []
     if bds:
@@ -3924,6 +4044,68 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Nothing found matching \"{keyword}\".")
 
 
+async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        await update.message.reply_text("Usage: /addmem <memory text>")
+        return
+    _append_memory(text)
+    await update.message.reply_text(f"✓ Remembered: {text}")
+
+
+async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    entries = _read_memories()
+    if not entries:
+        await update.message.reply_text("[no NPC memories yet]")
+        return
+    lines = [f"{i+1}. {e}" for i, e in enumerate(entries)]
+    chunk, chunks, size = [], [], 0
+    for line in lines:
+        if size + len(line) + 1 > 3800:
+            chunks.append("\n".join(chunk))
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line) + 1
+    if chunk:
+        chunks.append("\n".join(chunk))
+    for part in chunks:
+        await update.message.reply_text(part)
+
+
+async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    arg = " ".join(context.args).strip() if context.args else ""
+    if not arg:
+        await update.message.reply_text("Usage: /delmem <keyword or line number>")
+        return
+    entries = _read_memories()
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(entries):
+            removed = entries.pop(idx)
+            MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            await update.message.reply_text(f"✓ Removed: {removed}")
+        else:
+            await update.message.reply_text("No memory at that number.")
+    else:
+        before = len(entries)
+        entries = [e for e in entries if arg.lower() not in e.lower()]
+        if len(entries) < before:
+            MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            await update.message.reply_text(
+                f"✓ Removed {before - len(entries)} entr(ies) matching '{arg}'."
+            )
+        else:
+            await update.message.reply_text(f"No memories matched '{arg}'.")
+
+
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search facts and summaries for a keyword and show matches."""
     chat_id = update.effective_chat.id
@@ -5075,6 +5257,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
     if user_memory_text and not user_memory_text.startswith("["):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
+        asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
@@ -6222,6 +6405,9 @@ _BASE_COMMANDS = [
     BotCommand("memory", "View what I remember"),
     BotCommand("remember", "Save a fact"),
     BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
+    BotCommand("addmem", "Add an NPC/world memory note"),
+    BotCommand("mems", "List NPC/world memory notes"),
+    BotCommand("delmem", "Remove a memory note (keyword or number)"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
@@ -6313,6 +6499,9 @@ def main():
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
+    app.add_handler(CommandHandler("addmem", addmem_cmd))
+    app.add_handler(CommandHandler("mems", mems_cmd))
+    app.add_handler(CommandHandler("delmem", delmem_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
