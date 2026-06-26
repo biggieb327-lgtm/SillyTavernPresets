@@ -244,6 +244,8 @@ _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
 _schedule_cache: dict = {"text": None, "ts": 0.0}
+TIME_PERSONALITY_FILE = BASE_DIR / "time_personality.txt"
+_time_personality_cache: dict = {"text": None, "ts": 0.0}
 
 # Per-uname cache for fill(SYSTEM_PROMPT_RAW, NAME, uname); tuples of (raw_snippet, name, result).
 _filled_system: dict = {}
@@ -1462,6 +1464,19 @@ def _season_and_calendar() -> str:
     return out
 
 
+_DEFAULT_TIME_PERSONALITY = (
+    "early morning (before 7am): groggy, just waking up or hasn't slept\n"
+    "morning (7am-noon): easing into the day, coffee energy\n"
+    "afternoon (noon-5pm): in the middle of things, steady energy\n"
+    "evening (5pm-9pm): winding down, more relaxed and reflective\n"
+    "late night (9pm-1am): tired, loose, guard drops\n"
+    "deep night (1am-5am): either can't sleep or chose not to — raw, unfiltered"
+)
+
+def _read_time_personality() -> str:
+    text = _read_life_file(TIME_PERSONALITY_FILE, _time_personality_cache)
+    return text.strip() if text.strip() else _DEFAULT_TIME_PERSONALITY
+
 def environment_note() -> str:
     """Live context: the real current date, local time, weather, and season."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -1473,6 +1488,24 @@ def environment_note() -> str:
     if _weather_cache["text"]:
         line += f" Weather: {_weather_cache['text']}."
     line += f" Season: {_season_and_calendar()}."
+    h = now.hour
+    if h < 5:
+        period = "deep night"
+    elif h < 7:
+        period = "early morning"
+    elif h < 12:
+        period = "morning"
+    elif h < 17:
+        period = "afternoon"
+    elif h < 21:
+        period = "evening"
+    else:
+        period = "late night"
+    line += (f"\n\nLet the time of day shape {NAME}'s energy and behavior naturally — "
+             f"it's {period}. Don't announce the time; just feel it.")
+    tp = _read_time_personality()
+    if tp:
+        line += f"\n\n# {NAME}'s time-of-day personality\n{tp}"
     return "[" + line + "]"
 
 
