@@ -11,6 +11,7 @@ import calendar
 import logging
 import signal
 import tempfile
+import threading
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
@@ -248,6 +249,7 @@ MEMORY_MODEL = os.getenv("MEMORY_MODEL", "deepseek/deepseek-v4-flash")
 MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
+_memory_lock = threading.Lock()
 
 
 def _est_tokens(text: str) -> int:
@@ -385,25 +387,27 @@ def _append_memory(text: str, auto: bool = False):
     text = text.strip()
     if not text:
         return
-    existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
-    if text[:40].lower() in existing.lower():
-        return
-    new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
-                 if w not in _MEMORY_STOPWORDS}
-    for line in existing.splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
-                    if w not in _MEMORY_STOPWORDS}
-        if len(new_words & ex_words) >= 3:
+    with _memory_lock:
+        existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+        if text[:40].lower() in existing.lower():
             return
-    entry = (f"[auto {date.today()}] {text}" if auto else text)
-    lines = [l for l in existing.splitlines() if l.strip()]
-    lines.append(entry)
-    if len(lines) > MEMORIES_MAX:
-        lines = lines[-MEMORIES_MAX:]
-    MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _memories_cache["text"] = None
+        new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
+                     if w not in _MEMORY_STOPWORDS}
+        for line in existing.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+                        if w not in _MEMORY_STOPWORDS}
+            if len(new_words & ex_words) >= 3:
+                return
+        entry = (f"[auto {date.today()}] {text}" if auto else text)
+        lines = [l for l in existing.splitlines() if l.strip()]
+        lines.append(entry)
+        if len(lines) > MEMORIES_MAX:
+            lines = lines[-MEMORIES_MAX:]
+        MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _memories_cache["text"] = None
+        _memories_cache["ts"] = 0.0
 
 
 def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
@@ -421,7 +425,7 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
              {"role": "user", "content": f"{uname}: {user_msg}\nAssistant: {ai_response}"}],
             model=MEMORY_MODEL,
         ).strip()
-        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+        if raw and not re.match(r"^(none|no|nothing|n/a|not\b)", raw.lower()):
             return raw
     except Exception as e:
         print("[memories] extraction failed:", e)
@@ -433,10 +437,14 @@ async def update_memories(chat_id: int, user_msg: str, ai_response: str):
         return
     uname = user_names.get(chat_id, "you")
     try:
-        mem = await asyncio.to_thread(_extract_memory, uname, user_msg, ai_response)
-        if mem:
-            _append_memory(mem, auto=True)
-            print(f"[memories] added: {mem}")
+        def _work():
+            mem = _extract_memory(uname, user_msg, ai_response)
+            if mem:
+                _append_memory(mem, auto=True)
+                print(f"[memories] added: {mem}")
+        await asyncio.to_thread(_work)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         print("[memories] update failed:", e)
 
@@ -1351,12 +1359,12 @@ def triggered_memories(scan_text: str) -> list[str]:
     char_name = NAME.lower() if NAME else ""
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     low = scan_text.lower()
+    scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
     scored = []
     for line in entries:
         words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                  if w not in stopwords}
-        hits = sum(1 for w in words
-                   if re.search(r"\b" + re.escape(w) + r"\b", low))
+        hits = len(words & scan_words)
         if hits > 0:
             scored.append((hits, line))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -1365,7 +1373,7 @@ def triggered_memories(scan_text: str) -> list[str]:
     for _, line in scored:
         cost = _est_tokens(line)
         if cost > budget:
-            break
+            continue
         out.append(line)
         budget -= cost
     return out
@@ -4051,7 +4059,7 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Usage: /addmem <memory text>")
         return
-    _append_memory(text)
+    await asyncio.to_thread(_append_memory, text)
     await update.message.reply_text(f"✓ Remembered: {text}")
 
 
@@ -4090,6 +4098,7 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed = entries.pop(idx)
             MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
             _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
             await update.message.reply_text(f"✓ Removed: {removed}")
         else:
             await update.message.reply_text("No memory at that number.")
@@ -4099,6 +4108,7 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(entries) < before:
             MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
             _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
             await update.message.reply_text(
                 f"✓ Removed {before - len(entries)} entr(ies) matching '{arg}'."
             )
@@ -5255,7 +5265,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
-    if user_memory_text and not user_memory_text.startswith("["):
+    if user_memory_text and not user_memory_text.startswith("[sent "):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
         asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
