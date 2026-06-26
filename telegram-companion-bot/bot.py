@@ -326,6 +326,7 @@ def _read_schedule_today() -> str:
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
 USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
+_user_notes_lock = threading.Lock()
 
 
 def _read_user_notes() -> str:
@@ -336,14 +337,15 @@ def _append_user_note(note: str):
     note = note.strip()
     if not note:
         return
-    existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
-    if existing and note[:20].lower() in existing.lower():
-        return  # simple dedup
-    lines = [l for l in existing.splitlines() if l.strip()]
-    lines.append(note)
-    if len(lines) > USER_NOTES_MAX:
-        lines = lines[-USER_NOTES_MAX:]
-    USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+    with _user_notes_lock:
+        existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+        if existing and note[:20].lower() in existing.lower():
+            return  # simple dedup
+        lines = [l for l in existing.splitlines() if l.strip()]
+        lines.append(note)
+        if len(lines) > USER_NOTES_MAX:
+            lines = lines[-USER_NOTES_MAX:]
+        USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
     _user_notes_cache["text"] = None  # invalidate cache
 
 
@@ -1381,7 +1383,7 @@ def triggered_memories(low: str) -> list[str]:
     for _, line in scored:
         cost = _est_tokens(line)
         if cost > budget:
-            continue
+            break
         out.append(line)
         budget -= cost
     return out
@@ -2582,7 +2584,7 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
 
 
 def _generate_selfie_nanogpt(prompt: str) -> bytes:
-    headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
+    headers = _NANOGPT_HEADERS
     payload = {
         "model": SELFIE_MODEL,
         "prompt": prompt,
@@ -5477,16 +5479,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        inner_voice_task = (
-            asyncio.ensure_future(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
-            if INNER_VOICE_ENABLED else None
-        )
         messages = assemble_messages(chat_id, content_for_model)
-        inner_voice = (await inner_voice_task) if inner_voice_task else ""
-        if inner_voice:
-            messages.append({"role": "system", "content": (
-                f"# {NAME}'s private thought — not shown to {user_names[chat_id]}\n{inner_voice.strip()}"
-            )})
+        if INNER_VOICE_ENABLED:
+            inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id])
+            if inner_voice:
+                messages.append({"role": "system", "content": (
+                    f"# {NAME}'s private thought — not shown to {user_names[chat_id]}\n{inner_voice.strip()}"
+                )})
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -5716,6 +5715,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     # the user replies and the history is dumped into the next request.
     remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
     remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
+    save_state()
     if clean:
         await send_bubbles(context, chat_id, clean)
     if selfie_hint is not None:
