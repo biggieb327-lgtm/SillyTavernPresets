@@ -2166,10 +2166,10 @@ def extract_tags(text: str):
         reaction = norm_emoji(rm.group(1))
         text = re.sub(r"\[react:\s*[^\]]+?\]", "", text, flags=re.IGNORECASE)
     selfie_hint = None
-    sm = re.search(r"\[selfie:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    sm = re.search(r"\[(?:selfie|photo):\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
     if sm:
         selfie_hint = sm.group(1).strip()
-        text = re.sub(r"\[selfie:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"\[(?:selfie|photo):\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
     # Safety net: a [search: ..] tag should already be consumed by maybe_search, but if a
     # regenerated reply emits another one, strip it rather than leak the literal tag.
     sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
