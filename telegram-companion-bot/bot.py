@@ -2521,6 +2521,20 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         ]
     if chat_id is not None:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
+    tp = _read_time_personality()
+    now = datetime.now(TZ) if TZ else datetime.now()
+    h = now.hour
+    for tpline in tp.splitlines():
+        if not tpline.strip():
+            continue
+        if ((h < 5 and "deep night" in tpline.lower()) or
+            (5 <= h < 7 and "early morning" in tpline.lower()) or
+            (7 <= h < 12 and tpline.lower().startswith("morning")) or
+            (12 <= h < 17 and "afternoon" in tpline.lower()) or
+            (17 <= h < 21 and "evening" in tpline.lower()) or
+            (h >= 21 and "late night" in tpline.lower())):
+            bits.append(f"Her energy right now: {tpline.split(':', 1)[-1].strip()}")
+            break
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
         if _weather_outdoor_ok():
