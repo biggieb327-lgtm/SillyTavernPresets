@@ -11,6 +11,7 @@ import calendar
 import logging
 import signal
 import tempfile
+import threading
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
@@ -52,13 +53,15 @@ env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-NANOGPT_API_KEY = os.getenv("NANOGPT_API_KEY")
+NANOGPT_API_KEY = (os.getenv("NANOGPT_API_KEY") or "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
 if not NANOGPT_API_KEY:
     raise SystemExit("NANOGPT_API_KEY not found in .env at " + str(env_path))
+
+_NANOGPT_HEADERS = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
 
 # --- Logging ---
 logging.basicConfig(
@@ -240,6 +243,15 @@ _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
+_schedule_cache: dict = {"text": None, "ts": 0.0}
+
+# Per-uname cache for fill(SYSTEM_PROMPT_RAW, NAME, uname); tuples of (raw_snippet, name, result).
+_filled_system: dict = {}
+# ATLAS random sample: refreshed every 5 min so it varies across long sessions.
+_atlas_cache: dict = {"sample": None, "ts": 0.0}
+_ATLAS_TTL = 300.0
+# Word-set cache for triggered_memories: maps memory line -> frozenset of content words.
+_memory_word_cache: dict = {}
 
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
@@ -248,6 +260,7 @@ MEMORY_MODEL = os.getenv("MEMORY_MODEL", "deepseek/deepseek-v4-flash")
 MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
+_memory_lock = threading.Lock()
 
 
 def _est_tokens(text: str) -> int:
@@ -287,11 +300,8 @@ def _read_memories() -> list[str]:
 
 def _read_schedule_today() -> str:
     """Return today's section from schedule.txt (lines under today's day name)."""
-    if not SCHEDULE_FILE.exists():
-        return ""
-    try:
-        text = SCHEDULE_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
+    text = _read_life_file(SCHEDULE_FILE, _schedule_cache)
+    if not text:
         return ""
     today = (datetime.now(tz=TZ) if TZ else datetime.now()).strftime("%A")  # e.g. "Monday"
     day_abbrevs = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -315,21 +325,11 @@ def _read_schedule_today() -> str:
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
 USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
-_USER_NOTES_TTL = 300
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
 
 
 def _read_user_notes() -> str:
-    now = time.time()
-    if _user_notes_cache["text"] is not None and now - _user_notes_cache["ts"] < _USER_NOTES_TTL:
-        return _user_notes_cache["text"]
-    try:
-        text = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
-    except Exception:
-        text = ""
-    _user_notes_cache["text"] = text
-    _user_notes_cache["ts"] = now
-    return text
+    return _read_life_file(USER_NOTES_FILE, _user_notes_cache)
 
 
 def _append_user_note(note: str):
@@ -375,7 +375,7 @@ async def update_user_notes(chat_id: int, user_message: str):
     try:
         note = await asyncio.to_thread(_extract_user_note, uname, user_message)
         if note:
-            _append_user_note(note)
+            await asyncio.to_thread(_append_user_note, note)
             print(f"[user-notes] added: {note}")
     except Exception as e:
         print("[user-notes] update failed:", e)
@@ -385,25 +385,29 @@ def _append_memory(text: str, auto: bool = False):
     text = text.strip()
     if not text:
         return
-    existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
-    if text[:40].lower() in existing.lower():
-        return
-    new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
-                 if w not in _MEMORY_STOPWORDS}
-    for line in existing.splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
-                    if w not in _MEMORY_STOPWORDS}
-        if len(new_words & ex_words) >= 3:
-            return
-    entry = (f"[auto {date.today()}] {text}" if auto else text)
-    lines = [l for l in existing.splitlines() if l.strip()]
-    lines.append(entry)
-    if len(lines) > MEMORIES_MAX:
-        lines = lines[-MEMORIES_MAX:]
-    MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _memories_cache["text"] = None
+    with _memory_lock:
+        existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+        char_name = NAME.lower() if NAME else ""
+        stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
+        new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
+                     if w not in stopwords}
+        threshold = min(3, max(1, len(new_words)))
+        for line in existing.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+                        if w not in stopwords}
+            if len(new_words & ex_words) >= threshold:
+                return
+        entry = (f"[auto {date.today()}] {text}" if auto else text)
+        lines = [l for l in existing.splitlines() if l.strip()]
+        lines.append(entry)
+        if len(lines) > MEMORIES_MAX:
+            lines = lines[-MEMORIES_MAX:]
+        MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _memories_cache["text"] = None
+        _memories_cache["ts"] = 0.0
+        _memory_word_cache.clear()
 
 
 def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
@@ -421,7 +425,7 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
              {"role": "user", "content": f"{uname}: {user_msg}\nAssistant: {ai_response}"}],
             model=MEMORY_MODEL,
         ).strip()
-        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+        if raw and not re.match(r"^(none|no|nothing|n/a|not\b)", raw.lower()):
             return raw
     except Exception as e:
         print("[memories] extraction failed:", e)
@@ -429,14 +433,21 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
 
 
 async def update_memories(chat_id: int, user_msg: str, ai_response: str):
-    if not MEMORY_AUTO or len(user_msg.split()) < 3:
+    if not MEMORY_AUTO or not any(
+        w not in _MEMORY_STOPWORDS
+        for w in re.findall(r"\b[a-z]{4,}\b", user_msg.lower())
+    ):
         return
     uname = user_names.get(chat_id, "you")
     try:
-        mem = await asyncio.to_thread(_extract_memory, uname, user_msg, ai_response)
-        if mem:
-            _append_memory(mem, auto=True)
-            print(f"[memories] added: {mem}")
+        def _work():
+            mem = _extract_memory(uname, user_msg, ai_response)
+            if mem:
+                _append_memory(mem, auto=True)
+                print(f"[memories] added: {mem}")
+        await asyncio.to_thread(_work)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         print("[memories] update failed:", e)
 
@@ -623,10 +634,12 @@ def load_character(path: Path):
     for entry in book.get("entries", []):
         if not entry.get("enabled", True):
             continue
+        keys = [k.lower() for k in entry.get("keys", [])]
         lore.append({
-            "keys": [k.lower() for k in entry.get("keys", [])],
+            "keys": keys,
             "content": (entry.get("content") or "").strip(),
             "constant": bool(entry.get("constant", False)),
+            "patterns": [re.compile(r"\b" + re.escape(k) + r"\b") for k in keys],
         })
 
     first_mes = data.get("first_mes", "")
@@ -670,6 +683,8 @@ def _save_and_reload_card():
         out = _card_json
     card_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
+    _filled_system.clear()
+    _memory_word_cache.clear()
 
 
 # --- State (in-memory, mirrored to disk so the character remembers across restarts) ---
@@ -1323,13 +1338,11 @@ def set_owner(chat_id: int):
         OWNER_FILE.write_text(str(chat_id))
 
 
-def triggered_lore(scan_text: str):
-    low = scan_text.lower()
+def triggered_lore(low: str):
+    """low must already be lowercased."""
     out = []
     for entry in LORE:
-        hit = entry["constant"] or any(
-            re.search(r"\b" + re.escape(k) + r"\b", low) for k in entry["keys"]
-        )
+        hit = entry["constant"] or any(p.search(low) for p in entry["patterns"])
         if hit:
             out.append(entry["content"])
     return out
@@ -1344,19 +1357,22 @@ _MEMORY_STOPWORDS = frozenset({
 })
 
 
-def triggered_memories(scan_text: str) -> list[str]:
+def triggered_memories(low: str) -> list[str]:
+    """low must already be lowercased."""
     entries = _read_memories()
     if not entries:
         return []
     char_name = NAME.lower() if NAME else ""
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
-    low = scan_text.lower()
+    scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
     scored = []
     for line in entries:
-        words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
-                 if w not in stopwords}
-        hits = sum(1 for w in words
-                   if re.search(r"\b" + re.escape(w) + r"\b", low))
+        words = _memory_word_cache.get(line)
+        if words is None:
+            words = frozenset(w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+                              if w not in stopwords)
+            _memory_word_cache[line] = words
+        hits = len(words & scan_words)
         if hits > 0:
             scored.append((hits, line))
     scored.sort(key=lambda x: x[0], reverse=True)
@@ -1365,7 +1381,7 @@ def triggered_memories(scan_text: str) -> list[str]:
     for _, line in scored:
         cost = _est_tokens(line)
         if cost > budget:
-            break
+            continue
         out.append(line)
         budget -= cost
     return out
@@ -1535,6 +1551,9 @@ def _appraise_mood(chat_id: int, convo_tail: str):
 async def update_mood(chat_id: int):
     if not MOOD_AUTO:
         return
+    m = moods.get(chat_id) or {}
+    if time.time() - m.get("ts", 0) < 60:
+        return  # already appraised this minute — skip
     hist = conversation_history.get(chat_id, [])[-4:]
     if not hist:
         return
@@ -1817,7 +1836,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
 
-    messages = [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
+    cached_fill = _filled_system.get(uname)
+    if cached_fill and cached_fill[0] == SYSTEM_PROMPT_RAW and cached_fill[1] == NAME:
+        system_content = cached_fill[2]
+    else:
+        system_content = fill(SYSTEM_PROMPT_RAW, NAME, uname)
+        _filled_system[uname] = (SYSTEM_PROMPT_RAW, NAME, system_content)
+    messages = [{"role": "system", "content": system_content}]
 
     if SETTING:
         messages.append({
@@ -1844,7 +1869,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )})
 
     if ATLAS:
-        picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
+        _now_ts = time.time()
+        if _atlas_cache["sample"] is None or _now_ts - _atlas_cache["ts"] > _ATLAS_TTL:
+            _atlas_cache["sample"] = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
+            _atlas_cache["ts"] = _now_ts
+        picks = _atlas_cache["sample"]
         messages.append({
             "role": "system",
             "content": (f"# Local places\nReal spots {NAME} knows and might naturally reference "
@@ -1947,15 +1976,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             + "\n".join("- " + q for q in rq[-5:])
         )})
 
-    scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
-    lore = triggered_lore(scan_text)
+    scan_text_low = (latest_user_content + " " + " ".join(m["content"] for m in history[-8:])).lower()
+    lore = triggered_lore(scan_text_low)
     if lore:
         messages.append({
             "role": "system",
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
 
-    mems = triggered_memories(scan_text)
+    mems = triggered_memories(scan_text_low)
     if mems:
         messages.append({"role": "system", "content": (
             "# Relevant memories\n" + "\n".join("- " + m for m in mems)
@@ -2060,7 +2089,7 @@ def _one_call(messages: list, model: str) -> str:
     payload = {"model": model, "messages": messages, "stream": False}
     response = _session.post(
         f"{NANOGPT_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
+        headers=_NANOGPT_HEADERS,
         json=payload,
         timeout=(10, REQUEST_TIMEOUT),  # (connect timeout, read timeout)
     )
@@ -2704,7 +2733,7 @@ def remember(chat_id: int, role: str, content: str):
     hard_cap = MAX_HISTORY * 4
     if len(hist) > hard_cap:
         del hist[:-hard_cap]
-    save_state()
+    # save_state() is called once per turn by _deliver after both remembers complete.
 
 
 def _short_term_overflow(chat_id: int) -> int:
@@ -4051,7 +4080,7 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.message.reply_text("Usage: /addmem <memory text>")
         return
-    _append_memory(text)
+    await asyncio.to_thread(_append_memory, text)
     await update.message.reply_text(f"✓ Remembered: {text}")
 
 
@@ -4090,6 +4119,8 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed = entries.pop(idx)
             MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
             _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _memory_word_cache.clear()
             await update.message.reply_text(f"✓ Removed: {removed}")
         else:
             await update.message.reply_text("No memory at that number.")
@@ -4099,6 +4130,8 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(entries) < before:
             MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
             _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _memory_word_cache.clear()
             await update.message.reply_text(
                 f"✓ Removed {before - len(entries)} entr(ies) matching '{arg}'."
             )
@@ -5230,6 +5263,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     )
     remember(chat_id, "user", user_memory_text)
     remember(chat_id, "assistant", placeholder)
+    save_state()  # single write for both history appends
 
     reacted = False
     if reaction and reaction in ALLOWED_REACTIONS:
@@ -5255,7 +5289,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
-    if user_memory_text and not user_memory_text.startswith("["):
+    if user_memory_text and not user_memory_text.startswith("[sent "):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
         asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
@@ -5443,8 +5477,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id]) if INNER_VOICE_ENABLED else ""
-        messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
+        inner_voice_task = (
+            asyncio.ensure_future(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
+            if INNER_VOICE_ENABLED else None
+        )
+        messages = assemble_messages(chat_id, content_for_model)
+        inner_voice = (await inner_voice_task) if inner_voice_task else ""
+        if inner_voice:
+            messages.append({"role": "system", "content": (
+                f"# {NAME}'s private thought — not shown to {user_names[chat_id]}\n{inner_voice.strip()}"
+            )})
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
