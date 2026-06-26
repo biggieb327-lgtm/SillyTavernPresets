@@ -3295,10 +3295,16 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         model_id = choice
 
     var = MODEL_ROLES[role]
-    globals()[var] = model_id
-    model_overrides[var] = model_id
-    save_state()
-    await update.message.reply_text(f"✅ {role} model set to `{model_id}`", parse_mode="Markdown")
+    old_model = globals().get(var, "(unset)")
+    try:
+        globals()[var] = model_id
+        model_overrides[var] = model_id
+        save_state()
+    except Exception as e:
+        print(f"[setmodel] error setting {role}: {e}")
+    await update.message.reply_text(
+        f"✅ {role} model changed\n`{old_model}` → `{model_id}`",
+        parse_mode="Markdown")
 
 
 SETTINGS_INFO = {
