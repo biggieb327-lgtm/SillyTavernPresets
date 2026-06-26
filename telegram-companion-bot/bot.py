@@ -2441,6 +2441,31 @@ def _weather_camera_pool() -> list:
     return "withdrawn and flat, not really feeling it"
 
 
+_OUTFIT_STOPWORDS = frozenset({
+    "the", "and", "with", "over", "into", "that", "this", "her", "his",
+    "she", "him", "they", "from", "just", "also", "both", "each", "some",
+    "very", "then", "when", "what", "your", "their", "have", "been", "will",
+})
+
+def pick_outfit(hint: str) -> str | None:
+    """Return the best-matching outfit from wardrobe given scene context, or current if no match."""
+    outfits = wardrobe.get("outfits") or []
+    if outfits and hint:
+        low = hint.lower()
+        scan_words = frozenset(w for w in re.findall(r"\b[a-z]{3,}\b", low)
+                               if w not in _OUTFIT_STOPWORDS)
+        best_hits, best_outfit = 0, None
+        for outfit in outfits:
+            words = frozenset(w for w in re.findall(r"\b[a-z]{3,}\b", outfit.lower())
+                              if w not in _OUTFIT_STOPWORDS)
+            hits = len(words & scan_words)
+            if hits > best_hits:
+                best_hits, best_outfit = hits, outfit
+        if best_outfit:
+            return best_outfit
+    return wardrobe.get("current")
+
+
 def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     scene = hint.strip() if hint else (random.choice(ATLAS) if ATLAS else "")
     framing = random.choice(SELFIE_FRAMINGS)
@@ -2472,7 +2497,7 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
             activity = random.choice(indoor)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
-    current_fit = wardrobe.get("current")
+    current_fit = pick_outfit(hint or scene)
     if current_fit:
         bits.append(f"Wearing {current_fit}.")
     elif random.random() < 0.55:
