@@ -317,21 +317,11 @@ def _read_schedule_today() -> str:
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
 USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
-_USER_NOTES_TTL = 300
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
 
 
 def _read_user_notes() -> str:
-    now = time.time()
-    if _user_notes_cache["text"] is not None and now - _user_notes_cache["ts"] < _USER_NOTES_TTL:
-        return _user_notes_cache["text"]
-    try:
-        text = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
-    except Exception:
-        text = ""
-    _user_notes_cache["text"] = text
-    _user_notes_cache["ts"] = now
-    return text
+    return _read_life_file(USER_NOTES_FILE, _user_notes_cache)
 
 
 def _append_user_note(note: str):
@@ -393,12 +383,13 @@ def _append_memory(text: str, auto: bool = False):
         stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
         new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
                      if w not in stopwords}
+        threshold = min(3, max(1, len(new_words)))
         for line in existing.splitlines():
             if not line.strip() or line.startswith("#"):
                 continue
             ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                         if w not in stopwords}
-            if len(new_words & ex_words) >= 3:
+            if len(new_words & ex_words) >= threshold:
                 return
         entry = (f"[auto {date.today()}] {text}" if auto else text)
         lines = [l for l in existing.splitlines() if l.strip()]
@@ -433,7 +424,10 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
 
 
 async def update_memories(chat_id: int, user_msg: str, ai_response: str):
-    if not MEMORY_AUTO or len(user_msg.split()) < 3:
+    if not MEMORY_AUTO or not any(
+        w not in _MEMORY_STOPWORDS
+        for w in re.findall(r"\b[a-z]{4,}\b", user_msg.lower())
+    ):
         return
     uname = user_names.get(chat_id, "you")
     try:
