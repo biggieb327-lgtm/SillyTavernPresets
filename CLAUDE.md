@@ -60,6 +60,14 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Verify Before Using
+
+**Grep before assuming. Test before committing.**
+
+- Never assume a variable, function, or class name — grep the codebase first.
+- Run `py_compile` or equivalent before every commit (enforced by hook).
+- After editing, re-read the changed lines to confirm correctness.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
