@@ -52,7 +52,7 @@ env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-NANOGPT_API_KEY = os.getenv("NANOGPT_API_KEY")
+NANOGPT_API_KEY = (os.getenv("NANOGPT_API_KEY") or "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
