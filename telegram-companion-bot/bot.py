@@ -389,15 +389,15 @@ def _append_memory(text: str, auto: bool = False):
         return
     with _memory_lock:
         existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
-        if text[:40].lower() in existing.lower():
-            return
+        char_name = NAME.lower() if NAME else ""
+        stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
         new_words = {w for w in re.findall(r"\b[a-z]{4,}\b", text.lower())
-                     if w not in _MEMORY_STOPWORDS}
+                     if w not in stopwords}
         for line in existing.splitlines():
             if not line.strip() or line.startswith("#"):
                 continue
             ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
-                        if w not in _MEMORY_STOPWORDS}
+                        if w not in stopwords}
             if len(new_words & ex_words) >= 3:
                 return
         entry = (f"[auto {date.today()}] {text}" if auto else text)
@@ -1955,7 +1955,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             + "\n".join("- " + q for q in rq[-5:])
         )})
 
-    scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-4:])
+    scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-8:])
     lore = triggered_lore(scan_text)
     if lore:
         messages.append({
