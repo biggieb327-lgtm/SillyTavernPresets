@@ -2357,7 +2357,7 @@ def selfie_ready() -> bool:
 def _find_base_image() -> Path | None:
     if SELFIE_BASE and (BASE_DIR / SELFIE_BASE).exists():
         return BASE_DIR / SELFIE_BASE
-    name_lower = (CHARACTER_NAME or "").split()[0].lower()
+    name_lower = (NAME or "").split()[0].lower()
     for pattern in [f"{name_lower}_base.*", f"{name_lower}.*", "base.*"]:
         for p in BASE_DIR.glob(pattern):
             if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
@@ -2779,7 +2779,7 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(f"📷 No reference photo or appearance.txt set. Drop a base photo "
-                      f"(e.g. {(CHARACTER_NAME or 'name').split()[0].lower()}_base.png) in "
+                      f"(e.g. {(NAME or 'name').split()[0].lower()}_base.png) in "
                       f"{BASE_DIR}/ or write a description to {BASE_DIR}/appearance.txt "
                       f"and restart."),
             )
