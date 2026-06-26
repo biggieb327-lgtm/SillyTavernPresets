@@ -62,6 +62,16 @@ nano ~/emily-bot/.env
 
 ---
 
+## Working principles
+
+1. **Ask, don't assume.** If something is unclear, ask before writing a single line. Never make silent assumptions about intent, architecture, or requirements. When running unattended, pick the most reasonable interpretation, proceed, and record the assumption rather than blocking.
+2. **Simplest solution first.** Implement the simplest solution for simple problems, better solutions for harder problems. Do not over-engineer or add flexibility that isn't needed yet.
+3. **Don't touch unrelated code** — but do surface bad code or design smells so we can address them as a separate issue.
+4. **Flag uncertainty explicitly.** If unsure, see rule 1. If appropriate, run a small, localised, low-risk experiment and bring the hypothesis and results to discuss. Confidence without certainty causes more damage than admitting a gap.
+5. **Suggest better approaches.** Always open to ideas with long-lasting impact over tactical changes — don't hesitate to propose them.
+
+---
+
 ## Git workflow
 
 - Push all changes to `main`
@@ -140,6 +150,9 @@ TRAFFIC_POLL_MINUTES=10
 | `/heartbeat` | Trigger proactive message now |
 | `/model` | Show active models |
 | `/usage` | NanoGPT token usage |
+| `/addmem <text>` | Manually add an NPC/world memory |
+| `/mems` | List all stored memories |
+| `/delmem <keyword or #>` | Remove a memory by keyword or number |
 
 ---
 
