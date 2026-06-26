@@ -2351,7 +2351,7 @@ async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0)
 
 # --- Selfies ---
 def selfie_ready() -> bool:
-    return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
+    return _find_base_image() is not None or _APPEARANCE_FILE.exists()
 
 
 def _find_base_image() -> Path | None:
@@ -5369,7 +5369,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
-        await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+        await send_selfie(context, chat_id, selfie_hint, announce_errors=True)
     if inside_jokes and clean:
         _check_joke_used(clean)
     if clean:
