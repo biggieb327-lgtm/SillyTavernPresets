@@ -189,7 +189,7 @@ NANOGPT_IMAGE_URL = os.getenv("NANOGPT_IMAGE_URL", "https://nano-gpt.com/v1/imag
 SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
 GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
+SELFIE_BASE = os.getenv("SELFIE_BASE", "")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = float(os.getenv("SELFIE_GUIDANCE", "3.5"))
 SELFIE_STEPS = int(os.getenv("SELFIE_STEPS", "28"))
@@ -2354,13 +2354,23 @@ def selfie_ready() -> bool:
     return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
 
 
+def _find_base_image() -> Path | None:
+    if SELFIE_BASE and (BASE_DIR / SELFIE_BASE).exists():
+        return BASE_DIR / SELFIE_BASE
+    name_lower = (CHARACTER_NAME or "").split()[0].lower()
+    for pattern in [f"{name_lower}_base.*", f"{name_lower}.*", "base.*"]:
+        for p in BASE_DIR.glob(pattern):
+            if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                return p
+    return None
+
 def _has_base_image() -> bool:
-    return (BASE_DIR / SELFIE_BASE).exists()
+    return _find_base_image() is not None
 
 
 def _base_image() -> tuple:
     """Returns (raw bytes, mime type) for the selfie reference photo."""
-    path = BASE_DIR / SELFIE_BASE
+    path = _find_base_image()
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return path.read_bytes(), mime
 
@@ -2768,9 +2778,10 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         if announce_errors:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=(f"📷 No reference photo or appearance.txt set. Drop a photo at "
-                      f"~/telegram-bot/{SELFIE_BASE} or write a description to "
-                      f"~/telegram-bot/appearance.txt and restart."),
+                text=(f"📷 No reference photo or appearance.txt set. Drop a base photo "
+                      f"(e.g. {(CHARACTER_NAME or 'name').split()[0].lower()}_base.png) in "
+                      f"{BASE_DIR}/ or write a description to {BASE_DIR}/appearance.txt "
+                      f"and restart."),
             )
         return
     if not hint:
