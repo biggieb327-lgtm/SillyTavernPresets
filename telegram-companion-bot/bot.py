@@ -1680,18 +1680,18 @@ async def update_milestones(chat_id: int):
         print(f"[milestones] recorded {added} new for chat {chat_id}.")
 
 
-def _extract_reading(topic: str, results: str) -> str:
+def _extract_reading(topic: str, article: str) -> str:
     sys_prompt = (
-        f"{NAME} just skimmed some stuff online about {topic}. Write ONE short line (under 30 "
-        f"words) in her exact voice -- her REACTION or hot take, NOT a summary. Do not define or "
-        f"explain the topic; respond to it the way she actually would: an opinion, an eye-roll, "
+        f"{NAME} just read this one article about {topic}. Write ONE short line (under 30 words) "
+        f"in her exact voice -- her REACTION to THIS specific article, NOT a summary. Do not define "
+        f"or explain the topic; respond the way she actually would: an opinion, an eye-roll, "
         f"something it reminded her of, an annoyance, who she'd argue with about it. No quotes, "
-        f"no 'I read' framing. If the results are junk, reply exactly: none"
+        f"no 'I read' framing. If the article is junk or irrelevant, reply exactly: none"
     )
     try:
         raw = call_nanogpt(
             [{"role": "system", "content": sys_prompt},
-             {"role": "user", "content": f"Topic: {topic}\n\nWhat she found:\n{results[:2000]}"}],
+             {"role": "user", "content": f"Topic: {topic}\n\nThe article she read:\n{article[:1200]}"}],
             model=READING_MODEL,
         ).strip()
         if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
@@ -1729,10 +1729,12 @@ async def update_reading():
         results = await asyncio.to_thread(web_search, topic)
         if not results or results.startswith("(search") or results.startswith("(no results"):
             return
-        line = await asyncio.to_thread(_extract_reading, topic, results)
+        top = results.splitlines()[0].lstrip("- ").strip()
+        _m = re.search(r"https?://[^\s)]+", top)
+        url = _m.group(0) if _m else ""
+        line = await asyncio.to_thread(_extract_reading, topic, top)
         if line:
-            _m = re.search(r"https?://[^\s)]+", results)
-            _append_reading(line, _m.group(0) if _m else "")
+            _append_reading(line, url)
             print(f"[reading] added ({topic}): {line}")
     except Exception as e:
         print("[reading] update failed:", e)
