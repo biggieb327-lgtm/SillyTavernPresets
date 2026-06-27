@@ -260,6 +260,16 @@ MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
 _memory_lock = threading.Lock()
 
+# --- Reading feed: periodic interest-topic search -> in-character "things she read" ---
+INTERESTS_FILE = BASE_DIR / "interests.txt"
+READING_FILE = BASE_DIR / "reading.txt"
+READING_ENABLED = SEARCH_ENABLED and os.getenv("READING_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+READING_MODEL = os.getenv("READING_MODEL", SUMMARY_MODEL)
+READING_MAX = int(os.getenv("READING_MAX", "5"))
+READING_TIMES = os.getenv("READING_TIMES", "09:40,18:40")
+_interests_cache: dict = {"text": None, "ts": 0.0}
+_reading_cache: dict = {"text": None, "ts": 0.0}
+
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -292,6 +302,18 @@ def _read_life_arc() -> str:
 
 def _read_memories() -> list[str]:
     text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _read_interests() -> list[str]:
+    text = _read_life_file(INTERESTS_FILE, _interests_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _read_reading() -> list[str]:
+    text = _read_life_file(READING_FILE, _reading_cache)
     return [ln.strip() for ln in text.splitlines()
             if ln.strip() and not ln.strip().startswith("#")]
 
@@ -1293,6 +1315,21 @@ _MEMORY_STOPWORDS = frozenset({
 })
 
 
+def triggered_reading(low: str) -> list[str]:
+    """low already lowercased. Surface 'things she read' whose keywords appear in recent text."""
+    entries = _read_reading()
+    if not entries:
+        return []
+    out = []
+    for line in entries:
+        body = re.sub(r"^\[[^\]]*\]\s*", "", line)
+        words = {w for w in re.findall(r"\b[a-z]{4,}\b", body.lower())
+                 if w not in _MEMORY_STOPWORDS}
+        if any(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words):
+            out.append(line)
+    return out[-3:]
+
+
 def triggered_memories(low: str) -> list[str]:
     """low must already be lowercased."""
     entries = _read_memories()
@@ -1642,6 +1679,59 @@ async def update_milestones(chat_id: int):
         print(f"[milestones] recorded {added} new for chat {chat_id}.")
 
 
+def _extract_reading(topic: str, results: str) -> str:
+    sys_prompt = (
+        f"{NAME} just skimmed a few things online about {topic}. In her exact voice, write ONE "
+        f"short line (under 30 words): what she read and her genuine take on it -- specific and "
+        f"opinionated, the way she'd actually bring it up. No quotes, no 'I read an article' "
+        f"framing. If nothing is interesting or the results are junk, reply exactly: none"
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": f"Topic: {topic}\n\nWhat she found:\n{results[:2000]}"}],
+            model=READING_MODEL,
+        ).strip()
+        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        print("[reading] extraction failed:", e)
+    return ""
+
+
+def _append_reading(line: str):
+    line = line.strip()
+    if not line:
+        return
+    existing = []
+    if READING_FILE.exists():
+        existing = [l for l in READING_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
+    existing.append(f"[{stamp}] {line}")
+    if len(existing) > READING_MAX:
+        existing = existing[-READING_MAX:]
+    READING_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    _reading_cache["text"] = None
+
+
+async def update_reading():
+    """Pick one interest, search it, and store an in-character take on what she read."""
+    interests = _read_interests()
+    if not interests:
+        return
+    topic = random.choice(interests)
+    try:
+        results = await asyncio.to_thread(web_search, topic)
+        if not results or results.startswith("(search") or results.startswith("(no results"):
+            return
+        line = await asyncio.to_thread(_extract_reading, topic, results)
+        if line:
+            _append_reading(line)
+            print(f"[reading] added ({topic}): {line}")
+    except Exception as e:
+        print("[reading] update failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -1817,6 +1907,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if mems:
         messages.append({"role": "system", "content": (
             "# Relevant memories\n" + "\n".join("- " + m for m in mems)
+        )})
+
+    reads = triggered_reading(scan_text_low)
+    if reads:
+        messages.append({"role": "system", "content": (
+            "# Things she's read lately (mention only if it genuinely fits)\n"
+            + "\n".join("- " + r for r in reads)
         )})
 
     bds = boundaries.get(chat_id) or []
@@ -3320,6 +3417,31 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"😶 {NAME}'s mood\n\n{state}\nScore: {s:+.1f}  [{bar}]\nLast updated: {age_str}"
     )
+
+
+async def reading_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    items = _read_reading()
+    if not items:
+        await update.message.reply_text("Nothing read yet -- the feed fills over the day (or use /readnow).")
+        return
+    await update.message.reply_text("\U0001F4F0 Things she's read lately:\n" + "\n".join("\u2022 " + r for r in items))
+
+
+async def readnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not READING_ENABLED:
+        await update.message.reply_text("Reading feed is off (needs SEARCH_ENABLED and READING_ENABLED).")
+        return
+    if not _read_interests():
+        await update.message.reply_text("No interests.txt set for this character yet.")
+        return
+    await update.message.reply_text("\U0001F4D6 Reading up on something...")
+    await update_reading()
+    items = _read_reading()
+    await update.message.reply_text(("\U0001F4F0 Latest:\n\u2022 " + items[-1]) if items else "Came up empty that time -- try again.")
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5646,6 +5768,12 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             f" What she's got going on today: {sched_today[:200]}."
             f" If something from it fits the reach-out naturally, draw on it.]"
         )
+    reads = _read_reading()
+    if reads:
+        trigger = trigger[:-1] + (
+            " Something she read recently and has a take on (work it in naturally in her voice"
+            " only if it fits, don't force it): " + reads[-1] + "]"
+        )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
@@ -5820,6 +5948,11 @@ def _overnight_mood_reset(chat_id: int):
     moods[chat_id] = m
     save_state()
     print(f"[mood] overnight reset: {s:+.2f} -> {m['score']:+.2f} for chat {chat_id}")
+
+
+async def reading_job(context: ContextTypes.DEFAULT_TYPE):
+    if READING_ENABLED:
+        await update_reading()
 
 
 async def nightly_maintenance(context: ContextTypes.DEFAULT_TYPE):
@@ -6237,6 +6370,8 @@ _BASE_COMMANDS = [
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
+    BotCommand("reading", "See what she's read lately"),
+    BotCommand("readnow", "Fetch a fresh reading now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -6317,6 +6452,8 @@ def main():
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))
+    app.add_handler(CommandHandler("reading", reading_cmd))
+    app.add_handler(CommandHandler("readnow", readnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -6400,6 +6537,16 @@ def main():
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
         app.job_queue.run_daily(nightly_maintenance, time=reflection_time)
         log.info("Nightly maintenance scheduled %s.", REFLECTION_TIME)
+        if READING_ENABLED:
+            for _rt in READING_TIMES.split(","):
+                _rt = _rt.strip()
+                try:
+                    _rh, _rm = (int(x) for x in _rt.split(":"))
+                except Exception:
+                    continue
+                _rtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
+                app.job_queue.run_daily(reading_job, time=_rtime)
+            log.info("Reading feed scheduled at %s.", READING_TIMES)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
