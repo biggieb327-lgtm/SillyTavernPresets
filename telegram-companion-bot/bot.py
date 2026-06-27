@@ -1477,6 +1477,31 @@ def _read_time_personality() -> str:
     text = _read_life_file(TIME_PERSONALITY_FILE, _time_personality_cache)
     return text.strip() if text.strip() else _DEFAULT_TIME_PERSONALITY
 
+def _current_period(h: int) -> str:
+    if h < 5:
+        return "deep night"
+    if h < 7:
+        return "early morning"
+    if h < 12:
+        return "morning"
+    if h < 17:
+        return "afternoon"
+    if h < 21:
+        return "evening"
+    return "late night"
+
+
+def _time_personality_line() -> str:
+    """Only the time_personality.txt line matching the current hour (description part)."""
+    tp = _read_time_personality()
+    now = datetime.now(TZ) if TZ else datetime.now()
+    period = _current_period(now.hour)
+    for tpline in tp.splitlines():
+        if tpline.strip().lower().startswith(period):
+            return tpline.split(":", 1)[-1].strip()
+    return ""
+
+
 def environment_note() -> str:
     """Live context: the real current date, local time, weather, and season."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -1488,24 +1513,12 @@ def environment_note() -> str:
     if _weather_cache["text"]:
         line += f" Weather: {_weather_cache['text']}."
     line += f" Season: {_season_and_calendar()}."
-    h = now.hour
-    if h < 5:
-        period = "deep night"
-    elif h < 7:
-        period = "early morning"
-    elif h < 12:
-        period = "morning"
-    elif h < 17:
-        period = "afternoon"
-    elif h < 21:
-        period = "evening"
-    else:
-        period = "late night"
+    period = _current_period(now.hour)
     line += (f"\n\nLet the time of day shape {NAME}'s energy and behavior naturally — "
              f"it's {period}. Don't announce the time; just feel it.")
-    tp = _read_time_personality()
-    if tp:
-        line += f"\n\n# {NAME}'s time-of-day personality\n{tp}"
+    tpline = _time_personality_line()
+    if tpline:
+        line += f"\n\nYour energy right now ({period}): {tpline}"
     return "[" + line + "]"
 
 
@@ -2038,9 +2051,6 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if TEXTING_REALISM:
         messages.append({"role": "system", "content": TEXTING_STYLE})
 
-    # Live context (local time + weather) kept near the end so it's salient.
-    messages.append({"role": "system", "content": environment_note()})
-
     # Today's schedule section, if a schedule file exists for this instance.
     sched = _read_schedule_today()
     if sched:
@@ -2059,6 +2069,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# What's going on today\n{day_ctx}\n\n"
             f"Let this color what you say when it fits — don't narrate it like a list."
         )})
+
+    # Live context (local time + weather) goes LAST so the real clock is the most
+    # salient thing the model sees before replying — prevents wrong day/time drift.
+    messages.append({"role": "system", "content": environment_note()})
 
     if image_data_url:
         messages.append({"role": "user", "content": [
@@ -2531,20 +2545,9 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         ]
     if chat_id is not None:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
-    tp = _read_time_personality()
-    now = datetime.now(TZ) if TZ else datetime.now()
-    h = now.hour
-    for tpline in tp.splitlines():
-        if not tpline.strip():
-            continue
-        if ((h < 5 and "deep night" in tpline.lower()) or
-            (5 <= h < 7 and "early morning" in tpline.lower()) or
-            (7 <= h < 12 and tpline.lower().startswith("morning")) or
-            (12 <= h < 17 and "afternoon" in tpline.lower()) or
-            (17 <= h < 21 and "evening" in tpline.lower()) or
-            (h >= 21 and "late night" in tpline.lower())):
-            bits.append(f"Her energy right now: {tpline.split(':', 1)[-1].strip()}")
-            break
+    tpline = _time_personality_line()
+    if tpline:
+        bits.append(f"Her energy right now: {tpline}")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
         if _weather_outdoor_ok():
