@@ -264,7 +264,7 @@ _memory_lock = threading.Lock()
 INTERESTS_FILE = BASE_DIR / "interests.txt"
 READING_FILE = BASE_DIR / "reading.txt"
 READING_ENABLED = SEARCH_ENABLED and os.getenv("READING_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
-READING_MODEL = os.getenv("READING_MODEL", SUMMARY_MODEL)
+READING_MODEL = os.getenv("READING_MODEL", MOOD_MODEL)
 READING_MAX = int(os.getenv("READING_MAX", "5"))
 READING_TIMES = os.getenv("READING_TIMES", "09:40,18:40")
 _interests_cache: dict = {"text": None, "ts": 0.0}
@@ -1681,10 +1681,11 @@ async def update_milestones(chat_id: int):
 
 def _extract_reading(topic: str, results: str) -> str:
     sys_prompt = (
-        f"{NAME} just skimmed a few things online about {topic}. In her exact voice, write ONE "
-        f"short line (under 30 words): what she read and her genuine take on it -- specific and "
-        f"opinionated, the way she'd actually bring it up. No quotes, no 'I read an article' "
-        f"framing. If nothing is interesting or the results are junk, reply exactly: none"
+        f"{NAME} just skimmed some stuff online about {topic}. Write ONE short line (under 30 "
+        f"words) in her exact voice -- her REACTION or hot take, NOT a summary. Do not define or "
+        f"explain the topic; respond to it the way she actually would: an opinion, an eye-roll, "
+        f"something it reminded her of, an annoyance, who she'd argue with about it. No quotes, "
+        f"no 'I read' framing. If the results are junk, reply exactly: none"
     )
     try:
         raw = call_nanogpt(
