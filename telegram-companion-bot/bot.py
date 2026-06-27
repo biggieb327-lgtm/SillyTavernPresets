@@ -94,7 +94,7 @@ def _rate_ok(user_id: int) -> bool:
 NANOGPT_BASE_URL = os.getenv("NANOGPT_BASE", "https://nano-gpt.com/api/v1").rstrip("/")
 NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "zai-org/glm-5:thinking")
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a faster model
-VISION_MODEL = os.getenv("VISION_MODEL", NANOGPT_MODEL)    # must accept image input
+VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept image input (main model is text-only)
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))  # seconds to wait on the API
