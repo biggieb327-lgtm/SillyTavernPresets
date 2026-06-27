@@ -1900,6 +1900,22 @@ def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks emitted by reasoning models."""
     return _THINK_RE.sub("", text).strip()
 
+
+# Provider-side moderation refusals sometimes come back as ordinary completion text
+# (e.g. GLM returns "The request was rejected because it was considered high risk").
+# These must never be delivered as the character's message.
+_REFUSAL_MARKERS = (
+    "request was rejected because it was considered high risk",
+    "the request was rejected because",
+    "considered high risk",
+)
+
+def _looks_like_refusal(text: str) -> bool:
+    if not text:
+        return False
+    low = text.strip().lower()
+    return any(marker in low for marker in _REFUSAL_MARKERS)
+
 def _strip_slop(text: str) -> str:
     """Remove hollow AI openers from the start of a response."""
     return _SLOP_OPENER_RE.sub("", text).strip()
@@ -5023,6 +5039,13 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
+    if _looks_like_refusal(ai_response):
+        # Provider moderation returned its refusal as the reply text. Never show it to
+        # the user; still remember their message so the next turn keeps context.
+        print(f"[reply] provider refused generation; suppressing refusal for chat {chat_id}.")
+        remember(chat_id, "user", user_memory_text)
+        save_state()
+        return False
     clean, reaction, selfie_hint = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
@@ -5474,6 +5497,11 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
+    if _looks_like_refusal(text):
+        # Provider moderation refused this generation — skip the tick entirely rather
+        # than deliver the raw refusal or poison history with it.
+        print(f"[proactive] provider refused generation; skipping tick for chat {chat_id}.")
+        return ""
     clean, _reaction, selfie_hint = extract_tags(text)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
