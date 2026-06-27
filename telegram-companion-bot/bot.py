@@ -98,6 +98,28 @@ VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept im
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))  # seconds to wait on the API
+
+# --- Sampling knobs (optional; applied to her replies only, not utility calls) ---
+# Only the ones you set are sent; unset = the model's own default. temperature and
+# top_p are universal; top_k/min_p/repetition_penalty are open-model extras NanoGPT
+# passes through for many models (a model that rejects one will 400 -- just unset it).
+_SAMPLING: dict = {}
+for _sk, _senv, _sconv in [
+    ("temperature", "TEMPERATURE", float),
+    ("top_p", "TOP_P", float),
+    ("top_k", "TOP_K", int),
+    ("min_p", "MIN_P", float),
+    ("frequency_penalty", "FREQUENCY_PENALTY", float),
+    ("presence_penalty", "PRESENCE_PENALTY", float),
+    ("repetition_penalty", "REPETITION_PENALTY", float),
+    ("max_tokens", "MAX_TOKENS", int),
+]:
+    _sraw = os.getenv(_senv, "").strip()
+    if _sraw:
+        try:
+            _SAMPLING[_sk] = _sconv(_sraw)
+        except ValueError:
+            print(f"[config] ignoring bad {_senv}={_sraw!r}")
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -2049,8 +2071,10 @@ def _extract_content(choice: dict) -> str:
         text = (msg.get("reasoning_content") or "").strip()
     return _strip_thinking(text)
 
-def _one_call(messages: list, model: str) -> str:
+def _one_call(messages: list, model: str, sampling: bool = False) -> str:
     payload = {"model": model, "messages": messages, "stream": False}
+    if sampling and _SAMPLING:
+        payload.update(_SAMPLING)
     response = _session.post(
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers=_NANOGPT_HEADERS,
@@ -2064,7 +2088,7 @@ def _one_call(messages: list, model: str) -> str:
 _CHAT_RETRIES = 3        # attempts per model before moving to the next
 _RETRY_BACKOFF = (2, 4)  # seconds to wait between retries (2s then 4s)
 
-def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
+def call_nanogpt(messages: list, model: str = None, fallback: str = None, apply_sampling: bool = False) -> str:
     """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
@@ -2073,7 +2097,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
     for i, m in enumerate(models):
         for attempt in range(_CHAT_RETRIES):
             try:
-                return _one_call(messages, m)
+                return _one_call(messages, m, apply_sampling)
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
                     requests.exceptions.ConnectionError) as e:
                 last_err = e
@@ -2094,7 +2118,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
 
 async def generate_reply(messages: list, model: str = None, fallback: str = None) -> str:
     # Run the blocking HTTP call off the event loop so the bot stays responsive.
-    return await asyncio.to_thread(call_nanogpt, messages, model, fallback)
+    return await asyncio.to_thread(call_nanogpt, messages, model, fallback, True)
 
 
 async def _keep_typing(bot, chat_id: int):
