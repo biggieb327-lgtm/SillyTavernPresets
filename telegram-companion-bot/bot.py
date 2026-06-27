@@ -1323,6 +1323,7 @@ def triggered_reading(low: str) -> list[str]:
     out = []
     for line in entries:
         body = re.sub(r"^\[[^\]]*\]\s*", "", line)
+        body = re.sub(r"https?://\S+", "", body)
         words = {w for w in re.findall(r"\b[a-z]{4,}\b", body.lower())
                  if w not in _MEMORY_STOPWORDS}
         if any(re.search(r"\b" + re.escape(w) + r"\b", low) for w in words):
@@ -1700,15 +1701,18 @@ def _extract_reading(topic: str, results: str) -> str:
     return ""
 
 
-def _append_reading(line: str):
-    line = line.strip()
+def _append_reading(line: str, url: str = ""):
+    line = line.strip().strip('"').strip("'").strip()
     if not line:
         return
     existing = []
     if READING_FILE.exists():
         existing = [l for l in READING_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
     stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
-    existing.append(f"[{stamp}] {line}")
+    entry = f"[{stamp}] {line}"
+    if url:
+        entry += f" -- {url}"
+    existing.append(entry)
     if len(existing) > READING_MAX:
         existing = existing[-READING_MAX:]
     READING_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
@@ -1727,7 +1731,8 @@ async def update_reading():
             return
         line = await asyncio.to_thread(_extract_reading, topic, results)
         if line:
-            _append_reading(line)
+            _m = re.search(r"https?://[^\s)]+", results)
+            _append_reading(line, _m.group(0) if _m else "")
             print(f"[reading] added ({topic}): {line}")
     except Exception as e:
         print("[reading] update failed:", e)
@@ -1913,7 +1918,8 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     reads = triggered_reading(scan_text_low)
     if reads:
         messages.append({"role": "system", "content": (
-            "# Things she's read lately (mention only if it genuinely fits)\n"
+            "# Things she's read lately (mention only if it genuinely fits; if she brings one up "
+            "she can share its link)\n"
             + "\n".join("- " + r for r in reads)
         )})
 
@@ -5773,7 +5779,8 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     if reads:
         trigger = trigger[:-1] + (
             " Something she read recently and has a take on (work it in naturally in her voice"
-            " only if it fits, don't force it): " + reads[-1] + "]"
+            " only if it fits, don't force it; if she brings it up she can drop the link): "
+            + reads[-1] + "]"
         )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
