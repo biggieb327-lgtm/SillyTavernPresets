@@ -126,19 +126,15 @@ TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.5"))
 TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
-    "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
-    "- Go very light on *asterisk actions* — use them only when a physical detail genuinely adds "
-    "something. Don't stage-direct your movements (no \"*heads for the door, jacket on*\"). Mostly "
-    "just talk.\n"
-    "- Vary your energy. Not every message is intense or a big declaration — sometimes you're tired, "
-    "distracted, low-key, or just saying something ordinary. Let flat and mundane moments exist.\n"
-    "- Keep the language plain and natural, the way people actually text. Skip the poetic or dramatic "
-    "lines and the performing. Understatement over theater.\n"
-    "- Don't interrogate — don't stack questions or end every message on one (see dialogue_rules "
-    "if the card has them).\n"
-    "- Use normal capitalization and punctuation — capitalize sentence starts, \"I\", and proper "
-    "nouns, and use periods/commas/question marks where they'd naturally fall. Casual phrasing and "
-    "fragments are fine; sloppy typing (all lowercase, no punctuation) is not the goal."
+    "You're texting on a phone, not narrating a scene:\n"
+    "- Go very light on *asterisk actions* — only when a physical detail truly adds something. "
+    "Don't stage-direct your movements. Mostly just talk.\n"
+    "- Vary your energy — not every message is intense. Let tired, distracted, low-key, and "
+    "ordinary moments exist.\n"
+    "- Plain, natural language. Skip the poetic/dramatic performing; understatement over theater.\n"
+    "- Don't interrogate — don't stack questions or end every message on one.\n"
+    "- Normal capitalization and punctuation. Casual phrasing and fragments are fine; "
+    "all-lowercase no-punctuation sloppiness is not the goal."
 )
 # Per-bot preset: a small text file of extra system instructions (e.g. texting style),
 # editable without touching bot.py. Falls back to the default above if missing.
@@ -885,13 +881,6 @@ def save_jokes():
 
 def _new_joke_id() -> int:
     return (max((j["id"] for j in inside_jokes), default=0)) + 1
-
-
-def _available_jokes() -> list:
-    """Jokes whose cooldown has expired and are eligible to be surfaced."""
-    now = time.time()
-    return [j for j in inside_jokes
-            if now - j.get("last_used", 0) >= j.get("cooldown_days", 7) * 86400]
 
 
 def _check_joke_used(text: str):
@@ -1827,29 +1816,14 @@ async def reflect(chat_id: int):
     print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
 
 
-def belief_note(chat_id: int) -> str:
-    items = beliefs.get(chat_id, {}).get("items")
-    if not items:
-        return ""
-    desc = ", ".join(f"{t} ({d['score']:.0f}/10)" for t, d in items.items())
-    note = (f"# Self-image\n{NAME}'s sense of herself lately: {desc}. This shapes how she carries "
-            f"herself day to day — don't recite it or the numbers, just let it inform her tone "
-            f"and reactions.")
-    open_recs = [r for r in recommendations.get(chat_id, []) if r["status"] == "open"]
-    if open_recs:
-        items_txt = "; ".join(r["text"] for r in open_recs[:3])
-        note += (f"\n\nThings she's been wondering how they turned out: {items_txt}. If it comes "
-                 f"up naturally, she might ask about it — but don't force it.")
-    goal = (next_goals.get(chat_id) or "").strip()
-    if goal:
-        note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
-                 f"it fits — don't force it in.")
+def milestone_note(chat_id: int) -> str:
+    """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
-    if ms_list:
-        recent_ms = "; ".join(m["text"] for m in ms_list[-5:])
-        note += (f"\n\nMilestones in this relationship so far: {recent_ms}. These are part of "
-                 f"their shared history — she knows them, doesn't need to announce them.")
-    return note
+    if not ms_list:
+        return ""
+    recent_ms = "; ".join(m["text"] for m in ms_list[-5:])
+    return (f"# Relationship milestones\nShared history so far: {recent_ms}. She knows these — "
+            f"part of their history, doesn't need to announce them.")
 
 
 def memory_block(chat_id: int, uname: str) -> str:
@@ -1903,17 +1877,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if people:
         messages.append({"role": "system", "content": f"# People in {NAME}'s life\n{people}"})
 
-    projects = _read_projects()
-    if projects:
-        messages.append({"role": "system", "content": (
-            f"# What {NAME} has going on / is working on\n{projects}"
-        )})
-
+    # Stable "what she's up to" — life arc + ongoing projects merged into one block.
     life_arc = _read_life_arc()
-    if life_arc:
+    projects = _read_projects()
+    if life_arc or projects:
+        parts = [p for p in (life_arc, projects) if p]
         messages.append({"role": "system", "content": (
-            f"# {NAME}'s current life arc\n{life_arc}\n"
-            f"Draw on this naturally in conversation — it's the texture of her life right now."
+            f"# {NAME}'s life right now\n" + "\n\n".join(parts)
+            + "\n\nDraw on this naturally — it's the texture of her life, not a list to recite."
         )})
 
     if ATLAS:
@@ -1930,28 +1901,22 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         })
 
     cap_lines = [
-        f"# Capabilities\nA couple of things you can do with tags, used naturally and "
-        f"sparingly — never announce them, just include the tag:",
-        f"- React to {uname}'s message with a single emoji, like tapping a chat bubble: "
-        f"[react: 👍]. Pick from: {REACTION_HINTS}. Always include your text reply too — "
-        f"a reaction never replaces a message, it goes with it.",
+        f"# Capabilities\nThings you can do with tags — use sparingly, never announce them, "
+        f"just include the tag inline:",
+        f"- [react: 👍] taps a single emoji on {uname}'s message (from: {REACTION_HINTS}). "
+        f"Always include your text reply too — a reaction never replaces a message.",
     ]
     if selfie_ready():
         cap_lines.append(
-            f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
-            f"[selfie: a short visual description — your pose, expression, surroundings]. "
-            f"If you describe what the selfie looks like in your text (the setting, lighting, "
-            f"expression, what she's wearing), put those same details in the tag — the tag is "
-            f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
-            f"and don't overuse it."
+            f"- [selfie: short visual description — pose, expression, surroundings] sends a pic "
+            f"when it fits. If your text describes the shot, match those details in the tag (the "
+            f"tag generates the image). Casual, in-character, SFW, don't overuse."
         )
     if SEARCH_ENABLED:
         cap_lines.append(
-            f"- Look something up online when you genuinely don't know something and it'd "
-            f"help — a fact, something {uname} mentioned, your own curiosity. Add "
-            f"[search: your query] at the end of your reply on its own line. Don't write a "
-            f"separate lead-in about looking it up — just reply naturally and include the tag; "
-            f"the result will come back and you can follow up then."
+            f"- [search: query] on its own line at the end when you genuinely need to look "
+            f"something up. Don't announce it — just reply naturally and add the tag; the result "
+            f"comes back for you to follow up."
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
@@ -1996,25 +1961,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"More latitude to be elaborate, playful, match the energy.]"
         )})
 
-    bnote = belief_note(chat_id)
-    if bnote:
-        messages.append({"role": "system", "content": bnote})
+    mnote = milestone_note(chat_id)
+    if mnote:
+        messages.append({"role": "system", "content": mnote})
 
     pn = pinned.get(chat_id) or []
     if pn:
         messages.append({"role": "system", "content": (
             f"# Core things you know and never forget\n"
             + "\n".join("- " + p for p in pn)
-        )})
-
-    avail_jokes = _available_jokes()
-    if avail_jokes:
-        joke_lines = "\n".join(
-            f'- "{j["phrase"]}" ({j["tone"]}): {j["meaning"]}' for j in avail_jokes
-        )
-        messages.append({"role": "system", "content": (
-            f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
-            f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
         )})
 
     rq = _recent_questions.get(chat_id) or []
@@ -2051,23 +2006,20 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if TEXTING_REALISM:
         messages.append({"role": "system", "content": TEXTING_STYLE})
 
-    # Today's schedule section, if a schedule file exists for this instance.
-    sched = _read_schedule_today()
-    if sched:
-        messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
-
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
         messages.append({"role": "system", "content": (
             f"# Your appearance\n{SELFIE_APPEARANCE}"
         )})
 
-    # Day context — what's been happening today; drives continuity across conversations.
+    # Today — schedule + live day events merged into one block.
+    sched = _read_schedule_today()
     day_ctx = _read_day_context()
-    if day_ctx:
+    if sched or day_ctx:
+        parts = [p for p in (sched, day_ctx) if p]
         messages.append({"role": "system", "content": (
-            f"# What's going on today\n{day_ctx}\n\n"
-            f"Let this color what you say when it fits — don't narrate it like a list."
+            f"# {NAME}'s day today\n" + "\n\n".join(parts)
+            + "\n\nLet this color what she says when it fits — don't narrate it like a list."
         )})
 
     # Live context (local time + weather) goes LAST so the real clock is the most
@@ -6103,13 +6055,11 @@ def _overnight_mood_reset(chat_id: int):
 
 
 async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
+    # Nightly maintenance: long-term memory promotion + overnight mood reset.
+    # (Self-image "reflection" was removed; its prompt block is no longer injected.)
     owner = get_owner()
     if owner is None:
         return
-    try:
-        await reflect(owner)
-    except Exception as e:
-        print("[reflect] Error:", e)
     try:
         await maintain_long_term_memory(owner)
     except Exception as e:
