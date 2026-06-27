@@ -60,7 +60,6 @@ pkg install python git tmux -y
 ```bash
 mkdir -p ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o ~/telegram-bot/bot.py
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run.sh -o ~/telegram-bot/run.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o ~/telegram-bot/run-bot.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o ~/telegram-bot/.env.example
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/preset.txt -o ~/telegram-bot/preset.txt
@@ -84,7 +83,7 @@ Each character runs from its own directory with its own `.env` and character car
 
 ```bash
 mkdir ~/nora-bot
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json -o ~/nora-bot/nora.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/nora.json -o ~/nora-bot/nora.json
 cp ~/telegram-bot/.env.example ~/nora-bot/.env
 nano ~/nora-bot/.env
 ```
@@ -119,18 +118,18 @@ Download all character cards and create a directory for each:
 ```bash
 for char in emily bonnie nora cass priya; do
   mkdir -p ~/${char}-bot
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}.json" -o ~/${char}-bot/${char}.json 2>/dev/null || \
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily_harper.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
+  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}/${char}.json" -o ~/${char}-bot/${char}.json 2>/dev/null || \
+  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily_harper.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
 done
 ```
 
 Or individually:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily_harper.json -o ~/emily-bot/emily_harper.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie.json     -o ~/bonnie-bot/bonnie.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json        -o ~/nora-bot/nora.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass.json        -o ~/cass-bot/cass.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya.json       -o ~/priya-bot/priya.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily_harper.json -o ~/emily-bot/emily_harper.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/bonnie.json     -o ~/bonnie-bot/bonnie.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/nora.json        -o ~/nora-bot/nora.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/cass.json        -o ~/cass-bot/cass.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/priya.json       -o ~/priya-bot/priya.json
 ```
 
 Create a `.env` in each directory. Each needs its own bot token; the API key and model can be the same across all:

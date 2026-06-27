@@ -314,7 +314,7 @@ Each character is fully isolated — separate state, memory, context files, and 
 
 ```bash
 tmux attach -t nora          # live output
-tail -f ~/nora-bot/bot.log   # if launched via run.sh
+tail -f ~/nora-bot/bot.log   # if launched via run-bot.sh
 ```
 
 ---

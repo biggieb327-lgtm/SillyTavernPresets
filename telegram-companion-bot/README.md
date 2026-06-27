@@ -17,7 +17,7 @@ Includes an example character — Priya, a 26-year-old software engineer — des
 
 ## Quick Start
 
-See **SETUP_GUIDE.md** for full installation instructions.
+See **[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md)** for full installation instructions.
 
 ```bash
 git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
@@ -25,7 +25,7 @@ cd sillytavernpresets/telegram-companion-bot
 pip install -r requirements.txt
 cp .env.example .env
 # edit .env with your tokens
-bash run.sh
+bash run-bot.sh
 ```
 
 ## Files
@@ -33,14 +33,15 @@ bash run.sh
 | File | Purpose |
 |---|---|
 | `bot.py` | Main bot code |
-| `priya.json` | Example character card (SillyTavern v2 format) |
+| `<character>/` | Per-character folder — card, appearance, and context files (people, projects, schedule, places) |
+| `priya/priya.json` | Example character card (SillyTavern v2 format) |
 | `preset.txt` | Texting style instructions (injected into every prompt) |
 | `.env.example` | Config template |
 | `requirements.txt` | Python dependencies |
-| `run.sh` | Start script (Termux/tmux) |
-| `run-bot.sh` | Start script for named instances |
-| `SETUP_GUIDE.md` | Full setup walkthrough |
-| `OPS_MANUAL.md` | Day-to-day operation reference |
+| `run-bot.sh` | Start script (supervised, named instances) |
+| `start-bots.sh` | Start all character instances |
+| `update-all.sh` | Pull latest bot.py and restart all instances |
+| `docs/` | Setup guide, ops manual, project docs |
 
 ## License
 

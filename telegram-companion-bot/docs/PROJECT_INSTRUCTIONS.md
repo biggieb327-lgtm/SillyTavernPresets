@@ -55,7 +55,7 @@ tmux new-session -d -s bonnie -c ~/bonnie-bot 'python bot.py'
 
 For a card-only change (no bot.py change), curl the card JSON instead:
 ```bash
-curl -o ~/bonnie-bot/bonnie.json https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie.json
+curl -o ~/bonnie-bot/bonnie.json https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/bonnie.json
 tmux kill-session -t bonnie
 tmux new-session -d -s bonnie -c ~/bonnie-bot 'python bot.py'
 ```
