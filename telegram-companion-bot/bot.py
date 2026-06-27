@@ -576,15 +576,12 @@ def _read_day_context() -> str:
     return text
 
 
-# --- Nightly self-reflection (self-image + recommendation outcomes) ---
+# --- Nightly maintenance schedule (memory promotion, mood reset, milestone detection) ---
 REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
 try:
     _RF_H, _RF_M = (int(x) for x in REFLECTION_TIME.split(":"))
 except Exception:
     _RF_H, _RF_M = 3, 0
-BELIEF_TRAITS = int(os.getenv("BELIEF_TRAITS", "5"))      # how many core self-image traits to track
-BELIEF_DRIFT_MAX = float(os.getenv("BELIEF_DRIFT_MAX", "2.5"))  # max distance from her card-derived baseline
-RECS_MAX = int(os.getenv("RECS_MAX", "20"))  # cap on tracked recommendations/outcomes
 MILESTONES_MAX = int(os.getenv("MILESTONES_MAX", "30"))  # cap on relationship milestones stored
 
 
@@ -698,10 +695,6 @@ recent_summaries = {}  # chat_id -> short-term summary covering roughly the last
 recent_facts = {}      # chat_id -> list of recent/situational facts (last ~week)
 last_promotion = {}    # chat_id -> unix timestamp recent memory was last folded into long-term
 moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotional state
-beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
-recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
-rec_seq = {}        # chat_id -> next recommendation id
-next_goals = {}     # chat_id -> something she wants to bring up/do next time they talk
 milestones = {}     # chat_id -> [{"text": str, "ts": float}] relationship firsts
 pinned = {}         # chat_id -> [str] facts that never get summarized away
 boundaries = {}     # chat_id -> [str] hard behavioral constraints from the user
@@ -712,7 +705,6 @@ unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
-inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
@@ -754,14 +746,6 @@ def load_state():
         last_promotion[int(cid)] = ts
     for cid, mv in data.get("moods", {}).items():
         moods[int(cid)] = mv
-    for cid, bv in data.get("beliefs", {}).items():
-        beliefs[int(cid)] = bv
-    for cid, rl in data.get("recommendations", {}).items():
-        recommendations[int(cid)] = rl
-    for cid, sq in data.get("rec_seq", {}).items():
-        rec_seq[int(cid)] = sq
-    for cid, g in data.get("next_goals", {}).items():
-        next_goals[int(cid)] = g
     for cid, ml in data.get("milestones", {}).items():
         milestones[int(cid)] = ml
     for cid, pl in data.get("pinned", {}).items():
@@ -802,10 +786,6 @@ def save_state():
         "recent_facts": {str(k): v for k, v in recent_facts.items()},
         "last_promotion": {str(k): v for k, v in last_promotion.items()},
         "moods": {str(k): v for k, v in moods.items()},
-        "beliefs": {str(k): v for k, v in beliefs.items()},
-        "recommendations": {str(k): v for k, v in recommendations.items()},
-        "rec_seq": {str(k): v for k, v in rec_seq.items()},
-        "next_goals": {str(k): v for k, v in next_goals.items()},
         "milestones": {str(k): v for k, v in milestones.items()},
         "pinned": {str(k): v for k, v in pinned.items()},
         "boundaries": {str(k): v for k, v in boundaries.items()},
@@ -860,44 +840,7 @@ atexit.register(_release_pid_lock)
 load_state()
 
 
-# --- Inside jokes ---
-JOKES_FILE = BASE_DIR / "jokes.json"
 WARDROBE_FILE = BASE_DIR / "wardrobe.json"
-
-
-def load_jokes():
-    global inside_jokes
-    if JOKES_FILE.exists():
-        try:
-            inside_jokes = json.loads(JOKES_FILE.read_text(encoding="utf-8"))
-        except Exception as e:
-            print("[jokes] load failed:", e)
-            inside_jokes = []
-
-
-def save_jokes():
-    JOKES_FILE.write_text(json.dumps(inside_jokes, indent=2), encoding="utf-8")
-
-
-def _new_joke_id() -> int:
-    return (max((j["id"] for j in inside_jokes), default=0)) + 1
-
-
-def _check_joke_used(text: str):
-    """Scan a response and mark any joke whose phrase appears as recently used."""
-    if not inside_jokes:
-        return
-    low = text.lower()
-    changed = False
-    for j in inside_jokes:
-        if j["phrase"].lower() in low:
-            j["last_used"] = time.time()
-            changed = True
-    if changed:
-        save_jokes()
-
-
-load_jokes()
 
 
 # --- Wardrobe ---
@@ -1645,7 +1588,7 @@ def mood_note(chat_id: int) -> str:
             f"length naturally — never announce it outright.")
 
 
-# --- Self-image (core beliefs) + recommendation/outcome tracking ---
+# --- Relationship milestone detection (nightly) ---
 def _today_messages(chat_id: int) -> list:
     """Verbatim messages from conversation_history with a timestamp in the local 'today'."""
     now = datetime.now(TZ) if TZ else datetime.now()
@@ -1654,166 +1597,49 @@ def _today_messages(chat_id: int) -> list:
     return [m for m in conversation_history.get(chat_id, []) if m.get("ts", 0) >= cutoff]
 
 
-def _seed_beliefs() -> dict:
-    """Derive ~BELIEF_TRAITS core self-image traits + baseline (anchor) scores from the character card."""
-    sys = (
-        f"Based on this character description of {NAME}, identify {BELIEF_TRAITS} core "
-        f"personality traits that describe how {NAME} sees herself — single words or short "
-        f"phrases (e.g. \"guarded\", \"fiercely independent\", \"insecure about her work\"). "
-        f"For each, give a baseline score from 1-10 for how strongly that trait shows, based on "
-        f"the character description. Respond with ONLY a JSON object: "
-        f'{{"trait name": score, ...}}. No prose, no code fences.'
-    )
-    raw = call_nanogpt(
-        [{"role": "system", "content": sys}, {"role": "user", "content": SYSTEM_PROMPT_RAW[:4000]}],
-        model=SUMMARY_MODEL,
-    )
-    data = _extract_json(raw)
-    items = {}
-    for trait, score in data.items():
-        if not isinstance(trait, str) or not trait.strip():
-            continue
-        try:
-            v = max(1.0, min(10.0, float(score)))
-        except (TypeError, ValueError):
-            continue
-        items[trait.strip()[:60]] = {"score": round(v, 1), "anchor": round(v, 1)}
-        if len(items) >= BELIEF_TRAITS:
-            break
-    return items
-
-
-async def reflect(chat_id: int):
-    """Nightly: gently update her self-image (bounded by her card-derived baseline) and check
-    on past recommendations against today's conversation."""
+async def update_milestones(chat_id: int):
+    """Nightly: detect relationship 'firsts' from today's conversation and record them."""
     uname = user_names.get(chat_id, "you")
-    items = beliefs.get(chat_id, {}).get("items")
-    if not items:
-        try:
-            items = await asyncio.to_thread(_seed_beliefs)
-        except Exception as e:
-            print("[reflect] belief seeding failed:", e)
-            items = {}
-        if items:
-            beliefs[chat_id] = {"items": items}
-            save_state()
-            print(f"[reflect] Seeded self-image for chat {chat_id}: {list(items)}")
-
     todays = _today_messages(chat_id)
-    if not items or not todays:
+    if not todays:
         return
-
     convo = "\n".join(
         f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in todays
     )
-    open_recs = [r for r in recommendations.get(chat_id, []) if r["status"] == "open"]
-    belief_lines = "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items())
-    rec_lines = "\n".join(f"- (#{r['id']}) {r['text']}" for r in open_recs) or "(none)"
-    cur_goal = (next_goals.get(chat_id) or "").strip()
-
-    existing_milestones = milestones.get(chat_id) or []
-    ms_lines = (", ".join(m["text"] for m in existing_milestones[-10:])
-                if existing_milestones else "(none yet)")
+    existing = milestones.get(chat_id) or []
+    ms_lines = (", ".join(m["text"] for m in existing[-10:]) if existing else "(none yet)")
     sys = (
-        f"You help {NAME} do a private nightly reflection on her day with {uname}. You're given "
-        f"her current self-image (a handful of traits she rates herself on, 1-10), any open "
-        f"things she's recommended or said she'd check on, her current next-conversation goal, "
-        f"today's conversation, and a list of relationship milestones already recorded. "
-        f"Update her self-image based on how she actually behaved today — small shifts only, "
-        f"not dramatic swings. Note any NEW recommendation or piece of advice she gave {uname} "
-        f"today that she'd plausibly want to follow up on later. For any OPEN item, say whether "
-        f"today's conversation reveals an outcome (good, bad, or still open/no update).\n\n"
-        f"Also maintain a \"next_goal\": one specific, concrete thing {NAME} wants to bring up, "
-        f"ask about, or do the next time she talks to {uname} -- a thread to pick up so the next "
-        f"conversation doesn't start cold (e.g. \"ask if he ate before his shift\" or \"tell him "
-        f"about the thing her grandfather used to say about the Astros\"). If today's conversation already "
-        f"covered the current goal, replace it with a fresh one; otherwise keep it or update it. "
-        f"Leave it empty only if genuinely nothing comes to mind. Keep it short (<= 100 "
-        f"characters).\n\n"
-        f"Also look for relationship milestones — things that happened for the FIRST TIME in "
-        f"today's conversation that aren't in the existing list: first time he opened up about "
-        f"something painful, first real disagreement they worked through, first time she admitted "
-        f"something she doesn't usually say, first inside joke, first time he asked for her "
-        f"opinion on something big. Be selective — only flag genuine firsts that will matter "
-        f"later. Keep each one short (one brief phrase). Return an empty list if today had "
-        f"nothing new.\n\n"
-        f"Respond with ONLY a JSON object:\n"
-        f'{{"beliefs": {{"trait": score, ...}}, '
-        f'"new_recommendations": ["..."], '
-        f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}], '
-        f'"next_goal": "...", '
-        f'"milestones": ["first time he ..."]}}\n'
-        f"Keep the exact same trait names as given. No prose, no code fences."
+        f"Look at today's conversation between {NAME} and {uname} for relationship milestones — "
+        f"things that happened for the FIRST TIME today that aren't already in the existing list: "
+        f"first time he opened up about something painful, first real disagreement they worked "
+        f"through, first time she admitted something she doesn't usually say, first time he asked "
+        f"for her opinion on something big. Be selective — only genuine firsts that will matter "
+        f"later. Keep each one short (one brief phrase). Return an empty list if today had nothing "
+        f"new.\n\n"
+        f'Respond with ONLY a JSON object: {{"milestones": ["first time he ..."]}}. '
+        f"No prose, no code fences."
     )
-    user = (f"SELF-IMAGE:\n{belief_lines}\n\nOPEN ITEMS:\n{rec_lines}\n\n"
-            f"CURRENT NEXT-CONVERSATION GOAL: {cur_goal or '(none)'}\n\n"
-            f"EXISTING MILESTONES: {ms_lines}\n\n"
-            f"TODAY'S CONVERSATION:\n{convo}")
+    user = f"EXISTING MILESTONES: {ms_lines}\n\nTODAY'S CONVERSATION:\n{convo}"
     raw = await asyncio.to_thread(
         call_nanogpt, [{"role": "system", "content": sys}, {"role": "user", "content": user}],
         SUMMARY_MODEL,
     )
-    data = _extract_json(raw)
-
-    new_scores = data.get("beliefs") or {}
-    for trait, d in items.items():
-        if trait not in new_scores:
-            continue
-        try:
-            v = float(new_scores[trait])
-        except (TypeError, ValueError):
-            continue
-        anchor = d["anchor"]
-        v = max(anchor - BELIEF_DRIFT_MAX, min(anchor + BELIEF_DRIFT_MAX, v))
-        d["score"] = round(max(1.0, min(10.0, v)), 1)
-
-    recs = recommendations.setdefault(chat_id, [])
-    seq = rec_seq.get(chat_id, 1)
-    for text in data.get("new_recommendations") or []:
-        if isinstance(text, str) and text.strip():
-            recs.append({"id": seq, "text": text.strip()[:200], "ts": time.time(),
-                         "status": "open", "outcome": None, "note": ""})
-            seq += 1
-    rec_seq[chat_id] = seq
-
-    by_id = {r["id"]: r for r in recs}
-    for item in data.get("resolved") or []:
-        try:
-            rid = int(item.get("id"))
-        except (TypeError, ValueError):
-            continue
-        r = by_id.get(rid)
-        if not r or r["status"] != "open":
-            continue
-        outcome = item.get("outcome")
-        if outcome in ("good", "bad"):
-            r["status"] = "resolved"
-            r["outcome"] = outcome
-            r["note"] = (item.get("note") or "")[:200]
-
-    if len(recs) > RECS_MAX:
-        open_ones = [r for r in recs if r["status"] == "open"]
-        resolved = sorted((r for r in recs if r["status"] != "open"), key=lambda r: r["ts"], reverse=True)
-        keep_resolved = max(0, RECS_MAX - len(open_ones))
-        recs[:] = sorted(open_ones + resolved[:keep_resolved], key=lambda r: r["ts"])
-
-    goal = data.get("next_goal")
-    if isinstance(goal, str):
-        next_goals[chat_id] = goal.strip()[:200]
-
-    new_ms = data.get("milestones") or []
-    if isinstance(new_ms, list):
-        ms_list = milestones.setdefault(chat_id, [])
-        existing_texts = {m["text"].lower() for m in ms_list}
-        for text in new_ms:
-            if isinstance(text, str) and text.strip() and text.strip().lower() not in existing_texts:
-                ms_list.append({"text": text.strip()[:150], "ts": time.time()})
-                existing_texts.add(text.strip().lower())
-        if len(ms_list) > MILESTONES_MAX:
-            ms_list[:] = ms_list[-MILESTONES_MAX:]
-
-    save_state()
-    print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
+    new_ms = _extract_json(raw).get("milestones") or []
+    if not isinstance(new_ms, list):
+        return
+    ms_list = milestones.setdefault(chat_id, [])
+    existing_texts = {m["text"].lower() for m in ms_list}
+    added = 0
+    for text in new_ms:
+        if isinstance(text, str) and text.strip() and text.strip().lower() not in existing_texts:
+            ms_list.append({"text": text.strip()[:150], "ts": time.time()})
+            existing_texts.add(text.strip().lower())
+            added += 1
+    if len(ms_list) > MILESTONES_MAX:
+        ms_list[:] = ms_list[-MILESTONES_MAX:]
+    if added:
+        save_state()
+        print(f"[milestones] recorded {added} new for chat {chat_id}.")
 
 
 def milestone_note(chat_id: int) -> str:
@@ -3062,10 +2888,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
         "",
-        "*Inside jokes & wardrobe*",
-        "/addjoke phrase | meaning | tone — add an inside joke",
-        "/jokes — list inside jokes",
-        "/deljoke <id> — remove a joke",
+        "*Wardrobe*",
         "/wardrobe — list outfits",
         "/addoutfit <desc> — add an outfit",
         "/outfit <n> — set current outfit (used in selfies)",
@@ -3073,8 +2896,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         "*Selfie*",
         "/selfie [hint] — generate a selfie",
-        "/selfimage — view her current self-image",
-        "/reflect — trigger nightly reflection now",
         "",
         "*Day context*",
         "/life [text] — view or replace her current life arc (what she has going on long-term)",
@@ -3491,8 +3312,6 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
     rfts = recent_facts.get(chat_id) or []
     ms_list = milestones.get(chat_id) or []
-    goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-    items = beliefs.get(chat_id, {}).get("items") or {}
     lines = [
         f"Memory export — {NAME} / {now_str}",
         "",
@@ -3505,11 +3324,6 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Summary:\n{rsumm}",
         "",
         "Recent facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"),
-        "",
-        "=== SELF-IMAGE ===",
-        "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)",
-        "",
-        f"Next-conversation goal: {goal}",
     ]
     if ms_list:
         lines += [
@@ -3700,68 +3514,6 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Energy set to **{lvl}**. Use /energy off to clear.", parse_mode="Markdown")
 
 
-# --- Inside joke bank ---
-async def add_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text or "|" not in text:
-        await update.message.reply_text(
-            "Usage: /addjoke <phrase> | <meaning> [| tone]\n\n"
-            "Example: /addjoke the soup incident | failed at reheating soup | playful\n"
-            "Tone defaults to 'playful' if not specified."
-        )
-        return
-    parts = [p.strip() for p in text.split("|")]
-    phrase = parts[0]
-    meaning = parts[1] if len(parts) > 1 else ""
-    tone = parts[2] if len(parts) > 2 else "playful"
-    if not phrase or not meaning:
-        await update.message.reply_text("Need at least a phrase and a meaning.")
-        return
-    inside_jokes.append({
-        "id": _new_joke_id(),
-        "phrase": phrase[:80],
-        "meaning": meaning[:160],
-        "tone": tone[:30],
-        "last_used": 0,
-        "cooldown_days": 7,
-    })
-    save_jokes()
-    await update.message.reply_text(f'😂 Added joke: "{phrase}"')
-
-
-async def list_jokes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not inside_jokes:
-        await update.message.reply_text(
-            "No inside jokes yet. Use /addjoke to add one.\n\n"
-            "Format: /addjoke <phrase> | <meaning> [| tone]"
-        )
-        return
-    now = time.time()
-    lines = []
-    for j in inside_jokes:
-        last = j.get("last_used", 0)
-        cd = j.get("cooldown_days", 7)
-        ready_in = max(0, (last + cd * 86400 - now) / 3600)
-        status = "ready" if ready_in <= 0 else f"on cooldown ({round(ready_in)}h left)"
-        lines.append(f"{j['id']}. \"{j['phrase']}\" ({j['tone']}) — {j['meaning']} [{status}]")
-    await _reply_chunked(update, "😂 Inside jokes:\n\n" + "\n".join(lines)
-                         + "\n\nUse /deljoke <id> to remove one.")
-
-
-async def del_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /deljoke <id from /jokes>")
-        return
-    jid = int(context.args[0])
-    target = next((j for j in inside_jokes if j["id"] == jid), None)
-    if not target:
-        await update.message.reply_text("No joke with that id.")
-        return
-    inside_jokes.remove(target)
-    save_jokes()
-    await update.message.reply_text(f'🗑️ Removed joke: "{target["phrase"]}"')
-
-
 # --- Wardrobe ---
 async def wardrobe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     outfits = wardrobe.get("outfits") or []
@@ -3915,10 +3667,8 @@ def _build_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("💬 Vent", callback_data="cmd:vent")],
         [InlineKeyboardButton("⚡ Low energy", callback_data="energy:low"),
          InlineKeyboardButton("🔄 Clear vibe", callback_data="vibe:off"),
-         InlineKeyboardButton("😂 Jokes", callback_data="cmd:jokes"),
          InlineKeyboardButton("👗 Wardrobe", callback_data="cmd:wardrobe")],
         [InlineKeyboardButton("📸 Selfie", callback_data="cmd:selfie"),
-         InlineKeyboardButton("🪞 Self-image", callback_data="cmd:selfimage"),
          InlineKeyboardButton("💓 Check in", callback_data="cmd:heartbeat"),
          InlineKeyboardButton("📊 Nudges", callback_data="cmd:nudges")],
     ])
@@ -3972,17 +3722,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
         rfts = recent_facts.get(chat_id) or []
         ms_list = milestones.get(chat_id) or []
-        goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-        items = beliefs.get(chat_id, {}).get("items") or {}
         lines = [
             f"Memory export — {NAME} / {now_str}", "",
             "=== LONG-TERM ===", f"Summary:\n{summ}", "",
             "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"), "",
             "=== RECENT ===", f"Summary:\n{rsumm}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"), "",
-            "=== SELF-IMAGE ===",
-            "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)", "",
-            f"Next goal: {goal}",
+            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"),
         ]
         if ms_list:
             lines += ["", "=== MILESTONES ===",
@@ -4033,20 +3778,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_weather()
         await send_selfie(context, chat_id, "", announce_errors=True)
 
-    elif data == "cmd:jokes":
-        if not inside_jokes:
-            await _send("No inside jokes yet. Use /addjoke.")
-        else:
-            now = time.time()
-            lines = []
-            for j in inside_jokes:
-                last = j.get("last_used", 0)
-                cd = j.get("cooldown_days", 7)
-                ready_in = max(0, (last + cd * 86400 - now) / 3600)
-                status = "ready" if ready_in <= 0 else f"~{round(ready_in)}h cooldown"
-                lines.append(f'• "{j["phrase"]}" — {status}')
-            await _send("😂 Inside jokes:\n" + "\n".join(lines))
-
     elif data == "cmd:wardrobe":
         outfits = wardrobe.get("outfits") or []
         current = wardrobe.get("current")
@@ -4058,15 +3789,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current and current not in outfits:
                 lines.insert(0, f"Wearing: {current}")
             await _send("👗 Wardrobe:\n" + "\n".join(lines))
-
-    elif data == "cmd:selfimage":
-        items = beliefs.get(chat_id, {}).get("items") or {}
-        if not items:
-            await _send("Nothing yet — runs at the first nightly reflection.")
-        else:
-            lines = [f"• {t}: {d['score']}/10" for t, d in items.items()]
-            goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-            await _send("🪞 Self-image:\n" + "\n".join(lines) + f"\n\nNext goal: {goal}")
 
     elif data == "cmd:heartbeat":
         try:
@@ -5325,8 +5047,6 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=True)
-    if inside_jokes and clean:
-        _check_joke_used(clean)
     if clean:
         q = _extract_last_question(clean)
         if q and len(q) > 12:
@@ -6054,9 +5774,8 @@ def _overnight_mood_reset(chat_id: int):
     print(f"[mood] overnight reset: {s:+.2f} -> {m['score']:+.2f} for chat {chat_id}")
 
 
-async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
-    # Nightly maintenance: long-term memory promotion + overnight mood reset.
-    # (Self-image "reflection" was removed; its prompt block is no longer injected.)
+async def nightly_maintenance(context: ContextTypes.DEFAULT_TYPE):
+    # Nightly: long-term memory promotion, milestone detection, overnight mood reset.
     owner = get_owner()
     if owner is None:
         return
@@ -6064,16 +5783,11 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await maintain_long_term_memory(owner)
     except Exception as e:
         print("[memory] long-term promotion error:", e)
-    _overnight_mood_reset(owner)
-
-
-async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
     try:
-        await reflect(chat_id)
-        await update.message.reply_text("🪞 Reflection done.")
+        await update_milestones(owner)
     except Exception as e:
-        await update.message.reply_text(f"❌ Reflection failed: {str(e)}")
+        print("[milestones] detection error:", e)
+    _overnight_mood_reset(owner)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6211,27 +5925,6 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             pass
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
-
-
-async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    items = beliefs.get(chat_id, {}).get("items") or {}
-    if not items:
-        await update.message.reply_text("Nothing yet — runs at the first nightly reflection.")
-        return
-    lines = [f"• {t}: {d['score']}/10 (baseline {d['anchor']}/10)" for t, d in items.items()]
-    recs = recommendations.get(chat_id, [])
-    open_recs = [r for r in recs if r["status"] == "open"]
-    resolved = [r for r in recs if r["status"] != "open"]
-    rec_lines = [f"• {r['text']}" for r in open_recs] or ["(none)"]
-    res_lines = [f"• {r['text']} — {r['outcome']}: {r['note']}" for r in resolved[-5:]] or ["(none)"]
-    goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-    await update.message.reply_text(
-        f"🪞 {NAME}'s self-image\n\n" + "\n".join(lines) +
-        "\n\nOpen (waiting on an outcome):\n" + "\n".join(rec_lines) +
-        "\n\nRecently resolved:\n" + "\n".join(res_lines) +
-        f"\n\nNext-conversation goal:\n{goal}"
-    )
 
 
 # --- Reverse geocoding (OSM Nominatim — free, no key required) ---
@@ -6506,11 +6199,6 @@ _BASE_COMMANDS = [
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
     BotCommand("selfie", "Generate a selfie"),
-    BotCommand("selfimage", "View current self-image"),
-    BotCommand("reflect", "Trigger nightly reflection now"),
-    BotCommand("addjoke", "Add an inside joke"),
-    BotCommand("jokes", "List inside jokes"),
-    BotCommand("deljoke", "Remove a joke"),
     BotCommand("wardrobe", "List outfits"),
     BotCommand("addoutfit", "Add an outfit"),
     BotCommand("outfit", "Set current outfit"),
@@ -6587,8 +6275,6 @@ def main():
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
-    app.add_handler(CommandHandler("selfimage", selfimage_cmd))
-    app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
         app.add_handler(CommandHandler("addpayment", addpayment))
         app.add_handler(CommandHandler("addevery", addevery))
@@ -6623,9 +6309,6 @@ def main():
     app.add_handler(CommandHandler("vibe", vibe_cmd))
     app.add_handler(CommandHandler("vent", vent_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
-    app.add_handler(CommandHandler("addjoke", add_joke_cmd))
-    app.add_handler(CommandHandler("jokes", list_jokes_cmd))
-    app.add_handler(CommandHandler("deljoke", del_joke_cmd))
     app.add_handler(CommandHandler("wardrobe", wardrobe_cmd))
     app.add_handler(CommandHandler("addoutfit", add_outfit_cmd))
     app.add_handler(CommandHandler("outfit", outfit_cmd))
@@ -6667,8 +6350,8 @@ def main():
         _bwd = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][BACKUP_WEEKDAY % 7]
         log.info("Weekly backup scheduled %s on %s.", BACKUP_TIME, _bwd)
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
-        app.job_queue.run_daily(reflection_job, time=reflection_time)
-        log.info("Nightly reflection scheduled %s.", REFLECTION_TIME)
+        app.job_queue.run_daily(nightly_maintenance, time=reflection_time)
+        log.info("Nightly maintenance scheduled %s.", REFLECTION_TIME)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
