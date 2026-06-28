@@ -180,10 +180,10 @@ The bot reads a set of plain-text files from the character's directory to build 
 | `schedule.txt` | `/schedule` | Weekly routine by day name; today's section is auto-extracted |
 | `day.txt` | `/today` | Generated each morning; append mid-day notes with `/today` |
 | `user_notes.txt` | `/note`, `/notes` | Auto-collected notes about you; also manually added with `/note` |
-| `portland_places.txt` | — | Atlas of real local places she might naturally reference |
+| `places.txt` | — | Atlas of real local places she might naturally reference |
 
 ### Atlas file
-Each character directory can have a `portland_places.txt` (or override via `ATLAS_FILE=` in `.env`). One place per line — the bot samples a random handful each message. Lines starting with `#` are comments.
+Each character directory can have a `places.txt` (or override via `ATLAS_FILE=` in `.env`). One place per line — the bot samples a random handful each message. Lines starting with `#` are comments.
 
 ### User notes (auto-collection)
 After each message you send, the bot runs a background pass to extract upcoming events, appointments, or things you mentioned (job interview Thursday, doctor on Friday, etc.) and appends them to `user_notes.txt`. She references these naturally in conversation when the moment fits.
@@ -288,7 +288,7 @@ Each character lives in its own directory (e.g. `~/nora-bot/`) containing:
 - `.env` — bot token, API key, model settings
 - `nora.json` (or whatever `CHARACTER_CARD=` points to) — persona card
 - `state.json` — conversation history, memory, mood (auto-created)
-- Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `portland_places.txt`
+- Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `places.txt`
 
 The shared `~/telegram-bot/bot.py` is used by all instances — each instance just reads its own directory.
 

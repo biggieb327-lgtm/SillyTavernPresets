@@ -144,5 +144,5 @@ Writing collaborator/developmental editor. 27, left PhD program, freelance.
 
 ## Emily notes
 
-`emily_harper.json` — character details TBD in project context.
+`emily.json` — character details TBD in project context.
 `VISION_MODEL=zai-org/glm-4.6v` — photo receipt issue under investigation (no response when photos sent). Likely the error reply is dying on network after a long API wait. Check `tmux capture-pane -t emily -p -S -100` after sending a photo.

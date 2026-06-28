@@ -80,7 +80,7 @@ Commits also land on `main` (same history).
 
 **Cass** (`cass.json`) — writing collaborator/developmental editor. Analysis-mode bot: send her a `.json` character card and she gives a substantive critique. Uses `DOCUMENT_MODEL` (instruction model) for card analysis so she doesn't perform the character she's reading. Recently tuned: leads with fixes not just diagnosis, advances conversations rather than circling.
 
-**Emily** (`emily_harper.json`) — has `VISION_MODEL=zai-org/glm-4.6v`. Currently investigating photo receipt issues (no response when photos sent; likely network timeout silencing the error reply).
+**Emily** (`emily.json`) — has `VISION_MODEL=zai-org/glm-4.6v`. Currently investigating photo receipt issues (no response when photos sent; likely network timeout silencing the error reply).
 
 **Nora** (`nora.json`) — original instance.
 

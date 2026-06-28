@@ -241,7 +241,7 @@ SHORT_TERM_HOURS = float(os.getenv("SHORT_TERM_HOURS", "48"))  # verbatim messag
 SHORT_TERM_SECS = SHORT_TERM_HOURS * 3600                       # than this get distilled out
 
 # --- Local atlas (real places she can reference / selfie backgrounds) ---
-ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "portland_places.txt")
+ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "places.txt")
 ATLAS_SAMPLE = int(os.getenv("ATLAS_SAMPLE", "6"))
 ATLAS = (
     [ln.strip() for ln in ATLAS_FILE.read_text(encoding="utf-8").splitlines()

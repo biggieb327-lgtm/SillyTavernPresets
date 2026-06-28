@@ -119,13 +119,13 @@ Download all character cards and create a directory for each:
 for char in emily bonnie nora cass priya; do
   mkdir -p ~/${char}-bot
   curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}/${char}.json" -o ~/${char}-bot/${char}.json 2>/dev/null || \
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily_harper.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
+  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
 done
 ```
 
 Or individually:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily_harper.json -o ~/emily-bot/emily_harper.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily.json -o ~/emily-bot/emily.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/bonnie.json     -o ~/bonnie-bot/bonnie.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/nora.json        -o ~/nora-bot/nora.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/cass.json        -o ~/cass-bot/cass.json
@@ -158,15 +158,15 @@ Each character runs in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, 
 
 ## Step 6: Optional — Atlas Files (Local Places)
 
-Each character can have a `portland_places.txt` in her directory — a list of real local places she might naturally reference in conversation. The bot samples a handful per message.
+Each character can have a `places.txt` in her directory — a list of real local places she might naturally reference in conversation. The bot samples a handful per message.
 
 Download the pre-seeded ones:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/portland_places.txt  -o ~/emily-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/portland_places.txt -o ~/bonnie-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/portland_places.txt   -o ~/nora-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/portland_places.txt   -o ~/cass-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/portland_places.txt  -o ~/priya-bot/portland_places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/places.txt  -o ~/emily-bot/places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/places.txt -o ~/bonnie-bot/places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/places.txt   -o ~/nora-bot/places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/places.txt   -o ~/cass-bot/places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/places.txt  -o ~/priya-bot/places.txt
 ```
 
 Each file is just one place per line. Edit freely. Override the filename with `ATLAS_FILE=` in `.env`.
