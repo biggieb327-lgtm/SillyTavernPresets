@@ -473,7 +473,7 @@ _CAP_STOP = frozenset({
     "what", "who", "how", "why", "if", "so", "yes", "no", "ok", "okay",
 })
 
-def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
+def _extract_memory(uname: str, user_msg: str, ai_response: str) -> tuple:
     sys_prompt = (
         f"You keep a memory log for {NAME} about OTHER PEOPLE in her world -- her teammates, "
         f"friends, family, and anyone else who comes up. From this exchange, extract at most ONE "
@@ -488,7 +488,11 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
         f"- ONE short factual sentence, third person, under 25 words. Plain statement: NO dialogue, "
         f"NO quotation marks, NO *asterisk actions*, NO narration, NO first person.\n"
         f"- Use only people and events that actually appear in the exchange; never invent a name.\n"
-        f"- Most exchanges have nothing like this. When in doubt, output exactly: none"
+        f"- Most exchanges have nothing like this. When in doubt, the memory is none.\n"
+        f'Respond with ONLY a JSON object: {{"memory": "<the fact, or the word none>", '
+        f'"keywords": ["<alt term>", ...]}}. keywords = 2-4 OTHER ways someone might refer to the '
+        f"people or things in the memory (a nickname, a category, a synonym, a related word), so "
+        f"the memory can be found later when worded differently. No prose, no code fences."
     )
     try:
         raw = call_nanogpt(
@@ -498,32 +502,39 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
         ).strip()
     except Exception as e:
         print("[memories] extraction failed:", e)
-        return ""
-    raw = " ".join(raw.split())  # collapse to a single line
-    low = raw.lower()
-    if (not raw
-            or "*" in raw or '"' in raw
+        return "", []
+    data = _extract_json(raw)
+    if isinstance(data, dict) and data.get("memory"):
+        mem = str(data.get("memory"))
+        kws = data.get("keywords") if isinstance(data.get("keywords"), list) else []
+    else:
+        mem, kws = raw, []  # model didn't return JSON -> treat the whole reply as the memory
+    mem = " ".join(mem.split())  # collapse to a single line
+    low = mem.lower()
+    if (not mem
+            or "*" in mem or '"' in mem
             or re.match(r"^(none|no\b|nothing|n/a|not\b)", low)
             or re.search(r"\bi\b", low)  # first person = dumped dialogue, not a memory
             or any(p in low for p in _MEMORY_REJECT)
-            or not (8 <= len(raw) <= 220)):
-        return ""
+            or not (8 <= len(mem) <= 220)):
+        return "", []
     # Grounding: the memory must be about a real, named THIRD PARTY who appears in the
     # exchange -- not the user, not the character, not an invented name. This also kills
     # "memories" that are really negative psychoanalysis of the user (only their name in it).
     exchange_low = (user_msg + " " + ai_response).lower()
     known = {uname.lower()} | {w.lower() for w in (NAME or "").split()}
     third_party = False
-    for _nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", raw):
+    for _nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", mem):
         _nl = _nm.lower()
         if _nl in _CAP_STOP or _nl in known:
             continue
         if _nl not in exchange_low:
-            return ""           # hallucinated name
-        third_party = True      # a real third-party name, grounded in the exchange
+            return "", []           # hallucinated name
+        third_party = True          # a real third-party name, grounded in the exchange
     if not third_party:
-        return ""               # no third party named -> it's about the user/character
-    return raw
+        return "", []               # no third party named -> it's about the user/character
+    kws = [k.strip() for k in kws if isinstance(k, str) and k.strip() and len(k.strip()) <= 30][:4]
+    return mem, kws
 
 
 async def update_memories(chat_id: int, user_msg: str, ai_response: str):
@@ -535,8 +546,11 @@ async def update_memories(chat_id: int, user_msg: str, ai_response: str):
     uname = user_names.get(chat_id, "you")
     try:
         def _work():
-            mem = _extract_memory(uname, user_msg, ai_response)
+            mem, kws = _extract_memory(uname, user_msg, ai_response)
             if mem:
+                if kws:  # append alias terms so paraphrases ("truck" vs "Tacoma") still match
+                    # "aka" is <4 chars so the matcher ignores it; the alias terms still match
+                    mem = f"{mem} [aka: {', '.join(kws)}]"
                 _append_memory(mem, auto=True)
                 print(f"[memories] added: {mem}")
         await asyncio.to_thread(_work)
