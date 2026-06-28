@@ -454,6 +454,15 @@ def _append_memory(text: str, auto: bool = False):
         _memory_word_cache.clear()
 
 
+def _rewrite_memories(lines: list):
+    """Overwrite memories.txt with the given lines (under the lock) and drop the caches."""
+    with _memory_lock:
+        MEMORIES_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        _memories_cache["text"] = None
+        _memories_cache["ts"] = 0.0
+        _memory_word_cache.clear()
+
+
 # Phrases that mean the model is narrating/commenting instead of stating a fact.
 _MEMORY_REJECT = (
     "this note", "this exchange", "this interaction", "the interaction",
@@ -1418,7 +1427,8 @@ def triggered_reading(low: str) -> list[str]:
 
 
 def triggered_memories(low: str) -> list[str]:
-    """low must already be lowercased."""
+    """low must already be lowercased. Surface stored memories whose keywords appear in the
+    recent text: most relevant first (by keyword hits), ties broken by recency (newer wins)."""
     entries = _read_memories()
     if not entries:
         return []
@@ -1426,19 +1436,23 @@ def triggered_memories(low: str) -> list[str]:
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
     scored = []
-    for line in entries:
+    for idx, line in enumerate(entries):  # idx = recency rank within the file (higher = newer)
         words = _memory_word_cache.get(line)
         if words is None:
-            words = frozenset(w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
+            # strip the leading "[auto DATE]" tag so the date/"auto" don't count as keywords;
+            # the trailing "[aka: ...]" alias terms stay, so paraphrases still match.
+            body = re.sub(r"^\[[^\]]*\]\s*", "", line)
+            words = frozenset(w for w in re.findall(r"\b[a-z]{4,}\b", body.lower())
                               if w not in stopwords)
             _memory_word_cache[line] = words
         hits = len(words & scan_words)
         if hits > 0:
-            scored.append((hits, line))
-    scored.sort(key=lambda x: x[0], reverse=True)
+            scored.append((hits, idx, line))
+    # relevance dominates; recency (idx) only breaks ties among equally-relevant memories
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     out = []
     budget = MEMORY_TOKEN_BUDGET
-    for _, line in scored:
+    for _, _, line in scored:
         cost = _est_tokens(line)
         if cost > budget:
             break
@@ -4162,6 +4176,68 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"No memories matched '{arg}'.")
 
 
+def _mentions_third_party(text: str, uname: str) -> bool:
+    """True if text names someone other than the user or the character (i.e. an NPC)."""
+    known = {uname.lower()} | {w.lower() for w in (NAME or "").split()}
+    for nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", text):
+        if nm.lower() not in _CAP_STOP and nm.lower() not in known:
+            return True
+    return False
+
+
+async def correct_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fix a wrong memory in one step: remove anything matching <wrong>, then (optionally)
+    remember <right> in its place. Usage: /correct <wrong> => <right>"""
+    chat_id = update.effective_chat.id
+    raw = " ".join(context.args).strip() if context.args else ""
+    if not raw:
+        await update.message.reply_text(
+            "Usage: /correct <wrong> => <right>\n"
+            "Removes any memory matching <wrong>, then remembers <right> instead.\n"
+            "Leave off the \"=> <right>\" half to just unlearn the wrong thing."
+        )
+        return
+    wrong, _, right = raw.partition("=>")
+    wrong, right = wrong.strip(), right.strip()
+    if not wrong:
+        await update.message.reply_text("Tell me the wrong bit: /correct <wrong> => <right>")
+        return
+    key = wrong.lower()
+
+    # Unlearn: drop matching entries from the NPC memory file and the user-fact lists.
+    removed = 0
+    npc = _read_memories()
+    kept = [e for e in npc if key not in e.lower()]
+    if len(kept) < len(npc):
+        removed += len(npc) - len(kept)
+        await asyncio.to_thread(_rewrite_memories, kept)
+    for store in (facts, recent_facts):
+        old = store.get(chat_id) or []
+        new = [f for f in old if key not in f.lower()]
+        removed += len(old) - len(new)
+        store[chat_id] = new
+
+    # Relearn: route the correction to the store it belongs in (NPC memory vs. user facts).
+    added_to = ""
+    if right:
+        uname = user_names.get(chat_id, "you")
+        if _mentions_third_party(right, uname):
+            await asyncio.to_thread(_append_memory, right)
+            added_to = "NPC memory"
+        else:
+            fts = facts.setdefault(chat_id, [])
+            if right not in fts:
+                fts.append(right)
+            added_to = f"what {NAME} knows about you"
+    save_state()
+
+    msg = (f"🧹 Removed {removed} matching memor{'y' if removed == 1 else 'ies'}."
+           if removed else f"Nothing matched \"{wrong}\" to remove.")
+    if right:
+        msg += f"\n📌 Now remembering instead ({added_to}): {right}"
+    await update.message.reply_text(msg)
+
+
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search facts and summaries for a keyword and show matches."""
     chat_id = update.effective_chat.id
@@ -6469,6 +6545,7 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("correct", "Fix a wrong memory: /correct <wrong> => <right>"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
@@ -6562,6 +6639,7 @@ def main():
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
+    app.add_handler(CommandHandler("correct", correct_cmd))
     if PAYMENTS_ENABLED:
         app.add_handler(CommandHandler("addpayment", addpayment))
         app.add_handler(CommandHandler("addevery", addevery))
