@@ -241,6 +241,10 @@ SHORT_TERM_HOURS = float(os.getenv("SHORT_TERM_HOURS", "48"))  # verbatim messag
 SHORT_TERM_SECS = SHORT_TERM_HOURS * 3600                       # than this get distilled out
 
 # --- Local atlas (real places she can reference / selfie backgrounds) ---
+# Liveness marker: the event loop touches this every minute. The external watchdog
+# treats a stale .alive (bot frozen but not exited) as reason to restart the instance.
+LIVENESS_FILE = BASE_DIR / ".alive"
+
 ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "places.txt")
 ATLAS_SAMPLE = int(os.getenv("ATLAS_SAMPLE", "6"))
 ATLAS = (
@@ -6599,6 +6603,16 @@ async def _register_commands(application):
     await application.bot.set_my_commands(cmds)
 
 
+async def _touch_liveness(context: ContextTypes.DEFAULT_TYPE):
+    """Stamp .alive so the external watchdog can tell a working bot from a frozen one.
+    Runs on the event loop, so if the loop wedges the file stops updating and the
+    watchdog restarts us -- the one failure the in-tmux supervisor can't catch."""
+    try:
+        LIVENESS_FILE.touch()
+    except Exception:
+        pass
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -6703,6 +6717,11 @@ def main():
     signal.signal(signal.SIGINT, _shutdown)
 
     if app.job_queue is not None:
+        try:
+            LIVENESS_FILE.touch()  # stamp immediately so the watchdog sees us alive at once
+        except Exception:
+            pass
+        app.job_queue.run_repeating(_touch_liveness, interval=60, first=60)
         schedule_next_heartbeat(app.job_queue)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:

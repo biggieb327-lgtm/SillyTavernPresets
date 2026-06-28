@@ -17,6 +17,9 @@ set -u
 BOT_SRC="$HOME/telegram-bot"
 LOG="$BOT_SRC/watchdog.log"
 INTERVAL="${WATCHDOG_INTERVAL:-300}"
+# A bot whose .alive heartbeat is older than this (seconds) is treated as frozen and
+# restarted even if its tmux session still exists. The bot stamps .alive every 60s.
+STALE="${WATCHDOG_STALE:-300}"
 
 BOTS="
 nora:$HOME/nora-bot
@@ -28,14 +31,29 @@ jules:$HOME/jules-bot
 # priya:$HOME/priya-bot   # uncomment once priya is built
 
 check_once() {
+  now=$(date +%s)
   for entry in $BOTS; do
     session="${entry%%:*}"
     dir="${entry##*:}"
     [ -d "$dir" ] || continue
-    if tmux has-session -t "$session" 2>/dev/null; then
-      continue
+    reason=""
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+      reason="session down"
+    else
+      # Session is up -- check the heartbeat to catch a frozen-but-alive bot.
+      # A missing .alive is left alone (old bot.py, or just-started): only a
+      # heartbeat that exists and has gone stale counts as a hang.
+      alive="$dir/.alive"
+      if [ -f "$alive" ]; then
+        mtime=$(stat -c %Y "$alive" 2>/dev/null || echo "$now")
+        age=$(( now - mtime ))
+        if [ "$age" -gt "$STALE" ]; then
+          reason="frozen (heartbeat ${age}s old)"
+        fi
+      fi
     fi
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $session down -> relaunching" >> "$LOG"
+    [ -n "$reason" ] || continue
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $session $reason -> relaunching" >> "$LOG"
     bash "$BOT_SRC/run-bot.sh" "$dir" "$session" >> "$LOG" 2>&1
   done
 }
