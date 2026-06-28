@@ -2854,11 +2854,14 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         f'  "summary": a short first-person narrative, written in {NAME}\'s own voice, like a '
         f"memory she could recall and recount — what's been going on lately with {uname}, how it "
         f"felt, what's current (<= 150 words). Integrate the previous summary with the new "
-        f"messages into one continuous recollection, not a list of events.\n"
-        f'  "facts": a curated list of specific, meaningful things about {uname} — events, '
-        f"current situations, inside jokes, things worth carrying forward. Merge with the prior "
-        f"facts; keep what a person would actually remember and care about (skip generic filler "
-        f"or purely transient observations); drop duplicates.\n"
+        f"messages into one continuous recollection, not a list of events. Keep it a fair account "
+        f"of the relationship, not a grievance log or a fixed verdict on {uname}.\n"
+        f'  "facts": a curated list of CONCRETE things about {uname} — events, preferences, plans, '
+        f"situations, history, things he said or did. Merge with prior facts; keep what a person "
+        f"would actually remember and care about; skip filler; drop duplicates. Facts are concrete, "
+        f"NOT judgments: never write analysis of his character or motives, predictions about how he "
+        f"behaves, or how {NAME} feels about him (e.g. never 'he deflects to stay in control', 'he "
+        f"avoids being seen'). Only what is actually true about him and his life.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
     user = f"EXISTING MEMORY:\n{existing}\n\nNEW MESSAGES:\n{convo}"
@@ -2873,9 +2876,13 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         new_facts = prev_facts
     cleaned, seen = [], set()
     for f in new_facts:
-        if isinstance(f, str) and f.strip() and f.strip().lower() not in seen:
-            seen.add(f.strip().lower())
-            cleaned.append(f.strip())
+        fs = f.strip() if isinstance(f, str) else ""
+        low = fs.lower()
+        # drop dupes and any "fact" that's actually interpretation/judgment (see _MEMORY_REJECT)
+        if not fs or low in seen or any(m in low for m in _MEMORY_REJECT):
+            continue
+        seen.add(low)
+        cleaned.append(fs)
     return summary, cleaned
 
 
@@ -2898,9 +2905,11 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: 
         f"You maintain {NAME}'s memory of {uname}. The facts list has grown too long. "
         f"Consolidate it: merge near-duplicates, combine related facts into one, drop trivia, and "
         f"fold superseded or minor details into the summary so nothing important is lost. Keep at "
-        f"most {target} facts — the most durable and relevant ones. Keep the "
-        f"summary as a first-person narrative in {NAME}'s own voice, like a memory she could "
-        f"recall and recount. Respond with ONLY a JSON object: "
+        f"most {target} facts — the most durable and relevant ones. Drop any 'fact' that is "
+        f"actually analysis of {uname}'s character or motives, a prediction, or a judgment — keep "
+        f"only concrete facts about him and his life. Keep the summary as a first-person narrative "
+        f"in {NAME}'s own voice, a fair recollection (not a grievance log or a verdict on {uname}). "
+        f"Respond with ONLY a JSON object: "
         f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
     )
     raw = call_nanogpt(
@@ -2914,9 +2923,12 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: 
         return prev_summary, prev_facts  # keep what we had rather than lose memory
     cleaned, seen = [], set()
     for f in new_facts:
-        if isinstance(f, str) and f.strip() and f.strip().lower() not in seen:
-            seen.add(f.strip().lower())
-            cleaned.append(f.strip())
+        fs = f.strip() if isinstance(f, str) else ""
+        low = fs.lower()
+        if not fs or low in seen or any(m in low for m in _MEMORY_REJECT):
+            continue
+        seen.add(low)
+        cleaned.append(fs)
     return summary, cleaned
 
 
