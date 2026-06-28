@@ -288,7 +288,7 @@ READING_FILE = BASE_DIR / "reading.txt"
 READING_ENABLED = SEARCH_ENABLED and os.getenv("READING_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
 READING_MODEL = os.getenv("READING_MODEL", MOOD_MODEL)
 READING_MAX = int(os.getenv("READING_MAX", "5"))
-READING_TIMES = os.getenv("READING_TIMES", "09:40,18:40")
+READING_TIMES = os.getenv("READING_TIMES", "09:40,13:40,18:40")
 _interests_cache: dict = {"text": None, "ts": 0.0}
 _reading_cache: dict = {"text": None, "ts": 0.0}
 
