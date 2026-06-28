@@ -41,6 +41,8 @@ bash run-bot.sh
 | `run-bot.sh` | Start script (supervised, named instances) |
 | `start-bots.sh` | Start all character instances |
 | `update-all.sh` | Pull latest bot.py and restart all instances |
+| `watchdog.sh` | Relaunch any bot whose tmux session has died (for cron/boot) |
+| `termux-boot-start.sh` | Termux:Boot launcher — brings bots back after a reboot |
 | `docs/` | Setup guide, ops manual, project docs |
 
 ## License
