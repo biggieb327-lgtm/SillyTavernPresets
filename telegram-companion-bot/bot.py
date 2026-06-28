@@ -490,6 +490,7 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
     if (not raw
             or "*" in raw or '"' in raw
             or re.match(r"^(none|no\b|nothing|n/a|not\b)", low)
+            or re.search(r"\bi\b", low)  # first person = dumped dialogue, not a memory
             or any(p in low for p in _MEMORY_REJECT)
             or not (8 <= len(raw) <= 220)):
         return ""
