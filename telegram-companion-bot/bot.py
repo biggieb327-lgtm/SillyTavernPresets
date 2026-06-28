@@ -1708,7 +1708,8 @@ def _today_messages(chat_id: int) -> list:
 
 
 async def update_milestones(chat_id: int):
-    """Nightly: detect relationship 'firsts' from today's conversation and record them."""
+    """Nightly: detect relationship milestones -- firsts AND warm turning points -- from
+    today's conversation, recorded as concrete events (not feeling-labels)."""
     uname = user_names.get(chat_id, "you")
     todays = _today_messages(chat_id)
     if not todays:
@@ -1719,14 +1720,19 @@ async def update_milestones(chat_id: int):
     existing = milestones.get(chat_id) or []
     ms_lines = (", ".join(m["text"] for m in existing[-10:]) if existing else "(none yet)")
     sys = (
-        f"Look at today's conversation between {NAME} and {uname} for relationship milestones — "
-        f"things that happened for the FIRST TIME today that aren't already in the existing list: "
-        f"first time he opened up about something painful, first real disagreement they worked "
-        f"through, first time she admitted something she doesn't usually say, first time he asked "
-        f"for her opinion on something big. Be selective — only genuine firsts that will matter "
-        f"later. Keep each one short (one brief phrase). Return an empty list if today had nothing "
-        f"new.\n\n"
-        f'Respond with ONLY a JSON object: {{"milestones": ["first time he ..."]}}. '
+        f"Look at today's conversation between {NAME} and {uname} for relationship milestones -- "
+        f"moments worth keeping as their history. Two kinds:\n"
+        f"1. FIRSTS: first time he opened up about something painful, first real disagreement they "
+        f"worked through, first time she admitted something she doesn't usually say.\n"
+        f"2. WARM TURNING POINTS: a moment the two of them got noticeably closer -- she let her "
+        f"guard down, he showed up for her, real tenderness or a real laugh landed, an inside thing "
+        f"formed between them, a wall came down for a second.\n"
+        f"Record each as a CONCRETE MOMENT that happened today (what actually occurred), third "
+        f"person, past tense -- e.g. 'the night he stayed on the line until she fell asleep'. NOT a "
+        f"feeling-label, NOT analysis of either person's character or motives, NOT a prediction. "
+        f"Be selective: only genuine turning points that will matter later, not every nice "
+        f"exchange. Return an empty list if today had nothing that rises to that.\n\n"
+        f'Respond with ONLY a JSON object: {{"milestones": ["the night he ..."]}}. '
         f"No prose, no code fences."
     )
     user = f"EXISTING MILESTONES: {ms_lines}\n\nTODAY'S CONVERSATION:\n{convo}"
