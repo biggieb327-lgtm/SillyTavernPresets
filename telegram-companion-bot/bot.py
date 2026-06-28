@@ -460,6 +460,10 @@ _MEMORY_REJECT = (
     "the conversation", "the exchange", "worth recording", "worth remembering",
     "worth noting", "nothing notable", "no notable", "filing that away",
     "the assistant", "the character", "no third party", "not about",
+    # interpretation/analysis markers -- memory is for facts, not psychoanalysis of anyone
+    "suggests", "tells you", "as if", "implies", "reveals", "it's clear", "this means",
+    "the way ", "defaults to", "tends to", "how he handles", "how she handles",
+    "how you handle", "practiced", "deep down", "underneath",
 )
 # Common capitalized non-name words, so the grounding check doesn't flag them.
 _CAP_STOP = frozenset({
@@ -471,18 +475,20 @@ _CAP_STOP = frozenset({
 
 def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
     sys_prompt = (
-        f"You maintain a memory log for {NAME}. From this exchange, extract at most ONE durable "
-        f"fact about a THIRD PARTY, or a relationship dynamic between named people -- not about "
-        f"{uname} or {NAME} themselves. A reaction, grudge, opinion, or piece of history worth "
-        f"recalling later.\n"
-        f"Rules:\n"
-        f"- ONE short factual sentence, third person, under 25 words.\n"
-        f"- Plain statement only. NO dialogue, NO quotation marks, NO *asterisk actions*, NO "
-        f"narration, NO first person, NO commentary about the exchange itself.\n"
-        f"- Name the person; refer to {NAME} by name, never as 'the assistant'.\n"
-        f"- Use ONLY people and events that actually appear in the exchange below. Never invent "
-        f"a name, a person, or an event. Do not reuse any name from these instructions.\n"
-        f"- If there is no such third-party fact in the exchange, output exactly: none"
+        f"You keep a memory log for {NAME} about OTHER PEOPLE in her world -- her teammates, "
+        f"friends, family, and anyone else who comes up. From this exchange, extract at most ONE "
+        f"concrete fact about such a THIRD PARTY: something they did or said, a stated opinion, or "
+        f"a piece of history worth recalling later.\n"
+        f"Hard rules:\n"
+        f"- It must be about a named THIRD PARTY who appears in the exchange. NOT about {uname}. "
+        f"NOT about {NAME}. NOT about how {NAME} feels about {uname}, or how {uname} treats her.\n"
+        f"- A concrete fact ONLY. NO psychology, NO interpretation, NO analysis of anyone's "
+        f"character, motives, or feelings, NO predictions about how anyone will behave. Never "
+        f"write what something 'suggests' or 'tells you' about a person.\n"
+        f"- ONE short factual sentence, third person, under 25 words. Plain statement: NO dialogue, "
+        f"NO quotation marks, NO *asterisk actions*, NO narration, NO first person.\n"
+        f"- Use only people and events that actually appear in the exchange; never invent a name.\n"
+        f"- Most exchanges have nothing like this. When in doubt, output exactly: none"
     )
     try:
         raw = call_nanogpt(
@@ -502,16 +508,21 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
             or any(p in low for p in _MEMORY_REJECT)
             or not (8 <= len(raw) <= 220)):
         return ""
-    # Grounding: any proper noun in the memory must actually appear in the exchange,
-    # else it's a hallucinated name (the model inventing a "Bob" that was never mentioned).
+    # Grounding: the memory must be about a real, named THIRD PARTY who appears in the
+    # exchange -- not the user, not the character, not an invented name. This also kills
+    # "memories" that are really negative psychoanalysis of the user (only their name in it).
     exchange_low = (user_msg + " " + ai_response).lower()
     known = {uname.lower()} | {w.lower() for w in (NAME or "").split()}
+    third_party = False
     for _nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", raw):
         _nl = _nm.lower()
         if _nl in _CAP_STOP or _nl in known:
             continue
         if _nl not in exchange_low:
-            return ""
+            return ""           # hallucinated name
+        third_party = True      # a real third-party name, grounded in the exchange
+    if not third_party:
+        return ""               # no third party named -> it's about the user/character
     return raw
 
 
