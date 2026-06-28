@@ -461,6 +461,13 @@ _MEMORY_REJECT = (
     "worth noting", "nothing notable", "no notable", "filing that away",
     "the assistant", "the character", "no third party", "not about",
 )
+# Common capitalized non-name words, so the grounding check doesn't flag them.
+_CAP_STOP = frozenset({
+    "the", "a", "an", "she", "he", "they", "it", "we", "you", "that", "this", "his", "her",
+    "their", "its", "your", "our", "when", "after", "before", "while", "since", "because",
+    "during", "despite", "then", "now", "still", "just", "and", "but", "there", "here",
+    "what", "who", "how", "why", "if", "so", "yes", "no", "ok", "okay",
+})
 
 def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
     sys_prompt = (
@@ -473,8 +480,9 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
         f"- Plain statement only. NO dialogue, NO quotation marks, NO *asterisk actions*, NO "
         f"narration, NO first person, NO commentary about the exchange itself.\n"
         f"- Name the person; refer to {NAME} by name, never as 'the assistant'.\n"
-        f"- Good: Bob reacted badly when {uname} mentioned their ex.\n"
-        f"- If there is no such third-party fact, output exactly: none"
+        f"- Use ONLY people and events that actually appear in the exchange below. Never invent "
+        f"a name, a person, or an event. Do not reuse any name from these instructions.\n"
+        f"- If there is no such third-party fact in the exchange, output exactly: none"
     )
     try:
         raw = call_nanogpt(
@@ -494,6 +502,16 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
             or any(p in low for p in _MEMORY_REJECT)
             or not (8 <= len(raw) <= 220)):
         return ""
+    # Grounding: any proper noun in the memory must actually appear in the exchange,
+    # else it's a hallucinated name (the model inventing a "Bob" that was never mentioned).
+    exchange_low = (user_msg + " " + ai_response).lower()
+    known = {uname.lower()} | {w.lower() for w in (NAME or "").split()}
+    for _nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", raw):
+        _nl = _nm.lower()
+        if _nl in _CAP_STOP or _nl in known:
+            continue
+        if _nl not in exchange_low:
+            return ""
     return raw
 
 
