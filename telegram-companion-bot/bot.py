@@ -426,7 +426,7 @@ async def update_user_notes(chat_id: int, user_message: str):
 
 
 def _append_memory(text: str, auto: bool = False):
-    text = text.strip()
+    text = " ".join(text.split())  # one line only; multi-line text splits into fake entries
     if not text:
         return
     with _memory_lock:
@@ -454,14 +454,27 @@ def _append_memory(text: str, auto: bool = False):
         _memory_word_cache.clear()
 
 
+# Phrases that mean the model is narrating/commenting instead of stating a fact.
+_MEMORY_REJECT = (
+    "this note", "this exchange", "this interaction", "the interaction",
+    "the conversation", "the exchange", "worth recording", "worth remembering",
+    "worth noting", "nothing notable", "no notable", "filing that away",
+    "the assistant", "the character", "no third party", "not about",
+)
+
 def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
     sys_prompt = (
-        f"Did this exchange reveal something notable about a third party, NPC, or relationship "
-        f"dynamic (not about {uname} themselves) worth remembering for future conversations? "
-        f"Think: reactions, grudges, opinions, history between people. "
-        f"If yes, write ONE brief memory line in third person "
-        f"(e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
-        f"If nothing notable, reply: none"
+        f"You maintain a memory log for {NAME}. From this exchange, extract at most ONE durable "
+        f"fact about a THIRD PARTY, or a relationship dynamic between named people -- not about "
+        f"{uname} or {NAME} themselves. A reaction, grudge, opinion, or piece of history worth "
+        f"recalling later.\n"
+        f"Rules:\n"
+        f"- ONE short factual sentence, third person, under 25 words.\n"
+        f"- Plain statement only. NO dialogue, NO quotation marks, NO *asterisk actions*, NO "
+        f"narration, NO first person, NO commentary about the exchange itself.\n"
+        f"- Name the person; refer to {NAME} by name, never as 'the assistant'.\n"
+        f"- Good: Bob reacted badly when {uname} mentioned their ex.\n"
+        f"- If there is no such third-party fact, output exactly: none"
     )
     try:
         raw = call_nanogpt(
@@ -469,11 +482,18 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
              {"role": "user", "content": f"{uname}: {user_msg}\nAssistant: {ai_response}"}],
             model=MEMORY_MODEL,
         ).strip()
-        if raw and not re.match(r"^(none|no|nothing|n/a|not\b)", raw.lower()):
-            return raw
     except Exception as e:
         print("[memories] extraction failed:", e)
-    return ""
+        return ""
+    raw = " ".join(raw.split())  # collapse to a single line
+    low = raw.lower()
+    if (not raw
+            or "*" in raw or '"' in raw
+            or re.match(r"^(none|no\b|nothing|n/a|not\b)", low)
+            or any(p in low for p in _MEMORY_REJECT)
+            or not (8 <= len(raw) <= 220)):
+        return ""
+    return raw
 
 
 async def update_memories(chat_id: int, user_msg: str, ai_response: str):
