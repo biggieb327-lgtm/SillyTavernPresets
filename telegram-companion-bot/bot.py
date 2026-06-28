@@ -2101,20 +2101,6 @@ def _looks_like_refusal(text: str) -> bool:
     return any(marker in low for marker in _REFUSAL_MARKERS)
 
 
-def _log_refusal_debug(stage: str, model: str, payload, output: str):
-    """TEMP DEBUG (remove after diagnosis): dump a caught refusal — stage, model,
-    full prompt, and output — to refusal_debug.txt for analysis."""
-    try:
-        ts = (datetime.now(TZ) if TZ else datetime.now()).isoformat()
-        body = (json.dumps(payload, ensure_ascii=False, indent=2)
-                if isinstance(payload, (list, dict)) else str(payload))
-        with open(BASE_DIR / "refusal_debug.txt", "a", encoding="utf-8") as f:
-            f.write(f"\n===== {ts} | stage={stage} | model={model} =====\n")
-            f.write(body[:12000] + "\n--- OUTPUT ---\n" + (output or "")[:3000] + "\n")
-        print(f"[refusal-debug] captured {stage} refusal from {model}")
-    except Exception as e:
-        print("[refusal-debug] log failed:", e)
-
 def _strip_slop(text: str) -> str:
     """Remove hollow AI openers from the start of a response."""
     return _SLOP_OPENER_RE.sub("", text).strip()
@@ -5724,11 +5710,13 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     if _looks_like_refusal(text):
-        # Provider moderation refused this generation — skip the tick entirely rather
-        # than deliver the raw refusal or poison history with it.
-        _log_refusal_debug("message", NANOGPT_MODEL, messages, text)  # TEMP DEBUG
-        print(f"[proactive] provider refused generation; skipping tick for chat {chat_id}.")
-        return ""
+        # The provider's content filter is probabilistic — regenerate once before giving up,
+        # so a one-off filter hit doesn't silently eat her reach-out.
+        print(f"[proactive] provider refused; retrying once for chat {chat_id}.")
+        text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        if _looks_like_refusal(text):
+            print(f"[proactive] still refused after retry; skipping tick for chat {chat_id}.")
+            return ""
     clean, _reaction, selfie_hint = extract_tags(text)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
@@ -5816,10 +5804,8 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
              {"role": "user", "content": "\n".join(parts)}],
             model=MOOD_MODEL,
         ).strip()
-        if _looks_like_refusal(result):  # TEMP DEBUG
-            _log_refusal_debug("hook", MOOD_MODEL,
-                               [{"role": "system", "content": sys_msg},
-                                {"role": "user", "content": "\n".join(parts)}], result)
+        if _looks_like_refusal(result):
+            return ""  # don't inject a moderation refusal as her "thought"
         if result:
             buf = _recent_proactive_hooks.setdefault(chat_id, [])
             buf.append(result)
