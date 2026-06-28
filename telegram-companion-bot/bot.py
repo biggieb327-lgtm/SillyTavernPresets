@@ -276,7 +276,7 @@ _memory_word_cache: dict = {}
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = int(os.getenv("MEMORY_TOKEN_BUDGET", "300"))
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "deepseek/deepseek-v4-flash")
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", "zai-org/glm-5.2")
 MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
