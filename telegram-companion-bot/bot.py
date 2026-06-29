@@ -315,6 +315,9 @@ EPISODE_TOPK = int(os.getenv("EPISODE_TOPK", "1"))            # how many past mo
 EPISODE_MIN_AGE_HOURS = float(os.getenv("EPISODE_MIN_AGE_HOURS", "24"))  # don't recall very recent stuff
 EPISODES_FILE = BASE_DIR / ".episodes.jsonl"
 EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
+LORE_MIN_SIM = float(os.getenv("LORE_MIN_SIM", "0.42"))      # cosine floor for semantic lore matches
+MEMORY_DEDUP_SIM = float(os.getenv("MEMORY_DEDUP_SIM", "0.93"))  # skip a new memory this close to an old one
+_lore_sem: dict = {"mat": None, "contents": [], "loaded": False}  # embedded lore entries (numpy)
 # In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
 _episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
 _episodes_lock = threading.Lock()
@@ -466,6 +469,8 @@ def _append_memory(text: str, auto: bool = False):
     text = " ".join(text.split())  # one line only; multi-line text splits into fake entries
     if not text:
         return
+    if auto and _is_semantic_dup(text):  # off-loop network check, before the lock
+        return
     with _memory_lock:
         existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
         char_name = NAME.lower() if NAME else ""
@@ -541,6 +546,72 @@ def _cosine(a, b) -> float:
         na += x * x
         nb += y * y
     return s / math.sqrt(na * nb) if na > 0 and nb > 0 else 0.0
+
+
+def _unit_vec(query_vec):
+    """numpy unit vector for a query, or None if zero/unavailable. Cosine vs a normalized
+    matrix is then just `mat @ _unit_vec(q)`."""
+    if _np is None or query_vec is None:
+        return None
+    q = _np.asarray(query_vec, dtype=_np.float32)
+    n = _np.linalg.norm(q)
+    return None if n == 0 else q / n
+
+
+def _memory_matrix():
+    """(memory lines, normalized float32 matrix of their vectors), or ([], None)."""
+    if _np is None:
+        return [], None
+    _load_memory_vectors()
+    vectors = _memory_vec_cache["vectors"]
+    if not vectors:
+        return [], None
+    lines = list(vectors.keys())
+    return lines, _normalize_rows(_np.asarray(list(vectors.values()), dtype=_np.float32))
+
+
+def _is_semantic_dup(text: str) -> bool:
+    """Off-loop: True if `text` is ~the same as an existing memory (cosine >= MEMORY_DEDUP_SIM).
+    Best-effort: any failure returns False so it never blocks a write."""
+    if not EMBED_ENABLED or _np is None:
+        return False
+    try:
+        qv = _embed([_memory_embed_text(text)])
+        q = _unit_vec(qv[0]) if qv else None
+        if q is None:
+            return False
+        _, mat = _memory_matrix()
+        return mat is not None and float((mat @ q).max()) >= MEMORY_DEDUP_SIM
+    except Exception as e:
+        print("[memories] semantic dedup check failed:", e)
+        return False
+
+
+def _semantic_recall(query: str, k: int = 5) -> list:
+    """Off-loop: NPC memory lines most semantically similar to `query` (for /recall)."""
+    if not EMBED_ENABLED or _np is None:
+        return []
+    try:
+        qv = _embed([query])
+        q = _unit_vec(qv[0]) if qv else None
+        if q is None:
+            return []
+        lines, mat = _memory_matrix()
+        if mat is None:
+            return []
+        sims = mat @ q
+        out = []
+        for i in _np.argsort(-sims):
+            i = int(i)
+            if float(sims[i]) < EMBED_MIN_SIM:
+                break
+            out.append(lines[i])
+            if len(out) >= k:
+                break
+        return out
+    except Exception as e:
+        print("[recall] semantic search failed:", e)
+        return []
 
 
 def _load_memory_vectors():
@@ -787,6 +858,26 @@ def triggered_episode(query_vec) -> str:
     return ("# A specific moment you remember\n"
             "Draw on this only if it genuinely fits the conversation — don't force a callback "
             "or quote it back word for word:\n\n" + "\n\n".join(blocks))
+
+
+def _load_lore_vectors():
+    """Off-loop: embed the (non-constant) lorebook entries once for semantic lore matching."""
+    if _lore_sem["loaded"]:
+        return
+    _lore_sem["loaded"] = True
+    if not EMBED_ENABLED or _np is None:
+        return
+    contents = [e["content"] for e in LORE if e.get("content") and not e.get("constant")]
+    if not contents:
+        return
+    try:
+        vecs = _embed(contents)
+    except Exception as e:
+        print("[lore] embed failed:", e)
+        return
+    if len(vecs) == len(contents):
+        _lore_sem["contents"] = contents
+        _lore_sem["mat"] = _normalize_rows(_np.asarray(vecs, dtype=_np.float32))
 
 
 # Phrases that mean the model is narrating/commenting instead of stating a fact.
@@ -1719,13 +1810,29 @@ def set_owner(chat_id: int):
         OWNER_FILE.write_text(str(chat_id))
 
 
-def triggered_lore(low: str):
-    """low must already be lowercased."""
-    out = []
+def triggered_lore(low: str, query_vec=None):
+    """low must already be lowercased. Keyword/constant hits, plus (when embeddings are on)
+    lorebook entries semantically close to the turn, so relevant background surfaces even
+    when the author's keywords don't appear verbatim."""
+    out, seen = [], set()
     for entry in LORE:
-        hit = entry["constant"] or any(p.search(low) for p in entry["patterns"])
-        if hit:
-            out.append(entry["content"])
+        if entry["constant"] or any(p.search(low) for p in entry["patterns"]):
+            c = entry["content"]
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    if EMBED_ENABLED and _lore_sem["mat"] is not None:
+        q = _unit_vec(query_vec)
+        if q is not None:
+            sims = _lore_sem["mat"] @ q
+            for i in _np.argsort(-sims):
+                i = int(i)
+                if float(sims[i]) < LORE_MIN_SIM:
+                    break
+                c = _lore_sem["contents"][i]
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
     return out
 
 
@@ -2343,7 +2450,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )})
 
     scan_text_low = (latest_user_content + " " + " ".join(m["content"] for m in history[-8:])).lower()
-    lore = triggered_lore(scan_text_low)
+    lore = triggered_lore(scan_text_low, query_vec=query_vec)
     if lore:
         messages.append({
             "role": "system",
@@ -4620,6 +4727,14 @@ async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rsumm = (recent_summaries.get(chat_id) or "").strip()
     if rsumm and keyword in rsumm.lower():
         hits.append(f"[recent summary] {rsumm[:300]}{'…' if len(rsumm) > 300 else ''}")
+    # Semantic pass over NPC/world memories (meaning, not just substring), when embeddings are on.
+    if EMBED_ENABLED:
+        shown = set(hits)
+        for m in await asyncio.to_thread(_semantic_recall, keyword):
+            line = f"[memory~] {m}"
+            if line not in shown:
+                hits.append(line)
+                shown.add(line)
     if hits:
         await update.message.reply_text(
             f"🔍 Found {len(hits)} match(es) for \"{keyword}\":\n\n" + "\n\n".join(hits)
@@ -6982,6 +7097,12 @@ async def _backfill_vectors_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"[memories] vector backfill complete ({len(_memory_vec_cache['vectors'])} embedded).")
     except Exception as e:
         print("[memories] vector backfill failed:", e)
+    try:
+        await asyncio.to_thread(_load_lore_vectors)
+        if _lore_sem["mat"] is not None:
+            print(f"[lore] embedded {len(_lore_sem['contents'])} lorebook entries.")
+    except Exception as e:
+        print("[lore] vector load failed:", e)
 
 
 async def _episodes_load_job(context: ContextTypes.DEFAULT_TYPE):
