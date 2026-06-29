@@ -40,7 +40,10 @@ resonates with it.
 - The file is append-only at runtime; RAM is capped on every append (newest kept).
   The on-disk file is trimmed back to `EPISODE_MAX` at the next startup load.
 - **numpy is required.** Without it, episodic recall disables itself with a startup
-  warning (everything else keeps working). `pip install numpy`.
+  warning (everything else keeps working). On Termux, don't `pip install numpy` (it
+  compiles from source and fails on `spawn.h`) — instead `pkg install python-numpy`
+  and set `include-system-site-packages = true` in the venv's `pyvenv.cfg` so the
+  venv can see it.
 
 ## Model coupling
 

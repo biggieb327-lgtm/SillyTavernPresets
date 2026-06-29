@@ -3,5 +3,8 @@ python-dotenv>=1.0,<2.0
 requests>=2.31,<3.0
 tzdata>=2024.1
 pypdf>=4.0,<5.0
-# Optional: only needed for episodic recall (EPISODIC_RECALL with EMBED_MODEL set)
+# Optional: only needed for episodic recall (EPISODIC_RECALL with EMBED_MODEL set).
+# On Termux, do NOT pip-install this (it tries to compile and fails) — instead run
+#   pkg install python-numpy
+# and set include-system-site-packages=true in your venv's pyvenv.cfg.
 numpy>=1.24

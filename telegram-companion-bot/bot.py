@@ -4522,7 +4522,7 @@ async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Episodic recall is off (set EMBED_MODEL + EPISODIC_RECALL).")
         return
     if _np is None:
-        await update.message.reply_text("Episodic recall needs numpy: pip install numpy")
+        await update.message.reply_text("Episodic recall needs numpy (Termux: pkg install python-numpy)")
         return
     with _episodes_lock:
         n = len(_episodes["ts"])
@@ -7111,7 +7111,7 @@ def main():
             log.info("Episodic recall on (cap %d chunks).", EPISODE_MAX)
         elif EPISODIC_RECALL and _np is None:
             log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
-                        "disabled. Install it with: pip install numpy")
+                        "disabled. On Termux install it with: pkg install python-numpy")
         schedule_next_heartbeat(app.job_queue)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:
