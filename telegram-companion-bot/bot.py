@@ -3354,12 +3354,28 @@ def _typing_delay_secs(text: str) -> float:
     return max(TYPING_DELAY_MIN, min(TYPING_DELAY_MAX, secs))
 
 
+def _no_surrogates(s: str) -> str:
+    """Make text safe to UTF-8 encode for Telegram: recombine split surrogate pairs (a stray
+    emoji written as \\uD83E\\uDE7A) and drop any lone leftovers, so a send can't crash on
+    'surrogates not allowed'. A no-op for normal text."""
+    if not isinstance(s, str):
+        return s
+    try:
+        s = s.encode("utf-16", "surrogatepass").decode("utf-16")  # pair up split surrogates
+    except Exception:
+        pass
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in s):  # strip any remaining unpaired surrogates
+        s = "".join(c for c in s if not 0xD800 <= ord(c) <= 0xDFFF)
+    return s
+
+
 async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0):
     """Send a reply as a single message (chunked only if it exceeds Telegram's length limit).
 
     pre_delay: hold the typing indicator for this many seconds before actually sending,
     simulating realistic compose time. Pass _typing_delay_secs(text) from user-reply paths.
     """
+    text = _no_surrogates(text)
     if pre_delay > 0:
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
         try:
@@ -4495,6 +4511,7 @@ _TELEGRAM_MAX_LEN = 4096
 
 async def _reply_chunked(update: Update, text: str):
     """Telegram caps messages at 4096 chars; split long replies into multiple messages."""
+    text = _no_surrogates(text)
     for i in range(0, len(text), _TELEGRAM_MAX_LEN):
         await update.message.reply_text(text[i:i + _TELEGRAM_MAX_LEN])
 
@@ -4649,7 +4666,7 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     on = lambda b: "\u2705" if b else "\u2014"
-    lines = [f"\ud83e\ude7a {NAME} \u2014 diagnostics"]
+    lines = [f"{NAME} \u2014 diagnostics"]
     lines.append(
         "Features:\n"
         f"  {on(EMBED_ENABLED)} embeddings ({EMBED_MODEL or 'off'})\n"
