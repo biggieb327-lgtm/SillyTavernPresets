@@ -145,6 +145,11 @@ SAFETY_RESOURCES = os.getenv(
     "SAFETY_RESOURCES",
     "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
 )
+# Scene continuity: track where she physically is so she doesn't teleport mid-scene
+# (kitchen table -> couch with no transition). Updated after each exchange; cheap model.
+SCENE_CONTINUITY = os.getenv("SCENE_CONTINUITY", "1").lower() not in ("0", "false", "no", "off")
+SCENE_MODEL = os.getenv("SCENE_MODEL", MOOD_MODEL)
+SCENE_MAX_AGE_HOURS = float(os.getenv("SCENE_MAX_AGE_HOURS", "3"))  # stop injecting a stale scene
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -1345,6 +1350,7 @@ milestones = {}     # chat_id -> [{"text": str, "ts": float}] relationship first
 pinned = {}         # chat_id -> [str] facts that never get summarized away
 boundaries = {}     # chat_id -> [str] hard behavioral constraints from the user
 current_vibe = {}   # chat_id -> {"name": str, "expires_at": float|None}
+scene_states = {}   # chat_id -> {"text": str, "ts": float} — current physical scene (in-memory)
 vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
@@ -2233,6 +2239,63 @@ async def update_mood(chat_id: int):
         print("[mood] appraisal failed:", e)
 
 
+def _extract_scene(prev: str, tail: str, uname: str) -> str:
+    """Sync/off-loop: where she physically is and what she's doing NOW, carried forward from
+    the previous scene. Returns '' when there's no physical scene (abstract texting)."""
+    sys = (
+        f"You track {NAME}'s physical location and posture in an ongoing scene with {uname}, for "
+        f"continuity between messages. Given the CURRENT SCENE (where she was) and the LATEST "
+        f"messages, output where she is and what she's physically doing NOW as ONE short phrase "
+        f"(e.g. 'at her kitchen table, seated, coffee in hand' or 'on the couch next to him'). "
+        f"Carry the scene forward — only change it if the messages actually show her moving or the "
+        f"setting changing, and if she moved, give where she ended up. If there's no physical scene "
+        f"at all (just abstract texting, no place or body established), reply exactly: none"
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys},
+             {"role": "user", "content": f"CURRENT SCENE: {prev or '(none yet)'}\n\nLATEST:\n{tail}"}],
+            model=SCENE_MODEL,
+        ).strip()
+        if not raw or raw.lower().startswith("none") or len(raw) > 120:
+            return ""
+        return raw
+    except Exception as e:
+        print("[scene] extract failed:", e)
+        return ""
+
+
+async def update_scene(chat_id: int):
+    """After an exchange, refresh the tracked physical scene (in-memory) so the next reply
+    stays spatially consistent. Carries the scene forward when nothing physical changed."""
+    if not SCENE_CONTINUITY:
+        return
+    hist = conversation_history.get(chat_id, [])[-4:]
+    if not hist:
+        return
+    uname = user_names.get(chat_id, "you")
+    tail = "\n".join(f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in hist)
+    prev = (scene_states.get(chat_id) or {}).get("text", "")
+    scene = await asyncio.to_thread(_extract_scene, prev, tail, uname)
+    if scene:
+        scene_states[chat_id] = {"text": scene, "ts": time.time()}
+    elif prev:  # scene still active, just no physical change this turn -> keep it fresh
+        scene_states[chat_id] = {"text": prev, "ts": time.time()}
+
+
+def scene_note(chat_id: int) -> str:
+    if not SCENE_CONTINUITY:
+        return ""
+    s = scene_states.get(chat_id)
+    if not s or not s.get("text"):
+        return ""
+    if time.time() - s.get("ts", 0) > SCENE_MAX_AGE_HOURS * 3600:
+        return ""  # gone cold -> she's wherever she is now, don't force a stale location
+    return (f"# Where you physically are right now\n{s['text']}\n"
+            f"Stay consistent with this. If you move or the setting changes, show the transition "
+            f"in your reply — don't just appear somewhere else.")
+
+
 def _mood_behavior(s: float) -> str:
     """Concrete behavioral guidance so reply length/energy/engagement actually shift with mood."""
     if s >= 1.2:
@@ -2796,6 +2859,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     episode = triggered_episode(query_vec) if episode_override is _UNSET else episode_override
     if episode:
         messages.append({"role": "system", "content": episode})
+
+    scene = scene_note(chat_id)
+    if scene:
+        messages.append({"role": "system", "content": scene})
 
     reads = triggered_reading(scan_text_low)
     if reads:
@@ -6283,6 +6350,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
     asyncio.create_task(update_mood(chat_id))      # background mood appraisal
+    if SCENE_CONTINUITY:
+        asyncio.create_task(update_scene(chat_id))  # track physical scene for next turn
     if user_memory_text and not user_memory_text.startswith("[sent "):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
         asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
