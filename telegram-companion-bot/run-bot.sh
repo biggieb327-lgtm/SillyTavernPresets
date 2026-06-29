@@ -59,6 +59,11 @@ cat > "$SUPERVISOR" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 cd '$SCRIPT_DIR'
 while true; do
+  # Cap bot.log: if it has grown past ~5 MB, rotate to bot.log.1 (one backup) so the
+  # unbuffered logs can't slowly fill the phone. Happens before each (re)start.
+  if [ -f '$LOG_FILE' ] && [ "\$(stat -c%s '$LOG_FILE' 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f '$LOG_FILE' '$LOG_FILE.1'
+  fi
   if [ -f '$PID_FILE' ]; then
     p=\$(cat '$PID_FILE' 2>/dev/null)
     if [ -z "\$p" ] || ! kill -0 "\$p" 2>/dev/null; then rm -f '$PID_FILE'; fi

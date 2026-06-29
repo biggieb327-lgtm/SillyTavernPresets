@@ -404,6 +404,15 @@ STRESS_POLL_MIN = int(os.getenv("STRESS_POLL_MIN", "30"))            # how often
 STRESS_ALERT_COOLDOWN_HOURS = float(os.getenv("STRESS_ALERT_COOLDOWN_HOURS", "4"))  # don't re-alert within this
 STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time so a restart can't re-fire
 
+# Resting-HR morning check: a notably elevated resting HR vs the user's own baseline is an early
+# "run down / coming down with something" signal. Builds a rolling baseline from daily readings.
+RHR_ALERTS = GARMIN_ENABLED and os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ELEVATED_DELTA = int(os.getenv("RHR_ELEVATED_DELTA", "7"))  # bpm above baseline to flag
+RHR_BASELINE_DAYS = int(os.getenv("RHR_BASELINE_DAYS", "14"))   # rolling window for the baseline median
+RHR_CHECK_TIME = os.getenv("RHR_CHECK_TIME", "08:00")          # local time for the once-daily check
+RHR_HISTORY_FILE = BASE_DIR / ".rhr_history.json"
+RHR_ALERT_FILE = BASE_DIR / ".rhr_alert"  # date of the last RHR check-in, so it fires at most once/day
+
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -2750,6 +2759,81 @@ async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         print("[stress] alert failed:", e)
 
 
+def _resting_hr_today():
+    """Off-loop: today's resting heart rate from Garmin, or None."""
+    if not RHR_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        rhr = (_garmin_client().get_stats(today) or {}).get("restingHeartRate")
+    except Exception as e:
+        print("[rhr] fetch failed:", e)
+        return None
+    return int(rhr) if isinstance(rhr, (int, float)) and rhr > 0 else None
+
+
+def _read_rhr_history() -> list:
+    try:
+        return json.loads(RHR_HISTORY_FILE.read_text(encoding="utf-8")) if RHR_HISTORY_FILE.exists() else []
+    except Exception:
+        return []
+
+
+def _record_rhr(date_str: str, rhr: int):
+    h = [x for x in _read_rhr_history() if x.get("date") != date_str]
+    h.append({"date": date_str, "rhr": rhr})
+    h = h[-(RHR_BASELINE_DAYS + 2):]
+    try:
+        RHR_HISTORY_FILE.write_text(json.dumps(h), encoding="utf-8")
+    except Exception as e:
+        print("[rhr] history save failed:", e)
+
+
+async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once-daily: flag a resting HR notably above the user's own baseline (early run-down signal)."""
+    if not RHR_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    rhr = await asyncio.to_thread(_resting_hr_today)
+    if not rhr:
+        return
+    prior = [x["rhr"] for x in _read_rhr_history()
+             if x.get("date") != today and isinstance(x.get("rhr"), (int, float))]
+    _record_rhr(today, rhr)  # always record so the baseline keeps building
+    if len(prior) < 3:
+        return  # not enough history for a baseline yet
+    baseline = sorted(prior)[len(prior) // 2]  # median
+    if rhr < baseline + RHR_ELEVATED_DELTA:
+        return
+    try:
+        if RHR_ALERT_FILE.exists() and RHR_ALERT_FILE.read_text(encoding="utf-8").strip() == today:
+            return  # already checked in today
+    except Exception:
+        pass
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s resting heart rate is notably higher than their usual baseline this "
+        f"morning — often an early sign of being run down, fighting something off, under-slept, or "
+        f"stressed. Gently and fully in character, open by noticing they might be a little under the "
+        f"weather or worn out, and check how they're feeling. Warm, brief, NOT clinical; no numbers "
+        f"or watch talk.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            RHR_ALERT_FILE.write_text(today, encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[rhr] elevated resting-HR check-in (today {rhr} vs baseline {baseline}).")
+    except Exception as e:
+        print("[rhr] alert failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -4591,6 +4675,48 @@ async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"\U0001F9D8 Last {STRESS_SUSTAINED_MIN} min \u2014 avg stress {avg}/100: {state}."
     )
+
+
+async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One-shot health/feature report for this bot \u2014 what's on, what's embedded, recent errors."""
+    if not _is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    on = lambda b: "\u2705" if b else "\u2014"
+    lines = [f"\ud83e\ude7a {NAME} \u2014 diagnostics"]
+    lines.append(
+        "Features:\n"
+        f"  {on(EMBED_ENABLED)} embeddings ({EMBED_MODEL or 'off'})\n"
+        f"  {on(EPISODIC_RECALL)} episodic recall   {on(SAFETY_ENABLED)} safety   {on(SCENE_CONTINUITY)} scene\n"
+        f"  {on(LIFE_SIM_ENABLED)} offline life   {on(EVENT_REMINDERS)} event reminders   {on(READING_ENABLED)} reading\n"
+        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   {on(RHR_ALERTS)} resting-HR"
+    )
+    if EMBED_ENABLED:
+        lines.append(
+            f"Embedded: {len(_memory_vec_cache.get('vectors') or {})} memories, "
+            f"{len(_episodes.get('ts') or [])} episodes, {len(_lore_sem.get('contents') or [])} lore "
+            f"(numpy: {'yes' if _np is not None else 'MISSING'})"
+        )
+    if GARMIN_ENABLED:
+        age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
+        tok = "cached" if Path(GARMIN_TOKENSTORE).exists() else "none"
+        lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}; token {tok}")
+    lines.append(
+        f"Memory: {len(_read_memories())} NPC notes \u00b7 {len(milestones.get(chat_id) or [])} milestones \u00b7 "
+        f"{len([r for r in reminders if r.get('chat_id') == chat_id])} reminders"
+    )
+    errs, last_err = 0, ""
+    try:
+        logf = BASE_DIR / "bot.log"
+        if logf.exists():
+            tail = logf.read_text(encoding="utf-8", errors="ignore").splitlines()[-300:]
+            hits = [l for l in tail if re.search(r"error|traceback|exception", l, re.I)]
+            errs = len(hits)
+            last_err = hits[-1][:120] if hits else ""
+    except Exception:
+        pass
+    lines.append(f"Log errors (last 300 lines): {errs}" + (f"\n  \u21b3 {last_err}" if last_err else ""))
+    await _reply_chunked(update, "\n".join(lines))
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7857,6 +7983,7 @@ _BASE_COMMANDS = [
     BotCommand("health", "Show your latest watch data"),
     BotCommand("healthnow", "Pull fresh watch data now"),
     BotCommand("stress", "Check recent stress level"),
+    BotCommand("diag", "Show this bot's feature/health status"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -7978,6 +8105,7 @@ def main():
     app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("healthnow", healthnow_cmd))
     app.add_handler(CommandHandler("stress", stress_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -8112,6 +8240,14 @@ def main():
             app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
                                         first=STRESS_POLL_MIN * 60)
             log.info("Stress monitoring on (every %d min, threshold %d).", STRESS_POLL_MIN, STRESS_THRESHOLD)
+        if RHR_ALERTS:
+            try:
+                _rh, _rm = (int(x) for x in RHR_CHECK_TIME.split(":"))
+                _rhtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
+                app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
+                log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
+            except Exception:
+                pass
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
