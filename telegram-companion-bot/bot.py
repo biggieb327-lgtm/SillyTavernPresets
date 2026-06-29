@@ -5795,15 +5795,17 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
             await send_triggered(context, r["chat_id"], trigger)
         except Exception as e:
             print("[event-reminder] fire failed:", e)
-        if r.get("recurs") in ("daily", "weekly"):  # advance to the next occurrence and re-arm
-            step = timedelta(days=1) if r["recurs"] == "daily" else timedelta(days=7)
+        if phase == "recurring" and r.get("weekdays"):  # advance to the next occurrence and re-arm
             now_dt = datetime.now(TZ) if TZ else datetime.now()
-            nxt = datetime.fromisoformat(r["due"])
-            while nxt <= now_dt:
-                nxt += step
-            r["due"] = nxt.isoformat()
-            save_reminders()
-            schedule_reminder(context.job_queue, r)
+            try:
+                hh, mm = (int(x) for x in str(r.get("time", "09:00")).split(":")[:2])
+            except Exception:
+                hh, mm = 9, 0
+            nxt = _next_occurrence(r["weekdays"], hh, mm, now_dt)
+            if nxt:
+                r["due"] = nxt.isoformat()
+                save_reminders()
+                schedule_reminder(context.job_queue, r)
             return
     else:
         await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
@@ -5828,27 +5830,41 @@ def schedule_reminder(job_queue, r: dict):
 
 # --- Auto event reminders: notice a dated event you mention, nudge in-character around it ---
 # Cheap gate so we only spend an extraction call on messages that plausibly mention an event.
+# Day names allow a trailing "s" (Sundays) and recurring words (every/weekly/check-in) are included.
 _EVENT_HINT_RE = re.compile(
-    r"\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|"
-    r"next\s+(week|month|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
-    r"saturday|sunday)|appointment|interview|meeting|exam|flight|trip|vacation|deadline|dentist|"
-    r"doctor|wedding|reservation|o'?clock)\b"
+    r"\b(today|tonight|tomorrow|mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|"
+    r"sundays?|weekends?|every|weekly|daily|each|next|appointment|interview|meeting|exam|flight|"
+    r"trip|vacation|deadline|dentist|doctor|wedding|reservation|check[\s-]?in|o'?clock)\b"
     r"|\b\d{1,2}(:\d{2})?\s?(am|pm)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}/\d{1,2}\b", re.I)
+
+_WEEKDAYS = {"monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
+             "thursday": 3, "thu": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
+             "sunday": 6, "sun": 6}
+
+
+def _next_occurrence(weekdays, hh: int, mm: int, after: datetime):
+    """Soonest datetime strictly after `after`, at hh:mm, landing on one of `weekdays` (0=Mon..6=Sun)."""
+    for i in range(8):
+        cand = (after + timedelta(days=i)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if cand > after and cand.weekday() in weekdays:
+            return cand
+    return None
 
 
 def _extract_event(uname: str, user_message: str, now: datetime):
-    """Sync/off-loop: resolve a specific dated event from the message to an absolute datetime.
-    Returns {'event','when','has_time'} or None."""
+    """Sync/off-loop: resolve an upcoming event from the message. Returns one of:
+    one-off  -> {'event', 'recurs': False, 'when', 'has_time'}
+    recurring -> {'event', 'recurs': True, 'weekdays': [0..6], 'hh', 'mm'}
+    or None."""
     sys = (
         f"Today is {now.strftime('%A %Y-%m-%d %H:%M')} (local time). Does this message from {uname} "
-        f"mention a SPECIFIC upcoming event tied to a day or time — an appointment, interview, exam, "
-        f"trip, flight, date, deadline, plan, or a recurring commitment? If yes, reply with ONLY "
-        f'JSON: {{"event":"<short, e.g. dentist appointment>","datetime":"YYYY-MM-DDTHH:MM",'
-        f'"has_time":true|false,"recurs":"none"|"daily"|"weekly"}}. Resolve relative dates (tomorrow, '
-        f"next Tuesday) against today. If only a day is given with no clock time, set has_time false "
-        f'and use T09:00. For a recurring commitment ("every Tuesday", "every morning"), set recurs '
-        f"and give the datetime of the NEXT occurrence. If there's no specific upcoming dated event, "
-        f"reply exactly: none"
+        f"mention a SPECIFIC upcoming event tied to a day/time, OR a recurring commitment? Reply with "
+        f"ONLY one JSON object:\n"
+        f'- one-off:   {{"event":"<short>","recurs":false,"datetime":"YYYY-MM-DDTHH:MM","has_time":true|false}}\n'
+        f'- recurring: {{"event":"<short>","recurs":true,"weekdays":["Sunday","Wednesday"],"time":"HH:MM"}}\n'
+        f"For recurring, list EVERY day it happens (a daily thing lists all seven days). Resolve "
+        f"relative dates against today. If no clock time is given, use 09:00 (one-off: has_time false). "
+        f"If there's no specific upcoming event, reply exactly: none"
     )
     try:
         raw = call_nanogpt([{"role": "system", "content": sys},
@@ -5862,8 +5878,20 @@ def _extract_event(uname: str, user_message: str, now: datetime):
     if not isinstance(data, dict):
         return None
     ev = str(data.get("event", "")).strip()
+    if not ev or len(ev) > 80:
+        return None
+    if data.get("recurs"):
+        wds = sorted({_WEEKDAYS[k] for w in (data.get("weekdays") or [])
+                      if (k := str(w).strip().lower()) in _WEEKDAYS})
+        if not wds:
+            wds = [0, 1, 2, 3, 4, 5, 6]  # unspecified/daily -> every day
+        try:
+            hh, mm = (int(x) for x in str(data.get("time", "09:00")).split(":")[:2])
+        except Exception:
+            hh, mm = 9, 0
+        return {"event": ev, "recurs": True, "weekdays": wds, "hh": hh, "mm": mm}
     dt_str = str(data.get("datetime", "")).strip()
-    if not ev or len(ev) > 80 or not dt_str:
+    if not dt_str:
         return None
     try:
         when = datetime.fromisoformat(dt_str)
@@ -5871,10 +5899,7 @@ def _extract_event(uname: str, user_message: str, now: datetime):
             when = when.replace(tzinfo=TZ)
     except Exception:
         return None
-    recurs = str(data.get("recurs", "none")).lower()
-    if recurs not in ("daily", "weekly"):
-        recurs = "none"
-    return {"event": ev, "when": when, "has_time": bool(data.get("has_time")), "recurs": recurs}
+    return {"event": ev, "recurs": False, "when": when, "has_time": bool(data.get("has_time"))}
 
 
 def _event_reminder_exists(chat_id: int, event: str) -> bool:
@@ -5904,18 +5929,24 @@ async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         return
     if not ev:
         return
-    when = ev["when"]
-    if when <= now or (when - now).days > EVENT_HORIZON_DAYS:
-        return
     if _event_reminder_exists(chat_id, ev["event"]):
         return
     new = []
-    if ev["recurs"] in ("daily", "weekly"):
-        # One self-rescheduling nudge at each occurrence (no before/after pair — that'd nag).
-        new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": when.isoformat(),
-                    "kind": "event", "phase": "recurring", "recurs": ev["recurs"],
-                    "event": ev["event"], "text": f"(auto, {ev['recurs']}) {ev['event']}"})
+    if ev["recurs"]:
+        # One self-rescheduling nudge per occurrence across the given weekdays (no before/after pair).
+        due = _next_occurrence(ev["weekdays"], ev["hh"], ev["mm"], now)
+        if not due:
+            return
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        dl = "daily" if len(ev["weekdays"]) == 7 else ",".join(labels[d] for d in ev["weekdays"])
+        new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": due.isoformat(),
+                    "kind": "event", "phase": "recurring", "weekdays": ev["weekdays"],
+                    "time": f"{ev['hh']:02d}:{ev['mm']:02d}", "event": ev["event"],
+                    "text": f"(auto, {dl}) {ev['event']}"})
     else:
+        when = ev["when"]
+        if when <= now or (when - now).days > EVENT_HORIZON_DAYS:
+            return
         before = (when - timedelta(minutes=EVENT_BEFORE_MIN)) if ev["has_time"] \
             else when.replace(hour=9, minute=0, second=0, microsecond=0)
         if before > now + timedelta(minutes=10):
@@ -5937,8 +5968,8 @@ async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         except Exception as e:
             print("[event] schedule failed:", e)
     save_reminders()
-    print(f"[event] scheduled {len(new)} nudge(s) for: {ev['event']} @ {when.isoformat()}"
-          f"{' (' + ev['recurs'] + ')' if ev['recurs'] != 'none' else ''}")
+    print(f"[event] scheduled {len(new)} nudge(s) for: {ev['event']} "
+          f"(next {new[0]['due']}{', recurring' if ev['recurs'] else ''})")
 
 
 async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
