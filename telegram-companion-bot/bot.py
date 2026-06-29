@@ -132,6 +132,14 @@ MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
+# Safety: flag genuine acute distress in an incoming message and have her drop the
+# performance and respond with real care. On by default; cheap classifier model.
+SAFETY_ENABLED = os.getenv("SAFETY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SAFETY_MODEL = os.getenv("SAFETY_MODEL", MOOD_MODEL)
+SAFETY_RESOURCES = os.getenv(
+    "SAFETY_RESOURCES",
+    "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
+)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -2819,6 +2827,38 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
     })
     return await reply_with_typing(context, chat_id, messages, model=model,
                                    fallback=fallback or FALLBACK_MODEL)
+
+
+def _assess_safety(user_message: str) -> bool:
+    """Sync/off-loop: True if the message shows genuine acute distress or crisis (not roleplay,
+    dark humor, or ordinary venting). Best-effort; any failure returns False."""
+    sys = (
+        "You are a safety classifier for a personal chat. Does this message express GENUINE, "
+        "present distress or crisis about the sender's own real life — suicidal thoughts, "
+        "self-harm, intent to harm, a mental-health emergency, or being in real danger right now? "
+        "Roleplay, fiction, song lyrics, dark humor, or just venting about a rough day do NOT "
+        "count. Only real, current danger to a real person. Answer with ONLY 'yes' or 'no'."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=SAFETY_MODEL,
+        ).strip().lower()
+        return raw.startswith("y")
+    except Exception as e:
+        print("[safety] check failed:", e)
+        return False
+
+
+def _safety_prompt(uname: str) -> str:
+    return (
+        f"# This matters more than the bit right now\n"
+        f"{uname} may be in real distress. Set the performance aside — no chirping, no roleplay "
+        f"deflection, no jokes to dodge it. Be fully present, warm, and steady, in your own voice. "
+        f"Take what they said seriously, don't minimize it, and don't lecture. Gently encourage "
+        f"them to reach out to someone they trust or a professional, and if it fits, that {SAFETY_RESOURCES}. "
+        f"Stay yourself — just the version of you that genuinely cares and isn't going anywhere."
+    )
 
 
 async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> str:
@@ -6194,15 +6234,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        # Embed the turn off-loop (when EMBED_MODEL is set) for semantic memory retrieval.
-        query_vec = await asyncio.to_thread(_embed_query, user_message) if EMBED_ENABLED else None
+        # Off-loop pre-reply work, run concurrently so neither adds serial latency:
+        # embed the turn for semantic retrieval, and screen it for genuine distress.
+        query_vec, distress = await asyncio.gather(
+            asyncio.to_thread(_embed_query, user_message) if EMBED_ENABLED
+            else asyncio.sleep(0, result=None),
+            asyncio.to_thread(_assess_safety, user_message) if SAFETY_ENABLED
+            else asyncio.sleep(0, result=False),
+        )
         messages = assemble_messages(chat_id, content_for_model, query_vec=query_vec)
-        if INNER_VOICE_ENABLED:
+        if INNER_VOICE_ENABLED and not distress:  # skip the performative inner voice in a crisis
             inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id])
             if inner_voice:
                 messages.append({"role": "system", "content": (
                     f"# {NAME}'s private thought — not shown to {user_names[chat_id]}\n{inner_voice.strip()}"
                 )})
+        if distress:  # set the bit aside; respond with real care (kept last = most salient)
+            messages.append({"role": "system", "content": _safety_prompt(user_names[chat_id])})
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
