@@ -14,8 +14,27 @@ if [ ! -d "$DEPLOY/.git" ]; then
   echo "      https://github.com/biggieb327-lgtm/sillytavernpresets.git $DEPLOY"
   exit 1
 fi
-git -C "$DEPLOY" pull --ff-only
+# Stash any stray local changes so a fast-forward pull can't be silently blocked by them.
+if [ -n "$(git -C "$DEPLOY" status --porcelain)" ]; then
+  echo "    Stray changes in $DEPLOY — stashing them so the pull can proceed."
+  git -C "$DEPLOY" stash push -u -m "update-all autostash $(date '+%Y-%m-%d %H:%M')" || true
+fi
+
+# Pull, and STOP LOUDLY if it fails — the old trap was set -e aborting here, leaving stale code.
+if ! git -C "$DEPLOY" pull --ff-only; then
+  echo "    ERROR: pull failed (branch diverged?). Fix by hand:"
+  echo "      git -C $DEPLOY status"
+  echo "      git -C $DEPLOY fetch && git -C $DEPLOY reset --hard @{u}   # if you want to discard local"
+  exit 1
+fi
+
 cp "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"
+# Verify the copy actually landed (matches the clone) — catch a silent stale deploy.
+if ! cmp -s "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"; then
+  echo "    ERROR: deployed bot.py does not match $DEPLOY — copy failed. Aborting."
+  exit 1
+fi
+
 # Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
 # left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
 for f in run-bot.sh watchdog.sh start-bots.sh status.sh; do
@@ -25,7 +44,7 @@ for f in run-bot.sh watchdog.sh start-bots.sh status.sh; do
     chmod +x "$BOT_SRC/$f"
   fi
 done
-echo "    bot.py + helper scripts updated from $DEPLOY."
+echo "    ✓ Deployed bot.py ($(wc -l < "$BOT_SRC/bot.py") lines) + helper scripts from $DEPLOY."
 
 echo ""
 echo "==> Restarting bots..."
