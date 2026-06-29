@@ -326,6 +326,14 @@ EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
 LORE_MIN_SIM = float(os.getenv("LORE_MIN_SIM", "0.42"))      # cosine floor for semantic lore matches
 MEMORY_DEDUP_SIM = float(os.getenv("MEMORY_DEDUP_SIM", "0.93"))  # skip a new memory this close to an old one
 _lore_sem: dict = {"mat": None, "contents": [], "loaded": False}  # embedded lore entries (numpy)
+
+# Reranker (optional): after cosine retrieval, re-score episode candidates with a cross-encoder
+# for a sharper top pick. Opt-in via RERANK_MODEL; applied only to episodic recall; falls back to
+# cosine on any failure. Endpoint path is overridable in case the provider's route differs.
+RERANK_MODEL = os.getenv("RERANK_MODEL", "").strip()
+RERANK_ENABLED = bool(RERANK_MODEL) and EPISODIC_RECALL
+RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "12"))  # cosine top-N to hand the reranker
+RERANK_ENDPOINT = os.getenv("RERANK_ENDPOINT", "/rerank")     # appended to NANOGPT_BASE_URL
 # In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
 _episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
 _episodes_lock = threading.Lock()
@@ -534,6 +542,29 @@ def _embed(inputs, model: str = None) -> list:
                       json=payload, timeout=(10, 30))
     r.raise_for_status()
     return [d["embedding"] for d in (r.json().get("data") or [])]
+
+
+_UNSET = object()  # sentinel: "no precomputed override, compute it yourself"
+
+
+def _rerank(query: str, documents: list, top_n: int = None):
+    """Cross-encoder rerank (Cohere/Jina-style). Returns [(index, score), ...] best-first.
+    Raises on failure so callers can fall back to cosine order."""
+    payload = {"model": RERANK_MODEL, "query": query, "documents": documents}
+    if top_n:
+        payload["top_n"] = top_n
+    r = _session.post(f"{NANOGPT_BASE_URL}{RERANK_ENDPOINT}", headers=_NANOGPT_HEADERS,
+                      json=payload, timeout=(10, 30))
+    r.raise_for_status()
+    data = r.json()
+    results = data.get("results") or data.get("data") or []
+    out = []
+    for item in results:
+        idx = item.get("index")
+        score = item.get("relevance_score", item.get("score"))
+        if isinstance(idx, int):
+            out.append((idx, score))
+    return out
 
 
 def _embed_query(text: str):
@@ -858,22 +889,20 @@ def _episode_when(ts: float) -> str:
     return f"back around {when.strftime('%b %d')}"
 
 
-def triggered_episode(query_vec) -> str:
-    """On-loop: return the most relevant past exchange(s) for this turn, or '' (no extra
-    embedding call -- reuses query_vec). Time-gated so the live window isn't echoed back."""
-    if not EPISODIC_RECALL or _np is None or query_vec is None:
-        return ""
+def _episode_candidates(query_vec, n: int) -> list:
+    """Age-gated cosine top-n episode (ts, text) candidates for this turn. Cheap (no network)."""
+    if not EPISODIC_RECALL or _np is None:
+        return []
+    q = _unit_vec(query_vec)
+    if q is None:
+        return []
     with _episodes_lock:
         mat = _episodes["mat"]
         ts = _episodes["ts"][:]
         text = _episodes["text"][:]
     if mat is None or not ts:
-        return ""
-    q = _np.asarray(query_vec, dtype=_np.float32)
-    nq = _np.linalg.norm(q)
-    if nq == 0:
-        return ""
-    sims = mat @ (q / nq)
+        return []
+    sims = mat @ q
     cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
     picks = []
     for idx in _np.argsort(-sims):
@@ -885,14 +914,42 @@ def triggered_episode(query_vec) -> str:
         if ts[i] > cutoff:
             continue
         picks.append((ts[i], text[i]))
-        if len(picks) >= EPISODE_TOPK:
+        if len(picks) >= n:
             break
+    return picks
+
+
+def _format_episode_block(picks: list) -> str:
     if not picks:
         return ""
     blocks = [f"({_episode_when(t)})\n{txt}" for t, txt in picks]
     return ("# A specific moment you remember\n"
             "Draw on this only if it genuinely fits the conversation — don't force a callback "
             "or quote it back word for word:\n\n" + "\n\n".join(blocks))
+
+
+def triggered_episode(query_vec) -> str:
+    """On-loop: most relevant past exchange(s) by cosine, or '' (reuses query_vec, no network)."""
+    return _format_episode_block(_episode_candidates(query_vec, EPISODE_TOPK))
+
+
+def _rerank_episode_block(query_text: str, query_vec):
+    """Off-loop: cosine top-N episode candidates, re-scored by the cross-encoder for a sharper
+    pick. Returns the formatted block, or None to signal 'fall back to the cosine path'."""
+    if not RERANK_ENABLED or not query_text:
+        return None
+    cands = _episode_candidates(query_vec, RERANK_CANDIDATES)
+    if not cands:
+        return ""
+    try:
+        ranked = _rerank(query_text, [c[1] for c in cands], top_n=EPISODE_TOPK)
+    except Exception as e:
+        print("[rerank] failed, using cosine order:", e)
+        return None
+    if not ranked:
+        return ""
+    picks = [cands[i] for i, _ in ranked[:EPISODE_TOPK] if 0 <= i < len(cands)]
+    return _format_episode_block(picks)
 
 
 def _load_lore_vectors():
@@ -2435,7 +2492,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None, query_vec=None):
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None, query_vec=None, episode_override=_UNSET):
     """Build the OpenAI-style message list the way SillyTavern layers a card."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
@@ -2585,7 +2642,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "# Relevant memories\n" + "\n".join("- " + m for m in mems)
         )})
 
-    episode = triggered_episode(query_vec)
+    episode = triggered_episode(query_vec) if episode_override is _UNSET else episode_override
     if episode:
         messages.append({"role": "system", "content": episode})
 
@@ -6242,7 +6299,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.to_thread(_assess_safety, user_message) if SAFETY_ENABLED
             else asyncio.sleep(0, result=False),
         )
-        messages = assemble_messages(chat_id, content_for_model, query_vec=query_vec)
+        # When a reranker is configured, re-score the episode candidates off-loop for a sharper
+        # pick; None means it failed/declined, so assemble_messages does the cosine path itself.
+        episode_override = _UNSET
+        if RERANK_ENABLED:
+            reranked = await asyncio.to_thread(_rerank_episode_block, user_message, query_vec)
+            if reranked is not None:
+                episode_override = reranked
+        messages = assemble_messages(chat_id, content_for_model, query_vec=query_vec,
+                                     episode_override=episode_override)
         if INNER_VOICE_ENABLED and not distress:  # skip the performative inner voice in a crisis
             inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id])
             if inner_voice:
