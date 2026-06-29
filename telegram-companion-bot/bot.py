@@ -5967,8 +5967,9 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             hours_ago = max(1, round((time.time() - draft["ts"]) / 3600))
             trigger = trigger[:-1] + (
                 f" Side note: about {hours_ago}h ago you had the urge to reach out but held "
-                f"back ({draft['reason']}). If it fits, mention it in passing — the way "
-                f"you'd say 'I almost texted you earlier.' Don't make a thing of it.]"
+                f"back ({draft['reason']}). Only if it genuinely fits, let it quietly color the "
+                f"message — never open with it, never announce that you almost texted or nearly "
+                f"reached out, and don't make a thing of it. Lead with something real instead.]"
             )
     return await send_triggered(context, chat_id, trigger)
 
