@@ -21,12 +21,12 @@ if [ -n "$INSTANCE_DIR" ]; then
   fi
   STATE_DIR="$INSTANCE_DIR"
   DEFAULT_SESSION="$(basename "$INSTANCE_DIR")"
-  RUN_CMD="python bot.py '$INSTANCE_DIR'"
+  RUN_CMD="python -u bot.py '$INSTANCE_DIR'"
 else
   # Home instance: code dir doubles as the instance dir, no folder arg.
   STATE_DIR="$SCRIPT_DIR"
   DEFAULT_SESSION="$(basename "$SCRIPT_DIR")"
-  RUN_CMD="python bot.py"
+  RUN_CMD="python -u bot.py"
 fi
 
 SESSION="${2:-$DEFAULT_SESSION}"
