@@ -776,7 +776,13 @@ def _archive_episode_chunks(batch: list, uname: str):
         if i + EPISODE_CHUNK_MSGS >= len(batch):
             break
         i += step
-    if not chunks:
+    _store_episodes(chunks)
+
+
+def _store_episodes(chunks: list):
+    """Off-loop: embed a list of (ts, text) chunks and append them to the archive (file +
+    RAM, capped). File is append-only at runtime; RAM is capped; file trimmed at startup."""
+    if not chunks or not EPISODIC_RECALL or _np is None:
         return
     try:
         vecs = _embed([c[1][:EPISODE_EMBED_CHARS] for c in chunks])
@@ -806,6 +812,19 @@ def _archive_episode_chunks(batch: list, uname: str):
             _episodes["text"] = _episodes["text"][cut:]
             _episodes["mat"] = _episodes["mat"][cut:]
     print(f"[episodes] archived {len(chunks)} chunk(s); {len(_episodes['ts'])} held.")
+
+
+def _archive_photo_episode(chat_id: int, desc: str, caption: str):
+    """Off-loop: store a sent photo (its description) as a recallable episode, so she can
+    recall what she was shown long after it scrolls off ('that sunset you sent')."""
+    if not EPISODIC_RECALL or _np is None or not desc:
+        return
+    _load_episodes()
+    uname = user_names.get(chat_id, "you")
+    text = f"{uname} sent {NAME} a photo. {NAME} saw: {desc}"
+    if caption:
+        text += f' {uname}\'s caption: "{caption}"'
+    _store_episodes([(time.time(), text)])
 
 
 def _episode_when(ts: float) -> str:
@@ -6104,6 +6123,8 @@ async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
                 rfts.pop(0)
             save_state()
             print(f"[photo-memory] {fact[:100]}")
+            if EPISODIC_RECALL:  # also keep it as a long-term, recallable episode
+                await asyncio.to_thread(_archive_photo_episode, chat_id, desc, caption)
     except Exception as e:
         print("[photo-memory] failed:", e)
 
