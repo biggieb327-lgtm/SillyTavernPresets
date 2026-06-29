@@ -27,6 +27,11 @@ try:
 except Exception:
     _np = None
 
+try:
+    from garminconnect import Garmin as _Garmin  # optional; only for the Garmin health feed
+except Exception:
+    _Garmin = None
+
 # Persistent session with connection pooling — reuses TCP connections across calls.
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(
@@ -355,6 +360,17 @@ LIFE_EVENTS_MAX = int(os.getenv("LIFE_EVENTS_MAX", "8"))
 LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
 LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
 _life_events_cache: dict = {"text": None, "ts": 0.0}
+
+# --- Garmin health feed: she quietly knows how you're doing physically (sleep, HR, etc.) ---
+GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "").strip()
+GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
+GARMIN_ENABLED = bool(GARMIN_EMAIL and GARMIN_PASSWORD)
+GARMIN_TIMES = os.getenv("GARMIN_TIMES", "07:30,16:00")
+GARMIN_TOKENSTORE = os.path.expanduser(os.getenv("GARMINTOKENS", "~/.garminconnect"))
+GARMIN_MAX_AGE_HOURS = float(os.getenv("GARMIN_MAX_AGE_HOURS", "18"))
+GARMIN_FILE = BASE_DIR / ".garmin_snapshot"
+_garmin: dict = {"text": "", "ts": 0.0, "loaded": False}
+_garmin_obj = None  # cached logged-in client
 
 
 def _est_tokens(text: str) -> int:
@@ -2455,6 +2471,106 @@ async def update_life_event():
         print("[life] update failed:", e)
 
 
+# --- Garmin: pull the user's watch metrics so she's quietly attuned to how they're doing ---
+
+def _garmin_client():
+    """Return a logged-in Garmin client, reusing the cached token store (login once)."""
+    global _garmin_obj
+    if _garmin_obj is not None:
+        return _garmin_obj
+    c = _Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
+    c.login(GARMIN_TOKENSTORE)  # resumes saved tokens, or logs in and saves them
+    _garmin_obj = c
+    return c
+
+
+def _fetch_garmin() -> str:
+    """Sync/off-loop: build a short plain-language snapshot of today's metrics. Each metric is
+    best-effort and isolated, so one missing field doesn't lose the rest."""
+    global _garmin_obj
+    if _Garmin is None or not GARMIN_ENABLED:
+        return ""
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        client = _garmin_client()
+    except Exception as e:
+        print("[garmin] login failed:", e)
+        _garmin_obj = None
+        return ""
+    bits = []
+    try:
+        dto = (client.get_sleep_data(today) or {}).get("dailySleepDTO") or {}
+        secs = dto.get("sleepTimeSeconds")
+        if secs:
+            h, m = divmod(int(secs) // 60, 60)
+            sleep = f"slept {h}h{m:02d}m last night"
+            sc = (dto.get("sleepScores") or {}).get("overall") or {}
+            if sc.get("value"):
+                q = (sc.get("qualifierKey") or "").lower().replace("_", " ")
+                sleep += f" (sleep score {sc['value']}{', ' + q if q else ''})"
+            bits.append(sleep)
+    except Exception as e:
+        print("[garmin] sleep:", e)
+    try:
+        st = client.get_stats(today) or {}
+        if st.get("restingHeartRate"):
+            bits.append(f"resting HR {st['restingHeartRate']}")
+        if st.get("totalSteps") is not None:
+            bits.append(f"{int(st['totalSteps']):,} steps so far")
+        bb = st.get("bodyBatteryMostRecentValue")
+        if bb is not None:
+            bits.append(f"body battery {bb}")
+        stress = st.get("averageStressLevel")
+        if isinstance(stress, (int, float)) and stress >= 0:
+            bits.append(f"avg stress {int(stress)}")
+    except Exception as e:
+        print("[garmin] stats:", e)
+    try:
+        acts = client.get_activities(0, 1) or []
+        if acts:
+            a = acts[0]
+            name = ((a.get("activityType") or {}).get("typeKey")
+                    or a.get("activityName") or "workout").replace("_", " ")
+            dist = a.get("distance")
+            desc = name + (f" {dist / 1000:.1f}km" if dist else "")
+            when = (a.get("startTimeLocal") or "")[:10]
+            bits.append(f"last workout: {desc}" + (f" ({when})" if when else ""))
+    except Exception as e:
+        print("[garmin] activities:", e)
+    return "; ".join(bits)
+
+
+def _garmin_snapshot() -> str:
+    """On-loop: the latest snapshot if it's fresh enough to inject, else ''. Loads from disk once."""
+    if not _garmin["loaded"]:
+        _garmin["loaded"] = True
+        try:
+            if GARMIN_FILE.exists():
+                d = json.loads(GARMIN_FILE.read_text(encoding="utf-8"))
+                _garmin["text"], _garmin["ts"] = d.get("text", ""), float(d.get("ts", 0))
+        except Exception:
+            pass
+    if _garmin["text"] and (time.time() - _garmin["ts"]) < GARMIN_MAX_AGE_HOURS * 3600:
+        return _garmin["text"]
+    return ""
+
+
+async def update_garmin():
+    if not GARMIN_ENABLED:
+        return
+    try:
+        text = await asyncio.to_thread(_fetch_garmin)
+        if text:
+            _garmin.update({"text": text, "ts": time.time(), "loaded": True})
+            try:
+                GARMIN_FILE.write_text(json.dumps({"text": text, "ts": _garmin["ts"]}), encoding="utf-8")
+            except Exception as e:
+                print("[garmin] save failed:", e)
+            print(f"[garmin] {text}")
+    except Exception as e:
+        print("[garmin] update failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -2534,6 +2650,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                 + "\n".join("- " + e for e in life_events[-3:])
                 + f"\nReal things that happened to her while she was off living her life. Hers to "
                   f"bring up if it fits — her news, not a checklist, and don't recite them all."
+            )})
+
+    if GARMIN_ENABLED:
+        snap = _garmin_snapshot()
+        if snap:
+            messages.append({"role": "system", "content": (
+                f"# How {uname} is doing physically today (from their watch)\n{snap}\n"
+                f"You quietly keep an eye on how they're doing. Let it color how you treat them — "
+                f"gentler if they slept badly or stress is high, hyped if they crushed a workout. "
+                f"Work it in naturally; never recite the numbers or act like you're reading a dashboard."
             )})
 
     if ATLAS:
@@ -4236,6 +4362,35 @@ async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_life_event()
     items = _read_life_events()
     await update.message.reply_text(("\u2022 " + items[-1]) if items else "Nothing came of it that time -- try again.")
+
+
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not GARMIN_ENABLED:
+        await update.message.reply_text("Garmin feed is off (set GARMIN_EMAIL and GARMIN_PASSWORD).")
+        return
+    snap = _garmin_snapshot() or (_garmin["text"] if _garmin.get("text") else "")
+    if not snap:
+        await update.message.reply_text("No watch data yet (it pulls a couple times a day, or use /healthnow).")
+        return
+    age = (time.time() - _garmin["ts"]) / 3600
+    stamp = "just now" if age < 1 else f"{age:.0f}h ago"
+    await update.message.reply_text(f"\u231a Latest from your watch ({stamp}):\n{snap}")
+
+
+async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not GARMIN_ENABLED:
+        await update.message.reply_text("Garmin feed is off (set GARMIN_EMAIL and GARMIN_PASSWORD).")
+        return
+    if _Garmin is None:
+        await update.message.reply_text("Garmin library missing: pip install garminconnect")
+        return
+    await update.message.reply_text("\u231a Checking your watch...")
+    await update_garmin()
+    await update.message.reply_text((f"\u231a {_garmin['text']}") if _garmin.get("text") else "Couldn't pull anything that time (check the logs).")
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6608,6 +6763,10 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
     if life_events:
         parts.append("Recent things that happened in her own life she might want to share:\n"
                      + "\n".join(life_events[-3:]))
+    if GARMIN_ENABLED:
+        snap = _garmin_snapshot()
+        if snap:
+            parts.append(f"How {uname} is doing physically today (from their watch): {snap}")
     recent = conversation_history.get(chat_id, [])[-4:]
     if recent:
         snippet = " / ".join(
@@ -6871,6 +7030,11 @@ async def reading_job(context: ContextTypes.DEFAULT_TYPE):
 async def life_event_job(context: ContextTypes.DEFAULT_TYPE):
     if LIFE_SIM_ENABLED:
         await update_life_event()
+
+
+async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
+    if GARMIN_ENABLED:
+        await update_garmin()
 
 
 async def nightly_maintenance(context: ContextTypes.DEFAULT_TYPE):
@@ -7294,6 +7458,8 @@ _BASE_COMMANDS = [
     BotCommand("readnow", "Fetch a fresh reading now"),
     BotCommand("news", "See what's been happening in her life"),
     BotCommand("newsnow", "Generate a life event now"),
+    BotCommand("health", "Show your latest watch data"),
+    BotCommand("healthnow", "Pull fresh watch data now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -7412,6 +7578,8 @@ def main():
     app.add_handler(CommandHandler("readnow", readnow_cmd))
     app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(CommandHandler("newsnow", newsnow_cmd))
+    app.add_handler(CommandHandler("health", health_cmd))
+    app.add_handler(CommandHandler("healthnow", healthnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -7531,6 +7699,17 @@ def main():
                 _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
                 app.job_queue.run_daily(life_event_job, time=_ltime)
             log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
+        if GARMIN_ENABLED:
+            for _gt in GARMIN_TIMES.split(","):
+                _gt = _gt.strip()
+                try:
+                    _gh, _gm = (int(x) for x in _gt.split(":"))
+                except Exception:
+                    continue
+                _gtime = dtime(_gh, _gm, tzinfo=TZ) if TZ else dtime(_gh, _gm)
+                app.job_queue.run_daily(garmin_job, time=_gtime)
+            app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
+            log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
