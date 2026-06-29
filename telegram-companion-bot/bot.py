@@ -59,6 +59,12 @@ IS_NAMED_INSTANCE = bool(_home)
 BASE_DIR = Path(_home).expanduser().resolve() if _home else Path(__file__).resolve().parent
 
 # --- Config / secrets ---
+# Shared defaults first (common.env next to the code, if present), then this bot's own .env
+# overrides them — so common settings (API key, model/feature defaults) live in one file and
+# each bot's .env only carries what's unique to it. Missing common.env is fine (skipped).
+COMMON_ENV = Path(__file__).resolve().parent / "common.env"
+if COMMON_ENV.exists():
+    load_dotenv(dotenv_path=COMMON_ENV, override=True)
 env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 

@@ -37,10 +37,12 @@ bash run-bot.sh
 | `priya/priya.json` | Example character card (SillyTavern v2 format) |
 | `preset.txt` | Texting style instructions (injected into every prompt) |
 | `.env.example` | Config template |
+| `common.env` | Optional shared config loaded before each bot's `.env` (API key, model/feature defaults) |
 | `requirements.txt` | Python dependencies |
 | `run-bot.sh` | Start script (supervised, named instances) |
 | `start-bots.sh` | Start all character instances |
-| `update-all.sh` | Pull latest bot.py and restart all instances |
+| `update-all.sh` | Pull latest from `~/stp-deploy` and restart all instances |
+| `status.sh` | At-a-glance health of every bot (session, heartbeat, recent errors) |
 | `watchdog.sh` | Relaunch any bot whose tmux session has died (for cron/boot) |
 | `termux-boot-start.sh` | Termux:Boot launcher — brings bots back after a reboot |
 | `docs/` | Setup guide, ops manual, project docs |

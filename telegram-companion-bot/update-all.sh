@@ -16,7 +16,16 @@ if [ ! -d "$DEPLOY/.git" ]; then
 fi
 git -C "$DEPLOY" pull --ff-only
 cp "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"
-echo "    bot.py updated from $DEPLOY."
+# Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
+# left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
+for f in run-bot.sh watchdog.sh start-bots.sh status.sh; do
+  src="$DEPLOY/telegram-companion-bot/$f"
+  if [ -f "$src" ]; then
+    cp "$src" "$BOT_SRC/$f"
+    chmod +x "$BOT_SRC/$f"
+  fi
+done
+echo "    bot.py + helper scripts updated from $DEPLOY."
 
 echo ""
 echo "==> Restarting bots..."
