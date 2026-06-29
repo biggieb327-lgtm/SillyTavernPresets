@@ -668,7 +668,9 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> tuple:
     third_party = False
     for _nm in re.findall(r"\b[A-Z][a-zA-Z'-]{2,}\b", mem):
         _nl = _nm.lower()
-        if _nl in _CAP_STOP or _nl in known:
+        # "You're"/"That's"/"He's" start sentences; the base before the apostrophe is a
+        # stopword, so don't mistake a capitalized contraction for a third-party name.
+        if _nl in _CAP_STOP or _nl.split("'")[0] in _CAP_STOP or _nl in known:
             continue
         if _nl not in exchange_low:
             return "", []           # hallucinated name
