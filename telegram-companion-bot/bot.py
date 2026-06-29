@@ -156,6 +156,13 @@ SAFETY_RESOURCES = os.getenv(
 SCENE_CONTINUITY = os.getenv("SCENE_CONTINUITY", "1").lower() not in ("0", "false", "no", "off")
 SCENE_MODEL = os.getenv("SCENE_MODEL", MOOD_MODEL)
 SCENE_MAX_AGE_HOURS = float(os.getenv("SCENE_MAX_AGE_HOURS", "3"))  # stop injecting a stale scene
+# Event reminders: when you mention a dated event, resolve it to a datetime and schedule
+# in-character nudges (good luck before, how-did-it-go after). Built on the reminder system.
+EVENT_REMINDERS = os.getenv("EVENT_REMINDERS", "1").lower() not in ("0", "false", "no", "off")
+EVENT_MODEL = os.getenv("EVENT_MODEL", MOOD_MODEL)
+EVENT_HORIZON_DAYS = int(os.getenv("EVENT_HORIZON_DAYS", "120"))     # ignore events further out than this
+EVENT_BEFORE_MIN = int(os.getenv("EVENT_BEFORE_MIN", "45"))         # "good luck" this many min before a timed event
+EVENT_AFTER_HOURS = float(os.getenv("EVENT_AFTER_HOURS", "2.5"))     # "how'd it go" this many hours after
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -5768,7 +5775,22 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     r = next((x for x in reminders if x["id"] == rid), None)
     if not r:
         return  # was cancelled
-    await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
+    if r.get("kind") == "event":
+        uname = user_names.get(r["chat_id"], "you")
+        if r.get("phase") == "after":
+            trigger = (f"[SYSTEM: earlier {uname} had this happening: {r['event']}. Check in now "
+                       f"with a short, natural, fully in-character message — ask how it went or how "
+                       f"they're feeling about it. Don't mention reminders or that this is automated.]")
+        else:
+            trigger = (f"[SYSTEM: {uname} has this coming up right about now: {r['event']}. Reach out "
+                       f"with a short, natural, fully in-character message — wish them luck or let "
+                       f"them know you're thinking of them about it. Don't mention reminders or automation.]")
+        try:
+            await send_triggered(context, r["chat_id"], trigger)
+        except Exception as e:
+            print("[event-reminder] fire failed:", e)
+    else:
+        await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
     if not r.get("daily"):
         if r in reminders:
             reminders.remove(r)
@@ -5786,6 +5808,108 @@ def schedule_reminder(job_queue, r: dict):
     # If the bot was down when it was due, deliver shortly after startup instead of dropping it.
     when = due if due > now else now + timedelta(seconds=5)
     job_queue.run_once(fire_reminder, when=when, data=r["id"])
+
+
+# --- Auto event reminders: notice a dated event you mention, nudge in-character around it ---
+# Cheap gate so we only spend an extraction call on messages that plausibly mention an event.
+_EVENT_HINT_RE = re.compile(
+    r"\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|"
+    r"next\s+(week|month|mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)|appointment|interview|meeting|exam|flight|trip|vacation|deadline|dentist|"
+    r"doctor|wedding|reservation|o'?clock)\b"
+    r"|\b\d{1,2}(:\d{2})?\s?(am|pm)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}/\d{1,2}\b", re.I)
+
+
+def _extract_event(uname: str, user_message: str, now: datetime):
+    """Sync/off-loop: resolve a specific dated event from the message to an absolute datetime.
+    Returns {'event','when','has_time'} or None."""
+    sys = (
+        f"Today is {now.strftime('%A %Y-%m-%d %H:%M')} (local time). Does this message from {uname} "
+        f"mention a SPECIFIC upcoming event tied to a day or time — an appointment, interview, exam, "
+        f"trip, flight, date, deadline, or plan? If yes, resolve it to an absolute local datetime "
+        f'and reply with ONLY JSON: {{"event":"<short, e.g. dentist appointment>","datetime":'
+        f'"YYYY-MM-DDTHH:MM","has_time":true|false}}. Resolve relative dates (tomorrow, next Tuesday) '
+        f"against today. If only a day is given with no clock time, set has_time false and use T09:00. "
+        f"If there's no specific upcoming dated event, reply exactly: none"
+    )
+    try:
+        raw = call_nanogpt([{"role": "system", "content": sys},
+                            {"role": "user", "content": user_message}], model=EVENT_MODEL).strip()
+    except Exception as e:
+        print("[event] extraction failed:", e)
+        return None
+    if not raw or raw.lower().startswith("none"):
+        return None
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        return None
+    ev = str(data.get("event", "")).strip()
+    dt_str = str(data.get("datetime", "")).strip()
+    if not ev or len(ev) > 80 or not dt_str:
+        return None
+    try:
+        when = datetime.fromisoformat(dt_str)
+        if TZ and when.tzinfo is None:
+            when = when.replace(tzinfo=TZ)
+    except Exception:
+        return None
+    return {"event": ev, "when": when, "has_time": bool(data.get("has_time"))}
+
+
+def _event_reminder_exists(chat_id: int, event: str) -> bool:
+    """True if a pending event reminder for this chat already covers ~the same event."""
+    ew = {w for w in re.findall(r"[a-z]{4,}", event.lower())}
+    if not ew:
+        return False
+    for r in reminders:
+        if r.get("chat_id") != chat_id or r.get("kind") != "event":
+            continue
+        rw = {w for w in re.findall(r"[a-z]{4,}", (r.get("event") or "").lower())}
+        if len(ew & rw) >= 2:
+            return True
+    return False
+
+
+async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_message: str):
+    """After a turn: if the message named a dated event, schedule in-character before/after nudges."""
+    if not EVENT_REMINDERS or not _EVENT_HINT_RE.search(user_message or ""):
+        return
+    uname = user_names.get(chat_id, "you")
+    now = datetime.now(TZ) if TZ else datetime.now()
+    try:
+        ev = await asyncio.to_thread(_extract_event, uname, user_message, now)
+    except Exception as e:
+        print("[event] update failed:", e)
+        return
+    if not ev:
+        return
+    when = ev["when"]
+    if when <= now or (when - now).days > EVENT_HORIZON_DAYS:
+        return
+    if _event_reminder_exists(chat_id, ev["event"]):
+        return
+    plan = []
+    before = (when - timedelta(minutes=EVENT_BEFORE_MIN)) if ev["has_time"] \
+        else when.replace(hour=9, minute=0, second=0, microsecond=0)
+    if before > now + timedelta(minutes=10):
+        plan.append(("before", before, "good luck"))
+    after = (when + timedelta(hours=EVENT_AFTER_HOURS)) if ev["has_time"] \
+        else when.replace(hour=20, minute=0, second=0, microsecond=0)
+    if after > now:
+        plan.append(("after", after, "follow up"))
+    if not plan:
+        return
+    for phase, due, label in plan:
+        r = {"id": _new_reminder_id(), "chat_id": chat_id, "due": due.isoformat(),
+             "kind": "event", "phase": phase, "event": ev["event"],
+             "text": f"(auto) {label}: {ev['event']}"}
+        reminders.append(r)
+        try:
+            schedule_reminder(context.job_queue, r)
+        except Exception as e:
+            print("[event] schedule failed:", e)
+    save_reminders()
+    print(f"[event] scheduled {len(plan)} nudge(s) for: {ev['event']} @ {when.isoformat()}")
 
 
 async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6367,6 +6491,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     if user_memory_text and not user_memory_text.startswith("[sent "):
         asyncio.create_task(update_user_notes(chat_id, user_memory_text))
         asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
+        if EVENT_REMINDERS and context.job_queue:
+            asyncio.create_task(update_event_reminders(context, chat_id, user_memory_text))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
