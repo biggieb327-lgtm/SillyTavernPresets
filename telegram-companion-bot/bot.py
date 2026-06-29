@@ -22,6 +22,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    import numpy as _np  # optional; only needed for episodic recall
+except Exception:
+    _np = None
+
 # Persistent session with connection pooling — reuses TCP connections across calls.
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(
@@ -297,6 +302,22 @@ EMBED_MIN_SIM = float(os.getenv("EMBED_MIN_SIM", "0.35"))  # cosine floor to cou
 MEMORY_VECTORS_FILE = BASE_DIR / ".memory_vectors.json"
 _memory_vec_cache: dict = {"model": None, "vectors": {}, "loaded": False}
 _vec_lock = threading.Lock()
+
+# Episodic recall: archive scrolled-off conversation as embedded chunks and pull the most
+# relevant *past exchange* back per turn. Needs EMBED_MODEL + numpy. Reuses the per-turn
+# query vector, so it adds no extra per-turn embedding cost.
+EPISODIC_RECALL = EMBED_ENABLED and os.getenv("EPISODIC_RECALL", "1").strip() not in ("0", "false", "no", "off")
+EPISODE_MAX = int(os.getenv("EPISODE_MAX", "4000"))           # hard cap on archived chunks (RAM/disk bound)
+EPISODE_CHUNK_MSGS = int(os.getenv("EPISODE_CHUNK_MSGS", "6"))  # messages per chunk (1 message overlap)
+EPISODE_EMBED_CHARS = int(os.getenv("EPISODE_EMBED_CHARS", "1600"))  # truncate before embed (model token cap)
+EPISODE_MIN_SIM = float(os.getenv("EPISODE_MIN_SIM", "0.40"))  # cosine floor to surface a memory
+EPISODE_TOPK = int(os.getenv("EPISODE_TOPK", "1"))            # how many past moments to surface
+EPISODE_MIN_AGE_HOURS = float(os.getenv("EPISODE_MIN_AGE_HOURS", "24"))  # don't recall very recent stuff
+EPISODES_FILE = BASE_DIR / ".episodes.jsonl"
+EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
+# In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
+_episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
+_episodes_lock = threading.Lock()
 
 # --- Reading feed: periodic interest-topic search -> in-character "things she read" ---
 INTERESTS_FILE = BASE_DIR / "interests.txt"
@@ -594,6 +615,178 @@ def _triggered_semantic(entries: list, query_vec):
         out.append(line)
         budget -= cost
     return out
+
+
+# --- Episodic recall: embedded archive of scrolled-off conversation (needs EMBED_MODEL + numpy) ---
+
+def _normalize_rows(mat):
+    """Return mat with each row L2-normalized, so cosine similarity == a plain dot product."""
+    norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
+
+
+def _load_episodes():
+    """Off-loop: load the episode archive into RAM once. A model change discards the archive
+    (cross-model vectors aren't comparable); over-cap files are trimmed to the newest EPISODE_MAX."""
+    if _episodes["loaded"]:
+        return
+    _episodes["loaded"] = True
+    if not EPISODIC_RECALL or _np is None:
+        return
+    model_ok = True
+    if EPISODES_MODEL_FILE.exists():
+        try:
+            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBED_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EPISODES_FILE, EPISODES_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    ts_list, text_list, vecs = [], [], []
+    if model_ok and EPISODES_FILE.exists():
+        for line in EPISODES_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+                v = o.get("vec")
+                if not v:
+                    continue
+                ts_list.append(float(o.get("ts", 0)))
+                text_list.append(str(o.get("text", "")))
+                vecs.append(v)
+            except Exception:
+                continue
+    trimmed = False
+    if len(vecs) > EPISODE_MAX:  # keep the newest, trim the file once
+        ts_list, text_list, vecs = ts_list[-EPISODE_MAX:], text_list[-EPISODE_MAX:], vecs[-EPISODE_MAX:]
+        trimmed = True
+    with _episodes_lock:
+        _episodes["ts"], _episodes["text"] = ts_list, text_list
+        _episodes["mat"] = _normalize_rows(_np.asarray(vecs, dtype=_np.float32)) if vecs else None
+    if trimmed:
+        _rewrite_episodes_file(ts_list, text_list, vecs)
+
+
+def _rewrite_episodes_file(ts_list, text_list, vecs):
+    try:
+        with EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for ts, text, v in zip(ts_list, text_list, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBED_MODEL, encoding="utf-8")
+    except Exception as e:
+        print("[episodes] file rewrite failed:", e)
+
+
+def _archive_episode_chunks(batch: list, uname: str):
+    """Off-loop: chunk the scrolled-off batch, embed each chunk, append to the archive (file +
+    RAM). File is append-only at runtime; RAM is capped; the file is trimmed at next startup."""
+    if not EPISODIC_RECALL or _np is None or not batch:
+        return
+    _load_episodes()  # ensure the existing archive is in RAM before we append to it
+    chunks, step = [], max(1, EPISODE_CHUNK_MSGS - 1)
+    i = 0
+    while i < len(batch):
+        window = batch[i:i + EPISODE_CHUNK_MSGS]
+        if not window:
+            break
+        text = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content'].strip()}"
+            for m in window if m.get("content")
+        ).strip()
+        if text:
+            ts = window[-1].get("ts") or time.time()
+            chunks.append((float(ts), text))
+        if i + EPISODE_CHUNK_MSGS >= len(batch):
+            break
+        i += step
+    if not chunks:
+        return
+    try:
+        vecs = _embed([c[1][:EPISODE_EMBED_CHARS] for c in chunks])
+    except Exception as e:
+        print("[episodes] embed failed:", e)
+        return
+    if len(vecs) != len(chunks):
+        return
+    try:  # append to file outside the lock (don't hold it during disk I/O)
+        with EPISODES_FILE.open("a", encoding="utf-8") as f:
+            for (ts, text), v in zip(chunks, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBED_MODEL, encoding="utf-8")
+    except Exception as e:
+        print("[episodes] append failed:", e)
+        return
+    new = _normalize_rows(_np.asarray(vecs, dtype=_np.float32))
+    with _episodes_lock:
+        for ts, text in chunks:
+            _episodes["ts"].append(ts)
+            _episodes["text"].append(text)
+        _episodes["mat"] = new if _episodes["mat"] is None else _np.vstack([_episodes["mat"], new])
+        n = len(_episodes["ts"])
+        if n > EPISODE_MAX:  # cap RAM (file trimmed at next startup)
+            cut = n - EPISODE_MAX
+            _episodes["ts"] = _episodes["ts"][cut:]
+            _episodes["text"] = _episodes["text"][cut:]
+            _episodes["mat"] = _episodes["mat"][cut:]
+    print(f"[episodes] archived {len(chunks)} chunk(s); {len(_episodes['ts'])} held.")
+
+
+def _episode_when(ts: float) -> str:
+    """Human phrasing of how long ago an episode was, for the recall prompt."""
+    days = max(0, int((time.time() - ts) / 86400))
+    if days <= 0:
+        return "earlier today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"about {days} days ago"
+    if days < 60:
+        return f"about {days // 7} weeks ago"
+    when = datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)
+    return f"back around {when.strftime('%b %d')}"
+
+
+def triggered_episode(query_vec) -> str:
+    """On-loop: return the most relevant past exchange(s) for this turn, or '' (no extra
+    embedding call -- reuses query_vec). Time-gated so the live window isn't echoed back."""
+    if not EPISODIC_RECALL or _np is None or query_vec is None:
+        return ""
+    with _episodes_lock:
+        mat = _episodes["mat"]
+        ts = _episodes["ts"][:]
+        text = _episodes["text"][:]
+    if mat is None or not ts:
+        return ""
+    q = _np.asarray(query_vec, dtype=_np.float32)
+    nq = _np.linalg.norm(q)
+    if nq == 0:
+        return ""
+    sims = mat @ (q / nq)
+    cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
+    picks = []
+    for idx in _np.argsort(-sims):
+        i = int(idx)
+        if i >= len(ts):
+            continue
+        if float(sims[i]) < EPISODE_MIN_SIM:
+            break
+        if ts[i] > cutoff:
+            continue
+        picks.append((ts[i], text[i]))
+        if len(picks) >= EPISODE_TOPK:
+            break
+    if not picks:
+        return ""
+    blocks = [f"({_episode_when(t)})\n{txt}" for t, txt in picks]
+    return ("# A specific moment you remember\n"
+            "Draw on this only if it genuinely fits the conversation — don't force a callback "
+            "or quote it back word for word:\n\n" + "\n\n".join(blocks))
 
 
 # Phrases that mean the model is narrating/commenting instead of stating a fact.
@@ -2163,6 +2356,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "# Relevant memories\n" + "\n".join("- " + m for m in mems)
         )})
 
+    episode = triggered_episode(query_vec)
+    if episode:
+        messages.append({"role": "system", "content": episode})
+
     reads = triggered_reading(scan_text_low)
     if reads:
         messages.append({"role": "system", "content": (
@@ -3122,6 +3319,8 @@ async def maintain_memory(chat_id: int):
             recent_facts[chat_id] = new_facts
         except Exception as e:
             print("[memory] summarize failed; dropping overflow without summary:", e)
+        if EPISODIC_RECALL:  # archive the verbatim turns before they're dropped (off-loop)
+            asyncio.create_task(asyncio.to_thread(_archive_episode_chunks, batch, uname))
         del conversation_history[chat_id][:drop_count]  # remove exactly what we summarized
         save_state()
         print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
@@ -4314,6 +4513,29 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(f"No memories matched '{arg}'.")
+
+
+async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not EPISODIC_RECALL:
+        await update.message.reply_text("Episodic recall is off (set EMBED_MODEL + EPISODIC_RECALL).")
+        return
+    if _np is None:
+        await update.message.reply_text("Episodic recall needs numpy: pip install numpy")
+        return
+    with _episodes_lock:
+        n = len(_episodes["ts"])
+        newest = _episodes["ts"][-1] if n else 0
+        sample = _episodes["text"][-1] if n else ""
+    if not n:
+        await update.message.reply_text("No episodes archived yet (they accrue as conversation ages out).")
+        return
+    await _reply_chunked(
+        update,
+        f"📚 Episodic archive: {n} chunk(s) held (cap {EPISODE_MAX}).\n"
+        f"Most recent ({_episode_when(newest)}):\n\n{sample[:1200]}"
+    )
 
 
 def _mentions_third_party(text: str, uname: str) -> bool:
@@ -6689,6 +6911,7 @@ _BASE_COMMANDS = [
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
     BotCommand("correct", "Fix a wrong memory: /correct <wrong> => <right>"),
+    BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
@@ -6761,6 +6984,15 @@ async def _backfill_vectors_job(context: ContextTypes.DEFAULT_TYPE):
         print("[memories] vector backfill failed:", e)
 
 
+async def _episodes_load_job(context: ContextTypes.DEFAULT_TYPE):
+    """One-shot at startup: load the episodic archive into RAM (off-loop)."""
+    try:
+        await asyncio.to_thread(_load_episodes)
+        print(f"[episodes] loaded {len(_episodes['ts'])} archived chunk(s).")
+    except Exception as e:
+        print("[episodes] load failed:", e)
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -6802,6 +7034,7 @@ def main():
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
     app.add_handler(CommandHandler("correct", correct_cmd))
+    app.add_handler(CommandHandler("episodes", episodes_cmd))
     if PAYMENTS_ENABLED:
         app.add_handler(CommandHandler("addpayment", addpayment))
         app.add_handler(CommandHandler("addevery", addevery))
@@ -6873,6 +7106,12 @@ def main():
         if EMBED_ENABLED:
             app.job_queue.run_once(_backfill_vectors_job, when=5)
             log.info("Semantic memory on (embeddings): %s.", EMBED_MODEL)
+        if EPISODIC_RECALL and _np is not None:
+            app.job_queue.run_once(_episodes_load_job, when=6)
+            log.info("Episodic recall on (cap %d chunks).", EPISODE_MAX)
+        elif EPISODIC_RECALL and _np is None:
+            log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
+                        "disabled. Install it with: pip install numpy")
         schedule_next_heartbeat(app.job_queue)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:

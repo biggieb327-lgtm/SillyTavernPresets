@@ -3,3 +3,5 @@ python-dotenv>=1.0,<2.0
 requests>=2.31,<3.0
 tzdata>=2024.1
 pypdf>=4.0,<5.0
+# Optional: only needed for episodic recall (EPISODIC_RECALL with EMBED_MODEL set)
+numpy>=1.24
