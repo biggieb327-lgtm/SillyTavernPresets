@@ -394,6 +394,16 @@ GARMIN_COOLDOWN_FILE = BASE_DIR / ".garmin_cooldown"  # persisted so restarts do
 _garmin: dict = {"text": "", "ts": 0.0, "loaded": False}
 _garmin_obj = None  # cached logged-in client
 
+# Stress monitoring: poll recent Garmin stress and reach out in-character when it stays high.
+# Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects "wound up" without
+# false-alarming on workouts. Only active when Garmin is configured.
+STRESS_ALERTS = GARMIN_ENABLED and os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+STRESS_THRESHOLD = int(os.getenv("STRESS_THRESHOLD", "60"))          # 0-100; sustained above this = high
+STRESS_SUSTAINED_MIN = int(os.getenv("STRESS_SUSTAINED_MIN", "45"))  # must stay high this long to trigger
+STRESS_POLL_MIN = int(os.getenv("STRESS_POLL_MIN", "30"))            # how often to check
+STRESS_ALERT_COOLDOWN_HOURS = float(os.getenv("STRESS_ALERT_COOLDOWN_HOURS", "4"))  # don't re-alert within this
+STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time so a restart can't re-fire
+
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -2679,6 +2689,67 @@ async def update_garmin():
         print("[garmin] update failed:", e)
 
 
+def _recent_stress_high():
+    """Off-loop: (sustained_high, avg) over the last STRESS_SUSTAINED_MIN minutes of Garmin stress.
+    Garmin marks readings -1/-2 when it can't measure (e.g. during activity); those are skipped."""
+    if not STRESS_ALERTS or _Garmin is None:
+        return (False, 0)
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        data = _garmin_client().get_stress_data(today) or {}
+    except Exception as e:
+        print("[stress] fetch failed:", e)
+        return (False, 0)
+    arr = data.get("stressValuesArray") or []
+    cutoff_ms = (time.time() - STRESS_SUSTAINED_MIN * 60) * 1000
+    recent = [v for pair in arr if isinstance(pair, (list, tuple)) and len(pair) >= 2
+              and isinstance((v := pair[1]), (int, float)) and v >= 0 and pair[0] >= cutoff_ms]
+    if len(recent) < 3:
+        return (False, 0)
+    avg = sum(recent) / len(recent)
+    high_frac = sum(1 for v in recent if v >= STRESS_THRESHOLD) / len(recent)
+    return (avg >= STRESS_THRESHOLD and high_frac >= 0.7, round(avg))
+
+
+def _stress_alert_ts() -> float:
+    try:
+        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: if stress has stayed high, reach out in-character (cooldown + quiet-hours aware)."""
+    if not STRESS_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
+        return  # already checked in recently about this
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if not high:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — they're "
+        f"wound up / on edge. Reach out gently and fully in character: notice they seem tense, check "
+        f"in warmly on how they're doing, and if it fits softly nudge them toward a breather. Brief "
+        f"and caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            STRESS_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[stress] high-stress check-in sent (avg {avg}).")
+    except Exception as e:
+        print("[stress] alert failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -4503,6 +4574,23 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\u231a Checking your watch...")
     await update_garmin()
     await update.message.reply_text((f"\u231a {_garmin['text']}") if _garmin.get("text") else "Couldn't pull anything that time (check the logs).")
+
+
+async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not STRESS_ALERTS:
+        await update.message.reply_text("Stress monitoring is off (needs Garmin + STRESS_ALERTS).")
+        return
+    await update.message.reply_text("\u231a Checking recent stress...")
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if avg == 0:
+        await update.message.reply_text("No recent stress readings (watch may need to sync).")
+        return
+    state = f"sustained high (\u2265{STRESS_THRESHOLD})" if high else "within normal range"
+    await update.message.reply_text(
+        f"\U0001F9D8 Last {STRESS_SUSTAINED_MIN} min \u2014 avg stress {avg}/100: {state}."
+    )
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7768,6 +7856,7 @@ _BASE_COMMANDS = [
     BotCommand("newsnow", "Generate a life event now"),
     BotCommand("health", "Show your latest watch data"),
     BotCommand("healthnow", "Pull fresh watch data now"),
+    BotCommand("stress", "Check recent stress level"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -7888,6 +7977,7 @@ def main():
     app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("healthnow", healthnow_cmd))
+    app.add_handler(CommandHandler("stress", stress_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -8018,6 +8108,10 @@ def main():
                 app.job_queue.run_daily(garmin_job, time=_gtime)
             app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
             log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
+        if STRESS_ALERTS:
+            app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                        first=STRESS_POLL_MIN * 60)
+            log.info("Stress monitoring on (every %d min, threshold %d).", STRESS_POLL_MIN, STRESS_THRESHOLD)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
