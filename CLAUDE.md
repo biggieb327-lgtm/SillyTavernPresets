@@ -71,3 +71,27 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## Project: telegram-companion-bot — deploy & restart
+
+Development happens on branch `claude/push-to-repo-7i2f3c` in this cloud repo; the user
+deploys to their Termux/Android device, which has a clone at `~/stp-deploy` and runs the
+bots from `~/telegram-bot/` (shared `bot.py`) with per-character dirs `~/<char>-bot/`.
+
+**The user's one-command update + restart (run on the device):**
+
+```bash
+bash ~/telegram-bot/update-all.sh
+```
+
+This git-pulls `~/stp-deploy`, copies `bot.py` to `~/telegram-bot/`, and restarts all five
+bots (nora, bonnie, cass, emily, jules) uniformly via `run-bot.sh <dir> <session>` under the
+supervisor. It deploys **only `bot.py`** — helper scripts (`watchdog.sh`, `run-bot.sh`,
+`update-all.sh` itself) and per-bot `.env`/character files must be copied over manually when
+they change. `.env` files are never touched, so per-bot config (API keys, `EMBED_MODEL`,
+Garmin creds, feature flags) is safe.
+
+When telling the user how to deploy a change, just point them at `bash ~/telegram-bot/update-all.sh`
+(after committing/pushing here) unless a helper script or `.env` also changed.
