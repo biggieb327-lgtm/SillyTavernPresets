@@ -269,6 +269,7 @@ else:
 CARD_NAME = os.getenv("CHARACTER_CARD", "priya.json")
 HEARTBEAT_MIN = float(os.getenv("HEARTBEAT_MIN_HOURS", "2")) * 3600  # random window low end
 HEARTBEAT_MAX = float(os.getenv("HEARTBEAT_MAX_HOURS", "6")) * 3600  # random window high end
+NEXT_HEARTBEAT_FILE = BASE_DIR / ".next_heartbeat"  # persist the next tick so restarts don't reset it
 OWNER_CHAT_ID_ENV = os.getenv("OWNER_CHAT_ID")
 OWNER_FILE = BASE_DIR / "owner_chat.txt"
 MAX_HISTORY = 20    # hard count cap on the verbatim window (marathon-session safety)
@@ -5777,10 +5778,15 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
         return  # was cancelled
     if r.get("kind") == "event":
         uname = user_names.get(r["chat_id"], "you")
-        if r.get("phase") == "after":
+        phase = r.get("phase")
+        if phase == "after":
             trigger = (f"[SYSTEM: earlier {uname} had this happening: {r['event']}. Check in now "
                        f"with a short, natural, fully in-character message — ask how it went or how "
                        f"they're feeling about it. Don't mention reminders or that this is automated.]")
+        elif phase == "recurring":
+            trigger = (f"[SYSTEM: it's about that time again for {uname}'s recurring thing: {r['event']}. "
+                       f"If it fits, bring it up in a short, natural, fully in-character message — wish "
+                       f"them well with it. Don't mention reminders or that this is automated.]")
         else:
             trigger = (f"[SYSTEM: {uname} has this coming up right about now: {r['event']}. Reach out "
                        f"with a short, natural, fully in-character message — wish them luck or let "
@@ -5789,6 +5795,16 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
             await send_triggered(context, r["chat_id"], trigger)
         except Exception as e:
             print("[event-reminder] fire failed:", e)
+        if r.get("recurs") in ("daily", "weekly"):  # advance to the next occurrence and re-arm
+            step = timedelta(days=1) if r["recurs"] == "daily" else timedelta(days=7)
+            now_dt = datetime.now(TZ) if TZ else datetime.now()
+            nxt = datetime.fromisoformat(r["due"])
+            while nxt <= now_dt:
+                nxt += step
+            r["due"] = nxt.isoformat()
+            save_reminders()
+            schedule_reminder(context.job_queue, r)
+            return
     else:
         await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
     if not r.get("daily"):
@@ -5826,11 +5842,13 @@ def _extract_event(uname: str, user_message: str, now: datetime):
     sys = (
         f"Today is {now.strftime('%A %Y-%m-%d %H:%M')} (local time). Does this message from {uname} "
         f"mention a SPECIFIC upcoming event tied to a day or time — an appointment, interview, exam, "
-        f"trip, flight, date, deadline, or plan? If yes, resolve it to an absolute local datetime "
-        f'and reply with ONLY JSON: {{"event":"<short, e.g. dentist appointment>","datetime":'
-        f'"YYYY-MM-DDTHH:MM","has_time":true|false}}. Resolve relative dates (tomorrow, next Tuesday) '
-        f"against today. If only a day is given with no clock time, set has_time false and use T09:00. "
-        f"If there's no specific upcoming dated event, reply exactly: none"
+        f"trip, flight, date, deadline, plan, or a recurring commitment? If yes, reply with ONLY "
+        f'JSON: {{"event":"<short, e.g. dentist appointment>","datetime":"YYYY-MM-DDTHH:MM",'
+        f'"has_time":true|false,"recurs":"none"|"daily"|"weekly"}}. Resolve relative dates (tomorrow, '
+        f"next Tuesday) against today. If only a day is given with no clock time, set has_time false "
+        f'and use T09:00. For a recurring commitment ("every Tuesday", "every morning"), set recurs '
+        f"and give the datetime of the NEXT occurrence. If there's no specific upcoming dated event, "
+        f"reply exactly: none"
     )
     try:
         raw = call_nanogpt([{"role": "system", "content": sys},
@@ -5853,7 +5871,10 @@ def _extract_event(uname: str, user_message: str, now: datetime):
             when = when.replace(tzinfo=TZ)
     except Exception:
         return None
-    return {"event": ev, "when": when, "has_time": bool(data.get("has_time"))}
+    recurs = str(data.get("recurs", "none")).lower()
+    if recurs not in ("daily", "weekly"):
+        recurs = "none"
+    return {"event": ev, "when": when, "has_time": bool(data.get("has_time")), "recurs": recurs}
 
 
 def _event_reminder_exists(chat_id: int, event: str) -> bool:
@@ -5888,28 +5909,36 @@ async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         return
     if _event_reminder_exists(chat_id, ev["event"]):
         return
-    plan = []
-    before = (when - timedelta(minutes=EVENT_BEFORE_MIN)) if ev["has_time"] \
-        else when.replace(hour=9, minute=0, second=0, microsecond=0)
-    if before > now + timedelta(minutes=10):
-        plan.append(("before", before, "good luck"))
-    after = (when + timedelta(hours=EVENT_AFTER_HOURS)) if ev["has_time"] \
-        else when.replace(hour=20, minute=0, second=0, microsecond=0)
-    if after > now:
-        plan.append(("after", after, "follow up"))
-    if not plan:
+    new = []
+    if ev["recurs"] in ("daily", "weekly"):
+        # One self-rescheduling nudge at each occurrence (no before/after pair — that'd nag).
+        new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": when.isoformat(),
+                    "kind": "event", "phase": "recurring", "recurs": ev["recurs"],
+                    "event": ev["event"], "text": f"(auto, {ev['recurs']}) {ev['event']}"})
+    else:
+        before = (when - timedelta(minutes=EVENT_BEFORE_MIN)) if ev["has_time"] \
+            else when.replace(hour=9, minute=0, second=0, microsecond=0)
+        if before > now + timedelta(minutes=10):
+            new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": before.isoformat(),
+                        "kind": "event", "phase": "before", "event": ev["event"],
+                        "text": f"(auto) good luck: {ev['event']}"})
+        after = (when + timedelta(hours=EVENT_AFTER_HOURS)) if ev["has_time"] \
+            else when.replace(hour=20, minute=0, second=0, microsecond=0)
+        if after > now:
+            new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": after.isoformat(),
+                        "kind": "event", "phase": "after", "event": ev["event"],
+                        "text": f"(auto) follow up: {ev['event']}"})
+    if not new:
         return
-    for phase, due, label in plan:
-        r = {"id": _new_reminder_id(), "chat_id": chat_id, "due": due.isoformat(),
-             "kind": "event", "phase": phase, "event": ev["event"],
-             "text": f"(auto) {label}: {ev['event']}"}
+    for r in new:
         reminders.append(r)
         try:
             schedule_reminder(context.job_queue, r)
         except Exception as e:
             print("[event] schedule failed:", e)
     save_reminders()
-    print(f"[event] scheduled {len(plan)} nudge(s) for: {ev['event']} @ {when.isoformat()}")
+    print(f"[event] scheduled {len(new)} nudge(s) for: {ev['event']} @ {when.isoformat()}"
+          f"{' (' + ev['recurs'] + ')' if ev['recurs'] != 'none' else ''}")
 
 
 async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7182,10 +7211,26 @@ async def cron_del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Removed #{job_id}.")
 
 
-def schedule_next_heartbeat(job_queue):
-    delay = random.uniform(HEARTBEAT_MIN, HEARTBEAT_MAX)
+def schedule_next_heartbeat(job_queue, resume: bool = False):
+    """Schedule the next proactive tick. With resume=True (startup), keep the previously
+    persisted tick if it's still in the future, so a restart doesn't push the check-in out."""
+    now = time.time()
+    saved = 0.0
+    if resume:
+        try:
+            saved = float(NEXT_HEARTBEAT_FILE.read_text()) if NEXT_HEARTBEAT_FILE.exists() else 0.0
+        except Exception:
+            saved = 0.0
+    if saved > now + 30:  # an unfired tick survived the restart -> resume it
+        delay = saved - now
+    else:                 # fresh roll (first run, or the old tick already passed)
+        delay = random.uniform(HEARTBEAT_MIN, HEARTBEAT_MAX)
+        try:
+            NEXT_HEARTBEAT_FILE.write_text(str(now + delay))
+        except Exception:
+            pass
     job_queue.run_once(heartbeat, when=delay)
-    print(f"[heartbeat] next check in {delay / 3600:.1f}h.")
+    print(f"[heartbeat] next check in {delay / 3600:.1f}h{' (resumed)' if saved > now + 30 else ''}.")
 
 
 async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
@@ -7897,7 +7942,7 @@ def main():
         elif EPISODIC_RECALL and _np is None:
             log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
                         "disabled. On Termux install it with: pkg install python-numpy")
-        schedule_next_heartbeat(app.job_queue)
+        schedule_next_heartbeat(app.job_queue, resume=True)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:
             reminder_time = dtime(_REM_H, _REM_M, tzinfo=TZ) if TZ else dtime(_REM_H, _REM_M)
