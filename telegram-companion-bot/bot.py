@@ -286,6 +286,18 @@ MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
 _memory_lock = threading.Lock()
 
+# Semantic memory retrieval (optional, opt-in). Set EMBED_MODEL to a NanoGPT
+# embedding model (e.g. BAAI/bge-large-en-v1.5) to rank memories by meaning
+# instead of keyword overlap. Empty = disabled (keyword + alias retrieval only).
+# Embeddings are pay-as-you-go on NanoGPT, so this stays off until configured.
+EMBED_MODEL = os.getenv("EMBED_MODEL", "").strip()
+EMBED_ENABLED = bool(EMBED_MODEL)
+EMBED_DIM = int(os.getenv("EMBED_DIM", "0"))          # optional dim reduction (3-small/large only)
+EMBED_MIN_SIM = float(os.getenv("EMBED_MIN_SIM", "0.35"))  # cosine floor to count as relevant
+MEMORY_VECTORS_FILE = BASE_DIR / ".memory_vectors.json"
+_memory_vec_cache: dict = {"model": None, "vectors": {}, "loaded": False}
+_vec_lock = threading.Lock()
+
 # --- Reading feed: periodic interest-topic search -> in-character "things she read" ---
 INTERESTS_FILE = BASE_DIR / "interests.txt"
 READING_FILE = BASE_DIR / "reading.txt"
@@ -456,6 +468,8 @@ def _append_memory(text: str, auto: bool = False):
         _memories_cache["text"] = None
         _memories_cache["ts"] = 0.0
         _memory_word_cache.clear()
+    if EMBED_ENABLED:  # off-loop (always called from a worker thread): embed the new line
+        _ensure_memory_vectors()
 
 
 def _rewrite_memories(lines: list):
@@ -465,6 +479,121 @@ def _rewrite_memories(lines: list):
         _memories_cache["text"] = None
         _memories_cache["ts"] = 0.0
         _memory_word_cache.clear()
+
+
+# --- Semantic retrieval helpers (only used when EMBED_MODEL is set) ---
+
+def _embed(inputs, model: str = None) -> list:
+    """Return a list of embedding vectors for inputs (a str or list[str]). Raises on failure."""
+    payload = {"model": model or EMBED_MODEL, "input": inputs}
+    if EMBED_DIM > 0:
+        payload["dimensions"] = EMBED_DIM
+    r = _session.post(f"{NANOGPT_BASE_URL}/embeddings", headers=_NANOGPT_HEADERS,
+                      json=payload, timeout=(10, 30))
+    r.raise_for_status()
+    return [d["embedding"] for d in (r.json().get("data") or [])]
+
+
+def _embed_query(text: str):
+    """Off-loop: embed one query string; return its vector, or None on any failure
+    (so retrieval falls back to keyword matching when embeddings are down/unfunded)."""
+    text = " ".join((text or "").split())
+    if not text or not EMBED_ENABLED:
+        return None
+    try:
+        vecs = _embed([text])
+        return vecs[0] if vecs else None
+    except Exception as e:
+        print("[memories] query embed failed:", e)
+        return None
+
+
+def _memory_embed_text(line: str) -> str:
+    """Text to embed for a memory line: drop the leading "[auto DATE]" tag, keep the rest."""
+    return re.sub(r"^\[[^\]]*\]\s*", "", line).strip()
+
+
+def _cosine(a, b) -> float:
+    s = na = nb = 0.0
+    for x, y in zip(a, b):
+        s += x * y
+        na += x * x
+        nb += y * y
+    return s / math.sqrt(na * nb) if na > 0 and nb > 0 else 0.0
+
+
+def _load_memory_vectors():
+    """Load the vectors file into the cache once. A model change discards old vectors."""
+    if _memory_vec_cache["loaded"]:
+        return
+    store = {"model": None, "vectors": {}}
+    if MEMORY_VECTORS_FILE.exists():
+        try:
+            store = json.loads(MEMORY_VECTORS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            store = {"model": None, "vectors": {}}
+    if store.get("model") != EMBED_MODEL:
+        store = {"model": EMBED_MODEL, "vectors": {}}  # model changed -> re-embed everything
+    _memory_vec_cache["model"] = store.get("model")
+    _memory_vec_cache["vectors"] = store.get("vectors") or {}
+    _memory_vec_cache["loaded"] = True
+
+
+def _ensure_memory_vectors():
+    """Off-loop only: embed any memory lines missing a vector and drop vectors for lines
+    that are gone. Safe on failure -- leaves vectors missing so retrieval falls back."""
+    if not EMBED_ENABLED:
+        return
+    with _vec_lock:
+        _load_memory_vectors()
+        lines = _read_memories()
+        vectors = _memory_vec_cache["vectors"]
+        current = set(lines)
+        changed = False
+        for gone in [k for k in vectors if k not in current]:
+            vectors.pop(gone, None)
+            changed = True
+        missing = [ln for ln in lines if ln not in vectors]
+        if missing:
+            try:
+                embedded = _embed([_memory_embed_text(ln) for ln in missing])
+                for ln, vec in zip(missing, embedded):
+                    vectors[ln] = vec
+                changed = True
+            except Exception as e:
+                print("[memories] corpus embed failed (will retry later):", e)
+        if changed:
+            try:
+                MEMORY_VECTORS_FILE.write_text(
+                    json.dumps({"model": EMBED_MODEL, "vectors": vectors}), encoding="utf-8")
+            except Exception as e:
+                print("[memories] vector save failed:", e)
+
+
+def _triggered_semantic(entries: list, query_vec):
+    """Rank memories by cosine similarity to the query. Returns a list (possibly empty) when
+    vectors exist, or None when none are embedded yet (caller falls back to keywords)."""
+    _load_memory_vectors()
+    vectors = _memory_vec_cache["vectors"]
+    if not any(line in vectors for line in entries):
+        return None
+    scored = []
+    for idx, line in enumerate(entries):
+        v = vectors.get(line)
+        if not v:
+            continue
+        sim = _cosine(query_vec, v)
+        if sim >= EMBED_MIN_SIM:
+            scored.append((sim, idx, line))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)  # similarity, then recency
+    out, budget = [], MEMORY_TOKEN_BUDGET
+    for _, _, line in scored:
+        cost = _est_tokens(line)
+        if cost > budget:
+            break
+        out.append(line)
+        budget -= cost
+    return out
 
 
 # Phrases that mean the model is narrating/commenting instead of stating a fact.
@@ -1430,12 +1559,17 @@ def triggered_reading(low: str) -> list[str]:
     return out[-3:]
 
 
-def triggered_memories(low: str) -> list[str]:
-    """low must already be lowercased. Surface stored memories whose keywords appear in the
-    recent text: most relevant first (by keyword hits), ties broken by recency (newer wins)."""
+def triggered_memories(low: str, query_vec=None) -> list[str]:
+    """low must already be lowercased. Surface stored memories relevant to the current turn.
+    With EMBED_MODEL set and a query vector, rank by semantic similarity; otherwise (or if no
+    vectors are embedded yet) fall back to keyword hits, ties broken by recency (newer wins)."""
     entries = _read_memories()
     if not entries:
         return []
+    if EMBED_ENABLED and query_vec:
+        sem = _triggered_semantic(entries, query_vec)
+        if sem is not None:
+            return sem
     char_name = NAME.lower() if NAME else ""
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
@@ -1887,7 +2021,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None):
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None, query_vec=None):
     """Build the OpenAI-style message list the way SillyTavern layers a card."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
@@ -2021,7 +2155,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
 
-    mems = triggered_memories(scan_text_low)
+    mems = triggered_memories(scan_text_low, query_vec=query_vec)
     if mems:
         messages.append({"role": "system", "content": (
             "# Relevant memories\n" + "\n".join("- " + m for m in mems)
@@ -5585,7 +5719,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        messages = assemble_messages(chat_id, content_for_model)
+        # Embed the turn off-loop (when EMBED_MODEL is set) for semantic memory retrieval.
+        query_vec = await asyncio.to_thread(_embed_query, user_message) if EMBED_ENABLED else None
+        messages = assemble_messages(chat_id, content_for_model, query_vec=query_vec)
         if INNER_VOICE_ENABLED:
             inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id])
             if inner_voice:
@@ -6614,6 +6750,15 @@ async def _touch_liveness(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def _backfill_vectors_job(context: ContextTypes.DEFAULT_TYPE):
+    """One-shot at startup: embed any memories that don't have a vector yet (off-loop)."""
+    try:
+        await asyncio.to_thread(_ensure_memory_vectors)
+        print(f"[memories] vector backfill complete ({len(_memory_vec_cache['vectors'])} embedded).")
+    except Exception as e:
+        print("[memories] vector backfill failed:", e)
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -6723,6 +6868,9 @@ def main():
         except Exception:
             pass
         app.job_queue.run_repeating(_touch_liveness, interval=60, first=60)
+        if EMBED_ENABLED:
+            app.job_queue.run_once(_backfill_vectors_job, when=5)
+            log.info("Semantic memory on (embeddings): %s.", EMBED_MODEL)
         schedule_next_heartbeat(app.job_queue)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
         if PAYMENTS_ENABLED:
