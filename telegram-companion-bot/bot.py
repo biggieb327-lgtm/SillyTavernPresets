@@ -368,7 +368,9 @@ GARMIN_ENABLED = bool(GARMIN_EMAIL and GARMIN_PASSWORD)
 GARMIN_TIMES = os.getenv("GARMIN_TIMES", "07:30,16:00")
 GARMIN_TOKENSTORE = os.path.expanduser(os.getenv("GARMINTOKENS", "~/.garminconnect"))
 GARMIN_MAX_AGE_HOURS = float(os.getenv("GARMIN_MAX_AGE_HOURS", "18"))
+GARMIN_LOGIN_COOLDOWN = int(os.getenv("GARMIN_LOGIN_COOLDOWN", "1800"))  # back off this long after a failed login
 GARMIN_FILE = BASE_DIR / ".garmin_snapshot"
+GARMIN_COOLDOWN_FILE = BASE_DIR / ".garmin_cooldown"  # persisted so restarts don't hammer Garmin's login
 _garmin: dict = {"text": "", "ts": 0.0, "loaded": False}
 _garmin_obj = None  # cached logged-in client
 
@@ -2473,13 +2475,36 @@ async def update_life_event():
 
 # --- Garmin: pull the user's watch metrics so she's quietly attuned to how they're doing ---
 
+def _garmin_cooldown_left() -> float:
+    try:
+        return max(0.0, float(GARMIN_COOLDOWN_FILE.read_text()) - time.time()) if GARMIN_COOLDOWN_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
 def _garmin_client():
-    """Return a logged-in Garmin client, reusing the cached token store (login once)."""
+    """Return a logged-in Garmin client, reusing the cached token store. A failed login starts a
+    persisted cooldown so repeated triggers/restarts don't hammer Garmin's rate-limited login.
+    Once a token is cached, login() just resumes it (no fresh login, no rate limit)."""
     global _garmin_obj
     if _garmin_obj is not None:
         return _garmin_obj
-    c = _Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
-    c.login(GARMIN_TOKENSTORE)  # resumes saved tokens, or logs in and saves them
+    left = _garmin_cooldown_left()
+    if left > 0:
+        raise RuntimeError(f"garmin login on cooldown for {int(left)}s (rate-limited earlier)")
+    try:
+        c = _Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
+        c.login(GARMIN_TOKENSTORE)  # resumes saved tokens, or logs in fresh and saves them
+    except Exception:
+        try:
+            GARMIN_COOLDOWN_FILE.write_text(str(time.time() + GARMIN_LOGIN_COOLDOWN))
+        except Exception:
+            pass
+        raise
+    try:
+        GARMIN_COOLDOWN_FILE.unlink()  # success -> clear any cooldown
+    except Exception:
+        pass
     _garmin_obj = c
     return c
 
