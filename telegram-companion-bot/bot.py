@@ -332,6 +332,14 @@ READING_TIMES = os.getenv("READING_TIMES", "09:40,13:40,18:40")
 _interests_cache: dict = {"text": None, "ts": 0.0}
 _reading_cache: dict = {"text": None, "ts": 0.0}
 
+# --- Offline life: periodically invent concrete events in her own world so she has real news ---
+LIFE_SIM_ENABLED = os.getenv("LIFE_SIM_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+LIFE_MODEL = os.getenv("LIFE_MODEL", MOOD_MODEL)
+LIFE_EVENTS_MAX = int(os.getenv("LIFE_EVENTS_MAX", "8"))
+LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
+LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
+_life_events_cache: dict = {"text": None, "ts": 0.0}
+
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
@@ -2305,6 +2313,83 @@ async def update_reading():
         print("[reading] update failed:", e)
 
 
+# --- Offline life: she lives between conversations and has news when you return ---
+
+def _read_life_events() -> list[str]:
+    text = _read_life_file(LIFE_EVENTS_FILE, _life_events_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _append_life_event(line: str):
+    line = line.strip().strip('"').strip()
+    if not line:
+        return
+    existing = []
+    if LIFE_EVENTS_FILE.exists():
+        existing = [l for l in LIFE_EVENTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
+    existing.append(f"[{stamp}] {line}")
+    if len(existing) > LIFE_EVENTS_MAX:
+        existing = existing[-LIFE_EVENTS_MAX:]
+    LIFE_EVENTS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    _life_events_cache["text"] = None
+
+
+def _generate_life_event() -> str:
+    """Invent ONE concrete thing that happened in her own life, grounded in her routine/people."""
+    parts = []
+    sched = _read_schedule_today()
+    if sched:
+        parts.append(f"Her routine today:\n{sched}")
+    people = _read_people()
+    if people:
+        parts.append(f"People in her life:\n{people[:700]}")
+    projects = _read_projects()
+    if projects:
+        parts.append(f"What she's working on:\n{projects[:400]}")
+    arc = _read_life_arc()
+    if arc:
+        parts.append(f"Her life right now:\n{arc[:400]}")
+    recent = _read_life_events()
+    if recent:
+        parts.append("Recent events (do NOT repeat these or rehash the same beat):\n"
+                     + "\n".join(recent[-LIFE_EVENTS_MAX:]))
+    if not parts:
+        return ""
+    sys = (
+        f"Invent ONE small, concrete thing that just happened in {NAME}'s own life while she was "
+        f"off living it — an actual event involving the people, places, work, or activities in her "
+        f"world: something a teammate or coworker did, a bit of news, a small win or mishap, a "
+        f"moment at practice or on a shift. Past tense, third person, ONE specific sentence under "
+        f"25 words. It must be an EVENT in her own day — NOT a feeling, NOT reflection, NOT about "
+        f"her phone or who she's texting. Make it fit her routine and the real people named. Vary "
+        f"it from the recent events. Reply with just the sentence, or the word none."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": "\n\n".join(parts)}],
+            model=LIFE_MODEL,
+        ).strip()
+        if raw and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        print("[life] generation failed:", e)
+    return ""
+
+
+async def update_life_event():
+    if not LIFE_SIM_ENABLED:
+        return
+    try:
+        line = await asyncio.to_thread(_generate_life_event)
+        if line:
+            await asyncio.to_thread(_append_life_event, line)
+            print(f"[life] event: {line}")
+    except Exception as e:
+        print("[life] update failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -2375,6 +2460,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s life right now\n" + "\n\n".join(parts)
             + "\n\nDraw on this naturally — it's the texture of her life, not a list to recite."
         )})
+
+    if LIFE_SIM_ENABLED:
+        life_events = _read_life_events()
+        if life_events:
+            messages.append({"role": "system", "content": (
+                f"# What's been happening in {NAME}'s life\n"
+                + "\n".join("- " + e for e in life_events[-3:])
+                + f"\nReal things that happened to her while she was off living her life. Hers to "
+                  f"bring up if it fits — her news, not a checklist, and don't recite them all."
+            )})
 
     if ATLAS:
         _now_ts = time.time()
@@ -4022,6 +4117,28 @@ async def readnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_reading()
     items = _read_reading()
     await update.message.reply_text(("\U0001F4F0 Latest:\n\u2022 " + items[-1]) if items else "Came up empty that time -- try again.")
+
+
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    items = _read_life_events()
+    if not items:
+        await update.message.reply_text("Nothing's happened yet -- her life fills in over the day (or use /newsnow).")
+        return
+    await update.message.reply_text(f"\U0001F305 What's been happening in {NAME}'s life:\n" + "\n".join("\u2022 " + e for e in items))
+
+
+async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not LIFE_SIM_ENABLED:
+        await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
+        return
+    await update.message.reply_text("\U0001F914 Seeing what she got up to...")
+    await update_life_event()
+    items = _read_life_events()
+    await update.message.reply_text(("\u2022 " + items[-1]) if items else "Nothing came of it that time -- try again.")
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6374,6 +6491,10 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
     unotes = _read_user_notes()
     if unotes:
         parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    life_events = _read_life_events()
+    if life_events:
+        parts.append("Recent things that happened in her own life she might want to share:\n"
+                     + "\n".join(life_events[-3:]))
     recent = conversation_history.get(chat_id, [])[-4:]
     if recent:
         snippet = " / ".join(
@@ -6632,6 +6753,11 @@ def _overnight_mood_reset(chat_id: int):
 async def reading_job(context: ContextTypes.DEFAULT_TYPE):
     if READING_ENABLED:
         await update_reading()
+
+
+async def life_event_job(context: ContextTypes.DEFAULT_TYPE):
+    if LIFE_SIM_ENABLED:
+        await update_life_event()
 
 
 async def nightly_maintenance(context: ContextTypes.DEFAULT_TYPE):
@@ -7053,6 +7179,8 @@ _BASE_COMMANDS = [
     BotCommand("milestones", "View relationship milestones"),
     BotCommand("reading", "See what she's read lately"),
     BotCommand("readnow", "Fetch a fresh reading now"),
+    BotCommand("news", "See what's been happening in her life"),
+    BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -7169,6 +7297,8 @@ def main():
     app.add_handler(CommandHandler("milestones", milestones_cmd))
     app.add_handler(CommandHandler("reading", reading_cmd))
     app.add_handler(CommandHandler("readnow", readnow_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -7278,6 +7408,16 @@ def main():
                 _rtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
                 app.job_queue.run_daily(reading_job, time=_rtime)
             log.info("Reading feed scheduled at %s.", READING_TIMES)
+        if LIFE_SIM_ENABLED:
+            for _lt in LIFE_EVENT_TIMES.split(","):
+                _lt = _lt.strip()
+                try:
+                    _lh, _lm = (int(x) for x in _lt.split(":"))
+                except Exception:
+                    continue
+                _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
+                app.job_queue.run_daily(life_event_job, time=_ltime)
+            log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
