@@ -1200,7 +1200,7 @@ WEATHER_TTL = 3600  # refresh live weather at most every hour
 WSDOT_API_KEY       = os.getenv("WSDOT_API_KEY", "")
 TRAFFIC_ENABLED     = bool(WSDOT_API_KEY)
 TRAFFIC_RADIUS_MILES = float(os.getenv("TRAFFIC_RADIUS_MILES", "10"))
-TRAFFIC_POLL_MINUTES = int(os.getenv("TRAFFIC_POLL_MINUTES", "10"))
+TRAFFIC_POLL_MINUTES = int(os.getenv("TRAFFIC_POLL_MINUTES", "30"))
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
 
