@@ -1,15 +1,22 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Pull the latest bot.py from the repo and restart all bot instances.
+# Pull the latest bot.py from the ~/stp-deploy clone and restart all bot instances.
 # Usage: bash update-all.sh
 
 set -e
 
-REPO="https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot"
 BOT_SRC="$HOME/telegram-bot"
+DEPLOY="$HOME/stp-deploy"   # git clone of the working branch (bot.py lives under it)
 
-echo "==> Pulling latest bot.py..."
-curl -fsSL "$REPO/bot.py" -o "$BOT_SRC/bot.py"
-echo "    Done."
+echo "==> Updating $DEPLOY..."
+if [ ! -d "$DEPLOY/.git" ]; then
+  echo "    ERROR: $DEPLOY is not a git clone. Create it first, e.g.:"
+  echo "    git clone -b claude/push-to-repo-7i2f3c --single-branch \\"
+  echo "      https://github.com/biggieb327-lgtm/sillytavernpresets.git $DEPLOY"
+  exit 1
+fi
+git -C "$DEPLOY" pull --ff-only
+cp "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"
+echo "    bot.py updated from $DEPLOY."
 
 echo ""
 echo "==> Restarting bots..."
