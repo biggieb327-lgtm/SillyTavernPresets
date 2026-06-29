@@ -323,6 +323,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "").strip()
 EMBED_ENABLED = bool(EMBED_MODEL)
 EMBED_DIM = int(os.getenv("EMBED_DIM", "0"))          # optional dim reduction (3-small/large only)
 EMBED_MIN_SIM = float(os.getenv("EMBED_MIN_SIM", "0.35"))  # cosine floor to count as relevant
+EMBED_MAX_CHARS = int(os.getenv("EMBED_MAX_CHARS", "1600"))  # truncate each input; models cap ~512 tokens
 MEMORY_VECTORS_FILE = BASE_DIR / ".memory_vectors.json"
 _memory_vec_cache: dict = {"model": None, "vectors": {}, "loaded": False}
 _vec_lock = threading.Lock()
@@ -563,7 +564,12 @@ def _rewrite_memories(lines: list):
 # --- Semantic retrieval helpers (only used when EMBED_MODEL is set) ---
 
 def _embed(inputs, model: str = None) -> list:
-    """Return a list of embedding vectors for inputs (a str or list[str]). Raises on failure."""
+    """Return a list of embedding vectors for inputs (a str or list[str]). Raises on failure.
+    Each input is truncated to EMBED_MAX_CHARS so a long item can't exceed the model's token
+    limit and 400 (e.g. a long lorebook entry or a wall-of-text message)."""
+    if isinstance(inputs, str):
+        inputs = [inputs]
+    inputs = [s[:EMBED_MAX_CHARS] for s in inputs]
     payload = {"model": model or EMBED_MODEL, "input": inputs}
     if EMBED_DIM > 0:
         payload["dimensions"] = EMBED_DIM
