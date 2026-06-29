@@ -512,40 +512,6 @@ def _append_user_note(note: str):
     _user_notes_cache["text"] = None  # invalidate cache
 
 
-def _extract_user_note(uname: str, user_message: str) -> str:
-    """Sync: return a brief upcoming-thing fact extracted from the user's message, or ''."""
-    sys = (
-        f"Does this message from {uname} mention something specific and upcoming — an event, "
-        f"appointment, deadline, worry, plan, or thing they're excited or nervous about that would "
-        f"be natural to ask about later? If yes, write a single brief note in the third person "
-        f"(e.g. 'has a job interview on Tuesday', 'nervous about a doctor's appointment next week', "
-        f"'excited about a trip next month'). If nothing notable, write: none"
-    )
-    try:
-        raw = call_nanogpt(
-            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
-            model=MOOD_MODEL,
-        ).strip()
-        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
-            return raw
-    except Exception as e:
-        print("[user-notes] extraction failed:", e)
-    return ""
-
-
-async def update_user_notes(chat_id: int, user_message: str):
-    if len(user_message.split()) < 4:
-        return
-    uname = user_names.get(chat_id, "you")
-    try:
-        note = await asyncio.to_thread(_extract_user_note, uname, user_message)
-        if note:
-            await asyncio.to_thread(_append_user_note, note)
-            print(f"[user-notes] added: {note}")
-    except Exception as e:
-        print("[user-notes] update failed:", e)
-
-
 def _append_memory(text: str, auto: bool = False):
     text = " ".join(text.split())  # one line only; multi-line text splits into fake entries
     if not text:
@@ -6043,14 +6009,6 @@ def schedule_reminder(job_queue, r: dict):
 
 
 # --- Auto event reminders: notice a dated event you mention, nudge in-character around it ---
-# Cheap gate so we only spend an extraction call on messages that plausibly mention an event.
-# Day names allow a trailing "s" (Sundays) and recurring words (every/weekly/check-in) are included.
-_EVENT_HINT_RE = re.compile(
-    r"\b(today|tonight|tomorrow|mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|"
-    r"sundays?|weekends?|every|weekly|daily|each|next|appointment|interview|meeting|exam|flight|"
-    r"trip|vacation|deadline|dentist|doctor|wedding|reservation|check[\s-]?in|o'?clock)\b"
-    r"|\b\d{1,2}(:\d{2})?\s?(am|pm)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}/\d{1,2}\b", re.I)
-
 _WEEKDAYS = {"monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "wednesday": 2, "wed": 2,
              "thursday": 3, "thu": 3, "friday": 4, "fri": 4, "saturday": 5, "sat": 5,
              "sunday": 6, "sun": 6}
@@ -6065,46 +6023,23 @@ def _next_occurrence(weekdays, hh: int, mm: int, after: datetime):
     return None
 
 
-def _extract_event(uname: str, user_message: str, now: datetime):
-    """Sync/off-loop: resolve an upcoming event from the message. Returns one of:
-    one-off  -> {'event', 'recurs': False, 'when', 'has_time'}
-    recurring -> {'event', 'recurs': True, 'weekdays': [0..6], 'hh', 'mm'}
-    or None."""
-    sys = (
-        f"Today is {now.strftime('%A %Y-%m-%d %H:%M')} (local time). Does this message from {uname} "
-        f"mention a SPECIFIC upcoming event tied to a day/time, OR a recurring commitment? Reply with "
-        f"ONLY one JSON object:\n"
-        f'- one-off:   {{"event":"<short>","recurs":false,"datetime":"YYYY-MM-DDTHH:MM","has_time":true|false}}\n'
-        f'- recurring: {{"event":"<short>","recurs":true,"weekdays":["Sunday","Wednesday"],"time":"HH:MM"}}\n'
-        f"For recurring, list EVERY day it happens (a daily thing lists all seven days). Resolve "
-        f"relative dates against today. If no clock time is given, use 09:00 (one-off: has_time false). "
-        f"If there's no specific upcoming event, reply exactly: none"
-    )
-    try:
-        raw = call_nanogpt([{"role": "system", "content": sys},
-                            {"role": "user", "content": user_message}], model=EVENT_MODEL).strip()
-    except Exception as e:
-        print("[event] extraction failed:", e)
+def _parse_event_obj(name: str, obj: dict, now: datetime):
+    """Build an event dict from a model's structured event object, or None. Returns:
+    one-off -> {'event','recurs':False,'when','has_time'}; recurring -> {..,'weekdays','hh','mm'}."""
+    name = (name or "").strip()[:80]
+    if not name or not isinstance(obj, dict):
         return None
-    if not raw or raw.lower().startswith("none"):
-        return None
-    data = _extract_json(raw)
-    if not isinstance(data, dict):
-        return None
-    ev = str(data.get("event", "")).strip()
-    if not ev or len(ev) > 80:
-        return None
-    if data.get("recurs"):
-        wds = sorted({_WEEKDAYS[k] for w in (data.get("weekdays") or [])
+    if obj.get("recurs"):
+        wds = sorted({_WEEKDAYS[k] for w in (obj.get("weekdays") or [])
                       if (k := str(w).strip().lower()) in _WEEKDAYS})
         if not wds:
             wds = [0, 1, 2, 3, 4, 5, 6]  # unspecified/daily -> every day
         try:
-            hh, mm = (int(x) for x in str(data.get("time", "09:00")).split(":")[:2])
+            hh, mm = (int(x) for x in str(obj.get("time", "09:00")).split(":")[:2])
         except Exception:
             hh, mm = 9, 0
-        return {"event": ev, "recurs": True, "weekdays": wds, "hh": hh, "mm": mm}
-    dt_str = str(data.get("datetime", "")).strip()
+        return {"event": name, "recurs": True, "weekdays": wds, "hh": hh, "mm": mm}
+    dt_str = str(obj.get("datetime", "")).strip()
     if not dt_str:
         return None
     try:
@@ -6113,7 +6048,41 @@ def _extract_event(uname: str, user_message: str, now: datetime):
             when = when.replace(tzinfo=TZ)
     except Exception:
         return None
-    return {"event": ev, "recurs": False, "when": when, "has_time": bool(data.get("has_time"))}
+    return {"event": name, "recurs": False, "when": when, "has_time": bool(obj.get("has_time"))}
+
+
+def _extract_upcoming(uname: str, user_message: str, now: datetime) -> dict:
+    """One call: a follow-up note about any upcoming thing the user mentioned, AND (if it's tied to a
+    day/time) the structured event. Replaces the two separate note/event extractions. Returns
+    {'note': str|None, 'event': dict|None}."""
+    sys = (
+        f"Today is {now.strftime('%A %Y-%m-%d %H:%M')} (local). From this message by {uname}, return "
+        f"ONE JSON object with three fields:\n"
+        f'  "note": a brief third-person note about any specific upcoming thing they mentioned that '
+        f"would be natural to follow up on (e.g. \"has a job interview Tuesday\", \"nervous about a "
+        f'doctor visit\"), or null if none.\n'
+        f'  "event_name": a short label if that thing is tied to a specific day/time (e.g. "dentist '
+        f'appointment"), else null.\n'
+        f'  "event": the structured timing if event_name is set, else null. One-off: '
+        f'{{"recurs":false,"datetime":"YYYY-MM-DDTHH:MM","has_time":true|false}}. Recurring: '
+        f'{{"recurs":true,"weekdays":["Sunday","Wednesday"],"time":"HH:MM"}} (list EVERY day it '
+        f"happens; a daily thing lists all seven). Resolve relative dates against today; if no clock "
+        f"time, use 09:00 (one-off has_time false).\n"
+        f'Reply with ONLY the JSON. If nothing applies: {{"note":null,"event_name":null,"event":null}}.'
+    )
+    try:
+        raw = call_nanogpt([{"role": "system", "content": sys},
+                            {"role": "user", "content": user_message}], model=EVENT_MODEL).strip()
+    except Exception as e:
+        print("[upcoming] extraction failed:", e)
+        return {"note": None, "event": None}
+    data = _extract_json(raw)
+    if not isinstance(data, dict):
+        return {"note": None, "event": None}
+    note = data.get("note")
+    note = note.strip() if isinstance(note, str) and note.strip().lower() not in ("", "none", "null") else None
+    ev = _parse_event_obj(data.get("event_name") or "", data.get("event") or {}, now)
+    return {"note": note, "event": ev}
 
 
 def _event_reminder_exists(chat_id: int, event: str) -> bool:
@@ -6130,19 +6099,8 @@ def _event_reminder_exists(chat_id: int, event: str) -> bool:
     return False
 
 
-async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_message: str):
-    """After a turn: if the message named a dated event, schedule in-character before/after nudges."""
-    if not EVENT_REMINDERS or not _EVENT_HINT_RE.search(user_message or ""):
-        return
-    uname = user_names.get(chat_id, "you")
-    now = datetime.now(TZ) if TZ else datetime.now()
-    try:
-        ev = await asyncio.to_thread(_extract_event, uname, user_message, now)
-    except Exception as e:
-        print("[event] update failed:", e)
-        return
-    if not ev:
-        return
+def _schedule_event(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ev: dict, now: datetime):
+    """On-loop: turn an extracted event into reminder nudges (recurring, or one-off before/after)."""
     if _event_reminder_exists(chat_id, ev["event"]):
         return
     new = []
@@ -6184,6 +6142,28 @@ async def update_event_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     save_reminders()
     print(f"[event] scheduled {len(new)} nudge(s) for: {ev['event']} "
           f"(next {new[0]['due']}{', recurring' if ev['recurs'] else ''})")
+
+
+async def update_upcoming(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_message: str):
+    """One combined extraction per turn: store a follow-up note about anything upcoming the user
+    mentioned, and schedule event nudges if it's dated. Replaces update_user_notes + the old
+    event-reminder extraction (one model call instead of two)."""
+    if len(user_message.split()) < 4:
+        return
+    uname = user_names.get(chat_id, "you")
+    now = datetime.now(TZ) if TZ else datetime.now()
+    try:
+        res = await asyncio.to_thread(_extract_upcoming, uname, user_message, now)
+    except Exception as e:
+        print("[upcoming] update failed:", e)
+        return
+    note = res.get("note")
+    if note:
+        await asyncio.to_thread(_append_user_note, note)
+        print(f"[user-notes] added: {note}")
+    ev = res.get("event")
+    if ev and EVENT_REMINDERS and context.job_queue:
+        _schedule_event(context, chat_id, ev, now)
 
 
 async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6763,10 +6743,9 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     if SCENE_CONTINUITY:
         asyncio.create_task(update_scene(chat_id))  # track physical scene for next turn
     if user_memory_text and not user_memory_text.startswith("[sent "):
-        asyncio.create_task(update_user_notes(chat_id, user_memory_text))
+        # One combined call for upcoming-thing note + event scheduling; memory stays separate.
+        asyncio.create_task(update_upcoming(context, chat_id, user_memory_text))
         asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
-        if EVENT_REMINDERS and context.job_queue:
-            asyncio.create_task(update_event_reminders(context, chat_id, user_memory_text))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
