@@ -167,6 +167,7 @@ EVENT_BEFORE_MIN = int(os.getenv("EVENT_BEFORE_MIN", "45"))         # "good luck
 EVENT_AFTER_HOURS = float(os.getenv("EVENT_AFTER_HOURS", "2.5"))     # "how'd it go" this many hours after
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "25"))  # seconds; a hung/adversarial file is killed, not left to hang forever
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
 # Separate model for document/card analysis — should be an instruction model,
 # not a roleplay-tuned one, so it won't perform the character it's reading about.
@@ -2768,6 +2769,7 @@ async def update_garmin():
 def _recent_stress_high():
     """Off-loop: (sustained_high, avg) over the last STRESS_SUSTAINED_MIN minutes of Garmin stress.
     Garmin marks readings -1/-2 when it can't measure (e.g. during activity); those are skipped."""
+    global _garmin_obj
     if not STRESS_ALERTS or _Garmin is None:
         return (False, 0)
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
@@ -2775,6 +2777,9 @@ def _recent_stress_high():
         data = _garmin_client().get_stress_data(today) or {}
     except Exception as e:
         print("[stress] fetch failed:", e)
+        # The cached session may have broken mid-runtime (not just at login) — drop it so the
+        # next poll attempts a fresh login instead of retrying the same broken client forever.
+        _garmin_obj = None
         return (False, 0)
     arr = data.get("stressValuesArray") or []
     cutoff_ms = (time.time() - STRESS_SUSTAINED_MIN * 60) * 1000
@@ -2828,6 +2833,7 @@ async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 def _body_battery_now():
     """Off-loop: the latest Body Battery value (0-100) from Garmin, or None."""
+    global _garmin_obj
     if not BB_ALERTS or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
@@ -2835,6 +2841,9 @@ def _body_battery_now():
         bb = (_garmin_client().get_stats(today) or {}).get("bodyBatteryMostRecentValue")
     except Exception as e:
         print("[bb] fetch failed:", e)
+        # See _recent_stress_high: drop a session that broke mid-runtime so the next poll
+        # re-logs-in instead of retrying the same broken client forever.
+        _garmin_obj = None
         return None
     return int(bb) if isinstance(bb, (int, float)) and bb >= 0 else None
 
@@ -2881,6 +2890,7 @@ async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 def _resting_hr_today():
     """Off-loop: today's resting heart rate from Garmin, or None."""
+    global _garmin_obj
     if not RHR_ALERTS or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
@@ -2888,6 +2898,9 @@ def _resting_hr_today():
         rhr = (_garmin_client().get_stats(today) or {}).get("restingHeartRate")
     except Exception as e:
         print("[rhr] fetch failed:", e)
+        # See _recent_stress_high: drop a session that broke mid-runtime so the next poll
+        # re-logs-in instead of retrying the same broken client forever.
+        _garmin_obj = None
         return None
     return int(rhr) if isinstance(rhr, (int, float)) and rhr > 0 else None
 
@@ -6141,9 +6154,10 @@ async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"based on the material below. Cover what they've talked about and any meaningful moments. "
         f"No headers, no bullets, no markdown."
     )
-    raw = call_nanogpt(
+    raw = await asyncio.to_thread(
+        call_nanogpt,
         [{"role": "system", "content": sys_msg}, {"role": "user", "content": "\n\n".join(parts)}],
-        model=MOOD_MODEL,
+        MOOD_MODEL,
     )
     await update.message.reply_text(raw.strip() or "Nothing to recap.")
 
@@ -6731,7 +6745,15 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    return await proc.communicate()
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT)
+    except asyncio.TimeoutError:
+        # A malformed/adversarial file can make ffmpeg hang indefinitely; kill it instead of
+        # leaking a zombie process and blocking this call forever. Callers already treat any
+        # exception from this function as a soft failure (asyncio.gather(..., return_exceptions=True)).
+        proc.kill()
+        await proc.wait()
+        raise TimeoutError(f"ffmpeg timed out after {FFMPEG_TIMEOUT}s")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7109,7 +7131,8 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _guard(update):
         return
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
-    response = _session.get(
+    response = await asyncio.to_thread(
+        _session.get,
         "https://nano-gpt.com/api/subscription/v1/usage",
         headers=headers,
         timeout=30,
