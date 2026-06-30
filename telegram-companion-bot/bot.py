@@ -12,11 +12,13 @@ import logging
 import signal
 import tempfile
 import threading
+import socket
+import ipaddress
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, unquote
+from urllib.parse import parse_qs, urlparse, urljoin, unquote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -175,6 +177,7 @@ TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
+LINK_MAX_REDIRECTS = int(os.getenv("LINK_MAX_REDIRECTS", "5"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
@@ -4432,13 +4435,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversation_history[chat_id] = []
     last_seen[chat_id] = time.time()
     user_names[chat_id] = update.effective_user.first_name or "you"
-    set_owner(chat_id)  # whoever starts becomes the heartbeat recipient
-    save_state()
+    # Owner-claiming is a global, one-time side effect — gate it on allowlist membership so an
+    # unauthorized caller can never hijack ownership of a fresh/unconfigured bot by messaging
+    # first. The greeting itself stays visible to anyone, matching /chatid's spirit.
+    if _is_allowed(update.effective_user.id):
+        set_owner(chat_id)  # whoever starts becomes the heartbeat recipient
+        save_state()
     greeting = fill(FIRST_MES_RAW, NAME, user_names[chat_id]) or f"Hi, I'm {NAME}."
     await update.message.reply_text(greeting)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     lines = [
         f"*{NAME} — available commands*",
         "",
@@ -4539,6 +4548,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the current character card fields."""
+    if not _guard(update):
+        return
     lines = [f"*Character card — {NAME}*", ""]
     for label, key in _CARD_FIELDS.items():
         val = (_card_data.get(key) or "").strip()
@@ -4558,6 +4569,8 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /setcard <field> <value>
     /setcard <field> clear  — empty the field
     """
+    if not _guard(update):
+        return
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text(
@@ -4586,6 +4599,8 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     await update.message.reply_text(
         f"🤖 Character: *{NAME}*\nModel: `{NANOGPT_MODEL}`", parse_mode="Markdown"
     )
@@ -4649,6 +4664,8 @@ def _nanogpt_subscription_models():
 
 
 async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args
 
@@ -4734,6 +4751,8 @@ SETTINGS_INFO = {
 
 
 async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     args = context.args
 
     if not args:
@@ -4799,12 +4818,16 @@ def apply_overrides():
 
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     conversation_history[update.effective_chat.id] = []
     save_state()
     await update.message.reply_text("🗑️ Conversation history cleared!")
 
 
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Deliberately unguarded: a new user must be able to discover their own ID to get added
+    # to ALLOWED_USERS in the first place. Reveals nothing but the caller's own chat ID.
     await update.message.reply_text(
         f"Your chat ID: `{update.effective_chat.id}`", parse_mode="Markdown"
     )
@@ -4821,6 +4844,8 @@ async def _reply_chunked(update: Update, text: str):
 
 
 async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
@@ -4842,6 +4867,8 @@ async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     label = mood_label(chat_id)
     s = mood_now(chat_id)
@@ -5013,6 +5040,8 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     ms_list = milestones.get(chat_id) or []
     if not ms_list:
@@ -5026,6 +5055,8 @@ async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
@@ -5067,6 +5098,8 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Pinned memories ---
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
@@ -5080,6 +5113,8 @@ async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pinned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     pl = pinned.get(chat_id) or []
     if not pl:
@@ -5091,6 +5126,8 @@ async def pinned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /unpin <number from /pinned>")
@@ -5107,6 +5144,8 @@ async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Boundaries ---
 async def boundary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     if not args:
@@ -5136,6 +5175,8 @@ async def boundary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def boundaries_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     bl = boundaries.get(chat_id) or []
     if not bl:
@@ -5152,6 +5193,8 @@ async def boundaries_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Vibe mode ---
 async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     if not args or args[0].lower() == "status":
@@ -5194,6 +5237,8 @@ async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Vent mode ---
 async def vent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     turning_off = args and args[0].lower() == "off"
@@ -5214,6 +5259,8 @@ async def vent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Energy level ---
 async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     if not args:
@@ -5237,6 +5284,8 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Wardrobe ---
 async def wardrobe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     outfits = wardrobe.get("outfits") or []
     current = wardrobe.get("current")
     if not outfits and not current:
@@ -5258,6 +5307,8 @@ async def wardrobe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         await update.message.reply_text("Usage: /addoutfit <description>\nExample: /addoutfit oversized cream sweater")
@@ -5270,6 +5321,8 @@ async def add_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         current = wardrobe.get("current") or "(none set)"
@@ -5289,6 +5342,8 @@ async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def del_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /deloutfit <number from /wardrobe>")
         return
@@ -5306,6 +5361,8 @@ async def del_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Nudge budget ---
 async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     today = _today_str()
@@ -5352,6 +5409,8 @@ async def _send_voice_reply(context, chat_id: int, text: str):
 
 
 async def voice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     arg = args[0].lower() if args else ""
@@ -5396,12 +5455,16 @@ def _build_menu() -> InlineKeyboardMarkup:
 
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     await update.message.reply_text("⚙️ Menu", reply_markup=_build_menu())
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat_id
@@ -5527,6 +5590,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
@@ -5540,6 +5605,8 @@ async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     keyword = " ".join(context.args).strip().lower() if context.args else ""
     if not keyword:
@@ -5670,6 +5737,8 @@ def _mentions_third_party(text: str, uname: str) -> bool:
 async def correct_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fix a wrong memory in one step: remove anything matching <wrong>, then (optionally)
     remember <right> in its place. Usage: /correct <wrong> => <right>"""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     raw = " ".join(context.args).strip() if context.args else ""
     if not raw:
@@ -5722,6 +5791,8 @@ async def correct_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search facts and summaries for a keyword and show matches."""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     keyword = " ".join(context.args).strip().lower() if context.args else ""
     if not keyword:
@@ -5757,6 +5828,8 @@ async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     args = list(context.args or [])
     # Optional trailing cap like "x12" = 12 monthly payments left.
     count = None
@@ -5807,6 +5880,8 @@ async def addpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addevery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     args = context.args or []
     usage = (
         "Usage: /addevery <name> <amount> <start YYYY-MM-DD> <interval-days> [count]\n"
@@ -5844,6 +5919,8 @@ async def addevery(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not payments:
         await update.message.reply_text(
             "No payments saved yet. Add one with:\n"
@@ -5867,6 +5944,8 @@ async def list_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /delpayment <number from /payments, or name>")
         return
@@ -5903,6 +5982,8 @@ EDIT_USAGE = (
 
 
 async def editpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     args = context.args or []
     if len(args) < 3 or not args[0].isdigit():
         await update.message.reply_text(EDIT_USAGE)
@@ -6004,6 +6085,8 @@ async def editpayment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remind_payments_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     uname = user_names.get(update.effective_chat.id) or (update.effective_user.first_name or "you")
     start, end = week_window()
     due = due_between(start, end)
@@ -6039,6 +6122,8 @@ async def _send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     sent = await _send_backup(context, update.effective_chat.id)
     if sent:
         await update.message.reply_text("💾 Backup sent: " + ", ".join(sent) +
@@ -6049,6 +6134,8 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Summarize recent conversation, including rolled-up history if available."""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     uname = user_names.get(chat_id, "you")
     hist = conversation_history.get(chat_id, [])
@@ -6079,6 +6166,8 @@ async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause proactive messages for X hours (/quiet 3h) or cancel (/quiet off)."""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     arg = (context.args[0].strip().lower() if context.args else "").rstrip("h").strip()
     if arg in ("off", "cancel", "0", ""):
@@ -6115,6 +6204,8 @@ async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /life <text>   — replace with new arc description
     /life add <text> — append a line to the existing arc
     """
+    if not _guard(update):
+        return
     args = context.args or []
     if not args:
         current = LIFE_ARC_FILE.read_text(encoding="utf-8").strip() if LIFE_ARC_FILE.exists() else "(empty)"
@@ -6142,6 +6233,8 @@ async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _context_file_cmd(file: "Path", cache: dict, label: str):
     """Return an (args, file, cache, label) handler body factory — shared logic for /people, /projects."""
     async def _cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _guard(update):
+            return
         args = context.args or []
         if not args:
             current = file.read_text(encoding="utf-8").strip() if file.exists() else "(empty)"
@@ -6178,6 +6271,8 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /schedule <text>   — replace entire schedule
     /schedule add <text> — append a line
     """
+    if not _guard(update):
+        return
     args = context.args or []
     if not args:
         current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
@@ -6203,6 +6298,8 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Append a mid-day note to day.txt so the character picks it up in context."""
+    if not _guard(update):
+        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         current = DAY_FILE.read_text(encoding="utf-8").strip() if DAY_FILE.exists() else "(empty)"
@@ -6216,6 +6313,8 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually append a note about yourself to user_notes.txt."""
+    if not _guard(update):
+        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         current = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else "(empty)"
@@ -6232,6 +6331,8 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /notes del <n>   — delete entry n
     /notes clear     — wipe all
     """
+    if not _guard(update):
+        return
     args = context.args or []
     existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
     lines = [l for l in existing.splitlines() if l.strip()]
@@ -6500,6 +6601,8 @@ async def update_upcoming(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user
 
 
 async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     due, text = parse_when(context.args or [])
     if due is None or not text:
         await update.message.reply_text(
@@ -6521,6 +6624,8 @@ async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
                   key=lambda r: r["due"])
     if not mine:
@@ -6532,6 +6637,8 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /delreminder <number from /reminders, or id>")
         return
@@ -6553,6 +6660,8 @@ async def delreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text(
@@ -6993,7 +7102,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lead = caption
 
     user_prompt = f"{lead}\n\n{formatted}"
-    user_mem = user_prompt
+    # Persist only a short placeholder as the trusted conversation turn — the full file body
+    # (up to DOCUMENT_MAX_SIZE_MB, can be an entire character card with its own system_prompt/
+    # description) is untrusted and goes through the quarantine channel instead, mirroring the
+    # PDF branch's user_mem pattern. The live reply above still sees the full formatted content.
+    user_mem = f"[uploaded JSON file: {fname}]" + (f" {caption}" if caption else "")
+    _note_untrusted(chat_id, f"json:{fname}", formatted)
 
     try:
         await ensure_weather()
@@ -7008,6 +7122,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     response = _session.get(
         "https://nano-gpt.com/api/subscription/v1/usage",
@@ -7132,9 +7248,44 @@ def _fetch_reddit(url: str) -> str:
     return "\n\n".join(parts)
 
 
+def _url_host_is_safe(url: str) -> bool:
+    """SSRF guard: True only if every IP the URL's host resolves to is public/routable. Blocks
+    loopback, link-local (which includes the 169.254.169.254 cloud-metadata address), RFC1918
+    private ranges, and other reserved/multicast/unspecified addresses, so a user-pasted URL can
+    never reach an internal service. Fails closed on any resolution error."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        for info in socket.getaddrinfo(parsed.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                    or ip.is_multicast or ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _fetch_generic(url: str) -> str:
-    html = _session.get(url, headers={"User-Agent": _HTTP_UA},
-                        timeout=LINK_FETCH_TIMEOUT).text
+    # Validate the URL *and every redirect hop* before fetching — a redirect could otherwise
+    # send an initially-safe public URL to an internal address (DNS-rebinding-style bypass).
+    for _ in range(LINK_MAX_REDIRECTS + 1):
+        if not _url_host_is_safe(url):
+            raise ValueError(f"refusing to fetch a non-public host: {urlparse(url).hostname}")
+        resp = _session.get(url, headers={"User-Agent": _HTTP_UA},
+                            timeout=LINK_FETCH_TIMEOUT, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("Location")
+            if not location:
+                break
+            url = urljoin(url, location)
+            continue
+        resp.raise_for_status()
+        html = resp.text
+        break
+    else:
+        raise ValueError("too many redirects")
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
     text = re.sub(r"(?is)<(script|style|nav|header|footer|aside|form|noscript).*?</\1>", " ", html)
@@ -7714,6 +7865,8 @@ async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     if len(args) < 3 or args[0].lower() not in ("daily", "every"):
@@ -7739,6 +7892,8 @@ async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cron_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     jobs = [j for j in cron_jobs if j["chat_id"] == chat_id]
     if not jobs:
@@ -7749,6 +7904,8 @@ async def cron_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cron_del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args or []
     if not args or not args[0].isdigit():
@@ -7824,6 +7981,8 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     hint = " ".join(context.args).strip() if context.args else ""
@@ -7832,6 +7991,8 @@ async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def heartbeat_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -7888,6 +8049,8 @@ async def nightly_maintenance(context: ContextTypes.DEFAULT_TYPE):
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick dashboard: mood, outfit, today's context, and time since last message."""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     lines = [f"*{NAME} — status*", ""]
 
@@ -8141,6 +8304,8 @@ def _format_travel_times(times: list, lat=None, lon=None) -> str:
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Store the user's location (static or live); for traffic-enabled bots, acknowledge it."""
+    if not _guard(update):
+        return
     chat_id = update.effective_chat.id
     loc = (update.message or update.edited_message).location
 
@@ -8169,6 +8334,8 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not TRAFFIC_ENABLED:
         await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
         return
@@ -8185,6 +8352,8 @@ async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def incidents_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _guard(update):
+        return
     if not TRAFFIC_ENABLED:
         await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
         return
