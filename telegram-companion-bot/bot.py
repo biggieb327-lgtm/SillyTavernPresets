@@ -5560,7 +5560,10 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if removed:
         await update.message.reply_text(f"🧹 Removed {removed} fact(s) matching \"{keyword}\".")
     else:
-        await update.message.reply_text(f"Nothing found matching \"{keyword}\".")
+        await update.message.reply_text(
+            f"Nothing found matching \"{keyword}\". "
+            f"(That searches the /memory facts. For the NPC memories shown by /mems, use /delmem.)"
+        )
 
 
 async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5626,7 +5629,10 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✓ Removed {before - len(entries)} entr(ies) matching '{arg}'."
             )
         else:
-            await update.message.reply_text(f"No memories matched '{arg}'.")
+            await update.message.reply_text(
+                f"No NPC memories matched '{arg}'. "
+                f"(That searches /mems. For the long-term facts/summary shown by /memory, use /forget.)"
+            )
 
 
 async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
