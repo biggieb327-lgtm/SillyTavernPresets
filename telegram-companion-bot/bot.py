@@ -1401,12 +1401,30 @@ MAX_UNTRUSTED_NOTES = int(os.getenv("MAX_UNTRUSTED_NOTES", "60"))
 MAX_MEMORY_ITEM_CHARS = int(os.getenv("MAX_MEMORY_ITEM_CHARS", "500"))
 try:
     from bot_app.services.memory import MemoryService as _MemoryService
+    from bot_app.core.guards import GuardService as _GuardService
     _mem_service = _MemoryService(max_item_chars=MAX_MEMORY_ITEM_CHARS,
                                   max_untrusted_notes=MAX_UNTRUSTED_NOTES)
+    _guards = _GuardService(is_allowed_fn=_is_allowed, rate_ok_fn=_rate_ok)
     log.info("bot_app loaded — untrusted-notes channel active.")
 except Exception as _e:
     _mem_service = None
+    _guards = None
     log.warning("bot_app unavailable (%s); untrusted-notes channel off, inline behavior unchanged.", _e)
+
+
+def _guard(update, rate_limit: bool = False) -> bool:
+    """Central access check — True if the user may proceed. Routes through bot_app's GuardService
+    when loaded, else falls back to the inline _is_allowed/_rate_ok checks with identical
+    semantics. Pass rate_limit=True only where the handler previously called _rate_ok (it consumes
+    a rate slot via a side effect)."""
+    uid = update.effective_user.id
+    if _guards is not None:
+        return _guards.check_user(uid, rate_limit=rate_limit).ok
+    if not _is_allowed(uid):
+        return False
+    if rate_limit and not _rate_ok(uid):
+        return False
+    return True
 
 
 def _note_untrusted(chat_id: int, source: str, content: str):
@@ -6518,9 +6536,7 @@ async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not _rate_ok(update.effective_user.id):
+    if not _guard(update, rate_limit=True):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
@@ -6583,9 +6599,7 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not _rate_ok(update.effective_user.id):
+    if not _guard(update, rate_limit=True):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
@@ -6818,9 +6832,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_pdf and not is_json:
         return  # unsupported file type — let it fall through silently
 
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not _rate_ok(update.effective_user.id):
+    if not _guard(update, rate_limit=True):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
@@ -7134,9 +7146,7 @@ def fetch_link(url: str):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not _rate_ok(update.effective_user.id):
+    if not _guard(update, rate_limit=True):
         return
     user_message = update.message.text
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
@@ -7292,7 +7302,7 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
@@ -7340,7 +7350,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """React in character to a sticker the user sent."""
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
