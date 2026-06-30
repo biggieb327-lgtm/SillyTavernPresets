@@ -4937,6 +4937,11 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Memory: {len(_read_memories())} NPC notes \u00b7 {len(milestones.get(chat_id) or [])} milestones \u00b7 "
         f"{len([r for r in reminders if r.get('chat_id') == chat_id])} reminders"
     )
+    if _mem_service is not None:
+        n_unt = len(_mem_service.store.untrusted_notes.get(chat_id) or [])
+        lines.append(f"bot_app: {on(True)} loaded \u00b7 {n_unt} untrusted note(s) quarantined")
+    else:
+        lines.append(f"bot_app: {on(False)} not loaded (untrusted-notes channel off)")
     errs, last_err = 0, ""
     try:
         logf = BASE_DIR / "bot.log"
