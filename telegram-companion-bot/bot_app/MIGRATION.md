@@ -1,8 +1,25 @@
 # Migration plan: bot.py → bot_app/ (strangler-fig, tailored to this deploy)
 
-Status: **planning only.** Nothing in `bot.py` or the deploy scripts has changed yet.
-The `bot_app/` scaffold is committed as a foundation; the live bots still run entirely
-from `bot.py`.
+## Status
+
+`bot.py` remains the entry point; it now delegates into `bot_app/` for the migrated
+subsystems. Each `_mem_service`/`_guards`/`_action_allowed`/`_ingestion` call site is guarded
+so a missing package is a no-op.
+
+- ✅ **Step 0 — deploy plumbing.** `update-all.sh` syncs `bot_app/`; defensive import. *Verified in production.*
+- ✅ **Step 3 — untrusted-notes channel.** Attachment captions quarantined + persisted. *Verified in production.*
+- ✅ **Step 2 — guards.** All 18 guarded handlers route through `GuardService` via `_guard()`.
+- ✅ **Step 4 — action allowlist.** react/selfie/search pass `ActionRequest` allowlist + bounds before side effects.
+- ✅ **Step 5 — ingestion isolation.** JSON document parsing routes through `IngestionService.parse_json_bytes`.
+- ⏭️ **Step 1 — config.** *Deliberately skipped.* Moving env vars into `Settings` is lateral churn;
+  done opportunistically only as a subsystem that needs a var migrates.
+- ⏭️ **Step 7 — command bodies.** *Deliberately deferred.* Bulk-migrating 60+ working command
+  bodies is high churn / low value; no security or correctness benefit. Do piecemeal if ever.
+- ⛔ **Step 6 — `assemble_messages`.** *Intentionally last.* The riskiest code in the bot; only move
+  behind parity tests (capture current message lists, diff against the new builder).
+
+The four security-relevant steps (0, 2, 3, 4) plus ingestion isolation are complete. What
+remains is low-value cleanup deferred on purpose.
 
 ## Guiding principle
 
