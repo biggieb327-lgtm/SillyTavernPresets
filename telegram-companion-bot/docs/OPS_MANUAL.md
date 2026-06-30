@@ -6,13 +6,23 @@ Day-to-day operation reference for a running bot.
 
 ## Starting & Stopping
 
-### Start all 5 bots at once
+### Update bot.py + bot_app/ and restart everything (normal day-to-day operation)
 ```bash
-bash ~/start-bots.sh
+bash ~/telegram-bot/update-all.sh
 ```
-Kills any running instances, then opens each character in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, `priya`).
+Pulls the latest `bot.py`/`bot_app/`/helper scripts from the `~/stp-deploy` git clone, then
+restarts every deployed instance (`nora`, `bonnie`, `cass`, `emily`, `jules`, and `priya` if her
+directory exists) supervised under `run-bot.sh`. This is the one command to run after any code
+change — see the repo-root `CLAUDE.md` for the full deploy workflow.
 
-### Start a single bot
+### Start (or restart) a single bot, supervised
+```bash
+bash ~/telegram-bot/run-bot.sh ~/nora-bot nora
+```
+Kills any existing session/process for that instance, then relaunches it under a supervisor loop
+that auto-restarts it if it ever exits (crash, OOM kill, etc.) and rotates `bot.log` at ~5MB.
+
+### Run a single bot in the foreground (debugging only, not supervised)
 ```bash
 source ~/telegram-bot/venv/bin/activate
 python ~/telegram-bot/bot.py ~/nora-bot
@@ -32,16 +42,12 @@ Press `Ctrl+B`, then `D`.
 ```bash
 tmux kill-session -t nora
 ```
+Note: a session under `run-bot.sh`'s supervisor will restart itself after a few seconds unless you
+also kill the supervisor process for that instance.
 
 ### Stop all bots
 ```bash
 pkill -f bot.py
-```
-
-### Update bot.py and restart
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o ~/telegram-bot/bot.py
-bash ~/start-bots.sh
 ```
 
 ---
@@ -57,13 +63,16 @@ bash ~/start-bots.sh
 | `/recap` | 2–3 sentence summary of recent conversation |
 | `/help` | Show all available commands |
 | `/menu` | Open the inline button shortcut menu |
+| `/diag` | Health/feature report: what's on, embedded counts, Garmin status, recent log errors |
+| `/chatid` | Show your Telegram chat ID (works even if you're not in `ALLOWED_USERS` yet) |
 
-### Memory
+### Memory — long-term facts/summary (`/memory`, `/forget`)
 | Command | What it does |
 |---|---|
 | `/memory` | View long-term and recent memory summaries + facts |
 | `/remember <fact>` | Save a fact to long-term memory |
-| `/forget` | Wipe all memory (or `/forget <keyword>` to remove matching facts) |
+| `/forget` | Wipe all long-term + recent memory (or `/forget <keyword>` to remove matching facts) |
+| `/correct <wrong> => <right>` | Remove a wrong memory and optionally replace it, routed to the correct store |
 | `/recall <keyword>` | Search memory for a keyword |
 | `/exportmemory` | Download a full memory export as text |
 | `/milestones` | View relationship milestones |
@@ -72,6 +81,19 @@ bash ~/start-bots.sh
 | `/unpin <n>` | Remove a pinned memory by number |
 | `/boundary <text>` | Add a soft boundary note |
 | `/boundaries` | List boundaries |
+| `/backup` | Sends `state.json`/`reminders.json`/`payments.json` to you (owner-only) |
+
+### Memory — NPC/world notes (`/mems`, `/delmem`)
+A separate, keyword-retrieved store for facts about third parties (NPCs, relationships) — distinct
+from the long-term facts above. If `/delmem` says nothing matched, the keyword is probably in the
+other store — try `/forget` instead (and vice versa).
+
+| Command | What it does |
+|---|---|
+| `/addmem <text>` | Manually add an NPC/world memory |
+| `/mems` | List all NPC/world memories |
+| `/delmem <keyword or n>` | Remove an NPC/world memory by keyword or list number |
+| `/episodes <query>` | Search archived past conversation moments (requires `EMBED_MODEL` + `EPISODIC_RECALL`) |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.
@@ -100,12 +122,9 @@ These files shape what the character knows and references. All are editable from
 | `/vent` | Toggle vent mode (listening only, no advice) |
 | `/energy <level>` | Set your energy: `high` / `low` / `crash` |
 
-### Inside Jokes & Wardrobe
+### Wardrobe
 | Command | What it does |
 |---|---|
-| `/addjoke phrase \| meaning \| tone` | Add an inside joke |
-| `/jokes` | List inside jokes |
-| `/deljoke <id>` | Remove a joke by ID |
 | `/wardrobe` | List saved outfits |
 | `/addoutfit <desc>` | Add an outfit description |
 | `/outfit <n>` | Set current outfit (used in selfie generation) |
@@ -115,14 +134,27 @@ These files shape what the character knows and references. All are editable from
 | Command | What it does |
 |---|---|
 | `/selfie [hint]` | Generate a selfie (optional scene hint) |
-| `/selfimage` | View the character's current self-image traits |
-| `/reflect` | Trigger the nightly self-reflection now |
+
+### Reading & News (offline-life features)
+| Command | What it does |
+|---|---|
+| `/reading` | View what she's read lately (requires `SEARCH_ENABLED`) |
+| `/readnow` | Trigger an interest-topic reading pass now |
+| `/news` | View recent things that happened in her own life |
+| `/newsnow` | Trigger an offline-life event now |
+
+### Health (Garmin — only on bots with `GARMIN_EMAIL`/`GARMIN_PASSWORD` set)
+| Command | What it does |
+|---|---|
+| `/health` | Latest cached Garmin snapshot (sleep, HR, steps, body battery, stress) |
+| `/healthnow` | Force a fresh Garmin pull |
+| `/stress` | Current stress-monitoring status and threshold |
 
 ### Proactive Messages
 | Command | What it does |
 |---|---|
 | `/heartbeat` | Trigger a proactive check-in now |
-| `/nudges` | Show today's proactive message budget |
+| `/nudges [n]` | Show today's proactive message budget, or set the daily limit (`/nudges 0` = unlimited) |
 | `/quiet <h>` | Pause proactive messages for X hours (e.g. `/quiet 3`) |
 | `/quiet off` | Cancel quiet mode early |
 
@@ -154,17 +186,23 @@ These files shape what the character knows and references. All are editable from
 | `/payments` | List all bills |
 | `/delpayment <n>` | Remove a bill |
 | `/editpayment <n> <field> <value>` | Edit a bill field |
-| `/week` | Payment summary for the current week |
+| `/week` / `/remindpayments` | Payment summary / reminder for the current week |
+
+### Traffic (if `TRAFFIC_ENABLED` and a location has been shared)
+| Command | What it does |
+|---|---|
+| `/traffic` | Current traffic-polling status |
+| `/incidents` | Recent traffic incidents near the shared location |
 
 ### Settings & Info
 | Command | What it does |
 |---|---|
+| `/card` | Show info about the active character card |
+| `/setcard <file>` | Switch the character card (file must exist in the bot's directory) |
 | `/model` | Show active models |
 | `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `vision`, `reaction`, `mood`, `fallback`) |
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats |
-| `/chatid` | Show your Telegram user ID |
-| `/backup` | Download a memory backup file |
 
 ---
 
@@ -223,18 +261,23 @@ Find your chat ID key and edit `facts`. Changes take effect on the next message.
 
 ## Proactive Messages (Heartbeat)
 
-The bot sends unprompted check-ins on a random timer (default 2–6 hours) during waking hours.
+The bot sends unprompted check-ins on a random timer (default 2–6 hours). The next tick is
+persisted across restarts (`.next_heartbeat`), so redeploying doesn't reset the countdown. A tick
+is skipped (not rescheduled early) during quiet hours, if you were recently active, or if the
+daily nudge budget is exhausted — in all three cases it saves a draft instead of sending nothing.
 
 Before sending, it runs a quick background call to generate a concrete hook — drawing on her current life arc, weather, your notes, and the last exchange — so the message feels like she actually thought of something rather than a templated check-in.
 
 Configure in `.env`:
 ```
-HEARTBEAT_MIN=2          # minimum hours between heartbeats
-HEARTBEAT_MAX=6          # maximum hours
-PROACTIVE_HOUR_START=9   # don't send before this hour (local time)
-PROACTIVE_HOUR_END=21    # don't send after this hour
-NUDGE_MAX=3              # max proactive messages per day
+HEARTBEAT_MIN_HOURS=2    # minimum hours between heartbeats
+HEARTBEAT_MAX_HOURS=6    # maximum hours
+QUIET_START=23:00        # no proactive messages sent after this local time
+QUIET_END=08:00          # ...until this local time
 ```
+
+Daily proactive message limit (not an env var) — set per chat with `/nudges N` (e.g. `/nudges 6`,
+or `/nudges 0` for unlimited; defaults to 3/day).
 
 Pause proactives temporarily: `/quiet 3` (3 hours), `/quiet off` to cancel.
 
@@ -298,13 +341,17 @@ To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use 
 
 ## Running Multiple Characters
 
-All 5 bots share one `bot.py` and launch from their own directories:
+All bots share one `bot.py` (+ `bot_app/`) and launch from their own directories. Currently live:
+`nora`, `bonnie`, `cass`, `emily`, `jules` (Priya's character files exist in the repo but she isn't
+deployed yet). Restart all of them at once with:
 
 ```bash
-bash ~/start-bots.sh
+bash ~/telegram-bot/update-all.sh
 ```
 
-The script kills any running instances and opens each in a named tmux session. Sessions: `emily`, `bonnie`, `nora`, `cass`, `priya`.
+This pulls the latest code and relaunches each instance found on disk under `run-bot.sh`'s
+supervisor, in its own named tmux session (`nora`, `bonnie`, `cass`, `emily`, `jules`, and `priya`
+once she's built).
 
 Each character is fully isolated — separate state, memory, context files, and bot token. They have no knowledge of each other.
 
@@ -314,7 +361,7 @@ Each character is fully isolated — separate state, memory, context files, and 
 
 ```bash
 tmux attach -t nora          # live output
-tail -f ~/nora-bot/bot.log   # if launched via run-bot.sh
+tail -f ~/nora-bot/bot.log   # full log (rotates to bot.log.1 at ~5MB, one backup kept)
 ```
 
 ---
@@ -343,7 +390,7 @@ tail -f ~/nora-bot/bot.log   # if launched via run-bot.sh
 
 **Reminders not firing**
 - Requires `python-telegram-bot[job-queue]`: `pip install "python-telegram-bot[job-queue]"`
-- Check that `BOT_TIMEZONE` in `.env` is set correctly (e.g. `America/Chicago`)
+- Check that `TIMEZONE` in `.env` is set correctly (e.g. `America/Chicago`)
 
 **State file corrupted on startup**
 - The bot renames `state.json` to `state.json.corrupted` and starts fresh
@@ -352,4 +399,10 @@ tail -f ~/nora-bot/bot.log   # if launched via run-bot.sh
 **Proactive messages stopped**
 - Check `/nudges` — daily budget may be exhausted
 - Check `/quiet` status in `/status`
-- Verify `PROACTIVE_HOUR_START`/`END` match your timezone
+- Verify `QUIET_START`/`QUIET_END` match your timezone (set via `TIMEZONE`)
+
+**`bot_app unavailable` warning in the log**
+- `bot.py` imports the `bot_app/` package defensively — a missing/half-deployed copy disables the
+  guard-consolidation/untrusted-notes/action-allowlist subsystems but never crashes the bot
+- Confirm `bot_app/` exists next to `bot.py` (`ls ~/telegram-bot/bot_app/`); if not, re-run
+  `update-all.sh`, which syncs it in lockstep with `bot.py`

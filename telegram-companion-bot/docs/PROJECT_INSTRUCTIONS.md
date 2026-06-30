@@ -13,13 +13,19 @@ This project is a Python Telegram bot system for AI companion characters. The us
 
 ## Architecture
 
-One `bot.py` file, multiple instance directories. Each instance has its own `.env`, character card JSON, and `state.json`. The instance dir is passed as `sys.argv[1]` or `BOT_HOME` env var.
+One shared `bot.py` (+ `bot_app/`, a modular migration package it imports defensively — see
+`bot_app/MIGRATION.md`) living in `~/telegram-bot/`, with separate per-character instance
+directories. Each instance has its own `.env`, character card JSON, and `state.json`. The instance
+dir is passed as `sys.argv[1]`.
 
-**Instance directories:**
-- Nora: `~/telegram-bot/` (tmux session: `nora`)
+**Instance directories** (all under the supervised `run-bot.sh` pattern — Nora runs as her own
+named instance like the rest, not as the code/home directory):
+- Nora: `~/nora-bot/` (tmux session: `nora`)
 - Bonnie: `~/bonnie-bot/` (tmux session: `bonnie`)
-- Emily: `~/emily-bot/` (tmux session: `emily`)
 - Cass: `~/cass-bot/` (tmux session: `cass`)
+- Emily: `~/emily-bot/` (tmux session: `emily`)
+- Jules: `~/jules-bot/` (tmux session: `jules`)
+- Priya: `~/priya-bot/` — character card exists in the repo; not yet deployed
 
 ## Key `.env` variables
 
@@ -35,29 +41,23 @@ CHARACTER_CARD=          # filename of the JSON card in the instance dir
 ALLOWED_USERS=           # comma-separated Telegram user IDs
 ```
 
-## Active model (Cass, as of last session)
-
-`NANOGPT_MODEL=deepseek/deepseek-v4-flash`
-`DOCUMENT_MODEL=deepseek/deepseek-v4-flash`
-
 ## Deployment workflow
 
-After committing and pushing bot.py changes to GitHub:
+After committing and pushing `bot.py`/`bot_app/` changes to GitHub, on the device:
 
 ```bash
-# Update bot.py for an instance
-curl -o ~/bonnie-bot/bot.py https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py
-
-# Restart the instance
-tmux kill-session -t bonnie
-tmux new-session -d -s bonnie -c ~/bonnie-bot 'python bot.py'
+bash ~/telegram-bot/update-all.sh
 ```
 
-For a card-only change (no bot.py change), curl the card JSON instead:
+This pulls the latest code from the `~/stp-deploy` git clone, deploys `bot.py` + `bot_app/` +
+helper scripts to `~/telegram-bot/`, and restarts every instance found on disk under
+`run-bot.sh`'s supervisor (auto-restarts on crash, rotates `bot.log`). See `docs/OPS_MANUAL.md`
+for the full reference.
+
+For a card-only change (no `bot.py` change), copy just the card and restart that one instance:
 ```bash
-curl -o ~/bonnie-bot/bonnie.json https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/bonnie.json
-tmux kill-session -t bonnie
-tmux new-session -d -s bonnie -c ~/bonnie-bot 'python bot.py'
+cp ~/stp-deploy/telegram-companion-bot/bonnie/bonnie.json ~/bonnie-bot/bonnie.json
+bash ~/telegram-bot/run-bot.sh ~/bonnie-bot bonnie
 ```
 
 All bots share the venv at `~/telegram-bot/venv/`.
@@ -71,16 +71,24 @@ All bots share the venv at `~/telegram-bot/venv/`.
 
 ## Git branch
 
-Development branch: `claude/telegram-emotion-concepts-prompt-s4eqzn`
-Commits also land on `main` (same history).
+Development branch: `claude/push-to-repo-7i2f3c`
 
 ## Character card notes
 
-**Bonnie** (`bonnie.json`) — libertarian gremlin housewife, chaotic surface/abandonment terror underneath. Recently revised: personality reordered (Friction → Core → OCEAN → Energy States → Surface), friction rewritten, energy states section added, sexual behavior rewritten as observable patterns, first_mes changed to 4-state (calm) opening.
+**Bonnie** (`bonnie.json`) — libertarian gremlin housewife, chaotic surface/abandonment terror
+underneath. Her `system_prompt` explicitly overrides `preset.txt`'s no-asterisk-actions rule
+(intentional — see the comment in `preset.txt`).
 
-**Cass** (`cass.json`) — writing collaborator/developmental editor. Analysis-mode bot: send her a `.json` character card and she gives a substantive critique. Uses `DOCUMENT_MODEL` (instruction model) for card analysis so she doesn't perform the character she's reading. Recently tuned: leads with fixes not just diagnosis, advances conversations rather than circling.
+**Cass** (`cass.json`) — writing collaborator/developmental editor. Analysis-mode bot: send her a
+`.json` character card and she gives a substantive critique. Uses `DOCUMENT_MODEL` (instruction
+model) for card analysis so she doesn't perform the character she's reading.
 
-**Emily** (`emily.json`) — has `VISION_MODEL=zai-org/glm-4.6v`. Currently investigating photo receipt issues (no response when photos sent; likely network timeout silencing the error reply).
+**Emily** (`emily.json`) — has Garmin health integration (sleep/stress/RHR/Body Battery, owner
+only). Her `system_prompt` also overrides the no-asterisk rule (third-person, italicized action
+beats — intentional, see `preset.txt`).
+
+**Jules** (`jules.json`) — roller-derby voice, third-person prose narration like Emily's
+(intentional, also noted in `preset.txt`).
 
 **Nora** (`nora.json`) — original instance.
 

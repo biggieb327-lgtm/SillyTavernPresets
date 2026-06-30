@@ -10,7 +10,7 @@ Includes an example character — Priya, a 26-year-old software engineer — des
 - Sends and receives photos, voice messages, documents, stickers, and location
 - Proactive check-ins (optional — the bot can message you first)
 - Reminders (`/remindme`, `/setreminder`)
-- Image generation and TTS via `/imagine` and `/tts`
+- Selfie generation (`/selfie`) and optional voice (TTS) replies (`/voice`)
 - Multi-instance support — run multiple characters simultaneously
 - Standard SillyTavern v2 character card format
 - Configurable models for chat, vision, and summarization
@@ -32,7 +32,9 @@ bash run-bot.sh
 
 | File | Purpose |
 |---|---|
-| `bot.py` | Main bot code |
+| `bot.py` | Main bot code (entry point — imports `bot_app/` defensively) |
+| `bot_app/` | Modular migration package (guards, untrusted-notes quarantine, action allowlist, ingestion) — see `bot_app/MIGRATION.md` for status |
+| `main.py` | Standalone smoke test for `bot_app/` in isolation; not the bot's entry point |
 | `<character>/` | Per-character folder — card, appearance, and context files (people, projects, schedule, places) |
 | `priya/priya.json` | Example character card (SillyTavern v2 format) |
 | `preset.txt` | Texting style instructions (injected into every prompt) |
@@ -40,8 +42,7 @@ bash run-bot.sh
 | `common.env` | Optional shared config loaded before each bot's `.env` (API key, model/feature defaults) |
 | `requirements.txt` | Python dependencies |
 | `run-bot.sh` | Start script (supervised, named instances) |
-| `start-bots.sh` | Start all character instances |
-| `update-all.sh` | Pull latest from `~/stp-deploy` and restart all instances |
+| `update-all.sh` | Pull latest `bot.py`/`bot_app/`/helper scripts from `~/stp-deploy` and restart all instances |
 | `status.sh` | At-a-glance health of every bot (session, heartbeat, recent errors) |
 | `watchdog.sh` | Relaunch any bot whose tmux session has died (for cron/boot) |
 | `termux-boot-start.sh` | Termux:Boot launcher — brings bots back after a reboot |

@@ -3823,22 +3823,6 @@ def _weather_camera_pool() -> list:
     return filtered or SELFIE_CAMERA
 
 
-
-    label = mood_label(chat_id)
-    if label:
-        return label
-    s = mood_now(chat_id)
-    if s >= 1.2:
-        return "happy and relaxed, warmth in her eyes"
-    if s >= 0.4:
-        return "comfortable and easy"
-    if s > -0.4:
-        return "everyday, neutral"
-    if s > -1.2:
-        return "a little subdued and tired"
-    return "withdrawn and flat, not really feeling it"
-
-
 _OUTFIT_STOPWORDS = frozenset({
     "the", "and", "with", "over", "into", "that", "this", "her", "his",
     "she", "him", "they", "from", "just", "also", "both", "each", "some",

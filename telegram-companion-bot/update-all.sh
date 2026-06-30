@@ -45,7 +45,7 @@ fi
 
 # Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
 # left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
-for f in run-bot.sh watchdog.sh start-bots.sh status.sh; do
+for f in run-bot.sh watchdog.sh status.sh; do
   src="$DEPLOY/telegram-companion-bot/$f"
   if [ -f "$src" ]; then
     cp "$src" "$BOT_SRC/$f"

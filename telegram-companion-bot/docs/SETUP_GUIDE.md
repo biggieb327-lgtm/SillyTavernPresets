@@ -96,7 +96,7 @@ NANOGPT_API_KEY=your-key-here
 NANOGPT_MODEL=your-model-name
 ALLOWED_USERS=your-telegram-user-id
 CHARACTER_CARD=nora.json
-BOT_TIMEZONE=America/New_York
+TIMEZONE=America/Los_Angeles
 ```
 
 Start the bot:
@@ -111,15 +111,14 @@ Detach so it keeps running: press `Ctrl+B`, then `D`.
 
 ---
 
-## Step 5: Run All 5 Characters
+## Step 5: Run All Characters
 
 Download all character cards and create a directory for each:
 
 ```bash
-for char in emily bonnie nora cass priya; do
+for char in emily bonnie nora cass jules priya; do
   mkdir -p ~/${char}-bot
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}/${char}.json" -o ~/${char}-bot/${char}.json 2>/dev/null || \
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/emily.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
+  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}/${char}.json" -o ~/${char}-bot/${char}.json
 done
 ```
 
@@ -129,7 +128,8 @@ curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/bonnie.json     -o ~/bonnie-bot/bonnie.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/nora.json        -o ~/nora-bot/nora.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/cass.json        -o ~/cass-bot/cass.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/priya.json       -o ~/priya-bot/priya.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/jules/jules.json      -o ~/jules-bot/jules.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/priya.json      -o ~/priya-bot/priya.json
 ```
 
 Create a `.env` in each directory. Each needs its own bot token; the API key and model can be the same across all:
@@ -140,19 +140,20 @@ cp ~/telegram-bot/.env.example ~/bonnie-bot/.env
 # etc.
 ```
 
-Download the launch script:
+Download the supervised launcher (auto-restarts a bot if it ever exits — crash, OOM kill, etc.):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/start-bots.sh -o ~/start-bots.sh
-chmod +x ~/start-bots.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o ~/telegram-bot/run-bot.sh
 ```
 
-Start all five:
+Start each one (instance folder, then session name):
 ```bash
 source ~/telegram-bot/venv/bin/activate
-bash ~/start-bots.sh
+for char in emily bonnie nora cass jules priya; do
+  bash ~/telegram-bot/run-bot.sh ~/${char}-bot ${char}
+done
 ```
 
-Each character runs in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, `priya`). Attach to any with `tmux attach -t nora`.
+Each character runs supervised in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, `jules`, `priya`). Attach to any with `tmux attach -t nora`. See **OPS_MANUAL.md** for the full day-to-day update/restart workflow (`update-all.sh`).
 
 ---
 

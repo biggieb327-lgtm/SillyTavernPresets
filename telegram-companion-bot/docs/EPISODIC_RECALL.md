@@ -72,6 +72,11 @@ See `.env.example` (the "Episodic recall" block). Defaults:
 | `EPISODE_TOPK` | `1` | How many past moments per turn |
 | `EPISODE_MIN_AGE_HOURS` | `24` | Don't recall anything newer than this |
 
+Optional reranker: after cosine retrieval pulls candidate episodes, set `RERANK_MODEL` to have a
+cross-encoder re-score them for a sharper top pick (`RERANK_CANDIDATES` controls how many cosine
+candidates are handed to it). Off by default; falls back to plain cosine ranking on any failure, so
+it can't break recall. See the "Reranker" block in `.env.example`.
+
 ## Inspecting it
 
 `/episodes` shows how many chunks are archived and the most recent one.
