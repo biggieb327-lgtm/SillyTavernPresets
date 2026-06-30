@@ -357,6 +357,37 @@ Each character is fully isolated — separate state, memory, context files, and 
 
 ---
 
+## Crash Recovery (Watchdog)
+
+Two layers, catching different failure modes:
+
+1. **In-tmux supervisor** (`run-bot.sh`, always on once a bot is started) — if the bot process
+   itself exits (crash, unhandled exception escaping `main()`), the supervisor loop inside that
+   bot's tmux session relaunches it after 5s. This dies if the tmux session itself dies.
+2. **`watchdog.sh`** — catches what the supervisor can't: the tmux session (or all of Termux)
+   getting killed by Android. It checks every bot's tmux session and `.alive` heartbeat file
+   (stamped every 60s; a session that's up but hasn't stamped recently is treated as frozen) and
+   relaunches anything missing or stale.
+
+`watchdog.sh` only checks **once** unless something keeps re-invoking it — a single check at boot
+is not enough to catch Termux getting killed *mid-session*. `termux-boot-start.sh` (installed as
+`~/.termux/boot/termux-boot-start.sh` via the Termux:Boot app — see SETUP_GUIDE.md) launches
+`watchdog.sh --loop` in the background at boot, which re-checks every `WATCHDOG_INTERVAL` seconds
+(default 300) for as long as the device stays up. This is what actually provides continuous
+coverage, not just a fresh-boot check.
+
+Manual checks:
+```bash
+bash ~/telegram-bot/watchdog.sh           # one-shot check, relaunches anything missing/stale
+pgrep -f "watchdog.sh --loop"             # confirm the continuous loop is actually running
+tail -f ~/telegram-bot/watchdog.log       # watchdog's own relaunch log
+```
+
+If `pgrep -f "watchdog.sh --loop"` comes back empty after a reboot, Termux:Boot likely isn't
+installed/granted, or `termux-boot-start.sh` wasn't copied to `~/.termux/boot/`.
+
+---
+
 ## Logs
 
 ```bash

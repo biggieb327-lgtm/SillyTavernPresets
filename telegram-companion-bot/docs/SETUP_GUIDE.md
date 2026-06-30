@@ -197,6 +197,30 @@ Termux can be killed by Android's battery optimizer:
 
 Or run on a Linux VPS instead ($3–5/month on Hetzner or DigitalOcean).
 
+### Watchdog: automatic recovery if Android kills Termux anyway
+
+Even with the steps above, Android can still kill Termux outright. `run-bot.sh`'s in-tmux
+supervisor only protects against the bot process itself crashing — it dies along with the tmux
+session if Termux is killed. `watchdog.sh` catches that case, but needs to actually run
+continuously to do so:
+
+1. Install the **Termux:Boot** app from F-Droid: https://f-droid.org/packages/com.termux.boot/
+   (open it once after installing so it's allowed to run at boot)
+2. Copy the boot launcher into place:
+```bash
+mkdir -p ~/.termux/boot
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/termux-boot-start.sh -o ~/.termux/boot/termux-boot-start.sh
+chmod +x ~/.termux/boot/termux-boot-start.sh
+```
+3. Reboot the device once to confirm it works:
+```bash
+pgrep -f "watchdog.sh --loop"   # should print a PID a minute or two after reboot
+```
+
+This launches `watchdog.sh --loop` in the background at every boot, which keeps relaunching any
+bot whose session goes down for as long as the device stays up — not just a one-time check at
+boot. See `docs/OPS_MANUAL.md`'s "Crash Recovery (Watchdog)" section for the full reference.
+
 ---
 
 ### Option B: Linux VPS (Ubuntu/Debian)
