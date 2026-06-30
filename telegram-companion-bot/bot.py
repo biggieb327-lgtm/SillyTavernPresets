@@ -200,6 +200,11 @@ PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
 _preset_path = BASE_DIR / PRESET_FILE
 TEXTING_STYLE = _preset_path.read_text(encoding="utf-8").strip() if _preset_path.exists() \
     else _DEFAULT_TEXTING_STYLE
+# Adaptive style mirroring: passively read the user's recent texting habits (length, emoji,
+# caps, enthusiasm) and nudge her register to subtly match — no model call, pure heuristics.
+STYLE_MIRROR = os.getenv("STYLE_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+STYLE_SAMPLE = int(os.getenv("STYLE_SAMPLE", "20"))    # how many recent user messages to read
+STYLE_MIN_MSGS = int(os.getenv("STYLE_MIN_MSGS", "6"))  # need at least this many before adapting
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
@@ -363,6 +368,16 @@ RERANK_ENDPOINT = os.getenv("RERANK_ENDPOINT", "/rerank")     # appended to NANO
 _episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
 _episodes_lock = threading.Lock()
 
+# "On this day" resurfacing: once in a while she reminisces about a past moment whose
+# anniversary lands today (a month / 6 months / a year ago). Reuses the episode archive,
+# so it needs no extra storage. Gated on EPISODIC_RECALL (which requires EMBED_MODEL).
+ONTHISDAY_ENABLED = EPISODIC_RECALL and os.getenv("ONTHISDAY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ONTHISDAY_TIME = os.getenv("ONTHISDAY_TIME", "10:30")          # local time for the daily check
+ONTHISDAY_INTERVALS = [365, 182, 91, 30]                       # anniversaries to look for (days), longest first
+ONTHISDAY_WINDOW_DAYS = int(os.getenv("ONTHISDAY_WINDOW_DAYS", "3"))  # +/- match window around an anniversary
+ONTHISDAY_MIN_GAP_DAYS = int(os.getenv("ONTHISDAY_MIN_GAP_DAYS", "5"))  # don't reminisce more often than this
+ONTHISDAY_FILE = BASE_DIR / ".onthisday"  # JSON {date, ts}: last resurface date + episode ts (avoid repeats)
+
 # --- Reading feed: periodic interest-topic search -> in-character "things she read" ---
 INTERESTS_FILE = BASE_DIR / "interests.txt"
 READING_FILE = BASE_DIR / "reading.txt"
@@ -412,6 +427,14 @@ RHR_BASELINE_DAYS = int(os.getenv("RHR_BASELINE_DAYS", "14"))   # rolling window
 RHR_CHECK_TIME = os.getenv("RHR_CHECK_TIME", "08:00")          # local time for the once-daily check
 RHR_HISTORY_FILE = BASE_DIR / ".rhr_history.json"
 RHR_ALERT_FILE = BASE_DIR / ".rhr_alert"  # date of the last RHR check-in, so it fires at most once/day
+
+# Body Battery low alert: Garmin's 0-100 energy-reserve gauge drains through the day. When it
+# bottoms out the user is genuinely depleted — a good moment to gently say "take it easy". Polled
+# on the same cadence as stress (the Garmin client is cached, so it's one extra GET, not a login).
+BB_ALERTS = GARMIN_ENABLED and os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_LOW_THRESHOLD = int(os.getenv("BB_LOW_THRESHOLD", "20"))  # body battery at/below this = drained
+BB_ALERT_COOLDOWN_HOURS = float(os.getenv("BB_ALERT_COOLDOWN_HOURS", "8"))  # don't re-alert within this
+BB_ALERT_FILE = BASE_DIR / ".bb_alert"  # persisted last-alert time so a restart can't re-fire
 
 
 def _est_tokens(text: str) -> int:
@@ -2725,6 +2748,59 @@ async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         print("[stress] alert failed:", e)
 
 
+def _body_battery_now():
+    """Off-loop: the latest Body Battery value (0-100) from Garmin, or None."""
+    if not BB_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        bb = (_garmin_client().get_stats(today) or {}).get("bodyBatteryMostRecentValue")
+    except Exception as e:
+        print("[bb] fetch failed:", e)
+        return None
+    return int(bb) if isinstance(bb, (int, float)) and bb >= 0 else None
+
+
+def _bb_alert_ts() -> float:
+    try:
+        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: if Body Battery has bottomed out, gently check in (cooldown + quiet-hours aware)."""
+    if not BB_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
+        return  # already checked in recently about this
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    bb = await asyncio.to_thread(_body_battery_now)
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty right "
+        f"now — they're physically depleted, the kind of drained where pushing harder won't help. "
+        f"Reach out gently and fully in character: notice they seem worn out / running low, be warm and "
+        f"soft, and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            BB_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[bb] low-energy check-in sent (body battery {bb}).")
+    except Exception as e:
+        print("[bb] alert failed:", e)
+
+
 def _resting_hr_today():
     """Off-loop: today's resting heart rate from Garmin, or None."""
     if not RHR_ALERTS or _Garmin is None:
@@ -2800,6 +2876,81 @@ async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         print("[rhr] alert failed:", e)
 
 
+def _read_onthisday() -> dict:
+    try:
+        return json.loads(ONTHISDAY_FILE.read_text(encoding="utf-8")) if ONTHISDAY_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _onthisday_episode(exclude_ts=None):
+    """Find one archived episode whose anniversary lands today (~1mo/6mo/1yr ago). Prefers the
+    longest interval, then the closest match. Returns (ts, text) or None. Cheap (no network)."""
+    if not ONTHISDAY_ENABLED or _np is None:
+        return None
+    _load_episodes()
+    with _episodes_lock:
+        ts_list = _episodes["ts"][:]
+        text_list = _episodes["text"][:]
+    now = time.time()
+    best = None  # (interval, -offset, ts, text) — larger interval wins, then closest to anniversary
+    for ts, text in zip(ts_list, text_list):
+        if exclude_ts is not None and ts == exclude_ts:
+            continue
+        days_ago = (now - ts) / 86400
+        for interval in ONTHISDAY_INTERVALS:
+            off = abs(days_ago - interval)
+            if off <= ONTHISDAY_WINDOW_DAYS:
+                cand = (interval, -off, ts, text)
+                if best is None or cand[:2] > best[:2]:
+                    best = cand
+                break
+    return (best[2], best[3]) if best else None
+
+
+async def onthisday_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once-daily: if a past moment's anniversary lands today, reach out to reminisce about it."""
+    if not ONTHISDAY_ENABLED:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    last = _read_onthisday()
+    if last.get("date") == today:
+        return  # already reminisced today
+    last_date = last.get("date")
+    if last_date:
+        try:
+            if (date.fromisoformat(today) - date.fromisoformat(last_date)).days < ONTHISDAY_MIN_GAP_DAYS:
+                return  # keep it special — don't reminisce too often
+        except Exception:
+            pass
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    ep = await asyncio.to_thread(_onthisday_episode, last.get("ts"))
+    if not ep:
+        return
+    ts, text = ep
+    when = _episode_when(ts)
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {when} this moment happened between you and {uname}:\n\"{text}\"\n"
+        f"It just drifted back into your mind. Reach out warmly and fully in character — bring it up "
+        f"the way someone reminisces out of nowhere ('hey, remember when...'), say what it stirs up in "
+        f"you, maybe ask if they remember it too. Brief and genuine, not a recap or a quote.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": ts}), encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[onthisday] resurfaced an episode from {when}.")
+    except Exception as e:
+        print("[onthisday] failed:", e)
+
+
 def milestone_note(chat_id: int) -> str:
     """Relationship history (shared milestones). Self-image/reflection was removed."""
     ms_list = milestones.get(chat_id) or []
@@ -2835,6 +2986,56 @@ def memory_block(chat_id: int, uname: str) -> str:
         blocks.append("# What's been going on lately\n\n" + "\n\n".join(rparts))
 
     return "\n\n".join(blocks)
+
+
+_TXT_ABBREVS = frozenset({
+    "lol", "lmao", "lmfao", "rofl", "u", "ur", "rn", "idk", "tbh", "ngl", "omg",
+    "fr", "imo", "btw", "ikr", "smh", "wyd", "hbu", "ty", "np", "ofc", "bc", "cuz", "ya",
+})
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF❤✨‼⁉]"
+)
+
+
+def _user_style_note(chat_id: int) -> str:
+    """Heuristic: read the user's recent texting habits and nudge her register to subtly match
+    (length, emoji, caps, enthusiasm, textspeak). No model call — pure stats off RAM history."""
+    if not STYLE_MIRROR:
+        return ""
+    msgs = [m["content"] for m in conversation_history.get(chat_id, [])
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and m["content"].strip() and not m["content"].startswith("[")]
+    msgs = msgs[-STYLE_SAMPLE:]
+    n = len(msgs)
+    if n < STYLE_MIN_MSGS:
+        return ""
+    avg_words = sum(len(m.split()) for m in msgs) / n
+    emoji = sum(1 for m in msgs if _EMOJI_RE.search(m)) / n
+    lower = sum(1 for m in msgs if any(c.isalpha() for c in m) and m == m.lower()) / n
+    excl = sum(1 for m in msgs if "!" in m) / n
+    abbr = sum(1 for m in msgs
+               if {w.strip(".,!?").lower() for w in m.split()} & _TXT_ABBREVS) / n
+    traits = []
+    if avg_words <= 6:
+        traits.append("they text in short, clipped messages — keep yours brief and punchy to match")
+    elif avg_words >= 25:
+        traits.append("they write longer, fuller messages — you have room to be a bit more expansive")
+    if emoji >= 0.4:
+        traits.append("they use emoji freely — an emoji here and there fits")
+    elif emoji <= 0.05:
+        traits.append("they rarely use emoji — go light on them")
+    if lower >= 0.6:
+        traits.append("they text in casual all-lowercase — you can loosen your capitalization a touch")
+    if excl >= 0.5:
+        traits.append("they're punchy and exclaim a lot — match that liveliness")
+    if abbr >= 0.3:
+        traits.append("they use casual textspeak (lol, rn, idk) — a little of that is natural with them")
+    if not traits:
+        return ""
+    uname = user_names.get(chat_id, "they")
+    return (f"# Matching {uname}'s texting style\n"
+            f"Subtly mirror how {uname} texts, without losing your own voice: "
+            + "; ".join(traits) + ".")
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None, query_vec=None, episode_override=_UNSET):
@@ -3025,6 +3226,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     if TEXTING_REALISM:
         messages.append({"role": "system", "content": TEXTING_STYLE})
+
+    if STYLE_MIRROR:
+        snote = _user_style_note(chat_id)
+        if snote:
+            messages.append({"role": "system", "content": snote})
 
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
@@ -4672,7 +4878,8 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  {on(EMBED_ENABLED)} embeddings ({EMBED_MODEL or 'off'})\n"
         f"  {on(EPISODIC_RECALL)} episodic recall   {on(SAFETY_ENABLED)} safety   {on(SCENE_CONTINUITY)} scene\n"
         f"  {on(LIFE_SIM_ENABLED)} offline life   {on(EVENT_REMINDERS)} event reminders   {on(READING_ENABLED)} reading\n"
-        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   {on(RHR_ALERTS)} resting-HR"
+        f"  {on(ONTHISDAY_ENABLED)} on-this-day   {on(STYLE_MIRROR)} style mirror\n"
+        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   {on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
     )
     if EMBED_ENABLED:
         lines.append(
@@ -8236,12 +8443,24 @@ def main():
             app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
                                         first=STRESS_POLL_MIN * 60)
             log.info("Stress monitoring on (every %d min, threshold %d).", STRESS_POLL_MIN, STRESS_THRESHOLD)
+        if BB_ALERTS:
+            app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                        first=STRESS_POLL_MIN * 60)
+            log.info("Body Battery monitoring on (every %d min, low threshold %d).", STRESS_POLL_MIN, BB_LOW_THRESHOLD)
         if RHR_ALERTS:
             try:
                 _rh, _rm = (int(x) for x in RHR_CHECK_TIME.split(":"))
                 _rhtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
                 app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
                 log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
+            except Exception:
+                pass
+        if ONTHISDAY_ENABLED:
+            try:
+                _oh, _om = (int(x) for x in ONTHISDAY_TIME.split(":"))
+                _ohtime = dtime(_oh, _om, tzinfo=TZ) if TZ else dtime(_oh, _om)
+                app.job_queue.run_daily(onthisday_job, time=_ohtime)
+                log.info("On-this-day reminiscing scheduled at %s.", ONTHISDAY_TIME)
             except Exception:
                 pass
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
