@@ -31,7 +31,12 @@ def parse(p: Path) -> dict:
 
 
 def backup(p: Path):
-    p.with_suffix(p.suffix + ".bak").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    """Back up a file to .bak -- but only if one doesn't already exist. Without this guard a
+    second run overwrites the .bak with the *already-migrated* content, silently destroying the
+    true pre-migration snapshot the docstring promises ("safe to re-run")."""
+    bak = p.with_suffix(p.suffix + ".bak")
+    if not bak.exists():
+        bak.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def redact(k: str, v: str) -> str:
@@ -45,6 +50,7 @@ def main():
         print(f"Need at least 2 bot .env files to compare; found {len(bots)}.")
         return 1
     print("Comparing:", ", ".join(b for b, _ in bots))
+    BOT_SRC.mkdir(parents=True, exist_ok=True)  # don't crash if ~/telegram-bot/ isn't there yet
 
     parsed = {b: parse(p) for b, p in bots}
     all_keys = set().union(*(set(d) for d in parsed.values()))

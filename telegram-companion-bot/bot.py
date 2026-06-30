@@ -339,6 +339,10 @@ _memory_lock = threading.Lock()
 EMBED_MODEL = os.getenv("EMBED_MODEL", "").strip()
 EMBED_ENABLED = bool(EMBED_MODEL)
 EMBED_DIM = int(os.getenv("EMBED_DIM", "0"))          # optional dim reduction (3-small/large only)
+# Cache-invalidation identity for embedded vectors: must change whenever EMBED_DIM changes too,
+# not just EMBED_MODEL -- otherwise a dimension change leaves stale, wrong-length cached vectors
+# that _cosine() silently truncates against (zip() pads to the shorter vector) instead of erroring.
+EMBED_CACHE_KEY = f"{EMBED_MODEL}|dim={EMBED_DIM}"
 EMBED_MIN_SIM = float(os.getenv("EMBED_MIN_SIM", "0.35"))  # cosine floor to count as relevant
 EMBED_MAX_CHARS = int(os.getenv("EMBED_MAX_CHARS", "1600"))  # truncate each input; models cap ~512 tokens
 MEMORY_VECTORS_FILE = BASE_DIR / ".memory_vectors.json"
@@ -642,6 +646,12 @@ def _memory_embed_text(line: str) -> str:
 
 
 def _cosine(a, b) -> float:
+    # Defense-in-depth: zip() would otherwise silently pad to the shorter vector and produce a
+    # meaningless score instead of erroring. EMBED_CACHE_KEY's cache invalidation (model+dim)
+    # should prevent a mismatch from reaching here at all; this just makes sure that if one ever
+    # does, similarity search drops it ("not similar") instead of acting on a bogus number.
+    if len(a) != len(b):
+        return 0.0
     s = na = nb = 0.0
     for x, y in zip(a, b):
         s += x * y
@@ -717,7 +727,9 @@ def _semantic_recall(query: str, k: int = 5) -> list:
 
 
 def _load_memory_vectors():
-    """Load the vectors file into the cache once. A model change discards old vectors."""
+    """Load the vectors file into the cache once. A model OR dimension change discards old
+    vectors -- a dim-only change leaves the model name unchanged, so checking model alone would
+    silently keep wrong-length cached vectors around (see EMBED_CACHE_KEY)."""
     if _memory_vec_cache["loaded"]:
         return
     store = {"model": None, "vectors": {}}
@@ -726,8 +738,8 @@ def _load_memory_vectors():
             store = json.loads(MEMORY_VECTORS_FILE.read_text(encoding="utf-8"))
         except Exception:
             store = {"model": None, "vectors": {}}
-    if store.get("model") != EMBED_MODEL:
-        store = {"model": EMBED_MODEL, "vectors": {}}  # model changed -> re-embed everything
+    if store.get("model") != EMBED_CACHE_KEY:
+        store = {"model": EMBED_CACHE_KEY, "vectors": {}}  # model/dim changed -> re-embed everything
     _memory_vec_cache["model"] = store.get("model")
     _memory_vec_cache["vectors"] = store.get("vectors") or {}
     _memory_vec_cache["loaded"] = True
@@ -759,7 +771,7 @@ def _ensure_memory_vectors():
         if changed:
             try:
                 MEMORY_VECTORS_FILE.write_text(
-                    json.dumps({"model": EMBED_MODEL, "vectors": vectors}), encoding="utf-8")
+                    json.dumps({"model": EMBED_CACHE_KEY, "vectors": vectors}), encoding="utf-8")
             except Exception as e:
                 print("[memories] vector save failed:", e)
 
@@ -810,7 +822,10 @@ def _load_episodes():
     model_ok = True
     if EPISODES_MODEL_FILE.exists():
         try:
-            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBED_MODEL
+            # Compared against EMBED_CACHE_KEY (model+dim), not just EMBED_MODEL, so an EMBED_DIM
+            # change also invalidates -- otherwise wrong-length cached vectors would silently
+            # produce meaningless episode-recall scores instead of triggering a re-embed.
+            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBED_CACHE_KEY
         except Exception:
             model_ok = False
     if not model_ok:
@@ -851,7 +866,7 @@ def _rewrite_episodes_file(ts_list, text_list, vecs):
         with EPISODES_FILE.open("w", encoding="utf-8") as f:
             for ts, text, v in zip(ts_list, text_list, vecs):
                 f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
-        EPISODES_MODEL_FILE.write_text(EMBED_MODEL, encoding="utf-8")
+        EPISODES_MODEL_FILE.write_text(EMBED_CACHE_KEY, encoding="utf-8")
     except Exception as e:
         print("[episodes] file rewrite failed:", e)
 
@@ -897,7 +912,7 @@ def _store_episodes(chunks: list):
         with EPISODES_FILE.open("a", encoding="utf-8") as f:
             for (ts, text), v in zip(chunks, vecs):
                 f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
-        EPISODES_MODEL_FILE.write_text(EMBED_MODEL, encoding="utf-8")
+        EPISODES_MODEL_FILE.write_text(EMBED_CACHE_KEY, encoding="utf-8")
     except Exception as e:
         print("[episodes] append failed:", e)
         return
@@ -6536,6 +6551,11 @@ def _schedule_event(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ev: dict, 
     if _event_reminder_exists(chat_id, ev["event"]):
         return
     new = []
+    # _new_reminder_id() looks at the global `reminders` list, which isn't updated until the
+    # append loop below runs — so two calls in a row (the before/after pair) would return the same
+    # id. This local id source also accounts for entries already queued in `new` this call.
+    def next_id():
+        return max([r["id"] for r in reminders] + [r["id"] for r in new], default=0) + 1
     if ev["recurs"]:
         # One self-rescheduling nudge per occurrence across the given weekdays (no before/after pair).
         due = _next_occurrence(ev["weekdays"], ev["hh"], ev["mm"], now)
@@ -6543,7 +6563,7 @@ def _schedule_event(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ev: dict, 
             return
         labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         dl = "daily" if len(ev["weekdays"]) == 7 else ",".join(labels[d] for d in ev["weekdays"])
-        new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": due.isoformat(),
+        new.append({"id": next_id(), "chat_id": chat_id, "due": due.isoformat(),
                     "kind": "event", "phase": "recurring", "weekdays": ev["weekdays"],
                     "time": f"{ev['hh']:02d}:{ev['mm']:02d}", "event": ev["event"],
                     "text": f"(auto, {dl}) {ev['event']}"})
@@ -6554,13 +6574,13 @@ def _schedule_event(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ev: dict, 
         before = (when - timedelta(minutes=EVENT_BEFORE_MIN)) if ev["has_time"] \
             else when.replace(hour=9, minute=0, second=0, microsecond=0)
         if before > now + timedelta(minutes=10):
-            new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": before.isoformat(),
+            new.append({"id": next_id(), "chat_id": chat_id, "due": before.isoformat(),
                         "kind": "event", "phase": "before", "event": ev["event"],
                         "text": f"(auto) good luck: {ev['event']}"})
         after = (when + timedelta(hours=EVENT_AFTER_HOURS)) if ev["has_time"] \
             else when.replace(hour=20, minute=0, second=0, microsecond=0)
         if after > now:
-            new.append({"id": _new_reminder_id(), "chat_id": chat_id, "due": after.isoformat(),
+            new.append({"id": next_id(), "chat_id": chat_id, "due": after.isoformat(),
                         "kind": "event", "phase": "after", "event": ev["event"],
                         "text": f"(auto) follow up: {ev['event']}"})
     if not new:
