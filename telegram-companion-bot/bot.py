@@ -4834,7 +4834,7 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reading_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     items = _read_reading()
     if not items:
@@ -4844,7 +4844,7 @@ async def reading_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def readnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not READING_ENABLED:
         await update.message.reply_text("Reading feed is off (needs SEARCH_ENABLED and READING_ENABLED).")
@@ -4859,7 +4859,7 @@ async def readnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     items = _read_life_events()
     if not items:
@@ -4869,7 +4869,7 @@ async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not LIFE_SIM_ENABLED:
         await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
@@ -4881,7 +4881,7 @@ async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not GARMIN_ENABLED:
         await update.message.reply_text("Garmin feed is off (set GARMIN_EMAIL and GARMIN_PASSWORD).")
@@ -4896,7 +4896,7 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not GARMIN_ENABLED:
         await update.message.reply_text("Garmin feed is off (set GARMIN_EMAIL and GARMIN_PASSWORD).")
@@ -4910,7 +4910,7 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not STRESS_ALERTS:
         await update.message.reply_text("Stress monitoring is off (needs Garmin + STRESS_ALERTS).")
@@ -4928,7 +4928,7 @@ async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """One-shot health/feature report for this bot \u2014 what's on, what's embedded, recent errors."""
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     chat_id = update.effective_chat.id
     on = lambda b: "\u2705" if b else "\u2014"
@@ -5526,7 +5526,7 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
@@ -5537,7 +5537,7 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     entries = _read_memories()
     if not entries:
@@ -5558,7 +5558,7 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg:
@@ -5592,7 +5592,7 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _guard(update):
         return
     if not EPISODIC_RECALL:
         await update.message.reply_text("Episodic recall is off (set EMBED_MODEL + EPISODIC_RECALL).")
