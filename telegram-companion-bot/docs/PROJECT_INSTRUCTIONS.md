@@ -76,8 +76,9 @@ Development branch: `claude/push-to-repo-7i2f3c`
 ## Character card notes
 
 **Bonnie** (`bonnie.json`) — libertarian gremlin housewife, chaotic surface/abandonment terror
-underneath. Her `system_prompt` explicitly overrides `preset.txt`'s no-asterisk-actions rule
-(intentional — see the comment in `preset.txt`).
+underneath. Her `system_prompt` explicitly overrides `preset.txt`'s no-asterisk-actions rule —
+intentional, not drift (a character's own `system_prompt` naturally takes precedence over the
+shared default; see the note next to `PRESET_FILE` in `bot.py`).
 
 **Cass** (`cass.json`) — writing collaborator/developmental editor. Analysis-mode bot: send her a
 `.json` character card and she gives a substantive critique. Uses `DOCUMENT_MODEL` (instruction
@@ -85,10 +86,10 @@ model) for card analysis so she doesn't perform the character she's reading.
 
 **Emily** (`emily.json`) — has Garmin health integration (sleep/stress/RHR/Body Battery, owner
 only). Her `system_prompt` also overrides the no-asterisk rule (third-person, italicized action
-beats — intentional, see `preset.txt`).
+beats) — same intentional exception as Bonnie's.
 
-**Jules** (`jules.json`) — roller-derby voice, third-person prose narration like Emily's
-(intentional, also noted in `preset.txt`).
+**Jules** (`jules.json`) — roller-derby voice, third-person prose narration like Emily's, with the
+same explicit `system_prompt` instruction added for consistency — same intentional exception.
 
 **Nora** (`nora.json`) — original instance.
 

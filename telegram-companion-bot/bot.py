@@ -200,6 +200,12 @@ _DEFAULT_TEXTING_STYLE = (
 )
 # Per-bot preset: a small text file of extra system instructions (e.g. texting style),
 # editable without touching bot.py. Falls back to the default above if missing.
+# NOTE: preset.txt's entire content is injected verbatim as live prompt text (no comment
+# syntax survives — don't add maintainer notes inside it). preset.txt's default rule bans
+# asterisk actions, but Bonnie, Emily, and Jules's own character-card system_prompt fields
+# deliberately override it (third-person/asterisk-action prose) — that's intentional, not
+# drift; their card's system_prompt naturally takes precedence as the more specific, later
+# instruction, so editing this shared default can never undo a per-character override.
 PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
 _preset_path = BASE_DIR / PRESET_FILE
 TEXTING_STYLE = _preset_path.read_text(encoding="utf-8").strip() if _preset_path.exists() \
