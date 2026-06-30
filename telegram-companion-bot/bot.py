@@ -3748,13 +3748,20 @@ SELFIE_EXPRESSIONS = [
     "yawning, half-asleep", "a wide goofy open-mouth grin", "squinting at a bright screen",
 ]
 SELFIE_FRAMINGS = [
-    "a close arm's-length selfie", "a mirror selfie", "a slightly-too-close front-camera shot",
-    "a high-angle selfie looking up at the camera", "a candid half-in-frame selfie",
-    "a cozy selfie lying back on the couch", "a quick selfie over her shoulder",
-    "a low-angle selfie from below", "a wider selfie with the room visible behind her",
-    "a selfie with her face half-cut-off the frame", "a selfie held up high looking down",
-    "a tight crop on just her face and shoulders", "a bathroom mirror selfie with phone visible",
+    # Weighted toward framings where the phone-holding arm is cropped out or isn't reaching toward
+    # the lens — the reaching-arm pose is what triggers the extra/detached-limb artifact. A couple
+    # of classic arm's-length / mirror shots are kept so selfies don't all look the same.
+    "a tight crop on just her face and shoulders, phone-holding arm out of frame",
+    "a close front-camera shot cropped at the collarbone, her arm out of frame",
+    "a selfie with her face half-cut-off the frame",
+    "a candid half-in-frame selfie, close on her face",
+    "a cozy selfie lying back, head resting on a cushion",
+    "a quick selfie over her shoulder",
     "a selfie peeking out from under a blanket",
+    "a soft close-up, just her face filling the frame",
+    "a mirror selfie",
+    "a bathroom mirror selfie with phone visible",
+    "a close arm's-length selfie",
 ]
 SELFIE_OUTFITS = [
     "an oversized hoodie", "a loose t-shirt", "a tank top", "a flannel shirt",
