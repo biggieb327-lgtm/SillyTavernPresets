@@ -1403,14 +1403,17 @@ try:
     from bot_app.services.memory import MemoryService as _MemoryService
     from bot_app.core.guards import GuardService as _GuardService
     from bot_app.services.action_schema import ActionRequest as _ActionRequest
+    from bot_app.services.ingestion import IngestionService as _IngestionService
     _mem_service = _MemoryService(max_item_chars=MAX_MEMORY_ITEM_CHARS,
                                   max_untrusted_notes=MAX_UNTRUSTED_NOTES)
     _guards = _GuardService(is_allowed_fn=_is_allowed, rate_ok_fn=_rate_ok)
+    _ingestion = _IngestionService()
     log.info("bot_app loaded — untrusted-notes channel active.")
 except Exception as _e:
     _mem_service = None
     _guards = None
     _ActionRequest = None
+    _ingestion = None
     log.warning("bot_app unavailable (%s); untrusted-notes channel off, inline behavior unchanged.", _e)
 
 
@@ -6943,7 +6946,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         tg_file = await context.bot.get_file(doc.file_id)
         raw_bytes = bytes(await tg_file.download_as_bytearray())
-        data = json.loads(raw_bytes.decode("utf-8"))
+        # Untrusted-byte parsing isolated behind IngestionService (single place to harden later);
+        # raises json.JSONDecodeError on bad input just like the inline path, so handling is unchanged.
+        data = (_ingestion.parse_json_bytes(raw_bytes) if _ingestion is not None
+                else json.loads(raw_bytes.decode("utf-8")))
     except json.JSONDecodeError as e:
         await context.bot.send_message(chat_id=chat_id,
             text=f"[couldn't parse that JSON: {e}]")
