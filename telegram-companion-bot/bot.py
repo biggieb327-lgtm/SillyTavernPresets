@@ -1402,6 +1402,7 @@ MAX_MEMORY_ITEM_CHARS = int(os.getenv("MAX_MEMORY_ITEM_CHARS", "500"))
 try:
     from bot_app.services.memory import MemoryService as _MemoryService
     from bot_app.core.guards import GuardService as _GuardService
+    from bot_app.services.action_schema import ActionRequest as _ActionRequest
     _mem_service = _MemoryService(max_item_chars=MAX_MEMORY_ITEM_CHARS,
                                   max_untrusted_notes=MAX_UNTRUSTED_NOTES)
     _guards = _GuardService(is_allowed_fn=_is_allowed, rate_ok_fn=_rate_ok)
@@ -1409,7 +1410,26 @@ try:
 except Exception as _e:
     _mem_service = None
     _guards = None
+    _ActionRequest = None
     log.warning("bot_app unavailable (%s); untrusted-notes channel off, inline behavior unchanged.", _e)
+
+
+def _action_allowed(action: str, query: str = None) -> bool:
+    """Allowlist + bounds gate for a model-requested action (react/selfie/search) before any side
+    effect runs. Uses bot_app's ActionRequest when loaded, else equivalent inline bounds. Rejects
+    only anomalous/oversized output — legitimate actions always pass."""
+    if _ActionRequest is not None:
+        try:
+            return _ActionRequest(action=action, query=query).valid()
+        except Exception:
+            pass
+    if action == "search":
+        return bool(query) and len(query) <= 200
+    if action == "selfie":
+        return query is not None and len(query) <= 500
+    if action == "react":
+        return bool(query) and len(query) <= 16
+    return action == "none"
 
 
 def _guard(update, rate_limit: bool = False) -> bool:
@@ -3498,6 +3518,9 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
         return ai_response
     query = _extract_search(ai_response)
     if not query:
+        return ai_response
+    if not _action_allowed("search", query):
+        print(f"[search] rejected query ({len(query)} chars) — failed allowlist/bounds gate.")
         return ai_response
     results = await asyncio.to_thread(web_search, query)
     messages.append({
@@ -7005,7 +7028,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     save_state()  # single write for both history appends
 
     reacted = False
-    if reaction and reaction in ALLOWED_REACTIONS:
+    if reaction and _action_allowed("react", reaction) and reaction in ALLOWED_REACTIONS:
         try:
             await update.message.set_reaction(reaction)
             reacted = True
@@ -7015,7 +7038,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
         if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
-    if selfie_hint is not None:
+    if selfie_hint is not None and _action_allowed("selfie", selfie_hint):
         await send_selfie(context, chat_id, selfie_hint, announce_errors=True)
     if clean:
         q = _extract_last_question(clean)
@@ -7483,7 +7506,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     save_state()
     if clean:
         await send_bubbles(context, chat_id, clean)
-    if selfie_hint is not None:
+    if selfie_hint is not None and _action_allowed("selfie", selfie_hint):
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
