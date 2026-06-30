@@ -3874,6 +3874,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
             f"Shot: {framing}.",
             f"Expression: {expression}.",
         ]
+    # Anatomy sanity — selfie poses (one arm reaching for the camera) are where these models most
+    # often grow an extra/detached limb (the "hand out of her chest" artifact). Stated explicitly.
+    bits.append("Natural, correct human anatomy: exactly two arms and two hands; the arm holding "
+                "the phone connects normally at her shoulder — no extra, duplicated, or detached "
+                "limbs, and no stray hands on her torso.")
     if chat_id is not None:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     tpline = _time_personality_line()
