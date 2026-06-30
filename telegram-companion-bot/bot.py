@@ -1392,6 +1392,35 @@ setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set 
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 
+# --- Modular refactor (bot_app/): incremental migration target. See bot_app/MIGRATION.md.
+# Imported defensively so a missing or half-deployed package can NEVER take the bots down — on
+# any failure _mem_service is None and every call site falls back to prior inline behavior.
+# First migrated subsystem: a quarantined "untrusted notes" channel for attachment-derived text
+# (captions on documents/photos/videos), kept separate from trusted memory and labeled as such. ---
+MAX_UNTRUSTED_NOTES = int(os.getenv("MAX_UNTRUSTED_NOTES", "60"))
+MAX_MEMORY_ITEM_CHARS = int(os.getenv("MAX_MEMORY_ITEM_CHARS", "500"))
+try:
+    from bot_app.services.memory import MemoryService as _MemoryService
+    _mem_service = _MemoryService(max_item_chars=MAX_MEMORY_ITEM_CHARS,
+                                  max_untrusted_notes=MAX_UNTRUSTED_NOTES)
+    log.info("bot_app loaded — untrusted-notes channel active.")
+except Exception as _e:
+    _mem_service = None
+    log.warning("bot_app unavailable (%s); untrusted-notes channel off, inline behavior unchanged.", _e)
+
+
+def _note_untrusted(chat_id: int, source: str, content: str):
+    """Record attachment-derived text in the quarantined untrusted-notes channel (kept out of
+    trusted memory). No-op if bot_app isn't available or there's nothing to record."""
+    if _mem_service is None or not (content or "").strip():
+        return
+    try:
+        _mem_service.append_untrusted(chat_id, source, content)
+        save_state()
+    except Exception as e:
+        log.warning("untrusted note failed: %s", e)
+
+
 STATE_FILE = BASE_DIR / "state.json"
 
 
@@ -1452,6 +1481,9 @@ def load_state():
         user_location[int(cid)] = lv
     for cid, ids in data.get("seen_incidents", {}).items():
         seen_incidents[int(cid)] = set(ids)
+    if _mem_service is not None:
+        for cid, notes in data.get("untrusted_notes", {}).items():
+            _mem_service.store.untrusted_notes[int(cid)] = notes
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -1481,6 +1513,8 @@ def save_state():
         "user_location": {str(k): v for k, v in user_location.items()},
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
     }
+    if _mem_service is not None:
+        data["untrusted_notes"] = {str(k): v for k, v in _mem_service.store.untrusted_notes.items()}
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
     tmp.replace(STATE_FILE)  # atomic, so a crash mid-write can't corrupt the file
@@ -3132,6 +3166,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     mem = memory_block(chat_id, uname)
     if mem:
         messages.append({"role": "system", "content": mem})
+
+    # Quarantined channel: text derived from attachments (captions on documents/photos/videos) is
+    # surfaced separately and explicitly flagged as not-durable-truth, so the model never treats
+    # attacker-controllable content as trusted memory. No-op until bot_app is loaded.
+    if _mem_service is not None:
+        ublock = _mem_service.untrusted_context_block(chat_id)
+        if ublock:
+            messages.append({"role": "system", "content": ublock})
 
     unotes = _read_user_notes()
     if unotes:
@@ -6559,6 +6601,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     caption = (getattr(update.message, "caption", None) or "").strip()
+    _note_untrusted(chat_id, "video", caption)  # quarantine attachment-derived text
 
     frame_data_url = None
     transcript = None
@@ -6786,6 +6829,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     caption = (getattr(update.message, "caption", None) or "").strip()
     uname = user_names[chat_id]
+    # Attachment caption is user-attached but travels with untrusted file content — quarantine it.
+    _note_untrusted(chat_id, ("pdf:" if is_pdf else "json:") + (fname or "file"), caption)
 
     # --- PDF branch ---
     if is_pdf:
@@ -7252,6 +7297,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_owner(chat_id)
         save_state()
     caption = (update.message.caption or "").strip()
+    _note_untrusted(chat_id, "photo", caption)  # quarantine attachment-derived text
 
     try:
         photo = update.message.photo[-1]  # largest size

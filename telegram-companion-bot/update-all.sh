@@ -35,6 +35,14 @@ if ! cmp -s "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"; then
   exit 1
 fi
 
+# Sync the modular package (bot_app/) that bot.py imports. bot.py imports it defensively, so a
+# missing package only disables the migrated subsystems — it can't crash the bots — but we keep
+# it in lockstep with bot.py so the migrated code is actually present on the device.
+if [ -d "$DEPLOY/telegram-companion-bot/bot_app" ]; then
+  rm -rf "$BOT_SRC/bot_app"
+  cp -r "$DEPLOY/telegram-companion-bot/bot_app" "$BOT_SRC/bot_app"
+fi
+
 # Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
 # left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
 for f in run-bot.sh watchdog.sh start-bots.sh status.sh; do
