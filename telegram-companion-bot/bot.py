@@ -182,14 +182,15 @@ INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 INWORLD_STT_URL = "https://api.inworld.ai/stt/v1/transcribe"
 INWORLD_STT_MODEL = os.getenv("INWORLD_STT_MODEL", "inworld/inworld-stt-1")
 INWORLD_STT_LANG = os.getenv("INWORLD_STT_LANG", "en")
+INWORLD_TTS_URL = "https://api.inworld.ai/tts/v1/voice"
+INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-1.5-max")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "25"))  # seconds; a hung/adversarial file is killed, not left to hang forever
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
 # Separate model for document/card analysis — should be an instruction model,
 # not a roleplay-tuned one, so it won't perform the character it's reading about.
 DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "meta-llama/llama-3.3-70b-instruct")
-TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
-TTS_VOICE = os.getenv("TTS_VOICE", "nova")
+TTS_VOICE = os.getenv("TTS_VOICE", "Sarah")  # Inworld voiceId -- list them via GET /voices/v1/voices
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
@@ -5442,16 +5443,8 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
     try:
-        resp = await asyncio.to_thread(
-            lambda: _session.post(
-                f"{NANOGPT_BASE_URL}/audio/speech",
-                headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-                json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
-                timeout=60,
-            )
-        )
-        resp.raise_for_status()
-        await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(resp.content))
+        audio_bytes = await asyncio.to_thread(_synth_inworld, text)
+        await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(audio_bytes))
     except Exception as e:
         log.warning("TTS failed: %s", e)
 
@@ -6901,6 +6894,27 @@ def describe_voice_profile(vp: dict):
         if arr:
             bits.append(f"{label}={arr[0].get('label', '?')}")
     return ", ".join(bits) if bits else None
+
+
+def _synth_inworld(text: str) -> bytes:
+    """Sync/off-loop: call Inworld's TTS API. Returns raw OGG/Opus audio bytes, ready for
+    Telegram's send_voice as-is (no ffmpeg conversion needed). Raises on failure -- the caller
+    (_send_voice_reply) already logs and swallows it."""
+    if not INWORLD_API_KEY:
+        raise RuntimeError("INWORLD_API_KEY not configured")
+    payload = {
+        "text": text,
+        "voiceId": TTS_VOICE,
+        "modelId": INWORLD_TTS_MODEL,
+        "audioConfig": {"audioEncoding": "OGG_OPUS", "sampleRateHertz": 48000},
+    }
+    resp = _session.post(
+        INWORLD_TTS_URL, json=payload,
+        headers={"Authorization": f"Basic {INWORLD_API_KEY}"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return base64.b64decode(resp.json()["audioContent"])
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
