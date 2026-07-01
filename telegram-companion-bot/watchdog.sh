@@ -27,8 +27,8 @@ bonnie:$HOME/bonnie-bot
 cass:$HOME/cass-bot
 emily:$HOME/emily-bot
 jules:$HOME/jules-bot
+priya:$HOME/priya-bot
 "
-# priya:$HOME/priya-bot   # uncomment once priya is built
 
 check_once() {
   now=$(date +%s)
