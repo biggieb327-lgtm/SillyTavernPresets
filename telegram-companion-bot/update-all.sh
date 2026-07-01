@@ -52,6 +52,13 @@ for f in run-bot.sh watchdog.sh status.sh; do
     chmod +x "$BOT_SRC/$f"
   fi
 done
+
+# .env.example is the template used when setting up a new bot instance (cp it to a fresh
+# <char>-bot/.env). Not needed by already-running bots, but kept in sync so it's always
+# there when you go to add a new character — not a script, so no chmod +x.
+if [ -f "$DEPLOY/telegram-companion-bot/.env.example" ]; then
+  cp "$DEPLOY/telegram-companion-bot/.env.example" "$BOT_SRC/.env.example"
+fi
 echo "    ✓ Deployed bot.py ($(wc -l < "$BOT_SRC/bot.py") lines) + helper scripts from $DEPLOY."
 
 echo ""
