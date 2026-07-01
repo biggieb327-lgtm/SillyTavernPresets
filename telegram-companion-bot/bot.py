@@ -176,8 +176,12 @@ EVENT_AFTER_HOURS = float(os.getenv("EVENT_AFTER_HOURS", "2.5"))     # "how'd it
 # than just skipping — capped so it's never silently dropped forever.
 EVENT_NUDGE_BUFFER_MIN = int(os.getenv("EVENT_NUDGE_BUFFER_MIN", "15"))  # defer if active within this many minutes
 EVENT_NUDGE_MAX_DEFERS = int(os.getenv("EVENT_NUDGE_MAX_DEFERS", "3"))   # fire anyway after this many deferrals
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")  # video audio only -- voice notes use Inworld below
 VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
+INWORLD_STT_URL = "https://api.inworld.ai/stt/v1/transcribe"
+INWORLD_STT_MODEL = os.getenv("INWORLD_STT_MODEL", "inworld/inworld-stt-1")
+INWORLD_STT_LANG = os.getenv("INWORLD_STT_LANG", "en")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "25"))  # seconds; a hung/adversarial file is killed, not left to hang forever
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -6766,20 +6770,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tone_task = None
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
-        voice_bytes = await voice_file.download_as_bytearray()
+        voice_bytes = bytes(await voice_file.download_as_bytearray())
         if VOICE_TONE_ENABLED and acoustic_ears is not None:
-            # Kick this off now so it runs concurrently with the (blocking) transcription
-            # call below instead of adding serial latency.
-            tone_task = asyncio.create_task(_analyze_voice_tone(bytes(voice_bytes)))
-        resp = _session.post(
-            f"{NANOGPT_BASE_URL}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-            files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
-            data={"model": WHISPER_MODEL},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        transcript = resp.json().get("text", "").strip()
+            # Kick this off now so it runs concurrently with the transcription call below
+            # instead of adding serial latency.
+            tone_task = asyncio.create_task(_analyze_voice_tone(voice_bytes))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ogg_path = os.path.join(tmpdir, "voice.ogg")
+            mp3_path = os.path.join(tmpdir, "voice.mp3")
+            with open(ogg_path, "wb") as f:
+                f.write(voice_bytes)
+            await _run_ffmpeg("-y", "-i", ogg_path, "-ar", "44100", "-ac", "1", "-b:a", "160k", mp3_path)
+            with open(mp3_path, "rb") as f:
+                mp3_bytes = f.read()
+        result = await asyncio.to_thread(_transcribe_inworld, mp3_bytes)
+        transcript = result["transcript"]
+        voice_profile = result["voice_profile"]
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
         if tone_task:
@@ -6796,9 +6802,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         acoustic = await tone_task if tone_task else None
         tone_note = acoustic_ears.describe_acoustic(acoustic, len(transcript.split())) if acoustic else None
+        vp_note = describe_voice_profile(voice_profile)
         content = f"[voice message]: {transcript}"
-        if tone_note:
-            content += f"\n[How it sounded: {tone_note}]"
+        extra = ", ".join(n for n in (vp_note, tone_note) if n)
+        if extra:
+            content += f"\n[How it sounded: {extra}]"
         messages = assemble_messages(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -6849,6 +6857,50 @@ async def _analyze_voice_tone(voice_bytes: bytes):
     except Exception as e:
         print("[voice-tone] check failed:", e)
         return None
+
+
+# Request/response shape adapted from menelly/AI_Ears' hear_core._transcribe_inworld (MIT
+# license), ported to requests/_session to match this file's own HTTP conventions.
+def _transcribe_inworld(mp3_bytes: bytes) -> dict:
+    """Sync/off-loop: call Inworld's STT API. Raises on failure -- caller handles it the same
+    way it already handles a transcription failure."""
+    if not INWORLD_API_KEY:
+        raise RuntimeError("INWORLD_API_KEY not configured")
+    payload = {
+        "transcribeConfig": {
+            "modelId": INWORLD_STT_MODEL,
+            "audioEncoding": "MP3",
+            "language": INWORLD_STT_LANG,
+            "includeWordTimestamps": False,
+            "voiceProfileConfig": {"enableVoiceProfile": True, "topN": 1},
+        },
+        "audioData": {"content": base64.b64encode(mp3_bytes).decode()},
+    }
+    resp = _session.post(
+        INWORLD_STT_URL, json=payload,
+        headers={"Authorization": f"Basic {INWORLD_API_KEY}"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    tr = data.get("transcription", data)
+    return {
+        "transcript": (tr.get("transcript") or "").strip(),
+        "voice_profile": data.get("voiceProfile") or tr.get("voiceProfile") or {},
+    }
+
+
+def describe_voice_profile(vp: dict):
+    """Top label per category from an Inworld voiceProfile dict, e.g. 'emotion=warm, pitch=low'."""
+    if not vp:
+        return None
+    bits = []
+    for cat, label in (("emotion", "emotion"), ("vocalStyle", "style"),
+                        ("pitch", "pitch"), ("age", "age"), ("accent", "accent")):
+        arr = vp.get(cat) or []
+        if arr:
+            bits.append(f"{label}={arr[0].get('label', '?')}")
+    return ", ".join(bits) if bits else None
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
