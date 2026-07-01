@@ -34,6 +34,11 @@ try:
 except Exception:
     _Garmin = None
 
+try:
+    import acoustic_ears  # optional; needs numpy, same Termux caveat as episodic recall above
+except Exception:
+    acoustic_ears = None
+
 # Persistent session with connection pooling — reuses TCP connections across calls.
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(
@@ -172,6 +177,7 @@ EVENT_AFTER_HOURS = float(os.getenv("EVENT_AFTER_HOURS", "2.5"))     # "how'd it
 EVENT_NUDGE_BUFFER_MIN = int(os.getenv("EVENT_NUDGE_BUFFER_MIN", "15"))  # defer if active within this many minutes
 EVENT_NUDGE_MAX_DEFERS = int(os.getenv("EVENT_NUDGE_MAX_DEFERS", "3"))   # fire anyway after this many deferrals
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "25"))  # seconds; a hung/adversarial file is killed, not left to hang forever
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
@@ -6757,9 +6763,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    tone_task = None
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
+        if VOICE_TONE_ENABLED and acoustic_ears is not None:
+            # Kick this off now so it runs concurrently with the (blocking) transcription
+            # call below instead of adding serial latency.
+            tone_task = asyncio.create_task(_analyze_voice_tone(bytes(voice_bytes)))
         resp = _session.post(
             f"{NANOGPT_BASE_URL}/audio/transcriptions",
             headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
@@ -6771,15 +6782,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         transcript = resp.json().get("text", "").strip()
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
+        if tone_task:
+            tone_task.cancel()
         await context.bot.send_message(chat_id=chat_id,
                                        text="[couldn't make out that voice note]")
         return
 
     if not transcript:
+        if tone_task:
+            tone_task.cancel()
         return
 
     try:
+        acoustic = await tone_task if tone_task else None
+        tone_note = acoustic_ears.describe_acoustic(acoustic, len(transcript.split())) if acoustic else None
         content = f"[voice message]: {transcript}"
+        if tone_note:
+            content += f"\n[How it sounded: {tone_note}]"
         messages = assemble_messages(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -6813,6 +6832,23 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
         proc.kill()
         await proc.wait()
         raise TimeoutError(f"ffmpeg timed out after {FFMPEG_TIMEOUT}s")
+
+
+async def _analyze_voice_tone(voice_bytes: bytes):
+    """Best-effort acoustic read on a voice note (pace/pauses/tone) -- local FFT analysis,
+    no network. Returns the analyze_acoustic() dict, or None on any failure."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ogg_path = os.path.join(tmpdir, "voice.ogg")
+            wav_path = os.path.join(tmpdir, "voice.wav")
+            with open(ogg_path, "wb") as f:
+                f.write(voice_bytes)
+            await _run_ffmpeg("-y", "-i", ogg_path, "-ar", "44100", "-ac", "1",
+                               "-c:a", "pcm_s16le", wav_path)
+            return await asyncio.to_thread(acoustic_ears.analyze_acoustic, wav_path)
+    except Exception as e:
+        print("[voice-tone] check failed:", e)
+        return None
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):

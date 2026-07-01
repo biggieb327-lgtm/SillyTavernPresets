@@ -43,6 +43,12 @@ if [ -d "$DEPLOY/telegram-companion-bot/bot_app" ]; then
   cp -r "$DEPLOY/telegram-companion-bot/bot_app" "$BOT_SRC/bot_app"
 fi
 
+# acoustic_ears.py is a vendored module bot.py imports directly (voice-note tone analysis) --
+# keep it in lockstep with bot.py, same as the main file itself.
+if [ -f "$DEPLOY/telegram-companion-bot/acoustic_ears.py" ]; then
+  cp "$DEPLOY/telegram-companion-bot/acoustic_ears.py" "$BOT_SRC/acoustic_ears.py"
+fi
+
 # Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
 # left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
 for f in run-bot.sh watchdog.sh status.sh; do
