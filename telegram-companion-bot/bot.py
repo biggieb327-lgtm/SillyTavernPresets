@@ -165,6 +165,12 @@ EVENT_MODEL = os.getenv("EVENT_MODEL", MOOD_MODEL)
 EVENT_HORIZON_DAYS = int(os.getenv("EVENT_HORIZON_DAYS", "120"))     # ignore events further out than this
 EVENT_BEFORE_MIN = int(os.getenv("EVENT_BEFORE_MIN", "45"))         # "good luck" this many min before a timed event
 EVENT_AFTER_HOURS = float(os.getenv("EVENT_AFTER_HOURS", "2.5"))     # "how'd it go" this many hours after
+# Don't interrupt an active exchange with an unprompted event nudge — defer it briefly and
+# re-check, same spirit as heartbeat's "recently active" skip. Unlike heartbeat, an event nudge
+# is tied to a specific happening (not a re-rolled random tick), so it defers and retries rather
+# than just skipping — capped so it's never silently dropped forever.
+EVENT_NUDGE_BUFFER_MIN = int(os.getenv("EVENT_NUDGE_BUFFER_MIN", "15"))  # defer if active within this many minutes
+EVENT_NUDGE_MAX_DEFERS = int(os.getenv("EVENT_NUDGE_MAX_DEFERS", "3"))   # fire anyway after this many deferrals
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "25"))  # seconds; a hung/adversarial file is killed, not left to hang forever
@@ -6410,6 +6416,18 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return  # was cancelled
     if r.get("kind") == "event":
+        # Don't interrupt an active exchange with an unprompted nudge -- defer briefly and
+        # re-check (same spirit as heartbeat's "recently active" skip), capped so it's never
+        # silently dropped forever.
+        deferred = r.get("_deferred", 0)
+        if (time.time() - last_seen.get(r["chat_id"], 0) < EVENT_NUDGE_BUFFER_MIN * 60
+                and deferred < EVENT_NUDGE_MAX_DEFERS):
+            r["_deferred"] = deferred + 1
+            save_reminders()
+            context.job_queue.run_once(fire_reminder, when=EVENT_NUDGE_BUFFER_MIN * 60, data=rid)
+            print(f"[event-reminder] {r['event']}: owner active, deferring "
+                  f"{EVENT_NUDGE_BUFFER_MIN}m (attempt {r['_deferred']}/{EVENT_NUDGE_MAX_DEFERS}).")
+            return
         uname = user_names.get(r["chat_id"], "you")
         phase = r.get("phase")
         if phase == "after":
@@ -6437,6 +6455,7 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
             nxt = _next_occurrence(r["weekdays"], hh, mm, now_dt)
             if nxt:
                 r["due"] = nxt.isoformat()
+                r["_deferred"] = 0  # fresh occurrence -- don't carry over this instance's defer count
                 save_reminders()
                 schedule_reminder(context.job_queue, r)
             return
