@@ -3580,19 +3580,33 @@ async def maybe_search(context, chat_id: int, messages: list, ai_response: str, 
                                    fallback=fallback or FALLBACK_MODEL)
 
 
-def _assess_safety(user_message: str) -> bool:
-    """Sync/off-loop: True if the message shows genuine acute distress or crisis (not roleplay,
-    dark humor, or ordinary venting). Best-effort; any failure returns False."""
+def _assess_safety(chat_id: int, user_message: str, uname: str) -> bool:
+    """Sync/off-loop: True if the newest message shows genuine acute distress or crisis about the
+    sender's own real life (not roleplay, dark humor, ordinary venting, or a terse reply that only
+    reads as heavy out of context). Best-effort; any failure returns False."""
+    recent = conversation_history.get(chat_id, [])[-6:]
+    history_snippet = "\n".join(
+        f"{'you' if m['role'] == 'assistant' else uname}: {m['content'][:150].strip()}"
+        for m in recent
+    )
     sys = (
-        "You are a safety classifier for a personal chat. Does this message express GENUINE, "
-        "present distress or crisis about the sender's own real life — suicidal thoughts, "
-        "self-harm, intent to harm, a mental-health emergency, or being in real danger right now? "
-        "Roleplay, fiction, song lyrics, dark humor, or just venting about a rough day do NOT "
-        "count. Only real, current danger to a real person. Answer with ONLY 'yes' or 'no'."
+        "You are a safety classifier for a personal chat. Judge the NEWEST message in light of "
+        "the conversation it's part of -- a short or ambiguous reply (like \"all of it\" or "
+        "\"I don't know\") must be read against what it's answering, not judged as if it appeared "
+        "with no context. Does the newest message express GENUINE, present distress or crisis "
+        "about the sender's own real life -- suicidal thoughts, self-harm, intent to harm, a "
+        "mental-health emergency, or being in real danger right now? Roleplay, fiction, song "
+        "lyrics, dark humor, ordinary venting about a rough day, or a terse/vague reply that only "
+        "reads as heavy in isolation do NOT count. Only real, current danger to a real person. "
+        "Answer with ONLY 'yes' or 'no'."
+    )
+    user_content = (
+        (f"Recent exchange:\n{history_snippet}\n\n" if history_snippet else "")
+        + f"Newest message: {user_message}"
     )
     try:
         raw = call_nanogpt(
-            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_content}],
             model=SAFETY_MODEL,
         ).strip().lower()
         return raw.startswith("y")
@@ -7470,7 +7484,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query_vec, distress = await asyncio.gather(
             asyncio.to_thread(_embed_query, user_message) if EMBED_ENABLED
             else asyncio.sleep(0, result=None),
-            asyncio.to_thread(_assess_safety, user_message) if SAFETY_ENABLED
+            asyncio.to_thread(_assess_safety, chat_id, user_message, user_names[chat_id]) if SAFETY_ENABLED
             else asyncio.sleep(0, result=False),
         )
         # When a reranker is configured, re-score the episode candidates off-loop for a sharper
