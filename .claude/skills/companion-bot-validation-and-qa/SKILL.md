@@ -95,8 +95,8 @@ in a test context is not safe and never will be (single-file entry point is an a
 invariant). So: parse the file, extract the one function's source, `exec` it in a clean
 namespace, and call it.
 
-The runnable skeleton — this exact script was run against the real `bot.py` on 2026-07-02
-and all four cases passed:
+The runnable skeleton (authoritative copy — analysis-toolkit Method 3 points here) — this
+exact script was run against the real `bot.py` on 2026-07-02 and all four cases passed:
 
 ```python
 import ast
@@ -334,6 +334,3 @@ to make validation repeatable.
   inventory before citing it.
 - Sibling skills: change gating → companion-bot-change-control; deploy/device mechanics →
   companion-bot-device-ops; live-bug triage → companion-bot-debugging-playbook.
-- Referenced skills companion-bot-diagnostics and companion-bot-analysis-toolkit did not
-  exist in `.claude/skills/` on 2026-07-02 — update the description's routing if they land
-  under different names.

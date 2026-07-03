@@ -34,7 +34,7 @@ instance list is the `BOTS` list in `watchdog.sh` and the loop in `update-all.sh
 `bot.py` is and remains the process entry point (`run-bot.sh` runs `python -u bot.py
 [instance-dir]`). Do NOT switch to `main.py` (it is an unused scaffold initializer), do not
 rewrite `main()` / handler registration, and do not split bot.py into modules on your own
-initiative.
+initiative. (Canonical statement of all four non-negotiables: companion-bot-change-control.)
 
 **Rationale:** the deploy target is a phone. `update-all.sh` copies `bot.py` (plus `bot_app/`,
 `acoustic_ears.py`, and helper scripts) into `~/telegram-bot/` and restarts everything. One file
@@ -44,7 +44,8 @@ for zero user-visible gain.
 
 ### bot_app/ — strangler-fig migration, partially adopted ON PURPOSE
 
-`bot_app/MIGRATION.md` is the **canonical** record. bot.py imports the package defensively
+(Strangler-fig = the new package grows around the monolith, which stays the entry point
+until each piece is proven.) `bot_app/MIGRATION.md` is the **canonical** record. bot.py imports the package defensively
 (~line 1444): a `try/except` sets `_mem_service`/`_guards`/`_ActionRequest`/`_ingestion` to
 `None` on any failure, and every call site falls back to inline behavior. A missing or
 half-deployed `bot_app/` disables the migrated subsystems; it can NEVER crash the bots.
@@ -133,6 +134,9 @@ Every system that can message the owner **unprompted**. Grep the log tag to find
 | Traffic alerts | `traffic_poll_job` ~8549 | every `TRAFFIC_POLL_MINUTES`; new WSDOT incident nearby | **only while a live location share is active** (`live_until`); deduped via `seen_incidents`; raw utility text | `[traffic]` |
 | Payments digest | `payments_reminder` ~6137 | daily at `REMINDER_TIME` (weekday-gated inside) | — | — |
 | Weekly backup | `weekly_backup` ~6419 | daily at `BACKUP_TIME` (weekday-gated inside) | sends the state backup file to owner | — |
+
+This table is the authoritative inventory — the playbook and proactive campaign carry
+task-specific subsets.
 
 All in-character paths funnel through `send_triggered` (~7828): assembles a `[SYSTEM: ...]`
 trigger as the "user" content, retries once on provider refusal, records a synthetic user turn

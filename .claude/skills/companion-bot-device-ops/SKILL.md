@@ -7,7 +7,8 @@ description: >
   setting up a fresh device or a new character instance, composing ANY command the owner will
   run on the phone (chat paste-corruption rules live here), reading/interpreting bot.log or
   watchdog.log paths, editing the helper scripts (update-all.sh, run-bot.sh, watchdog.sh,
-  status.sh, termux-boot-start.sh), verifying whether a deploy actually landed, or answering
+  status.sh, termux-boot-start.sh), the deploy/restart mechanics themselves (for the symptom
+  "did my deploy take?" start at companion-bot-debugging-playbook), or answering
   "what runs where / what file lives where" questions about ~/telegram-bot and ~/<char>-bot.
 ---
 
@@ -70,8 +71,10 @@ Key facts:
   character whose `~/<char>-bot/` directory doesn't exist. Both scripts already list all
   six names including priya (verified: `watchdog.sh` BOTS block lines 24–31,
   `update-all.sh` restart loop line 79). Note: `docs/OPS_MANUAL.md` still says priya
-  "isn't deployed yet" — the scripts are the source of truth for what WOULD run; whether
-  `~/priya-bot/` exists on the device is a question only the owner can answer (`ls ~`).
+  "isn't deployed yet", but the owner deployed `~/priya-bot` during a 2026-06/07 session
+  (owner-confirmed, session log) — six instances on-device. General caveat stands:
+  per-instance dirs are device state a remote session cannot enumerate; confirm with the
+  owner (`ls ~`) when it matters.
 
 ---
 
@@ -203,6 +206,9 @@ the venv activated, this is why.
 ---
 
 ## 5. update-all.sh anatomy (the one deploy command)
+
+This section is the authoritative single home of the deploy sync manifest — sibling
+skills point here.
 
 ```
 # device — THE normal deploy command after any pushed change

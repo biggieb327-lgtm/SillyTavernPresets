@@ -35,14 +35,15 @@ companion-bot-device-ops for the full paste-corruption rules and restart mechani
 ## The proactive-path inventory (ground truth)
 
 Every unprompted message comes from exactly one of these paths. Identify the path by its
-log tag BEFORE touching anything.
+log tag BEFORE touching anything. Authoritative full inventory with gates:
+companion-bot-architecture-contract §4 (this table carries the campaign-relevant subset).
 
 | Path | Trigger | Gates (in order) | Log tag | Env knobs | Restart persistence |
 |---|---|---|---|---|---|
 | **Heartbeat** | `schedule_next_heartbeat` rolls a random delay in [`HEARTBEAT_MIN_HOURS`, `HEARTBEAT_MAX_HOURS`] (defaults 2–6h); `heartbeat()` fires, always re-rolls first | owner set → skip if owner active within `HEARTBEAT_MIN * 0.9` (`last_seen`) → quiet hours (`QUIET_START`/`QUIET_END`, saves a draft) → `/quiet` active → nudge budget (`_check_nudge_budget`, default 3/day, saves a draft) → mood-based random skip (60% if mood ≤ −1.2, 25% if ≤ −0.4) | `[heartbeat]` | `HEARTBEAT_MIN_HOURS`, `HEARTBEAT_MAX_HOURS`, `QUIET_START`, `QUIET_END`; runtime `/quiet`, `/nudges` | next tick persisted to `.next_heartbeat`; resumed on restart if still in the future |
 | **Follow-up** | regex `_FOLLOWUP_RE` matches the CHARACTER'S OWN reply (not the user's message); fires a second message after `random.uniform(FOLLOWUP_MIN, FOLLOWUP_MAX)` (45–120s) | `FOLLOWUP_ENABLED` (default **false**) → active vibe is not "in-person" → regex match | `[followup]` | `FOLLOWUP_ENABLED`, `FOLLOWUP_MIN_SECS`, `FOLLOWUP_MAX_SECS` | none — pending follow-up dies with the process |
 | **Event reminders** | `fire_reminder` with `kind == "event"`; phases `before` / `after` / `recurring`, LLM-extracted from conversation | if owner active within `EVENT_NUDGE_BUFFER_MIN` (15) minutes of `last_seen`, DEFER by that many minutes, up to `EVENT_NUDGE_MAX_DEFERS` (3), then fire anyway | `[event-reminder]` | `EVENT_REMINDERS` (default on), `EVENT_NUDGE_BUFFER_MIN`, `EVENT_NUDGE_MAX_DEFERS` | reminders (incl. `_deferred` count) saved via `save_reminders()` |
-| **Explicit user reminders** | `fire_reminder`, `kind != "event"` — the owner asked to be reminded | NONE. Fires exactly on time BY DESIGN. **Never "fix" this path's timing.** | `[reminders]` | — | persisted with reminders |
+| **Explicit user reminders** | `fire_reminder`, `kind != "event"` — the owner asked to be reminded | NONE. Fires exactly on time BY DESIGN. **Never "fix" this path's timing.** | — (sends literal `⏰ Reminder: ...` text, NO log tag; `[reminders]` is a state-load-failure tag only, never a firing tag) | — | persisted with reminders |
 | **Garmin stress** | periodic `stress_monitor_job`, fires if stress stayed high | `STRESS_ALERTS` → cooldown `STRESS_ALERT_COOLDOWN_HOURS` → quiet hours / `/quiet` | `[stress]` (fetch layer logs `[garmin]`) | `STRESS_ALERTS`, `STRESS_ALERT_COOLDOWN_HOURS` | cooldown timestamp on disk |
 | **Garmin body battery** | periodic `bb_monitor_job`, fires if BB ≤ `BB_LOW_THRESHOLD` | `BB_ALERTS` → cooldown `BB_ALERT_COOLDOWN_HOURS` → quiet hours / `/quiet` | `[bb]` | `BB_ALERTS`, `BB_ALERT_COOLDOWN_HOURS`, `BB_LOW_THRESHOLD` | cooldown timestamp on disk |
 | **Garmin RHR** | morning job, fires if resting HR ≥ baseline + `RHR_ELEVATED_DELTA` | once/day (date file) → quiet hours / `/quiet` | `[rhr]` | `RHR_ELEVATED_DELTA` | once-per-day date file |

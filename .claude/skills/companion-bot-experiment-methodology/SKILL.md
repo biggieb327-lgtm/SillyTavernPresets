@@ -35,8 +35,7 @@ human interacts with all six. That is a real laboratory — treat it like one.
 
 ## 0. Routing — is this the right skill?
 
-- "What should we research next?" → **companion-bot-research-frontier** (route there even
-  though it may not exist yet; if absent, say so and ask the owner).
+- "What should we research next?" → **companion-bot-research-frontier**.
 - "Something is broken / behaving weird" → **companion-bot-debugging-playbook** (triage),
   then **companion-bot-analysis-toolkit** (deep investigation).
 - "How do I measure X?" → **companion-bot-diagnostics** (log tags, /diag, scripts).

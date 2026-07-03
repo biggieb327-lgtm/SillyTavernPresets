@@ -6,8 +6,9 @@ description: >
   /diag, /status, /health, /stress, /usage, /memory, /episodes, /recall, /nudges
   or any other in-chat diagnostic output; doing log forensics on bot.log or
   watchdog.log (what a [heartbeat]/[followup]/[garmin]/[memories] line means, or
-  what its ABSENCE proves); verifying a deploy actually landed on the device
-  ("did my deploy take?" as a measurement problem); checking liveness (.alive
+  what its ABSENCE proves); the marker-grep/cmp verification technique for
+  confirming a deploy landed (first stop for the SYMPTOM "did my deploy take?"
+  is companion-bot-debugging-playbook); checking liveness (.alive
   heartbeat, tmux sessions, watchdog behavior); quantifying proactive behavior
   (how many nudges fired, why ticks were skipped); auditing env-var drift between
   code and .env.example; or gathering before/after evidence for any fix. Ships
@@ -133,7 +134,7 @@ state is zero lines). Grouped by subsystem:
 |---|---|---|---|
 | `[heartbeat]` | proactive tick engine; **every tick prints ≥1 line**: always `next check in X.Xh` (reschedule, 8114), then exactly one outcome: `No owner yet` / `Owner recently active; skipping` / `Quiet hours; saved draft` / `User /quiet active; skipping` / `Nudge budget exhausted; saved draft` / `Mood is low (−X.X); saved draft` / `Proactive message sent.` / `Error:` | `[heartbeat] Proactive message sent.` | No `[heartbeat]` lines in a window ≥ `HEARTBEAT_MAX_HOURS` = ticks not firing at all (dead job queue / process down) — a much stronger claim than "gates suppressed it". |
 | `[proactive]` | provider refused a proactive generation; retry / skip notice | (error-only) | absence = no provider refusals on proactive sends |
-| `[followup]` | short-delay follow-up armed after a reply that asked a question (7375) or failed later (7666) | `scheduled in 412s for chat N` | message in question was not a follow-up |
+| `[followup]` | short-delay follow-up armed when `_FOLLOWUP_RE` matches an away-signal ("brb", "hold on") in the BOT'S OWN reply (7375), or failed later (7666); `FOLLOWUP_ENABLED` default off | `scheduled in 87s for chat N` (always within 45–120s, `FOLLOWUP_MIN_SECS`–`FOLLOWUP_MAX_SECS`) | message in question was not a follow-up |
 | `[draft]` | proactive urge suppressed by a gate, saved as unsent thought (1737) | `Saved unsent thought for chat N: <reason>` | no gate suppressed anything (nothing wanted to send, or sends went out) |
 | `[event]` | dated-event nudges scheduled from a message (6637) | `scheduled 2 nudge(s) for: dentist Tuesday` | event extraction never scheduled anything — the "good luck" text can't have come from here |
 | `[event-reminder]` | a scheduled event nudge deferring (owner mid-conversation) or failing to fire | `... owner active, deferring` | no deferrals/failures |

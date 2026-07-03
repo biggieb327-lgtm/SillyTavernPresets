@@ -66,7 +66,7 @@ Notes verified against `update-all.sh` (2026-07-02):
 - It syncs exactly: `bot.py` (with `cmp -s` verification), `bot_app/` (rm-then-copy),
   `acoustic_ears.py`, `run-bot.sh`/`watchdog.sh`/`status.sh` (with `chmod +x`), and
   `.env.example`. Nothing else. In particular **`preset.txt` and character dirs are NOT
-  synced** — they are class (c).
+  synced** — they are class (c). (Itemized manifest: companion-bot-device-ops §5.)
 - It auto-stashes stray changes in `~/stp-deploy`, fails loudly (`exit 1`) if
   `git pull --ff-only` fails, and restarts all six instances (`nora`, `bonnie`, `cass`,
   `emily`, `jules`, `priya`) via `run-bot.sh <dir> <session>`, skipping any whose instance
@@ -74,8 +74,8 @@ Notes verified against `update-all.sh` (2026-07-02):
 
 ## The four non-negotiables
 
-Owner-confirmed rules. None of them is fully written down anywhere else — this section is
-the canonical statement. Do not trade any of them away for convenience.
+Owner-confirmed rules. This section is the canonical statement (siblings cite it). Do not
+trade any of them away for convenience.
 
 ### 1. bot.py stays the entry point
 

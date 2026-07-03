@@ -69,14 +69,14 @@ on a guess.
 
 - **ZERO dollar signs** in any command destined for the owner. The owner's chat
   client strips `$...$` spans (renders them as math), silently corrupting
-  commands — a heredoc once arrived with `$HOME/$dir` mangled to ` dir`.
-  Use `~` for home, and write per-bot commands as literal lines
-  (`~/nora-bot/bot.log`, `~/bonnie-bot/bot.log`, ...) instead of shell loops
-  with variables. No `$(...)`, no `${...}`, no awk fields like `$1`.
+  commands. Use `~` for home and literal per-bot lines instead of shell loops
+  with variables.
 - If a command that reached the device behaves inexplicably, suspect paste
   corruption first: have the owner run `cat -A` on the file (or history) to see
   what actually landed.
 - Keep commands short and single-purpose so the pasted output is unambiguous.
+
+(Full command-formatting rules: companion-bot-device-ops.)
 
 ## Symptom → first discriminating command
 
@@ -113,15 +113,17 @@ live in `bot.py`; entry points named for grep-ability.
 | Heartbeat check-in | `heartbeat`, `schedule_next_heartbeat`, sends via `send_proactive` | `[heartbeat]` | Random 2–6 h (`HEARTBEAT_MIN_HOURS`/`MAX`); persisted across restarts | Yes — skips if owner active within ~0.9×min window; also quiet hours, `/quiet`, nudge budget, low mood |
 | Follow-up ("brb" comeback) | `_send_followup`, gated by `_FOLLOWUP_RE` on the BOT's own reply | `[followup]` | 45–120 s (`FOLLOWUP_MIN_SECS`/`MAX`) after the bot says brb/hold on/one sec; **off by default** (`FOLLOWUP_ENABLED`) | Cancelled if the user replies first |
 | Event reminders (auto-extracted) | `fire_reminder` with `kind == "event"`; scheduling logs `[event]`/`[upcoming]` | `[event-reminder]` | At the extracted event time; recurring ones re-arm | Since commit `6a8061f`: defers 15 min (`EVENT_NUDGE_BUFFER_MIN`) up to 3 times (`EVENT_NUDGE_MAX_DEFERS`) if owner active, **then fires anyway** |
-| Plain reminders (`/remind`) | `fire_reminder`, non-event kind | (sends literal `⏰ Reminder:` text) | At the set time | No |
+| Plain reminders (`/remindme`) | `fire_reminder`, non-event kind | (sends literal `⏰ Reminder:` text, no log tag) | At the set time | No |
 | Garmin stress monitor | `stress_monitor_job` | `[stress]` | Every 30 min (`STRESS_POLL_MIN`) when `STRESS_ALERTS` on | Cooldown hours + quiet hours + `/quiet`; no recent-activity check |
 | Garmin body-battery monitor | `bb_monitor_job` | `[bb]` | Every 30 min when `BB_ALERTS` on | Same as stress |
 | Garmin resting-HR monitor | `rhr_monitor_job` | `[rhr]` | Once daily (morning) when `RHR_ALERTS` on | Once/day + quiet hours |
 | On-this-day reminiscing | `onthisday_job` | `[onthisday]` | Once daily; min-gap days between reminisces | Quiet hours + `/quiet` |
-| Cron jobs (`/cronadd`) | `run_cron_job` | `[cron #N]` | Owner-defined daily/interval schedule | No |
+| Cron jobs (`/cron`) | `run_cron_job` | `[cron #N]` | Owner-defined daily/interval schedule | No |
 | Payments reminder | `payments_reminder` | `[payments]` | Daily at a fixed time | No |
 | Weekly backup | `weekly_backup` | `[backup]` | Weekly, fixed weekday | No |
 | Traffic alerts | `traffic_poll_job` | `[traffic]` (via `log.warning` on failure) | Every 30 min (`TRAFFIC_POLL_MINUTES`), only when `WSDOT_API_KEY` set and location shared | No |
+
+Authoritative full inventory with gates: companion-bot-architecture-contract §4.
 
 **Not senders (common misattribution):** the life-sim (`[life]`, `update_life_event`)
 and day-events (`[day-events]`, `[day-rotate]`) systems only generate background
@@ -183,7 +185,7 @@ shared send paths most of the above funnel through.
 - **Cost:** Debugging a "bug" that was actually transport corruption.
 - **Discriminator:** `cat -A` on the file that landed on-device.
 - **Rule:** zero dollar signs in anything the owner will paste (see formatting
-  rules above).
+  rules above; full rules: companion-bot-device-ops).
 
 ### 5. /diag UnicodeEncodeError
 - **Trap:** Surrogate-pair emoji in source strings crashed Telegram sends of
@@ -220,9 +222,15 @@ reminder IDs and the `EMBED_DIM` cache gap (`7c205bd`), lore embed HTTP 400
 from over-long embedding inputs (`a53a28e`), event-loop-blocking sync calls and
 un-timed-out ffmpeg (`2012fbc`), Cass roleplaying documents instead of analyzing
 them (fixed by the `DOCUMENT_MODEL` split — documents go to a separate model),
-and PDF OCR issues (fix lives on the dead branch `fix-bot-py`).
+and PDF OCR issues (fixes fully reconciled into HEAD — see
+companion-bot-failure-archaeology §0; never cherry-pick from the dead branch
+`fix-bot-py`).
 
 ## Log-tag reference
+
+Full tag map + regeneration script: companion-bot-diagnostics
+(`scripts/enumerate-log-tags.sh`). This table covers only the proactive senders the
+symptom rows need.
 
 Tags are bracketed prefixes on `print()` lines; `bot.py` runs under `python -u`
 so they appear in `~/<char>-bot/bot.log` in real time. The high-signal ones:

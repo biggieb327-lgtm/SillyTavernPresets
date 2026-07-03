@@ -6,7 +6,6 @@ description: >
   project history. Load this when: investigating ANY non-trivial bug (especially
   one that only reproduces on the owner's Termux/Android device); about to assert
   "the cause is X" or "this mechanism works" and you need to PROVE it first;
-  testing a single bot.py function in isolation (bot.py cannot be imported);
   checking whether a regex actually matches a real message; building a synthetic
   fixture (audio, JSON, text) to exercise an algorithm offline; deciding which
   code version is actually running on the device; reasoning from an absent log
@@ -69,8 +68,8 @@ the owner runs commands and pastes output.
 Command-authoring constraints (violating these wastes an owner round-trip):
 
 - **Zero dollar signs.** The owner's chat client strips `$...$` spans as math markup, so
-  `$(...)`, `$HOME`, `$1` silently vanish before the shell sees them. Use `~`, literal
-  paths, and backtick-free constructions.
+  `$(...)`, `$HOME`, `$1` silently vanish before the shell sees them (full
+  command-formatting rules: companion-bot-device-ops).
 - **Single purpose.** One command, one bit of evidence. No `&&` chains that hide which
   step produced the output.
 - If pasted output looks impossible, suspect paste corruption before suspecting the
@@ -158,37 +157,20 @@ pattern for unit-testing anything in an un-importable module.
 **RECIPE:** Parse the file, extract the target function's exact source segment, `exec` it
 in a controlled namespace, call it with hand-built inputs of known expected output.
 
-Full runnable skeleton — executed successfully against the real bot.py on 2026-07-02
-(target `describe_voice_profile`, bot.py:6886), printed
-`AST dry run PASS: emotion=warm, pitch=low`:
+The idea in miniature:
 
 ```python
-import ast
-
-SRC_PATH = "telegram-companion-bot/bot.py"   # un-importable module
-TARGET = "describe_voice_profile"            # function under test
-
-src = open(SRC_PATH).read()
-tree = ast.parse(src)
-seg = next(ast.get_source_segment(src, n) for n in tree.body
+seg = next(ast.get_source_segment(src, n) for n in ast.walk(ast.parse(src))
            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == TARGET)
-
-ns = {}          # controlled namespace: add stub deps here if exec raises NameError
-exec(seg, ns)
-fn = ns[TARGET]
-
-# Hand-built inputs with KNOWN expected outputs
-assert fn(None) is None
-assert fn({}) is None
-assert fn({"emotion": [{"label": "warm"}], "pitch": [{"label": "low"}]}) == "emotion=warm, pitch=low"
-assert fn({"vocalStyle": [{}]}) == "style=?"
-print("AST dry run PASS:", fn({"emotion": [{"label": "warm"}], "pitch": [{"label": "low"}]}))
+ns = {}; exec(seg, ns)                      # stub module-level deps into ns on NameError
+assert ns[TARGET](hand_built_input) == known_expected_output
 ```
+
+Authoritative runnable skeleton: **companion-bot-validation-and-qa** (its `ast.walk`
+variant also finds nested functions).
 
 Adaptation notes:
 
-- The `next(...)` only walks `tree.body` — top-level functions. For a method or nested
-  function, walk with `ast.walk(tree)` instead.
 - When the extracted function references module globals (`os`, a config constant, a
   helper), the `exec`'d call raises `NameError`. Add exactly those names to `ns` as
   imports or stubs — stubbing is a feature: you control every dependency's behavior.
@@ -256,8 +238,11 @@ single costliest failure class: hours have been lost debugging repo code that wa
 running. Also whenever a "fixed" bug recurs, or a log line doesn't match repo source.
 
 **RECIPE:** Prove which code runs, by content, not by assumption. Device layout: the git
-clone lives at `~/stp-deploy`, the RUNNING copy at `~/telegram-bot/bot.py` (helper scripts
-and per-character files deploy manually). Owner-runnable, zero-dollar commands:
+clone lives at `~/stp-deploy`, the RUNNING copy at `~/telegram-bot/bot.py`. `update-all.sh`
+auto-syncs `bot.py`, `bot_app/`, `acoustic_ears.py`, `run-bot.sh`, `watchdog.sh`,
+`status.sh`, and `.env.example`; `update-all.sh` itself, `termux-boot-start.sh`, character
+files, and `.env`s deploy manually (full manifest: companion-bot-device-ops).
+Owner-runnable, zero-dollar commands:
 
 ```bash
 cmp ~/stp-deploy/telegram-companion-bot/bot.py ~/telegram-bot/bot.py
@@ -279,9 +264,10 @@ before the copy still runs old code from memory; confirm restart time with the o
 hardened to cmp-verify: line 33 runs
 `if ! cmp -s "$DEPLOY/telegram-companion-bot/bot.py" "$BOT_SRC/bot.py"; then` after the
 copy, so the deploy script now refuses to report success on a mismatched bot.py. That
-turned this method's manual check into an automatic gate — but ONLY for bot.py; helper
-scripts, character files, and `.env`s still deploy manually and still need the manual
-differential.
+turned this method's manual check into an automatic gate — but the cmp gate covers ONLY
+bot.py; the manually-deployed files (`update-all.sh` itself, `termux-boot-start.sh`,
+character files, `.env`s) still need the manual differential (full manifest:
+companion-bot-device-ops).
 
 **FAILURE MODE of the method:** Comparing the wrong pair — repo-vs-clone (`~/stp-deploy`)
 when the running copy is `~/telegram-bot/bot.py`, or checking a helper script through the
@@ -408,6 +394,9 @@ guess. Adapt transport and error-handling conventions; never adapt the wire form
 Second trap: a reference that itself targets a different API version — confirm the
 reference actually runs today before extracting from it.
 
+**Shipping obligation:** route the resulting code change through
+companion-bot-change-control before it ships.
+
 ---
 
 ## Provenance and maintenance
@@ -418,9 +407,9 @@ reference actually runs today before extracting from it.
   bot.py:7785 (gate at 7366), `describe_voice_profile` bot.py:6886, pause floor
   acoustic_ears.py:95, deploy cmp update-all.sh:33 — re-grep before trusting; bot.py
   moves.
-- The Method 3 skeleton was executed against the live repo on 2026-07-02 and passed;
-  if `ast.get_source_segment` or the namespace-exec pattern stops working, fix the
-  skeleton here, not just in your scratch file.
+- The Method 3 pattern was executed against the live repo on 2026-07-02 and passed;
+  the authoritative runnable skeleton lives in companion-bot-validation-and-qa — if
+  `ast.get_source_segment` or the namespace-exec pattern stops working, fix it there.
 - When an investigation teaches a NEW method (not a new instance of these eight), add it
   here with a worked example and its own failure mode; instances of existing methods go
   to companion-bot-failure-archaeology instead.

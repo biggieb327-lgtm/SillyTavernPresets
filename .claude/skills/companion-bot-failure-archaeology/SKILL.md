@@ -8,7 +8,7 @@ description: >
   nohup daemonizing, prompt examples with concrete names, splitting bot.py); you are touching a
   subsystem with history (proactive/heartbeat, memory extraction, selfie generation, deploy
   scripts, voice pipeline, card reading); the owner reports a symptom that matches an old one
-  ("she texted me out of nowhere", "deploy didn't take", "bot died after reboot", garbage
+  ("she texted me out of nowhere", "bot died after reboot", garbage
   memories); or you want to know WHY something is built the way it is before "fixing" it.
   Do NOT use for: active live triage (companion-bot-debugging-playbook), investigation
   methodology (companion-bot-analysis-toolkit), architecture reference
