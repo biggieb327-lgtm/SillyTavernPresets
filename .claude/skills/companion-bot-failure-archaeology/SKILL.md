@@ -77,16 +77,19 @@ cherry-pick from `fix-bot-py`; you would regress the intentional `continue → b
   (2) Heartbeat suspected — logs showed it firing on its normal 2–6h cadence and correctly
   skipping near recent activity.
 - **Real root cause:** event-reminder nudges (`fire_reminder`, kind == "event") had **no
-  owner-is-currently-active check at all**, unlike every other proactive path (heartbeat,
-  stress, Body Battery, RHR all check `last_seen`). An auto-extracted "Aeropress lesson"
-  check-in fired mid-conversation.
+  owner-is-currently-active check at all**, unlike the heartbeat (which skips when the owner
+  was recently active). An auto-extracted "Aeropress lesson" check-in fired mid-conversation.
+  (Note: the Garmin monitors gate on cooldown + quiet hours only — they do NOT check
+  `last_seen` either; that remaining gap is flagged in companion-bot-proactive-tuning-campaign.)
 - **Evidence:** `6a8061f` (2026-07-01) — the commit message narrates the full diagnosis chain.
   Session log 2026-07.
 - **Status:** fixed @`6a8061f` (`EVENT_NUDGE_BUFFER_MIN` defer + `EVENT_NUDGE_MAX_DEFERS` cap;
   scoped to event-kind nudges only — explicit `/remindme` reminders still fire exactly on time).
-- **Settled lesson (settled-forever):** there are FIVE independent proactive paths. Discriminate
-  by **log tags** (`[heartbeat]`, `[followup]`, `[reminders]`, `[stress]`, `[rhr]`), never by
-  "the timing looks like X". Delay similarity proves nothing.
+- **Settled lesson (settled-forever):** there are MANY independent proactive paths (heartbeat,
+  follow-up, event reminders, explicit reminders, cron, stress/BB/RHR monitors, on-this-day,
+  traffic — see companion-bot-architecture-contract's table for the full inventory). Discriminate
+  by **log tags** (`[heartbeat]`, `[followup]`, `[event-reminder]`, `[stress]`, `[bb]`, `[rhr]`,
+  `[onthisday]`, `[cron #N]`), never by "the timing looks like X". Delay similarity proves nothing.
 
 ### 1.2 Follow-up feature: too trigger-happy, disabled by default
 - **Symptom:** unprompted message 1–2 minutes after ordinary replies.

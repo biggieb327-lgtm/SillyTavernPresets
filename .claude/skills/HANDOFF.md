@@ -1,6 +1,29 @@
-# Skill-library build: handoff state (2026-07-02)
+# Skill-library build: handoff state (2026-07-02, updated after authoring completion)
 
 Delete this file when the library is complete and reviewed.
+
+## CURRENT STATE: authoring DONE (15/15, pushed through 66c704a). Phase 3 review PARTIAL.
+All 15 skills exist and are committed. Phase 3 (three reviewers + fixer) was launched but all
+three reviewers were killed by session limits. Before dying, the factual reviewer confirmed one
+BLOCKING finding — two skills claimed "heartbeat, stress, Body Battery, RHR all check last_seen"
+when the Garmin monitors actually gate on cooldown + quiet hours only — which has been FIXED
+inline (failure-archaeology, experiment-methodology), along with an inter-skill inconsistency
+(archaeology's "FIVE proactive paths" undercount vs architecture-contract's full table).
+
+## REMAINING WORK: re-run Phase 3 in full
+Three parallel reviewers over all 15 skills, then one fixer, then the final inventory report:
+- FACTUAL: re-verify flags/paths/commands/hashes against the repo (BLOCKING = wrong action or
+  broken command). Cross-check ground truths: Garmin monitors do NOT check last_seen; life-sim
+  never sends messages; fix-bot-py fully reconciled; TTS_VOICE = Inworld voiceId, TTS_MODEL
+  removed; system_prompt stripping superseded by DOCUMENT_MODEL (9d19b6a); device-bound commands
+  must be zero-dollar-sign.
+- DOCTRINE: contradictions with CLAUDE.md / the four owner non-negotiables / between skills;
+  overclaims; missing change-control routing on behavior-changing advice.
+- USABILITY: ~10 routing scenarios against frontmatter descriptions; duplication (one home per
+  fact); dangling cross-references; jargon defined; scannability. Also: this HANDOFF.md's
+  earlier sections are now historical — the "Remaining to author" list below is COMPLETE.
+Fixer applies BLOCKING+IMPORTANT. Then report to owner: inventory + spot-checks + uncertainties,
+commit, and delete this file.
 
 ## Mission
 Build a 15-skill library under `.claude/skills/` so junior/mid-level engineers and

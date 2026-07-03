@@ -209,8 +209,10 @@ Retrospective case study — this feature predates the formal protocol but exhib
 2. **Discriminating evidence** (Section 1): heartbeat log normal → ruled out; follow-up
    explained timing but not the empty `[followup]` log → ruled out; event reminders
    explained everything **including** the earlier-pasted `[event] scheduled 1 nudge(s)`
-   line. Root mechanism: `fire_reminder()` had no owner-active check, unlike every other
-   proactive path (heartbeat, stress, Body Battery, RHR all check `last_seen`).
+   line. Root mechanism: `fire_reminder()` had no owner-active check, unlike the heartbeat
+   (which skips when the owner was recently active). (The Garmin monitors don't check
+   `last_seen` either — cooldown + quiet hours only; that gap is flagged in
+   companion-bot-proactive-tuning-campaign.)
 3. **Fix behind knobs:** `EVENT_NUDGE_BUFFER_MIN` (default **15** — defer if owner active
    within that many minutes) and `EVENT_NUDGE_MAX_DEFERS` (default **3** — fire anyway
    after that many deferrals), `bot.py` lines ~177–178. Scoped to `kind == "event"`
