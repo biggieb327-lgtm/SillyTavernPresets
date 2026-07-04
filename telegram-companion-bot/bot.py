@@ -23,13 +23,31 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Persistent session with connection pooling — reuses TCP connections across calls.
-_session = requests.Session()
-_session.mount("https://", HTTPAdapter(
-    max_retries=Retry(total=0),  # we handle retries ourselves where needed
-    pool_connections=8,
-    pool_maxsize=32,
-))
+import concurrent.futures
+
+# Thread-local HTTP sessions — each worker thread gets its own connection pool,
+# avoiding the thread-safety issues of a shared requests.Session.
+_thread_local = threading.local()
+
+def _get_session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.mount("https://", HTTPAdapter(
+            max_retries=Retry(total=0),
+            pool_connections=4,
+            pool_maxsize=8,
+        ))
+        s.mount("http://", HTTPAdapter(
+            max_retries=Retry(total=0),
+            pool_connections=2,
+            pool_maxsize=4,
+        ))
+        _thread_local.session = s
+    return s
+
+# Dedicated pool for user-facing LLM replies — background tasks can never starve these.
+_REPLY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="reply")
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.error import NetworkError, TimedOut
@@ -87,7 +105,10 @@ _BOOT_TIME = time.time()
 _error_counts: dict[str, list[float]] = {}
 
 def _count_error(category: str):
-    _error_counts.setdefault(category, []).append(time.time())
+    ts = _error_counts.setdefault(category, [])
+    ts.append(time.time())
+    if len(ts) > 200:
+        del ts[:-200]
 
 # --- Access control ---
 _allowed_raw = os.getenv("ALLOWED_USERS", "")
@@ -187,7 +208,7 @@ def _reddit_access_token() -> str:
     """Get a cached (or fresh) OAuth token via Reddit's client_credentials grant."""
     if _reddit_token["value"] and time.time() < _reddit_token["exp"]:
         return _reddit_token["value"]
-    resp = _session.post(
+    resp = _get_session().post(
         "https://www.reddit.com/api/v1/access_token",
         data={"grant_type": "client_credentials"},
         auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
@@ -801,7 +822,7 @@ def load_state():
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
-def save_state():
+def _write_state():
     data = {
         "conversation_history": {str(k): v for k, v in conversation_history.items()},
         "last_seen": {str(k): v for k, v in last_seen.items()},
@@ -833,7 +854,31 @@ def save_state():
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(STATE_FILE)  # atomic, so a crash mid-write can't corrupt the file
+    tmp.replace(STATE_FILE)
+
+_save_scheduled = False
+
+def save_state():
+    """Save bot state. On the event loop: debounces and writes in a thread.
+    From a worker thread or at startup/shutdown: writes immediately."""
+    global _save_scheduled
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _write_state()
+        return
+    if _save_scheduled:
+        return
+    _save_scheduled = True
+    async def _deferred():
+        global _save_scheduled
+        await asyncio.sleep(0.5)
+        _save_scheduled = False
+        try:
+            await asyncio.to_thread(_write_state)
+        except Exception as e:
+            log.error("[state] deferred save failed: %s", e)
+    loop.create_task(_deferred())
 
 
 # --- PID lock: prevent duplicate instances ---
@@ -1408,7 +1453,7 @@ def _fetch_weather() -> str:
         "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m"
         "&temperature_unit=fahrenheit&wind_speed_unit=mph"
     )
-    r = _session.get(url, timeout=10)
+    r = _get_session().get(url, timeout=10)
     r.raise_for_status()
     c = r.json()["current"]
     desc = WEATHER_CODES.get(c.get("weather_code"), "")
@@ -2091,7 +2136,7 @@ def _one_call(messages: list, model: str) -> str:
                "max_tokens": MAX_TOKENS}
     if TEMPERATURE is not None:
         payload["temperature"] = TEMPERATURE
-    with _session.post(
+    with _get_session().post(
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
         json=payload,
@@ -2164,8 +2209,8 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
 
 
 async def generate_reply(messages: list, model: str = None, fallback: str = None) -> str:
-    # Run the blocking HTTP call off the event loop so the bot stays responsive.
-    return await asyncio.to_thread(call_nanogpt, messages, model, fallback)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
 
 
 async def _keep_typing(bot, chat_id: int):
@@ -2559,7 +2604,7 @@ _IMAGE_RETRIES = 3
 def _post_with_retries(url, **kwargs):
     for attempt in range(_IMAGE_RETRIES):
         try:
-            return _session.post(url, **kwargs)
+            return _get_session().post(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt == _IMAGE_RETRIES - 1:
                 raise
@@ -2570,7 +2615,7 @@ def _post_with_retries(url, **kwargs):
 def _get_with_retries(url, **kwargs):
     for attempt in range(_IMAGE_RETRIES):
         try:
-            return _session.get(url, **kwargs)
+            return _get_session().get(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             if attempt == _IMAGE_RETRIES - 1:
                 raise
@@ -3222,7 +3267,7 @@ def _nanogpt_subscription_models():
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     models, filtered = [], False
     try:
-        r = _session.get("https://nano-gpt.com/api/subscription/v1/models",
+        r = _get_session().get("https://nano-gpt.com/api/subscription/v1/models",
                          headers=headers, timeout=30)
         r.raise_for_status()
         data = r.json()
@@ -3237,7 +3282,7 @@ def _nanogpt_subscription_models():
 
     if not models:
         try:
-            r = _session.get(f"{NANOGPT_BASE_URL}/models", headers=headers, timeout=30)
+            r = _get_session().get(f"{NANOGPT_BASE_URL}/models", headers=headers, timeout=30)
             r.raise_for_status()
             for m in r.json().get("data", []):
                 if any(m.get(k) for k in ("subscription", "is_subscription", "subscription_only")):
@@ -3864,7 +3909,7 @@ async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
     try:
         resp = await asyncio.to_thread(
-            lambda: _session.post(
+            lambda: _get_session().post(
                 f"{NANOGPT_BASE_URL}/audio/speech",
                 headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
                 json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
@@ -4861,7 +4906,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
-        resp = _session.post(
+        resp = _get_session().post(
             f"{NANOGPT_BASE_URL}/audio/transcriptions",
             headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
             files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
@@ -4968,7 +5013,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(audio_path, "rb") as f:
                     audio_bytes = f.read()
                 try:
-                    resp = _session.post(
+                    resp = _get_session().post(
                         f"{NANOGPT_BASE_URL}/audio/transcriptions",
                         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
                         files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
@@ -5274,7 +5319,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
-    response = _session.get(
+    response = _get_session().get(
         "https://nano-gpt.com/api/subscription/v1/usage",
         headers=headers,
         timeout=30,
@@ -5359,12 +5404,12 @@ def _fetch_reddit(url: str) -> str:
     }
     path = urlparse(url).path  # e.g. /r/NecroMerger/s/UFZMQRrTYT
     # Resolve share-link redirects (/s/<id>) to the real post path via the API host.
-    resolved = _session.get("https://oauth.reddit.com" + path, headers=headers,
+    resolved = _get_session().get("https://oauth.reddit.com" + path, headers=headers,
                             timeout=LINK_FETCH_TIMEOUT, allow_redirects=True)
     base = "https://oauth.reddit.com" + urlparse(resolved.url).path.rstrip("/")
     if not base.endswith(".json"):
         base += "/.json"
-    resp = _session.get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
+    resp = _get_session().get(base, headers=headers, timeout=LINK_FETCH_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     post = data[0]["data"]["children"][0]["data"]
@@ -5389,7 +5434,7 @@ def _fetch_reddit(url: str) -> str:
 
 
 def _fetch_generic(url: str) -> str:
-    html = _session.get(url, headers={"User-Agent": _HTTP_UA},
+    html = _get_session().get(url, headers={"User-Agent": _HTTP_UA},
                         timeout=LINK_FETCH_TIMEOUT).text
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
@@ -5402,7 +5447,7 @@ def _fetch_generic(url: str) -> str:
 def web_search(query: str) -> str:
     """Quick text-only web search (DuckDuckGo HTML, no API key needed)."""
     try:
-        r = _session.post(
+        r = _get_session().post(
             "https://html.duckduckgo.com/html/", data={"q": query},
             headers={"User-Agent": _SEARCH_UA}, timeout=LINK_FETCH_TIMEOUT,
         )
@@ -6259,7 +6304,7 @@ def _reverse_geocode_sync(lat: float, lon: float) -> str:
     try:
         url = (f"https://nominatim.openstreetmap.org/reverse"
                f"?lat={lat}&lon={lon}&format=json&zoom=10")
-        r = _session.get(url, headers={"User-Agent": "SillyTavernBot/1.0"}, timeout=5)
+        r = _get_session().get(url, headers={"User-Agent": "SillyTavernBot/1.0"}, timeout=5)
         r.raise_for_status()
         addr = r.json().get("address", {})
         parts = [p for p in [
@@ -6285,7 +6330,7 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def _fetch_wsdot_alerts() -> list:
     try:
-        r = _session.get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r = _get_session().get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
         r.raise_for_status()
         return r.json().get("Alerts") or []
     except Exception as e:
@@ -6295,7 +6340,7 @@ def _fetch_wsdot_alerts() -> list:
 
 def _fetch_wsdot_times() -> list:
     try:
-        r = _session.get(_WSDOT_TIMES_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
+        r = _get_session().get(_WSDOT_TIMES_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else []
@@ -6777,7 +6822,7 @@ def main():
 
     def _shutdown(sig, frame):
         log.info("Received signal %s — saving state and shutting down.", sig)
-        save_state()
+        _write_state()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
