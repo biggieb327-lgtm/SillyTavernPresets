@@ -1492,11 +1492,12 @@ def _guard(update, rate_limit: bool = False) -> bool:
     return True
 
 
-def _touch_activity(update, chat_id: int):
+def _touch_activity(update, chat_id: int) -> float:
     """Record incoming activity: username, mood nudge from the gap since last contact, last_seen,
     and first-contact owner claim. Shared by every content handler so last_seen -- which every
     proactive gate (heartbeat, event reminders, Garmin monitors) reads -- can't be silently
-    skipped in just one of them."""
+    skipped in just one of them. Returns gap_hours for callers that need it downstream (e.g. the
+    gap-aware opener in handle_message)."""
     user_names[chat_id] = update.effective_user.first_name or "you"
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
@@ -1504,6 +1505,7 @@ def _touch_activity(update, chat_id: int):
     if get_owner() is None:
         set_owner(chat_id)
         save_state()
+    return gap_hours
 
 
 def _note_untrusted(chat_id: int, source: str, content: str):
@@ -7521,7 +7523,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _guard(update, rate_limit=True):
         return
     user_message = update.message.text
-    _touch_activity(update, chat_id)  # any interaction claims the heartbeat owner, not just /start
+    gap_hours = _touch_activity(update, chat_id)  # any interaction claims the heartbeat owner, not just /start
 
     # Cancel any pending follow-up — user replied before it fired
     existing = _pending_followup.pop(chat_id, None)
