@@ -9,6 +9,7 @@ import time
 import base64
 import calendar
 import logging
+import logging.handlers
 import signal
 import tempfile
 import threading
@@ -70,6 +71,23 @@ logging.basicConfig(
 log = logging.getLogger("companion")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+
+_error_log_path = BASE_DIR / "errors.log"
+_error_handler = logging.handlers.RotatingFileHandler(
+    _error_log_path, maxBytes=2_000_000, backupCount=3, encoding="utf-8",
+)
+_error_handler.setLevel(logging.WARNING)
+_error_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+))
+log.addHandler(_error_handler)
+
+# --- Error tracking for self-audit ---
+_BOOT_TIME = time.time()
+_error_counts: dict[str, list[float]] = {}
+
+def _count_error(category: str):
+    _error_counts.setdefault(category, []).append(time.time())
 
 # --- Access control ---
 _allowed_raw = os.getenv("ALLOWED_USERS", "")
@@ -356,7 +374,7 @@ def _extract_user_note(uname: str, user_message: str) -> str:
         if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
             return raw
     except Exception as e:
-        print("[user-notes] extraction failed:", e)
+        log.warning("[user-notes] extraction failed: %s", e)
     return ""
 
 
@@ -370,7 +388,7 @@ async def update_user_notes(chat_id: int, user_message: str):
             _append_user_note(note)
             print(f"[user-notes] added: {note}")
     except Exception as e:
-        print("[user-notes] update failed:", e)
+        log.warning("[user-notes] update failed: %s", e)
 
 
 def _append_memory(text: str, auto: bool = False):
@@ -419,7 +437,8 @@ def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
         if raw and not re.match(r"^(none|no|nothing|n/a|not\b)", raw.lower()):
             return raw
     except Exception as e:
-        print("[memories] extraction failed:", e)
+        log.warning("[memories] extraction failed: %s", e)
+        _count_error("memory")
     return ""
 
 
@@ -440,7 +459,8 @@ async def update_memories(chat_id: int, user_msg: str, ai_response: str):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        print("[memories] update failed:", e)
+        log.warning("[memories] update failed: %s", e)
+        _count_error("memory")
 
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
@@ -467,7 +487,7 @@ try:
     from zoneinfo import ZoneInfo
     TZ = ZoneInfo(TIMEZONE)
 except Exception as e:
-    print(f"[time] Could not load timezone '{TIMEZONE}' ({e}); using device local time.")
+    log.error("[time] Could not load timezone '%s' (%s); using device local time.", TIMEZONE, e)
     TZ = None
 
 # Built-in default setting. Override by dropping a setting.txt next to bot.py.
@@ -858,7 +878,8 @@ def load_jokes():
         try:
             inside_jokes = json.loads(JOKES_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[jokes] load failed:", e)
+            log.warning("[jokes] load failed: %s", e)
+            _count_error("load")
             inside_jokes = []
 
 
@@ -900,7 +921,8 @@ def load_wardrobe():
         try:
             wardrobe.update(json.loads(WARDROBE_FILE.read_text(encoding="utf-8")))
         except Exception as e:
-            print("[wardrobe] load failed:", e)
+            log.warning("[wardrobe] load failed: %s", e)
+            _count_error("load")
 
 
 def save_wardrobe():
@@ -1015,7 +1037,8 @@ def load_payments():
         try:
             payments = json.loads(PAYMENTS_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[payments] load failed:", e)
+            log.warning("[payments] load failed: %s", e)
+            _count_error("load")
             payments = []
 
 
@@ -1191,7 +1214,8 @@ def load_reminders():
         try:
             reminders = json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[reminders] load failed:", e)
+            log.warning("[reminders] load failed: %s", e)
+            _count_error("load")
             reminders = []
 
 
@@ -1217,7 +1241,8 @@ def load_cron_jobs():
         try:
             cron_jobs = json.loads(CRON_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[cron] load failed:", e)
+            log.warning("[cron] load failed: %s", e)
+            _count_error("load")
             cron_jobs = []
 
 
@@ -1401,7 +1426,7 @@ async def ensure_weather():
         _weather_cache["text"] = await asyncio.to_thread(_fetch_weather)
         _weather_cache["ts"] = time.time()
     except Exception as e:
-        print("[weather] fetch failed:", e)
+        log.warning("[weather] fetch failed: %s", e)
 
 
 def _season_and_calendar() -> str:
@@ -1545,7 +1570,7 @@ async def update_mood(chat_id: int):
     try:
         await asyncio.to_thread(_appraise_mood, chat_id, tail)
     except Exception as e:
-        print("[mood] appraisal failed:", e)
+        log.warning("[mood] appraisal failed: %s", e)
 
 
 def _mood_behavior(s: float) -> str:
@@ -1638,7 +1663,7 @@ async def reflect(chat_id: int):
         try:
             items = await asyncio.to_thread(_seed_beliefs)
         except Exception as e:
-            print("[reflect] belief seeding failed:", e)
+            log.warning("[reflect] belief seeding failed: %s", e)
             items = {}
         if items:
             beliefs[chat_id] = {"items": items}
@@ -2092,12 +2117,14 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                     raise
                 if attempt < _CHAT_RETRIES - 1:
                     wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
-                    print(f"[model] {m} transient error ({status or e.__class__.__name__}), "
-                          f"retry {attempt + 1}/{_CHAT_RETRIES - 1} in {wait}s...")
+                    log.warning("[model] %s transient error (%s), retry %d/%d in %ds...",
+                               m, status or e.__class__.__name__, attempt + 1, _CHAT_RETRIES - 1, wait)
+                    _count_error("api")
                     time.sleep(wait)
                 elif i < len(models) - 1:
-                    print(f"[model] {m} failed after {_CHAT_RETRIES} attempts; "
-                          f"falling back to {models[i + 1]}")
+                    log.warning("[model] %s failed after %d attempts; falling back to %s",
+                               m, _CHAT_RETRIES, models[i + 1])
+                    _count_error("api")
     raise last_err
 
 
@@ -2242,7 +2269,7 @@ async def maybe_auto_react(update, user_message: str):
             await update.message.set_reaction(emoji)
             print("[react-auto] applied", emoji)
     except Exception as e:
-        print("[react-auto] failed:", e)
+        log.warning("[react-auto] failed: %s", e)
 
 
 def _typing_delay_secs(text: str) -> float:
@@ -2691,7 +2718,8 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         if len(buf) > SELFIE_DEDUP_SIZE:
             buf.pop(0)
     except Exception as e:
-        print("[selfie] failed:", e)
+        log.error("[selfie] failed: %s", e)
+        _count_error("media")
         if announce_errors:
             await context.bot.send_message(chat_id=chat_id, text=f"📷 Couldn't make that one: {e}")
     finally:
@@ -2844,7 +2872,8 @@ async def maintain_memory(chat_id: int):
             recent_summaries[chat_id] = summary
             recent_facts[chat_id] = new_facts
         except Exception as e:
-            print("[memory] summarize failed; dropping overflow without summary:", e)
+            log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
+            _count_error("memory")
         del conversation_history[chat_id][:drop_count]  # remove exactly what we summarized
         save_state()
         print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
@@ -2861,7 +2890,8 @@ async def maintain_memory(chat_id: int):
                 save_state()
                 print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
-                print("[memory] recent fact consolidation failed (kept as-is):", e)
+                log.warning("[memory] recent fact consolidation failed (kept as-is): %s", e)
+                _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -2931,7 +2961,8 @@ async def maintain_long_term_memory(chat_id: int):
                 save_state()
                 print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
             except Exception as e:
-                print("[memory] promotion failed:", e)
+                log.warning("[memory] promotion failed: %s", e)
+                _count_error("memory")
         if due:
             last_promotion[chat_id] = time.time()
             save_state()
@@ -2948,7 +2979,8 @@ async def maintain_long_term_memory(chat_id: int):
                 save_state()
                 print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
-                print("[memory] long-term fact consolidation failed (kept as-is):", e)
+                log.warning("[memory] long-term fact consolidation failed (kept as-is): %s", e)
+                _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -3160,7 +3192,7 @@ def _nanogpt_subscription_models():
                 models.append(str(mid))
         filtered = bool(models)
     except Exception as e:
-        print("[models] subscription model list failed:", e)
+        log.warning("[models] subscription model list failed: %s", e)
 
     if not models:
         try:
@@ -3173,7 +3205,7 @@ def _nanogpt_subscription_models():
             if not models:  # subscription flag not present -- fall back to the full list
                 models = [m["id"] for m in r.json().get("data", []) if m.get("id")]
         except Exception as e:
-            print("[models] general model list failed:", e)
+            log.warning("[models] general model list failed: %s", e)
 
     models = sorted(set(models))
     _model_list_cache.update(value=models, filtered=filtered, ts=now)
@@ -5241,7 +5273,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             await update.message.set_reaction(reaction)
             reacted = True
         except Exception as e:
-            print("[react] failed:", e)
+            log.warning("[react] failed: %s", e)
     if clean:
         await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
         if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
@@ -5336,7 +5368,7 @@ def web_search(query: str) -> str:
         r.raise_for_status()
         page = r.text
     except Exception as e:
-        print("[search] failed:", e)
+        log.warning("[search] failed: %s", e)
         return "(search failed — couldn't reach the search engine)"
 
     def clean(s):
@@ -5370,7 +5402,7 @@ def fetch_link(url: str):
         content = content.strip()
         return content[:LINK_MAX_CHARS] if content else None
     except Exception as e:
-        print("[link] fetch failed:", e)
+        log.warning("[link] fetch failed: %s", e)
         return None
 
 
@@ -5487,7 +5519,8 @@ async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
             save_state()
             print(f"[photo-memory] {fact[:100]}")
     except Exception as e:
-        print("[photo-memory] failed:", e)
+        log.error("[photo-memory] failed: %s", e)
+        _count_error("media")
 
 
 async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
@@ -5504,7 +5537,7 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_triggered(context, chat_id, trigger)
     except Exception as e:
-        print(f"[followup] error for chat {chat_id}:", e)
+        log.warning("[followup] error for chat %s: %s", chat_id, e)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5586,7 +5619,8 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if REACTIONS_AUTO and not reacted:
             asyncio.create_task(maybe_auto_react(update, emoji or "sticker"))
     except Exception as e:
-        print(f"[sticker] error:", e)
+        log.error("[sticker] error: %s", e)
+        _count_error("media")
 
 
 # --- Proactive heartbeat ---
@@ -5842,7 +5876,8 @@ async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
         await send_triggered(context, job["chat_id"], trigger)
         print(f"[cron #{job_id}] Ran: {job['instruction']}")
     except Exception as e:
-        print(f"[cron #{job_id}] Error:", e)
+        log.error("[cron #%s] Error: %s", job_id, e)
+        _count_error("cron")
 
 
 async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5936,7 +5971,8 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         _consume_nudge(owner)
         print("[heartbeat] Proactive message sent.")
     except Exception as e:
-        print("[heartbeat] Error:", e)
+        log.error("[heartbeat] Error: %s", e)
+        _count_error("heartbeat")
 
 
 async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5978,11 +6014,12 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await reflect(owner)
     except Exception as e:
-        print("[reflect] Error:", e)
+        log.error("[reflect] Error: %s", e)
     try:
         await maintain_long_term_memory(owner)
     except Exception as e:
-        print("[memory] long-term promotion error:", e)
+        log.warning("[memory] long-term promotion error: %s", e)
+        _count_error("memory")
     _overnight_mood_reset(owner)
 
 
@@ -6093,7 +6130,7 @@ async def _generate_daily_events(owner: int):
             _day_cache["ts"] = time.time()
             print(f"[day-events] {NAME}: {events[:100]}…")
     except Exception as e:
-        print(f"[day-events] failed: {e}")
+        log.error("[day-events] failed: %s", e)
 
 
 async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
@@ -6109,7 +6146,7 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
         try:
             archive.write_text(day_ctx, encoding="utf-8")
         except Exception as e:
-            print(f"[day-rotate] archive failed: {e}")
+            log.error("[day-rotate] archive failed: %s", e)
         # Save a compact memory fact so it persists through summarization
         if owner is not None:
             fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
@@ -6368,16 +6405,123 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
             log.warning("[traffic] alert send failed for %s: %s", chat_id, e)
 
 
+# --- Self-audit ---
+def _log_startup_diagnostic():
+    import platform, shutil
+    disk = shutil.disk_usage(BASE_DIR)
+    state_size = STATE_FILE.stat().st_size if STATE_FILE.exists() else 0
+    err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
+    log.warning(
+        "=== STARTUP AUDIT === Python %s | Instance: %s | Card: %s | "
+        "Model: %s | Fallback: %s | Disk free: %d MB | state.json: %d bytes | "
+        "errors.log: %d bytes | Chats: %d | PID: %d",
+        platform.python_version(), BASE_DIR.name, CARD_NAME,
+        NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
+        disk.free // (1024 * 1024), state_size, err_size,
+        len(conversation_history), os.getpid(),
+    )
+
+
+async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
+    issues = []
+    uptime_h = (time.time() - _BOOT_TIME) / 3600
+
+    hour_ago = time.time() - 3600
+    recent = {cat: sum(1 for t in ts if t > hour_ago) for cat, ts in _error_counts.items()}
+    total_recent = sum(recent.values())
+    total_all = sum(len(ts) for ts in _error_counts.values())
+
+    try:
+        if STATE_FILE.exists():
+            json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        else:
+            issues.append("state.json missing")
+    except Exception as e:
+        issues.append(f"state.json corrupt: {e}")
+
+    try:
+        err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
+    except Exception:
+        err_size = -1
+        issues.append("errors.log not accessible")
+
+    try:
+        import shutil
+        free_mb = shutil.disk_usage(BASE_DIR).free // (1024 * 1024)
+        if free_mb < 50:
+            issues.append(f"low disk: {free_mb} MB free")
+    except Exception:
+        free_mb = -1
+
+    status = "ISSUES" if issues else "OK"
+    summary = (f"[audit] {status} | uptime={uptime_h:.1f}h | "
+               f"errors_1h={total_recent} total={total_all} | "
+               f"disk_free={free_mb}MB | error_log={err_size}b")
+    if recent:
+        summary += " | " + " ".join(f"{k}={v}" for k, v in sorted(recent.items()) if v)
+
+    if issues:
+        log.warning("%s | issues: %s", summary, "; ".join(issues))
+        owner = get_owner()
+        if owner:
+            try:
+                await context.bot.send_message(chat_id=owner, text=f"🔧 {'; '.join(issues)}")
+            except Exception:
+                pass
+    else:
+        log.info(summary)
+
+
+async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    uptime_h = (time.time() - _BOOT_TIME) / 3600
+    hour_ago = time.time() - 3600
+    recent = {cat: sum(1 for t in ts if t > hour_ago) for cat, ts in _error_counts.items()}
+    total_all = sum(len(ts) for ts in _error_counts.values())
+
+    state_ok = "OK"
+    try:
+        if STATE_FILE.exists():
+            json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        else:
+            state_ok = "MISSING"
+    except Exception:
+        state_ok = "CORRUPT"
+
+    err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
+    bot_log = BASE_DIR / "bot.log"
+    bot_log_size = bot_log.stat().st_size if bot_log.exists() else 0
+
+    lines = [
+        f"🔧 *Self-Audit*",
+        f"Uptime: {uptime_h:.1f}h",
+        f"Errors (last hour): {sum(recent.values())}",
+    ]
+    if recent:
+        lines.append("  " + ", ".join(f"{k}: {v}" for k, v in sorted(recent.items()) if v))
+    lines += [
+        f"Errors (total): {total_all}",
+        f"State file: {state_ok}",
+        f"errors.log: {err_size / 1024:.1f} KB",
+        f"bot.log: {bot_log_size / 1024:.1f} KB",
+        f"PID: {os.getpid()}",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
     err = context.error
     if isinstance(err, (NetworkError, TimedOut)):
-        print(f"[net] transient: {err.__class__.__name__}: {err}")  # one quiet line
+        log.warning("[net] transient: %s: %s", err.__class__.__name__, err)
+        _count_error("network")
         return
     import traceback
     tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
-    print("[error] " + tb)
+    log.error("[unhandled]\n%s", tb)
+    _count_error("unhandled")
     # Surface the error to the user so button failures aren't silent
     try:
         if update and hasattr(update, "callback_query") and update.callback_query:
@@ -6450,6 +6594,7 @@ _BASE_COMMANDS = [
     BotCommand("usage", "Token usage stats"),
     BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
+    BotCommand("audit", "Bot health and error report"),
 ]
 
 _PAYMENT_COMMANDS = [
@@ -6471,6 +6616,7 @@ async def _register_commands(application):
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
+    _log_startup_diagnostic()
     app = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
@@ -6552,6 +6698,7 @@ def main():
     app.add_handler(CommandHandler("nudges", nudges_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
@@ -6599,6 +6746,8 @@ def main():
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
             log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
+        app.job_queue.run_repeating(_self_audit, interval=1800, first=300)
+        log.info("Self-audit: every 30 minutes.")
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)

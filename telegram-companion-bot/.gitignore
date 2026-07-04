@@ -8,6 +8,7 @@ jokes.json
 wardrobe.json
 owner_chat.txt
 bot.log
+errors.log*
 *.tmp
 *.png
 *.jpg
