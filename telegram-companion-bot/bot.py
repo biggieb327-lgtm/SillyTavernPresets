@@ -119,7 +119,7 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
-INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() == "true"
+INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
