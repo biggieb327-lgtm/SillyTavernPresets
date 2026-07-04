@@ -148,7 +148,7 @@ REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", 
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
-INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() == "true"
+INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 # Safety: flag genuine acute distress in an incoming message and have her drop the
 # performance and respond with real care. On by default; cheap classifier model.
@@ -1492,6 +1492,20 @@ def _guard(update, rate_limit: bool = False) -> bool:
     return True
 
 
+def _touch_activity(update, chat_id: int):
+    """Record incoming activity: username, mood nudge from the gap since last contact, last_seen,
+    and first-contact owner claim. Shared by every content handler so last_seen -- which every
+    proactive gate (heartbeat, event reminders, Garmin monitors) reads -- can't be silently
+    skipped in just one of them."""
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
+    nudge_mood(chat_id, gap_hours)
+    last_seen[chat_id] = time.time()
+    if get_owner() is None:
+        set_owner(chat_id)
+        save_state()
+
+
 def _note_untrusted(chat_id: int, source: str, content: str):
     """Record attachment-derived text in the quarantined untrusted-notes channel (kept out of
     trusted memory). No-op if bot_app isn't available or there's nothing to record."""
@@ -1890,9 +1904,14 @@ def week_window(from_date: date = None):
 def due_between(start: date, end: date):
     out = []
     for p in payments:
-        occ = next_occurrence_p(p, start)
-        if occ is not None and start <= occ <= end:
+        cursor = start
+        while True:
+            occ = next_occurrence_p(p, cursor)
+            if occ is None or occ > end:
+                break
             out.append((occ, p))
+            cursor = occ + timedelta(days=1)  # keep walking -- a fast-recurring payment can fall
+                                               # due more than once inside the window
     out.sort(key=lambda x: x[0])
     return out
 
@@ -2805,11 +2824,12 @@ async def update_garmin():
 
 
 def _recent_stress_high():
-    """Off-loop: (sustained_high, avg) over the last STRESS_SUSTAINED_MIN minutes of Garmin stress.
+    """Off-loop: (sustained_high, avg) over the last STRESS_SUSTAINED_MIN minutes of Garmin stress,
+    or avg=None if there's no usable data (distinct from a genuinely calm avg that rounds to 0).
     Garmin marks readings -1/-2 when it can't measure (e.g. during activity); those are skipped."""
     global _garmin_obj
     if not STRESS_ALERTS or _Garmin is None:
-        return (False, 0)
+        return (False, None)
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
         data = _garmin_client().get_stress_data(today) or {}
@@ -2818,13 +2838,13 @@ def _recent_stress_high():
         # The cached session may have broken mid-runtime (not just at login) — drop it so the
         # next poll attempts a fresh login instead of retrying the same broken client forever.
         _garmin_obj = None
-        return (False, 0)
+        return (False, None)
     arr = data.get("stressValuesArray") or []
     cutoff_ms = (time.time() - STRESS_SUSTAINED_MIN * 60) * 1000
     recent = [v for pair in arr if isinstance(pair, (list, tuple)) and len(pair) >= 2
               and isinstance((v := pair[1]), (int, float)) and v >= 0 and pair[0] >= cutoff_ms]
     if len(recent) < 3:
-        return (False, 0)
+        return (False, None)
     avg = sum(recent) / len(recent)
     high_frac = sum(1 for v in recent if v >= STRESS_THRESHOLD) / len(recent)
     return (avg >= STRESS_THRESHOLD and high_frac >= 0.7, round(avg))
@@ -5031,7 +5051,7 @@ async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("\u231a Checking recent stress...")
     high, avg = await asyncio.to_thread(_recent_stress_high)
-    if avg == 0:
+    if avg is None:
         await update.message.reply_text("No recent stress readings (watch may need to sync).")
         return
     state = f"sustained high (\u2265{STRESS_THRESHOLD})" if high else "within normal range"
@@ -6433,16 +6453,18 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return  # was cancelled
     if r.get("kind") == "event":
-        # Don't interrupt an active exchange with an unprompted nudge -- defer briefly and
-        # re-check (same spirit as heartbeat's "recently active" skip), capped so it's never
-        # silently dropped forever.
+        # Don't interrupt an active exchange, or land during quiet hours, with an unprompted
+        # nudge -- defer briefly and re-check (same spirit as heartbeat's "recently active"
+        # skip), capped so it's never silently dropped forever.
         deferred = r.get("_deferred", 0)
-        if (time.time() - last_seen.get(r["chat_id"], 0) < EVENT_NUDGE_BUFFER_MIN * 60
-                and deferred < EVENT_NUDGE_MAX_DEFERS):
+        owner_active = time.time() - last_seen.get(r["chat_id"], 0) < EVENT_NUDGE_BUFFER_MIN * 60
+        quiet = in_quiet_hours() or _is_quiet(r["chat_id"])
+        if (owner_active or quiet) and deferred < EVENT_NUDGE_MAX_DEFERS:
             r["_deferred"] = deferred + 1
             save_reminders()
             context.job_queue.run_once(fire_reminder, when=EVENT_NUDGE_BUFFER_MIN * 60, data=rid)
-            print(f"[event-reminder] {r['event']}: owner active, deferring "
+            reason = "quiet hours" if quiet and not owner_active else "owner active"
+            print(f"[event-reminder] {r['event']}: {reason}, deferring "
                   f"{EVENT_NUDGE_BUFFER_MIN}m (attempt {r['_deferred']}/{EVENT_NUDGE_MAX_DEFERS}).")
             return
         uname = user_names.get(r["chat_id"], "you")
@@ -6751,13 +6773,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _guard(update, rate_limit=True):
         return
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     tone_task = None
@@ -6921,13 +6937,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _guard(update, rate_limit=True):
         return
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)
 
     video = update.message.video or update.message.video_note
     if not video:
@@ -6976,15 +6986,17 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(audio_path, "rb") as f:
                     audio_bytes = f.read()
                 try:
-                    resp = _session.post(
-                        f"{NANOGPT_BASE_URL}/audio/transcriptions",
-                        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-                        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-                        data={"model": WHISPER_MODEL},
-                        timeout=60,
-                    )
-                    resp.raise_for_status()
-                    transcript = resp.json().get("text", "").strip() or None
+                    def _do_transcribe():
+                        r = _session.post(
+                            f"{NANOGPT_BASE_URL}/audio/transcriptions",
+                            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+                            files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+                            data={"model": WHISPER_MODEL},
+                            timeout=60,
+                        )
+                        r.raise_for_status()
+                        return r.json().get("text", "").strip() or None
+                    transcript = await asyncio.to_thread(_do_transcribe)
                 except Exception as e:
                     log.warning("Video transcription failed: %s", e)
             else:
@@ -7110,7 +7122,7 @@ def _extract_pdf_text(raw_bytes: bytes) -> str:
 
 def _format_json_for_prompt(data: dict, fname: str) -> str:
     """Return a readable text block describing a JSON file."""
-    if data.get("spec") in ("chara_card_v2", "chara_card_v3"):
+    if isinstance(data, dict) and data.get("spec") in ("chara_card_v2", "chara_card_v3"):
         card = data.get("data", data)
         name = card.get("name", "Unknown")
         parts = [f"CHARACTER CARD: {name}"]
@@ -7154,13 +7166,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not _guard(update, rate_limit=True):
         return
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)
     if not doc:
         return
 
@@ -7255,7 +7261,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     formatted = _format_json_for_prompt(data, fname)
 
-    is_card = data.get("spec") in ("chara_card_v2", "chara_card_v3")
+    is_card = isinstance(data, dict) and data.get("spec") in ("chara_card_v2", "chara_card_v3")
     if is_card:
         card_name = (data.get("data") or data).get("name", "unknown")
         lead = (
@@ -7515,13 +7521,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _guard(update, rate_limit=True):
         return
     user_message = update.message.text
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    if get_owner() is None:  # any interaction claims the heartbeat owner, not just /start
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)  # any interaction claims the heartbeat owner, not just /start
 
     # Cancel any pending follow-up — user replied before it fired
     existing = _pending_followup.pop(chat_id, None)
@@ -7668,15 +7668,9 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _guard(update):
+    if not _guard(update, rate_limit=True):
         return
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)
     caption = (update.message.caption or "").strip()
     _note_untrusted(chat_id, "photo", caption)  # quarantine attachment-derived text
 
@@ -7716,15 +7710,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """React in character to a sticker the user sent."""
     chat_id = update.effective_chat.id
-    if not _guard(update):
+    if not _guard(update, rate_limit=True):
         return
-    gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
-    nudge_mood(chat_id, gap_hours)
-    last_seen[chat_id] = time.time()
-    user_names[chat_id] = update.effective_user.first_name or "you"
-    if get_owner() is None:
-        set_owner(chat_id)
-        save_state()
+    _touch_activity(update, chat_id)
     sticker = update.message.sticker
     emoji = sticker.emoji or ""
     name = sticker.set_name or ""
@@ -7781,7 +7769,7 @@ PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
 # Disabled by default — set FOLLOWUP_ENABLED=true in .env to turn on.
-FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() == "true"
+FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() not in ("0", "false", "no", "off")
 _FOLLOWUP_RE = re.compile(
     r"\b(hold on|hold up|brb|be right back"
     r"|give me a (sec|second|minute|min)"
@@ -8557,14 +8545,20 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
         live_until = loc.get("live_until")
         if not live_until or time.time() > live_until:
             continue  # only proactive alerts when live location is active
+        if in_quiet_hours() or _is_quiet(chat_id):
+            continue  # don't mark incidents seen yet -- pick them up on the next poll instead
 
         nearby = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
-        known = seen_incidents.get(chat_id, set())
+        nearby_ids = {str(a.get("AlertID", "")) for a in nearby}
+        # Drop IDs for incidents that closed or fell out of range -- keeps this set bounded to
+        # what's currently nearby instead of accumulating every AlertID ever seen.
+        known = seen_incidents.get(chat_id, set()) & nearby_ids
         new = [a for a in nearby if str(a.get("AlertID", "")) not in known]
+        seen_incidents[chat_id] = known
         if not new:
             continue
 
-        seen_incidents.setdefault(chat_id, set()).update(str(a["AlertID"]) for a in new)
+        seen_incidents[chat_id] = known | {str(a["AlertID"]) for a in new}
         lines = [_format_alert(a) for a in new[:5]]
         try:
             await context.bot.send_message(
