@@ -49,6 +49,13 @@ if [ -f "$DEPLOY/telegram-companion-bot/acoustic_ears.py" ]; then
   cp "$DEPLOY/telegram-companion-bot/acoustic_ears.py" "$BOT_SRC/acoustic_ears.py"
 fi
 
+# Pure-function tests (not imported by bot.py; here so you can sanity-check on-device with
+# `python3 ~/telegram-bot/tests/run.py`). The pre-commit hook already runs them in the repo.
+if [ -d "$DEPLOY/telegram-companion-bot/tests" ]; then
+  rm -rf "$BOT_SRC/tests"
+  cp -r "$DEPLOY/telegram-companion-bot/tests" "$BOT_SRC/tests"
+fi
+
 # Sync the helper scripts too, so a single run is always complete. (update-all.sh itself is
 # left out on purpose — overwriting the running script mid-run is unsafe; copy it by hand.)
 for f in run-bot.sh watchdog.sh status.sh; do

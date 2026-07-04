@@ -312,19 +312,38 @@ The honest list of what is currently verified — nothing more:
   detection specifically exercised; see Pattern 5 for the transcript).
 - `describe_voice_profile` dry-run via AST extraction, 4/4 cases pass (Pattern 2).
 - `update-all.sh` self-verifies its bot.py copy with `cmp` and aborts loudly on pull failure.
-- The commit-time py_compile hook is present and active in `.claude/settings.json`.
+- The commit-time hook in `.claude/settings.json` runs py_compile **and** the tests/ suite
+  before every commit.
+- `tests/run.py`: 45/45 pure-function assertions pass at HEAD (2026-07-04).
 
-There is no standing test suite. Anything not on this list was verified (if at all) only at
-the time it shipped — re-verify before relying on it.
+Anything not on this list, or not covered by `tests/test_pure.py`, was verified (if at all) only
+at the time it shipped — re-verify before relying on it.
 
-## CANDIDATE (unbuilt): a lightweight tests/ directory
+## The tests/ directory (BUILT 2026-07-04)
 
-A future `tests/` directory of AST-extraction scripts (Pattern 2 skeletons, one file per
-function, plus the WAV smoke test) would give a repeatable `for f in tests/*.py; do python3
-"$f"; done` gate — with no refactor of bot.py, no imports of it, and no new dependencies,
-so it does not violate the single-file entry-point rule. Status: **CANDIDATE, not built,
-not agreed with the owner.** Do not create it unprompted; propose it if the owner asks how
-to make validation repeatable.
+`telegram-companion-bot/tests/` now exists: `run.py` (the AST-extraction harness — pulls a
+function from bot.py source and exec's it in a controlled namespace, so bot.py is never
+imported) and `test_pure.py` (~45 assertions over the pure functions that had real bugs:
+`_parse_hhmm`, `parse_when`, `parse_cron_schedule`, `due_between`, `in_quiet_hours`,
+`_seconds_until_daytime_slot`, `_reminder_due_str`, `_looks_like_refusal`,
+`_format_json_for_prompt`, the `_valid_*` load guards, mood decay). Run with
+`python3 telegram-companion-bot/tests/run.py` — exits non-zero on any failure. The commit-time
+hook in `.claude/settings.json` runs it before every `git commit` (alongside py_compile), so a
+regression in a covered function blocks the commit. No bot.py refactor, no imports of it, no new
+deps — does not violate the single-file entry-point rule. **When you fix a bug in a pure
+function or add one, add a case to `test_pure.py` in the same change.**
+
+## Run the periodic multi-agent audit after any batch of bot.py changes
+
+Tests catch regressions in *covered* functions; they do not catch drift, integration
+regressions, or new bugs in untested code — which is most of an 8,900-line file. Two audits this
+session found 23 bugs the tests couldn't have (copy-paste drift, missing gates, cross-function
+preconditions), and two were introduced by an earlier batch's own fixes. So **before deploying any
+non-trivial batch of bot.py changes, run the multi-angle audit**: dispatch parallel review agents
+(line-by-line, removed-behavior, cross-function, reuse/simplification/efficiency, plus subsystem
+sweeps for the areas touched) per the methods in **companion-bot-analysis-toolkit**, verify each
+surfaced finding against the code yourself, then fix. This is the process half of the safety net;
+the tests are the automated half. Do not skip it because "the tests pass."
 
 ## Provenance and maintenance
 

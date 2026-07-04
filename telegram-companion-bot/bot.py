@@ -1256,30 +1256,32 @@ PAYMENTS_ENABLED = os.getenv(
     "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
 ).lower() not in ("0", "false", "no", "off")
 PAYMENTS_FILE = BASE_DIR / "payments.json"
+def _parse_hhmm(s):
+    """Parse an 'HH:MM' string to a validated (hour, minute), or None if malformed or out of
+    range. Single chokepoint so a shape-only regex match can never feed an out-of-range value
+    into dtime()/datetime.replace() (which raise). Used for user input, model output, and env."""
+    try:
+        h, m = (int(x) for x in str(s).split(":")[:2])
+    except Exception:
+        return None
+    return (h, m) if 0 <= h < 24 and 0 <= m < 60 else None
+
+
 REMINDER_TIME = os.getenv("REMINDER_TIME", "09:00")        # HH:MM in local TZ
 REMINDER_WEEKDAY = int(os.getenv("REMINDER_WEEKDAY", "3"))  # Mon=0 ... Thu=3 ... Sun=6
 REMINDER_WINDOW_DAYS = int(os.getenv("REMINDER_WINDOW_DAYS", "6"))  # Thu + 6 = next Wed
-try:
-    _REM_H, _REM_M = (int(x) for x in REMINDER_TIME.split(":"))
-except Exception:
-    _REM_H, _REM_M = 9, 0
+_REM_H, _REM_M = _parse_hhmm(REMINDER_TIME) or (9, 0)
 
 # --- Quiet hours (heartbeat won't ping overnight) ---
 QUIET_START = os.getenv("QUIET_START", "23:00")
 QUIET_END = os.getenv("QUIET_END", "08:00")
-try:
-    _QS_H, _QS_M = (int(x) for x in QUIET_START.split(":"))
-    _QE_H, _QE_M = (int(x) for x in QUIET_END.split(":"))
-except Exception:
-    _QS_H, _QS_M, _QE_H, _QE_M = 23, 0, 8, 0
+_QS_H, _QS_M = _parse_hhmm(QUIET_START) or (23, 0)
+_QE_H, _QE_M = _parse_hhmm(QUIET_END) or (8, 0)
 
 # --- Weekly backup ---
 BACKUP_WEEKDAY = int(os.getenv("BACKUP_WEEKDAY", "6"))  # Sun=6
 BACKUP_TIME = os.getenv("BACKUP_TIME", "09:05")
-try:
-    _BK_H, _BK_M = (int(x) for x in BACKUP_TIME.split(":"))
-except Exception:
-    _BK_H, _BK_M = 9, 5
+_BK_H, _BK_M = _parse_hhmm(BACKUP_TIME) or (9, 5)
 
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
@@ -1306,10 +1308,7 @@ def _read_day_context() -> str:
 
 # --- Nightly maintenance schedule (memory promotion, mood reset, milestone detection) ---
 REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
-try:
-    _RF_H, _RF_M = (int(x) for x in REFLECTION_TIME.split(":"))
-except Exception:
-    _RF_H, _RF_M = 3, 0
+_RF_H, _RF_M = _parse_hhmm(REFLECTION_TIME) or (3, 0)
 MILESTONES_MAX = int(os.getenv("MILESTONES_MAX", "30"))  # cap on relationship milestones stored
 
 
@@ -1604,6 +1603,63 @@ def _rescue_corrupted(path, err, tag):
         print(f"[{tag}] load failed:", err)
 
 
+def _valid_reminder(r) -> bool:
+    """A reminder dict that won't crash schedule_reminder: int id/chat_id and a due that parses
+    (an 'HH:MM' for daily, an ISO datetime otherwise). Used at write time and load time."""
+    if not isinstance(r, dict) or not isinstance(r.get("id"), int) or not isinstance(r.get("chat_id"), int):
+        return False
+    due = r.get("due")
+    if not isinstance(due, str):
+        return False
+    if r.get("daily"):
+        return _parse_hhmm(due) is not None
+    try:
+        datetime.fromisoformat(due)
+        return True
+    except ValueError:
+        return False
+
+
+def _valid_cron(j) -> bool:
+    """A cron job dict that won't crash schedule_cron_job: int id/chat_id and a schedule whose
+    daily time is in range or whose interval is positive."""
+    if not isinstance(j, dict) or not isinstance(j.get("id"), int) or not isinstance(j.get("chat_id"), int):
+        return False
+    sch = j.get("schedule")
+    if not isinstance(sch, dict):
+        return False
+    if sch.get("type") == "daily":
+        h, m = sch.get("hour"), sch.get("minute")
+        return isinstance(h, int) and isinstance(m, int) and 0 <= h < 24 and 0 <= m < 60
+    if sch.get("type") == "interval":
+        return isinstance(sch.get("seconds"), int) and sch["seconds"] > 0
+    return False
+
+
+def _valid_payment(p) -> bool:
+    """A payment dict that won't crash next_occurrence_p: parseable amount and a valid recurrence
+    (monthly day 1-31, or an interval with an ISO start and positive interval)."""
+    if not isinstance(p, dict) or "name" not in p or "amount" not in p:
+        return False
+    try:
+        float(p["amount"])
+        if p.get("recur", "monthly") == "monthly":
+            return 1 <= int(p["day"]) <= 31
+        date.fromisoformat(p["start"])
+        return int(p["interval"]) > 0
+    except Exception:
+        return False
+
+
+def _filter_valid(items, predicate, tag):
+    """Keep only entries passing `predicate`; log how many were dropped. A hand-edited or
+    partially-migrated JSON can't schedule a crashing job."""
+    good = [x for x in items if predicate(x)]
+    if len(good) != len(items):
+        print(f"[{tag}] dropped {len(items) - len(good)} invalid entr(y/ies) on load.")
+    return good
+
+
 def save_state():
     data = {
         "conversation_history": {str(k): v for k, v in conversation_history.items()},
@@ -1793,7 +1849,8 @@ def load_payments():
     global payments
     if PAYMENTS_FILE.exists():
         try:
-            payments = json.loads(PAYMENTS_FILE.read_text(encoding="utf-8"))
+            payments = _filter_valid(json.loads(PAYMENTS_FILE.read_text(encoding="utf-8")),
+                                     _valid_payment, "payments")
         except Exception as e:
             _rescue_corrupted(PAYMENTS_FILE, e, "payments")
             payments = []
@@ -1982,6 +2039,17 @@ def _seconds_until_daytime_slot() -> float:
     return max(60.0, (target - now).total_seconds())
 
 
+def _may_nudge(chat_id: int) -> bool:
+    """True if an unprompted in-character nudge may be sent to chat_id right now: not during quiet
+    hours and not under an active /quiet. The single gate every periodic proactive job calls so
+    the check can't drift -- event reminders and traffic each missed it once (see the audits).
+    Paths that gate differently ON PURPOSE and do NOT use this: heartbeat (saves a draft instead of
+    skipping), fire_reminder event nudges (reschedule to a daytime slot rather than skip),
+    _send_followup (same-turn, the user just spoke), user-scheduled cron/reminders (fire exactly
+    when asked), and the manual /*_now commands."""
+    return not in_quiet_hours() and not _is_quiet(chat_id)
+
+
 # --- One-off reminders: storage + parsing ---
 reminders = []  # {"id":int, "chat_id":int, "due":iso, "text":str}
 
@@ -1990,7 +2058,8 @@ def load_reminders():
     global reminders
     if REMINDERS_FILE.exists():
         try:
-            reminders = json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
+            reminders = _filter_valid(json.loads(REMINDERS_FILE.read_text(encoding="utf-8")),
+                                      _valid_reminder, "reminders")
         except Exception as e:
             _rescue_corrupted(REMINDERS_FILE, e, "reminders")
             reminders = []
@@ -2016,7 +2085,8 @@ def load_cron_jobs():
     global cron_jobs
     if CRON_FILE.exists():
         try:
-            cron_jobs = json.loads(CRON_FILE.read_text(encoding="utf-8"))
+            cron_jobs = _filter_valid(json.loads(CRON_FILE.read_text(encoding="utf-8")),
+                                      _valid_cron, "cron")
         except Exception as e:
             _rescue_corrupted(CRON_FILE, e, "cron")
             cron_jobs = []
@@ -2036,12 +2106,12 @@ def _new_cron_id() -> int:
 def parse_cron_schedule(spec: str):
     """Parse 'daily HH:MM' or 'every Nh'/'every Nm' into a schedule dict, or None."""
     spec = spec.strip().lower()
-    m = re.fullmatch(r"daily\s+(\d{1,2}):(\d{2})", spec)
+    m = re.fullmatch(r"daily\s+(\d{1,2}:\d{2})", spec)
     if m:
-        hour, minute = int(m.group(1)), int(m.group(2))
-        if not (0 <= hour < 24 and 0 <= minute < 60):
+        hm = _parse_hhmm(m.group(1))
+        if hm is None:
             return None  # out-of-range time -> cron_add shows the usage hint
-        return {"type": "daily", "hour": hour, "minute": minute}
+        return {"type": "daily", "hour": hm[0], "minute": hm[1]}
     m = re.fullmatch(r"every\s+(\d+)\s*([mh])", spec)
     if m:
         n, unit = int(m.group(1)), m.group(2)
@@ -2076,16 +2146,19 @@ def parse_when(tokens):
         return now + delta, " ".join(rest).strip()
 
     def grab_time(rest, default=(9, 0)):
+        """(hh, mm, remaining) from a leading HH:MM token if present and valid; `default` if no
+        time token; None if a time token is present but out of range (caller -> usage hint)."""
         if rest and re.fullmatch(r"\d{1,2}:\d{2}", rest[0]):
-            hh, mm = map(int, rest[0].split(":"))
-            return hh, mm, rest[1:]
+            hm = _parse_hhmm(rest[0])
+            return None if hm is None else (hm[0], hm[1], rest[1:])
         return default[0], default[1], rest
 
     if t0 in ("tomorrow", "today"):
         base = now + timedelta(days=1) if t0 == "tomorrow" else now
-        hh, mm, rest = grab_time(rest)
-        if not (0 <= hh < 24 and 0 <= mm < 60):
+        got = grab_time(rest)
+        if got is None:
             return None, None  # out-of-range time -> caller shows the usage hint
+        hh, mm, rest = got
         due = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t0 == "today" and due <= now:
             due += timedelta(days=1)
@@ -2096,16 +2169,18 @@ def parse_when(tokens):
             d = date.fromisoformat(t0)  # rejects e.g. 2026-13-40
         except ValueError:
             return None, None
-        hh, mm, rest = grab_time(rest)
-        if not (0 <= hh < 24 and 0 <= mm < 60):
+        got = grab_time(rest)
+        if got is None:
             return None, None
+        hh, mm, rest = got
         due = datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ) if TZ else datetime(d.year, d.month, d.day, hh, mm)
         return due, " ".join(rest).strip()
 
     if re.fullmatch(r"\d{1,2}:\d{2}", t0):
-        hh, mm = map(int, t0.split(":"))
-        if not (0 <= hh < 24 and 0 <= mm < 60):
+        hm = _parse_hhmm(t0)
+        if hm is None:
             return None, None
+        hh, mm = hm
         due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if due <= now:
             due += timedelta(days=1)
@@ -2916,7 +2991,7 @@ async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         return
     if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
         return  # already checked in recently about this
-    if in_quiet_hours() or _is_quiet(owner):
+    if not _may_nudge(owner):
         return
     high, avg = await asyncio.to_thread(_recent_stress_high)
     if not high:
@@ -2972,7 +3047,7 @@ async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
         return
     if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
         return  # already checked in recently about this
-    if in_quiet_hours() or _is_quiet(owner):
+    if not _may_nudge(owner):
         return
     bb = await asyncio.to_thread(_body_battery_now)
     if bb is None or bb > BB_LOW_THRESHOLD:
@@ -3054,7 +3129,7 @@ async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
             return  # already checked in today
     except Exception:
         pass
-    if in_quiet_hours() or _is_quiet(owner):
+    if not _may_nudge(owner):
         return
     uname = user_names.get(owner, "you")
     trigger = (
@@ -3125,7 +3200,7 @@ async def onthisday_job(context: ContextTypes.DEFAULT_TYPE):
                 return  # keep it special — don't reminisce too often
         except Exception:
             pass
-    if in_quiet_hours() or _is_quiet(owner):
+    if not _may_nudge(owner):
         return
     ep = await asyncio.to_thread(_onthisday_episode, last.get("ts"))
     if not ep:
@@ -6506,7 +6581,7 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
         # Quiet hours: don't fire mid-night and don't defer 15m repeatedly through the whole
         # window -- bump to a random organic daytime moment. (The daytime target is outside quiet
         # hours by construction, so this can't loop.) Give it a fresh owner-active budget for then.
-        if in_quiet_hours() or _is_quiet(r["chat_id"]):
+        if not _may_nudge(r["chat_id"]):
             if r.get("_deferred"):
                 r["_deferred"] = 0
                 save_reminders()
@@ -6567,8 +6642,10 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 def schedule_reminder(job_queue, r: dict):
     if r.get("daily"):
-        h, m = [int(x) for x in r["due"].split(":")]
-        t = dtime(h, m, tzinfo=TZ) if TZ else dtime(h, m)
+        hm = _parse_hhmm(r["due"])
+        if hm is None:
+            raise ValueError(f"invalid daily reminder time {r['due']!r}")  # caught by _arm_persisted_jobs
+        t = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
         job_queue.run_daily(fire_reminder, time=t, data=r["id"])
         return
     due = datetime.fromisoformat(r["due"])
@@ -6608,12 +6685,9 @@ def _parse_event_obj(name: str, obj: dict, now: datetime):
                       if (k := str(w).strip().lower()) in _WEEKDAYS})
         if not wds:
             wds = [0, 1, 2, 3, 4, 5, 6]  # unspecified/daily -> every day
-        try:
-            hh, mm = (int(x) for x in str(obj.get("time", "09:00")).split(":")[:2])
-            if not (0 <= hh < 24 and 0 <= mm < 60):  # model can return "24:00"/"09:75" -> would
-                raise ValueError                      # crash _next_occurrence's datetime.replace
-        except Exception:
-            hh, mm = 9, 0
+        # model can return "24:00"/"09:75" -> _parse_hhmm rejects it (falls back to 9:00) so it
+        # can't crash _next_occurrence's datetime.replace(hour=..).
+        hh, mm = _parse_hhmm(obj.get("time", "09:00")) or (9, 0)
         return {"event": name, "recurs": True, "weekdays": wds, "hh": hh, "mm": mm}
     dt_str = str(obj.get("datetime", "")).strip()
     if not dt_str:
@@ -6828,12 +6902,11 @@ async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use /reminders to list and /delreminder to cancel."
         )
         return
-    try:
-        h, m = [int(x) for x in args[0].split(":")]
-        assert 0 <= h < 24 and 0 <= m < 60
-    except Exception:
+    hm = _parse_hhmm(args[0])
+    if hm is None:
         await update.message.reply_text("Time must be HH:MM (e.g. 08:30 or 14:00)")
         return
+    h, m = hm
     text = " ".join(args[1:])
     rid = _new_reminder_id()
     r = {"id": rid, "chat_id": update.effective_chat.id,
@@ -8094,6 +8167,28 @@ def schedule_cron_job(job_queue, job: dict):
                                 data=job["id"], name=name, chat_id=job["chat_id"])
 
 
+def _arm_persisted_jobs(job_queue):
+    """Re-arm reminders and cron jobs at startup. One bad persisted entry must never abort main()
+    (the watchdog would just restart into the same crash) -- validate first, and defensively
+    log-and-skip anything that still raises, keeping it in its file for the owner to hand-fix."""
+    for items, predicate, scheduler, label in (
+        (reminders, _valid_reminder, schedule_reminder, "reminder"),
+        (cron_jobs, _valid_cron, schedule_cron_job, "scheduled task"),
+    ):
+        armed = 0
+        for it in items:
+            if not predicate(it):
+                log.error("Skipping invalid %s %s (kept in file): %r", label, it.get("id"), it)
+                continue
+            try:
+                scheduler(job_queue, it)
+                armed += 1
+            except Exception as e:
+                log.error("Skipping un-armable %s %s: %s", label, it.get("id"), e)
+        if armed:
+            log.info("Re-armed %d %s(s).", armed, label)
+
+
 async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
     job_id = context.job.data
     job = next((j for j in cron_jobs if j["id"] == job_id), None)
@@ -8634,7 +8729,7 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
         live_until = loc.get("live_until")
         if not live_until or time.time() > live_until:
             continue  # only proactive alerts when live location is active
-        if in_quiet_hours() or _is_quiet(chat_id):
+        if not _may_nudge(chat_id):
             continue  # don't mark incidents seen yet -- pick them up on the next poll instead
 
         nearby = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
@@ -8941,32 +9036,26 @@ def main():
         log.info("Nightly maintenance scheduled %s.", REFLECTION_TIME)
         if READING_ENABLED:
             for _rt in READING_TIMES.split(","):
-                _rt = _rt.strip()
-                try:
-                    _rh, _rm = (int(x) for x in _rt.split(":"))
-                except Exception:
+                hm = _parse_hhmm(_rt.strip())
+                if hm is None:
                     continue
-                _rtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
+                _rtime = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
                 app.job_queue.run_daily(reading_job, time=_rtime)
             log.info("Reading feed scheduled at %s.", READING_TIMES)
         if LIFE_SIM_ENABLED:
             for _lt in LIFE_EVENT_TIMES.split(","):
-                _lt = _lt.strip()
-                try:
-                    _lh, _lm = (int(x) for x in _lt.split(":"))
-                except Exception:
+                hm = _parse_hhmm(_lt.strip())
+                if hm is None:
                     continue
-                _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
+                _ltime = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
                 app.job_queue.run_daily(life_event_job, time=_ltime)
             log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
         if GARMIN_ENABLED:
             for _gt in GARMIN_TIMES.split(","):
-                _gt = _gt.strip()
-                try:
-                    _gh, _gm = (int(x) for x in _gt.split(":"))
-                except Exception:
+                hm = _parse_hhmm(_gt.strip())
+                if hm is None:
                     continue
-                _gtime = dtime(_gh, _gm, tzinfo=TZ) if TZ else dtime(_gh, _gm)
+                _gtime = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
                 app.job_queue.run_daily(garmin_job, time=_gtime)
             app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
             log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
@@ -8979,42 +9068,21 @@ def main():
                                         first=STRESS_POLL_MIN * 60)
             log.info("Body Battery monitoring on (every %d min, low threshold %d).", STRESS_POLL_MIN, BB_LOW_THRESHOLD)
         if RHR_ALERTS:
-            try:
-                _rh, _rm = (int(x) for x in RHR_CHECK_TIME.split(":"))
-                _rhtime = dtime(_rh, _rm, tzinfo=TZ) if TZ else dtime(_rh, _rm)
+            hm = _parse_hhmm(RHR_CHECK_TIME)
+            if hm:
+                _rhtime = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
                 app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
                 log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
-            except Exception:
-                pass
         if ONTHISDAY_ENABLED:
-            try:
-                _oh, _om = (int(x) for x in ONTHISDAY_TIME.split(":"))
-                _ohtime = dtime(_oh, _om, tzinfo=TZ) if TZ else dtime(_oh, _om)
+            hm = _parse_hhmm(ONTHISDAY_TIME)
+            if hm:
+                _ohtime = dtime(hm[0], hm[1], tzinfo=TZ) if TZ else dtime(hm[0], hm[1])
                 app.job_queue.run_daily(onthisday_job, time=_ohtime)
                 log.info("On-this-day reminiscing scheduled at %s.", ONTHISDAY_TIME)
-            except Exception:
-                pass
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
-        armed = 0
-        for r in reminders:
-            try:  # one bad persisted reminder must not abort startup for all of them
-                schedule_reminder(app.job_queue, r)
-                armed += 1
-            except Exception as e:
-                log.error("Skipping un-armable reminder %s: %s", r.get("id"), e)
-        if armed:
-            log.info("Re-armed %d pending reminder(s).", armed)
-        armed = 0
-        for j in cron_jobs:
-            try:  # a bad cron time on disk must not brick startup
-                schedule_cron_job(app.job_queue, j)
-                armed += 1
-            except Exception as e:
-                log.error("Skipping un-armable cron job %s: %s", j.get("id"), e)
-        if armed:
-            log.info("Re-armed %d scheduled task(s).", armed)
+        _arm_persisted_jobs(app.job_queue)
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)

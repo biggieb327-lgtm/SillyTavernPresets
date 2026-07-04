@@ -7,9 +7,9 @@
           {
             "type": "command",
             "if": "Bash(git commit *)",
-            "command": "python3 -c \"import py_compile; py_compile.compile('telegram-companion-bot/bot.py', doraise=True)\" 2>&1 && echo '{\"decision\":\"allow\"}' || echo '{\"decision\":\"block\",\"reason\":\"bot.py has a syntax error — fix it before committing.\"}'",
-            "timeout": 10,
-            "statusMessage": "Checking bot.py syntax..."
+            "command": "python3 -c \"import py_compile; py_compile.compile('telegram-companion-bot/bot.py', doraise=True)\" 2>&1 && python3 telegram-companion-bot/tests/run.py >/dev/null 2>&1 && echo '{\"decision\":\"allow\"}' || echo '{\"decision\":\"block\",\"reason\":\"bot.py failed py_compile or the pure-function tests (python3 telegram-companion-bot/tests/run.py) — fix before committing.\"}'",
+            "timeout": 30,
+            "statusMessage": "Checking bot.py syntax + tests..."
           }
         ]
       }
