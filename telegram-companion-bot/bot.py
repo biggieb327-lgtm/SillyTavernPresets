@@ -27,8 +27,8 @@ from urllib3.util.retry import Retry
 _session = requests.Session()
 _session.mount("https://", HTTPAdapter(
     max_retries=Retry(total=0),  # we handle retries ourselves where needed
-    pool_connections=4,
-    pool_maxsize=10,
+    pool_connections=8,
+    pool_maxsize=32,
 ))
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -131,7 +131,7 @@ TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
-LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "15"))
+LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "8"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
@@ -2227,13 +2227,19 @@ async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> s
         ctx_parts.append(f"Recent exchange:\n{history_snippet}")
     ctx_parts.append(f"{uname} just said: {user_message}")
     try:
-        result = await asyncio.to_thread(
-            call_nanogpt,
-            [{"role": "system", "content": sys_msg},
-             {"role": "user", "content": "\n\n".join(ctx_parts)}],
-            model=INNER_VOICE_MODEL,
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                call_nanogpt,
+                [{"role": "system", "content": sys_msg},
+                 {"role": "user", "content": "\n\n".join(ctx_parts)}],
+                model=INNER_VOICE_MODEL,
+            ),
+            timeout=8.0,
         )
         return result.strip()
+    except asyncio.TimeoutError:
+        log.warning("[inner-voice] timed out, skipping")
+        return ""
     except Exception:
         return ""
 
@@ -5447,16 +5453,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f'[replying to your message: "{quoted[:250]}"]\n{user_message}'
                     )
 
+        link_url = None
         if LINK_READING:
             link = _URL_RE.search(user_message)
             if link:
+                link_url = link.group(0)
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-                fetched = await asyncio.to_thread(fetch_link, link.group(0))
-                if fetched:
-                    content_for_model = (content_for_model + "\n\n[Content of the link they shared — "
-                                         "read it and react in character:\n" + fetched + "\n]")
-                else:
-                    content_for_model = content_for_model + "\n\n[You tried to open that link but couldn't.]"
+
+        # Run inner voice + link fetch in parallel to cut wall-clock latency.
+        parallel = []
+        if INNER_VOICE_ENABLED:
+            parallel.append(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
+        if link_url:
+            parallel.append(asyncio.to_thread(fetch_link, link_url))
+
+        if parallel:
+            results = await asyncio.gather(*parallel, return_exceptions=True)
+        else:
+            results = []
+
+        idx = 0
+        if INNER_VOICE_ENABLED:
+            inner_voice = results[idx] if not isinstance(results[idx], BaseException) else ""
+            idx += 1
+        else:
+            inner_voice = ""
+        if link_url:
+            fetched = results[idx] if not isinstance(results[idx], BaseException) else None
+            if fetched:
+                content_for_model = (content_for_model + "\n\n[Content of the link they shared — "
+                                     "read it and react in character:\n" + fetched + "\n]")
+            else:
+                content_for_model = content_for_model + "\n\n[You tried to open that link but couldn't.]"
 
         # Gap-aware opener: when user returns after a long absence, note it this turn only.
         if gap_hours > GAP_AWARE_HOURS:
@@ -5479,7 +5507,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
-        inner_voice = await generate_inner_voice(chat_id, user_message, user_names[chat_id]) if INNER_VOICE_ENABLED else ""
         messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
