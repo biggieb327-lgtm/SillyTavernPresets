@@ -113,7 +113,10 @@ SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a fast
 VISION_MODEL = os.getenv("VISION_MODEL", NANOGPT_MODEL)    # must accept image input
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))  # seconds to wait on the API
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # hard cap per request
+STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "30"))    # max silence between chunks
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
+TEMPERATURE = float(os.getenv("TEMPERATURE")) if os.getenv("TEMPERATURE") else None
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -2084,19 +2087,45 @@ def _extract_content(choice: dict) -> str:
     return _strip_thinking(text)
 
 def _one_call(messages: list, model: str) -> str:
-    payload = {"model": model, "messages": messages, "stream": False}
-    response = _session.post(
+    payload = {"model": model, "messages": messages, "stream": True,
+               "max_tokens": MAX_TOKENS}
+    if TEMPERATURE is not None:
+        payload["temperature"] = TEMPERATURE
+    with _session.post(
         f"{NANOGPT_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
         json=payload,
-        timeout=(10, REQUEST_TIMEOUT),  # (connect timeout, read timeout)
-    )
-    response.raise_for_status()
-    return _extract_content(response.json()["choices"][0])
+        timeout=(10, STREAM_TIMEOUT),
+        stream=True,
+    ) as resp:
+        resp.raise_for_status()
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[6:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                delta = json.loads(data)["choices"][0].get("delta", {})
+                c = delta.get("content") or ""
+                r = delta.get("reasoning_content") or ""
+                if c:
+                    content_parts.append(c)
+                if r:
+                    reasoning_parts.append(r)
+            except (json.JSONDecodeError, KeyError, IndexError):
+                continue
+    text = "".join(content_parts)
+    if not text:
+        text = "".join(reasoning_parts)
+    return _strip_thinking(text)
 
 
-_CHAT_RETRIES = 3        # attempts per model before moving to the next
-_RETRY_BACKOFF = (2, 4)  # seconds to wait between retries (2s then 4s)
+_CHAT_RETRIES = 2        # attempts per model before moving to the next
+_RETRY_BACKOFF = (2, 4)  # seconds to wait between retries
+_CALL_BUDGET = 150       # max wall-clock seconds on the primary before forcing fallback
 
 def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
     """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
@@ -2104,8 +2133,14 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
     if fallback and fallback not in models:
         models.append(fallback)
     last_err = None
+    t0 = time.time()
     for i, m in enumerate(models):
         for attempt in range(_CHAT_RETRIES):
+            if time.time() - t0 > _CALL_BUDGET and i < len(models) - 1:
+                log.warning("[model] %s: budget exceeded (%.0fs), falling back to %s",
+                           m, time.time() - t0, models[i + 1])
+                _count_error("api")
+                break
             try:
                 return _one_call(messages, m)
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
@@ -6440,10 +6475,11 @@ def _log_startup_diagnostic():
     err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
     log.warning(
         "=== STARTUP AUDIT === Python %s | Instance: %s | Card: %s | "
-        "Model: %s | Fallback: %s | Disk free: %d MB | state.json: %d bytes | "
-        "errors.log: %d bytes | Chats: %d | PID: %d",
+        "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
+        "Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
+        STREAM_TIMEOUT, MAX_TOKENS,
         disk.free // (1024 * 1024), state_size, err_size,
         len(conversation_history), os.getpid(),
     )
