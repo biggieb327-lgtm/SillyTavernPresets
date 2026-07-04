@@ -995,7 +995,14 @@ def _episode_candidates(query_vec, n: int) -> list:
         text = _episodes["text"][:]
     if mat is None or not ts:
         return []
-    sims = mat @ q
+    try:
+        sims = mat @ q
+    except ValueError as e:
+        # Query/stored-vector dimension mismatch (e.g. a hand-edited or partly-migrated episodes
+        # file that slipped past EMBED_CACHE_KEY). Degrade to no episode recall rather than
+        # crashing the whole reply -- same defense _cosine already has for its length check.
+        print("[episodes] dim mismatch, skipping recall:", e)
+        return []
     cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
     picks = []
     for idx in _np.argsort(-sims):
@@ -1586,6 +1593,17 @@ def load_state():
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
+def _rescue_corrupted(path, err, tag):
+    """Rename a corrupted JSON file to <name>.corrupted so its bytes survive instead of being
+    silently overwritten by the next save. Mirrors load_state's handling."""
+    backup = path.with_suffix(".corrupted")
+    try:
+        path.rename(backup)
+        print(f"[{tag}] file corrupted, moved to {backup}: {err}")
+    except Exception:
+        print(f"[{tag}] load failed:", err)
+
+
 def save_state():
     data = {
         "conversation_history": {str(k): v for k, v in conversation_history.items()},
@@ -1777,7 +1795,7 @@ def load_payments():
         try:
             payments = json.loads(PAYMENTS_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[payments] load failed:", e)
+            _rescue_corrupted(PAYMENTS_FILE, e, "payments")
             payments = []
 
 
@@ -1948,6 +1966,22 @@ def in_quiet_hours(now=None) -> bool:
     return s <= cur < e if s < e else (cur >= s or cur < e)  # handle wrap past midnight
 
 
+def _seconds_until_daytime_slot() -> float:
+    """Seconds from now until a random time in the next waking window (after quiet hours end,
+    before the following quiet start, with a 30-min margin). Used to bump a proactive nudge that
+    came due during quiet hours to an organic daytime moment instead of firing mid-night."""
+    now = datetime.now(TZ) if TZ else datetime.now()
+    end = now.replace(hour=_QE_H, minute=_QE_M, second=0, microsecond=0)  # next quiet-hours end
+    if end <= now:
+        end += timedelta(days=1)
+    start = end.replace(hour=_QS_H, minute=_QS_M, second=0, microsecond=0)  # following quiet start
+    if start <= end:
+        start += timedelta(days=1)
+    span = max(0.0, (start - end).total_seconds() - 30 * 60)
+    target = end + timedelta(seconds=random.uniform(0, span))
+    return max(60.0, (target - now).total_seconds())
+
+
 # --- One-off reminders: storage + parsing ---
 reminders = []  # {"id":int, "chat_id":int, "due":iso, "text":str}
 
@@ -1958,7 +1992,7 @@ def load_reminders():
         try:
             reminders = json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[reminders] load failed:", e)
+            _rescue_corrupted(REMINDERS_FILE, e, "reminders")
             reminders = []
 
 
@@ -1984,7 +2018,7 @@ def load_cron_jobs():
         try:
             cron_jobs = json.loads(CRON_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print("[cron] load failed:", e)
+            _rescue_corrupted(CRON_FILE, e, "cron")
             cron_jobs = []
 
 
@@ -2004,7 +2038,10 @@ def parse_cron_schedule(spec: str):
     spec = spec.strip().lower()
     m = re.fullmatch(r"daily\s+(\d{1,2}):(\d{2})", spec)
     if m:
-        return {"type": "daily", "hour": int(m.group(1)), "minute": int(m.group(2))}
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            return None  # out-of-range time -> cron_add shows the usage hint
+        return {"type": "daily", "hour": hour, "minute": minute}
     m = re.fullmatch(r"every\s+(\d+)\s*([mh])", spec)
     if m:
         n, unit = int(m.group(1)), m.group(2)
@@ -2047,19 +2084,28 @@ def parse_when(tokens):
     if t0 in ("tomorrow", "today"):
         base = now + timedelta(days=1) if t0 == "tomorrow" else now
         hh, mm, rest = grab_time(rest)
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None, None  # out-of-range time -> caller shows the usage hint
         due = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if t0 == "today" and due <= now:
             due += timedelta(days=1)
         return due, " ".join(rest).strip()
 
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t0):
-        d = date.fromisoformat(t0)
+        try:
+            d = date.fromisoformat(t0)  # rejects e.g. 2026-13-40
+        except ValueError:
+            return None, None
         hh, mm, rest = grab_time(rest)
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None, None
         due = datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ) if TZ else datetime(d.year, d.month, d.day, hh, mm)
         return due, " ".join(rest).strip()
 
     if re.fullmatch(r"\d{1,2}:\d{2}", t0):
         hh, mm = map(int, t0.split(":"))
+        if not (0 <= hh < 24 and 0 <= mm < 60):
+            return None, None
         due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if due <= now:
             due += timedelta(days=1)
@@ -2351,6 +2397,8 @@ def nudge_mood(chat_id: int, gap_hours):
     penalty = min(1.8, (gap_hours - 12) / 12)
     cur = mood_now(chat_id)
     m["score"] = round(max(-3.0, cur - penalty), 3)
+    m["ts"] = time.time()  # anchor decay from now so mood_now doesn't re-decay the penalty away
+    m.pop("label", None)   # old label described the pre-penalty mood; let the appraisal refresh it
 
 
 def _appraise_mood(chat_id: int, convo_tail: str):
@@ -3466,7 +3514,7 @@ def _strip_thinking(text: str) -> str:
 _REFUSAL_MARKERS = (
     "request was rejected because it was considered high risk",
     "the request was rejected because",
-    "considered high risk",
+    "rejected because it was considered high risk",
 )
 
 def _looks_like_refusal(text: str) -> bool:
@@ -6455,18 +6503,27 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not r:
         return  # was cancelled
     if r.get("kind") == "event":
-        # Don't interrupt an active exchange, or land during quiet hours, with an unprompted
-        # nudge -- defer briefly and re-check (same spirit as heartbeat's "recently active"
-        # skip), capped so it's never silently dropped forever.
+        # Quiet hours: don't fire mid-night and don't defer 15m repeatedly through the whole
+        # window -- bump to a random organic daytime moment. (The daytime target is outside quiet
+        # hours by construction, so this can't loop.) Give it a fresh owner-active budget for then.
+        if in_quiet_hours() or _is_quiet(r["chat_id"]):
+            if r.get("_deferred"):
+                r["_deferred"] = 0
+                save_reminders()
+            delay = _seconds_until_daytime_slot()
+            context.job_queue.run_once(fire_reminder, when=delay, data=rid)
+            print(f"[event-reminder] {r['event']}: quiet hours, rescheduling "
+                  f"~{round(delay / 3600, 1)}h to a daytime slot.")
+            return
+        # Otherwise don't interrupt an active exchange -- defer briefly and re-check (same spirit
+        # as heartbeat's "recently active" skip), capped so it's never silently dropped forever.
         deferred = r.get("_deferred", 0)
         owner_active = time.time() - last_seen.get(r["chat_id"], 0) < EVENT_NUDGE_BUFFER_MIN * 60
-        quiet = in_quiet_hours() or _is_quiet(r["chat_id"])
-        if (owner_active or quiet) and deferred < EVENT_NUDGE_MAX_DEFERS:
+        if owner_active and deferred < EVENT_NUDGE_MAX_DEFERS:
             r["_deferred"] = deferred + 1
             save_reminders()
             context.job_queue.run_once(fire_reminder, when=EVENT_NUDGE_BUFFER_MIN * 60, data=rid)
-            reason = "quiet hours" if quiet and not owner_active else "owner active"
-            print(f"[event-reminder] {r['event']}: {reason}, deferring "
+            print(f"[event-reminder] {r['event']}: owner active, deferring "
                   f"{EVENT_NUDGE_BUFFER_MIN}m (attempt {r['_deferred']}/{EVENT_NUDGE_MAX_DEFERS}).")
             return
         uname = user_names.get(r["chat_id"], "you")
@@ -6516,6 +6573,10 @@ def schedule_reminder(job_queue, r: dict):
         return
     due = datetime.fromisoformat(r["due"])
     now = datetime.now(TZ) if TZ else datetime.now()
+    # Match awareness so a TIMEZONE change between save and restart can't raise a naive/aware
+    # TypeError comparing due against now (the reminder was stored under a different TZ config).
+    if (due.tzinfo is None) != (now.tzinfo is None):
+        due = due.replace(tzinfo=now.tzinfo)
     # If the bot was down when it was due, deliver shortly after startup instead of dropping it.
     when = due if due > now else now + timedelta(seconds=5)
     job_queue.run_once(fire_reminder, when=when, data=r["id"])
@@ -6549,6 +6610,8 @@ def _parse_event_obj(name: str, obj: dict, now: datetime):
             wds = [0, 1, 2, 3, 4, 5, 6]  # unspecified/daily -> every day
         try:
             hh, mm = (int(x) for x in str(obj.get("time", "09:00")).split(":")[:2])
+            if not (0 <= hh < 24 and 0 <= mm < 60):  # model can return "24:00"/"09:75" -> would
+                raise ValueError                      # crash _next_occurrence's datetime.replace
         except Exception:
             hh, mm = 9, 0
         return {"event": name, "recurs": True, "weekdays": wds, "hh": hh, "mm": mm}
@@ -6707,15 +6770,25 @@ async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏰ Got it — I'll remind you {fmt_due_dt(due)}: {text}")
 
 
+def _reminder_due_str(r: dict) -> str:
+    """Display string for a reminder's due time. Daily reminders store `due` as 'HH:MM' (not an
+    ISO datetime), so fromisoformat would raise on them -- render those directly."""
+    if r.get("daily"):
+        return f"daily at {r['due']}"
+    return fmt_due_dt(datetime.fromisoformat(r["due"]))
+
+
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _guard(update):
         return
+    # Sort daily reminders (keyed 'HH:MM') ahead of one-off reminders (keyed ISO datetime); the
+    # leading 0/1 keeps the two string formats from being compared against each other.
     mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
-                  key=lambda r: r["due"])
+                  key=lambda r: (0, r["due"]) if r.get("daily") else (1, r["due"]))
     if not mine:
         await update.message.reply_text("No reminders set. Add one with /remindme <when> <message>.")
         return
-    lines = [f"{i}. {fmt_due_dt(datetime.fromisoformat(r['due']))} — {r['text']}  (id {r['id']})"
+    lines = [f"{i}. {_reminder_due_str(r)} — {r['text']}  (id {r['id']})"
              for i, r in enumerate(mine, 1)]
     await update.message.reply_text("⏰ Your reminders:\n\n" + "\n".join(lines))
 
@@ -6728,7 +6801,7 @@ async def delreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     arg = context.args[0]
     mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
-                  key=lambda r: r["due"])
+                  key=lambda r: (0, r["due"]) if r.get("daily") else (1, r["due"]))
     target = None
     if arg.isdigit():
         n = int(arg)
@@ -7339,6 +7412,19 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
         "[sent a selfie]" if selfie_hint is not None else
         (f"[reacted {reaction}]" if reaction else "")
     )
+    if not placeholder:
+        # Model returned nothing usable (a think-only or slop-only completion that got stripped to
+        # empty). Persisting an empty assistant turn poisons the next request (providers reject
+        # content:"") and the user would silently get nothing -- surface a soft retry instead.
+        print(f"[reply] empty completion for chat {chat_id}; not persisting an empty turn.")
+        remember(chat_id, "user", user_memory_text)
+        save_state()
+        try:
+            await context.bot.send_message(chat_id=chat_id,
+                                           text="hang on, my brain skipped a beat — say that again?")
+        except Exception:
+            pass
+        return False
     remember(chat_id, "user", user_memory_text)
     remember(chat_id, "assistant", placeholder)
     save_state()  # single write for both history appends
@@ -8167,6 +8253,7 @@ def _overnight_mood_reset(chat_id: int):
         return  # positive moods don't need nudging
     m = moods.get(chat_id) or {}
     m["score"] = round(s * 0.45, 3)  # pull roughly halfway toward 0
+    m["ts"] = time.time()  # anchor decay from now so mood_now doesn't re-decay the reset value
     m.pop("label", None)  # stale label — let the next exchange set a fresh one
     m.pop("_gap_hours", None)
     moods[chat_id] = m
@@ -8560,8 +8647,11 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
         if not new:
             continue
 
-        seen_incidents[chat_id] = known | {str(a["AlertID"]) for a in new}
-        lines = [_format_alert(a) for a in new[:5]]
+        shown = new[:5]
+        # Mark seen ONLY what we actually show -- the rest stay "new" and surface on later polls
+        # (drip-fed) rather than being marked seen here and silently never shown.
+        seen_incidents[chat_id] = known | {str(a["AlertID"]) for a in shown}
+        lines = [_format_alert(a) for a in shown]
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -8907,14 +8997,24 @@ def main():
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
+        armed = 0
         for r in reminders:
-            schedule_reminder(app.job_queue, r)
-        if reminders:
-            log.info("Re-armed %d pending reminder(s).", len(reminders))
+            try:  # one bad persisted reminder must not abort startup for all of them
+                schedule_reminder(app.job_queue, r)
+                armed += 1
+            except Exception as e:
+                log.error("Skipping un-armable reminder %s: %s", r.get("id"), e)
+        if armed:
+            log.info("Re-armed %d pending reminder(s).", armed)
+        armed = 0
         for j in cron_jobs:
-            schedule_cron_job(app.job_queue, j)
-        if cron_jobs:
-            log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
+            try:  # a bad cron time on disk must not brick startup
+                schedule_cron_job(app.job_queue, j)
+                armed += 1
+            except Exception as e:
+                log.error("Skipping un-armable cron job %s: %s", j.get("id"), e)
+        if armed:
+            log.info("Re-armed %d scheduled task(s).", armed)
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
