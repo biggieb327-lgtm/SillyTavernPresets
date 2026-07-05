@@ -14,8 +14,10 @@ A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running
 | `bonnie` | `~/bonnie-bot/` | `bonnie.json` |
 | `cass` | `~/cass-bot/` | `cass.json` |
 | `emily` | `~/emily-bot/` | `emily_harper.json` |
+| `priya` | `~/priya-bot/` | `priya.json` |
+| `jules` | `~/jules-bot/` | (per its `.env`) |
 
-All instances share the venv at `~/telegram-bot/venv/`. `bot.py` always lives in `~/telegram-bot/` and is passed an instance directory as `sys.argv[1]`.
+The authoritative instance list is the loop in `update-all.sh`. All instances share the venv at `~/telegram-bot/venv/`. `bot.py` always lives in `~/telegram-bot/` and is passed an instance directory as `sys.argv[1]`.
 
 ---
 
@@ -32,33 +34,34 @@ All instances share the venv at `~/telegram-bot/venv/`. `bot.py` always lives in
 
 ## Deployment
 
-### Update and restart a single bot
-```bash
-cd ~/telegram-bot
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
-bash ~/telegram-bot/run-bot.sh ~/emily-bot emily
-```
+### Preferred: from Telegram, no shell needed
+After pushing to `main`, send `/update` to **one** bot — it downloads bot.py, refuses to
+install anything that doesn't compile, keeps a `bot.py.bak`, swaps the shared file, and
+restarts itself. Then send `/restart` to the other bots (bot.py is shared, so they just
+need to reload it). Verify each with `/audit` — it shows `BOT_VERSION`.
 
-Nora (the default instance) uses `run.sh` instead:
-```bash
-tmux kill-session -t nora 2>/dev/null && bash ~/telegram-bot/run.sh
-```
+**Bump `BOT_VERSION` in bot.py on every release** — it's how `/update` detects a new
+version and how `/audit` proves a deploy took.
 
-### Update and restart all bots at once
+### When run-bot.sh (the supervisor) changed — shell required
+`/update` and `/restart` never regenerate the supervisor script (`.supervise.sh` is baked
+by run-bot.sh at launch). Any change to `run-bot.sh` needs one shell run of:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
 ```
+(update-all.sh pulls bot.py AND run-bot.sh, then restarts every instance.)
 
 ### Card-only update (no bot.py change)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/.../nora.json -o ~/telegram-bot/nora.json
-bash ~/telegram-bot/run-bot.sh ~/telegram-bot nora   # or run.sh for nora
+bash ~/telegram-bot/run-bot.sh ~/telegram-bot nora
 ```
 
 ### Edit an instance .env
 ```bash
 nano ~/emily-bot/.env
 ```
+Then `/restart` that bot from Telegram — it picks up the .env on relaunch.
 
 ---
 
@@ -93,6 +96,9 @@ SUMMARY_MODEL=zai-org/glm-4.7-flash
 REACTION_MODEL=zai-org/glm-4.7-flash
 CHARACTER_CARD=nora.json
 ALLOWED_USERS=                             # comma-separated Telegram user IDs
+STREAM_TIMEOUT=90                          # max silence between streamed chunks (s)
+MAX_TOKENS=2048
+NOTE_FOLLOWUP_TIME=18:00                   # when dated user notes get followed up
 ```
 
 **Emily only (WSDOT traffic):**
@@ -102,14 +108,36 @@ TRAFFIC_RADIUS_MILES=10
 TRAFFIC_POLL_MINUTES=10
 ```
 
+**Voice via Inworld (Emily):** TTS voice and model must come from the same engine — an
+Inworld voice ID sent to an OpenAI-style model 400s. Setting `INWORLD_API_KEY` switches
+voice replies to api.inworld.ai:
+```
+INWORLD_API_KEY=                           # base64 runtime key (Basic auth)
+INWORLD_TTS_MODEL=inworld-tts-2
+TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voices)
+```
+
 ---
 
 ## NanoGPT connection notes
 
-- `call_nanogpt` retries each model up to 3 times with 2s/4s backoff before falling to the fallback
-- Timeout is `(10, 300)` — 10s connect, 300s read
+- Responses are **streamed** (SSE); `STREAM_TIMEOUT` (default 90s) is the max silence
+  between chunks — stall detection, not total time. Non-streaming requests use
+  `REQUEST_TIMEOUT` (default 120s). 30s proved too tight on a phone connection.
+- `call_nanogpt`: 2 attempts per model with 2s/4s backoff, 150s wall-clock budget on the
+  primary before forcing fallback. 400/429/5xx/timeouts are all fallback-eligible.
+- Models that reject streaming get an automatic non-streaming retry and are cached in
+  `_no_stream_models` for the process lifetime.
+- **Streaming error bodies must be force-read (`resp.content`) before `raise_for_status()`**
+  — otherwise a 400 arrives with an empty body and is undiagnosable. This bug cost three
+  fix rounds; `_do_request` handles it now. Keep the pattern if touching that code.
+- Per user message there is ONE combined post-reply analysis call (`post_reply_analysis`:
+  mood + user note + NPC memory in one JSON response) — don't reintroduce separate calls;
+  side calls compete with user-facing replies for phone bandwidth.
 - `FALLBACK_MODEL=anthracite-org/magnum-v4-72b` is the recommended roleplay fallback; `Sao10K/L3.3-70B-Euryale-v2.3` is a solid alternative
 - `DOCUMENT_MODEL` must be an instruction model — roleplay-tuned models will perform the character card they're analyzing
+- `VISION_MODEL` must be multimodal — the chat default (`glm-5:thinking`) rejects images
+  with 400; bot.py defaults `VISION_MODEL` to `zai-org/glm-4.6v` for this reason
 
 ---
 
@@ -130,14 +158,50 @@ TRAFFIC_POLL_MINUTES=10
 
 ---
 
-## Termux quirks
+## Termux / Android quirks
 
+- **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
+  processes when >32 exist system-wide; 6 bots × several processes sits at that limit.
+  Signature: `STARTUP AUDIT` lines piling up in `/errors` with **no** "Received signal"
+  line before them (a catchable SIGTERM would log one; SIGKILL can't). Fix (one-time,
+  via adb — wireless debugging from Termux itself works):
+  `adb shell settings put global settings_enable_monitor_phantom_procs false`
+  plus Termux battery → Unrestricted. **The setting reverts after an Android OS update
+  and factory reset** — if silent restarts ever return, check
+  `settings get global settings_enable_monitor_phantom_procs` before debugging anything.
+- run-bot.sh launches with `~/telegram-bot/venv/bin/python` **explicitly** — bare
+  `python` only works if the venv happens to be on PATH when tmux starts; otherwise the
+  bot crash-loops on `ModuleNotFoundError: requests`. Never regress this.
+- `pkg upgrade` hazards: android-tools can break with a libprotobuf symbol error
+  (`pkg reinstall android-tools` fixes); a Python **minor**-version bump breaks the
+  shared venv — rebuild with
+  `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install "python-telegram-bot[job-queue]>=21,<22" requests python-dotenv`
+  then run update-all.sh.
 - `/tmp` is not writable — use `~/` for temp files
 - Network goes stale during long model waits — `_keep_typing` swallows exceptions; `send_bubbles` retries with backoff
 - `tmux kill-session -t name` before `new-session` with the same name or you get "duplicate session" error
-- Stale `bot.pid` lock file after a crash: delete `~/instance-dir/bot.pid` before restarting
+- Stale `bot.pid` lock file after a crash: delete `~/instance-dir/bot.pid` before restarting (run-bot.sh also clears it)
 - `httpx.ConnectError` on startup or mid-session = transient network blip; kill and restart the session
 - Termux wake lock is acquired automatically on startup via `termux-wake-lock`
+- The supervisor writes `bot.log` via `>>` redirect (no tee — fewer processes for the
+  phantom limit) and trims it to 1 MB when it exceeds 5 MB; `errors.log` rotates at 2 MB
+
+---
+
+## Debugging protocol (lessons learned)
+
+1. **Evidence before fixes.** Get `/errors` output (or `tail -50 ~/<instance>-bot/bot.log`)
+   and the exact error text before proposing anything. Three rounds of speculative fixes
+   lost to one pasted log line in this project's history.
+2. **Differential diagnosis.** Always establish which bots work and which don't — what's
+   different about the broken one (its .env, its model, its extra features) is usually
+   the answer.
+3. **When the error is opaque, instrument first.** Make the failure self-describing
+   (include the API error body, the model name), deploy, reproduce, then fix the real
+   cause. The vision-400 bug was unsolvable until the error message included the body.
+4. **A bot that can't answer `/errors` is a startup crash** — go to `bot.log` on the
+   phone; the supervisor log lines show exit codes and restart cadence.
+5. **Verify every deploy** with `/audit` (shows `BOT_VERSION`, uptime, error counts).
 
 ---
 
@@ -181,6 +245,7 @@ TRAFFIC_POLL_MINUTES=10
 │   ├── bonnie.json
 │   ├── cass.json
 │   ├── emily_harper.json
+│   ├── priya.json
 │   ├── OPS_MANUAL.md
 │   ├── PROJECT_CONTEXT.md
 │   └── PROJECT_INSTRUCTIONS.md
