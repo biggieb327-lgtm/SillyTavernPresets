@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.3"
+BOT_VERSION = "2026-07-05.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -147,6 +147,10 @@ VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept im
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # hard cap per request
+# Dead man's switch: per-instance ping URL (e.g. healthchecks.io). The self-audit job
+# GETs it every 30 min; the service alerts the owner when pings STOP — which catches
+# every failure the bot can't self-report, including the whole phone being dead.
+HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
 STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "90"))    # max silence between chunks
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 TEMPERATURE = float(os.getenv("TEMPERATURE")) if os.getenv("TEMPERATURE") else None
@@ -6711,7 +6715,32 @@ def _log_startup_diagnostic():
     )
 
 
+_restart_alert_ts = 0.0  # cooldown: a restart storm alerts once, not every 30 min
+
+def _count_recent_restarts(window_s: int = 3600) -> int:
+    """Count STARTUP AUDIT lines in errors.log newer than window_s seconds.
+    Each line marks a process start, so >1 in an hour means something is killing us."""
+    try:
+        if not _error_log_path.exists():
+            return 0
+        cutoff = time.time() - window_s
+        n = 0
+        for line in _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=== STARTUP AUDIT ===" not in line:
+                continue
+            try:
+                ts = time.mktime(time.strptime(line[:19], "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            if ts >= cutoff:
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
+    global _restart_alert_ts
     issues = []
     uptime_h = (time.time() - _BOOT_TIME) / 3600
 
@@ -6742,6 +6771,17 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         free_mb = -1
 
+    # Restart-storm self-report: a revived bot tells on whatever keeps killing it.
+    restarts = _count_recent_restarts()
+    if restarts >= 3 and time.time() - _restart_alert_ts > 7200:
+        _restart_alert_ts = time.time()
+        issues.append(
+            f"restarted {restarts}x in the last hour — something is killing the process. "
+            f"If /errors shows no 'Received signal' lines before the startup audits, "
+            f"suspect Android's phantom process killer "
+            f"(check: adb shell settings get global settings_enable_monitor_phantom_procs)"
+        )
+
     status = "ISSUES" if issues else "OK"
     summary = (f"[audit] {status} | uptime={uptime_h:.1f}h | "
                f"errors_1h={total_recent} total={total_all} | "
@@ -6759,6 +6799,15 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
                 pass
     else:
         log.info(summary)
+
+    # Dead man's switch: prove liveness to the external monitor. If these pings stop,
+    # the service alerts the owner — covering everything a dead bot can't report.
+    if HEALTHCHECK_URL:
+        try:
+            await asyncio.to_thread(
+                lambda: _get_session().get(HEALTHCHECK_URL, timeout=10))
+        except Exception as e:
+            log.warning("[audit] healthcheck ping failed: %s", e)
 
 
 async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
@@ -7129,7 +7178,9 @@ def main():
             schedule_cron_job(app.job_queue, j)
         if cron_jobs:
             log.info("Re-armed %d scheduled task(s).", len(cron_jobs))
-        app.job_queue.run_repeating(_self_audit, interval=1800, first=300)
+        # first=90 (not 300): during a restart storm the process may not live 5 minutes,
+        # and the storm alert has to fire from a short-lived revival to be useful.
+        app.job_queue.run_repeating(_self_audit, interval=1800, first=90)
         log.info("Self-audit: every 30 minutes.")
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60

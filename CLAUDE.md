@@ -205,6 +205,20 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 
 ---
 
+## Monitoring
+
+Two layers, no supervisor bot (a same-phone watchdog shares fate with what it watches):
+
+- **Restart-storm self-report**: `_self_audit` (every 30 min, first run 90s after boot)
+  counts `STARTUP AUDIT` lines in errors.log; ≥3 in an hour → DMs the owner with the
+  phantom-killer hint. 2h cooldown between alerts. A revived bot tells on its killer.
+- **Dead man's switch**: if `HEALTHCHECK_URL` is set in an instance `.env`, `_self_audit`
+  GETs it every 30 min. Pair with healthchecks.io (free): one check per bot, 30 min
+  period + ~15 min grace, alert channel = Telegram/email. Silence = the alert — covers
+  bot-fully-down and phone-dead, which nothing on the phone can report.
+
+---
+
 ## Bot commands reference (quick)
 
 | Command | What it does |
