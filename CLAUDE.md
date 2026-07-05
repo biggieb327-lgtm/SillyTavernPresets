@@ -113,6 +113,11 @@ TRAFFIC_POLL_MINUTES=10
 
 ---
 
+## Continuity features (all characters)
+
+- **Date-aware note follow-ups**: when the user mentions something datable ("interview Tuesday"), the note is stored with a `(due YYYY-MM-DD)` suffix in `user_notes.txt`; a daily job (default 18:00, `NOTE_FOLLOWUP_TIME`) proactively asks how it went once the date passes, then rewrites the marker to `(asked ...)`. Respects quiet hours and the nudge budget; max one per day.
+- **Multi-day life threads**: the midnight day-context rotation feeds yesterday's `day.txt` into today's event generation, so one of today's events may continue or resolve a hanging thread instead of the character's life resetting daily.
+
 ## Character notes
 
 **Nora** (`nora.json` / `caa16137-nora.json`) — 25, bike messenger, Chicago South Side, Seattle. Casual conversation register. Curious and conversational, shows it by talking not interrogating. Mormor (grandmother) died a year ago; mother left at 8. Three months into something with user she won't name. Friction section describes her fear/reset pattern. Lorebook has 6 entries: Ingrid/jacket, Mother, Messenger work, The toothbrush, Money/The City, Religion/Politics.

@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.2"
+BOT_VERSION = "2026-07-05.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -381,13 +381,16 @@ def _read_user_notes() -> str:
     return _read_life_file(USER_NOTES_FILE, _user_notes_cache)
 
 
-def _append_user_note(note: str):
+def _append_user_note(note: str, due: str = ""):
     note = note.strip()
     if not note:
         return
     existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
     if existing and note[:20].lower() in existing.lower():
         return  # simple dedup
+    if due:
+        # Suffix marker (keeps the prefix dedup working); note_followup_job fires on it.
+        note = f"{note} (due {due})"
     lines = [l for l in existing.splitlines() if l.strip()]
     lines.append(note)
     if len(lines) > USER_NOTES_MAX:
@@ -547,6 +550,13 @@ def _read_day_context() -> str:
     _day_cache["ts"] = now
     return text
 
+
+# --- Date-aware note follow-ups ("interview Tuesday" -> asks how it went) ---
+NOTE_FOLLOWUP_TIME = os.getenv("NOTE_FOLLOWUP_TIME", "18:00")
+try:
+    _NF_H, _NF_M = (int(x) for x in NOTE_FOLLOWUP_TIME.split(":"))
+except Exception:
+    _NF_H, _NF_M = 18, 0
 
 # --- Nightly self-reflection (self-image + recommendation outcomes) ---
 REFLECTION_TIME = os.getenv("REFLECTION_TIME", "03:00")
@@ -1580,12 +1590,17 @@ def _post_reply_analysis(chat_id: int, want_mood: bool, want_note: bool, want_me
         f'"user_note": if {uname} mentioned something specific and upcoming — an event, appointment, '
         f"deadline, worry, or plan that would be natural to ask about later — a single brief "
         f"third-person note (e.g. 'has a job interview on Tuesday'). Otherwise null.\n"
+        f'"user_note_date": if the user_note refers to a specific or inferable day '
+        f"('Tuesday', 'tomorrow', 'next week' means its first day), that date as YYYY-MM-DD. "
+        f"Otherwise null.\n"
         f'"memory": if the exchange revealed something notable about a third party, NPC, or '
         f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
         f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
         f"Otherwise null."
     )
-    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
+    now_local = datetime.now(TZ) if TZ else datetime.now()
+    user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
+            f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
             f"Latest exchange:\n{tail}")
     raw = call_nanogpt(
         [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}],
@@ -1614,8 +1629,17 @@ def _post_reply_analysis(chat_id: int, want_mood: bool, want_note: bool, want_me
     if want_note:
         note = _clean_field("user_note")
         if note:
-            _append_user_note(note)
-            print(f"[user-notes] added: {note}")
+            due = _clean_field("user_note_date")
+            # Sanity: proper format, today..+1y — a hallucinated date is worse than none.
+            if due:
+                try:
+                    d = date.fromisoformat(due)
+                    if not (now_local.date() <= d <= now_local.date() + timedelta(days=366)):
+                        due = ""
+                except ValueError:
+                    due = ""
+            _append_user_note(note, due=due)
+            print(f"[user-notes] added: {note}" + (f" (due {due})" if due else ""))
 
     if want_memory:
         mem = _clean_field("memory")
@@ -6174,6 +6198,56 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         _count_error("heartbeat")
 
 
+_DUE_NOTE_RE = re.compile(r"^(?P<note>.*\S)\s+\(due (?P<date>\d{4}-\d{2}-\d{2})\)\s*$")
+
+async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily: if a dated user note has come due, reach out and ask how it went.
+
+    At most one follow-up per firing — being remembered should feel rare and real,
+    not like a notification system."""
+    owner = get_owner()
+    if owner is None or _is_quiet(owner) or in_quiet_hours():
+        return
+    if not USER_NOTES_FILE.exists():
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date()
+    lines = USER_NOTES_FILE.read_text(encoding="utf-8").splitlines()
+    hit = None  # (line index, note text, due date) — oldest due note wins
+    for i, line in enumerate(lines):
+        m = _DUE_NOTE_RE.match(line.strip())
+        if not m:
+            continue
+        try:
+            d = date.fromisoformat(m.group("date"))
+        except ValueError:
+            continue
+        if d <= today and (hit is None or d < hit[2]):
+            hit = (i, m.group("note"), d)
+    if hit is None:
+        return
+    if not _check_nudge_budget(owner):
+        return  # budget spent; the (due) marker survives, so we retry tomorrow
+    i, note, d = hit
+    days_ago = (today - d).days
+    when = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f'[SYSTEM: {uname} mentioned this: "{note}" — that was {when}. Reach out unprompted '
+        f"and ask how it went, specific and in character, 1-2 sentences. If it clearly hasn't "
+        f"happened yet today, wish them luck instead. Don't mention this message is automated.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        lines[i] = f"{note} (asked {today.isoformat()})"
+        USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
+        _user_notes_cache["text"] = None
+        print(f"[note-followup] asked about: {note}")
+    except Exception as e:
+        log.warning("[note-followup] failed: %s", e)
+        _count_error("heartbeat")
+
+
 async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -6287,9 +6361,12 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def _generate_daily_events(owner: int):
+async def _generate_daily_events(owner: int, yesterday: str = ""):
     """Generate 2-3 small life events for the day using the character's people, projects,
-    and schedule as seeds. Writes the result to day.txt so it's ready when she texts."""
+    and schedule as seeds. Writes the result to day.txt so it's ready when she texts.
+
+    When yesterday's events are passed in, one of today's items may continue or pay off
+    a hanging thread — multi-day micro-arcs instead of a life that resets at midnight."""
     try:
         people = _read_people()
         projects = _read_projects()
@@ -6306,6 +6383,13 @@ async def _generate_daily_events(owner: int):
             ctx_parts.append(f"Ongoing things in her life:\n{projects}")
         if people:
             ctx_parts.append(f"People in her life:\n{people}")
+        if yesterday:
+            ctx_parts.append(
+                f"Yesterday: {yesterday[:400]}\n"
+                f"If yesterday left something hanging — a plan, an errand, a person, a mood — "
+                f"let ONE of today's items continue or pay it off naturally. The rest should be "
+                f"fresh. Some days nothing carries over; that's fine."
+            )
 
         ctx_block = "\n\n".join(ctx_parts)
         prompt = (
@@ -6355,9 +6439,10 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
                 rfts.pop(0)
             save_state()
         print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
-    # Generate fresh events for the new day (writes to day.txt, clears cache implicitly)
+    # Generate fresh events for the new day (writes to day.txt, clears cache implicitly),
+    # feeding in yesterday's events so unresolved threads can carry over.
     if owner is not None:
-        await _generate_daily_events(owner)
+        await _generate_daily_events(owner, yesterday=day_ctx)
     else:
         # No owner yet — just clear the file
         try:
@@ -7030,6 +7115,9 @@ def main():
         reflection_time = dtime(_RF_H, _RF_M, tzinfo=TZ) if TZ else dtime(_RF_H, _RF_M)
         app.job_queue.run_daily(reflection_job, time=reflection_time)
         log.info("Nightly reflection scheduled %s.", REFLECTION_TIME)
+        note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
+        app.job_queue.run_daily(note_followup_job, time=note_time)
+        log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
