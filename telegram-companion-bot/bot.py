@@ -2136,11 +2136,14 @@ _no_stream_models: set[str] = set()
 def _do_request(payload: dict, model: str, stream: bool) -> str:
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
     if stream:
-        with _get_session().post(
+        resp = _get_session().post(
             f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
             json=payload, timeout=(10, STREAM_TIMEOUT), stream=True,
-        ) as resp:
-            resp.raise_for_status()
+        )
+        try:
+            if resp.status_code >= 400:
+                _ = resp.content
+                resp.raise_for_status()
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
             for line in resp.iter_lines(decode_unicode=True):
@@ -2159,6 +2162,8 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
                         reasoning_parts.append(r)
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
+        finally:
+            resp.close()
         text = "".join(content_parts)
         if not text:
             text = "".join(reasoning_parts)
@@ -5714,7 +5719,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_selfie(context, chat_id, "", announce_errors=False)
     except requests.exceptions.HTTPError as e:
         await send_bubbles(context, chat_id,
-            f"⚠️ Vision API Error: {e.response.status_code} — {e.response.text[:200]}")
+            f"⚠️ Vision API Error ({VISION_MODEL}): {e.response.status_code} — {e.response.text[:200]}")
     except Exception as e:
         await send_bubbles(context, chat_id, f"❌ Couldn't look at that one: {str(e)}")
 
