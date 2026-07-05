@@ -6655,6 +6655,31 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the tail of errors.log so bug reports carry evidence."""
+    if not _is_allowed(update.effective_user.id):
+        return
+    args = context.args or []
+    try:
+        n = max(1, min(int(args[0]), 50)) if args else 20
+    except ValueError:
+        n = 20
+    try:
+        lines = _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        lines = []
+    lines = [l for l in lines if l.strip()][-n:]
+    if not lines:
+        await update.message.reply_text("✅ No errors logged.")
+        return
+    text = "\n".join(lines)
+    # Telegram cap is 4096 chars; drop oldest lines until it fits.
+    while len(text) > 3800 and len(lines) > 1:
+        lines = lines[1:]
+        text = "\n".join(lines)
+    await update.message.reply_text(f"🪵 Last {len(lines)} error line(s):\n\n{text[:3900]}")
+
+
 # --- Main ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
@@ -6844,6 +6869,7 @@ def main():
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
+    app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))

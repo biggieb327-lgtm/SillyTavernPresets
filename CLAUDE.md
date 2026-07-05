@@ -153,6 +153,8 @@ TRAFFIC_POLL_MINUTES=10
 | `/addmem <text>` | Manually add an NPC/world memory |
 | `/mems` | List all stored memories |
 | `/delmem <keyword or #>` | Remove a memory by keyword or number |
+| `/audit` | Self-audit: uptime, error counts, state/disk health |
+| `/errors [N]` | Show last N lines of errors.log (default 20, max 50) |
 
 ---
 
