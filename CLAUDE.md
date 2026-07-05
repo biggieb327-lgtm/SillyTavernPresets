@@ -175,8 +175,17 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 - `pkg upgrade` hazards: android-tools can break with a libprotobuf symbol error
   (`pkg reinstall android-tools` fixes); a Python **minor**-version bump breaks the
   shared venv — rebuild with
-  `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install "python-telegram-bot[job-queue]>=21,<22" requests python-dotenv`
-  then run update-all.sh.
+  `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install "python-telegram-bot[job-queue]>=21,<22" requests python-dotenv tzdata`
+  then run update-all.sh. **Don't drop `tzdata`** — Termux has no system IANA timezone
+  database, so `zoneinfo.ZoneInfo(TIMEZONE)` needs the pip package or it silently falls
+  back to `TZ = None`. That alone won't crash anything, but a *stored* tz-aware
+  timestamp (e.g. a reminder's `due`) compared against a now-naive `datetime.now()`
+  raises `TypeError: can't compare offset-naive and offset-aware datetimes` — and if
+  that comparison happens during startup (re-arming reminders), it takes the whole bot
+  down before it can even answer Telegram. `schedule_reminder` normalizes this
+  defensively as of v2026-07-05.5, but a missing `tzdata` still degrades every
+  timezone-dependent feature (quiet hours, proactive windows, day rotation) to raw
+  device local time — reinstall it rather than rely on the defensive fix alone.
 - `/tmp` is not writable — use `~/` for temp files
 - Network goes stale during long model waits — `_keep_typing` swallows exceptions; `send_bubbles` retries with backoff
 - `tmux kill-session -t name` before `new-session` with the same name or you get "duplicate session" error

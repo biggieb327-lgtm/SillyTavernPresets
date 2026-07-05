@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.4"
+BOT_VERSION = "2026-07-05.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4926,6 +4926,13 @@ def schedule_reminder(job_queue, r: dict):
         return
     due = datetime.fromisoformat(r["due"])
     now = datetime.now(TZ) if TZ else datetime.now()
+    if (due.tzinfo is None) != (now.tzinfo is None):
+        # A stored aware/naive timestamp can outlive a tzdata hiccup (e.g. TZ falling
+        # back to None after a venv rebuild missing the `tzdata` package) — comparing
+        # mismatched awareness raises TypeError and would crash startup for every
+        # reminder behind this one. Strip tzinfo from both rather than let one bad
+        # timestamp take the whole bot down.
+        due, now = due.replace(tzinfo=None), now.replace(tzinfo=None)
     # If the bot was down when it was due, deliver shortly after startup instead of dropping it.
     when = due if due > now else now + timedelta(seconds=5)
     job_queue.run_once(fire_reminder, when=when, data=r["id"])
@@ -7171,7 +7178,12 @@ def main():
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
         for r in reminders:
-            schedule_reminder(app.job_queue, r)
+            try:
+                schedule_reminder(app.job_queue, r)
+            except Exception as e:
+                # A single corrupt/unparseable reminder must never block startup for
+                # every other one (or the bot itself) — skip it and keep going.
+                log.error("[reminders] failed to re-arm reminder %s: %s", r.get("id"), e)
         if reminders:
             log.info("Re-armed %d pending reminder(s).", len(reminders))
         for j in cron_jobs:
