@@ -154,6 +154,10 @@ DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "meta-llama/llama-3.3-70b-instruct"
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
+# Inworld TTS: when INWORLD_API_KEY is set, voice replies use api.inworld.ai
+# (with TTS_VOICE as the Inworld voice ID) instead of NanoGPT's speech endpoint.
+INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")   # base64 runtime key from the Inworld portal
+INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-2")
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
 LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "8"))
 LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
@@ -3936,19 +3940,41 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Inline keyboard menu ---
+def _inworld_tts(text: str) -> bytes:
+    """Synthesize speech via Inworld's TTS API; returns OGG/Opus bytes for Telegram."""
+    resp = _get_session().post(
+        "https://api.inworld.ai/tts/v1/voice",
+        headers={"Authorization": f"Basic {INWORLD_API_KEY}",
+                 "Content-Type": "application/json"},
+        json={
+            "text": text,
+            "voiceId": TTS_VOICE,
+            "modelId": INWORLD_TTS_MODEL,
+            "audioConfig": {"audioEncoding": "OGG_OPUS"},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return base64.b64decode(resp.json()["audioContent"])
+
+
+def _nanogpt_tts(text: str) -> bytes:
+    resp = _get_session().post(
+        f"{NANOGPT_BASE_URL}/audio/speech",
+        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+        json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.content
+
+
 async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
     try:
-        resp = await asyncio.to_thread(
-            lambda: _get_session().post(
-                f"{NANOGPT_BASE_URL}/audio/speech",
-                headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-                json={"model": TTS_MODEL, "input": text, "voice": TTS_VOICE},
-                timeout=60,
-            )
-        )
-        resp.raise_for_status()
-        await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(resp.content))
+        tts = _inworld_tts if INWORLD_API_KEY else _nanogpt_tts
+        audio = await asyncio.to_thread(tts, text)
+        await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(audio))
     except requests.exceptions.HTTPError as e:
         log.warning("TTS failed: %s — %s", e, e.response.text[:300])
     except Exception as e:
