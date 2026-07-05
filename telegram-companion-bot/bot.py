@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.6"
+BOT_VERSION = "2026-07-05.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6726,17 +6726,23 @@ _restart_alert_ts = 0.0  # cooldown: a restart storm alerts once, not every 30 m
 
 def _count_recent_restarts(window_s: int = 3600) -> int:
     """Count STARTUP AUDIT lines in errors.log newer than window_s seconds.
-    Each line marks a process start, so >1 in an hour means something is killing us."""
+    Each line marks a process start, so >1 in an hour means something is killing us.
+
+    Compares naive wall-clock datetimes directly (never converting through Unix epoch)
+    so this stays correct even if the OS's local-time calibration is off — e.g. right
+    after a pkg upgrade disrupts tzdata. time.mktime() would silently misjudge every
+    historical line as "recent" in that case, which is exactly the false-alarm bug this
+    replaced (every bot on the same phone would misfire identically)."""
     try:
         if not _error_log_path.exists():
             return 0
-        cutoff = time.time() - window_s
+        cutoff = datetime.now() - timedelta(seconds=window_s)
         n = 0
         for line in _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if "=== STARTUP AUDIT ===" not in line:
                 continue
             try:
-                ts = time.mktime(time.strptime(line[:19], "%Y-%m-%d %H:%M:%S"))
+                ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 continue
             if ts >= cutoff:
