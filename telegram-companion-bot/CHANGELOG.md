@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-05.12 — admin HTTP API (Phase 1 of VPS migration)
+
+**New capability, not a bug fix.** Adds an opt-in HTTP admin API that mirrors
+`/audit /errors /backup /update /restart` for non-Telegram clients — the motivating
+case is a future native Android control-panel app, which can't just be a second
+Telegram client (only one process can poll a bot token for updates at a time, and
+there's no way to route a "send as the user" reply back to a second client via the
+Bot API). Fully inert unless `ADMIN_API_ENABLED=1` is set — existing Termux instances
+that never set it are unaffected.
+
+Refactored `audit_cmd`/`errors_cmd`/`update_cmd`/`_send_backup` so their logic lives in
+plain functions (`gather_audit_data`, `tail_error_lines`, `backup_file_list`,
+`build_backup_zip`, `perform_self_update`) called by both the Telegram handler and the
+matching HTTP route — no duplicated logic, and the Telegram-facing output text/format
+is unchanged.
+
+`/update` and `/restart`'s old pattern — reply, `_write_state()`, immediate
+`os._exit(0)` — doesn't hold for HTTP: `ThreadingHTTPServer` writes its response on the
+same thread handling the request, so an immediate exit right after building the
+response risks killing the process before those bytes reach the socket (the caller
+would see a connection reset instead of the 200 they were just sent). New
+`_schedule_exit()` helper fires `os._exit(0)` from a `threading.Timer` after a short
+delay instead, used by `/update`, `/restart`, and the matching `/admin/update`,
+`/admin/restart` HTTP routes. `threading.Timer` runs on its own thread regardless of
+caller, so this works uniformly from both the asyncio event loop thread (Telegram
+handlers) and an admin API request-handling thread.
+
+Auth: every route except `GET /admin/health` requires `Authorization: Bearer
+<ADMIN_API_TOKEN>`, compared with `secrets.compare_digest`. `/admin/health` is
+deliberately unauthenticated (trivial liveness ping, no sensitive data) so uptime
+monitors and the future app's connectivity check don't need the token wired in.
+`ADMIN_API_BIND` defaults to `127.0.0.1` (fails closed) — set it to the host's
+Tailscale IP to actually expose it over the private tailnet; never bind `0.0.0.0`.
+
+Also new: `telegram-companion-bot/deploy/bot@.service` (systemd template unit,
+`Restart=always`, `RestartSec=2`) and `deploy/install-vps.sh` (idempotent VPS
+installer — clones/pulls the repo, builds the venv from `requirements.txt` as the
+single source of truth, prompts per-instance for tokens, installs the systemd unit,
+prints Tailscale setup instructions). Confirmed `_PID_FILE`'s stale-lock detection
+(`os.kill(pid, 0)`) and `os._exit(0)` are already compatible with `Restart=always` as-is
+— `RestartSec=2` exists specifically to make PID-reuse races between an old exiting
+process and systemd's relaunch practically impossible, not to work around a new bug.
+
 ## v2026-07-05.11 — meme generation (`/meme` + `[meme:]` tag)
 
 **New feature, not a bug fix.** Bots can now make and send a meme via `/meme [hint]`,

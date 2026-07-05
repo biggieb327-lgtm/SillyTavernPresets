@@ -12,6 +12,9 @@ import logging
 import logging.handlers
 import tempfile
 import threading
+import secrets
+import zipfile
+import http.server
 import html as _html_module
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
@@ -62,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.11"
+BOT_VERSION = "2026-07-05.12"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4830,15 +4833,31 @@ async def payments_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Backup ---
+_BACKUP_FILENAMES = ("payments.json", "state.json", "reminders.json",
+                     "memories.txt", "user_notes.txt", "setting.txt")
+
+
+def backup_file_list() -> list[Path]:
+    """Existing backup files for this instance, in send order."""
+    return [p for p in (BASE_DIR / f for f in _BACKUP_FILENAMES) if p.exists()]
+
+
+def build_backup_zip() -> bytes:
+    """Zip the same files backup_file_list() names, for a single-response download
+    (the admin HTTP API can't send multiple Telegram documents)."""
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in backup_file_list():
+            zf.write(path, arcname=path.name)
+    return buf.getvalue()
+
+
 async def _send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     sent = []
-    for fname in ("payments.json", "state.json", "reminders.json",
-                  "memories.txt", "user_notes.txt", "setting.txt"):
-        path = BASE_DIR / fname
-        if path.exists():
-            with path.open("rb") as fh:
-                await context.bot.send_document(chat_id=chat_id, document=fh, filename=fname)
-            sent.append(fname)
+    for path in backup_file_list():
+        with path.open("rb") as fh:
+            await context.bot.send_document(chat_id=chat_id, document=fh, filename=path.name)
+        sent.append(path.name)
     return sent
 
 
@@ -7026,9 +7045,8 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
             log.warning("[audit] healthcheck ping failed: %s", e)
 
 
-async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update.effective_user.id):
-        return
+def gather_audit_data() -> dict:
+    """Self-audit facts as plain data — shared by /audit and the admin HTTP API."""
     uptime_h = (time.time() - _BOOT_TIME) / 3600
     hour_ago = time.time() - 3600
     recent = {cat: sum(1 for t in ts if t > hour_ago) for cat, ts in _error_counts.items()}
@@ -7047,21 +7065,48 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     bot_log = BASE_DIR / "bot.log"
     bot_log_size = bot_log.stat().st_size if bot_log.exists() else 0
 
+    return {
+        "version": BOT_VERSION,
+        "uptime_hours": round(uptime_h, 1),
+        "errors_last_hour": {k: v for k, v in recent.items() if v},
+        "errors_last_hour_total": sum(recent.values()),
+        "errors_total": total_all,
+        "state_file": state_ok,
+        "errors_log_kb": round(err_size / 1024, 1),
+        "bot_log_kb": round(bot_log_size / 1024, 1),
+        "pid": os.getpid(),
+    }
+
+
+async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    d = gather_audit_data()
     lines = [
-        f"🔧 *Self-Audit* (v{BOT_VERSION})",
-        f"Uptime: {uptime_h:.1f}h",
-        f"Errors (last hour): {sum(recent.values())}",
+        f"🔧 *Self-Audit* (v{d['version']})",
+        f"Uptime: {d['uptime_hours']}h",
+        f"Errors (last hour): {d['errors_last_hour_total']}",
     ]
-    if recent:
-        lines.append("  " + ", ".join(f"{k}: {v}" for k, v in sorted(recent.items()) if v))
+    if d["errors_last_hour"]:
+        lines.append("  " + ", ".join(f"{k}: {v}" for k, v in sorted(d["errors_last_hour"].items())))
     lines += [
-        f"Errors (total): {total_all}",
-        f"State file: {state_ok}",
-        f"errors.log: {err_size / 1024:.1f} KB",
-        f"bot.log: {bot_log_size / 1024:.1f} KB",
-        f"PID: {os.getpid()}",
+        f"Errors (total): {d['errors_total']}",
+        f"State file: {d['state_file']}",
+        f"errors.log: {d['errors_log_kb']} KB",
+        f"bot.log: {d['bot_log_kb']} KB",
+        f"PID: {d['pid']}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+def tail_error_lines(n: int = 20) -> list[str]:
+    """Last n non-blank lines of errors.log — shared by /errors and the admin HTTP API."""
+    n = max(1, min(n, 50))
+    try:
+        lines = _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        lines = []
+    return [l for l in lines if l.strip()][-n:]
 
 
 async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7073,11 +7118,7 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         n = max(1, min(int(args[0]), 50)) if args else 20
     except ValueError:
         n = 20
-    try:
-        lines = _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except FileNotFoundError:
-        lines = []
-    lines = [l for l in lines if l.strip()][-n:]
+    lines = tail_error_lines(n)
     if not lines:
         await update.message.reply_text("✅ No errors logged.")
         return
@@ -7092,32 +7133,45 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _RAW_BOT_URL = ("https://raw.githubusercontent.com/biggieb327-lgtm/"
                 "SillyTavernPresets/main/telegram-companion-bot/bot.py")
 
-async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Self-deploy: fetch latest bot.py from main, verify it compiles, restart.
 
-    The supervisor (run-bot.sh) restarts the process automatically, so exiting
-    after a successful swap is all it takes to come back on the new code.
+def _schedule_exit(delay_s: float = 1.0):
+    """Save state and exit after a short delay, instead of immediately.
+
+    Both a Telegram reply and an admin HTTP API response must actually leave the
+    process before it exits, or the caller sees a reset connection instead of the
+    reply they were just sent. Telegram replies are awaited before this is called, so
+    they're already flushed by the time we get here; the admin API's HTTP response is
+    written just before this call returns control to the caller, and still needs a
+    moment to reach the socket. threading.Timer runs on its own thread regardless of
+    which thread calls it, so this is safe from both the asyncio event loop thread and
+    an admin API request-handling thread.
     """
-    if not _is_admin(update.effective_user.id):
-        return
-    force = bool(context.args) and context.args[0].lower() == "force"
+    def _exit():
+        _write_state()
+        os._exit(0)
+    threading.Timer(delay_s, _exit).start()
+
+
+def perform_self_update(force: bool = False) -> dict:
+    """Fetch latest bot.py from main, verify it compiles, swap it in.
+
+    Plain function shared by /update and the admin HTTP API's /admin/update — neither
+    restarts the process itself; callers decide how (and whether) to schedule the exit
+    after reporting the result back to whoever asked.
+    """
     code_dir = Path(__file__).resolve().parent
     target = code_dir / "bot.py"
     tmp = code_dir / "bot.py.new"
     try:
-        resp = await asyncio.to_thread(
-            lambda: _get_session().get(_RAW_BOT_URL, timeout=(10, 60)))
+        resp = _get_session().get(_RAW_BOT_URL, timeout=(10, 60))
         resp.raise_for_status()
         source = resp.text
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Download failed: {e}")
-        return
+        return {"ok": False, "reason": "download_failed", "detail": str(e)}
     m = re.search(r'^BOT_VERSION\s*=\s*"([^"]+)"', source, re.M)
     new_version = m.group(1) if m else "unknown"
     if new_version == BOT_VERSION and not force:
-        await update.message.reply_text(
-            f"✅ Already on v{BOT_VERSION}. Use /update force to reinstall anyway.")
-        return
+        return {"ok": False, "reason": "already_current", "version": BOT_VERSION}
     import py_compile
     tmp.write_text(source, encoding="utf-8")
     cfile = str(tmp) + "c"
@@ -7125,19 +7179,43 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         py_compile.compile(str(tmp), cfile=cfile, doraise=True)
     except py_compile.PyCompileError as e:
         tmp.unlink(missing_ok=True)
-        await update.message.reply_text(
-            f"❌ New bot.py does not compile — keeping v{BOT_VERSION}.\n{str(e)[:300]}")
-        return
+        return {"ok": False, "reason": "compile_failed", "detail": str(e)[:300],
+                "version": BOT_VERSION}
     finally:
         Path(cfile).unlink(missing_ok=True)
     (code_dir / "bot.py.bak").write_bytes(target.read_bytes())
     tmp.replace(target)
+    log.warning("[update] v%s -> v%s; restarting", BOT_VERSION, new_version)
+    return {"ok": True, "old_version": BOT_VERSION, "new_version": new_version}
+
+
+async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Self-deploy: fetch latest bot.py from main, verify it compiles, restart.
+
+    The supervisor (run-bot.sh, or systemd on a VPS) restarts the process
+    automatically, so exiting after a successful swap is all it takes to come back on
+    the new code.
+    """
+    if not _is_admin(update.effective_user.id):
+        return
+    force = bool(context.args) and context.args[0].lower() == "force"
+    result = await asyncio.to_thread(perform_self_update, force)
+    if not result["ok"]:
+        reason = result["reason"]
+        if reason == "download_failed":
+            await update.message.reply_text(f"⚠️ Download failed: {result['detail']}")
+        elif reason == "already_current":
+            await update.message.reply_text(
+                f"✅ Already on v{result['version']}. Use /update force to reinstall anyway.")
+        elif reason == "compile_failed":
+            await update.message.reply_text(
+                f"❌ New bot.py does not compile — keeping v{result['version']}.\n{result['detail']}")
+        return
     await update.message.reply_text(
-        f"⬆️ Updated v{BOT_VERSION} → v{new_version}. Restarting now — back in ~15s.\n"
+        f"⬆️ Updated v{result['old_version']} → v{result['new_version']}. "
+        f"Restarting now — back in ~15s.\n"
         f"Other instances keep running old code until they get /update too.")
-    log.warning("[update] v%s -> v%s via /update; restarting", BOT_VERSION, new_version)
-    _write_state()
-    os._exit(0)
+    _schedule_exit()
 
 
 async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7146,8 +7224,114 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔄 Restarting — back in ~15s.")
     log.warning("[restart] requested via /restart")
-    _write_state()
-    os._exit(0)
+    _schedule_exit()
+
+
+# --- Admin HTTP API (opt-in) ---
+# Mirrors /audit /errors /backup /update /restart over HTTP so a non-Telegram client
+# (e.g. a control-panel app) can drive the same operations — only one process can poll
+# a bot token for Telegram updates at a time, so that client can't just be a second
+# Telegram client. Fully inert unless ADMIN_API_ENABLED is set: existing Termux
+# instances that never set these vars are unaffected. Meant to be reachable only over
+# a private Tailscale network, never the public internet — ADMIN_API_BIND defaults to
+# loopback (never 0.0.0.0) so a misconfigured instance fails closed rather than open;
+# set it to the host's Tailscale IP to actually expose it on a VPS.
+ADMIN_API_ENABLED = os.getenv("ADMIN_API_ENABLED", "").strip().lower() in ("1", "true", "yes")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
+ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8765") or 8765)
+ADMIN_API_BIND = os.getenv("ADMIN_API_BIND", "127.0.0.1").strip() or "127.0.0.1"
+
+_admin_httpd = None
+
+
+def _admin_authorized(handler: "_AdminRequestHandler") -> bool:
+    if not ADMIN_API_TOKEN:
+        return False
+    got = handler.headers.get("Authorization", "")
+    return secrets.compare_digest(got, f"Bearer {ADMIN_API_TOKEN}")
+
+
+class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        log.info("[admin-api] %s - %s", self.address_string(), fmt % args)
+
+    def _json(self, status: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/admin/health":
+            self._json(200, {"ok": True, "version": BOT_VERSION})
+            return
+        if not _admin_authorized(self):
+            self._json(401, {"ok": False, "error": "unauthorized"})
+            return
+        if path == "/admin/audit":
+            self._json(200, gather_audit_data())
+        elif path == "/admin/errors":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                n = max(1, min(int(qs.get("n", ["20"])[0]), 50))
+            except ValueError:
+                n = 20
+            self._json(200, {"lines": tail_error_lines(n)})
+        elif path == "/admin/backup":
+            data = build_backup_zip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="backup.zip"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            self.wfile.flush()
+        else:
+            self._json(404, {"ok": False, "error": "not_found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if not _admin_authorized(self):
+            self._json(401, {"ok": False, "error": "unauthorized"})
+            return
+        if path == "/admin/update":
+            qs = parse_qs(urlparse(self.path).query)
+            force = qs.get("force", ["0"])[0].lower() in ("1", "true", "yes")
+            result = perform_self_update(force)
+            self._json(200 if result["ok"] else 409, result)
+            if result["ok"]:
+                _schedule_exit()
+        elif path == "/admin/restart":
+            log.warning("[restart] requested via admin API")
+            self._json(200, {"ok": True})
+            _schedule_exit()
+        else:
+            self._json(404, {"ok": False, "error": "not_found"})
+
+
+async def _start_admin_api(application):
+    global _admin_httpd
+    if not ADMIN_API_ENABLED:
+        return
+    if not ADMIN_API_TOKEN:
+        log.warning("[admin-api] ADMIN_API_ENABLED is set but ADMIN_API_TOKEN is "
+                    "empty — refusing to start rather than serve an unauthenticated API.")
+        return
+    _admin_httpd = http.server.ThreadingHTTPServer(
+        (ADMIN_API_BIND, ADMIN_API_PORT), _AdminRequestHandler)
+    threading.Thread(target=_admin_httpd.serve_forever, name="admin-api", daemon=True).start()
+    log.info("[admin-api] listening on %s:%d", ADMIN_API_BIND, ADMIN_API_PORT)
+
+
+async def _stop_admin_api(application):
+    global _admin_httpd
+    if _admin_httpd is not None:
+        _admin_httpd.shutdown()
+        _admin_httpd = None
 
 
 # --- Main ---
@@ -7253,6 +7437,11 @@ async def _register_commands(application):
     await application.bot.set_my_commands(cmds)
 
 
+async def _post_init(application):
+    await _register_commands(application)
+    await _start_admin_api(application)
+
+
 async def _on_shutdown(application):
     # run_polling() installs its OWN SIGINT/SIGTERM/SIGABRT handlers internally,
     # silently overriding any signal.signal() registered beforehand in main() — so a
@@ -7264,6 +7453,7 @@ async def _on_shutdown(application):
     # process killer / OOM killer — those can't be caught at all).
     log.warning("[shutdown] graceful stop — saving state.")
     _write_state()
+    await _stop_admin_api(application)
 
 
 def main():
@@ -7278,7 +7468,7 @@ def main():
         .write_timeout(30)
         .pool_timeout(30)
         .get_updates_read_timeout(40)
-        .post_init(_register_commands)
+        .post_init(_post_init)
         .post_shutdown(_on_shutdown)
         .build()
     )

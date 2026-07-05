@@ -344,6 +344,41 @@ Each character is fully isolated — separate state, memory, context files, and 
 
 ---
 
+## Running on a VPS (Phase 1: installer + admin API)
+
+Alternative to Termux for anyone who'd rather not keep a phone on and awake 24/7. On a
+VPS, systemd replaces the tmux+run-bot.sh+watchdog.sh stack (`Restart=always`) and this
+whole category of Android-specific bug (phantom process killer, Samsung battery
+management, the `.alive` heartbeat watchdog.sh needs) doesn't apply — Termux keeps its
+existing mechanism unchanged for anyone still running that way.
+
+**Install** (Ubuntu 24.04 recommended, e.g. a Hetzner CX22):
+```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/install-vps.sh -o install-vps.sh
+sudo bash install-vps.sh
+```
+It's idempotent — re-run it to add another instance or after a `git pull` updates
+`requirements.txt`; it skips already-configured `.env` files and only touches units
+whose config changed. It prompts per instance for a Telegram token, NanoGPT key, and
+character card filename, and generates an `ADMIN_API_TOKEN`.
+
+**Supervision**: `systemctl {status,restart,stop} bot@nora`, logs via
+`journalctl -u bot@nora -f` (the VPS equivalent of `tail -f bot.log`). `/update` and
+`/restart` from Telegram work exactly as they do on Termux — systemd's
+`Restart=always` picks the process back up.
+
+**Admin HTTP API**: opt-in (`ADMIN_API_ENABLED=1`), mirrors `/audit /errors /backup
+/update /restart` over HTTP for a non-Telegram client (e.g. a future control-panel
+app). Reachable only over a private Tailscale network — the installer prints
+Tailscale setup instructions and the API stays bound to loopback (unreachable) until
+you set `ADMIN_API_BIND` to the host's tailnet IP. See `.env.example` for the full
+`ADMIN_API_*` reference and `CHANGELOG.md` (v2026-07-05.12) for the design rationale.
+
+The native Android control-panel app itself is a separate, later phase — not part of
+this installer.
+
+---
+
 ## Logs
 
 ```bash
