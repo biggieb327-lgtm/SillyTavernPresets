@@ -19,24 +19,39 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo "== 1/8: system packages =="
-if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-  apt-get update -qq
-  apt-get install -y git python3 python3-venv python3-pip
-fi
+# Always run this (apt-get install is a no-op on already-installed packages) rather
+# than gating on `command -v python3` — a stock Ubuntu image ships python3 but NOT
+# python3-venv/python3-pip, so that check would skip this block and `python3 -m venv`
+# below would fail on a genuinely fresh box.
+apt-get update -qq
+apt-get install -y git python3 python3-venv python3-pip
 
 echo "== 2/8: cloning / updating repo =="
-if [ -d "$INSTALL_DIR/.git" ]; then
-  git -C "$INSTALL_DIR" pull --ff-only
+# Keep the actual git checkout in a hidden subfolder so a re-run can `git pull` it
+# (an earlier version flattened the clone directly into INSTALL_DIR and deleted .git
+# in the process, which meant every "re-run" silently did a full re-clone instead).
+REPO_CHECKOUT="$INSTALL_DIR/.repo"
+mkdir -p "$INSTALL_DIR"
+if [ -d "$REPO_CHECKOUT/.git" ]; then
+  git -C "$REPO_CHECKOUT" pull --ff-only
 else
-  mkdir -p "$INSTALL_DIR"
-  git clone "$REPO_URL" "$INSTALL_DIR/repo"
-  # The repo's telegram-companion-bot/ subfolder is what actually gets deployed;
-  # keep INSTALL_DIR itself as the flat bot.py/venv/instances layout.
-  shopt -s dotglob
-  cp -r "$INSTALL_DIR"/repo/telegram-companion-bot/* "$INSTALL_DIR"/
-  rm -rf "$INSTALL_DIR"/repo
-  shopt -u dotglob
+  git clone "$REPO_URL" "$REPO_CHECKOUT"
 fi
+# The repo's telegram-companion-bot/ subfolder is what actually gets deployed; sync
+# the shared files into INSTALL_DIR's flat bot.py/venv/instances layout every run, so
+# a re-run actually picks up upstream changes instead of only doing this once. Per-
+# character seed folders (nora/, bonnie/, ...) are excluded here — they hold living,
+# hand-editable content (atlas.txt, people.txt, ...), not something to keep overwriting
+# from git on every re-run. Step 5 below seeds each one once, only when that instance
+# is first created.
+shopt -s dotglob
+for item in "$REPO_CHECKOUT"/telegram-companion-bot/*; do
+  case "$(basename "$item")" in
+    nora|bonnie|cass|emily|priya|jules) continue ;;
+  esac
+  cp -r "$item" "$INSTALL_DIR"/
+done
+shopt -u dotglob
 
 echo "== 3/8: python venv =="
 if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
@@ -66,11 +81,19 @@ while true; do
   if [ -f "$ENV_FILE" ]; then
     echo "  $ENV_FILE already exists — leaving it as-is. Edit it by hand and re-run to restart the unit."
   else
-    read -rp "  Telegram bot token: " TG_TOKEN
-    read -rp "  NanoGPT API key: " NANOGPT_KEY
+    read -rsp "  Telegram bot token: " TG_TOKEN; echo
+    read -rsp "  NanoGPT API key: " NANOGPT_KEY; echo
     read -rp "  Character card filename (e.g. ${INSTANCE_NAME}.json): " CARD_NAME
     CARD_NAME="${CARD_NAME:-$INSTANCE_NAME.json}"
     ADMIN_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
+
+    # One-time seed of this character's context files (atlas.txt, people.txt, ...)
+    # from the repo. Only happens here, on first creation — never re-copied on a
+    # later re-run, so hand-edits made directly on the VPS don't get clobbered.
+    SEED_DIR="$REPO_CHECKOUT/telegram-companion-bot/$INSTANCE_NAME"
+    if [ -d "$SEED_DIR" ]; then
+      cp -r "$SEED_DIR"/. "$INSTANCE_DIR"/
+    fi
 
     cp "$INSTALL_DIR/.env.example" "$ENV_FILE"
     {
@@ -88,8 +111,13 @@ while true; do
   fi
 
   CARD="$(grep -m1 '^CHARACTER_CARD=' "$ENV_FILE" | cut -d= -f2)"
-  if [ -n "$CARD" ] && [ -f "$INSTALL_DIR/$CARD" ] && [ ! -f "$INSTANCE_DIR/$CARD" ]; then
-    cp "$INSTALL_DIR/$CARD" "$INSTANCE_DIR/$CARD"
+  if [ -n "$CARD" ] && [ ! -f "$INSTANCE_DIR/$CARD" ]; then
+    if [ -f "$INSTALL_DIR/$CARD" ]; then
+      cp "$INSTALL_DIR/$CARD" "$INSTANCE_DIR/$CARD"
+    else
+      echo "  WARNING: character card '$CARD' not found in $INSTALL_DIR or $INSTANCE_DIR —" >&2
+      echo "  the bot will fail to start until you place it there." >&2
+    fi
   fi
   chown -R "$BOT_USER:$BOT_USER" "$INSTANCE_DIR"
   CONFIGURED_INSTANCES+=("$INSTANCE_NAME")
