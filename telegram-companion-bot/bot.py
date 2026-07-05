@@ -135,7 +135,7 @@ VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept im
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # hard cap per request
-STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "30"))    # max silence between chunks
+STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "90"))    # max silence between chunks
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 TEMPERATURE = float(os.getenv("TEMPERATURE")) if os.getenv("TEMPERATURE") else None
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
@@ -3949,6 +3949,8 @@ async def _send_voice_reply(context, chat_id: int, text: str):
         )
         resp.raise_for_status()
         await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(resp.content))
+    except requests.exceptions.HTTPError as e:
+        log.warning("TTS failed: %s — %s", e, e.response.text[:300])
     except Exception as e:
         log.warning("TTS failed: %s", e)
 
@@ -6363,7 +6365,11 @@ def _fetch_wsdot_alerts() -> list:
     try:
         r = _get_session().get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
         r.raise_for_status()
-        return r.json().get("Alerts") or []
+        data = r.json()
+        # GetAlertsAsJson returns a bare array; older docs show {"Alerts": [...]}.
+        if isinstance(data, list):
+            return data
+        return data.get("Alerts") or []
     except Exception as e:
         log.warning("[traffic] alerts fetch failed: %s", e)
         return []
