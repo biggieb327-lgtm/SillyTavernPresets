@@ -60,6 +60,10 @@ from telegram.ext import (
     filters,
 )
 
+# Bump on every release — shown in /audit and the startup log so it's always
+# clear which build an instance is running.
+BOT_VERSION = "2026-07-05.1"
+
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
 # same code: `python bot.py ~/luna-bot`. With no arg, uses the script's own folder.
@@ -291,7 +295,6 @@ _life_arc_cache: dict = {"text": None, "ts": 0.0}
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = int(os.getenv("MEMORY_TOKEN_BUDGET", "300"))
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "deepseek/deepseek-v4-flash")
 MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
@@ -385,40 +388,6 @@ def _append_user_note(note: str):
     _user_notes_cache["text"] = None  # invalidate cache
 
 
-def _extract_user_note(uname: str, user_message: str) -> str:
-    """Sync: return a brief upcoming-thing fact extracted from the user's message, or ''."""
-    sys = (
-        f"Does this message from {uname} mention something specific and upcoming — an event, "
-        f"appointment, deadline, worry, plan, or thing they're excited or nervous about that would "
-        f"be natural to ask about later? If yes, write a single brief note in the third person "
-        f"(e.g. 'has a job interview on Tuesday', 'nervous about a doctor's appointment next week', "
-        f"'excited about a trip next month'). If nothing notable, write: none"
-    )
-    try:
-        raw = call_nanogpt(
-            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
-            model=MOOD_MODEL,
-        ).strip()
-        if raw and raw.lower() != "none" and not raw.lower().startswith("none"):
-            return raw
-    except Exception as e:
-        log.warning("[user-notes] extraction failed: %s", e)
-    return ""
-
-
-async def update_user_notes(chat_id: int, user_message: str):
-    if len(user_message.split()) < 4:
-        return
-    uname = user_names.get(chat_id, "you")
-    try:
-        note = await asyncio.to_thread(_extract_user_note, uname, user_message)
-        if note:
-            _append_user_note(note)
-            print(f"[user-notes] added: {note}")
-    except Exception as e:
-        log.warning("[user-notes] update failed: %s", e)
-
-
 def _append_memory(text: str, auto: bool = False):
     text = text.strip()
     if not text:
@@ -445,50 +414,6 @@ def _append_memory(text: str, auto: bool = False):
         MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         _memories_cache["text"] = None
         _memories_cache["ts"] = 0.0
-
-
-def _extract_memory(uname: str, user_msg: str, ai_response: str) -> str:
-    sys_prompt = (
-        f"Did this exchange reveal something notable about a third party, NPC, or relationship "
-        f"dynamic (not about {uname} themselves) worth remembering for future conversations? "
-        f"Think: reactions, grudges, opinions, history between people. "
-        f"If yes, write ONE brief memory line in third person "
-        f"(e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
-        f"If nothing notable, reply: none"
-    )
-    try:
-        raw = call_nanogpt(
-            [{"role": "system", "content": sys_prompt},
-             {"role": "user", "content": f"{uname}: {user_msg}\nAssistant: {ai_response}"}],
-            model=MEMORY_MODEL,
-        ).strip()
-        if raw and not re.match(r"^(none|no|nothing|n/a|not\b)", raw.lower()):
-            return raw
-    except Exception as e:
-        log.warning("[memories] extraction failed: %s", e)
-        _count_error("memory")
-    return ""
-
-
-async def update_memories(chat_id: int, user_msg: str, ai_response: str):
-    if not MEMORY_AUTO or not any(
-        w not in _MEMORY_STOPWORDS
-        for w in re.findall(r"\b[a-z]{4,}\b", user_msg.lower())
-    ):
-        return
-    uname = user_names.get(chat_id, "you")
-    try:
-        def _work():
-            mem = _extract_memory(uname, user_msg, ai_response)
-            if mem:
-                _append_memory(mem, auto=True)
-                print(f"[memories] added: {mem}")
-        await asyncio.to_thread(_work)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        log.warning("[memories] update failed: %s", e)
-        _count_error("memory")
 
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
@@ -1625,6 +1550,95 @@ async def update_mood(chat_id: int):
         log.warning("[mood] appraisal failed: %s", e)
 
 
+def _post_reply_analysis(chat_id: int, want_mood: bool, want_note: bool, want_memory: bool):
+    """Sync worker: one LLM call covering mood + user note + NPC memory."""
+    uname = user_names.get(chat_id, "you")
+    cur = moods.get(chat_id) or {}
+    gap_hours = cur.pop("_gap_hours", 0)
+    gap_note = ""
+    if gap_hours > 4:
+        gap_note = f" Note: it's been {gap_hours:.0f}h since they last talked — factor the time gap into her state."
+    hist = conversation_history.get(chat_id, [])[-4:]
+    tail = "\n".join(f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in hist)
+    sys_prompt = (
+        f"You analyze the latest exchange between {uname} and {NAME}, and you track {NAME}'s "
+        f"emotional state across the conversation. Output ONLY a JSON object — no prose, no code "
+        f"fences — with exactly these keys:\n"
+        f'"mood": short, specific, in-character description of how {NAME} feels right now and why '
+        f"(e.g. 'pissed off, some guy doored her on her route' or 'cozy and content, slow morning'). "
+        f"Moods persist: if nothing notable happened, stay close to the current mood rather than "
+        f"resetting to neutral.\n"
+        f'"valence": integer from -3 to 3 for that mood.\n'
+        f'"user_note": if {uname} mentioned something specific and upcoming — an event, appointment, '
+        f"deadline, worry, or plan that would be natural to ask about later — a single brief "
+        f"third-person note (e.g. 'has a job interview on Tuesday'). Otherwise null.\n"
+        f'"memory": if the exchange revealed something notable about a third party, NPC, or '
+        f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
+        f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
+        f"Otherwise null."
+    )
+    user = (f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
+            f"Latest exchange:\n{tail}")
+    raw = call_nanogpt(
+        [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}],
+        model=MOOD_MODEL,
+    )
+    data = _extract_json(raw)
+
+    if want_mood:
+        label = (data.get("mood") or "").strip() if isinstance(data.get("mood"), str) else ""
+        try:
+            valence = max(-3.0, min(3.0, float(data.get("valence"))))
+        except (TypeError, ValueError):
+            valence = cur.get("score", 0.0)
+        if label:
+            moods[chat_id] = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
+            save_state()
+            print(f"[mood] {label} ({valence:+.0f})")
+
+    def _clean_field(key: str) -> str:
+        val = data.get(key)
+        if not isinstance(val, str):
+            return ""
+        val = val.strip()
+        return "" if re.match(r"^(none|null|no|nothing|n/a|not\b)", val.lower()) else val
+
+    if want_note:
+        note = _clean_field("user_note")
+        if note:
+            _append_user_note(note)
+            print(f"[user-notes] added: {note}")
+
+    if want_memory:
+        mem = _clean_field("memory")
+        if mem:
+            _append_memory(mem, auto=True)
+            print(f"[memories] added: {mem}")
+
+
+async def post_reply_analysis(chat_id: int, user_msg: str):
+    """One combined background pass per exchange: mood + user note + NPC memory.
+
+    Replaces three separate LLM calls — on a phone connection the side calls
+    compete with the user-facing reply for bandwidth, so fewer round-trips
+    matter more than prompt purity.
+    """
+    is_text = bool(user_msg) and not user_msg.startswith("[sent ")
+    want_mood = MOOD_AUTO and bool(conversation_history.get(chat_id))
+    want_note = is_text and len(user_msg.split()) >= 4
+    want_memory = MEMORY_AUTO and is_text and any(
+        w not in _MEMORY_STOPWORDS for w in re.findall(r"\b[a-z]{4,}\b", user_msg.lower()))
+    if not (want_mood or want_note or want_memory):
+        return
+    try:
+        await asyncio.to_thread(_post_reply_analysis, chat_id, want_mood, want_note, want_memory)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.warning("[analysis] post-reply pass failed: %s", e)
+        _count_error("memory")
+
+
 def _mood_behavior(s: float) -> str:
     """Concrete behavioral guidance so reply length/energy/engagement actually shift with mood."""
     if s >= 1.2:
@@ -2243,9 +2257,16 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
     raise last_err
 
 
+_replies_in_flight = 0  # gates optional side calls (auto-react) off active replies
+
 async def generate_reply(messages: list, model: str = None, fallback: str = None) -> str:
+    global _replies_in_flight
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
+    _replies_in_flight += 1
+    try:
+        return await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
+    finally:
+        _replies_in_flight -= 1
 
 
 async def _keep_typing(bot, chat_id: int):
@@ -2384,6 +2405,8 @@ def _decide_reaction(user_message: str) -> str:
 
 
 async def maybe_auto_react(update, user_message: str):
+    if _replies_in_flight:
+        return  # never compete with an active reply for bandwidth
     try:
         emoji = await asyncio.to_thread(_decide_reaction, user_message)
         if emoji and emoji in ALLOWED_REACTIONS:
@@ -5435,10 +5458,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             if len(buf) > QUESTION_MEMORY_SIZE:
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
-    asyncio.create_task(update_mood(chat_id))      # background mood appraisal
-    if user_memory_text and not user_memory_text.startswith("[sent "):
-        asyncio.create_task(update_user_notes(chat_id, user_memory_text))
-        asyncio.create_task(update_memories(chat_id, user_memory_text, clean))
+    # One combined background pass: mood + user note + NPC memory (was 3 separate calls)
+    asyncio.create_task(post_reply_analysis(chat_id, user_memory_text))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
@@ -6582,10 +6603,10 @@ def _log_startup_diagnostic():
     state_size = STATE_FILE.stat().st_size if STATE_FILE.exists() else 0
     err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
     log.warning(
-        "=== STARTUP AUDIT === Python %s | Instance: %s | Card: %s | "
+        "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
         "Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
-        platform.python_version(), BASE_DIR.name, CARD_NAME,
+        BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
         STREAM_TIMEOUT, MAX_TOKENS,
         disk.free // (1024 * 1024), state_size, err_size,
@@ -6665,7 +6686,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     bot_log_size = bot_log.stat().st_size if bot_log.exists() else 0
 
     lines = [
-        f"🔧 *Self-Audit*",
+        f"🔧 *Self-Audit* (v{BOT_VERSION})",
         f"Uptime: {uptime_h:.1f}h",
         f"Errors (last hour): {sum(recent.values())}",
     ]
@@ -6704,6 +6725,57 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = lines[1:]
         text = "\n".join(lines)
     await update.message.reply_text(f"🪵 Last {len(lines)} error line(s):\n\n{text[:3900]}")
+
+
+_RAW_BOT_URL = ("https://raw.githubusercontent.com/biggieb327-lgtm/"
+                "SillyTavernPresets/main/telegram-companion-bot/bot.py")
+
+async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Self-deploy: fetch latest bot.py from main, verify it compiles, restart.
+
+    The supervisor (run-bot.sh) restarts the process automatically, so exiting
+    after a successful swap is all it takes to come back on the new code.
+    """
+    if not _is_allowed(update.effective_user.id):
+        return
+    force = bool(context.args) and context.args[0].lower() == "force"
+    code_dir = Path(__file__).resolve().parent
+    target = code_dir / "bot.py"
+    tmp = code_dir / "bot.py.new"
+    try:
+        resp = await asyncio.to_thread(
+            lambda: _get_session().get(_RAW_BOT_URL, timeout=(10, 60)))
+        resp.raise_for_status()
+        source = resp.text
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Download failed: {e}")
+        return
+    m = re.search(r'^BOT_VERSION\s*=\s*"([^"]+)"', source, re.M)
+    new_version = m.group(1) if m else "unknown"
+    if new_version == BOT_VERSION and not force:
+        await update.message.reply_text(
+            f"✅ Already on v{BOT_VERSION}. Use /update force to reinstall anyway.")
+        return
+    import py_compile
+    tmp.write_text(source, encoding="utf-8")
+    cfile = str(tmp) + "c"
+    try:
+        py_compile.compile(str(tmp), cfile=cfile, doraise=True)
+    except py_compile.PyCompileError as e:
+        tmp.unlink(missing_ok=True)
+        await update.message.reply_text(
+            f"❌ New bot.py does not compile — keeping v{BOT_VERSION}.\n{str(e)[:300]}")
+        return
+    finally:
+        Path(cfile).unlink(missing_ok=True)
+    (code_dir / "bot.py.bak").write_bytes(target.read_bytes())
+    tmp.replace(target)
+    await update.message.reply_text(
+        f"⬆️ Updated v{BOT_VERSION} → v{new_version}. Restarting now — back in ~15s.\n"
+        f"Other instances keep running old code until they get /update too.")
+    log.warning("[update] v%s -> v%s via /update; restarting", BOT_VERSION, new_version)
+    _write_state()
+    os._exit(0)
 
 
 # --- Main ---
@@ -6896,6 +6968,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
+    app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))

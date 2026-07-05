@@ -72,9 +72,9 @@ while true; do
     p=\$(cat '$PID_FILE' 2>/dev/null)
     if [ -z "\$p" ] || ! kill -0 "\$p" 2>/dev/null; then rm -f '$PID_FILE'; fi
   fi
-  echo "[run-bot] starting $SESSION at \$(date)" | tee -a '$LOG_FILE'
-  $RUN_CMD 2>&1 | tee -a '$LOG_FILE'
-  echo "[run-bot] $SESSION exited (code \${PIPESTATUS[0]}) at \$(date); restarting in 5s" | tee -a '$LOG_FILE'
+  echo "[run-bot] starting $SESSION at \$(date)" >> '$LOG_FILE'
+  $RUN_CMD >> '$LOG_FILE' 2>&1
+  echo "[run-bot] $SESSION exited (code \$?) at \$(date); restarting in 5s" >> '$LOG_FILE'
   sleep 5
 done
 EOF
@@ -82,4 +82,4 @@ chmod +x "$SUPERVISOR"
 
 echo "Starting supervised bot: ${INSTANCE_DIR:-$SCRIPT_DIR (home)}"
 tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" "bash '$SUPERVISOR'"
-echo "Bot started under supervisor. Attach with: tmux attach -t $SESSION"
+echo "Bot started under supervisor. Follow logs with: tail -f $LOG_FILE"
