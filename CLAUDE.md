@@ -6,6 +6,24 @@ A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running
 
 ---
 
+## Changelog — read this first
+
+**Before making any change to `telegram-companion-bot/`, read
+`telegram-companion-bot/CHANGELOG.md`.** It documents every shipped fix this project has
+had, with the actual root cause, not just the diff — several of these bugs took multiple
+rounds of guessing to find the first time (a swallowed streaming error body, a phone-side
+watchdog script restarting healthy bots because of a heartbeat file `bot.py` never wrote,
+`python-telegram-bot` silently overriding our own signal handler). Re-diagnosing one of
+these from scratch because the history wasn't checked first is the exact failure mode
+this file exists to prevent.
+
+**After shipping a change** (anything that bumps `BOT_VERSION`, or any fix non-obvious
+enough that a future session would benefit from knowing why), add an entry at the top of
+the changelog: root cause first, fix second. Skip it for pure content edits (character
+card tweaks) that don't touch `bot.py` behavior.
+
+---
+
 ## Bot instances
 
 | Session | Directory | Character card |
@@ -303,6 +321,7 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 │   ├── cass.json
 │   ├── emily_harper.json
 │   ├── priya.json
+│   ├── CHANGELOG.md                   # read before changes, update after — root causes, not just diffs
 │   ├── OPS_MANUAL.md
 │   ├── PROJECT_CONTEXT.md
 │   └── PROJECT_INSTRUCTIONS.md
