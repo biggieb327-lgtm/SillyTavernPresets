@@ -156,6 +156,8 @@ TRAFFIC_POLL_MINUTES=10
 | `/audit` | Self-audit: version, uptime, error counts, state/disk health |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) |
 | `/update` | Self-deploy: pull latest bot.py from main, verify, restart (per instance; `force` to reinstall same version) |
+| `/restart` | Clean restart via supervisor — picks up .env edits and a swapped bot.py |
+| `/backup` | Send state.json, memories.txt, user_notes.txt, setting.txt, reminders.json, payments.json to chat (.env excluded) |
 
 ---
 

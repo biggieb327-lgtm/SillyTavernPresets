@@ -72,6 +72,9 @@ while true; do
     p=\$(cat '$PID_FILE' 2>/dev/null)
     if [ -z "\$p" ] || ! kill -0 "\$p" 2>/dev/null; then rm -f '$PID_FILE'; fi
   fi
+  if [ -f '$LOG_FILE' ] && [ "\$(stat -c%s '$LOG_FILE' 2>/dev/null || echo 0)" -gt 5000000 ]; then
+    tail -c 1000000 '$LOG_FILE' > '$LOG_FILE.tmp' && mv '$LOG_FILE.tmp' '$LOG_FILE'
+  fi
   echo "[run-bot] starting $SESSION at \$(date)" >> '$LOG_FILE'
   $RUN_CMD >> '$LOG_FILE' 2>&1
   echo "[run-bot] $SESSION exited (code \$?) at \$(date); restarting in 5s" >> '$LOG_FILE'

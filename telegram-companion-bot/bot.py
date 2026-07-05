@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.1"
+BOT_VERSION = "2026-07-05.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -124,6 +124,14 @@ RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "2"))
 
 def _is_allowed(user_id: int) -> bool:
     return not ALLOWED_USERS or user_id in ALLOWED_USERS
+
+def _is_admin(user_id: int) -> bool:
+    """Strict gate for operational commands (update/restart/errors/backup).
+    Unlike _is_allowed, an empty ALLOWED_USERS does NOT open the door."""
+    if user_id in ALLOWED_USERS:
+        return True
+    owner = get_owner()
+    return owner is not None and user_id == owner
 
 def _rate_ok(user_id: int) -> bool:
     now = time.time()
@@ -4611,7 +4619,8 @@ async def payments_reminder(context: ContextTypes.DEFAULT_TYPE):
 # --- Backup ---
 async def _send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     sent = []
-    for fname in ("payments.json", "state.json", "reminders.json"):
+    for fname in ("payments.json", "state.json", "reminders.json",
+                  "memories.txt", "user_notes.txt", "setting.txt"):
         path = BASE_DIR / fname
         if path.exists():
             with path.open("rb") as fh:
@@ -4621,10 +4630,13 @@ async def _send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 
 
 async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
     sent = await _send_backup(context, update.effective_chat.id)
     if sent:
         await update.message.reply_text("💾 Backup sent: " + ", ".join(sent) +
-                                        "\n(Save these — restore by copying them back into the bot folder.)")
+                                        "\n(Save these — restore by copying them back into the bot folder. "
+                                        ".env is not included; keep your tokens somewhere safe separately.)")
     else:
         await update.message.reply_text("Nothing to back up yet.")
 
@@ -6665,7 +6677,7 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+    if not _is_admin(update.effective_user.id):
         return
     uptime_h = (time.time() - _BOOT_TIME) / 3600
     hour_ago = time.time() - 3600
@@ -6704,7 +6716,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
 
 async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the tail of errors.log so bug reports carry evidence."""
-    if not _is_allowed(update.effective_user.id):
+    if not _is_admin(update.effective_user.id):
         return
     args = context.args or []
     try:
@@ -6736,7 +6748,7 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     The supervisor (run-bot.sh) restarts the process automatically, so exiting
     after a successful swap is all it takes to come back on the new code.
     """
-    if not _is_allowed(update.effective_user.id):
+    if not _is_admin(update.effective_user.id):
         return
     force = bool(context.args) and context.args[0].lower() == "force"
     code_dir = Path(__file__).resolve().parent
@@ -6774,6 +6786,16 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⬆️ Updated v{BOT_VERSION} → v{new_version}. Restarting now — back in ~15s.\n"
         f"Other instances keep running old code until they get /update too.")
     log.warning("[update] v%s -> v%s via /update; restarting", BOT_VERSION, new_version)
+    _write_state()
+    os._exit(0)
+
+
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clean restart via the supervisor — picks up .env edits and a swapped bot.py."""
+    if not _is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text("🔄 Restarting — back in ~15s.")
+    log.warning("[restart] requested via /restart")
     _write_state()
     os._exit(0)
 
@@ -6969,6 +6991,7 @@ def main():
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
+    app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
