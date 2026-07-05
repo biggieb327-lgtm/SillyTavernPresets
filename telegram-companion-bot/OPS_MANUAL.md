@@ -352,7 +352,8 @@ whole category of Android-specific bug (phantom process killer, Samsung battery
 management, the `.alive` heartbeat watchdog.sh needs) doesn't apply — Termux keeps its
 existing mechanism unchanged for anyone still running that way.
 
-**Install** (Ubuntu 24.04 recommended, e.g. a Hetzner CX22):
+**Install** (Ubuntu 24.04 recommended, e.g. Contabo's ~€4.50/mo 4 vCPU/6GB RAM tier —
+best RAM headroom per dollar for running all 6 bots comfortably as of mid-2026 pricing):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/install-vps.sh -o install-vps.sh
 sudo bash install-vps.sh

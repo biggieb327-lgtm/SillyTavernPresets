@@ -211,7 +211,9 @@ installed); either disable it or add a Termux exception. See `CLAUDE.md`'s
 Termux/Android quirks section for the full troubleshooting story if bots keep
 restarting even after this.
 
-Or run on a Linux VPS instead ($3–5/month on Hetzner or DigitalOcean).
+Or run on a Linux VPS instead (~€4.50/month on Contabo — 4 vCPU/6GB RAM/100GB NVMe,
+the best RAM-per-dollar tier for running all 6 bots comfortably; see `OPS_MANUAL.md`'s
+"Running on a VPS" section for the installer).
 
 ---
 
