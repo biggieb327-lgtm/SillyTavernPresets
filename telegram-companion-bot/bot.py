@@ -2131,41 +2131,67 @@ def _extract_content(choice: dict) -> str:
         text = (msg.get("reasoning_content") or "").strip()
     return _strip_thinking(text)
 
+_no_stream_models: set[str] = set()
+
+def _do_request(payload: dict, model: str, stream: bool) -> str:
+    headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
+    if stream:
+        with _get_session().post(
+            f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
+            json=payload, timeout=(10, STREAM_TIMEOUT), stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data)["choices"][0].get("delta", {})
+                    c = delta.get("content") or ""
+                    r = delta.get("reasoning_content") or ""
+                    if c:
+                        content_parts.append(c)
+                    if r:
+                        reasoning_parts.append(r)
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+        text = "".join(content_parts)
+        if not text:
+            text = "".join(reasoning_parts)
+        return _strip_thinking(text)
+    else:
+        resp = _get_session().post(
+            f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
+            json=payload, timeout=(10, REQUEST_TIMEOUT),
+        )
+        resp.raise_for_status()
+        return _extract_content(resp.json()["choices"][0])
+
+
 def _one_call(messages: list, model: str) -> str:
-    payload = {"model": model, "messages": messages, "stream": True,
-               "max_tokens": MAX_TOKENS}
+    use_stream = model not in _no_stream_models
+    payload: dict = {"model": model, "messages": messages}
+    if use_stream:
+        payload["stream"] = True
+        payload["max_tokens"] = MAX_TOKENS
+    else:
+        payload["stream"] = False
     if TEMPERATURE is not None:
         payload["temperature"] = TEMPERATURE
-    with _get_session().post(
-        f"{NANOGPT_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=(10, STREAM_TIMEOUT),
-        stream=True,
-    ) as resp:
-        resp.raise_for_status()
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            data = line[6:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                delta = json.loads(data)["choices"][0].get("delta", {})
-                c = delta.get("content") or ""
-                r = delta.get("reasoning_content") or ""
-                if c:
-                    content_parts.append(c)
-                if r:
-                    reasoning_parts.append(r)
-            except (json.JSONDecodeError, KeyError, IndexError):
-                continue
-    text = "".join(content_parts)
-    if not text:
-        text = "".join(reasoning_parts)
-    return _strip_thinking(text)
+    try:
+        return _do_request(payload, model, stream=use_stream)
+    except requests.exceptions.HTTPError as e:
+        if use_stream and getattr(e.response, "status_code", 0) == 400:
+            log.warning("[model] %s rejected streaming, retrying without", model)
+            _no_stream_models.add(model)
+            payload["stream"] = False
+            payload.pop("max_tokens", None)
+            return _do_request(payload, model, stream=False)
+        raise
 
 
 _CHAT_RETRIES = 2        # attempts per model before moving to the next
@@ -2192,7 +2218,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                     requests.exceptions.ConnectionError) as e:
                 last_err = e
                 status = getattr(getattr(e, "response", None), "status_code", None)
-                transient = status is None or status == 429 or 500 <= status < 600
+                transient = status is None or status in (400, 429) or 500 <= status < 600
                 if not transient:
                     raise
                 if attempt < _CHAT_RETRIES - 1:
@@ -5612,7 +5638,7 @@ async def _log_photo_memory(chat_id: int, data_url: str, caption: str):
             {"type": "text", "text": desc_prompt},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]}]
-        desc = await asyncio.to_thread(_one_call, messages, VISION_MODEL)
+        desc = await asyncio.to_thread(call_nanogpt, messages, VISION_MODEL, VISION_FALLBACK)
         desc = _strip_thinking(desc).strip().strip('"')
         if desc:
             ts = datetime.now(tz=TZ).strftime("%b %d")
@@ -6229,7 +6255,7 @@ async def _generate_daily_events(owner: int):
             {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
             {"role": "user", "content": prompt},
         ]
-        events = await asyncio.to_thread(_one_call, msgs, SUMMARY_MODEL)
+        events = await asyncio.to_thread(call_nanogpt, msgs, SUMMARY_MODEL)
         events = _strip_thinking(events).strip()
         if events:
             DAY_FILE.write_text(events, encoding="utf-8")
