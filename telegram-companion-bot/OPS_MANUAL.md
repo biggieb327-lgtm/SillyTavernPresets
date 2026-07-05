@@ -213,6 +213,16 @@ message. Lines starting with `#` are comments. Keep this geographically consiste
 wherever the character actually lives now (see her entry in `CLAUDE.md`'s Character
 notes) — it's plain text the bot reads verbatim, so nothing stops it from drifting.
 
+### Memes
+`/meme [hint]` sends a meme: template image + Pillow-rendered top/bottom text (not
+AI-drawn — AI image models render text unreliably, this doesn't). She can also send
+one unprompted via a `[meme: top | bottom]` tag when a moment calls for it, mirroring
+how the `[selfie: ...]` tag works. Templates live in the shared `meme_templates/`
+directory and the font in `fonts/Anton-Regular.ttf`, alongside `bot.py` — not
+per-instance, and not part of `update-all.sh`'s routine pull (see Setup Guide Step 8
+for the one-time fetch). Add your own templates by dropping a `.jpg` in
+`meme_templates/` — no code change needed.
+
 ### User notes (auto-collection)
 After each message you send, the bot runs a background pass to extract upcoming events, appointments, or things you mentioned (job interview Thursday, doctor on Friday, etc.) and appends them to `user_notes.txt`. She references these naturally in conversation when the moment fits.
 

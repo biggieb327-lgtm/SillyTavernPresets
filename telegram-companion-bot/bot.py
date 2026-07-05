@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse, unquote
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from PIL import Image, ImageDraw, ImageFont
 
 import concurrent.futures
 
@@ -61,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.10"
+BOT_VERSION = "2026-07-05.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -256,6 +257,17 @@ IMAGE_TIMEOUT = int(os.getenv("IMAGE_TIMEOUT", "180"))
 
 if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
     raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
+
+# --- Memes (template + text overlay, not AI-generated -- AI image models render text
+# unreliably, and a meme lives or dies on legible captions) ---
+# Templates/font are shared code assets (alongside bot.py), not per-instance, since
+# they're generic rather than character-specific.
+MEME_TEMPLATES_DIR = Path(__file__).resolve().parent / "meme_templates"
+MEME_FONT_PATH = Path(__file__).resolve().parent / "fonts" / "Anton-Regular.ttf"
+MEME_FONT_SIZE = int(os.getenv("MEME_FONT_SIZE", "80"))
+MEME_MIN_FONT_SIZE = 24
+MEME_DEDUP_SIZE = int(os.getenv("MEME_DEDUP_SIZE", "5"))
+_recent_meme_templates: dict = {}  # chat_id -> list of recently used template filenames
 _APPEARANCE_DEFAULT = (
     "a 29-year-old woman, tall and lanky, half-shaved head with the long side pushed back, "
     "septum ring, both arms sleeved in tattoos, paint- and ink-stained fingers."
@@ -2007,6 +2019,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
             f"and don't overuse it."
         )
+    if meme_ready():
+        cap_lines.append(
+            f"- Send a meme when the moment genuinely calls for it (a joke, a shared "
+            f"reaction, something {uname} said that's begging for one): "
+            f"[meme: top caption text | bottom caption text]. Keep both lines short and "
+            f"punchy — this is classic meme-macro format, not a sentence. Don't overuse it."
+        )
     if SEARCH_ENABLED:
         cap_lines.append(
             f"- Look something up online when you genuinely don't know something and it'd "
@@ -2339,7 +2358,9 @@ async def reply_with_typing(context, chat_id: int, messages: list,
 
 
 def extract_tags(text: str):
-    """Pull [react: ..] and [selfie: ..] tags out, return (clean_text, reaction, selfie_hint)."""
+    """Pull [react: ..], [selfie: ..], and [meme: ..] tags out, return
+    (clean_text, reaction, selfie_hint, meme_caption). meme_caption is a (top, bottom)
+    tuple or None."""
     reaction = None
     rm = re.search(r"\[react:\s*([^\]]+?)\]", text, re.IGNORECASE)
     if rm:
@@ -2350,14 +2371,20 @@ def extract_tags(text: str):
     if sm:
         selfie_hint = sm.group(1).strip()
         text = re.sub(r"\[selfie:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+    meme_caption = None
+    mm = re.search(r"\[meme:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    if mm:
+        parts = mm.group(1).split("|", 1)
+        meme_caption = (parts[0].strip(), parts[1].strip() if len(parts) > 1 else "")
+        text = re.sub(r"\[meme:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
     # Safety net: a [search: ..] tag should already be consumed by maybe_search, but if a
     # regenerated reply emits another one, strip it rather than leak the literal tag.
     sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
     if sr:
         text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
-    if reaction or sm or sr:
+    if reaction or sm or mm or sr:
         text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip(), reaction, selfie_hint
+    return text.strip(), reaction, selfie_hint, meme_caption
 
 
 def _extract_search(text: str):
@@ -2912,6 +2939,154 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         _count_error("media")
         if announce_errors:
             await context.bot.send_message(chat_id=chat_id, text=f"📷 Couldn't make that one: {e}")
+    finally:
+        uploading.cancel()
+
+
+# --- Memes ---
+def meme_ready() -> bool:
+    return MEME_TEMPLATES_DIR.is_dir() and any(MEME_TEMPLATES_DIR.glob("*.jpg")) and MEME_FONT_PATH.exists()
+
+
+def _pick_meme_template(chat_id: int) -> Path:
+    templates = sorted(MEME_TEMPLATES_DIR.glob("*.jpg"))
+    recent = _recent_meme_templates.get(chat_id, [])
+    choices = [t for t in templates if t.name not in recent] or templates
+    pick = random.choice(choices)
+    buf = _recent_meme_templates.setdefault(chat_id, [])
+    buf.append(pick.name)
+    if len(buf) > MEME_DEDUP_SIZE:
+        buf.pop(0)
+    return pick
+
+
+def _wrap_meme_text(draw, text: str, font, max_width: int) -> list:
+    """Greedy word-wrap: return a list of lines that each fit within max_width."""
+    words = text.split()
+    if not words:
+        return []
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        trial = f"{current} {word}"
+        if draw.textbbox((0, 0), trial, font=font)[2] <= max_width:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _fit_meme_text(draw, text: str, max_width: int, max_height: int, start_size: int):
+    """Shrink font size in steps until the wrapped text fits max_width/max_height.
+    Returns (font, lines, line_height)."""
+    size = start_size
+    while size >= MEME_MIN_FONT_SIZE:
+        font = ImageFont.truetype(str(MEME_FONT_PATH), size)
+        lines = _wrap_meme_text(draw, text, font, max_width)
+        line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+        total_height = line_height * len(lines) * 1.15
+        widest = max((draw.textbbox((0, 0), l, font=font)[2] for l in lines), default=0)
+        if total_height <= max_height and widest <= max_width:
+            return font, lines, line_height
+        size -= 4
+    font = ImageFont.truetype(str(MEME_FONT_PATH), MEME_MIN_FONT_SIZE)
+    lines = _wrap_meme_text(draw, text, font, max_width)
+    line_height = font.getbbox("Ag")[3] - font.getbbox("Ag")[1]
+    return font, lines, line_height
+
+
+def _draw_meme_caption(draw, lines: list, font, line_height: float, img_width: int, y_start: float):
+    y = y_start
+    for line in lines:
+        w = draw.textbbox((0, 0), line, font=font)[2]
+        x = (img_width - w) / 2
+        draw.text((x, y), line, font=font, fill="white",
+                   stroke_width=max(2, font.size // 18), stroke_fill="black")
+        y += line_height * 1.15
+
+
+def render_meme(template_path: Path, top_text: str, bottom_text: str) -> bytes:
+    """Sync/CPU-bound Pillow work — call via asyncio.to_thread."""
+    img = Image.open(template_path).convert("RGB")
+    w, h = img.size
+    draw = ImageDraw.Draw(img)
+    margin = int(w * 0.04)
+    max_width = w - 2 * margin
+    max_block_height = h * 0.28  # each caption gets up to ~28% of image height
+
+    if top_text:
+        font, lines, lh = _fit_meme_text(draw, top_text.upper(), max_width, max_block_height, MEME_FONT_SIZE)
+        _draw_meme_caption(draw, lines, font, lh, w, margin)
+
+    if bottom_text:
+        font, lines, lh = _fit_meme_text(draw, bottom_text.upper(), max_width, max_block_height, MEME_FONT_SIZE)
+        total_h = lh * 1.15 * len(lines)
+        _draw_meme_caption(draw, lines, font, lh, w, h - margin - total_h)
+
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+
+async def _generate_meme_captions(hint: str, chat_id: int) -> tuple:
+    """Ask the model for a short top/bottom meme caption pair. Mirrors _selfie_caption's
+    context-gathering, but asks for structured JSON since two distinct fields are needed."""
+    uname = user_names.get(chat_id, "you")
+    recent = [m for m in conversation_history.get(chat_id, [])[-8:] if isinstance(m.get("content"), str)]
+    mem = memory_block(chat_id, uname)
+    history = (
+        ([{"role": "system", "content": mem}] if mem else [])
+        + [{"role": m["role"], "content": m["content"][:300]} for m in recent]
+    )
+    ask = (
+        "Write a meme caption pair reacting to this conversation"
+        + (f", specifically: {hint}" if hint else "")
+        + ". Classic top-text/bottom-text meme-macro format — short, punchy, funny, in "
+        "your own voice. Respond with ONLY a JSON object: "
+        '{"top": "...", "bottom": "..."} — no prose, no code fences. Either field may be '
+        "an empty string if the joke only needs one line."
+    )
+    messages = (
+        [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
+        + history
+        + [{"role": "user", "content": ask}]
+    )
+    try:
+        raw = await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)
+        data = _extract_json(raw)
+        return (data.get("top") or "").strip(), (data.get("bottom") or "").strip()
+    except Exception:
+        return "", ""
+
+
+async def send_meme(context, chat_id: int, hint: str = "", top: str = None, bottom: str = None,
+                     announce_errors: bool = True):
+    """top/bottom pre-supplied (from an in-character [meme:] tag) skips caption generation;
+    otherwise (the /meme command path) captions are generated from hint + conversation."""
+    if not meme_ready():
+        if announce_errors:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🖼️ No meme templates found. Drop some .jpg templates in "
+                     "~/telegram-bot/meme_templates/ and a font at ~/telegram-bot/fonts/Anton-Regular.ttf.",
+            )
+        return
+    uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
+    try:
+        if top is None and bottom is None:
+            top, bottom = await _generate_meme_captions(hint, chat_id)
+        if not top and not bottom:
+            return
+        template = _pick_meme_template(chat_id)
+        img = await asyncio.to_thread(render_meme, template, top, bottom)
+        await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img))
+    except Exception as e:
+        log.error("[meme] failed: %s", e)
+        _count_error("media")
+        if announce_errors:
+            await context.bot.send_message(chat_id=chat_id, text=f"🖼️ Couldn't make that one: {e}")
     finally:
         uploading.cancel()
 
@@ -5482,11 +5657,12 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _deliver(update, context, chat_id, user_memory_text, ai_response):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
-    clean, reaction, selfie_hint = extract_tags(ai_response)
+    clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
+        "[sent a meme]" if meme_caption is not None else
         (f"[reacted {reaction}]" if reaction else "")
     )
     remember(chat_id, "user", user_memory_text)
@@ -5505,6 +5681,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+    if meme_caption is not None:
+        await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
     if inside_jokes and clean:
         _check_joke_used(clean)
     if clean:
@@ -5950,16 +6128,21 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
-    clean, _reaction, selfie_hint = extract_tags(text)
+    clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
     # the user replies and the history is dumped into the next request.
     remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
-    remember(chat_id, "assistant", clean or ("[sent a selfie]" if selfie_hint is not None else ""))
+    remember(chat_id, "assistant", clean or (
+        "[sent a selfie]" if selfie_hint is not None else
+        "[sent a meme]" if meme_caption is not None else ""
+    ))
     if clean:
         await send_bubbles(context, chat_id, clean)
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+    if meme_caption is not None:
+        await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
     return text
@@ -6275,6 +6458,15 @@ async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hint = " ".join(context.args).strip() if context.args else ""
     await ensure_weather()  # so the selfie reflects the current weather
     await send_selfie(context, chat_id, hint, announce_errors=True)
+
+
+async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    hint = " ".join(context.args).strip() if context.args else ""
+    await send_meme(context, chat_id, hint, announce_errors=True)
 
 
 async def heartbeat_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7105,6 +7297,7 @@ def main():
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("heartbeat", heartbeat_now))
     app.add_handler(CommandHandler("selfie", selfie_cmd))
+    app.add_handler(CommandHandler("meme", meme_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))

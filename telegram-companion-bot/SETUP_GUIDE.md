@@ -176,7 +176,27 @@ Restart, then try `/selfie` in the chat.
 
 ---
 
-## Step 8: Keep Android from Killing It
+## Step 8: Optional — Memes
+
+Memes use bundled template images + text overlay (Pillow), not AI image generation —
+reliable, legible captions instead of AI-garbled text. Templates and the font are
+shared across all characters, not per-instance:
+
+```bash
+mkdir -p ~/telegram-bot/meme_templates ~/telegram-bot/fonts
+# Download each template you want from the repo's meme_templates/ folder, e.g.:
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/meme_templates/drake.jpg -o ~/telegram-bot/meme_templates/drake.jpg
+# ...repeat for the other templates in that folder...
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/fonts/Anton-Regular.ttf -o ~/telegram-bot/fonts/Anton-Regular.ttf
+```
+
+These are one-time assets, not part of `update-all.sh`'s routine `bot.py` pull — no
+need to re-fetch them on every deploy. Then try `/meme` in the chat, or let her reach
+for a `[meme: ...]` tag on her own when a moment calls for it.
+
+---
+
+## Step 9: Keep Android from Killing It
 
 Termux can be killed by Android's battery optimizer:
 

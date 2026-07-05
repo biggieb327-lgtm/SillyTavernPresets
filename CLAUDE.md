@@ -208,8 +208,14 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 - `pkg upgrade` hazards: android-tools can break with a libprotobuf symbol error
   (`pkg reinstall android-tools` fixes); a Python **minor**-version bump breaks the
   shared venv — rebuild with
-  `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install "python-telegram-bot[job-queue]>=21,<22" requests python-dotenv tzdata`
-  then run update-all.sh. **Watch what Python version `pkg upgrade` lands on** — a jump
+  `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install -r ~/telegram-bot/requirements.txt`
+  (curl it down fresh first if it's not already there — `requirements.txt` is the single
+  source of truth for pip installs; don't hand-type the package list, it's how the
+  missing-`tzdata` bug happened) then run update-all.sh. Pillow (for memes) needs a
+  prebuilt wheel or Termux's own `pkg install python-pillow` — if `pip install -r
+  requirements.txt` fails compiling it, `pkg install libjpeg-turbo zlib freetype` first
+  and retry, or fall back to `pkg install python-pillow` + recreate the venv with
+  `--system-site-packages`. **Watch what Python version `pkg upgrade` lands on** — a jump
   to a much newer minor (e.g. 3.13 → 3.14) can outrun `python-telegram-bot`'s pinned
   v21 line: `run_polling()` calls the deprecated `asyncio.get_event_loop()` expecting it
   to auto-create a loop, and newer Python removes that fallback, raising
@@ -292,6 +298,7 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 | `/incidents` | Open WSDOT alerts (filtered nearby if live location active) |
 | `/memory` | View long-term + recent memory |
 | `/selfie [hint]` | Generate a selfie |
+| `/meme [hint]` | Generate and send a meme (template + text overlay, not AI-drawn — she can also send one unprompted via a `[meme: top \| bottom]` tag) |
 | `/vibe <name> [Xh]` | Set timed vibe |
 | `/remindme <when> <msg>` | One-off reminder |
 | `/cron <schedule> \| <instruction>` | Recurring task |
@@ -327,6 +334,8 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 │   ├── priya.json
 │   ├── jules_nakagawa.json
 │   ├── {bonnie,cass,emily,nora,priya}/  # per-character people/projects/schedule/atlas.txt seeds
+│   ├── meme_templates/                # shared meme template images (not per-instance)
+│   ├── fonts/Anton-Regular.ttf         # shared meme caption font (not per-instance)
 │   ├── CHANGELOG.md                   # read before changes, update after — root causes, not just diffs
 │   ├── README.md
 │   ├── SETUP_GUIDE.md

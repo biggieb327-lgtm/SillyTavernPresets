@@ -13,6 +13,11 @@ errors.log*
 *.png
 *.jpg
 *.jpeg
+# Exception: bundled meme templates ARE meant to be committed (shared assets, unlike
+# per-instance selfie base photos which the rules above correctly keep out of git).
+!meme_templates/
+!meme_templates/*.jpg
+!meme_templates/*.png
 __pycache__/
 *.pyc
 venv/

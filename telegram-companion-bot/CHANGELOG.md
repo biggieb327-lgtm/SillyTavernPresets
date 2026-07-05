@@ -7,6 +7,35 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-05.11 — meme generation (`/meme` + `[meme:]` tag)
+
+**New feature, not a bug fix.** Bots can now make and send a meme via `/meme [hint]`,
+or decide to send one unprompted mid-conversation via a `[meme: top | bottom]` tag —
+mirrors exactly how `/selfie`/`[selfie: hint]` already work (same tag-parsing pattern
+in `extract_tags`, same `_deliver`/`send_triggered` wiring, same `_is_allowed` gating,
+same `_keep_uploading`/`BytesIO`/`send_photo` send path).
+
+**Deliberate design choice:** memes are template images + Pillow text overlay, not
+AI-generated. AI image models render text unreliably (garbled/misspelled captions),
+which defeats the entire point of a meme — the caption *is* the joke. Templates
+(`meme_templates/*.jpg`) and the font (`fonts/Anton-Regular.ttf`, OFL-licensed) are
+shared assets alongside `bot.py`, not per-instance, and not part of `update-all.sh`'s
+routine pull — see `SETUP_GUIDE.md` Step 8 for the one-time fetch.
+
+New: `meme_ready`/`_pick_meme_template` (with per-chat dedup, mirrors
+`_recent_selfie_hints`)/`render_meme` (word-wrap + auto-shrink-to-fit + stroked text)/
+`_generate_meme_captions` (one LLM call, JSON `{"top", "bottom"}`, reuses the existing
+`_extract_json` helper)/`send_meme`/`meme_cmd`. `extract_tags` now returns a 4-tuple
+(`clean_text, reaction, selfie_hint, meme_caption`) instead of 3 — both call sites
+(`_deliver`, `send_triggered`) updated; verified via isolated extraction tests since a
+mismatch here would break every message, not just meme ones.
+
+New dependency: `Pillow>=10.0,<11.0`. Termux install can be flaky — see the Termux
+quirks note in `CLAUDE.md` for the `pkg install python-pillow` + `--system-site-packages`
+fallback if a source build fails.
+
+BOT_VERSION 2026-07-05.11.
+
 ## v2026-07-05.10 — repo cleanup: dead launchers, stale docs, Priya's real location
 
 **Not a bug fix — a documentation/hygiene pass**, prompted by finding that several files
