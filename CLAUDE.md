@@ -33,7 +33,7 @@ card tweaks) that don't touch `bot.py` behavior.
 | `cass` | `~/cass-bot/` | `cass.json` |
 | `emily` | `~/emily-bot/` | `emily_harper.json` |
 | `priya` | `~/priya-bot/` | `priya.json` |
-| `jules` | `~/jules-bot/` | (per its `.env`) |
+| `jules` | `~/jules-bot/` | `jules_nakagawa.json` |
 
 The authoritative instance list is the loop in `update-all.sh`. All instances share the venv at `~/telegram-bot/venv/`. `bot.py` always lives in `~/telegram-bot/` and is passed an instance directory as `sys.argv[1]`.
 
@@ -174,6 +174,10 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 
 **Emily** (`emily_harper.json`) — has `VISION_MODEL=zai-org/glm-4.6v`. Has WSDOT Western Washington traffic integration: `/traffic`, `/incidents`, live location → proactive nearby incident alerts every 10 min.
 
+**Priya** (`priya.json`) — 26, software engineer at a fintech startup, Bellevue, WA (moved from Austin, TX as of 2026-07-05). Tamil-American, grew up in New Jersey, Rutgers CS grad. Sardonic, dry, texts quick and lowercase, never performative. Quietly lonely in the specific way capable people can be. Her `atlas.txt` and `priya/atlas.txt` reference real Eastside/Seattle-area places (Meydenbauer Bay Park, Cougar Mountain, Stone Gardens, etc.) — keep any future edits geographically consistent with Bellevue, not Austin.
+
+**Jules** (`jules_nakagawa.json`) — details per her `.env` and card; not yet documented here.
+
 ---
 
 ## Termux / Android quirks
@@ -313,18 +317,20 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 ├── telegram-companion-bot/
 │   ├── bot.py                         # single bot codebase, all instances
 │   ├── update-all.sh                  # curl + restart all bots
-│   ├── run.sh                         # start nora (default instance)
-│   ├── run-bot.sh                     # start any named instance
+│   ├── run-bot.sh                     # start any instance, incl. the home/default one (no args)
 │   ├── .env.example                   # documented config template
+│   ├── requirements.txt               # pinned deps — single source of truth for pip installs
 │   ├── nora.json                      # Nora character card (bot copy)
 │   ├── bonnie.json
 │   ├── cass.json
 │   ├── emily_harper.json
 │   ├── priya.json
+│   ├── jules_nakagawa.json
+│   ├── {bonnie,cass,emily,nora,priya}/  # per-character people/projects/schedule/atlas.txt seeds
 │   ├── CHANGELOG.md                   # read before changes, update after — root causes, not just diffs
-│   ├── OPS_MANUAL.md
-│   ├── PROJECT_CONTEXT.md
-│   └── PROJECT_INSTRUCTIONS.md
+│   ├── README.md
+│   ├── SETUP_GUIDE.md
+│   └── OPS_MANUAL.md
 ├── caa16137-nora.json                 # Nora card (SillyTavern archive copy)
 └── [other SillyTavern presets/cards]
 ```

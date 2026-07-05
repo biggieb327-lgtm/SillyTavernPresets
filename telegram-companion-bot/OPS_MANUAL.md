@@ -6,17 +6,25 @@ Day-to-day operation reference for a running bot.
 
 ## Starting & Stopping
 
-### Start all 5 bots at once
-```bash
-bash ~/start-bots.sh
-```
-Kills any running instances, then opens each character in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, `priya`).
+### Preferred: from Telegram, no shell needed
+Send `/update` to **one** bot — it downloads the latest `bot.py`, refuses to install
+anything that doesn't compile, and restarts itself. Then send `/restart` to the other
+bots (they share the same `bot.py`, so they just need to reload it). Verify each with
+`/audit` — it shows `BOT_VERSION` and uptime.
 
-### Start a single bot
+### Start everything (first run, or after a run-bot.sh/supervisor change)
 ```bash
-source ~/telegram-bot/venv/bin/activate
-python ~/telegram-bot/bot.py ~/nora-bot
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
 ```
+Pulls the latest `bot.py` and `run-bot.sh`, then restarts every instance (`nora`,
+`bonnie`, `cass`, `emily`, `priya`, `jules`) under its own supervisor, which
+auto-restarts that bot if it ever crashes.
+
+### Start or restart a single bot
+```bash
+bash ~/telegram-bot/run-bot.sh ~/nora-bot nora
+```
+(No folder argument starts the home/default instance instead of a named one.)
 
 ### Attach to a running session
 ```bash
@@ -24,24 +32,18 @@ tmux attach -t nora
 tmux attach -t emily
 # etc.
 ```
-
-### Detach (leave bot running)
-Press `Ctrl+B`, then `D`.
+Detach without stopping it: `Ctrl+B`, then `D`.
 
 ### Stop one bot
 ```bash
 tmux kill-session -t nora
 ```
+The supervisor will *not* restart it after a manual kill like this — it only restarts
+on a crash. To bring it back: `bash ~/telegram-bot/run-bot.sh ~/nora-bot nora` again.
 
-### Stop all bots
+### Stop everything
 ```bash
-pkill -f bot.py
-```
-
-### Update bot.py and restart
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o ~/telegram-bot/bot.py
-bash ~/start-bots.sh
+for s in nora bonnie cass emily priya jules; do tmux kill-session -t $s 2>/dev/null; done
 ```
 
 ---
@@ -55,6 +57,8 @@ bash ~/start-bots.sh
 | `/clear` | Wipe conversation history (keeps long-term memory) |
 | `/status` | Dashboard: mood, life arc, today's context, user notes, weather, last chat |
 | `/recap` | 2–3 sentence summary of recent conversation |
+| `/card` | Show the currently loaded character card |
+| `/setcard <filename>` | Swap the character card (restart to fully apply; `/forget` for a clean slate) |
 | `/help` | Show all available commands |
 | `/menu` | Open the inline button shortcut menu |
 
@@ -72,6 +76,9 @@ bash ~/start-bots.sh
 | `/unpin <n>` | Remove a pinned memory by number |
 | `/boundary <text>` | Add a soft boundary note |
 | `/boundaries` | List boundaries |
+| `/addmem <text>` | Manually add an NPC/world memory (auto-collected too — see below) |
+| `/mems` | List all stored NPC/world memories |
+| `/delmem <keyword or #>` | Remove an NPC/world memory |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.
@@ -164,7 +171,24 @@ These files shape what the character knows and references. All are editable from
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats |
 | `/chatid` | Show your Telegram user ID |
-| `/backup` | Download a memory backup file |
+| `/backup` | Send state.json, memories.txt, user_notes.txt, setting.txt, reminders.json, payments.json to chat (`.env` excluded) |
+
+### Operations (admin only — allowlist member or owner)
+| Command | What it does |
+|---|---|
+| `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health |
+| `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
+| `/update` | Self-deploy: pull latest `bot.py` from `main`, verify it compiles, restart (`force` to reinstall the same version) |
+| `/restart` | Clean restart via the supervisor — picks up `.env` edits and a swapped `bot.py` |
+
+If a bot never responds to any of these either, it's not an app-level problem — see
+Troubleshooting below (the tmux session or the process itself may be down).
+
+### Western WA traffic (Emily only — needs `WSDOT_API_KEY`)
+| Command | What it does |
+|---|---|
+| `/traffic` | Western WA congestion snapshot (scoped to you if location shared) |
+| `/incidents` | Open WSDOT alerts (filtered nearby if live location active) |
 
 ---
 
@@ -180,10 +204,14 @@ The bot reads a set of plain-text files from the character's directory to build 
 | `schedule.txt` | `/schedule` | Weekly routine by day name; today's section is auto-extracted |
 | `day.txt` | `/today` | Generated each morning; append mid-day notes with `/today` |
 | `user_notes.txt` | `/note`, `/notes` | Auto-collected notes about you; also manually added with `/note` |
-| `portland_places.txt` | — | Atlas of real local places she might naturally reference |
+| `atlas.txt` | — | Real local places she might naturally reference |
 
 ### Atlas file
-Each character directory can have a `portland_places.txt` (or override via `ATLAS_FILE=` in `.env`). One place per line — the bot samples a random handful each message. Lines starting with `#` are comments.
+Each character directory can have an `atlas.txt` (or override the filename via
+`ATLAS_FILE=` in `.env`). One place per line — the bot samples a random handful each
+message. Lines starting with `#` are comments. Keep this geographically consistent with
+wherever the character actually lives now (see her entry in `CLAUDE.md`'s Character
+notes) — it's plain text the bot reads verbatim, so nothing stops it from drifting.
 
 ### User notes (auto-collection)
 After each message you send, the bot runs a background pass to extract upcoming events, appointments, or things you mentioned (job interview Thursday, doctor on Friday, etc.) and appends them to `user_notes.txt`. She references these naturally in conversation when the moment fits.
@@ -260,7 +288,7 @@ A ±20% random jitter is applied so the same-length message doesn't always take 
 The bot uses any OpenAI-compatible API endpoint. Configure in `.env`:
 
 ```
-NANOGPT_BASE_URL=https://api.your-provider.com/v1   # base URL (no trailing slash)
+NANOGPT_BASE=https://api.your-provider.com/v1   # base URL (no trailing slash); defaults to NanoGPT if unset
 NANOGPT_API_KEY=your-api-key-here
 NANOGPT_MODEL=your-default-chat-model
 ```
@@ -288,7 +316,7 @@ Each character lives in its own directory (e.g. `~/nora-bot/`) containing:
 - `.env` — bot token, API key, model settings
 - `nora.json` (or whatever `CHARACTER_CARD=` points to) — persona card
 - `state.json` — conversation history, memory, mood (auto-created)
-- Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `portland_places.txt`
+- Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `atlas.txt`
 
 The shared `~/telegram-bot/bot.py` is used by all instances — each instance just reads its own directory.
 
@@ -298,13 +326,9 @@ To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use 
 
 ## Running Multiple Characters
 
-All 5 bots share one `bot.py` and launch from their own directories:
-
-```bash
-bash ~/start-bots.sh
-```
-
-The script kills any running instances and opens each in a named tmux session. Sessions: `emily`, `bonnie`, `nora`, `cass`, `priya`.
+All 6 bots share one `bot.py` and launch from their own directories via `run-bot.sh` (see
+Starting & Stopping above) or `update-all.sh` for all of them at once. Sessions: `nora`,
+`bonnie`, `cass`, `emily`, `priya`, `jules`.
 
 Each character is fully isolated — separate state, memory, context files, and bot token. They have no knowledge of each other.
 
@@ -313,25 +337,39 @@ Each character is fully isolated — separate state, memory, context files, and 
 ## Logs
 
 ```bash
-tmux attach -t nora          # live output
-tail -f ~/nora-bot/bot.log   # if launched via run.sh
+tmux attach -t nora            # live output
+tail -f ~/nora-bot/bot.log      # everything the supervisor has seen (trimmed at 5 MB)
+tail -f ~/nora-bot/errors.log   # warnings/errors only (rotates at 2 MB)
 ```
+Or from Telegram, no shell needed: `/errors [N]` tails `errors.log` straight into chat.
 
 ---
 
 ## Troubleshooting
 
 **Bot doesn't respond**
-- Check sessions: `tmux ls`
-- Attach and watch output: `tmux attach -t nora`
-- Run in foreground: `python ~/telegram-bot/bot.py ~/nora-bot`
+- Try `/errors` and `/audit` first — if it answers those but not conversation, it's a
+  feature-level bug, not a startup crash
+- If it answers nothing at all: `tmux ls` (is the session even up?), then
+  `tail -50 ~/nora-bot/bot.log` (the actual crash traceback, if any) — see
+  `CHANGELOG.md` before assuming a new cause; several past crashes here have known,
+  documented root causes
+- Attach and watch output live: `tmux attach -t nora`
 
 **`TELEGRAM_BOT_TOKEN not found`**
 - Make sure `.env` exists in the character's directory (not just `.env.example`)
 - Check for typos in the key name
 
-**`ModuleNotFoundError`**
-- Activate the venv: `source ~/telegram-bot/venv/bin/activate`
+**`ModuleNotFoundError: No module named 'requests'` (or similar)**
+- The shared venv (`~/telegram-bot/venv/`) is missing or was built against a different
+  Python than the one now installed. `run-bot.sh` always launches with
+  `~/telegram-bot/venv/bin/python` explicitly, so this means the venv itself needs
+  rebuilding, not that the launcher picked the wrong interpreter:
+  ```bash
+  python -m venv --clear ~/telegram-bot/venv
+  ~/telegram-bot/venv/bin/pip install -r ~/telegram-bot/requirements.txt
+  ```
+  Then `update-all.sh` to restart everything on the rebuilt venv.
 
 **Model errors / 5xx from the API**
 - Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically

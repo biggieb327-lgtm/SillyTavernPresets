@@ -7,6 +7,54 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-05.10 — repo cleanup: dead launchers, stale docs, Priya's real location
+
+**Not a bug fix — a documentation/hygiene pass**, prompted by finding that several files
+in the repo hadn't been touched since before this project's reliability work (this
+session, v2026-07-05.1 through .9) and had drifted into actively misleading territory:
+
+- `run.sh` and `start-bots.sh` both still launched with bare `python` (no supervisor,
+  no crash recovery) — the exact `ModuleNotFoundError` crash-loop bug already fixed in
+  `run-bot.sh`. Deleted both; `run-bot.sh` (with no folder argument) and `update-all.sh`
+  already cover everything they did.
+- `PROJECT_CONTEXT.md`/`PROJECT_INSTRUCTIONS.md` were snapshot docs from an earlier,
+  now-superseded session — wrong instance list, a stale git branch reference, "as of
+  last session" state. Fully superseded by `CLAUDE.md` + this changelog. Deleted rather
+  than left to be trusted over the real docs by mistake.
+- `Dockerfile`/`docker-compose.yml` were incomplete (no multi-instance/`BOT_HOME`
+  support, single hardcoded `CMD`) and unreferenced by `CLAUDE.md` — this project is
+  Termux-first and the Docker path was never actually wired up. Removed; `requirements.txt`
+  is now the single source of truth for pip installs (`SETUP_GUIDE.md`, `CLAUDE.md`'s venv
+  rebuild recipe) instead of being duplicated inline in three places, which is exactly
+  the kind of drift that caused the missing-`tzdata` bug in v2026-07-05.5.
+- `SETUP_GUIDE.md` told users to set `NANOGPT_BASE_URL` — the actual code reads
+  `NANOGPT_BASE`; the wrong name would silently do nothing and leave every non-NanoGPT
+  provider setup broken. Fixed, along with the default URL (code default is
+  `https://nano-gpt.com/api/v1`, guide said `https://api.nano-gpt.com/v1`).
+- `DOCUMENT_MODEL`'s code default (`meta-llama/llama-3.3-70b-instruct`) never matched
+  what `CLAUDE.md` documented (`deepseek/deepseek-v4-flash`) or what's actually run in
+  practice. Changed the code default to match.
+- `ATLAS_FILE` default renamed `portland_places.txt` → `atlas.txt` (code default and all
+  five character subdirectories) — the old name was a copy-paste artifact that was
+  actively wrong for most characters.
+- **Found and fixed a real, pre-existing bug while investigating a Priya relocation
+  request:** `DEFAULT_SETTING` in `bot.py` — the fallback setting text for the
+  *unnamed/home instance* (Nora's slot) — was hardcoded describing "Priya... Houston,
+  Texas... moved to Portland, Oregon to tattoo at a shop." It never matched Nora (the
+  only character it could actually apply to) and never applied to the real Priya either
+  (named instances don't fall back to `DEFAULT_SETTING` at all unless they lack their
+  own `setting.txt`). Rewritten to actually describe Nora (Chicago South Side → Seattle,
+  per her real card) instead of an orphaned, wrong-character placeholder.
+- Priya (the real, deployed `priya.json` — Tamil-American software engineer, Rutgers
+  grad) relocated from Austin, TX to Bellevue, WA at the user's request. Updated her
+  card description and rewrote `priya/atlas.txt` with real Eastside/Seattle-area places
+  (Meydenbauer Bay Park, Cougar Mountain, Stone Gardens, etc.), keeping the same
+  personality-revealing-annotation structure as the original. `people.txt`/
+  `projects.txt`/`schedule.txt` needed no changes — they had no Austin-specific content.
+  Added Priya's (and Jules's) missing entries to `CLAUDE.md`'s Character notes — Priya
+  had never actually had one; the Houston/Portland description some earlier session may
+  have gone by was always `DEFAULT_SETTING` (see above), never a documented fact about her.
+
 ## v2026-07-05.9 — `.alive` heartbeat for watchdog.sh
 
 **Root cause:** a phone-side script (`~/telegram-bot/watchdog.sh`, not part of this repo)

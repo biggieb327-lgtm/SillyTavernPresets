@@ -13,11 +13,11 @@ This guide walks through setting up the companion bot from scratch on Android (T
 
 ### Choosing an LLM provider
 
-The bot works with any provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set `NANOGPT_BASE_URL` to their base URL and `NANOGPT_API_KEY` to your key. Popular options:
+The bot works with any provider that exposes an OpenAI-compatible `/v1/chat/completions` endpoint. Set `NANOGPT_BASE` to their base URL and `NANOGPT_API_KEY` to your key. Popular options:
 
 | Provider | Base URL |
 |---|---|
-| NanoGPT | `https://api.nano-gpt.com/v1` |
+| NanoGPT (default if unset) | `https://nano-gpt.com/api/v1` |
 | OpenAI | `https://api.openai.com/v1` |
 | OpenRouter | `https://openrouter.ai/api/v1` |
 | Ollama (local) | `http://localhost:11434/v1` |
@@ -60,8 +60,9 @@ pkg install python git tmux -y
 ```bash
 mkdir -p ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o ~/telegram-bot/bot.py
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run.sh -o ~/telegram-bot/run.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o ~/telegram-bot/run-bot.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh -o ~/telegram-bot/update-all.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o ~/telegram-bot/requirements.txt
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o ~/telegram-bot/.env.example
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/preset.txt -o ~/telegram-bot/preset.txt
 ```
@@ -71,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/
 cd ~/telegram-bot
 python -m venv venv
 source venv/bin/activate
-pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
+pip install -r requirements.txt
 ```
 
 ---
@@ -92,7 +93,7 @@ nano ~/nora-bot/.env
 At minimum set:
 ```
 TELEGRAM_BOT_TOKEN=your-token-here
-NANOGPT_BASE_URL=https://api.your-provider.com/v1
+NANOGPT_BASE=https://api.your-provider.com/v1
 NANOGPT_API_KEY=your-key-here
 NANOGPT_MODEL=your-model-name
 ALLOWED_USERS=your-telegram-user-id
@@ -102,75 +103,62 @@ BOT_TIMEZONE=America/New_York
 
 Start the bot:
 ```bash
-source ~/telegram-bot/venv/bin/activate
-python ~/telegram-bot/bot.py ~/nora-bot
+bash ~/telegram-bot/run-bot.sh ~/nora-bot nora
 ```
+This runs it in a tmux session under a supervisor that auto-restarts it if it ever
+crashes — you don't need to keep a terminal open or use `nohup`.
 
 You should see startup log lines. Message your bot on Telegram — she should respond.
 
-Detach so it keeps running: press `Ctrl+B`, then `D`.
+Detach without stopping it: attach with `tmux attach -t nora`, then press `Ctrl+B`, then `D`.
 
 ---
 
-## Step 5: Run All 5 Characters
+## Step 5: Run All 6 Characters
 
 Download all character cards and create a directory for each:
 
 ```bash
-for char in emily bonnie nora cass priya; do
-  mkdir -p ~/${char}-bot
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/${char}.json" -o ~/${char}-bot/${char}.json 2>/dev/null || \
-  curl -fsSL "https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily_harper.json" -o ~/${char}-bot/${char}.json 2>/dev/null || true
-done
-```
-
-Or individually:
-```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json          -o ~/nora-bot/nora.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie.json       -o ~/bonnie-bot/bonnie.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass.json         -o ~/cass-bot/cass.json
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily_harper.json -o ~/emily-bot/emily_harper.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie.json     -o ~/bonnie-bot/bonnie.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora.json        -o ~/nora-bot/nora.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass.json        -o ~/cass-bot/cass.json
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya.json       -o ~/priya-bot/priya.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya.json        -o ~/priya-bot/priya.json
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/jules_nakagawa.json -o ~/jules-bot/jules_nakagawa.json
 ```
 
 Create a `.env` in each directory. Each needs its own bot token; the API key and model can be the same across all:
 
 ```bash
-cp ~/telegram-bot/.env.example ~/emily-bot/.env   # then edit
+cp ~/telegram-bot/.env.example ~/nora-bot/.env   # then edit
 cp ~/telegram-bot/.env.example ~/bonnie-bot/.env
-# etc.
+# etc. — set CHARACTER_CARD= to match the filename you downloaded into each directory
 ```
 
-Download the launch script:
+Start (or restart) everything at once:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/start-bots.sh -o ~/start-bots.sh
-chmod +x ~/start-bots.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
 ```
 
-Start all five:
-```bash
-source ~/telegram-bot/venv/bin/activate
-bash ~/start-bots.sh
-```
-
-Each character runs in its own tmux session (`emily`, `bonnie`, `nora`, `cass`, `priya`). Attach to any with `tmux attach -t nora`.
+Each character runs in its own tmux session (`nora`, `bonnie`, `cass`, `emily`, `priya`, `jules`), under a supervisor that auto-restarts it if it ever crashes. Attach to any with `tmux attach -t nora`. `update-all.sh` also doubles as your update command later — see `OPS_MANUAL.md`, or just send `/update` to a bot from Telegram once it's running.
 
 ---
 
 ## Step 6: Optional — Atlas Files (Local Places)
 
-Each character can have a `portland_places.txt` in her directory — a list of real local places she might naturally reference in conversation. The bot samples a handful per message.
+Each character can have an `atlas.txt` in her directory — a list of real local places she might naturally reference in conversation. The bot samples a handful per message.
 
 Download the pre-seeded ones:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/portland_places.txt  -o ~/emily-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/portland_places.txt -o ~/bonnie-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/portland_places.txt   -o ~/nora-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/portland_places.txt   -o ~/cass-bot/portland_places.txt
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/portland_places.txt  -o ~/priya-bot/portland_places.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/nora/atlas.txt   -o ~/nora-bot/atlas.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bonnie/atlas.txt -o ~/bonnie-bot/atlas.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/cass/atlas.txt   -o ~/cass-bot/atlas.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/emily/atlas.txt  -o ~/emily-bot/atlas.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/priya/atlas.txt  -o ~/priya-bot/atlas.txt
 ```
 
-Each file is just one place per line. Edit freely. Override the filename with `ATLAS_FILE=` in `.env`.
+Each file is just one place per line, matching wherever that character actually lives —
+keep it geographically consistent if you edit it. Override the filename with `ATLAS_FILE=` in `.env`.
 
 ---
 
@@ -195,6 +183,14 @@ Termux can be killed by Android's battery optimizer:
 1. **Settings → Apps → Termux → Battery → Unrestricted**
 2. Lock Termux in the recent apps view (long-press the card and pin it)
 
+On Samsung specifically, also check **Settings → Battery → Background usage limits** —
+add Termux to **Never sleeping apps**, and turn off **Put unused apps to sleep**.
+Newer One UI versions also have **Settings → Security and privacy → Auto Blocker**,
+which restricts apps installed outside the Play Store (which is how Termux is
+installed); either disable it or add a Termux exception. See `CLAUDE.md`'s
+Termux/Android quirks section for the full troubleshooting story if bots keep
+restarting even after this.
+
 Or run on a Linux VPS instead ($3–5/month on Hetzner or DigitalOcean).
 
 ---
@@ -205,13 +201,16 @@ Or run on a Linux VPS instead ($3–5/month on Hetzner or DigitalOcean).
 sudo apt update && sudo apt install python3 python3-pip python3-venv git tmux -y
 mkdir -p ~/telegram-bot && cd ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o run-bot.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o requirements.txt
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
 python3 -m venv venv
 source venv/bin/activate
-pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
+pip install -r requirements.txt
 ```
 
-Then follow Step 4 onwards. Docker is also available — see `Dockerfile` and `docker-compose.yml` in the repo.
+Then follow Step 4 onwards. `run-bot.sh` uses tmux and works the same here as on Termux;
+no Docker setup needed.
 
 ---
 
@@ -221,10 +220,12 @@ Then follow Step 4 onwards. Docker is also available — see `Dockerfile` and `d
 brew install tmux python
 mkdir -p ~/telegram-bot && cd ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o run-bot.sh
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o requirements.txt
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
 python3 -m venv venv
 source venv/bin/activate
-pip install "python-telegram-bot[job-queue]>=21.0,<22.0" python-dotenv requests tzdata
+pip install -r requirements.txt
 ```
 
 Then follow Step 4 onwards.
@@ -237,7 +238,9 @@ Once the bot is running:
 
 - `/help` in the bot chat shows all available commands
 - `/status` gives a quick dashboard: mood, life arc, today's context, weather, last chat
+- `/audit` confirms it's actually running the version you deployed
 - Set up her **context files** from Telegram — start with `/life`, `/people`, and `/schedule` to give her something to draw on
-- Read **OPS_MANUAL.md** for day-to-day operation and troubleshooting
+- Read **OPS_MANUAL.md** for day-to-day operation, the full command list, and troubleshooting
+- Read **CHANGELOG.md** before making any code changes — it has the root cause behind every fix so far
 - Edit `preset.txt` to change texting style and behavioral rules
 - Edit the character card JSON to change personality, backstory, and scenario

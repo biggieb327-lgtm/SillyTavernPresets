@@ -61,7 +61,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.9"
+BOT_VERSION = "2026-07-05.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -165,7 +165,7 @@ VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
 DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
 # Separate model for document/card analysis — should be an instruction model,
 # not a roleplay-tuned one, so it won't perform the character it's reading about.
-DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "meta-llama/llama-3.3-70b-instruct")
+DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "deepseek/deepseek-v4-flash")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
@@ -282,7 +282,7 @@ SHORT_TERM_HOURS = float(os.getenv("SHORT_TERM_HOURS", "48"))  # verbatim messag
 SHORT_TERM_SECS = SHORT_TERM_HOURS * 3600                       # than this get distilled out
 
 # --- Local atlas (real places she can reference / selfie backgrounds) ---
-ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "portland_places.txt")
+ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "atlas.txt")
 ATLAS_SAMPLE = int(os.getenv("ATLAS_SAMPLE", "6"))
 ATLAS = (
     [ln.strip() for ln in ATLAS_FILE.read_text(encoding="utf-8").splitlines()
@@ -459,14 +459,13 @@ except Exception as e:
 
 # Built-in default setting. Override by dropping a setting.txt next to bot.py.
 DEFAULT_SETTING = (
-    "Priya grew up in Houston, Texas in a big Tamil-American family and is Houston underneath "
-    "it all — her drawl, her references (her grandfather's garden, Tex-Mex done right, "
-    "Thatha's stories), her instincts. She has since moved to Portland, Oregon to tattoo at a "
-    "respected shop. She's a transplant: she measures everything against Houston, gripes about "
-    "Portland's rain and its bike-lane politics, misses real queso, but Portland is her life "
-    "now. Use real Portland geography for her present-day surroundings — the Willamette River, "
-    "Hawthorne, Alberta Arts, food carts, the constant drizzle, the green — while keeping her "
-    "Houston roots, accent, and frame of reference fully intact."
+    "Nora grew up on Chicago's South Side and is Chicago underneath it all — her directness, "
+    "the chip on her shoulder, Ingrid's jacket she still wears, her instincts. She's since moved "
+    "to Seattle for the messenger work. She's a transplant: she measures everything against "
+    "Chicago, gripes about Seattle's passive-aggressiveness and its hills, misses real deep-dish, "
+    "but Seattle is her life now. Use real Seattle geography for her present-day surroundings — "
+    "the hills, the rain, her bike routes, Capitol Hill, the waterfront — while keeping her "
+    "Chicago roots, edge, and frame of reference fully intact."
 )
 SETTING_FILE = BASE_DIR / "setting.txt"
 if SETTING_FILE.exists():
