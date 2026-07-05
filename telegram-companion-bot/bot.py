@@ -6884,7 +6884,9 @@ def main():
         app.add_handler(CommandHandler("incidents", incidents_cmd))
 
     def _shutdown(sig, frame):
-        log.info("Received signal %s — saving state and shutting down.", sig)
+        # WARNING so it lands in errors.log: a startup audit with no preceding
+        # shutdown line means SIGKILL (Android phantom/OOM killer).
+        log.warning("Received signal %s — saving state and shutting down.", sig)
         _write_state()
         sys.exit(0)
 
