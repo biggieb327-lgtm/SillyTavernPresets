@@ -10,7 +10,6 @@ import base64
 import calendar
 import logging
 import logging.handlers
-import signal
 import tempfile
 import threading
 import html as _html_module
@@ -62,7 +61,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.7"
+BOT_VERSION = "2026-07-05.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6790,9 +6789,10 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
         _restart_alert_ts = time.time()
         issues.append(
             f"restarted {restarts}x in the last hour — something is killing the process. "
-            f"If /errors shows no 'Received signal' lines before the startup audits, "
-            f"suspect Android's phantom process killer "
-            f"(check: adb shell settings get global settings_enable_monitor_phantom_procs)"
+            f"Check /errors: a '[shutdown] graceful stop' line before a startup audit "
+            f"means it was signaled (a real Termux/Android battery-management restriction, "
+            f"not the phantom killer, which can't be caught at all — no line = SIGKILL, "
+            f"check: adb shell settings get global settings_enable_monitor_phantom_procs)"
         )
 
     status = "ISSUES" if issues else "OK"
@@ -7050,6 +7050,19 @@ async def _register_commands(application):
     await application.bot.set_my_commands(cmds)
 
 
+async def _on_shutdown(application):
+    # run_polling() installs its OWN SIGINT/SIGTERM/SIGABRT handlers internally,
+    # silently overriding any signal.signal() registered beforehand in main() — so a
+    # plain signal handler here would never fire. post_shutdown runs as part of PTB's
+    # own graceful-stop sequence regardless of what triggered it (signal, or an
+    # explicit app.stop() from /update or /restart), which is the reliable hook.
+    # WARNING so it lands in errors.log: a startup audit with no preceding "graceful
+    # shutdown" line means the process was SIGKILLed, not signaled (Android phantom
+    # process killer / OOM killer — those can't be caught at all).
+    log.warning("[shutdown] graceful stop — saving state.")
+    _write_state()
+
+
 def main():
     _acquire_termux_wake_lock()
     apply_overrides()
@@ -7063,6 +7076,7 @@ def main():
         .pool_timeout(30)
         .get_updates_read_timeout(40)
         .post_init(_register_commands)
+        .post_shutdown(_on_shutdown)
         .build()
     )
 
@@ -7151,16 +7165,6 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
-
-    def _shutdown(sig, frame):
-        # WARNING so it lands in errors.log: a startup audit with no preceding
-        # shutdown line means SIGKILL (Android phantom/OOM killer).
-        log.warning("Received signal %s — saving state and shutting down.", sig)
-        _write_state()
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
 
     if app.job_queue is not None:
         schedule_next_heartbeat(app.job_queue)

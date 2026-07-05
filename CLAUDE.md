@@ -162,13 +162,24 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 
 - **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
   processes when >32 exist system-wide; 6 bots × several processes sits at that limit.
-  Signature: `STARTUP AUDIT` lines piling up in `/errors` with **no** "Received signal"
-  line before them (a catchable SIGTERM would log one; SIGKILL can't). Fix (one-time,
-  via adb — wireless debugging from Termux itself works):
+  Signature: `STARTUP AUDIT` lines piling up in `/errors` with **no** `[shutdown]
+  graceful stop` line before them (a caught SIGTERM logs one; SIGKILL can't be caught
+  at all). Fix (one-time, via adb — wireless debugging from Termux itself works):
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
   plus Termux battery → Unrestricted. **The setting reverts after an Android OS update
   and factory reset** — if silent restarts ever return, check
   `settings get global settings_enable_monitor_phantom_procs` before debugging anything.
+  **Caveat:** `python-telegram-bot`'s `run_polling()` installs its own SIGINT/SIGTERM
+  handlers internally, silently overriding any `signal.signal()` registered in `main()`
+  beforehand — a plain signal handler there will never fire. Shutdown logging/state-save
+  is wired via `ApplicationBuilder().post_shutdown(_on_shutdown)` instead (as of
+  v2026-07-05.8), since that hook runs as part of PTB's own graceful-stop sequence
+  regardless of what triggered it. If a *clean* `exited (code 0)` restart shows up
+  repeatedly with a `[shutdown] graceful stop` line each time, that's NOT the phantom
+  killer (which can't be caught, and wouldn't produce a clean exit code) — it's a real
+  SIGTERM from somewhere, most likely an OEM battery/background-app manager (Samsung,
+  MIUI, ColorOS, etc. all have their own restrictions beyond stock Android's phantom-proc
+  setting). Check https://dontkillmyapp.com for the phone's specific manufacturer.
 - run-bot.sh launches with `~/telegram-bot/venv/bin/python` **explicitly** — bare
   `python` only works if the venv happens to be on PATH when tmux starts; otherwise the
   bot crash-loops on `ModuleNotFoundError: requests`. Never regress this.
