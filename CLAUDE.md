@@ -176,7 +176,16 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
   (`pkg reinstall android-tools` fixes); a Python **minor**-version bump breaks the
   shared venv — rebuild with
   `python -m venv --clear ~/telegram-bot/venv && ~/telegram-bot/venv/bin/pip install "python-telegram-bot[job-queue]>=21,<22" requests python-dotenv tzdata`
-  then run update-all.sh. **Don't drop `tzdata`** — Termux has no system IANA timezone
+  then run update-all.sh. **Watch what Python version `pkg upgrade` lands on** — a jump
+  to a much newer minor (e.g. 3.13 → 3.14) can outrun `python-telegram-bot`'s pinned
+  v21 line: `run_polling()` calls the deprecated `asyncio.get_event_loop()` expecting it
+  to auto-create a loop, and newer Python removes that fallback, raising
+  `RuntimeError: There is no current event loop in thread 'MainThread'` on every launch.
+  bot.py works around this in `main()` (explicitly creates/sets a loop before
+  `run_polling()` if none exists) as of v2026-07-05.6 — but if a *worse* incompatibility
+  ever shows up after a Python jump, the other option is holding Termux's `python`
+  package back rather than fighting library-version drift.
+  **Don't drop `tzdata`** — Termux has no system IANA timezone
   database, so `zoneinfo.ZoneInfo(TIMEZONE)` needs the pip package or it silently falls
   back to `TZ = None`. That alone won't crash anything, but a *stored* tz-aware
   timestamp (e.g. a reminder's `due`) compared against a now-naive `datetime.now()`

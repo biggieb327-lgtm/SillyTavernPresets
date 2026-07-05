@@ -62,7 +62,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.5"
+BOT_VERSION = "2026-07-05.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -7205,6 +7205,14 @@ def main():
     log.info("%s is running (home: %s)", NAME, BASE_DIR)
     if ALLOWED_USERS:
         log.info("Access restricted to user IDs: %s", ALLOWED_USERS)
+    # python-telegram-bot v21's run_polling() internally calls asyncio.get_event_loop()
+    # expecting it to auto-create a loop when none exists for this thread. Newer Python
+    # (3.14+) removed that fallback, so it raises instead — set one explicitly so the
+    # library's assumption still holds regardless of Python version.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling()
 
 
