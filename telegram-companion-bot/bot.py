@@ -61,7 +61,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-05.8"
+BOT_VERSION = "2026-07-05.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -702,6 +702,18 @@ user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic fea
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 
 STATE_FILE = BASE_DIR / "state.json"
+# watchdog.sh (a phone-side script, not part of this repo) treats a stale .alive as a
+# frozen-but-technically-running bot and force-restarts it. It expects this touched
+# every 60s; without this job the file (if present at all, e.g. from manual setup) only
+# gets more stale, so watchdog.sh eventually restarts every bot on a loop forever.
+ALIVE_FILE = BASE_DIR / ".alive"
+
+
+async def _touch_alive(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        ALIVE_FILE.touch(exist_ok=True)
+    except Exception:
+        pass
 
 
 def load_state():
@@ -7204,6 +7216,8 @@ def main():
         # and the storm alert has to fire from a short-lived revival to be useful.
         app.job_queue.run_repeating(_self_audit, interval=1800, first=90)
         log.info("Self-audit: every 30 minutes.")
+        app.job_queue.run_repeating(_touch_alive, interval=60, first=5)
+        log.info("Alive heartbeat: every 60s (for watchdog.sh, if present).")
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)

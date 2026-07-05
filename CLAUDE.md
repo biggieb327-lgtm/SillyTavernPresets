@@ -236,15 +236,29 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 
 ## Monitoring
 
-Two layers, no supervisor bot (a same-phone watchdog shares fate with what it watches):
-
 - **Restart-storm self-report**: `_self_audit` (every 30 min, first run 90s after boot)
-  counts `STARTUP AUDIT` lines in errors.log; ≥3 in an hour → DMs the owner with the
-  phantom-killer hint. 2h cooldown between alerts. A revived bot tells on its killer.
+  counts `STARTUP AUDIT` lines in errors.log; ≥3 in an hour → DMs the owner. 2h cooldown
+  between alerts. Says "check /errors for a `[shutdown] graceful stop` line" — present
+  means a real, catchable SIGTERM (a battery/background-app restriction, or the
+  watchdog below); absent means an uncatchable SIGKILL (the phantom process killer).
 - **Dead man's switch**: if `HEALTHCHECK_URL` is set in an instance `.env`, `_self_audit`
   GETs it every 30 min. Pair with healthchecks.io (free): one check per bot, 30 min
   period + ~15 min grace, alert channel = Telegram/email. Silence = the alert — covers
   bot-fully-down and phone-dead, which nothing on the phone can report.
+- **Phone-side `watchdog.sh`** (lives at `~/telegram-bot/watchdog.sh` on-device — not
+  part of this repo, not deployed by update-all.sh, edit/copy it manually): relaunches
+  any bot whose tmux session has vanished (catches Termux itself getting killed, which
+  the in-tmux supervisor can't survive), and separately restarts a bot whose `.alive`
+  file is older than `WATCHDOG_STALE` (default 300s) even if its tmux session looks
+  fine — a "frozen but technically running" check. **bot.py must touch `.alive` every
+  60s** (`_touch_alive`, a repeating job registered in `main()`) for that second check
+  to mean anything; if this job is ever removed and a stale `.alive` is left on disk,
+  watchdog.sh will conclude every bot is permanently frozen and restart the entire
+  fleet every `WATCHDOG_INTERVAL` (default 300s) forever — this exact failure mode cost
+  a full debugging session (2026-07-05) chasing Samsung battery settings and the
+  phantom process killer before the real cause (a heartbeat file bot.py never wrote)
+  was found via `tail watchdog.log`, which logs its exact reason (`session down` vs
+  `frozen (heartbeat Ns old)`) before every relaunch — check that log first next time.
 
 ---
 
