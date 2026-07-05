@@ -12,6 +12,15 @@
 INSTANCE_DIR="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Always launch with the shared venv's interpreter. A bare `python` only works
+# if the venv happened to be on PATH when the tmux session was created —
+# otherwise the bot crash-loops on ModuleNotFoundError.
+PYTHON="$SCRIPT_DIR/venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  echo "WARNING: venv not found at $PYTHON, falling back to 'python' on PATH"
+  PYTHON=python
+fi
+
 if [ -n "$INSTANCE_DIR" ]; then
   # Expand ~ and make absolute so the supervisor's lock/log paths are stable.
   INSTANCE_DIR="$(cd "$INSTANCE_DIR" 2>/dev/null && pwd)"
@@ -21,12 +30,12 @@ if [ -n "$INSTANCE_DIR" ]; then
   fi
   STATE_DIR="$INSTANCE_DIR"
   DEFAULT_SESSION="$(basename "$INSTANCE_DIR")"
-  RUN_CMD="python bot.py '$INSTANCE_DIR'"
+  RUN_CMD="'$PYTHON' bot.py '$INSTANCE_DIR'"
 else
   # Home instance: code dir doubles as the instance dir, no folder arg.
   STATE_DIR="$SCRIPT_DIR"
   DEFAULT_SESSION="$(basename "$SCRIPT_DIR")"
-  RUN_CMD="python bot.py"
+  RUN_CMD="'$PYTHON' bot.py"
 fi
 
 SESSION="${2:-$DEFAULT_SESSION}"

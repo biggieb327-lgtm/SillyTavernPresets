@@ -1,5 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Pull the latest bot.py from the repo and restart all bot instances.
+# Pull the latest bot.py + run-bot.sh from the repo and restart all bot instances.
 # Usage: bash update-all.sh
 
 set -e
@@ -9,6 +9,10 @@ BOT_SRC="$HOME/telegram-bot"
 
 echo "==> Pulling latest bot.py..."
 curl -fsSL "$REPO/bot.py" -o "$BOT_SRC/bot.py"
+echo "    Done."
+
+echo "==> Pulling latest run-bot.sh..."
+curl -fsSL "$REPO/run-bot.sh" -o "$BOT_SRC/run-bot.sh"
 echo "    Done."
 
 echo ""
