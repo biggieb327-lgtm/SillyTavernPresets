@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Stop hook — the "no fake done" gate. Blocks ending the turn when bot.py was modified
+# but the repo's own shipping rules (BOT_VERSION bump, CHANGELOG entry, a compile check
+# in the evidence log) haven't been met. Fires at most once per stop (stop_hook_active guard).
+set -u
+cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+
+# Never block twice in a row — avoids infinite stop loops.
+active=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("stop_hook_active", False))' 2>/dev/null) || exit 0
+[ "$active" = "True" ] && exit 0
+
+BOT=telegram-companion-bot/bot.py
+CHANGELOG=telegram-companion-bot/CHANGELOG.md
+
+# Only gate when bot.py differs from HEAD (staged or unstaged).
+git diff --quiet HEAD -- "$BOT" 2>/dev/null && exit 0
+
+missing=""
+
+# 1. BOT_VERSION must have changed.
+if git diff HEAD -- "$BOT" | grep -q '^[+-]BOT_VERSION'; then :; else
+  missing="${missing}- BOT_VERSION was not bumped (required for /update + /audit to detect the deploy)\n"
+fi
+
+# 2. CHANGELOG must be touched in the same change.
+if git diff --quiet HEAD -- "$CHANGELOG" 2>/dev/null; then
+  missing="${missing}- no CHANGELOG.md entry (root cause first, fix second — per CLAUDE.md)\n"
+fi
+
+# 3. Evidence log must show a compile/test run today.
+if ! grep -qE 'py_compile|compileall|pytest' ".claude/.runtime/evidence-$(date +%Y%m%d).log" 2>/dev/null; then
+  missing="${missing}- no compile/test evidence logged (run: python3 -m py_compile ${BOT})\n"
+fi
+
+if [ -n "$missing" ]; then
+  printf '[delivery-gate] bot.py is modified but the shipping checklist is incomplete:\n%b Complete these (or explicitly tell the user why they do not apply) before finishing.\n' "$missing" >&2
+  exit 2
+fi
+exit 0

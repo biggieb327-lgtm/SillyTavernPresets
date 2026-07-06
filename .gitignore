@@ -5,3 +5,4 @@ __pycache__/
 .env
 telegram-bot/
 substack-articles/
+.claude/.runtime/
