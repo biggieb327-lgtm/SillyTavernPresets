@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.3"
+BOT_VERSION = "2026-07-06.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -552,6 +552,19 @@ except Exception:
 
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
+
+# --- Shared world context (world.txt) — same weather/happenings across all instances ---
+# One instance (WORLD_GENERATOR=1, typically nora) writes world.txt at midnight;
+# every instance reads it as day-generation context if present.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+WORLD_FILE = Path(os.getenv("WORLD_FILE", str(_SCRIPT_DIR / "world.txt")))
+WORLD_GENERATOR = os.getenv("WORLD_GENERATOR", "").lower() in ("1", "true", "yes")
+
+def _read_world_context() -> str:
+    try:
+        return WORLD_FILE.read_text(encoding="utf-8").strip() if WORLD_FILE.exists() else ""
+    except Exception:
+        return ""
 
 # --- Day context file (day.txt) — editable throughout the day for continuity ---
 DAY_FILE = BASE_DIR / "day.txt"
@@ -6618,10 +6631,14 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
         await ensure_weather()
         weather = (_weather_cache.get("text") or "").strip()
 
+        world_ctx = _read_world_context()
+
         ctx_parts = []
+        if world_ctx:
+            ctx_parts.append(f"Shared world (same for everyone today):\n{world_ctx}")
         if schedule_today:
             ctx_parts.append(f"Her schedule today: {schedule_today}")
-        if weather:
+        if weather and not world_ctx:
             ctx_parts.append(f"Weather: {weather}")
         if projects:
             ctx_parts.append(f"Ongoing things in her life:\n{projects}")
@@ -6683,6 +6700,30 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
                 rfts.pop(0)
             save_state()
         print(f"[day-rotate] archived {date_str}: {day_ctx[:80]}…")
+    # If this instance is the world generator, produce world.txt before any instance
+    # generates its day events — all instances read it as shared context.
+    if WORLD_GENERATOR:
+        try:
+            await ensure_weather()
+            weather = (_weather_cache.get("text") or "").strip()
+            w_prompt = (
+                f"Write a brief shared-world snapshot for today (2-3 lines max). "
+                f"Include: the weather mood ({weather or 'unknown'}), and one or two "
+                f"small ambient things happening in the area — a local event, construction, "
+                f"a seasonal detail, something noticed on the street. Keep it terse and "
+                f"grounded. No character names — this is the shared backdrop, not anyone's "
+                f"personal day.\n\nWrite only the snapshot, no headers or bullets."
+            )
+            w_msgs = [{"role": "system", "content": "You describe the shared world."},
+                      {"role": "user", "content": w_prompt}]
+            world_text = await asyncio.to_thread(call_nanogpt, w_msgs, SUMMARY_MODEL)
+            world_text = _strip_thinking(world_text).strip()
+            if world_text:
+                WORLD_FILE.write_text(world_text, encoding="utf-8")
+                print(f"[world] generated: {world_text[:100]}…")
+        except Exception as e:
+            log.error("[world] generation failed: %s", e)
+
     # Generate fresh events for the new day (writes to day.txt, clears cache implicitly),
     # feeding in yesterday's events so unresolved threads can carry over.
     if owner is not None:

@@ -19,5 +19,9 @@ jobs:
         with:
           # Match the Termux runtime (CLAUDE.md: Python 3.13)
           python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -r telegram-companion-bot/requirements.txt pytest
       - name: Run eval suite
         run: bash .claude/evals/run-evals.sh
+      - name: Run pytest
+        run: python -m pytest telegram-companion-bot/tests/ -v

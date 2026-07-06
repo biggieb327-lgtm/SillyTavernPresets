@@ -7,6 +7,27 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.4 — shared world context, test suite, new-bot bootstrap
+
+**Shared world context (ROADMAP 3.2):** all six characters now share the same weather
+and ambient happenings each day. The designated world-generator instance
+(`WORLD_GENERATOR=1`, typically nora) writes `world.txt` at midnight — a 2-3 line shared
+backdrop (weather mood, local color). Every instance's `_generate_daily_events` reads it
+as context, so Nora's rainstorm is also Priya's rainstorm. Degrades gracefully: if the
+file is absent (generator not configured, or it failed), behavior is unchanged from
+before — each instance generates its own weather independently.
+
+**Test suite (ROADMAP 2.1):** `tests/test_pure.py` (pytest) covering the pure functions
+where a regression is fleet-breaking: `extract_tags` (4-tuple contract), `parse_cron_schedule`/
+`describe_cron_schedule` (roundtrip), `_extract_json` (prose/fence extraction), `parse_when`
+(reminder time parsing), `_est_tokens`, `_count_error` cap. 41 tests. CI workflow updated
+to run pytest after the eval suite. Fixture in `conftest.py` stands up a temporary instance
+directory with a minimal `.env` and character card so bot.py imports cleanly.
+
+**new-bot.sh (ROADMAP 2.2):** interactive bootstrap script for new instances — creates the
+directory, prompts for tokens/models, pulls the card and seed files, starts the bot. A
+seventh instance can be stood up in under five minutes.
+
 ## v2026-07-06.3 — voice reply symmetry + degradation alerts
 
 **Voice symmetry (ROADMAP 3.1):** sending a voice note to a bot with `/voice` on now
