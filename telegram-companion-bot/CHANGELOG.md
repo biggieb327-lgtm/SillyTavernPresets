@@ -7,6 +7,19 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.1 — fix UTF-8 mojibake in streamed model responses
+
+**Root cause:** `requests`' `iter_lines(decode_unicode=True)` uses the response's
+`Content-Type` charset to decode bytes. NanoGPT's SSE endpoint returns
+`text/event-stream` without an explicit `charset=utf-8`, so `requests` falls back to
+ISO-8859-1 (the HTTP/1.1 default for `text/*`). Any multi-byte UTF-8 character — curly
+quotes, em dashes, accented letters — gets decoded as Latin-1 garbage (e.g. `'` →
+`â€™`). Always latent, but never triggered until GLM 5.2 started using smart
+punctuation instead of ASCII apostrophes.
+
+**Fix:** Force `resp.encoding = "utf-8"` on the streaming response before
+`iter_lines(decode_unicode=True)` in `_do_request`.
+
 ## v2026-07-05.12 — admin HTTP API (Phase 1 of VPS migration)
 
 **New capability, not a bug fix.** Adds an opt-in HTTP admin API that mirrors
