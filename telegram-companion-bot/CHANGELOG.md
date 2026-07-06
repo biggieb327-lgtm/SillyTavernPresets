@@ -7,6 +7,26 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.3 — voice reply symmetry + degradation alerts
+
+**Voice symmetry (ROADMAP 3.1):** sending a voice note to a bot with `/voice` on now
+biases toward replying in kind — `VOICE_REPLY_TO_VOICE` (default 0.9) replaces the
+ambient `TTS_CHANCE` (default 0.3) when the incoming message is a voice note.
+Implementation: `_deliver` gains a `voice_input` flag; `handle_voice` sets it; the
+TTS probability check picks the higher value. Text messages are unaffected.
+
+**Degradation alerts (ROADMAP 1.4):** `_self_audit` now watches two new signals:
+- *Fallback rate*: a new `"fallback"` error category is incremented each time
+  `call_nanogpt` falls from the primary model to `FALLBACK_MODEL` (budget exceeded or
+  retries exhausted). If fallback fires ≥3 times in the last hour, the owner gets a DM
+  (2h cooldown, same pattern as restart-storm alerts).
+- *Monthly spend*: if `USAGE_BUDGET_MONTHLY` is set in `.env`, `_self_audit` hits the
+  NanoGPT subscription/usage API every 30 min and DMs the owner at 80% and 100% of
+  budget (24h cooldown). Inert when unset.
+
+Also in this release: `watchdog.sh`, `fleet-status.sh`, `sync-cards.sh` committed to the
+repo (ROADMAP 1.1, 1.3, 2.3 — shell scripts only, no bot.py change for those).
+
 ## v2026-07-06.2 — fix selfie crash when no base PNG (NanoGPT path)
 
 **Root cause:** `_generate_selfie_nanogpt` unconditionally called `_base_data_url()`,

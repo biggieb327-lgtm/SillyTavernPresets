@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.2"
+BOT_VERSION = "2026-07-06.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -154,6 +154,7 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # hard cap per reque
 # GETs it every 30 min; the service alerts the owner when pings STOP — which catches
 # every failure the bot can't self-report, including the whole phone being dead.
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
+USAGE_BUDGET_MONTHLY = float(os.getenv("USAGE_BUDGET_MONTHLY", "0"))
 STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "90"))    # max silence between chunks
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 TEMPERATURE = float(os.getenv("TEMPERATURE")) if os.getenv("TEMPERATURE") else None
@@ -173,6 +174,7 @@ DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "deepseek/deepseek-v4-flash")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
 TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
+VOICE_REPLY_TO_VOICE = float(os.getenv("VOICE_REPLY_TO_VOICE", "0.9"))
 # Inworld TTS: when INWORLD_API_KEY is set, voice replies use api.inworld.ai
 # (with TTS_VOICE as the Inworld voice ID) instead of NanoGPT's speech endpoint.
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")   # base64 runtime key from the Inworld portal
@@ -2306,6 +2308,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 log.warning("[model] %s: budget exceeded (%.0fs), falling back to %s",
                            m, time.time() - t0, models[i + 1])
                 _count_error("api")
+                _count_error("fallback")
                 break
             try:
                 return _one_call(messages, m)
@@ -2326,6 +2329,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                     log.warning("[model] %s failed after %d attempts; falling back to %s",
                                m, _CHAT_RETRIES, models[i + 1])
                     _count_error("api")
+                    _count_error("fallback")
     raise last_err
 
 
@@ -5267,7 +5271,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = assemble_messages(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
-        await _deliver(update, context, chat_id, transcript, ai_response)
+        await _deliver(update, context, chat_id, transcript, ai_response,
+                       voice_input=True)
         # Log a note about the voice message so it's preserved in memory
         ts = datetime.now(tz=TZ).strftime("%b %d")
         snippet = transcript[:150] + ("…" if len(transcript) > 150 else "")
@@ -5679,7 +5684,8 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
-async def _deliver(update, context, chat_id, user_memory_text, ai_response):
+async def _deliver(update, context, chat_id, user_memory_text, ai_response,
+                   voice_input=False):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
@@ -5701,7 +5707,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response):
             log.warning("[react] failed: %s", e)
     if clean:
         await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
-        if voice_reply.get(chat_id) and random.random() < TTS_CHANCE:
+        tts_prob = VOICE_REPLY_TO_VOICE if voice_input else TTS_CHANCE
+        if voice_reply.get(chat_id) and random.random() < tts_prob:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
@@ -6949,6 +6956,8 @@ def _log_startup_diagnostic():
 
 
 _restart_alert_ts = 0.0  # cooldown: a restart storm alerts once, not every 30 min
+_fallback_alert_ts = 0.0
+_budget_alert_ts = 0.0
 
 def _count_recent_restarts(window_s: int = 3600) -> int:
     """Count STARTUP AUDIT lines in errors.log newer than window_s seconds.
@@ -6979,7 +6988,7 @@ def _count_recent_restarts(window_s: int = 3600) -> int:
 
 
 async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
-    global _restart_alert_ts
+    global _restart_alert_ts, _fallback_alert_ts, _budget_alert_ts
     issues = []
     uptime_h = (time.time() - _BOOT_TIME) / 3600
 
@@ -7021,6 +7030,34 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
             f"not the phantom killer, which can't be caught at all — no line = SIGKILL, "
             f"check: adb shell settings get global settings_enable_monitor_phantom_procs)"
         )
+
+    fallback_1h = recent.get("fallback", 0)
+    if fallback_1h >= 3 and time.time() - _fallback_alert_ts > 7200:
+        _fallback_alert_ts = time.time()
+        issues.append(
+            f"primary model falling back {fallback_1h}x in the last hour — "
+            f"check /model and /errors; the fallback is serving replies silently"
+        )
+
+    if USAGE_BUDGET_MONTHLY:
+        try:
+            resp = await asyncio.to_thread(
+                lambda: _get_session().get(
+                    f"{NANOGPT_BASE_URL.rsplit('/v1', 1)[0]}/subscription/v1/usage",
+                    headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+                    timeout=15))
+            usage = resp.json()
+            if usage.get("active"):
+                used = float(usage["monthly"]["used"])
+                pct = used / USAGE_BUDGET_MONTHLY
+                if pct >= 1.0 and time.time() - _budget_alert_ts > 86400:
+                    _budget_alert_ts = time.time()
+                    issues.append(f"monthly spend at {pct:.0%} of budget ({used:.0f}/{USAGE_BUDGET_MONTHLY:.0f})")
+                elif pct >= 0.8 and time.time() - _budget_alert_ts > 86400:
+                    _budget_alert_ts = time.time()
+                    issues.append(f"monthly spend at {pct:.0%} of budget ({used:.0f}/{USAGE_BUDGET_MONTHLY:.0f})")
+        except Exception as e:
+            log.debug("[audit] usage check failed: %s", e)
 
     status = "ISSUES" if issues else "OK"
     summary = (f"[audit] {status} | uptime={uptime_h:.1f}h | "
