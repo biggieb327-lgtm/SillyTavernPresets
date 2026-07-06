@@ -1,0 +1,23 @@
+# Push-time enforcement of .claude/evals/run-evals.sh — the same checks Claude Code
+# sessions run before claiming done, but guaranteed to run on EVERY push regardless of
+# who made it (web UI edit, phone push, session that died mid-task). The fleet deploys
+# by curling raw files from main, so main must never hold a tree that fails these.
+name: evals
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Match the Termux runtime (CLAUDE.md: Python 3.13)
+          python-version: "3.13"
+      - name: Run eval suite
+        run: bash .claude/evals/run-evals.sh

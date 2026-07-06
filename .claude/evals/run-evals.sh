@@ -51,6 +51,29 @@ else
   bad "tzdata-pinned" "tzdata missing from requirements.txt — Termux has no system tz database"
 fi
 
+# Tokens must never land in the repo. The risk-guard hook blocks `git add .env`, but a
+# token pasted into a card, a doc, or a committed backup file would slip past it — this
+# repo is pulled from over raw public URLs, so a leaked token is instantly public.
+# Patterns: Telegram bot token (digits:35-char secret), OpenAI-style sk- key, AWS key ID.
+leaks=$(git grep -InE '[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|\bsk-[A-Za-z0-9]{32,}|\bAKIA[0-9A-Z]{16}\b' -- . ':!.claude/evals/run-evals.sh' 2>/dev/null || true)
+if [ -z "$leaks" ]; then
+  ok "secret-scan: no token-shaped strings in tracked files"
+else
+  bad "secret-scan" "possible credential committed: $(echo "$leaks" | head -3 | tr '\n' ' ')"
+fi
+
+# The delivery gate checks that BOT_VERSION and CHANGELOG.md both changed, but not that
+# they AGREE. Convention: release entries are titled '## v<version>' and must match
+# bot.py's BOT_VERSION; non-release entries (docs, ops tooling) use '## YYYY-MM-DD — ...'
+# headings, which this check ignores.
+bv=$(grep -m1 '^BOT_VERSION' "$BOT" | cut -d'"' -f2)
+top=$(grep -m1 -oE '^## v[0-9][^ ]*' telegram-companion-bot/CHANGELOG.md | sed 's/^## v//')
+if [ -n "$bv" ] && [ "$bv" = "$top" ]; then
+  ok "version-changelog-sync: BOT_VERSION $bv matches newest release entry"
+else
+  bad "version-changelog-sync" "BOT_VERSION is '$bv' but newest '## v' changelog entry is '$top' — bumped one, forgot the other"
+fi
+
 # Character cards and instance seeds are hand-edited JSON; a syntax slip bricks a bot at load.
 json_bad=""
 for f in telegram-companion-bot/*.json; do

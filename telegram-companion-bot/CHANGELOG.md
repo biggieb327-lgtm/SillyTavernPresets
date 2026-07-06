@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-06 — ops tooling: fleet backup script, CI evals, secret scan (no bot.py change)
+
+**Not a bot release — no BOT_VERSION bump.** (New heading convention, enforced by the
+`version-changelog-sync` eval: only actual bot.py releases get `## v<version>` headings,
+which must match `BOT_VERSION`; ops/docs entries use dated headings like this one.)
+
+- **`backup-all.sh`**: nightly-cronable fleet state backup. Motivation: all character
+  memory/state lives on one phone; `/backup` is manual and per-bot, so a dead phone
+  meant losing everything. Archives each instance's state files (same list as `/backup`,
+  `.env` always excluded) to `~/storage/shared/bot-backups/` (survives Termux
+  uninstall), prunes after 14 days, optional `BACKUP_RCLONE_REMOTE` for off-phone push.
+  Like `watchdog.sh` it must be curl-installed once and is not touched by
+  `update-all.sh`. Setup instructions in the script header and `OPS_MANUAL.md`.
+- **CI** (`.github/workflows/evals.yml`): runs `.claude/evals/run-evals.sh` on every
+  push to `main`/`claude/**` and on PRs. Rationale: bots deploy by curling raw files
+  from `main`, and session-side checks only run when a session runs them — a web-UI
+  edit or phone push had no gate at all before this.
+- **Two new evals**: `secret-scan` (token-shaped strings in tracked files — Telegram
+  bot tokens, sk- keys, AWS key IDs; this repo is pulled over public raw URLs, so a
+  committed token is instantly public) and `version-changelog-sync` (BOT_VERSION must
+  equal the newest `## v` changelog heading — the delivery gate checks both changed,
+  but not that they agree). Both break-it tested.
+
 ## v2026-07-05.12 — admin HTTP API (Phase 1 of VPS migration)
 
 **New capability, not a bug fix.** Adds an opt-in HTTP admin API that mirrors

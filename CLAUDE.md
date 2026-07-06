@@ -30,7 +30,9 @@ This repo has an enforcement layer — rules here are backed by files that run, 
 
 - **Agents** (`.claude/agents/`): `chief-operator` (opus) orchestrates; `builder`/`system-fixer`/`qa-engineer` (sonnet) implement and verify; `adversarial-critic`/`eval-designer`/`improvement-analyst` (opus) audit and improve the system; `context-librarian`/`research-scout` (haiku) handle hygiene and lookups. Each has a strict contract (mission, scope, required evidence, output limit). Launch the operator with `claude --agent chief-operator`.
 - **Hooks** (`.claude/hooks/`, wired in `.claude/settings.json`): session-start state audit, Bash risk guard (force-push to main, root-level `rm -rf`, staging `.env`), per-call evidence logger, tool-call budget governor, **delivery gate** (blocks ending a turn with a modified `bot.py` that lacks a BOT_VERSION bump, changelog entry, or compile evidence), pre-compact handoff writer.
-- **Evals** (`.claude/evals/run-evals.sh`): every past incident from the changelog, pinned as a runnable check. Run before claiming any change done. A failure recurring twice earns a new eval — that's the rule.
+- **Evals** (`.claude/evals/run-evals.sh`): every past incident from the changelog, pinned as a runnable check. Run before claiming any change done. A failure recurring twice earns a new eval — that's the rule. Includes a secret scan (this repo is public via raw URLs — a committed token is instantly leaked) and a BOT_VERSION↔changelog sync check.
+- **CI** (`.github/workflows/evals.yml`): the same eval suite runs on every push to `main`/`claude/**` and on PRs — enforcement that doesn't depend on a session remembering. Since deploys curl from `main`, treat a red run on main as a deploy blocker.
+- **Improvement loop**: a monthly scheduled Routine (Claude Code cloud trigger, 1st of the month) runs the `improvement-analyst` contract over the operational log and changelog, and pushes at most one proposed system patch to a `claude/improvement-loop` branch — never to `main`.
 - **Memory** (`.claude/memory/operational-log.md`): one row per failure that changed the system — date, failure, root cause, patch, eval, next. No narration.
 - Runtime state (evidence logs, handoffs, budget counters) lives in `.claude/.runtime/` — gitignored, never commit it.
 
@@ -285,6 +287,10 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
   GETs it every 30 min. Pair with healthchecks.io (free): one check per bot, 30 min
   period + ~15 min grace, alert channel = Telegram/email. Silence = the alert — covers
   bot-fully-down and phone-dead, which nothing on the phone can report.
+- **Automated fleet backup** (`backup-all.sh`, cron on the phone): nightly archive of
+  every instance's state files to Android shared storage, `.env` excluded, 14-day
+  retention, optional rclone push off-phone. Curl-installed once like watchdog.sh —
+  `update-all.sh` does not manage it. Setup in the script header / `OPS_MANUAL.md`.
 - **Phone-side `watchdog.sh`** (lives at `~/telegram-bot/watchdog.sh` on-device — not
   part of this repo, not deployed by update-all.sh, edit/copy it manually): relaunches
   any bot whose tmux session has vanished (catches Termux itself getting killed, which

@@ -251,6 +251,20 @@ cp ~/nora-bot/state.json ~/nora-bot/state.backup.$(date +%Y%m%d).json
 ```
 Or use `/backup` from the chat.
 
+### Automated fleet backup (recommended)
+
+`backup-all.sh` archives every instance's state files (same list as `/backup`, `.env`
+always excluded) to Android shared storage, prunes archives older than 14 days, and can
+push off-phone via rclone. One-time setup and nightly cron instructions are in the
+script's header:
+```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/backup-all.sh -o ~/telegram-bot/backup-all.sh
+bash ~/telegram-bot/backup-all.sh    # run once to verify, then schedule via crontab
+```
+Like `watchdog.sh`, it is NOT updated by `update-all.sh` — re-curl it after changes.
+Shared storage survives a Termux uninstall but not a lost phone; set
+`BACKUP_RCLONE_REMOTE` (see script header) for real off-device safety.
+
 ### Editing memory directly
 ```bash
 nano ~/nora-bot/state.json
