@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.4"
+BOT_VERSION = "2026-07-06.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -448,6 +448,86 @@ def _append_memory(text: str, auto: bool = False):
         MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         _memories_cache["text"] = None
         _memories_cache["ts"] = 0.0
+        _embed_memory_line(entry)
+        _save_embeddings()
+
+
+# --- Semantic memory (embeddings-backed recall) ---
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
+_embeddings_cache: dict[str, list[float]] = {}
+_embeddings_dirty = False
+
+
+def _load_embeddings():
+    global _embeddings_cache
+    try:
+        if EMBEDDINGS_FILE.exists():
+            _embeddings_cache = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _embeddings_cache = {}
+
+
+def _save_embeddings():
+    global _embeddings_dirty
+    if not _embeddings_dirty:
+        return
+    try:
+        EMBEDDINGS_FILE.write_text(
+            json.dumps(_embeddings_cache, ensure_ascii=False), encoding="utf-8")
+        _embeddings_dirty = False
+    except Exception as e:
+        log.warning("[embeddings] save failed: %s", e)
+
+
+def _embed_text(text: str) -> list[float] | None:
+    try:
+        resp = _get_session().post(
+            f"{NANOGPT_BASE_URL}/embeddings",
+            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+            json={"model": EMBEDDING_MODEL, "input": text[:8000]},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
+    except Exception as e:
+        log.debug("[embeddings] embed failed: %s", e)
+        return None
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _embed_memory_line(line: str):
+    global _embeddings_dirty
+    key = line.strip()
+    if key in _embeddings_cache:
+        return
+    vec = _embed_text(key)
+    if vec:
+        _embeddings_cache[key] = vec
+        _embeddings_dirty = True
+
+
+def semantic_recall(query: str, entries: list[str], top_k: int = 5) -> list[tuple[float, str]]:
+    q_vec = _embed_text(query)
+    if not q_vec:
+        return []
+    scored = []
+    for line in entries:
+        key = line.strip()
+        vec = _embeddings_cache.get(key)
+        if vec:
+            scored.append((_cosine_sim(q_vec, vec), line))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:top_k]
+
+
+_load_embeddings()
 
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
@@ -1421,17 +1501,33 @@ def triggered_memories(scan_text: str) -> list[str]:
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     low = scan_text.lower()
     scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
-    scored = []
+
+    # Keyword scoring (original path — always runs)
+    keyword_scored: dict[str, float] = {}
     for line in entries:
         words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                  if w not in stopwords}
         hits = len(words & scan_words)
         if hits > 0:
-            scored.append((hits, line))
-    scored.sort(key=lambda x: x[0], reverse=True)
+            keyword_scored[line] = float(hits)
+
+    # Semantic scoring (additive — falls back silently on failure)
+    sem_results = semantic_recall(scan_text, entries, top_k=8)
+    sem_scored: dict[str, float] = {}
+    if sem_results:
+        max_sim = max(s for s, _ in sem_results) or 1.0
+        for sim, line in sem_results:
+            if sim > 0.3:
+                sem_scored[line] = (sim / max_sim) * 3.0
+
+    # Merge: union of both, sum their scores
+    all_lines = set(keyword_scored) | set(sem_scored)
+    merged = [(keyword_scored.get(l, 0) + sem_scored.get(l, 0), l) for l in all_lines]
+    merged.sort(key=lambda x: x[0], reverse=True)
+
     out = []
     budget = MEMORY_TOKEN_BUDGET
-    for _, line in scored:
+    for _, line in merged:
         cost = _est_tokens(line)
         if cost > budget:
             continue
@@ -4557,11 +4653,11 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search facts and summaries for a keyword and show matches."""
+    """Search facts, summaries, and memories for a keyword (+ semantic similarity)."""
     chat_id = update.effective_chat.id
     keyword = " ".join(context.args).strip().lower() if context.args else ""
     if not keyword:
-        await update.message.reply_text("Usage: /recall <keyword>")
+        await update.message.reply_text("Usage: /recall <keyword or phrase>")
         return
     hits = []
     for f in (facts.get(chat_id) or []):
@@ -4576,6 +4672,13 @@ async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rsumm = (recent_summaries.get(chat_id) or "").strip()
     if rsumm and keyword in rsumm.lower():
         hits.append(f"[recent summary] {rsumm[:300]}{'…' if len(rsumm) > 300 else ''}")
+    # Semantic recall over memories.txt
+    seen_texts = {h.split("] ", 1)[-1] if "] " in h else h for h in hits}
+    sem = await asyncio.to_thread(semantic_recall, keyword, _read_memories(), 5)
+    for sim, line in sem:
+        if sim > 0.3 and line not in seen_texts:
+            hits.append(f"[memory ~{sim:.0%}] {line}")
+            seen_texts.add(line)
     if hits:
         await update.message.reply_text(
             f"🔍 Found {len(hits)} match(es) for \"{keyword}\":\n\n" + "\n\n".join(hits)

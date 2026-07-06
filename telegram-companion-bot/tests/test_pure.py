@@ -228,6 +228,25 @@ class TestEstTokens:
 
 # ── _count_error tracking ────────────────────────────────────────────────────
 
+# ── _cosine_sim ───────────────────────────────────────────────────────────────
+
+class TestCosineSim:
+    def test_identical_vectors(self):
+        v = [1.0, 0.0, 0.0]
+        assert abs(bot._cosine_sim(v, v) - 1.0) < 1e-6
+
+    def test_orthogonal_vectors(self):
+        assert abs(bot._cosine_sim([1, 0, 0], [0, 1, 0])) < 1e-6
+
+    def test_opposite_vectors(self):
+        assert abs(bot._cosine_sim([1, 0], [-1, 0]) - (-1.0)) < 1e-6
+
+    def test_zero_vector(self):
+        assert bot._cosine_sim([0, 0], [1, 1]) == 0.0
+
+
+# ── _count_error tracking ────────────────────────────────────────────────────
+
 class TestCountError:
     def test_counts_increment(self):
         cat = "_test_category_unique"

@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.5 — semantic memory recall via NanoGPT embeddings
+
+**Semantic recall (ROADMAP 3.3):** memory retrieval now supplements keyword matching with
+cosine-similarity search over NanoGPT embeddings (`text-embedding-3-small` by default,
+configurable via `EMBEDDING_MODEL`).
+
+- **On memory write:** `_append_memory` embeds the new line and caches the vector in
+  `embeddings.json` (sidecar to `memories.txt`). One API call per new memory.
+- **On context assembly:** `triggered_memories` merges keyword hits (existing behavior) with
+  semantic matches (cosine top-k, threshold 0.3). Scores are summed so a line that matches
+  both keyword AND meaning ranks highest.
+- **On /recall:** semantic results (with similarity percentage) appear alongside keyword
+  hits, so paraphrased queries ("remember when we talked about my sister's wedding?")
+  work even when the stored fact uses different words.
+- **Fallback:** any embedding API failure falls back silently to keyword-only — the
+  feature is additive, never subtractive.
+
 ## v2026-07-06.4 — shared world context, test suite, new-bot bootstrap
 
 **Shared world context (ROADMAP 3.2):** all six characters now share the same weather
