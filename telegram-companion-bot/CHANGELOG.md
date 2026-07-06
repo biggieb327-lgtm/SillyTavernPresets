@@ -7,6 +7,24 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.1 — fix UTF-8 mojibake + suppress "almost did X" model tic
+
+**Mojibake root cause:** `requests`' `iter_lines(decode_unicode=True)` uses the response's
+`Content-Type` charset to decode bytes. NanoGPT's SSE endpoint returns
+`text/event-stream` without an explicit `charset=utf-8`, so `requests` falls back to
+ISO-8859-1 (the HTTP/1.1 default for `text/*`). Any multi-byte UTF-8 character — curly
+quotes, em dashes, accented letters — gets decoded as Latin-1 garbage (e.g. `'` →
+`â€™`). Always latent, but never triggered until GLM 5.2 started using smart
+punctuation instead of ASCII apostrophes.
+
+**Mojibake fix:** Force `resp.encoding = "utf-8"` on the streaming response before
+`iter_lines(decode_unicode=True)` in `_do_request`.
+
+**"Almost texted you" tic:** GLM 5.2 heavily favors narrating actions it almost took
+("almost texted you," "I deleted a whole argument," "was going to send you this") as a
+low-effort way to perform emotional attachment. Added a rule to the default texting style
+calling this out — either do it or don't mention it.
+
 ## 2026-07-06 — ops tooling: fleet backup script, CI evals, secret scan (no bot.py change)
 
 **Not a bot release — no BOT_VERSION bump.** (New heading convention, enforced by the
