@@ -24,6 +24,18 @@ card tweaks) that don't touch `bot.py` behavior.
 
 ---
 
+## Agent operating system (`.claude/`)
+
+This repo has an enforcement layer — rules here are backed by files that run, not prose:
+
+- **Agents** (`.claude/agents/`): `chief-operator` (opus) orchestrates; `builder`/`system-fixer`/`qa-engineer` (sonnet) implement and verify; `adversarial-critic`/`eval-designer`/`improvement-analyst` (fable) audit and improve the system; `context-librarian`/`research-scout` (haiku) handle hygiene and lookups. Each has a strict contract (mission, scope, required evidence, output limit). Launch the operator with `claude --agent chief-operator`.
+- **Hooks** (`.claude/hooks/`, wired in `.claude/settings.json`): session-start state audit, Bash risk guard (force-push to main, root-level `rm -rf`, staging `.env`), per-call evidence logger, tool-call budget governor, **delivery gate** (blocks ending a turn with a modified `bot.py` that lacks a BOT_VERSION bump, changelog entry, or compile evidence), pre-compact handoff writer.
+- **Evals** (`.claude/evals/run-evals.sh`): every past incident from the changelog, pinned as a runnable check. Run before claiming any change done. A failure recurring twice earns a new eval — that's the rule.
+- **Memory** (`.claude/memory/operational-log.md`): one row per failure that changed the system — date, failure, root cause, patch, eval, next. No narration.
+- Runtime state (evidence logs, handoffs, budget counters) lives in `.claude/.runtime/` — gitignored, never commit it.
+
+---
+
 ## Bot instances
 
 | Session | Directory | Character card |
