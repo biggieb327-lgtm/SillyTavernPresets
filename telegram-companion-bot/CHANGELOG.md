@@ -7,6 +7,19 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-06.2 — fix selfie crash when no base PNG (NanoGPT path)
+
+**Root cause:** `_generate_selfie_nanogpt` unconditionally called `_base_data_url()`,
+which reads `SELFIE_BASE` (e.g. `priya_base.png`) from disk. If no base image exists
+but an `appearance.txt` does, `selfie_ready()` returns True (text-only generation is
+fine), and `build_selfie_prompt` correctly takes the text-only branch — but then
+`_generate_selfie_nanogpt` crashes with `FileNotFoundError` because it never checked
+`_has_base_image()` first. The Gemini path already had this guard (line 2778); the
+NanoGPT path was missing it.
+
+**Fix:** Only include `imageDataUrl` in the NanoGPT payload when `_has_base_image()`
+is True, matching the Gemini path's behavior.
+
 ## v2026-07-06.1 — fix UTF-8 mojibake + suppress "almost did X" model tic
 
 **Mojibake root cause:** `requests`' `iter_lines(decode_unicode=True)` uses the response's

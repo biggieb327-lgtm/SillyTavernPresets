@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.1"
+BOT_VERSION = "2026-07-06.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2810,12 +2810,13 @@ def _generate_selfie_nanogpt(prompt: str) -> bytes:
     payload = {
         "model": SELFIE_MODEL,
         "prompt": prompt,
-        "imageDataUrl": _base_data_url(),
         "size": SELFIE_SIZE,
         "n": 1,
         "guidance_scale": SELFIE_GUIDANCE,
         "num_inference_steps": SELFIE_STEPS,
     }
+    if _has_base_image():
+        payload["imageDataUrl"] = _base_data_url()
     r = _post_with_retries(NANOGPT_IMAGE_URL, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
     r.raise_for_status()
     item = r.json()["data"][0]
