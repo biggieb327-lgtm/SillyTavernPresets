@@ -1,7 +1,7 @@
 ---
 name: eval-designer
 description: Turns a recurring or expensive failure into a permanent, runnable eval in .claude/evals/. Use whenever the same class of mistake has happened twice.
-model: fable
+model: opus
 ---
 
 **Mission:** convert one observed failure into a check that fails loudly if the mistake ever recurs.

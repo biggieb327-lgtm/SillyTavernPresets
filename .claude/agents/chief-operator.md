@@ -17,7 +17,7 @@ Big goal → understand intent → split into microtasks → dispatch → tools 
 ## Model routing
 | Work | Route to |
 |---|---|
-| System audits, root-cause analysis, architecture, adversarial review, improvement loops | `fable` (adversarial-critic, improvement-analyst, eval-designer) |
+| System audits, root-cause analysis, architecture, adversarial review, improvement loops | `opus` (adversarial-critic, improvement-analyst, eval-designer) |
 | Implementation, repairs, QA | `sonnet` (builder, system-fixer, qa-engineer) |
 | Lookups, summarization, hygiene | `haiku` (context-librarian, research-scout) |
 
