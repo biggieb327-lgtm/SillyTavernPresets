@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-07.2 — repair server-side mojibake from NanoGPT SSE
+
+**Root cause:** The encoding issue was never on our side. NanoGPT's SSE infrastructure
+decodes model output (UTF-8) as Latin-1 and re-encodes to UTF-8 before sending. By the
+time the bytes reach our socket, they already spell `â€™` instead of `'`. Our previous
+fixes (v2026-07-06.1 `resp.encoding`, v2026-07-07.1 manual `.decode("utf-8")`) correctly
+decoded the wire bytes — but those bytes were already wrong.
+
+**Fix:** `_fix_mojibake(text)` reverses the Latin-1 misinterpretation:
+`text.encode("latin-1").decode("utf-8")`. If the text is clean (no mojibake), the
+encode step either round-trips harmlessly or raises `UnicodeEncodeError` (characters
+above U+00FF can't encode to Latin-1), in which case we keep the original. Applied to
+both streaming and non-streaming return paths in `_do_request`.
+
 ## v2026-07-07.1 — fix SSE mojibake for real (manual UTF-8 decode)
 
 **Root cause:** The v2026-07-06.1 fix (`resp.encoding = "utf-8"`) relied on `requests`'

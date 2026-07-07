@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-07.1"
+BOT_VERSION = "2026-07-07.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2315,6 +2315,13 @@ _SLOP_OPENER_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _fix_mojibake(text: str) -> str:
+    """Reverse UTF-8 → Latin-1 → UTF-8 double-encoding from upstream SSE servers."""
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return text
+
 def _strip_thinking(text: str) -> str:
     """Remove <think>...</think> blocks emitted by reasoning models."""
     return _THINK_RE.sub("", text).strip()
@@ -2368,14 +2375,14 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
         text = "".join(content_parts)
         if not text:
             text = "".join(reasoning_parts)
-        return _strip_thinking(text)
+        return _fix_mojibake(_strip_thinking(text))
     else:
         resp = _get_session().post(
             f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
             json=payload, timeout=(10, REQUEST_TIMEOUT),
         )
         resp.raise_for_status()
-        return _extract_content(resp.json()["choices"][0])
+        return _fix_mojibake(_extract_content(resp.json()["choices"][0]))
 
 
 def _one_call(messages: list, model: str) -> str:
