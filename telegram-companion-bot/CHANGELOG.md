@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-07.1 — fix SSE mojibake for real (manual UTF-8 decode)
+
+**Root cause:** The v2026-07-06.1 fix (`resp.encoding = "utf-8"`) relied on `requests`'
+`iter_lines(decode_unicode=True)` honoring the encoding override. On the phone's
+`requests` version it didn't — the response was still decoded as Latin-1, producing
+double-mojibake (`Ã¢ÂÂ` instead of `'`) as the already-garbled text was re-encoded
+through another layer.
+
+**Fix:** Drop `decode_unicode=True` entirely. Call `resp.iter_lines()` to get raw bytes,
+then decode each line explicitly with `raw.decode("utf-8", errors="replace")`. This
+bypasses `requests`' encoding detection completely — no Content-Type header, no
+`apparent_encoding`, no library version variance. The bytes come from the socket and we
+decode them ourselves.
+
 ## v2026-07-06.5 — semantic memory recall via NanoGPT embeddings
 
 **Semantic recall (ROADMAP 3.3):** memory retrieval now supplements keyword matching with

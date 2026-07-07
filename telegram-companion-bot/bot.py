@@ -65,7 +65,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.5"
+BOT_VERSION = "2026-07-07.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2344,10 +2344,10 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
             if resp.status_code >= 400:
                 _ = resp.content
                 resp.raise_for_status()
-            resp.encoding = "utf-8"
             content_parts: list[str] = []
             reasoning_parts: list[str] = []
-            for line in resp.iter_lines(decode_unicode=True):
+            for raw in resp.iter_lines():
+                line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
                 if not line or not line.startswith("data: "):
                     continue
                 data = line[6:].strip()
