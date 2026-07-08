@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
+import re
+import sys
+import warnings
 from pathlib import Path
 
 import jsonschema
@@ -21,6 +25,7 @@ from voicekit.prompts import (
 from voicekit.schemas import VOICE_PROFILE_SCHEMA
 
 ALLOWED_EXTENSIONS = {".txt", ".md", ".markdown"}
+CORPUS_CHAR_WARNING_THRESHOLD = 100_000
 
 
 def get_model(override: str | None = None) -> str:
@@ -33,16 +38,24 @@ def get_client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable is not set")
-    return OpenAI(api_key=api_key)
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def collect_samples(files: list[str] | None, samples_dir: str | None) -> list[Path]:
-    """Collect and de-duplicate sample file paths."""
+    """Collect and de-duplicate sample file paths, reporting skipped files."""
     paths: set[Path] = set()
+    skipped: list[str] = []
     if files:
         for f in files:
             p = Path(f).resolve()
-            if p.suffix.lower() in ALLOWED_EXTENSIONS and p.is_file():
+            if not p.exists():
+                skipped.append(f"{f} (file not found)")
+            elif not p.is_file():
+                skipped.append(f"{f} (not a regular file)")
+            elif p.suffix.lower() not in ALLOWED_EXTENSIONS:
+                skipped.append(f"{f} (unsupported extension '{p.suffix}'; use .txt, .md, .markdown)")
+            else:
                 paths.add(p)
     if samples_dir:
         d = Path(samples_dir).resolve()
@@ -50,13 +63,17 @@ def collect_samples(files: list[str] | None, samples_dir: str | None) -> list[Pa
             for p in d.iterdir():
                 if p.suffix.lower() in ALLOWED_EXTENSIONS and p.is_file():
                     paths.add(p)
+    if skipped:
+        print(f"Skipped {len(skipped)} file(s):", file=sys.stderr)
+        for reason in skipped:
+            print(f"  - {reason}", file=sys.stderr)
     if not paths:
         raise ValueError("No valid sample files found (.txt, .md, .markdown)")
     return sorted(paths)
 
 
 def build_corpus_text(paths: list[Path]) -> tuple[str, int, list[dict]]:
-    """Read files and build a labeled corpus string."""
+    """Read files and build a labeled corpus string. Warns if corpus is very large."""
     sections = []
     sources = []
     total_words = 0
@@ -68,13 +85,20 @@ def build_corpus_text(paths: list[Path]) -> tuple[str, int, list[dict]]:
         sources.append({"label": label, "word_count": word_count})
         sections.append(f"--- [{label}] ({word_count} words) ---\n{content}")
     corpus_text = "\n\n".join(sections)
+    if len(corpus_text) > CORPUS_CHAR_WARNING_THRESHOLD:
+        approx_tokens = len(corpus_text) // 4
+        warnings.warn(
+            f"Corpus is ~{approx_tokens:,} tokens ({len(corpus_text):,} chars). "
+            f"This may exceed model context limits and cause API errors or truncation.",
+            stacklevel=2,
+        )
     return corpus_text, total_words, sources
 
 
 def load_template() -> dict:
-    """Load the bundled voice profile template."""
-    template_path = Path(__file__).parent.parent.parent / "templates" / "voice_profile_template.json"
-    return json.loads(template_path.read_text(encoding="utf-8"))
+    """Load the bundled voice profile template using importlib.resources."""
+    ref = importlib.resources.files("voicekit").joinpath("templates/voice_profile_template.json")
+    return json.loads(ref.read_text(encoding="utf-8"))
 
 
 def validate_profile(profile: dict) -> None:
@@ -82,16 +106,33 @@ def validate_profile(profile: dict) -> None:
     jsonschema.validate(instance=profile, schema=VOICE_PROFILE_SCHEMA)
 
 
-def call_llm(client: OpenAI, model: str, system: str, user: str) -> str:
+def strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences wrapping JSON output."""
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*\n", "", text)
+    text = re.sub(r"\n```\s*$", "", text)
+    return text
+
+
+def call_llm(
+    client: OpenAI,
+    model: str,
+    system: str,
+    user: str,
+    json_mode: bool = False,
+) -> str:
     """Single LLM call returning the assistant message content."""
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    kwargs: dict = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.4,
-    )
+        "temperature": 0.4,
+    }
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content
     if not content:
         raise RuntimeError("LLM returned empty response")
@@ -141,12 +182,8 @@ def build_profile(
         if last_error:
             prompt += PROFILE_REPAIR_ADDENDUM.format(error=last_error)
 
-        raw = call_llm(client, resolved_model, PROFILE_BUILDER_SYSTEM, prompt)
-
-        # Strip markdown fences if the model wraps anyway
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else "\n".join(lines[1:])
+        raw = call_llm(client, resolved_model, PROFILE_BUILDER_SYSTEM, prompt, json_mode=True)
+        raw = strip_markdown_fences(raw)
 
         try:
             profile = json.loads(raw)
@@ -224,7 +261,17 @@ def judge(
         draft_text=draft_text,
     )
 
-    result = call_llm(client, resolved_model, JUDGE_SYSTEM, user_prompt)
+    raw = call_llm(client, resolved_model, JUDGE_SYSTEM, user_prompt, json_mode=True)
+    raw = strip_markdown_fences(raw)
+
+    # Validate that judge output is parseable JSON before saving
+    try:
+        parsed = json.loads(raw)
+        result = json.dumps(parsed, indent=2, ensure_ascii=False)
+    except json.JSONDecodeError:
+        # Save raw output but warn the user
+        result = raw
+        print("Warning: judge output is not valid JSON; saving raw response.", file=sys.stderr)
 
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

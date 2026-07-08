@@ -32,6 +32,12 @@ Optionally set a default model (falls back to `gpt-4.1-mini`):
 export OPENAI_MODEL="gpt-4.1"
 ```
 
+For local/alternative OpenAI-compatible servers (ollama, vLLM, LM Studio), set the base URL:
+
+```bash
+export OPENAI_BASE_URL="http://localhost:11434/v1"
+```
+
 ## Usage
 
 ### Build a profile from multiple files
@@ -113,8 +119,6 @@ Sample files must have one of these extensions: `.txt`, `.md`, `.markdown`
 voicekit-starter/
   pyproject.toml
   README.md
-  templates/
-    voice_profile_template.json
   src/
     voicekit/
       __init__.py
@@ -122,6 +126,8 @@ voicekit-starter/
       core.py       # Runtime logic (API calls, validation, file I/O)
       prompts.py    # System and user prompt templates
       schemas.py    # JSON schema for profile validation
+      templates/
+        voice_profile_template.json
 ```
 
 ## License
