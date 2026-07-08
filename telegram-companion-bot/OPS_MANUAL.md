@@ -392,6 +392,9 @@ you set `ADMIN_API_BIND` to the host's tailnet IP. See `.env.example` for the fu
 The native Android control-panel app itself is a separate, later phase — not part of
 this installer.
 
+**Migrating from Termux to VPS:** see [`deploy/MIGRATION.md`](deploy/MIGRATION.md) for
+the step-by-step runbook (pilot one bot, soak, then migrate the rest).
+
 ---
 
 ## Logs

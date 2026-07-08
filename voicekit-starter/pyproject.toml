@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicekit-starter"
+version = "0.1.0"
+description = "CLI tool for automating author voice profile extraction, generation, and judging"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+voicekit = "voicekit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+voicekit = ["templates/*.json"]
