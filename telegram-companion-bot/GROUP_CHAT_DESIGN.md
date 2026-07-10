@@ -193,11 +193,25 @@ is evaluated:
   **re-checked under the ledger's exclusive lock immediately before `send_message`** —
   if the chain reached `GROUP_BOT_CHAIN_MAX` (default **2**) while the reply was
   generating, the generated reply is discarded, not sent. A wasted model call is the
-  price of never exceeding the cap; it can only happen in an N≥3 race (two bots
-  replying to *different* messages concurrently — claims already prevent two replies
-  to the same one), which doesn't exist in the two-bot pilot. Any human message resets
-  the chain to zero by construction. Worst case per human beat:
+  price of never exceeding the cap. The lock is **released before** `send_message` —
+  see the lock discipline below for why that window is provably empty at N=2. Any
+  human message resets the chain to zero by construction. Worst case per human beat:
   human → bot A → bot B → silence.
+- **Lock discipline (binding on the implementation).** bot.py has no existing `flock`
+  usage; every blocking syscall elsewhere goes through a worker thread, and ledger I/O
+  follows the same rule: *every* flock acquire/release (append, read, rotate, the
+  pre-send cap re-check) runs inside `asyncio.to_thread`, and **the lock is never held
+  across an `await`** — in particular never across `send_message`. Holding it across a
+  network call would both starve the peer's 5s poll and, on a bad connection, freeze
+  the writer's own event loop, reproducing the exact `time.sleep` failure mode §2
+  bans. Releasing before send does open a check-then-send window, but at N=2 it is
+  provably empty: the only actor who could lengthen the chain during my send is the
+  peer, the peer only reacts to messages that exist in the ledger, my message enters
+  the ledger only *after* my send completes, and the claim on the message I'm
+  answering already excludes the peer from answering it too. At N≥3 the window is a
+  real (two bots answering *different* messages) but bounded race — one message over
+  cap, worst case — documented as the residual risk of the out-of-scope N≥3
+  configuration.
 - **Probability gate.** Below the cap, a bot replies to another bot's message only if
   `_is_addressed(...)` or `random() < GROUP_BOT_REPLY_PROB` (default **0.35**) — most
   bot remarks get no reply, which reads natural (group chats are full of unanswered
@@ -252,18 +266,22 @@ Two memory tiers exist today, and they split cleanly:
 
 Policy (per owner decision — **read-only in groups**):
 
-- **Writes: never from a group.** This claim is only as good as the write-path
-  inventory, so here is the complete one — every flat-file write reachable from a chat
-  message, and how it's closed:
+- **Writes: never from a group.** Two write surfaces exist, and they're closed by two
+  different mechanisms — one per surface, not per function, because round 1 and round 2
+  of adversarial review each caught a path a hand-enumerated list had missed
+  (`_check_joke_used`, then `/note` `/notes` `/addjoke` `/deljoke` `/addoutfit`
+  `/deloutfit` `/outfit` `/today` `/remindme` `/setreminder` `/cron`). A list that has
+  been incomplete twice is the wrong shape; the design closes *classes*:
 
-  | Write path | Trigger | Closed by |
-  |---|---|---|
-  | `post_reply_analysis` → `user_notes.txt`, `memories.txt` (+ `embeddings.json` via `_append_memory`), mood | every reply in `_deliver` | skipped entirely in `_group_deliver` |
-  | `_check_joke_used` → **`jokes.json`** | every reply in `_deliver`'s tail | skipped in `_group_deliver`. This one is easy to miss and leaks *both* directions: `inside_jokes` is a global list (not per-chat), so a group reply would mutate the DM's joke cooldowns, and the DM's inside jokes would be performed in front of the third party. The read side is closed too — the group prompt never injects the inside-jokes block. |
-  | `/addmem` → `memories.txt` | manual command | refuses in group chats with a one-line explanation |
-  | `/delmem`, `/setnote`-class commands | manual | same group refusal as `/addmem` |
-  | selfie/wardrobe paths → `wardrobe.json` | selfie generation | unreachable — no selfies in groups (§7) |
-  | `day.txt`, `world.txt`, `schedule.txt` | scheduled jobs, not chat messages | unaffected by groups by construction |
+  | Write surface | Closed by |
+  |---|---|
+  | **Automatic (reply-generation tail)**: `post_reply_analysis` (→ `user_notes.txt`, `memories.txt`, `embeddings.json` via `_append_memory`, mood), `_check_joke_used` (→ `jokes.json`), selfie/wardrobe paths (→ `wardrobe.json`) | `_group_deliver` is a lean sibling of `_deliver` that simply *does not contain* these calls — the group tail is allowlist-built (remember + send + ledger append + react), not a copy of `_deliver` with skips. A new call added to `_deliver`'s tail later does not leak into groups by default. |
+  | **Manual (command handlers)**: every `/command`, present and future | **Default-deny at one choke point.** A single guard handler registered in PTB handler group `-1` intercepts every command update in a group chat and stops propagation (`ApplicationHandlerStop`) with a one-line refusal, unless the command is on the tiny group allowlist: `/chatid` (needed during setup) — nothing else in v1. Ops commands (`/audit`, `/update`, …) are DM affordances; reminders and cron in groups are deferred with the other proactive-into-group features (§9). No per-command gating, so no future command reopens this. |
+
+  The `inside_jokes` leak closes on the read side too: the group prompt never injects
+  the inside-jokes block (`inside_jokes` is a global list, not per-chat — a DM's
+  private bits must not be performed in front of the third party, and a group reply
+  must not tick the DM's joke cooldowns).
 
   Per-chat in-memory structures written during group replies (`conversation_history`,
   `_recent_questions`, mood dict, facts) are keyed by the group's chat_id inside
@@ -303,10 +321,10 @@ Multiple humans are explicitly out of scope (§9).
 - **Non-text handlers** (photo, voice, sticker, video, document, location) return early
   in group chats in v1 — smaller surface, and the media pipelines (vision calls, whisper
   transcription) are exactly the expensive paths §4 is keeping off.
-- **Ops commands in groups**: `/update`, `/restart`, `/errors`, `/backup` etc. remain
-  admin-gated by user id; they work from a group only for the admin, and `/backup` is
-  additionally refused in groups (it would post state files where another bot's process
-  could log them — and it's just weird in company).
+- **Commands in groups: default-deny** (mechanism specified in §5). Every command —
+  including admin ops like `/update`, `/restart`, `/backup` — is refused in group
+  chats except `/chatid`. Admins run ops from the DM; `/backup` in particular must
+  never post state files into a group.
 
 ## 7. Prompt and delivery changes
 
@@ -381,9 +399,11 @@ All new, all inert unless `GROUP_MODE=1`:
 - **More than 1 human** — breaks the `{{user}}` two-participant assumption; needs
   per-participant identity in prompts (a real design change, not a config knob).
 - **Media in groups** — voice/selfie/meme/photo-understanding, all off.
-- **Group-initiated proactive messages** — heartbeats and note follow-ups stay DM-only.
-  (A character spontaneously texting the group is v2 gold, but it needs its own budget
-  and claim design.)
+- **Group-initiated proactive messages** — heartbeats and note follow-ups stay DM-only,
+  and so do user-created scheduled sends: `/remindme`, `/setreminder`, and `/cron` are
+  refused in groups by the default-deny command guard (§5), so nothing can schedule a
+  future message into the group. (A character spontaneously texting the group is v2
+  gold, but it needs its own budget and claim design.)
 - **Group-scoped flat-file memory** — a `group_memories.txt` tier can come later if the
   per-chat facts prove insufficient.
 - **Edited-message handling** — ledger entries are immutable; edits are ignored.
@@ -403,9 +423,12 @@ Setup (documented in OPS_MANUAL/SETUP_GUIDE):
    `GROUP_MODE=1`, `GROUP_ALLOWED_CHATS=<id>`, `GROUP_PEERS=<other name>`.
 4. Deploy bot.py normally (`/update` one bot, `/restart` the rest), then `/restart` the
    two pilots to pick up the .env changes.
-5. **On-device atomicity smoke test** (once, before trusting the claim mechanism): the
-   prototype ships a tiny `--claim-test` mode (two concurrent processes race 100 claims;
-   assert exactly one winner each) to verify flock/O_EXCL semantics on Termux's ext4.
+5. **On-device atomicity smoke test** (once, before trusting either primitive): the
+   prototype ships a tiny `--claim-test` mode covering both load-bearing mechanisms —
+   (a) two concurrent processes race 100 claims, assert exactly one winner each
+   (`O_EXCL`); (b) the same two processes append 100 ledger lines each under
+   `flock(LOCK_EX)`, assert all 200 lines present, intact, and unintermixed. Verifies
+   both on Termux's ext4 before the pilot goes live.
 
 Acceptance script (all must pass before the pilot is called working):
 
@@ -422,10 +445,14 @@ Acceptance script (all must pass before the pilot is called working):
    addressed-bypasses-nothing rule and the under-lock cap re-check).
 6. Restart one pilot mid-conversation → no replay of old messages (staleness guard).
 7. **Full flat-file freeze check.** Before the session:
-   `sha256sum ~/priya-bot/{memories.txt,user_notes.txt,people.txt,projects.txt,life.txt,jokes.json,wardrobe.json,embeddings.json} > /tmp/pre.sha` (same for jules-bot; missing
-   files are skipped). After an evening of group chat: every hash identical. `day.txt`
-   and `state.json` are excluded — jobs legitimately write them — but the group's
-   history/facts must exist under the group chat_id in state.json and the DM chat_id's
+   `sha256sum ~/priya-bot/{memories.txt,user_notes.txt,people.txt,projects.txt,life.txt,jokes.json,wardrobe.json,embeddings.json,reminders.json,cron_jobs.json} > /tmp/pre.sha`
+   (same for jules-bot; missing files are skipped). During the session, deliberately
+   attempt the leak paths from the group: `/note test`, `/notes clear`, `/addjoke x | y | z`,
+   `/today fake event`, `/remindme 5m test`, `/addmem test` — every one must be refused
+   by the default-deny guard. After the evening: every hash identical. `day.txt` and
+   `state.json` are excluded from the hash set — jobs legitimately write them — but
+   `/today` from the group must have been refused (checked above), the group's
+   history/facts must exist under the group chat_id in state.json, and the DM chat_id's
    entries must be unchanged.
 8. DM each pilot → normal 1:1 behavior, heartbeat/note-followups still target the DM
    owner only.
