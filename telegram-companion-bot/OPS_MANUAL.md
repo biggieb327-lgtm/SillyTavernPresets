@@ -354,7 +354,53 @@ All 6 bots share one `bot.py` and launch from their own directories via `run-bot
 Starting & Stopping above) or `update-all.sh` for all of them at once. Sessions: `nora`,
 `bonnie`, `cass`, `emily`, `priya`, `jules`.
 
-Each character is fully isolated — separate state, memory, context files, and bot token. They have no knowledge of each other.
+Each character is fully isolated — separate state, memory, context files, and bot token.
+They have no knowledge of each other (except instances opted into the group-chat pilot —
+see the next section).
+
+---
+
+## Group chat (experimental)
+
+Two character bots + you in one Telegram group, behind `GROUP_MODE=1` on exactly the
+pilot instances (Priya + Jules). **Read `GROUP_CHAT_DESIGN.md` before touching this** —
+the mechanisms (shared ledger, atomic claims, chain cap) exist because Telegram never
+delivers one bot's messages to another bot, and the design survived four adversarial
+review rounds; don't casually "simplify" it.
+
+Setup, once per pilot bot:
+
+1. BotFather → `/setprivacy` → **Disable** (or the bot never sees unaddressed group
+   messages). Then remove and re-add the bot to the group — Telegram applies privacy
+   changes only on re-add.
+2. Create the group, add both bots + yourself. Send `/chatid` in it to get the id
+   (negative number).
+3. In `~/priya-bot/.env` and `~/jules-bot/.env` only:
+   ```
+   GROUP_MODE=1
+   GROUP_ALLOWED_CHATS=<the id>
+   GROUP_PEERS=<the other character's first name>
+   ```
+4. One-time smoke test of the atomicity primitives on the phone:
+   `~/telegram-bot/venv/bin/python ~/telegram-bot/bot.py ~/priya-bot --claim-test`
+   (must print two PASS lines).
+5. `/restart` both pilots. Run the acceptance script in `GROUP_CHAT_DESIGN.md` §10
+   before calling it working.
+
+Behavior notes:
+
+- Every other instance ignores groups entirely (fail closed) — adding nora to some
+  group does nothing; she answers only `/chatid` there.
+- ALL commands except `/chatid` are refused in groups, for everyone, including admins.
+  Ops happen in DMs.
+- Nothing said in a group ever writes `memories.txt`, `user_notes.txt`, `jokes.json`,
+  etc., and `user_notes.txt` / inside jokes are never shown in group prompts — the
+  private 1:1 relationship stays private. Group conversation state lives under the
+  group's chat_id in each instance's `state.json`.
+- `/audit` (in DM) shows a per-group line: ledger size, bot-send budget used, current
+  bot chain length — that answers "why did she stop replying to Jules?" (budget or cap).
+- Kill switch: remove `GROUP_MODE=1` from both `.env`s and `/restart` — pure DM
+  behavior returns; the ledger file (`group_<id>.jsonl` next to bot.py) goes inert.
 
 ---
 

@@ -7,6 +7,50 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-10.1 — group chat prototype (GROUP_MODE, Priya + Jules pilot)
+
+**Group chat / bot-to-bot (ROADMAP 3.4):** two character bots + one human in one
+Telegram group, behind `GROUP_MODE=1` + `GROUP_ALLOWED_CHATS` on the pilot instances
+only. Full design + rationale in `GROUP_CHAT_DESIGN.md` — it survived four rounds of
+adversarial-critic review before any of this code was written, and the review caught
+real bugs (a poll/live double-answer race, a chain-cap race, and two rounds of missed
+flat-file write paths), so read it before touching this feature.
+
+**The platform fact everything is built around:** Telegram never delivers one bot's
+messages to another bot (API-level anti-loop policy, regardless of privacy mode).
+Bot-to-bot therefore flows through a shared ledger file (`group_<chat_id>.jsonl`
+alongside bot.py, same cross-instance pattern as world.txt): each bot appends what it
+posts, a 5s poll job reads what peers said. Human messages arrive live via Telegram
+(privacy mode must be DISABLED via BotFather for the pilot bots) and are never acted
+on from the ledger — acting on both would double-answer every addressed message.
+
+- **Turn-taking:** addressed messages (@mention / first name on word boundary / reply
+  to own message) answered deterministically; unaddressed ones through an atomic claim
+  file (`O_CREAT|O_EXCL`) so exactly one bot answers, with a jittered delay biased
+  toward alternation.
+- **Loop prevention, layered:** every reply to a bot message needs the claim (even
+  when addressed by name — the LLM's favorite register is exactly the loop risk);
+  chain cap `GROUP_BOT_CHAIN_MAX=2` re-checked under the ledger lock right before
+  send (generated reply discarded if the chain filled meanwhile); 20s send throttle;
+  30/day bot-to-bot budget.
+- **Fleet-wide fail-closed (deliberate behavior change):** group chats are ignored by
+  every instance unless GROUP_MODE + allowlist say otherwise, and ALL commands except
+  `/chatid` are refused in any group via a single TypeHandler choke point (group -1).
+  Previously any bot added to a random group would execute `/note`, `/backup`, etc.
+  there — same latent-bug class as `set_owner` being claimable by a group, which is
+  also fixed (central guard: negative chat_ids can never become the proactive owner).
+- **Memory read-only in groups:** group prompts read the character's life (memories,
+  people, projects, day/world context) but never `user_notes.txt` or inside jokes
+  (private 1:1 state); nothing in a group writes any flat file — `_group_deliver` is
+  allowlist-built (no post_reply_analysis, no joke tracking, no TTS/selfie/meme) and
+  the command guard blocks the manual paths. Two new evals pin this boundary in CI
+  (`group-deliver-clean`, `group-cmd-allowlist`).
+- **Cost:** ≤2 chat-model calls per human message fleet-wide + amortized summarization
+  (groups summarize half as often); zero side calls in groups.
+- **Ops:** `python bot.py <dir> --claim-test` smoke-tests both atomicity primitives
+  on-device; `/audit` shows ledger size, budget, and chain state per group; new error
+  categories `group_ledger` / `group_claim`.
+
 ## v2026-07-07.2 — repair server-side mojibake from NanoGPT SSE
 
 **Root cause:** The encoding issue was never on our side. NanoGPT's SSE infrastructure

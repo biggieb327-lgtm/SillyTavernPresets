@@ -111,6 +111,33 @@ if [ -f .claude/settings.json ]; then
   fi
 fi
 
+# Group chat boundary (GROUP_CHAT_DESIGN.md §12). Two adversarial-review rounds each
+# found a flat-file write path a hand-kept list had missed, so the boundary is pinned
+# here as class-level checks, not left to memory.
+# (a) _group_deliver must stay allowlist-BUILT: none of the DM tail's side effects may
+# appear in its body — those write per-instance flat files that leak into private DMs.
+if grep -q 'async def _group_deliver' "$BOT"; then
+  gd_body=$(awk '/^async def _group_deliver/{f=1; next} f && /^(async def |def )/{exit} f' "$BOT")
+  gd_bad=""
+  for banned in post_reply_analysis _check_joke_used send_selfie send_meme _send_voice_reply _append_user_note _append_memory; do
+    echo "$gd_body" | grep -q "$banned" && gd_bad="$gd_bad $banned"
+  done
+  if [ -z "$gd_bad" ]; then
+    ok "group-deliver-clean: _group_deliver contains no DM-tail side effects"
+  else
+    bad "group-deliver-clean" "banned call(s) in _group_deliver:$gd_bad — group replies would write private flat files"
+  fi
+else
+  bad "group-deliver-clean" "_group_deliver missing from bot.py"
+fi
+# (b) The group command allowlist must stay exactly {"chatid"} — widening it is a
+# reviewed act (edit this eval in the same commit), never a drive-by.
+if grep -qE 'GROUP_ALLOWED_COMMANDS = \{"chatid"\}' "$BOT"; then
+  ok "group-cmd-allowlist: GROUP_ALLOWED_COMMANDS pinned to {\"chatid\"}"
+else
+  bad "group-cmd-allowlist" "GROUP_ALLOWED_COMMANDS changed — group chats may now execute commands that write private state"
+fi
+
 echo
 echo "evals: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]

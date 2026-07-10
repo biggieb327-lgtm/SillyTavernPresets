@@ -245,6 +245,123 @@ class TestCosineSim:
         assert bot._cosine_sim([0, 0], [1, 1]) == 0.0
 
 
+# ── Group chat turn-taking / loop prevention (GROUP_CHAT_DESIGN.md) ─────────
+
+def _human(msg_id=1, sender="Brian", text="hey"):
+    return {"ts": 1000.0, "msg_id": msg_id, "sender": sender, "kind": "human",
+            "text": text, "reply_to": None}
+
+
+def _bot(msg_id=2, sender="Priya", text="hi", reply_to=None):
+    return {"ts": 1000.0, "msg_id": msg_id, "sender": sender, "kind": "bot",
+            "text": text, "reply_to": reply_to}
+
+
+class TestParseLedgerLines:
+    def test_valid_lines(self):
+        lines = [json.dumps(_human(1)), json.dumps(_bot(2))]
+        out = bot._parse_ledger_lines(lines)
+        assert len(out) == 2
+        assert out[0]["kind"] == "human"
+
+    def test_bad_json_skipped(self):
+        lines = ["{not json", json.dumps(_bot(2)), ""]
+        out = bot._parse_ledger_lines(lines)
+        assert len(out) == 1
+        assert out[0]["msg_id"] == 2
+
+    def test_missing_fields_skipped(self):
+        out = bot._parse_ledger_lines(['{"kind": "bot"}', '{"msg_id": 5}',
+                                       '{"msg_id": 5, "kind": "alien"}'])
+        assert out == []
+
+
+class TestBotChainLen:
+    def test_empty(self):
+        assert bot._bot_chain_len([]) == 0
+
+    def test_all_human(self):
+        assert bot._bot_chain_len([_human(1), _human(2)]) == 0
+
+    def test_bot_tail(self):
+        assert bot._bot_chain_len([_human(1), _bot(2), _bot(3)]) == 2
+
+    def test_human_resets(self):
+        assert bot._bot_chain_len([_bot(1), _bot(2), _human(3)]) == 0
+
+
+class TestIsAddressed:
+    def test_mention(self):
+        assert bot._is_addressed("hey @priya_bot what up", "Priya", "priya_bot")
+
+    def test_first_name_word_boundary(self):
+        assert bot._is_addressed("priya, you're wrong", "Priya Sharma", "x_bot")
+        assert bot._is_addressed("I think Jules is right", "Jules Nakagawa", "y_bot")
+
+    def test_substring_is_not_a_match(self):
+        assert not bot._is_addressed("I visited julesburg once", "Jules", "y_bot")
+        assert not bot._is_addressed("priyanka called", "Priya", "x_bot")
+
+    def test_reply_to_own(self):
+        assert bot._is_addressed("totally", "Priya", "x_bot", replied_to_own=True)
+
+    def test_unaddressed(self):
+        assert not bot._is_addressed("nice weather today", "Priya", "priya_bot")
+
+    def test_empty_text(self):
+        assert not bot._is_addressed("", "Priya", "priya_bot")
+
+
+class TestShouldReplyToBot:
+    def test_cap_overrides_addressed(self):
+        entries = [_human(1), _bot(2), _bot(3)]  # chain == GROUP_BOT_CHAIN_MAX (2)
+        assert not bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=True)
+
+    def test_addressed_below_cap(self):
+        entries = [_human(1), _bot(2)]
+        assert bot._should_reply_to_bot(entries, prob_roll=0.99, addressed=True)
+
+    def test_probability_gate(self):
+        entries = [_human(1), _bot(2)]
+        assert bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=False)
+        assert not bot._should_reply_to_bot(entries, prob_roll=0.99, addressed=False)
+
+
+class TestClaimDelay:
+    def test_jitter_range(self):
+        entries = [_human(1)]
+        assert abs(bot._claim_delay(entries, "Priya", 0.0) - 0.5) < 1e-9
+        assert abs(bot._claim_delay(entries, "Priya", 1.0) - 3.0) < 1e-9
+
+    def test_alternation_penalty_when_self_spoke_last(self):
+        entries = [_human(1), _bot(2, sender="Priya")]
+        base = bot._claim_delay([_human(1)], "Priya Sharma", 0.0)
+        penalized = bot._claim_delay(entries, "Priya Sharma", 0.0)
+        assert abs((penalized - base) - bot.GROUP_ALTERNATION_PENALTY) < 1e-9
+
+    def test_no_penalty_when_peer_spoke_last(self):
+        entries = [_human(1), _bot(2, sender="Jules")]
+        assert abs(bot._claim_delay(entries, "Priya", 0.0) - 0.5) < 1e-9
+
+    def test_last_bot_found_past_humans(self):
+        # Humans after the bot don't hide it — "last BOT to speak" is what matters.
+        entries = [_bot(1, sender="Priya"), _human(2)]
+        assert bot._claim_delay(entries, "Priya", 0.0) > 2.0
+
+
+class TestGroupLedgerPath:
+    def test_negative_id_in_name(self):
+        p = bot._group_ledger_path(-1001234)
+        assert p.name == "group_-1001234.jsonl"
+
+
+class TestGroupCommandAllowlist:
+    def test_pinned_to_chatid_only(self):
+        # Widening this is a deliberate act — see GROUP_CHAT_DESIGN.md §12 and the
+        # group-cmd-allowlist eval. Update both together or not at all.
+        assert bot.GROUP_ALLOWED_COMMANDS == {"chatid"}
+
+
 # ── _count_error tracking ────────────────────────────────────────────────────
 
 class TestCountError:
