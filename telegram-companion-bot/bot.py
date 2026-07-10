@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import math
+import fcntl
 import random
 import asyncio
 import time
@@ -56,16 +57,18 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotComm
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
+    TypeHandler,
     filters,
 )
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-06.5"
+BOT_VERSION = "2026-07-10.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -189,6 +192,30 @@ TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no"
 TYPING_WPM = float(os.getenv("TYPING_WPM", "120"))
 TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.5"))
 TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
+
+# --- Group chat (experimental, GROUP_CHAT_DESIGN.md) ---
+# An instance participates in a group only when GROUP_MODE=1 AND the group is in
+# GROUP_ALLOWED_CHATS. Every other instance ignores group traffic entirely (fail
+# closed, fleet-wide) — see group_guard().
+GROUP_MODE = os.getenv("GROUP_MODE", "0").lower() in ("1", "true", "yes")
+GROUP_ALLOWED_CHATS: set[int] = {
+    int(x) for x in os.getenv("GROUP_ALLOWED_CHATS", "").split(",")
+    if x.strip().lstrip("-").isdigit()
+}
+GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
+GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line; Name2: ..."
+GROUP_BOT_REPLY_PROB = float(os.getenv("GROUP_BOT_REPLY_PROB", "0.35"))
+GROUP_BOT_CHAIN_MAX = int(os.getenv("GROUP_BOT_CHAIN_MAX", "2"))
+GROUP_POLL_SECONDS = int(os.getenv("GROUP_POLL_SECONDS", "5"))
+GROUP_MIN_GAP_SECONDS = float(os.getenv("GROUP_MIN_GAP_SECONDS", "20"))
+GROUP_ALTERNATION_PENALTY = float(os.getenv("GROUP_ALTERNATION_PENALTY", "2.0"))
+GROUP_DAILY_BOT_BUDGET = int(os.getenv("GROUP_DAILY_BOT_BUDGET", "30"))
+GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
+GROUP_LEDGER_MAX_AGE_SECONDS = int(os.getenv("GROUP_LEDGER_MAX_AGE_SECONDS", "600"))
+GROUP_CLAIM_TTL_SECONDS = int(os.getenv("GROUP_CLAIM_TTL_SECONDS", "600"))
+# The ONLY commands a bot answers in any group chat. Widening this is a reviewed,
+# deliberate act: the group-cmd-allowlist eval pins it (GROUP_CHAT_DESIGN.md §12).
+GROUP_ALLOWED_COMMANDS = {"chatid"}
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -646,6 +673,275 @@ def _read_world_context() -> str:
     except Exception:
         return ""
 
+# --- Group chat: shared ledger, claims, turn-taking (GROUP_CHAT_DESIGN.md) ---
+# Telegram never delivers one bot's messages to another bot, so bot-to-bot flows
+# through a shared JSONL ledger on the common filesystem (same pattern as world.txt).
+# LOCK DISCIPLINE (binding): every flock acquire/release runs in a worker thread via
+# asyncio.to_thread, and the lock is NEVER held across an await — see design §3.
+
+def _group_ledger_path(chat_id: int) -> Path:
+    return GROUP_LEDGER_DIR / f"group_{chat_id}.jsonl"
+
+
+def _group_claims_dir() -> Path:
+    d = GROUP_LEDGER_DIR / "group_claims"
+    try:
+        d.mkdir(exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _parse_ledger_lines(lines) -> list[dict]:
+    """Tolerant line-by-line parse; bad lines are skipped and counted, never fatal."""
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except Exception:
+            _count_error("group_ledger")
+            continue
+        if isinstance(e, dict) and "msg_id" in e and e.get("kind") in ("human", "bot"):
+            out.append(e)
+    return out
+
+
+def _bot_chain_len(entries: list[dict]) -> int:
+    """Consecutive kind=='bot' entries at the ledger tail. A human message resets it."""
+    n = 0
+    for e in reversed(entries):
+        if e.get("kind") == "bot":
+            n += 1
+        else:
+            break
+    return n
+
+
+def _is_addressed(text: str, char_name: str, bot_username: str, replied_to_own: bool = False) -> bool:
+    """Does this message address this character? @username, first name on a word
+    boundary, or a Telegram reply to a message this bot posted."""
+    if replied_to_own:
+        return True
+    low = (text or "").lower()
+    if bot_username and f"@{bot_username.lower()}" in low:
+        return True
+    first = (char_name or "").split()[0].lower() if char_name else ""
+    if first and re.search(r"\b" + re.escape(first) + r"\b", low):
+        return True
+    return False
+
+
+def _should_reply_to_bot(entries: list[dict], prob_roll: float, addressed: bool) -> bool:
+    """Reply to a peer bot's message? The chain cap overrides even being addressed —
+    that's the loop-prevention primary (design §3)."""
+    if _bot_chain_len(entries) >= GROUP_BOT_CHAIN_MAX:
+        return False
+    return addressed or prob_roll < GROUP_BOT_REPLY_PROB
+
+
+def _claim_delay(entries: list[dict], char_name: str, jitter_roll: float) -> float:
+    """Jittered pre-claim delay; the last bot to have spoken waits extra so the quieter
+    character tends to win the next open message (alternation without coordination)."""
+    delay = 0.5 + max(0.0, min(1.0, jitter_roll)) * 2.5
+    first = (char_name or "").split()[0] if char_name else ""
+    for e in reversed(entries):
+        if e.get("kind") == "bot":
+            if e.get("sender") == first:
+                delay += GROUP_ALTERNATION_PENALTY
+            break
+    return delay
+
+
+def _ledger_append(chat_id: int, entry: dict) -> bool:
+    """Append one entry under an exclusive lock, deduping by msg_id against the tail
+    (all privacy-off bots receive the same human message; one append survives).
+    Rotates the file when it grows past ~1000 lines. Blocking — call via to_thread."""
+    path = _group_ledger_path(chat_id)
+    try:
+        with open(path, "a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                lines = f.readlines()
+                tail = _parse_ledger_lines(lines[-50:])
+                if any(e.get("msg_id") == entry.get("msg_id") for e in tail):
+                    return False
+                if len(lines) > 1000:
+                    keep = lines[-300:]
+                    f.seek(0)
+                    f.truncate()
+                    f.writelines(keep)
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+                return True
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception as e:
+        log.warning("[group] ledger append failed: %s", e)
+        _count_error("group_ledger")
+        return False
+
+
+def _ledger_tail(chat_id: int, max_lines: int = 50) -> list[dict]:
+    """Last entries of the ledger, read under a shared lock. Blocking — to_thread."""
+    path = _group_ledger_path(chat_id)
+    if not path.exists():
+        return []
+    try:
+        with open(path, "rb") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 16384))
+                raw = f.read()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return _parse_ledger_lines(raw.decode("utf-8", "replace").splitlines()[-max_lines:])
+    except Exception as e:
+        log.warning("[group] ledger tail read failed: %s", e)
+        _count_error("group_ledger")
+        return []
+
+
+def _ledger_read_new(chat_id: int) -> list[dict]:
+    """Entries past this instance's persisted byte cursor. On first sight or rotation
+    shrink, fast-forward to EOF (never replay). Blocking — call via to_thread."""
+    path = _group_ledger_path(chat_id)
+    if not path.exists():
+        return []
+    try:
+        with open(path, "rb") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            try:
+                f.seek(0, 2)
+                size = f.tell()
+                cur = group_cursor.get(chat_id, -1)
+                if cur < 0 or cur > size:
+                    group_cursor[chat_id] = size
+                    save_state()
+                    return []
+                if cur == size:
+                    return []
+                f.seek(cur)
+                raw = f.read()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        group_cursor[chat_id] = cur + len(raw)
+        save_state()
+        return _parse_ledger_lines(raw.decode("utf-8", "replace").splitlines())
+    except Exception as e:
+        log.warning("[group] ledger read failed: %s", e)
+        _count_error("group_ledger")
+        return []
+
+
+def _chain_ok_under_lock(chat_id: int) -> bool:
+    """Pre-send re-check of the chain cap against the current ledger tail (design §3).
+    Fails open on IO error — the claim/throttle/budget still bound. Blocking — to_thread."""
+    return _bot_chain_len(_ledger_tail(chat_id)) < GROUP_BOT_CHAIN_MAX
+
+
+def _try_claim(chat_id: int, msg_id) -> bool:
+    """Atomically claim the right to answer one message. O_CREAT|O_EXCL: exactly one
+    process fleet-wide can succeed. Blocking — call via to_thread."""
+    try:
+        fd = os.open(str(_group_claims_dir() / f"{chat_id}_{msg_id}"),
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        log.warning("[group] claim failed: %s", e)
+        _count_error("group_claim")
+        return False
+
+
+def _prune_claims():
+    """Delete claim markers older than the TTL. Blocking — call via to_thread."""
+    try:
+        now = time.time()
+        for p in _group_claims_dir().iterdir():
+            try:
+                if now - p.stat().st_mtime > GROUP_CLAIM_TTL_SECONDS:
+                    p.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+
+
+_group_last_send: dict[int, float] = {}  # chat_id -> ts of our last group message
+
+
+def _group_gap_ok(chat_id: int) -> bool:
+    return time.time() - _group_last_send.get(chat_id, 0) >= GROUP_MIN_GAP_SECONDS
+
+
+def _group_budget_ok(chat_id: int) -> bool:
+    today = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d")
+    b = group_bot_sends_today.get(chat_id)
+    if not b or b.get("date") != today:
+        return True
+    return b.get("count", 0) < GROUP_DAILY_BOT_BUDGET
+
+
+def _group_bump_budget(chat_id: int):
+    today = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d")
+    b = group_bot_sends_today.get(chat_id)
+    if not b or b.get("date") != today:
+        group_bot_sends_today[chat_id] = {"date": today, "count": 1}
+    else:
+        b["count"] = b.get("count", 0) + 1
+    save_state()
+
+
+def _run_claim_test() -> bool:
+    """--claim-test: on-device smoke test of both atomicity primitives before trusting
+    them (GROUP_CHAT_DESIGN.md §10.5). Two processes race 100 claims (exactly one
+    winner each) and append 100 flock'd ledger lines each (all 200 intact)."""
+    import multiprocessing as mp
+    test_chat = -999_999_999
+    ledger = _group_ledger_path(test_chat)
+    ledger.unlink(missing_ok=True)
+    for p in _group_claims_dir().glob(f"{test_chat}_*"):
+        p.unlink(missing_ok=True)
+
+    def worker(idx: int, q):
+        wins = 0
+        for i in range(100):
+            if _try_claim(test_chat, 7_000_000 + i):
+                wins += 1
+            _ledger_append(test_chat, {
+                "ts": time.time(), "msg_id": idx * 1_000_000 + i,
+                "sender": f"proc{idx}", "kind": "bot", "text": "x" * 40, "reply_to": None,
+            })
+        q.put(wins)
+
+    q = mp.Queue()
+    procs = [mp.Process(target=worker, args=(i + 1, q)) for i in range(2)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    wins = [q.get(timeout=5) for _ in range(2)]
+    entries = _parse_ledger_lines(ledger.read_text(encoding="utf-8").splitlines())
+    claims_ok = sum(wins) == 100
+    ledger_ok = len(entries) == 200
+    print(f"[claim-test] claims: {wins[0]}+{wins[1]}={sum(wins)} (want exactly 100) -> "
+          f"{'PASS' if claims_ok else 'FAIL'}")
+    print(f"[claim-test] ledger: {len(entries)}/200 intact lines -> "
+          f"{'PASS' if ledger_ok else 'FAIL'}")
+    ledger.unlink(missing_ok=True)
+    for p in _group_claims_dir().glob(f"{test_chat}_*"):
+        p.unlink(missing_ok=True)
+    return claims_ok and ledger_ok
+
+
 # --- Day context file (day.txt) — editable throughout the day for continuity ---
 DAY_FILE = BASE_DIR / "day.txt"
 DAY_TTL = 300  # re-read at most every 5 minutes
@@ -752,6 +1048,13 @@ if not card_path.exists():
 
 NAME, SYSTEM_PROMPT_RAW, POST_HISTORY_RAW, LORE, FIRST_MES_RAW = load_character(card_path)
 
+
+def _char_first_name() -> str:
+    """First name of the character — the ledger sender label and the name peers use
+    to address her in groups. A function (not a constant) so /setcard stays live."""
+    return (NAME or "Bot").split()[0]
+
+
 # Raw card data kept in memory so /setcard can update individual fields without a restart.
 _card_json: dict = json.loads(card_path.read_text(encoding="utf-8"))
 _card_data: dict = _card_json.get("data", _card_json)  # reference into the live dict
@@ -812,6 +1115,8 @@ model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, se
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
+group_cursor: dict = {}    # group chat_id -> byte offset into the shared group ledger
+group_bot_sends_today: dict = {}  # group chat_id -> {"date": str, "count": int} (bot-to-bot budget)
 
 STATE_FILE = BASE_DIR / "state.json"
 # watchdog.sh (a phone-side script, not part of this repo) treats a stale .alive as a
@@ -893,6 +1198,10 @@ def load_state():
         user_location[int(cid)] = lv
     for cid, ids in data.get("seen_incidents", {}).items():
         seen_incidents[int(cid)] = set(ids)
+    for cid, off in data.get("group_cursor", {}).items():
+        group_cursor[int(cid)] = off
+    for cid, b in data.get("group_bot_sends_today", {}).items():
+        group_bot_sends_today[int(cid)] = b
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -925,6 +1234,8 @@ def _write_state():
         "setting_overrides": setting_overrides,
         "user_location": {str(k): v for k, v in user_location.items()},
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
+        "group_cursor": {str(k): v for k, v in group_cursor.items()},
+        "group_bot_sends_today": {str(k): v for k, v in group_bot_sends_today.items()},
     }
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -1468,6 +1779,11 @@ def get_owner():
 
 
 def set_owner(chat_id: int):
+    # A group chat must never capture proactive messaging (heartbeats, follow-ups).
+    # Central guard: there are seven call sites and all of them claim on first
+    # interaction — refusing negative ids here closes every one (GROUP_CHAT_DESIGN.md §6).
+    if chat_id < 0:
+        return
     if not OWNER_CHAT_ID_ENV:
         OWNER_FILE.write_text(str(chat_id))
 
@@ -2080,8 +2396,14 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
-def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None, inner_voice: str = None):
-    """Build the OpenAI-style message list the way SillyTavern layers a card."""
+def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
+                      inner_voice: str = None, group: bool = False):
+    """Build the OpenAI-style message list the way SillyTavern layers a card.
+
+    group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
+    group-context block is added, and the two blocks that would leak private 1:1
+    state in front of a third party — user_notes.txt and inside jokes — are omitted.
+    Everything else keyed by chat_id is the group's own state and stays."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
 
@@ -2127,7 +2449,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         f"[react: 👍]. Pick from: {REACTION_HINTS}. Always include your text reply too — "
         f"a reaction never replaces a message, it goes with it.",
     ]
-    if selfie_ready():
+    if not group and selfie_ready():
         cap_lines.append(
             f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
             f"[selfie: a short visual description — your pose, expression, surroundings]. "
@@ -2136,14 +2458,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
             f"and don't overuse it."
         )
-    if meme_ready():
+    if not group and meme_ready():
         cap_lines.append(
             f"- Send a meme when the moment genuinely calls for it (a joke, a shared "
             f"reaction, something {uname} said that's begging for one): "
             f"[meme: top caption text | bottom caption text]. Keep both lines short and "
             f"punchy — this is classic meme-macro format, not a sentence. Don't overuse it."
         )
-    if SEARCH_ENABLED:
+    if not group and SEARCH_ENABLED:
         cap_lines.append(
             f"- Look something up online when you genuinely don't know something and it'd "
             f"help — a fact, something {uname} mentioned, your own curiosity. Add "
@@ -2153,6 +2475,23 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
+    if group:
+        peers = ", ".join(GROUP_PEERS) if GROUP_PEERS else "a couple of other people"
+        peer_lines = ""
+        if GROUP_PEER_NOTES:
+            peer_lines = "\n" + "\n".join(
+                "- " + p.strip() for p in GROUP_PEER_NOTES.split(";") if p.strip()
+            )
+        messages.append({"role": "system", "content": (
+            f"# Group chat\nYou're in a small group text thread with {uname} and {peers}. "
+            f"To you they're all real people you know.{peer_lines}\n"
+            f"Group texting rules: keep replies short (usually 1-2 bubbles); talk TO "
+            f"people, not about them; messages from others appear as 'Name: text' — never "
+            f"prefix your own replies with your name; you don't have to respond to "
+            f"everything, it's fine to let a message pass; never answer on someone "
+            f"else's behalf."
+        )})
+
     messages += [{"role": m["role"], "content": m["content"]} for m in history]  # drop internal ts
 
     # Dynamic per-turn state kept close to the end, right before the final voice/style
@@ -2161,7 +2500,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if mem:
         messages.append({"role": "system", "content": mem})
 
-    unotes = _read_user_notes()
+    # user_notes.txt is the private 1:1 relationship ledger — never read into group
+    # prompts (GROUP_CHAT_DESIGN.md §5).
+    unotes = "" if group else _read_user_notes()
     if unotes:
         messages.append({"role": "system", "content": (
             f"# Things you know {uname} has going on\n{unotes}\n"
@@ -2205,7 +2546,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             + "\n".join("- " + p for p in pn)
         )})
 
-    avail_jokes = _available_jokes()
+    # inside_jokes is a GLOBAL list (not per-chat) — a DM's private bits must not be
+    # performed in front of the group (GROUP_CHAT_DESIGN.md §5).
+    avail_jokes = [] if group else _available_jokes()
     if avail_jokes:
         joke_lines = "\n".join(
             f'- "{j["phrase"]}" ({j["tone"]}): {j["meaning"]}' for j in avail_jokes
@@ -2619,12 +2962,14 @@ def _typing_delay_secs(text: str) -> float:
     return max(TYPING_DELAY_MIN, min(TYPING_DELAY_MAX, secs))
 
 
-async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0):
+async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0,
+                       reply_to_message_id: int = None):
     """Send a reply as a single message (chunked only if it exceeds Telegram's length limit).
 
     pre_delay: hold the typing indicator for this many seconds before actually sending,
     simulating realistic compose time. Pass _typing_delay_secs(text) from user-reply paths.
-    """
+    reply_to_message_id: thread the first chunk as a Telegram reply (used in groups).
+    Returns the last sent Message (its message_id feeds the group ledger)."""
     if pre_delay > 0:
         typing_task = asyncio.create_task(_keep_typing(context.bot, chat_id))
         try:
@@ -2635,20 +2980,26 @@ async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0)
                 await typing_task
             except asyncio.CancelledError:
                 pass
+    last = None
     for i in range(0, len(text), _TELEGRAM_MAX_LEN):
         chunk = text[i:i + _TELEGRAM_MAX_LEN]
+        reply_to = reply_to_message_id if i == 0 else None
         for attempt in range(3):
             try:
                 if DEVICE_RENDER:
                     escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
-                    await context.bot.send_message(chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML")
+                    last = await context.bot.send_message(
+                        chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML",
+                        reply_to_message_id=reply_to)
                 else:
-                    await context.bot.send_message(chat_id=chat_id, text=chunk)
+                    last = await context.bot.send_message(
+                        chat_id=chat_id, text=chunk, reply_to_message_id=reply_to)
                 break
             except (NetworkError, TimedOut) as e:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
+    return last
 
 
 # --- Selfies ---
@@ -3229,8 +3580,11 @@ def _short_term_overflow(chat_id: int) -> int:
     n = len(hist)
     if n <= KEEP_RECENT:
         return 0
-    by_count = max(0, n - MAX_HISTORY)              # marathon-session safety cap
-    cutoff = time.time() - SHORT_TERM_SECS
+    # Groups summarize half as often — banter is lower-density than DM conversation
+    # and every summarization is a model call (GROUP_CHAT_DESIGN.md §4).
+    mult = 2 if chat_id < 0 else 1
+    by_count = max(0, n - MAX_HISTORY * mult)       # marathon-session safety cap
+    cutoff = time.time() - SHORT_TERM_SECS * mult
     by_time = 0
     for m in hist:                                  # messages are chronological
         if m.get("ts", time.time()) < cutoff:
@@ -5954,11 +6308,185 @@ def fetch_link(url: str):
         return None
 
 
+async def group_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Single choke point for ALL group traffic, registered in handler group -1
+    (GROUP_CHAT_DESIGN.md §5/§6). Fleet-wide, GROUP_MODE or not: in a group chat only
+    two things ever flow to feature handlers — allowlisted commands (/chatid), and
+    plain text messages for an instance that participates in that group. Everything
+    else (other commands, media, stickers, locations, callbacks, edits, future update
+    types) stops here by construction."""
+    chat = update.effective_chat
+    if chat is None or chat.id >= 0:
+        return  # private chats: the guard is a no-op
+    msg = update.effective_message
+    text = (msg.text or "") if msg else ""
+    if text.startswith("/"):
+        cmd = text.split()[0][1:].split("@")[0].lower()
+        if cmd in GROUP_ALLOWED_COMMANDS:
+            return
+        # In a participating group, refuse audibly once; everywhere else, total silence.
+        if GROUP_MODE and chat.id in GROUP_ALLOWED_CHATS and msg is not None:
+            try:
+                await msg.reply_text("(commands are a DM thing — text me directly)")
+            except Exception:
+                pass
+        raise ApplicationHandlerStop
+    if (GROUP_MODE and chat.id in GROUP_ALLOWED_CHATS
+            and update.message is not None and update.message.text):
+        return  # live plain-text message in a participating group → handle_message
+    raise ApplicationHandlerStop
+
+
+async def _handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Group counterpart of handle_message's core: ledger, turn-taking, reply.
+    Reached only for live human text in a participating group (guard + branch)."""
+    chat_id = update.effective_chat.id
+    msg = update.message
+    sender = (update.effective_user.first_name or "Someone").strip()
+    text = msg.text
+    # {{user}} in group prompts is the human — only human messages may set it (§5).
+    user_names[chat_id] = sender
+    entry = {
+        "ts": time.time(), "msg_id": msg.message_id, "sender": sender, "kind": "human",
+        "text": text[:1000],
+        "reply_to": msg.reply_to_message.message_id if msg.reply_to_message else None,
+    }
+    await asyncio.to_thread(_ledger_append, chat_id, entry)
+
+    replied_to_own = bool(
+        msg.reply_to_message and msg.reply_to_message.from_user
+        and msg.reply_to_message.from_user.id == context.bot.id
+    )
+    content = f"{sender}: {text}"
+    addressed = _is_addressed(text, NAME, context.bot.username or "", replied_to_own)
+    if not addressed:
+        tail = await asyncio.to_thread(_ledger_tail, chat_id)
+        # MUST stay an asyncio.sleep — a blocking sleep here freezes every DM,
+        # the poll job, and the watchdog heartbeat (design §2).
+        await asyncio.sleep(_claim_delay(tail, NAME, random.random()))
+        if not await asyncio.to_thread(_try_claim, chat_id, msg.message_id):
+            # A peer claimed it; stay silent — but the message still belongs in
+            # this instance's group history, or her context grows holes.
+            remember(chat_id, "user", content)
+            return
+    if not _group_gap_ok(chat_id):
+        remember(chat_id, "user", content)
+        return
+    try:
+        messages = assemble_messages(chat_id, content, group=True)
+        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        await _group_deliver(context, chat_id, content, ai_response,
+                             reply_to=msg.message_id if addressed else None,
+                             react_msg_id=msg.message_id)
+    except Exception as e:
+        log.warning("[group] reply failed: %s", e)
+        _count_error("group_ledger")
+
+
+async def _group_deliver(context, chat_id: int, user_content: str, ai_response: str,
+                         reply_to: int = None, react_msg_id: int = None):
+    """Group delivery tail — allowlist-BUILT, not _deliver-with-skips: remember, react,
+    send, ledger-append. Nothing else. The group-deliver-clean eval greps this body
+    (GROUP_CHAT_DESIGN.md §5/§12)."""
+    clean, reaction, _selfie_hint, _meme_caption = extract_tags(ai_response)
+    if clean:
+        clean = _strip_slop(clean)
+    placeholder = clean or (f"[reacted {reaction}]" if reaction else "")
+    remember(chat_id, "user", user_content)
+    remember(chat_id, "assistant", placeholder)
+    if reaction and reaction in ALLOWED_REACTIONS and react_msg_id:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat_id, message_id=react_msg_id, reaction=reaction)
+        except Exception as e:
+            log.warning("[react] group failed: %s", e)
+    if not clean:
+        return
+    sent = await send_bubbles(context, chat_id, clean,
+                              pre_delay=_typing_delay_secs(clean),
+                              reply_to_message_id=reply_to)
+    if sent is not None:
+        _group_last_send[chat_id] = time.time()
+        await asyncio.to_thread(_ledger_append, chat_id, {
+            "ts": time.time(), "msg_id": sent.message_id, "sender": _char_first_name(),
+            "kind": "bot", "text": clean[:1000], "reply_to": reply_to,
+        })
+    asyncio.create_task(maintain_memory(chat_id))
+
+
+async def _maybe_reply_to_bot(context, chat_id: int, e: dict):
+    """Decide → claim → generate → re-check cap → send, for one peer-bot ledger entry.
+    Every control from design §3 is applied here."""
+    tail = await asyncio.to_thread(_ledger_tail, chat_id)
+    my_first = _char_first_name()
+    replied_to_own = any(
+        t.get("msg_id") == e.get("reply_to") and t.get("sender") == my_first
+        for t in tail
+    ) if e.get("reply_to") else False
+    addressed = _is_addressed(e.get("text", ""), NAME, context.bot.username or "", replied_to_own)
+    content = f"{e.get('sender', '?')}: {e.get('text', '')}"
+    if not _should_reply_to_bot(tail, random.random(), addressed):
+        # Heard it, chose silence — it still belongs in the conversation record.
+        remember(chat_id, "user", content)
+        return
+    if not _group_budget_ok(chat_id) or not _group_gap_ok(chat_id):
+        remember(chat_id, "user", content)
+        return
+    await asyncio.sleep(_claim_delay(tail, NAME, random.random()))
+    if not await asyncio.to_thread(_try_claim, chat_id, e["msg_id"]):
+        remember(chat_id, "user", content)
+        return
+    try:
+        messages = assemble_messages(chat_id, content, group=True)
+        ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
+        # Pre-send cap re-check (design §3): if the chain filled while we generated,
+        # discard the reply — a wasted model call is the price of never exceeding it.
+        if not await asyncio.to_thread(_chain_ok_under_lock, chat_id):
+            remember(chat_id, "user", content)
+            return
+        _group_bump_budget(chat_id)
+        await _group_deliver(context, chat_id, content, ai_response,
+                             reply_to=e["msg_id"], react_msg_id=e["msg_id"])
+    except Exception as ex:
+        log.warning("[group] bot-to-bot reply failed: %s", ex)
+        _count_error("group_ledger")
+
+
+async def _group_poll_job(context: ContextTypes.DEFAULT_TYPE):
+    """Ledger poll — the ONLY way bots hear each other (Telegram never delivers bot
+    messages to bots). Processes kind=='bot' entries from peers exclusively; human
+    entries are chain-reset markers, consumed silently (design §1 — acting on them
+    here would double-answer messages already handled live)."""
+    for gid in GROUP_ALLOWED_CHATS:
+        try:
+            entries = await asyncio.to_thread(_ledger_read_new, gid)
+        except Exception:
+            continue
+        now = time.time()
+        my_first = _char_first_name()
+        for e in entries:
+            if e.get("sender") == my_first:
+                continue
+            if now - float(e.get("ts", 0)) > GROUP_LEDGER_MAX_AGE_SECONDS:
+                continue
+            if e.get("kind") != "bot":
+                if e.get("sender"):
+                    user_names[gid] = e["sender"]  # cache {{user}}; nothing else
+                continue
+            await _maybe_reply_to_bot(context, gid, e)
+    await asyncio.to_thread(_prune_claims)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _is_allowed(update.effective_user.id):
         return
     if not _rate_ok(update.effective_user.id):
+        return
+    if chat_id < 0:
+        # Only a participating instance's live human text gets this far (group_guard).
+        if GROUP_MODE and chat_id in GROUP_ALLOWED_CHATS:
+            await _handle_group_message(update, context)
         return
     user_message = update.message.text
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
@@ -7282,6 +7810,18 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
     ]
+    if GROUP_MODE and GROUP_ALLOWED_CHATS:
+        # "Why did she stop replying to Jules?" must be answerable from Telegram:
+        # budget or chain cap, and which (GROUP_CHAT_DESIGN.md §11).
+        for gid in sorted(GROUP_ALLOWED_CHATS):
+            lp = _group_ledger_path(gid)
+            lsize = round(lp.stat().st_size / 1024, 1) if lp.exists() else 0
+            b = group_bot_sends_today.get(gid) or {}
+            chain = _bot_chain_len(await asyncio.to_thread(_ledger_tail, gid, 10))
+            lines.append(
+                f"Group {gid}: ledger {lsize} KB, bot-sends today "
+                f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}"
+            )
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -7643,6 +8183,11 @@ async def _on_shutdown(application):
 
 
 def main():
+    if "--claim-test" in sys.argv:
+        # On-device atomicity smoke test for the group primitives — run once before
+        # trusting the pilot (GROUP_CHAT_DESIGN.md §10.5). Usage:
+        #   python bot.py <instance-dir> --claim-test
+        raise SystemExit(0 if _run_claim_test() else 1)
     _acquire_termux_wake_lock()
     apply_overrides()
     _log_startup_diagnostic()
@@ -7660,6 +8205,9 @@ def main():
     )
 
     app.add_error_handler(on_error)
+    # Group choke point — runs before every other handler (group -1) and stops all
+    # group-chat traffic except allowlisted commands and participating plain text.
+    app.add_handler(TypeHandler(Update, group_guard), group=-1)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))
@@ -7790,6 +8338,15 @@ def main():
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
             log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)
+        if GROUP_MODE and GROUP_ALLOWED_CHATS:
+            # In-process asyncio job (no new PID — phantom-process budget untouched).
+            # The ledger poll is the only way this bot hears its peer bots.
+            app.job_queue.run_repeating(_group_poll_job, interval=GROUP_POLL_SECONDS, first=15)
+            log.info("Group mode: polling ledger every %ds for %s.",
+                     GROUP_POLL_SECONDS, sorted(GROUP_ALLOWED_CHATS))
+        elif GROUP_MODE:
+            log.warning("GROUP_MODE=1 but GROUP_ALLOWED_CHATS is empty — group chat "
+                        "stays fully disabled (fail closed).")
     else:
         log.warning('JobQueue unavailable — scheduled features disabled. '
                     'Install with: pip install "python-telegram-bot[job-queue]"')
