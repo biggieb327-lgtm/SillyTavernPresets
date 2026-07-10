@@ -85,16 +85,51 @@ single-device blast radius.
 - NanoGPT embeddings (`text-embedding-3-small`). Embeds on write, cosine top-k on
   recall merged with keyword results. Falls back to keyword-only on API failure.
 
-### 3.4 Group chat / bot-to-bot — L, experimental, deliberately last
-- **Evidence:** none of the plumbing assumes groups (`_is_allowed` is per-user, memory
-  is per-chat_id); this is the one genuinely new surface. It's also the fun one:
-  two characters + you in one Telegram group.
-- **Hard problems to solve on paper before any code:** turn-taking (bots must not
-  answer every message, especially each other's), loop prevention (hard cap on
-  consecutive bot-to-bot exchanges), cost (two models per conversational beat), and
-  memory semantics (group memories vs the private relationship state).
-- **Done when:** a design doc survives adversarial-critic review; only then a
-  prototype behind `GROUP_MODE=1` on two instances.
+### 3.4 ~~Group chat / bot-to-bot~~ ✅ (shipped v2026-07-10.1)
+- Design doc (`GROUP_CHAT_DESIGN.md`) survived four adversarial-critic review rounds,
+  then the prototype shipped behind `GROUP_MODE=1` for the Priya + Jules pilot.
+  Shared flock'd ledger + atomic claim files (Telegram never delivers bot messages to
+  bots); chain cap 2; fleet-wide fail-closed group posture; two CI evals pin the
+  group/private memory boundary. On-device rollout steps in OPS_MANUAL.
+
+---
+
+## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
+
+The 2026-07-10 audit (external Deepseek pass + verification + two user-observed bugs)
+shipped its confirmed fixes as v2026-07-10.2. What remains, triaged:
+
+### 4.1 Memory auditor — M (the theme behind the hallucination bug)
+- **Evidence:** the own-day provenance fix (v2026-07-10.2) closed the acute cause of
+  hallucinated memories, but memory writes are still unattributed — when she asserts
+  something wrong there's no way to see where it came from or correct it surgically.
+- **Plan:** source-attached memories (each fact stores the snippet that created it),
+  numbered `/editmem` + `/sourcemem`, and an interactive correction flow ("that never
+  happened" → she identifies the memory and offers deletion/correction).
+- **Done when:** a wrong memory can be traced and corrected from Telegram in under a
+  minute.
+
+### 4.2 Availability awareness — S
+- `/away` and `/back` commands (suppress proactives + prime the prompt); extraction of
+  availability from conversation via the existing post-reply analysis.
+
+### 4.3 Robustness leftovers — S each
+- Atomic writes (tmp+replace) for jokes.json / reminders.json / cron_jobs.json —
+  a process death mid-write can truncate them today.
+- Prune `_last_request` (rate-limit dict grows unbounded; trivial but unclean).
+- Central `validate_config()` startup summary (bad values already fall back with
+  warnings since v2026-07-10.2; this would surface them all in one place + /audit).
+
+### Rejected or already covered (recorded so they don't come back)
+- `/rollback` command — `bot.py.bak` + shell already covers it; a bad bot.py can't be
+  trusted to run its own rollback anyway.
+- Group ledger pruning / bot liveness heartbeats — rotation already exists; liveness
+  adds machinery the claim-file design deliberately avoids (a down bot just loses
+  claims).
+- "Unit tests, DRY_RUN" — test suite exists (95 tests); DRY_RUN adds a second untested
+  code path to every send site for little value on a 1-user fleet.
+- Self-evolution ideas (closeness score, auto inside-jokes, live self-image updates)
+  — product direction, not audit debt; revisit deliberately, not as a checklist.
 
 ---
 
@@ -104,8 +139,10 @@ single-device blast radius.
 |---|---|---|
 | ~~**Now**~~ | ~~1.1 watchdog→repo, 1.3 fleet-status, 2.3 card sync, 3.1 voice symmetry, 1.4 alerts~~ | ✅ All shipped (v2026-07-06.3) |
 | ~~**Next**~~ | ~~2.1 test suite, 2.2 new-bot.sh, 3.2 shared world, 3.3 semantic recall~~ | ✅ All shipped (v2026-07-06.4–5) |
+| ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
-| **Someday** | 3.4 group chat | Gated on a design review |
+| **Next** | 4.1 memory auditor, 4.3 robustness leftovers | From AUDIT-2026-07-10.md |
+| **Someday** | 4.2 availability awareness | Small, whenever it itches |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,

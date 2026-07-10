@@ -7,6 +7,47 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-10.2 — audit release: memory hallucination + tool-call leak + concurrency fixes
+
+Triggered by two user-observed symptoms plus an external (Deepseek) audit of bot.py.
+Every audit claim was verified against the code before being fixed — 10 of 15 confirmed,
+4 false, 1 by-design. Full triage in `AUDIT-2026-07-10.md`.
+
+**Heartbeat memory hallucination (root cause):** `_rotate_day_context` archived each
+day's `day.txt` — the character's own GENERATED fiction — into `recent_facts[owner]` as
+a plain `"[Jul 09] …"` fact. `memory_block` rendered it under "Recent specifics" (read
+by the model as real shared history), weekly promotion folded it into permanent
+long-term facts, and `_todays_memory_note` could flag her own archive as "a significant
+date". Fix: own-day provenance tag (`[own-day …]`) honored by every consumer — separate
+clearly-framed prompt section, never LLM-merged into user facts, never promoted, skipped
+by the date scan, capped at `OWN_DAYS_KEPT=5`; `load_state` migrates legacy entries
+(sparing `[… ] Voice note:` user content). Extraction prompt also tightened: notes and
+memories only from what the USER said.
+
+**Raw `<tool_call>` XML sent to the user (root cause):** models taught the bracket
+`[search: …]` tag sometimes emit the intent in their NATIVE function-call XML instead;
+nothing anywhere parsed or stripped that syntax, so it sailed through to Telegram.
+Fix: `_strip_native_tool_calls` at the model-output choke point (both `_do_request`
+return paths, including the `reasoning_content` fallback, itself a leak vector) —
+search-like calls become `[search: q]` so `maybe_search` still runs; others stripped.
+
+**Concurrency (audit-confirmed):** state serialization now always happens on the event
+loop (worker-thread saves hand off via `call_soon_threadsafe`; only the file write runs
+in a thread) — the old path iterated ~28 live dicts cross-thread (`RuntimeError: dict
+changed size during iteration`). Post-reply analysis snapshots the history tail on the
+loop. Voice/video transcription and `/usage` no longer run bare synchronous `requests`
+calls on the event loop (each froze every chat for up to 60s). `_error_counts`
+iteration snapshotted.
+
+**Smaller confirmed bugs:** `ALLOWED_USERS`/`GROUP_ALLOWED_CHATS` no longer crash the
+import on malformed ids (`--123`); schedule day-headings require the first word to BE a
+day name ("money" is not Monday, "wedding" is not Wednesday); `_extract_json` recovers
+the first balanced object when a stray brace follows; `get_owner` warns loudly on a
+non-numeric `OWNER_CHAT_ID`; `/backup` skips files that vanish mid-run; all 64
+`int()/float()` env parses fall back to defaults with a warning instead of
+crash-looping the bot on a typo'd `.env`; deleted 13 lines of unreachable dead code in
+`_weather_camera_pool`.
+
 ## v2026-07-10.1 — group chat prototype (GROUP_MODE, Priya + Jules pilot)
 
 **Group chat / bot-to-bot (ROADMAP 3.4):** two character bots + one human in one
