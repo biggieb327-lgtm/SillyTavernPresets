@@ -1219,7 +1219,15 @@ def load_state():
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
-def _write_state():
+# Captured by _post_init so worker threads can hand saves back to the event loop
+# instead of iterating live state dicts cross-thread (RuntimeError race).
+_MAIN_LOOP = None
+
+
+def _serialize_state() -> str:
+    """Build the JSON payload. MUST run on the thread that owns the mutations
+    (the event loop, normally) — iterating the live dicts from a worker thread
+    while handlers mutate them raises 'dict changed size during iteration'."""
     data = {
         "conversation_history": {str(k): v for k, v in conversation_history.items()},
         "last_seen": {str(k): v for k, v in last_seen.items()},
@@ -1251,19 +1259,36 @@ def _write_state():
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
         "group_bot_sends_today": {str(k): v for k, v in group_bot_sends_today.items()},
     }
+    return json.dumps(data)
+
+
+def _write_state_text(payload: str):
     tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.write_text(payload, encoding="utf-8")
     tmp.replace(STATE_FILE)
+
+
+def _write_state():
+    _write_state_text(_serialize_state())
 
 _save_scheduled = False
 
 def save_state():
-    """Save bot state. On the event loop: debounces and writes in a thread.
-    From a worker thread or at startup/shutdown: writes immediately."""
+    """Save bot state. On the event loop: debounce, serialize on the loop (safe),
+    write the file in a thread. From a worker thread: hand off to the loop — the
+    old direct write iterated live dicts cross-thread and could hit
+    'dict changed size during iteration'. At startup/shutdown (no loop running):
+    write immediately."""
     global _save_scheduled
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        if _MAIN_LOOP is not None and _MAIN_LOOP.is_running():
+            try:
+                _MAIN_LOOP.call_soon_threadsafe(save_state)
+                return
+            except RuntimeError:
+                pass  # loop mid-shutdown — fall through to a direct write
         _write_state()
         return
     if _save_scheduled:
@@ -1274,7 +1299,8 @@ def save_state():
         await asyncio.sleep(0.5)
         _save_scheduled = False
         try:
-            await asyncio.to_thread(_write_state)
+            payload = _serialize_state()  # on the loop — no cross-thread iteration
+            await asyncio.to_thread(_write_state_text, payload)
         except Exception as e:
             log.error("[state] deferred save failed: %s", e)
     loop.create_task(_deferred())
@@ -2041,16 +2067,18 @@ async def update_mood(chat_id: int):
         log.warning("[mood] appraisal failed: %s", e)
 
 
-def _post_reply_analysis(chat_id: int, want_mood: bool, want_note: bool, want_memory: bool):
-    """Sync worker: one LLM call covering mood + user note + NPC memory."""
+def _post_reply_analysis(chat_id: int, hist_tail: list,
+                         want_mood: bool, want_note: bool, want_memory: bool):
+    """Sync worker: one LLM call covering mood + user note + NPC memory.
+    hist_tail is snapshotted by the caller on the event loop — never read the live
+    conversation_history from this thread."""
     uname = user_names.get(chat_id, "you")
     cur = moods.get(chat_id) or {}
     gap_hours = cur.pop("_gap_hours", 0)
     gap_note = ""
     if gap_hours > 4:
         gap_note = f" Note: it's been {gap_hours:.0f}h since they last talked — factor the time gap into her state."
-    hist = conversation_history.get(chat_id, [])[-4:]
-    tail = "\n".join(f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in hist)
+    tail = "\n".join(f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content']}" for m in hist_tail)
     sys_prompt = (
         f"You analyze the latest exchange between {uname} and {NAME}, and you track {NAME}'s "
         f"emotional state across the conversation. Output ONLY a JSON object — no prose, no code "
@@ -2139,7 +2167,11 @@ async def post_reply_analysis(chat_id: int, user_msg: str):
     if not (want_mood or want_note or want_memory):
         return
     try:
-        await asyncio.to_thread(_post_reply_analysis, chat_id, want_mood, want_note, want_memory)
+        # Snapshot the history tail ON the loop — the worker must not slice the live
+        # list while handlers keep appending to it.
+        hist_tail = list(conversation_history.get(chat_id, [])[-4:])
+        await asyncio.to_thread(_post_reply_analysis, chat_id, hist_tail,
+                                want_mood, want_note, want_memory)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -2395,7 +2427,9 @@ def belief_note(chat_id: int) -> str:
 _OWN_DAY_PREFIX = "[own-day"
 OWN_DAYS_KEPT = int(os.getenv("OWN_DAYS_KEPT", "5"))  # her own past days kept in the recent tier
 
-_LEGACY_DAY_RE = re.compile(r"^\[[A-Z][a-z]{2} \d{1,2}\] ")
+# Negative lookahead: handle_voice stores user voice notes as '[Jul 10] Voice note: …'
+# — those are USER content and must not be retagged as her own fiction.
+_LEGACY_DAY_RE = re.compile(r"^\[[A-Z][a-z]{2} \d{1,2}\] (?!Voice note:)")
 
 
 def _is_own_day_fact(f) -> bool:
@@ -5808,6 +5842,20 @@ async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏰ Got it — I'll remind you daily at {h:02d}:{m:02d}: {text}")
 
 
+def _transcribe_audio(data: bytes, filename: str, mime: str) -> str:
+    """Blocking Whisper call — always run via asyncio.to_thread. Calling it bare in an
+    async handler freezes the whole bot for up to 60s (every chat, every job)."""
+    resp = _get_session().post(
+        f"{NANOGPT_BASE_URL}/audio/transcriptions",
+        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+        files={"file": (filename, data, mime)},
+        data={"model": WHISPER_MODEL},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json().get("text", "").strip()
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _is_allowed(update.effective_user.id):
@@ -5826,15 +5874,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
-        resp = _get_session().post(
-            f"{NANOGPT_BASE_URL}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-            files={"file": ("voice.ogg", bytes(voice_bytes), "audio/ogg")},
-            data={"model": WHISPER_MODEL},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        transcript = resp.json().get("text", "").strip()
+        transcript = await asyncio.to_thread(
+            _transcribe_audio, bytes(voice_bytes), "voice.ogg", "audio/ogg")
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
         await context.bot.send_message(chat_id=chat_id,
@@ -5934,15 +5975,8 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(audio_path, "rb") as f:
                     audio_bytes = f.read()
                 try:
-                    resp = _get_session().post(
-                        f"{NANOGPT_BASE_URL}/audio/transcriptions",
-                        headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-                        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-                        data={"model": WHISPER_MODEL},
-                        timeout=60,
-                    )
-                    resp.raise_for_status()
-                    transcript = resp.json().get("text", "").strip() or None
+                    transcript = await asyncio.to_thread(
+                        _transcribe_audio, audio_bytes, "audio.ogg", "audio/ogg") or None
                 except Exception as e:
                     log.warning("Video transcription failed: %s", e)
             else:
@@ -6240,11 +6274,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
-    response = _get_session().get(
-        "https://nano-gpt.com/api/subscription/v1/usage",
-        headers=headers,
-        timeout=30,
-    )
+    # to_thread: a bare requests call here would freeze the whole event loop for
+    # up to 30s on a slow phone connection.
+    response = await asyncio.to_thread(
+        lambda: _get_session().get(
+            "https://nano-gpt.com/api/subscription/v1/usage",
+            headers=headers,
+            timeout=30,
+        ))
     data = response.json()
     if not data.get("active"):
         await update.message.reply_text("⚠️ No active subscription found.")
@@ -7779,9 +7816,12 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
     uptime_h = (time.time() - _BOOT_TIME) / 3600
 
     hour_ago = time.time() - 3600
-    recent = {cat: sum(1 for t in ts if t > hour_ago) for cat, ts in _error_counts.items()}
+    # snapshot: _count_error appends from worker threads; iterating the live dict/lists
+    # here can raise 'changed size during iteration'
+    recent = {cat: sum(1 for t in list(ts) if t > hour_ago)
+              for cat, ts in list(_error_counts.items())}
     total_recent = sum(recent.values())
-    total_all = sum(len(ts) for ts in _error_counts.values())
+    total_all = sum(len(ts) for ts in list(_error_counts.values()))
 
     try:
         if STATE_FILE.exists():
@@ -7877,8 +7917,11 @@ def gather_audit_data() -> dict:
     """Self-audit facts as plain data — shared by /audit and the admin HTTP API."""
     uptime_h = (time.time() - _BOOT_TIME) / 3600
     hour_ago = time.time() - 3600
-    recent = {cat: sum(1 for t in ts if t > hour_ago) for cat, ts in _error_counts.items()}
-    total_all = sum(len(ts) for ts in _error_counts.values())
+    # snapshot: _count_error appends from worker threads; iterating the live dict/lists
+    # here can raise 'changed size during iteration'
+    recent = {cat: sum(1 for t in list(ts) if t > hour_ago)
+              for cat, ts in list(_error_counts.items())}
+    total_all = sum(len(ts) for ts in list(_error_counts.values()))
 
     state_ok = "OK"
     try:
@@ -8278,6 +8321,8 @@ async def _register_commands(application):
 
 
 async def _post_init(application):
+    global _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()  # lets worker threads hand saves to the loop
     await _register_commands(application)
     await _start_admin_api(application)
 

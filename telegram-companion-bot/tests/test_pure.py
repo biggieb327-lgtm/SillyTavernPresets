@@ -387,6 +387,12 @@ class TestOwnDayFacts:
         assert out[1] == "met Bob on Jul 09"
         assert out[2] == "[own-day Jul 08] already tagged"
 
+    def test_retag_spares_voice_notes(self):
+        # handle_voice stores user voice notes with the same date-bracket prefix —
+        # they are USER content, not her own fiction.
+        out = bot._retag_legacy_day_facts(['[Jul 10] Voice note: "running late, start without me"'])
+        assert out[0].startswith("[Jul 10] Voice note:")
+
     def test_memory_block_separates_own_days(self):
         cid = -424242
         for d in (bot.facts, bot.summaries, bot.recent_summaries):
