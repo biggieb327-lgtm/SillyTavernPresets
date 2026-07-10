@@ -362,6 +362,65 @@ class TestGroupCommandAllowlist:
         assert bot.GROUP_ALLOWED_COMMANDS == {"chatid"}
 
 
+# ── Own-day memory provenance (heartbeat hallucination fix, v2026-07-10.2) ──
+
+class TestOwnDayFacts:
+    def test_is_own_day(self):
+        assert bot._is_own_day_fact("[own-day Jul 09] rode to Fremont")
+        assert not bot._is_own_day_fact("has a job interview Tuesday")
+        assert not bot._is_own_day_fact(None)
+
+    def test_split(self):
+        real, own = bot._split_own_day_facts(
+            ["likes coffee", "[own-day Jul 09] rode to Fremont", "sister named Amy"])
+        assert real == ["likes coffee", "sister named Amy"]
+        assert own == ["[own-day Jul 09] rode to Fremont"]
+
+    def test_split_empty_and_none(self):
+        assert bot._split_own_day_facts([]) == ([], [])
+        assert bot._split_own_day_facts(None) == ([], [])
+
+    def test_retag_legacy(self):
+        out = bot._retag_legacy_day_facts(
+            ["[Jul 09] her day archive", "met Bob on Jul 09", "[own-day Jul 08] already tagged"])
+        assert out[0] == "[own-day Jul 09] her day archive"
+        assert out[1] == "met Bob on Jul 09"
+        assert out[2] == "[own-day Jul 08] already tagged"
+
+    def test_memory_block_separates_own_days(self):
+        cid = -424242
+        for d in (bot.facts, bot.summaries, bot.recent_summaries):
+            d.pop(cid, None)
+        bot.recent_facts[cid] = ["works at a fintech startup",
+                                 "[own-day Jul 09] biked to Meydenbauer Bay at sunset"]
+        try:
+            block = bot.memory_block(cid, "Brian")
+            # Real fact under Recent specifics; her own day NOT there.
+            recent_sec = block.split("# Your own recent days")[0]
+            assert "works at a fintech startup" in recent_sec
+            assert "Meydenbauer" not in recent_sec
+            # Own day rendered under its clearly-framed section.
+            assert "# Your own recent days" in block
+            assert "Jul 09: biked to Meydenbauer Bay at sunset" in block
+            assert "NOT shared memories" in block
+        finally:
+            bot.recent_facts.pop(cid, None)
+
+    def test_memory_block_moves_own_day_out_of_longterm(self):
+        cid = -424243
+        for d in (bot.recent_facts, bot.summaries, bot.recent_summaries):
+            d.pop(cid, None)
+        bot.facts[cid] = ["[own-day Jul 07] a promoted archive", "real durable fact"]
+        try:
+            block = bot.memory_block(cid, "Brian")
+            longterm_sec = block.split("# Your own recent days")[0]
+            assert "real durable fact" in longterm_sec
+            assert "promoted archive" not in longterm_sec
+            assert "Jul 07: a promoted archive" in block
+        finally:
+            bot.facts.pop(cid, None)
+
+
 # ── _count_error tracking ────────────────────────────────────────────────────
 
 class TestCountError:

@@ -1202,6 +1202,20 @@ def load_state():
         group_cursor[int(cid)] = off
     for cid, b in data.get("group_bot_sends_today", {}).items():
         group_bot_sends_today[int(cid)] = b
+    # Migration (v2026-07-10.2): day archives used to be stored as plain "[Jul 09] …"
+    # facts — indistinguishable from real user facts, so proactive prompts asserted
+    # her own fiction as shared history. Retag them, and move any that were promoted
+    # into permanent facts back into the recent tier where they expire.
+    for cid in list(recent_facts.keys()):
+        recent_facts[cid] = _retag_legacy_day_facts(recent_facts[cid])
+    for cid in list(facts.keys()):
+        retagged = _retag_legacy_day_facts(facts[cid])
+        real, own = _split_own_day_facts(retagged)
+        if own:
+            facts[cid] = real
+            recent_facts.setdefault(cid, []).extend(own)
+            log.info("[memory] moved %d own-day entr(ies) out of long-term facts for chat %s",
+                     len(own), cid)
     log.info("Loaded history for %d chat(s).", len(conversation_history))
 
 
@@ -2055,7 +2069,10 @@ def _post_reply_analysis(chat_id: int, want_mood: bool, want_note: bool, want_me
         f'"memory": if the exchange revealed something notable about a third party, NPC, or '
         f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
         f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
-        f"Otherwise null."
+        f"Otherwise null.\n"
+        f"CRITICAL for user_note and memory: extract ONLY from what {uname} actually said. "
+        f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
+        f"statements, events, or plans into notes or memories; they are not real-world facts."
     )
     now_local = datetime.now(TZ) if TZ else datetime.now()
     user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
@@ -2369,6 +2386,36 @@ def belief_note(chat_id: int) -> str:
     return note
 
 
+# Provenance tag for the character's own generated day events archived into
+# recent_facts by _rotate_day_context. These are HER generated fiction, not user
+# facts — every memory consumer must treat them differently, or she asserts her
+# invented life as shared history (the 2026-07-10 heartbeat-hallucination bug:
+# untagged day archives rendered under "Recent specifics" and even got promoted
+# into permanent long-term facts about the user).
+_OWN_DAY_PREFIX = "[own-day"
+OWN_DAYS_KEPT = int(os.getenv("OWN_DAYS_KEPT", "5"))  # her own past days kept in the recent tier
+
+_LEGACY_DAY_RE = re.compile(r"^\[[A-Z][a-z]{2} \d{1,2}\] ")
+
+
+def _is_own_day_fact(f) -> bool:
+    return isinstance(f, str) and f.startswith(_OWN_DAY_PREFIX)
+
+
+def _split_own_day_facts(fl):
+    """(real_facts, own_day_entries) — keeps LLM memory consumers away from her fiction."""
+    fl = fl or []
+    return ([f for f in fl if not _is_own_day_fact(f)],
+            [f for f in fl if _is_own_day_fact(f)])
+
+
+def _retag_legacy_day_facts(fl):
+    """Migration: day archives used to be stored as plain '[Jul 09] …' facts,
+    indistinguishable from real user facts. Retag them with the own-day prefix."""
+    return [f"[own-day {f[1:]}" if isinstance(f, str) and _LEGACY_DAY_RE.match(f) else f
+            for f in (fl or [])]
+
+
 def memory_block(chat_id: int, uname: str) -> str:
     """Long-term (durable) + recent (last ~week) memory injected every request."""
     blocks = []
@@ -2377,7 +2424,7 @@ def memory_block(chat_id: int, uname: str) -> str:
     summ = (summaries.get(chat_id) or "").strip()
     if summ:
         parts.append(f"How you remember things with {uname} so far:\n{summ}")
-    fts = facts.get(chat_id) or []
+    fts, own_long = _split_own_day_facts(facts.get(chat_id))
     if fts:
         parts.append(f"Things you know about {uname}:\n" + "\n".join("- " + f for f in fts))
     if parts:
@@ -2387,11 +2434,25 @@ def memory_block(chat_id: int, uname: str) -> str:
     rsumm = (recent_summaries.get(chat_id) or "").strip()
     if rsumm:
         rparts.append(rsumm)
-    rfts = recent_facts.get(chat_id) or []
+    rfts, own_days = _split_own_day_facts(recent_facts.get(chat_id))
     if rfts:
         rparts.append("Recent specifics:\n" + "\n".join("- " + f for f in rfts))
     if rparts:
         blocks.append("# What's been going on lately\n\n" + "\n\n".join(rparts))
+
+    own_days = (own_long + own_days)[-OWN_DAYS_KEPT:]
+    if own_days:
+        lines = []
+        for d in own_days:
+            body = d[len(_OWN_DAY_PREFIX):].lstrip()  # "Jul 09] event text"
+            lines.append("- " + body.replace("]", ":", 1))
+        blocks.append(
+            f"# Your own recent days\n"
+            f"Things that happened in YOUR life on recent days — your own day-to-day, "
+            f"NOT shared memories with {uname} and NOT things {uname} told you. Never "
+            f"recall these as conversations, plans, or moments you had with {uname}:\n"
+            + "\n".join(lines)
+        )
 
     return "\n\n".join(blocks)
 
@@ -3712,12 +3773,15 @@ async def maintain_memory(chat_id: int):
         batch = list(conversation_history.get(chat_id, [])[:drop_count])
         uname = user_names.get(chat_id, "you")
         try:
+            # Her own-day entries never go through the LLM merge — it would launder
+            # them into ordinary "facts about the user" (the hallucination bug).
+            real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
             summary, new_facts = await asyncio.to_thread(
-                _summarize, recent_summaries.get(chat_id, ""), recent_facts.get(chat_id, []),
+                _summarize, recent_summaries.get(chat_id, ""), real_facts,
                 batch, uname,
             )
             recent_summaries[chat_id] = summary
-            recent_facts[chat_id] = new_facts
+            recent_facts[chat_id] = new_facts + own_days
         except Exception as e:
             log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
             _count_error("memory")
@@ -3727,13 +3791,14 @@ async def maintain_memory(chat_id: int):
 
         if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
             try:
+                real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
                 summary, new_facts = await asyncio.to_thread(
                     _consolidate_facts, recent_summaries.get(chat_id, ""),
-                    recent_facts.get(chat_id, []), uname, RECENT_FACTS_TARGET,
+                    real_facts, uname, RECENT_FACTS_TARGET,
                 )
                 before = len(recent_facts.get(chat_id, []))
                 recent_summaries[chat_id] = summary
-                recent_facts[chat_id] = new_facts
+                recent_facts[chat_id] = new_facts + own_days
                 save_state()
                 print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
@@ -3797,14 +3862,17 @@ async def maintain_long_term_memory(chat_id: int):
         uname = user_names.get(chat_id, "you")
         if due and has_recent:
             try:
+                # Own-day fiction is never promoted into permanent facts about the
+                # user; it stays in the recent tier and expires via OWN_DAYS_KEPT.
+                real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
                 summary, new_facts = await asyncio.to_thread(
                     _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
-                    recent_summaries.get(chat_id, ""), recent_facts.get(chat_id, []), uname,
+                    recent_summaries.get(chat_id, ""), real_facts, uname,
                 )
                 summaries[chat_id] = summary
                 facts[chat_id] = new_facts
                 recent_summaries[chat_id] = ""
-                recent_facts[chat_id] = []
+                recent_facts[chat_id] = own_days
                 save_state()
                 print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
             except Exception as e:
@@ -6842,6 +6910,8 @@ def _todays_memory_note(chat_id: int) -> str:
 
     hits = []
     for f in (facts.get(chat_id) or []) + (recent_facts.get(chat_id) or []):
+        if _is_own_day_fact(f):
+            continue  # her own archived days start with a date — not anniversaries
         fl = f.lower()
         if any(tok in fl for tok in date_tokens):
             if any(k in fl for k in recurring_keywords):
@@ -7329,11 +7399,15 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             archive.write_text(day_ctx, encoding="utf-8")
         except Exception as e:
             log.error("[day-rotate] archive failed: %s", e)
-        # Save a compact memory fact so it persists through summarization
+        # Save a compact continuity note — tagged as her OWN day so memory consumers
+        # never present it as a fact about the user (see _OWN_DAY_PREFIX).
         if owner is not None:
-            fact = f"[{yesterday.strftime('%b %d')}] {day_ctx[:300]}"
+            fact = f"[own-day {yesterday.strftime('%b %d')}] {day_ctx[:300]}"
             rfts = recent_facts.setdefault(owner, [])
             rfts.append(fact)
+            own = [f for f in rfts if _is_own_day_fact(f)]
+            for stale in own[:-OWN_DAYS_KEPT]:  # her fiction must not crowd real facts
+                rfts.remove(stale)
             if len(rfts) > RECENT_FACTS_MAX:
                 rfts.pop(0)
             save_state()
