@@ -159,6 +159,14 @@ class TestExtractJson:
     def test_malformed_json_returns_empty(self):
         assert bot._extract_json('{"broken": }') == {}
 
+    def test_object_followed_by_stray_brace(self):
+        # The greedy first-{-to-last-} span used to swallow both and lose the
+        # valid first object (v2026-07-10.2 fix: balanced raw_decode fallback).
+        assert bot._extract_json('{"mood": "ok"} and then { something') == {"mood": "ok"}
+
+    def test_two_objects_takes_first(self):
+        assert bot._extract_json('{"a": 1} {"b": 2}') == {"a": 1}
+
 
 # ── parse_when (reminder time parsing) ────────────────────────────────────────
 
@@ -471,6 +479,62 @@ class TestStripNativeToolCalls:
         import re as _re
         m = _re.search(r"\[search:\s*(.*?)\]", out)
         assert m and m.group(1) == "Seattle news today July 9 2026"
+
+
+# ── Config id-set parsing (import-crash fix, v2026-07-10.2) ──────────────────
+
+class TestParseIdSet:
+    def test_normal(self):
+        assert bot._parse_id_set("123, 456", "T") == {123, 456}
+
+    def test_negative_group_ids(self):
+        assert bot._parse_id_set("-1001234567890", "T") == {-1001234567890}
+
+    def test_bad_tokens_skipped_not_fatal(self):
+        # '--123' passed the old isdigit-after-lstrip filter but crashed int().
+        assert bot._parse_id_set("--123, 456, abc, ", "T") == {456}
+
+    def test_empty(self):
+        assert bot._parse_id_set("", "T") == set()
+
+
+# ── Schedule day-heading matching (v2026-07-10.2) ────────────────────────────
+
+class TestScheduleHeadings:
+    def _today_section(self, tmp_path, text, monkeypatch, today="Monday"):
+        sched = tmp_path / "schedule.txt"
+        sched.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(bot, "SCHEDULE_FILE", sched)
+
+        class _FakeDT:
+            @staticmethod
+            def now(tz=None):
+                import datetime as _dt
+                # 2026-07-06 was a Monday; 07-07 Tuesday
+                base = {"Monday": _dt.datetime(2026, 7, 6, 12, 0),
+                        "Tuesday": _dt.datetime(2026, 7, 7, 12, 0)}[today]
+                return base.replace(tzinfo=tz) if tz else base
+
+        monkeypatch.setattr(bot, "datetime", _FakeDT)
+        try:
+            return bot._read_schedule_today()
+        finally:
+            monkeypatch.undo()
+
+    def test_money_is_not_monday(self, tmp_path, monkeypatch):
+        text = "Monday\n- standup 9am\nmoney is tight this week\nTuesday\n- dentist"
+        out = self._today_section(tmp_path, text, monkeypatch, today="Monday")
+        # "money is tight" must be treated as content, not a new heading
+        assert "standup" in out
+        assert "money is tight" in out
+        assert "dentist" not in out
+
+    def test_real_headings_still_work(self, tmp_path, monkeypatch):
+        text = "Mon:\n- standup\nTue:\n- dentist\nWed:\n- gym"
+        out = self._today_section(tmp_path, text, monkeypatch, today="Tuesday")
+        assert "dentist" in out
+        assert "standup" not in out
+        assert "gym" not in out
 
 
 # ── _count_error tracking ────────────────────────────────────────────────────

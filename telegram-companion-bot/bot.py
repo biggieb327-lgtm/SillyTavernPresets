@@ -121,8 +121,24 @@ def _count_error(category: str):
         del ts[:-200]
 
 # --- Access control ---
+def _parse_id_set(raw: str, name: str) -> set[int]:
+    """Comma-separated Telegram ids → set. Bad tokens are skipped with a warning —
+    the old isdigit-after-lstrip filter let '--123' through to int(), which raised
+    ValueError at import and crash-looped the bot until someone got to a shell."""
+    out: set[int] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.add(int(tok))
+        except ValueError:
+            logging.warning("[config] ignoring invalid id %r in %s", tok, name)
+    return out
+
+
 _allowed_raw = os.getenv("ALLOWED_USERS", "")
-ALLOWED_USERS: set[int] = {int(x) for x in _allowed_raw.split(",") if x.strip().lstrip("-").isdigit()}
+ALLOWED_USERS: set[int] = _parse_id_set(_allowed_raw, "ALLOWED_USERS")
 
 # --- Rate limiting ---
 _last_request: dict[int, float] = {}
@@ -198,10 +214,8 @@ TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
 # GROUP_ALLOWED_CHATS. Every other instance ignores group traffic entirely (fail
 # closed, fleet-wide) — see group_guard().
 GROUP_MODE = os.getenv("GROUP_MODE", "0").lower() in ("1", "true", "yes")
-GROUP_ALLOWED_CHATS: set[int] = {
-    int(x) for x in os.getenv("GROUP_ALLOWED_CHATS", "").split(",")
-    if x.strip().lstrip("-").isdigit()
-}
+GROUP_ALLOWED_CHATS: set[int] = _parse_id_set(
+    os.getenv("GROUP_ALLOWED_CHATS", ""), "GROUP_ALLOWED_CHATS")
 GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
 GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line; Name2: ..."
 GROUP_BOT_REPLY_PROB = float(os.getenv("GROUP_BOT_REPLY_PROB", "0.35"))
@@ -410,7 +424,17 @@ def _read_schedule_today() -> str:
         stripped = line.strip()
         if not stripped:
             continue
-        is_day_heading = any(stripped.lower().startswith(d) for d in day_abbrevs)
+        # A heading is a line whose FIRST WORD is a day name/abbrev ("Mon", "Monday",
+        # "Monday:"), not any line that merely starts with those letters — plain
+        # startswith turned "money is tight" into a Monday heading ("wedding"→Wed,
+        # "sunshine"→Sun, …) and served the wrong day's schedule.
+        first_word = re.split(r"[\s:,-]+", stripped.lower(), maxsplit=1)[0]
+        is_day_heading = any(
+            first_word == d or (first_word.startswith(d) and first_word in
+                                ("monday", "tuesday", "wednesday", "thursday",
+                                 "friday", "saturday", "sunday", "tues", "thur", "thurs"))
+            for d in day_abbrevs
+        )
         if is_day_heading:
             if today.lower()[:3] in stripped.lower()[:3]:
                 in_today = True
@@ -1809,6 +1833,11 @@ def get_owner():
         try:
             return int(OWNER_CHAT_ID_ENV)
         except ValueError:
+            # Silent None here made every admin command fail closed for the owner
+            # with zero signal — say why, loudly, once per call site that cares.
+            log.warning("[config] OWNER_CHAT_ID is not numeric (%r) — owner disabled, "
+                        "admin commands and proactive messages will not work",
+                        OWNER_CHAT_ID_ENV)
             return None
     if OWNER_FILE.exists():
         try:
@@ -3246,22 +3275,6 @@ def _weather_camera_pool() -> list:
     return filtered or SELFIE_CAMERA
 
 
-
-    label = mood_label(chat_id)
-    if label:
-        return label
-    s = mood_now(chat_id)
-    if s >= 1.2:
-        return "happy and relaxed, warmth in her eyes"
-    if s >= 0.4:
-        return "comfortable and easy"
-    if s > -0.4:
-        return "everyday, neutral"
-    if s > -1.2:
-        return "a little subdued and tired"
-    return "withdrawn and flat, not really feeling it"
-
-
 def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     scene = hint.strip() if hint else (random.choice(ATLAS) if ATLAS else "")
     framing = random.choice(SELFIE_FRAMINGS)
@@ -3741,7 +3754,17 @@ def _extract_json(raw: str) -> dict:
         try:
             return json.loads(m.group(0))
         except Exception:
-            return {}
+            pass
+    # Greedy span failed (e.g. a second '{' after the real object). Decode the
+    # first balanced JSON object instead.
+    start = raw.find("{")
+    if start != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
     return {}
 
 
@@ -5469,15 +5492,21 @@ def build_backup_zip() -> bytes:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in backup_file_list():
-            zf.write(path, arcname=path.name)
+            try:
+                zf.write(path, arcname=path.name)
+            except FileNotFoundError:
+                continue  # rotated/removed between listing and open — skip, don't die
     return buf.getvalue()
 
 
 async def _send_backup(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     sent = []
     for path in backup_file_list():
-        with path.open("rb") as fh:
-            await context.bot.send_document(chat_id=chat_id, document=fh, filename=path.name)
+        try:
+            with path.open("rb") as fh:
+                await context.bot.send_document(chat_id=chat_id, document=fh, filename=path.name)
+        except FileNotFoundError:
+            continue  # rotated/removed between listing and open — skip, don't die
         sent.append(path.name)
     return sent
 
