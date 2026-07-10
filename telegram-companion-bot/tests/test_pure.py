@@ -421,6 +421,52 @@ class TestOwnDayFacts:
             bot.facts.pop(cid, None)
 
 
+# ── Native tool-call stripping (raw XML leak fix, v2026-07-10.2) ─────────────
+
+class TestStripNativeToolCalls:
+    # The exact payload Priya leaked to the user on 2026-07-09.
+    LEAKED = ("<tool_call>\n<function=search>\n"
+              "<parameter=query>Seattle news today July 9 2026</parameter>\n"
+              "</function>\n</tool_call>")
+
+    def test_leaked_payload_becomes_search_tag(self):
+        out = bot._strip_native_tool_calls(self.LEAKED)
+        assert out == "[search: Seattle news today July 9 2026]"
+
+    def test_embedded_in_prose(self):
+        out = bot._strip_native_tool_calls(
+            "hang on let me check\n" + self.LEAKED + "\nback in a sec")
+        assert "<tool_call" not in out
+        assert "[search: Seattle news today July 9 2026]" in out
+        assert "hang on let me check" in out
+
+    def test_non_search_tool_call_stripped(self):
+        block = ("<tool_call><function=get_weather>"
+                 "<parameter=city>Seattle</parameter></function></tool_call>")
+        assert bot._strip_native_tool_calls("sure! " + block) == "sure!"
+
+    def test_truncated_block_stripped(self):
+        out = bot._strip_native_tool_calls(
+            "one sec\n<tool_call>\n<function=search>\n<parameter=query>half a")
+        assert out == "one sec"
+
+    def test_bare_function_block(self):
+        out = bot._strip_native_tool_calls(
+            "<function=search>\n<parameter=query>bike routes fremont</parameter>\n</function>")
+        assert out == "[search: bike routes fremont]"
+
+    def test_clean_text_unchanged(self):
+        text = "just a normal reply about my day <3"
+        assert bot._strip_native_tool_calls(text) == text
+
+    def test_search_query_survives_intact(self):
+        # The converted tag must be parseable by the existing [search:] extractor.
+        out = bot._strip_native_tool_calls(self.LEAKED)
+        import re as _re
+        m = _re.search(r"\[search:\s*(.*?)\]", out)
+        assert m and m.group(1) == "Seattle news today July 9 2026"
+
+
 # ── _count_error tracking ────────────────────────────────────────────────────
 
 class TestCountError:

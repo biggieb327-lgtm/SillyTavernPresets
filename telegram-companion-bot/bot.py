@@ -2694,6 +2694,39 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 # --- NanoGPT ---
 _THINK_RE = re.compile(r"(?s)<think>.*?</think>")
 
+# Native tool-call syntax (Hermes/GLM/DeepSeek style). Models taught the bracket
+# [search: …] tag sometimes render that intent in their NATIVE function-call format
+# instead — which nothing downstream parses, so the raw XML reached the user verbatim
+# (observed 2026-07-09, Priya: "<tool_call>\n<function=search>\n<parameter=query>
+# Seattle news today July 9 2026</parameter>…"). Search-like calls are converted to
+# the bracket tag so maybe_search still runs; anything else is stripped.
+_TOOL_CALL_RE = re.compile(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>")
+_TOOL_CALL_OPEN_RE = re.compile(r"(?s)<tool_call>.*$")  # truncated/unclosed block
+_FUNC_BLOCK_RE = re.compile(r"(?s)<function[=\s][^>]*>.*?(?:</function>|$)")
+_FUNC_NAME_RE = re.compile(r'<function[=\s]"?([\w.\-]+)')
+_TOOL_QUERY_RE = re.compile(r'(?s)<parameter[=\s]"?query"?\s*>\s*(.*?)\s*</parameter>')
+
+
+def _convert_tool_call_block(block: str) -> str:
+    """One native tool-call block → '[search: q]' if it's a search, else ''."""
+    name = _FUNC_NAME_RE.search(block)
+    if name and "search" in name.group(1).lower():
+        q = _TOOL_QUERY_RE.search(block)
+        if q and q.group(1).strip():
+            return f"[search: {q.group(1).strip()}]"
+    return ""
+
+
+def _strip_native_tool_calls(text: str) -> str:
+    """Convert/remove native tool-call XML so it never reaches the user as text."""
+    if "<tool_call" not in text and "<function" not in text:
+        return text
+    sub = lambda m: _convert_tool_call_block(m.group(0))
+    text = _TOOL_CALL_RE.sub(sub, text)
+    text = _TOOL_CALL_OPEN_RE.sub(sub, text)
+    text = _FUNC_BLOCK_RE.sub(sub, text)
+    return text.strip()
+
 # Hollow openers that mark AI sycophancy / assistant-speak.
 # Stripped from the start of every response before delivery.
 _SLOP_OPENER_RE = re.compile(
@@ -2740,7 +2773,7 @@ def _extract_content(choice: dict) -> str:
     text = (msg.get("content") or "").strip()
     if not text:
         text = (msg.get("reasoning_content") or "").strip()
-    return _strip_thinking(text)
+    return _strip_native_tool_calls(_strip_thinking(text))
 
 _no_stream_models: set[str] = set()
 
@@ -2779,7 +2812,7 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
         text = "".join(content_parts)
         if not text:
             text = "".join(reasoning_parts)
-        return _fix_mojibake(_strip_thinking(text))
+        return _fix_mojibake(_strip_native_tool_calls(_strip_thinking(text)))
     else:
         resp = _get_session().post(
             f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
