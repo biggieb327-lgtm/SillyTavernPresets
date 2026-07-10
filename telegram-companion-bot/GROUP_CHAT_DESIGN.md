@@ -3,8 +3,19 @@
 Status: draft for adversarial-critic review. No bot.py code lands until this survives.
 
 Goal: two character bots (pilot: **Priya + Jules**) and one human in one Telegram group,
-behind `GROUP_MODE=1` on exactly those two instances. Everything here is additive and
-gated — with `GROUP_MODE` unset, bot.py behavior is byte-identical to today.
+behind `GROUP_MODE=1` on exactly those two instances.
+
+Scope of behavior change, stated precisely:
+
+- **Private chats (chat_id > 0): byte-identical to today**, GROUP_MODE set or not.
+- **Group chats (chat_id < 0): fail closed for everyone.** An instance participates in
+  a group only when `GROUP_MODE=1` AND the group is in its `GROUP_ALLOWED_CHATS`;
+  every other instance ignores group traffic entirely (except `/chatid`, needed for
+  setup). This is deliberately NOT gated on GROUP_MODE, and it changes today's
+  behavior on purpose: today a bot added to any random group will execute `/note`,
+  `/backup`, or reply in full companion mode when @mentioned there — that's a latent
+  bug of the same class as the `set_owner` group-claim bug (§6), and both fixes ship
+  fleet-wide. No non-pilot bot loses anything real; what it "loses" is an accident.
 
 Product decisions already made (owner sign-off, 2026-07-07):
 
@@ -318,9 +329,14 @@ Multiple humans are explicitly out of scope (§9).
 - **Human gating unchanged.** `_is_allowed(user_id)` still applies to the sender of
   every group message; strangers in an allowed group are ignored unless `ALLOWED_USERS`
   is empty.
-- **Non-text handlers** (photo, voice, sticker, video, document, location) return early
-  in group chats in v1 — smaller surface, and the media pipelines (vision calls, whisper
-  transcription) are exactly the expensive paths §4 is keeping off.
+- **Non-text updates: same choke point, same default-deny.** The group -1 guard
+  handler doesn't just gate commands — in a group chat it stops **every update that
+  isn't a plain text message** (photo, voice, sticker, video, document, location, and
+  any update type Telegram adds later) before it reaches a feature handler. No
+  per-handler early-returns to keep in sync: text flows (for a GROUP_MODE instance in
+  an allowed group), `/chatid` flows, everything else stops by construction. This also
+  keeps the expensive media pipelines (vision calls, whisper transcription) off in
+  groups, per §4.
 - **Commands in groups: default-deny** (mechanism specified in §5). Every command —
   including admin ops like `/update`, `/restart`, `/backup` — is refused in group
   chats except `/chatid`. Admins run ops from the DM; `/backup` in particular must
@@ -439,10 +455,14 @@ Acceptance script (all must pass before the pilot is called working):
    act on human entries). Repeat ×5 and count Priya's messages.
 3. `jules you're wrong about this` (name, no @) → only Jules answers, once.
 4. Human line → bot A answers → bot B chimes in → **silence** (chain cap 2 holds), ×5.
-5. Adversarial loop bait, ×5: `priya, ask jules a question` — the reply will
-   near-certainly name Jules, Jules's reply will near-certainly name Priya. Verify the
-   exchange still stops at 2 bot messages under real poll timing (this probes the
-   addressed-bypasses-nothing rule and the under-lock cap re-check).
+   **Space the repeats >20s apart** — inside the `GROUP_MIN_GAP_SECONDS=20` window the
+   send throttle could mask a cap failure and produce a false pass; the point is to
+   observe the *cap* holding, so the throttle must be out of the picture.
+5. Adversarial loop bait, ×5 (same >20s spacing, same reason): `priya, ask jules a
+   question` — the reply will near-certainly name Jules, Jules's reply will
+   near-certainly name Priya. Verify the exchange still stops at 2 bot messages under
+   real poll timing (this probes the addressed-bypasses-nothing rule and the
+   under-lock cap re-check).
 6. Restart one pilot mid-conversation → no replay of old messages (staleness guard).
 7. **Full flat-file freeze check.** Before the session:
    `sha256sum ~/priya-bot/{memories.txt,user_notes.txt,people.txt,projects.txt,life.txt,jokes.json,wardrobe.json,embeddings.json,reminders.json,cron_jobs.json} > /tmp/pre.sha`
@@ -458,6 +478,11 @@ Acceptance script (all must pass before the pilot is called working):
    owner only.
 9. A non-allowed group: add Priya to a second group not in `GROUP_ALLOWED_CHATS`, send
    messages → zero response, zero ledger, zero state.
+10. A non-pilot instance (e.g. Nora, GROUP_MODE unset): add her to a test group,
+    @mention her, send `/note test` and `/backup` → total silence except `/chatid`,
+    zero state written for the group chat_id. Then DM her → completely normal. This
+    verifies the fleet-wide fail-closed posture (§0) on a production bot without
+    touching its real state.
 
 Kill switch: remove `GROUP_MODE=1` from the two .env files and `/restart` — instances
 return to pure DM behavior; the ledger file goes inert (nothing reads it).
@@ -469,3 +494,22 @@ return to pure DM behavior; the ledger file goes inert (nothing reads it).
 - `/audit` gains one group line when GROUP_MODE=1: ledger size, bot-sends today vs
   budget, chain state — so "why did she stop replying to Jules?" is answerable from
   Telegram (answer: budget or cap, and which).
+
+## 12. Durable enforcement (not just a one-time script)
+
+The acceptance script in §10 is run once, by hand; this repo's operating model
+(CLAUDE.md, `.claude/evals/`) is that invariants live as runnable checks or they decay.
+Two new evals ship with the prototype in `.claude/evals/run-evals.sh` (and therefore
+run in CI on every push):
+
+- **`group-deliver-clean`**: `_group_deliver`'s body must contain none of
+  `post_reply_analysis`, `_check_joke_used`, `send_selfie`, `send_meme`,
+  `_send_voice_reply`, `_append_user_note`, `_append_memory` — the allowlist-built
+  claim in §5, greppable. A future edit that pastes `_deliver` tail code into the
+  group path turns CI red.
+- **`group-cmd-allowlist`**: the group command allowlist constant in bot.py must be
+  exactly `{"chatid"}`. Widening it is a deliberate, reviewed act (edit the eval in
+  the same commit), never a drive-by.
+
+The pure-function tests (§ Phase B / tests) additionally pin the turn-taking and
+loop-prevention logic in pytest, which also runs in CI.
