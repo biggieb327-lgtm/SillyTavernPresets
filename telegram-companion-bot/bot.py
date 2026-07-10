@@ -120,6 +120,32 @@ def _count_error(category: str):
     if len(ts) > 200:
         del ts[:-200]
 
+# --- Env parsing that can't brick the fleet ---
+# A non-numeric value in an instance .env used to raise at import and crash-loop
+# that bot until someone reached a shell (/restart can't fix a file that won't
+# import). Bad values now fall back to the default with a loud warning.
+
+def _env_int(name: str, default: str) -> int:
+    raw = os.getenv(name, default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logging.warning("[config] %s=%r is not a valid integer — using default %s",
+                        name, raw, default)
+        return int(default)
+
+
+def _env_float(name: str, default: str = None):
+    raw = os.getenv(name, default)
+    if raw is None or raw == "":
+        return None if default is None else float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logging.warning("[config] %s=%r is not a valid number — using default %s",
+                        name, raw, default)
+        return None if default is None else float(default)
+
 # --- Access control ---
 def _parse_id_set(raw: str, name: str) -> set[int]:
     """Comma-separated Telegram ids → set. Bad tokens are skipped with a warning —
@@ -142,7 +168,7 @@ ALLOWED_USERS: set[int] = _parse_id_set(_allowed_raw, "ALLOWED_USERS")
 
 # --- Rate limiting ---
 _last_request: dict[int, float] = {}
-RATE_LIMIT_SECONDS = float(os.getenv("RATE_LIMIT_SECONDS", "2"))
+RATE_LIMIT_SECONDS = _env_float("RATE_LIMIT_SECONDS", "2")
 
 def _is_allowed(user_id: int) -> bool:
     return not ALLOWED_USERS or user_id in ALLOWED_USERS
@@ -168,46 +194,46 @@ SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a fast
 VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept image input
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "120"))  # hard cap per request
+REQUEST_TIMEOUT = _env_int("REQUEST_TIMEOUT", "120")  # hard cap per request
 # Dead man's switch: per-instance ping URL (e.g. healthchecks.io). The self-audit job
 # GETs it every 30 min; the service alerts the owner when pings STOP — which catches
 # every failure the bot can't self-report, including the whole phone being dead.
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
-USAGE_BUDGET_MONTHLY = float(os.getenv("USAGE_BUDGET_MONTHLY", "0"))
-STREAM_TIMEOUT = int(os.getenv("STREAM_TIMEOUT", "90"))    # max silence between chunks
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
-TEMPERATURE = float(os.getenv("TEMPERATURE")) if os.getenv("TEMPERATURE") else None
+USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
+STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
+MAX_TOKENS = _env_int("MAX_TOKENS", "2048")
+TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
-MOOD_LABEL_FRESH_HOURS = float(os.getenv("MOOD_LABEL_FRESH_HOURS", "12"))
+MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
-VIDEO_MAX_SIZE_MB = int(os.getenv("VIDEO_MAX_SIZE_MB", "50"))
-DOCUMENT_MAX_SIZE_MB = int(os.getenv("DOCUMENT_MAX_SIZE_MB", "2"))
+VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
+DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
 # Separate model for document/card analysis — should be an instruction model,
 # not a roleplay-tuned one, so it won't perform the character it's reading about.
 DOCUMENT_MODEL = os.getenv("DOCUMENT_MODEL", "deepseek/deepseek-v4-flash")
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 TTS_VOICE = os.getenv("TTS_VOICE", "nova")
-TTS_CHANCE = float(os.getenv("TTS_CHANCE", "0.30"))
-VOICE_REPLY_TO_VOICE = float(os.getenv("VOICE_REPLY_TO_VOICE", "0.9"))
+TTS_CHANCE = _env_float("TTS_CHANCE", "0.30")
+VOICE_REPLY_TO_VOICE = _env_float("VOICE_REPLY_TO_VOICE", "0.9")
 # Inworld TTS: when INWORLD_API_KEY is set, voice replies use api.inworld.ai
 # (with TTS_VOICE as the Inworld voice ID) instead of NanoGPT's speech endpoint.
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")   # base64 runtime key from the Inworld portal
 INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-2")
 LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
-LINK_FETCH_TIMEOUT = int(os.getenv("LINK_FETCH_TIMEOUT", "8"))
-LINK_MAX_CHARS = int(os.getenv("LINK_MAX_CHARS", "2200"))
+LINK_FETCH_TIMEOUT = _env_int("LINK_FETCH_TIMEOUT", "8")
+LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
-SEARCH_RESULTS = int(os.getenv("SEARCH_RESULTS", "4"))
+SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
 TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
-TYPING_WPM = float(os.getenv("TYPING_WPM", "120"))
-TYPING_DELAY_MIN = float(os.getenv("TYPING_DELAY_MIN", "0.5"))
-TYPING_DELAY_MAX = float(os.getenv("TYPING_DELAY_MAX", "3.5"))
+TYPING_WPM = _env_float("TYPING_WPM", "120")
+TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
+TYPING_DELAY_MAX = _env_float("TYPING_DELAY_MAX", "3.5")
 
 # --- Group chat (experimental, GROUP_CHAT_DESIGN.md) ---
 # An instance participates in a group only when GROUP_MODE=1 AND the group is in
@@ -218,15 +244,15 @@ GROUP_ALLOWED_CHATS: set[int] = _parse_id_set(
     os.getenv("GROUP_ALLOWED_CHATS", ""), "GROUP_ALLOWED_CHATS")
 GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
 GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line; Name2: ..."
-GROUP_BOT_REPLY_PROB = float(os.getenv("GROUP_BOT_REPLY_PROB", "0.35"))
-GROUP_BOT_CHAIN_MAX = int(os.getenv("GROUP_BOT_CHAIN_MAX", "2"))
-GROUP_POLL_SECONDS = int(os.getenv("GROUP_POLL_SECONDS", "5"))
-GROUP_MIN_GAP_SECONDS = float(os.getenv("GROUP_MIN_GAP_SECONDS", "20"))
-GROUP_ALTERNATION_PENALTY = float(os.getenv("GROUP_ALTERNATION_PENALTY", "2.0"))
-GROUP_DAILY_BOT_BUDGET = int(os.getenv("GROUP_DAILY_BOT_BUDGET", "30"))
+GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.35")
+GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "2")
+GROUP_POLL_SECONDS = _env_int("GROUP_POLL_SECONDS", "5")
+GROUP_MIN_GAP_SECONDS = _env_float("GROUP_MIN_GAP_SECONDS", "20")
+GROUP_ALTERNATION_PENALTY = _env_float("GROUP_ALTERNATION_PENALTY", "2.0")
+GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "30")
 GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
-GROUP_LEDGER_MAX_AGE_SECONDS = int(os.getenv("GROUP_LEDGER_MAX_AGE_SECONDS", "600"))
-GROUP_CLAIM_TTL_SECONDS = int(os.getenv("GROUP_CLAIM_TTL_SECONDS", "600"))
+GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
+GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
 # The ONLY commands a bot answers in any group chat. Widening this is a reviewed,
 # deliberate act: the group-cmd-allowlist eval pins it (GROUP_CHAT_DESIGN.md §12).
 GROUP_ALLOWED_COMMANDS = {"chatid"}
@@ -300,9 +326,9 @@ GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.goo
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
-SELFIE_GUIDANCE = float(os.getenv("SELFIE_GUIDANCE", "3.5"))
-SELFIE_STEPS = int(os.getenv("SELFIE_STEPS", "28"))
-IMAGE_TIMEOUT = int(os.getenv("IMAGE_TIMEOUT", "180"))
+SELFIE_GUIDANCE = _env_float("SELFIE_GUIDANCE", "3.5")
+SELFIE_STEPS = _env_int("SELFIE_STEPS", "28")
+IMAGE_TIMEOUT = _env_int("IMAGE_TIMEOUT", "180")
 
 if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
     raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
@@ -313,9 +339,9 @@ if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
 # they're generic rather than character-specific.
 MEME_TEMPLATES_DIR = Path(__file__).resolve().parent / "meme_templates"
 MEME_FONT_PATH = Path(__file__).resolve().parent / "fonts" / "Anton-Regular.ttf"
-MEME_FONT_SIZE = int(os.getenv("MEME_FONT_SIZE", "80"))
+MEME_FONT_SIZE = _env_int("MEME_FONT_SIZE", "80")
 MEME_MIN_FONT_SIZE = 24
-MEME_DEDUP_SIZE = int(os.getenv("MEME_DEDUP_SIZE", "5"))
+MEME_DEDUP_SIZE = _env_int("MEME_DEDUP_SIZE", "5")
 _recent_meme_templates: dict = {}  # chat_id -> list of recently used template filenames
 _APPEARANCE_DEFAULT = (
     "a 29-year-old woman, tall and lanky, half-shaved head with the long side pushed back, "
@@ -333,18 +359,18 @@ else:
     SELFIE_APPEARANCE = "an adult woman in her late 20s, the same person as in the reference photo"
 
 CARD_NAME = os.getenv("CHARACTER_CARD", "priya.json")
-HEARTBEAT_MIN = float(os.getenv("HEARTBEAT_MIN_HOURS", "2")) * 3600  # random window low end
-HEARTBEAT_MAX = float(os.getenv("HEARTBEAT_MAX_HOURS", "6")) * 3600  # random window high end
+HEARTBEAT_MIN = _env_float("HEARTBEAT_MIN_HOURS", "2") * 3600  # random window low end
+HEARTBEAT_MAX = _env_float("HEARTBEAT_MAX_HOURS", "6") * 3600  # random window high end
 OWNER_CHAT_ID_ENV = os.getenv("OWNER_CHAT_ID")
 OWNER_FILE = BASE_DIR / "owner_chat.txt"
 MAX_HISTORY = 20    # hard count cap on the verbatim window (marathon-session safety)
 KEEP_RECENT = 10    # always keep at least this many recent messages verbatim
-SHORT_TERM_HOURS = float(os.getenv("SHORT_TERM_HOURS", "48"))  # verbatim messages older
+SHORT_TERM_HOURS = _env_float("SHORT_TERM_HOURS", "48")  # verbatim messages older
 SHORT_TERM_SECS = SHORT_TERM_HOURS * 3600                       # than this get distilled out
 
 # --- Local atlas (real places she can reference / selfie backgrounds) ---
 ATLAS_FILE = BASE_DIR / os.getenv("ATLAS_FILE", "atlas.txt")
-ATLAS_SAMPLE = int(os.getenv("ATLAS_SAMPLE", "6"))
+ATLAS_SAMPLE = _env_int("ATLAS_SAMPLE", "6")
 ATLAS = (
     [ln.strip() for ln in ATLAS_FILE.read_text(encoding="utf-8").splitlines()
      if ln.strip() and not ln.strip().startswith("#")]
@@ -366,8 +392,8 @@ _life_arc_cache: dict = {"text": None, "ts": 0.0}
 
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
-MEMORY_TOKEN_BUDGET = int(os.getenv("MEMORY_TOKEN_BUDGET", "300"))
-MEMORIES_MAX = int(os.getenv("MEMORIES_MAX", "200"))
+MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
+MEMORIES_MAX = _env_int("MEMORIES_MAX", "200")
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 _memories_cache: dict = {"text": None, "ts": 0.0}
 _memory_lock = threading.Lock()
@@ -447,7 +473,7 @@ def _read_schedule_today() -> str:
 
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
-USER_NOTES_MAX = int(os.getenv("USER_NOTES_MAX", "15"))
+USER_NOTES_MAX = _env_int("USER_NOTES_MAX", "15")
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
 
 
@@ -646,8 +672,8 @@ WEATHER_TTL = 3600  # refresh live weather at most every hour
 # --- WSDOT Traffic (Western Washington) ---
 WSDOT_API_KEY       = os.getenv("WSDOT_API_KEY", "")
 TRAFFIC_ENABLED     = bool(WSDOT_API_KEY)
-TRAFFIC_RADIUS_MILES = float(os.getenv("TRAFFIC_RADIUS_MILES", "10"))
-TRAFFIC_POLL_MINUTES = int(os.getenv("TRAFFIC_POLL_MINUTES", "10"))
+TRAFFIC_RADIUS_MILES = _env_float("TRAFFIC_RADIUS_MILES", "10")
+TRAFFIC_POLL_MINUTES = _env_int("TRAFFIC_POLL_MINUTES", "10")
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
 
@@ -657,8 +683,8 @@ PAYMENTS_ENABLED = os.getenv(
 ).lower() not in ("0", "false", "no", "off")
 PAYMENTS_FILE = BASE_DIR / "payments.json"
 REMINDER_TIME = os.getenv("REMINDER_TIME", "09:00")        # HH:MM in local TZ
-REMINDER_WEEKDAY = int(os.getenv("REMINDER_WEEKDAY", "3"))  # Mon=0 ... Thu=3 ... Sun=6
-REMINDER_WINDOW_DAYS = int(os.getenv("REMINDER_WINDOW_DAYS", "6"))  # Thu + 6 = next Wed
+REMINDER_WEEKDAY = _env_int("REMINDER_WEEKDAY", "3")  # Mon=0 ... Thu=3 ... Sun=6
+REMINDER_WINDOW_DAYS = _env_int("REMINDER_WINDOW_DAYS", "6")  # Thu + 6 = next Wed
 try:
     _REM_H, _REM_M = (int(x) for x in REMINDER_TIME.split(":"))
 except Exception:
@@ -674,7 +700,7 @@ except Exception:
     _QS_H, _QS_M, _QE_H, _QE_M = 23, 0, 8, 0
 
 # --- Weekly backup ---
-BACKUP_WEEKDAY = int(os.getenv("BACKUP_WEEKDAY", "6"))  # Sun=6
+BACKUP_WEEKDAY = _env_int("BACKUP_WEEKDAY", "6")  # Sun=6
 BACKUP_TIME = os.getenv("BACKUP_TIME", "09:05")
 try:
     _BK_H, _BK_M = (int(x) for x in BACKUP_TIME.split(":"))
@@ -999,10 +1025,10 @@ try:
     _RF_H, _RF_M = (int(x) for x in REFLECTION_TIME.split(":"))
 except Exception:
     _RF_H, _RF_M = 3, 0
-BELIEF_TRAITS = int(os.getenv("BELIEF_TRAITS", "5"))      # how many core self-image traits to track
-BELIEF_DRIFT_MAX = float(os.getenv("BELIEF_DRIFT_MAX", "2.5"))  # max distance from her card-derived baseline
-RECS_MAX = int(os.getenv("RECS_MAX", "20"))  # cap on tracked recommendations/outcomes
-MILESTONES_MAX = int(os.getenv("MILESTONES_MAX", "30"))  # cap on relationship milestones stored
+BELIEF_TRAITS = _env_int("BELIEF_TRAITS", "5")      # how many core self-image traits to track
+BELIEF_DRIFT_MAX = _env_float("BELIEF_DRIFT_MAX", "2.5")  # max distance from her card-derived baseline
+RECS_MAX = _env_int("RECS_MAX", "20")  # cap on tracked recommendations/outcomes
+MILESTONES_MAX = _env_int("MILESTONES_MAX", "30")  # cap on relationship milestones stored
 
 
 # --- Character card loading (SillyTavern v2) ---
@@ -2454,7 +2480,7 @@ def belief_note(chat_id: int) -> str:
 # untagged day archives rendered under "Recent specifics" and even got promoted
 # into permanent long-term facts about the user).
 _OWN_DAY_PREFIX = "[own-day"
-OWN_DAYS_KEPT = int(os.getenv("OWN_DAYS_KEPT", "5"))  # her own past days kept in the recent tier
+OWN_DAYS_KEPT = _env_int("OWN_DAYS_KEPT", "5")  # her own past days kept in the recent tier
 
 # Negative lookahead: handle_voice stores user voice notes as '[Jul 10] Voice note: …'
 # — those are USER content and must not be retagged as her own fiction.
@@ -3809,15 +3835,15 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
 
 
 # Recent (last ~week) facts list: consolidate when it grows past this, down to roughly this many.
-RECENT_FACTS_MAX = int(os.getenv("RECENT_FACTS_MAX", "30"))
-RECENT_FACTS_TARGET = int(os.getenv("RECENT_FACTS_TARGET", "20"))
+RECENT_FACTS_MAX = _env_int("RECENT_FACTS_MAX", "30")
+RECENT_FACTS_TARGET = _env_int("RECENT_FACTS_TARGET", "20")
 
 # Long-term (durable) facts list: same idea, but kept much smaller since it's permanent.
-LONG_FACTS_MAX = int(os.getenv("LONG_FACTS_MAX", "22"))
-LONG_FACTS_TARGET = int(os.getenv("LONG_FACTS_TARGET", "15"))
+LONG_FACTS_MAX = _env_int("LONG_FACTS_MAX", "22")
+LONG_FACTS_TARGET = _env_int("LONG_FACTS_TARGET", "15")
 
 # How often (days) recent memory gets reviewed and folded into long-term memory.
-PROMOTION_INTERVAL_DAYS = float(os.getenv("PROMOTION_INTERVAL_DAYS", "7"))
+PROMOTION_INTERVAL_DAYS = _env_float("PROMOTION_INTERVAL_DAYS", "7")
 
 
 def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: int):
@@ -6047,9 +6073,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
 
 
-PDF_MAX_SIZE_MB = int(os.getenv("PDF_MAX_SIZE_MB", "20"))
-PDF_MAX_CHARS = int(os.getenv("PDF_MAX_CHARS", "16000"))
-PDF_OCR_MAX_PAGES = int(os.getenv("PDF_OCR_MAX_PAGES", "4"))
+PDF_MAX_SIZE_MB = _env_int("PDF_MAX_SIZE_MB", "20")
+PDF_MAX_CHARS = _env_int("PDF_MAX_CHARS", "16000")
+PDF_OCR_MAX_PAGES = _env_int("PDF_OCR_MAX_PAGES", "4")
 
 
 async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
@@ -6921,7 +6947,7 @@ PROACTIVE_SELFIE_HINT = (
 )
 PROACTIVE_SELFIE_CHANCE = 0.15
 # After she reacts to a photo the user sends, chance she fires back a selfie of her own.
-PHOTO_SELFIE_CHANCE = float(os.getenv("PHOTO_SELFIE_CHANCE", "0.20"))
+PHOTO_SELFIE_CHANCE = _env_float("PHOTO_SELFIE_CHANCE", "0.20")
 
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
@@ -6936,20 +6962,20 @@ _FOLLOWUP_RE = re.compile(
     r"|give me a moment|one moment)\b",
     re.IGNORECASE,
 )
-FOLLOWUP_MIN = float(os.getenv("FOLLOWUP_MIN_SECS", "45"))
-FOLLOWUP_MAX = float(os.getenv("FOLLOWUP_MAX_SECS", "120"))
+FOLLOWUP_MIN = _env_float("FOLLOWUP_MIN_SECS", "45")
+FOLLOWUP_MAX = _env_float("FOLLOWUP_MAX_SECS", "120")
 _pending_followup: dict = {}  # chat_id -> scheduled job object (cancel if user replies first)
 
 # Selfie scene deduplication — avoids repeating the same scenario in back-to-back selfies.
-SELFIE_DEDUP_SIZE = int(os.getenv("SELFIE_DEDUP_SIZE", "6"))
+SELFIE_DEDUP_SIZE = _env_int("SELFIE_DEDUP_SIZE", "6")
 _recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
 
 # Proactive hook dedup — avoids repeating the same pattern in back-to-back heartbeats.
-PROACTIVE_HOOK_DEDUP_SIZE = int(os.getenv("PROACTIVE_HOOK_DEDUP_SIZE", "8"))
+PROACTIVE_HOOK_DEDUP_SIZE = _env_int("PROACTIVE_HOOK_DEDUP_SIZE", "8")
 _recent_proactive_hooks: dict = {}  # chat_id -> list of recent hook sentences
 
 # Question memory — tracks questions the bot has asked recently; avoids repeating them.
-QUESTION_MEMORY_SIZE = int(os.getenv("QUESTION_MEMORY_SIZE", "8"))
+QUESTION_MEMORY_SIZE = _env_int("QUESTION_MEMORY_SIZE", "8")
 _recent_questions: dict = {}  # chat_id -> list of recent questions
 
 _QUESTION_RE = re.compile(r"[^.!?…]*\?")  # quick sentence-level question extractor
@@ -6961,13 +6987,13 @@ def _extract_last_question(text: str) -> str:
 
 # Lull detection: consecutive terse replies trigger a gentle approach shift.
 _terse_count: dict = {}  # chat_id -> int
-LULL_THRESHOLD = int(os.getenv("LULL_THRESHOLD", "3"))
+LULL_THRESHOLD = _env_int("LULL_THRESHOLD", "3")
 
 def _is_terse(text: str) -> bool:
     return len(text.strip()) <= 15
 
 # Gap-aware opener: when user returns after a long absence, note it in that turn's context.
-GAP_AWARE_HOURS = float(os.getenv("GAP_AWARE_HOURS", "12"))
+GAP_AWARE_HOURS = _env_float("GAP_AWARE_HOURS", "12")
 
 
 async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigger: str):
@@ -8150,7 +8176,7 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # set it to the host's Tailscale IP to actually expose it on a VPS.
 ADMIN_API_ENABLED = os.getenv("ADMIN_API_ENABLED", "").strip().lower() in ("1", "true", "yes")
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
-ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "8765") or 8765)
+ADMIN_API_PORT = _env_int("ADMIN_API_PORT", "8765")
 ADMIN_API_BIND = os.getenv("ADMIN_API_BIND", "127.0.0.1").strip() or "127.0.0.1"
 
 _admin_httpd = None

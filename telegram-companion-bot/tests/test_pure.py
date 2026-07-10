@@ -498,6 +498,34 @@ class TestParseIdSet:
         assert bot._parse_id_set("", "T") == set()
 
 
+# ── Env parsing that can't brick the fleet (v2026-07-10.2) ───────────────────
+
+class TestEnvHelpers:
+    def test_env_int_good(self, monkeypatch):
+        monkeypatch.setenv("X_TEST_INT", "42")
+        assert bot._env_int("X_TEST_INT", "7") == 42
+
+    def test_env_int_bad_value_falls_back(self, monkeypatch):
+        monkeypatch.setenv("X_TEST_INT", "not-a-number")
+        assert bot._env_int("X_TEST_INT", "7") == 7
+
+    def test_env_int_unset_uses_default(self, monkeypatch):
+        monkeypatch.delenv("X_TEST_INT", raising=False)
+        assert bot._env_int("X_TEST_INT", "7") == 7
+
+    def test_env_float_no_default_means_none(self, monkeypatch):
+        monkeypatch.delenv("X_TEST_F", raising=False)
+        assert bot._env_float("X_TEST_F") is None
+
+    def test_env_float_bad_with_default(self, monkeypatch):
+        monkeypatch.setenv("X_TEST_F", "abc")
+        assert bot._env_float("X_TEST_F", "0.5") == 0.5
+
+    def test_env_float_empty_string_uses_default(self, monkeypatch):
+        monkeypatch.setenv("X_TEST_F", "")
+        assert bot._env_float("X_TEST_F", "0.5") == 0.5
+
+
 # ── Schedule day-heading matching (v2026-07-10.2) ────────────────────────────
 
 class TestScheduleHeadings:
