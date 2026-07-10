@@ -479,10 +479,17 @@ Acceptance script (all must pass before the pilot is called working):
 9. A non-allowed group: add Priya to a second group not in `GROUP_ALLOWED_CHATS`, send
    messages → zero response, zero ledger, zero state.
 10. A non-pilot instance (e.g. Nora, GROUP_MODE unset): add her to a test group,
-    @mention her, send `/note test` and `/backup` → total silence except `/chatid`,
-    zero state written for the group chat_id. Then DM her → completely normal. This
-    verifies the fleet-wide fail-closed posture (§0) on a production bot without
-    touching its real state.
+    @mention her, send `/note test` → total silence except `/chatid`, zero state
+    written for the group chat_id. Then DM her → completely normal. This verifies the
+    fleet-wide fail-closed posture (§0) on a production bot. **Probe `/backup` last,
+    and only after every other probe was silent** — it's the one command whose failure
+    mode posts real state files into the group; if anything else leaked, stop there
+    and fix before risking it (or run the whole test against a disposable instance
+    first).
+11. Media in the pilot group: send a photo, a sticker, and a voice note → all three
+    ignored (no reply, no reaction, and `/errors` + logs show no vision or whisper
+    call was made). This exercises the class-level non-text guard that §12's evals
+    can't reach.
 
 Kill switch: remove `GROUP_MODE=1` from the two .env files and `/restart` — instances
 return to pure DM behavior; the ledger file goes inert (nothing reads it).
@@ -507,9 +514,10 @@ run in CI on every push):
   `_send_voice_reply`, `_append_user_note`, `_append_memory` — the allowlist-built
   claim in §5, greppable. A future edit that pastes `_deliver` tail code into the
   group path turns CI red.
-- **`group-cmd-allowlist`**: the group command allowlist constant in bot.py must be
-  exactly `{"chatid"}`. Widening it is a deliberate, reviewed act (edit the eval in
-  the same commit), never a drive-by.
+- **`group-cmd-allowlist`**: the group command allowlist constant in bot.py — named
+  exactly `GROUP_ALLOWED_COMMANDS`, so the eval greps a real symbol — must be exactly
+  `{"chatid"}`. Widening it is a deliberate, reviewed act (edit the eval in the same
+  commit), never a drive-by.
 
 The pure-function tests (§ Phase B / tests) additionally pin the turn-taking and
 loop-prevention logic in pytest, which also runs in CI.
