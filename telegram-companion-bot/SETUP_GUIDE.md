@@ -266,3 +266,7 @@ Once the bot is running:
 - Read **CHANGELOG.md** before making any code changes — it has the root cause behind every fix so far
 - Edit `preset.txt` to change texting style and behavioral rules
 - Edit the character card JSON to change personality, backstory, and scenario
+- Want two characters + you in one Telegram group? That's the experimental group-chat
+  feature — setup steps in **OPS_MANUAL.md** ("Group chat"), design and guarantees in
+  **GROUP_CHAT_DESIGN.md**. Note: bots ignore all group chats unless explicitly opted
+  in via `GROUP_MODE` + `GROUP_ALLOWED_CHATS`.

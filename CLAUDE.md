@@ -140,6 +140,23 @@ TRAFFIC_RADIUS_MILES=10
 TRAFFIC_POLL_MINUTES=10
 ```
 
+**Group-chat pilot only (Priya + Jules; experimental):** read
+`telegram-companion-bot/GROUP_CHAT_DESIGN.md` before touching anything group-related —
+Telegram never delivers one bot's messages to another bot, so the whole feature runs on
+a shared flock'd ledger + atomic claim files, and the design survived four adversarial
+review rounds. Fleet-wide behavior even when unset: bots ignore all group chats (only
+`/chatid` answers), and `set_owner` refuses group chat_ids. Two CI evals
+(`group-deliver-clean`, `group-cmd-allowlist`) pin the group/private memory boundary.
+```
+GROUP_MODE=1
+GROUP_ALLOWED_CHATS=                       # comma-separated group chat ids (REQUIRED, fail closed)
+GROUP_PEERS=                               # other character's first name
+GROUP_BOT_CHAIN_MAX=2                      # loop cap: consecutive bot msgs since last human
+GROUP_DAILY_BOT_BUDGET=30                  # bot-to-bot replies per day
+```
+BotFather privacy must be DISABLED for pilot bots (re-add to group after changing).
+One-time on-device check: `python bot.py ~/priya-bot --claim-test` (two PASS lines).
+
 **Voice via Inworld (Emily):** TTS voice and model must come from the same engine — an
 Inworld voice ID sent to an OpenAI-style model 400s. Setting `INWORLD_API_KEY` switches
 voice replies to api.inworld.ai:
@@ -355,6 +372,7 @@ TTS_VOICE=Zadieova                         # Inworld voice ID (incl. cloned voic
 │   ├── meme_templates/                # shared meme template images (not per-instance)
 │   ├── fonts/Anton-Regular.ttf         # shared meme caption font (not per-instance)
 │   ├── CHANGELOG.md                   # read before changes, update after — root causes, not just diffs
+│   ├── GROUP_CHAT_DESIGN.md           # group-chat design — read before touching GROUP_* code
 │   ├── README.md
 │   ├── SETUP_GUIDE.md
 │   └── OPS_MANUAL.md
