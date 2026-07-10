@@ -97,7 +97,9 @@ single-device blast radius.
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
 
 The 2026-07-10 audit (external Deepseek pass + verification + two user-observed bugs)
-shipped its confirmed fixes as v2026-07-10.2. What remains, triaged:
+shipped its confirmed fixes as v2026-07-10.2. What remains, triaged below — and specced
+in full, release-by-release, in **`IMPROVEMENTS_PLAN.md`** (self-contained handoff for
+whichever agent implements it):
 
 ### 4.1 Memory auditor — M (the theme behind the hallucination bug)
 - **Evidence:** the own-day provenance fix (v2026-07-10.2) closed the acute cause of
