@@ -77,24 +77,41 @@ ours.
 
 - A `job_queue.run_repeating` poll job (`_group_poll_job`, every `GROUP_POLL_SECONDS=5`),
   registered only when `GROUP_MODE=1`, reads lines past a persisted cursor
-  (`group_cursor[chat_id]` = byte offset, stored in state.json). New entries from *other*
-  senders feed the same decide→claim→reply path as live Telegram messages.
+  (`group_cursor[chat_id]` = byte offset, stored in state.json).
+- **The poll job processes `kind == "bot"` entries from other senders ONLY.** Human
+  messages are heard live via Telegram by every privacy-off bot and are *never* acted
+  on from the ledger — their ledger entries exist purely as chain-reset markers and
+  history. This is load-bearing: if the poll job also fed human entries into the reply
+  path, a bot that already answered an addressed human message live would answer it a
+  second time when its own poll swept past the same line (addressed messages don't go
+  through claims, so nothing would dedup the double-reply).
+- Human entries the poll encounters are consumed silently (cursor advances, human name
+  cached for `{{user}}`, nothing else).
 - **Startup staleness guard**: entries older than `GROUP_LEDGER_MAX_AGE_SECONDS=600`
   are skipped (cursor fast-forwarded past them). A bot that restarts mid-conversation
   must not replay a ten-minute-old exchange.
 - Own entries are always skipped (matched on `sender == NAME`).
+- Note on cadence: `run_repeating` is an in-process asyncio job — no new PID, so the
+  phantom-process budget is untouched. It does add a 5s wakeup on the two pilot
+  instances (alongside the existing 60s `_touch_alive`); that's the deliberate
+  trade for bot-to-bot latency, and it exists only where `GROUP_MODE=1`.
 
 ### Rotation
 
 When the appender finds the file over ~1000 lines it rewrites it to the last 300, under
-the same exclusive lock. Readers detect shrink (file size < stored cursor) and reset
-their cursor to EOF — losing at most a few seconds of backlog, never replaying.
+the same exclusive lock (either bot may do it; the lock serializes append-vs-rotate,
+and reads also take the lock briefly, so a reader never sees a half-rewritten file).
+Readers detect shrink (file size < stored cursor) and reset their cursor to EOF. Honest
+cost: a poller that was lagging at rotation time drops whatever unread bot messages fell
+between its cursor and the rewrite — up to one poll interval's worth. That means a
+missed reply opportunity, never a replay or a loop, and rotation fires at most once per
+~1000 messages.
 
 ### Failure modes
 
 | Failure | Behavior |
 |---|---|
-| Claim winner crashes before replying | Message goes unanswered. Self-heals: the human @mentions a bot, which always answers. Accepted for v1. |
+| Claim winner crashes before replying | That message stays unanswered — the claim file blocks any peer from retrying it until the claim TTL (10 min) prunes it, and by then it's stale anyway. This is a real dead window, accepted for v1: the human's recovery is sending a *new* addressed message, which is answered deterministically without a claim. |
 | Corrupt/partial ledger line | Line-by-line tolerant JSON parse; bad lines skipped and counted (`_count_error("group_ledger")`). |
 | Ledger file deleted mid-run | Appender recreates it; readers reset cursor. Conversation continuity in prompts survives via per-chat `conversation_history` (state.json), which is the actual prompt source — the ledger is a signaling channel, not the memory store. |
 | One bot down | The other bot wins every claim; group degrades to single-bot, which is exactly today's behavior. |
@@ -114,14 +131,23 @@ Bots must not answer every message. Two cases:
 - the message is a Telegram reply to a message this bot posted (checked against the
   ledger: `reply_to` msg_id whose entry has `sender == NAME`).
 
-Addressed → always reply (no claim needed, no dice), subject only to the bot-chain cap
-(§3) when the addresser is a bot. Both bots addressed in one message ("priya, jules,
-settle this") → both reply; that's the correct reading of the message.
+**Addressed *human* messages** → reply deterministically, no claim, no dice: addressing
+selects the responder, and each bot decides independently off its own live Telegram
+update. Both bots addressed in one message ("priya, jules, settle this") → both reply;
+that's the correct reading of the message.
+
+**Bot messages are different: being addressed by a bot never skips the claim.** Every
+reply to a bot message — addressed or not — must win that message's claim (§3). This
+matters because addressing is the LLM's favorite register ("jules, you're wrong" /
+"priya, no") — if a name-drop bypassed the serialization, the loop controls would be
+optional exactly when the loop risk is highest.
 
 ### Unaddressed messages — atomic claim, exactly one responder
 
 1. On receiving an unaddressed human message (or deciding to respond to a bot message,
-   §3), the bot sleeps a jittered delay:
+   §3), the bot waits a jittered delay — **`await asyncio.sleep`, mandatory; a blocking
+   `time.sleep` here freezes the instance's entire event loop (every DM, the poll job,
+   the `_touch_alive` heartbeat) for up to 5s per group message.** Delay =
    `uniform(0.5, 3.0)` + `GROUP_ALTERNATION_PENALTY` (default **2.0s**) if this bot was
    the last *bot* to speak in the ledger. The penalty biases toward alternation — the
    quieter character tends to win the next open message — without any coordination.
@@ -129,7 +155,7 @@ settle this") → both reply; that's the correct reading of the message.
    `<GROUP_LEDGER_DIR>/group_claims/<chat_id>_<msg_id>` with
    `os.open(..., O_CREAT | O_EXCL)`. Exactly one process can succeed — POSIX guarantees
    it. Winner replies; losers stay silent for that message, permanently.
-3. Claim files are content-free markers; the poll job prunes claims older than 1h.
+3. Claim files are content-free markers, pruned after `GROUP_CLAIM_TTL_SECONDS=600`.
 
 The claim also caps the human's cost exposure: an unaddressed message costs at most one
 chat-model call fleet-wide, not one per bot.
@@ -151,19 +177,31 @@ chat-model call fleet-wide, not one per bot.
 ## 3. Loop prevention (hard problem 2)
 
 The ledger is the only channel bots hear each other on, so loop control is a property we
-enforce on our own data structure:
+enforce on our own data structure. The controls, and — because two of them are checked
+against a file that another process is concurrently appending to — exactly *when* each
+is evaluated:
 
-- **Hard cap — the primary control.** `_bot_chain_len(entries)` counts consecutive
-  `kind == "bot"` entries at the ledger tail. If it is ≥ `GROUP_BOT_CHAIN_MAX`
-  (default **2**), a bot does not reply to a bot message **even when addressed by
-  name**. Any human message resets the chain to zero by construction (it's a
-  `kind == "human"` entry). Worst case per human beat: human → bot A → bot B → silence.
+- **Serialization: every bot-message reply goes through the claim.** Addressed or not
+  (§2). Each bot message can therefore get at most ONE reply fleet-wide, ever. A bot
+  can also only react to a peer message *after* it exists in the ledger (that's the
+  only way it learns of it), so at decision time the chain it reads already includes
+  the message it's replying to. For N=2 this alone makes the exchange strictly
+  alternating and the cap check race-free: when Priya evaluates a reply to Jules's
+  message, every message that could lengthen the chain is already visible to her.
+- **Hard cap.** `_bot_chain_len(entries)` counts consecutive `kind == "bot"` entries at
+  the ledger tail. Checked twice: at decision time (before spending a model call), and
+  **re-checked under the ledger's exclusive lock immediately before `send_message`** —
+  if the chain reached `GROUP_BOT_CHAIN_MAX` (default **2**) while the reply was
+  generating, the generated reply is discarded, not sent. A wasted model call is the
+  price of never exceeding the cap; it can only happen in an N≥3 race (two bots
+  replying to *different* messages concurrently — claims already prevent two replies
+  to the same one), which doesn't exist in the two-bot pilot. Any human message resets
+  the chain to zero by construction. Worst case per human beat:
+  human → bot A → bot B → silence.
 - **Probability gate.** Below the cap, a bot replies to another bot's message only if
   `_is_addressed(...)` or `random() < GROUP_BOT_REPLY_PROB` (default **0.35**) — most
   bot remarks get no reply, which reads natural (group chats are full of unanswered
-  messages) and keeps cost down.
-- **Claims apply to bot messages too.** Even with only two bots today, claiming bot
-  messages costs nothing and makes N=3 safe by default.
+  messages) and keeps cost down. Passing the gate still requires winning the claim.
 - **Self-filter.** A bot never processes its own ledger entries (`sender == NAME`).
 - **Send throttle.** `GROUP_MIN_GAP_SECONDS=20` minimum between a bot's own consecutive
   group messages — even a logic bug upstream can't produce a message torrent.
@@ -171,14 +209,19 @@ enforce on our own data structure:
   (counter in state.json, reset at midnight rotation). At the cap the bot simply stops
   replying to bots until tomorrow; human-addressed messages are unaffected.
 
-Defense in depth: cap (bounds every exchange), probability (bounds expected frequency),
-throttle (bounds burst rate), budget (bounds daily total). Any three can fail and the
-fourth still bounds the damage.
+Defense in depth: claim (serializes every exchange), cap (bounds every exchange's
+length, enforced under the lock), probability (bounds expected frequency), throttle
+(bounds burst rate), budget (bounds daily total). Any four can fail and the fifth still
+bounds the damage.
 
 ## 4. Cost (hard problem 3)
 
-Worst case per human message: **2 chat-model calls fleet-wide** (the chain cap), and in
-groups every side call is off:
+Worst case per human message: **≤2 chat-model calls fleet-wide plus amortized
+summarization**. The "≤2" is a consequence of the mechanisms in §2–§3, not a separate
+promise: the claim gives an unaddressed message exactly one responder, and the chain
+cap ends every bot exchange at two. Summarization (`maintain_memory`, SUMMARY_MODEL) is
+kept and runs on its normal amortized schedule — it is not per-beat, but it is not zero
+either. Every other side call is off in groups:
 
 | Call | In groups |
 |---|---|
@@ -209,10 +252,22 @@ Two memory tiers exist today, and they split cleanly:
 
 Policy (per owner decision — **read-only in groups**):
 
-- **Writes: never from a group.** Skipping `post_reply_analysis` in groups closes the
-  main write path (mood, user notes, NPC memories all come from that one call). The
-  manual paths are gated too: `/addmem` (and any other flat-file-writing command)
-  refuses in group chats with a one-line explanation.
+- **Writes: never from a group.** This claim is only as good as the write-path
+  inventory, so here is the complete one — every flat-file write reachable from a chat
+  message, and how it's closed:
+
+  | Write path | Trigger | Closed by |
+  |---|---|---|
+  | `post_reply_analysis` → `user_notes.txt`, `memories.txt` (+ `embeddings.json` via `_append_memory`), mood | every reply in `_deliver` | skipped entirely in `_group_deliver` |
+  | `_check_joke_used` → **`jokes.json`** | every reply in `_deliver`'s tail | skipped in `_group_deliver`. This one is easy to miss and leaks *both* directions: `inside_jokes` is a global list (not per-chat), so a group reply would mutate the DM's joke cooldowns, and the DM's inside jokes would be performed in front of the third party. The read side is closed too — the group prompt never injects the inside-jokes block. |
+  | `/addmem` → `memories.txt` | manual command | refuses in group chats with a one-line explanation |
+  | `/delmem`, `/setnote`-class commands | manual | same group refusal as `/addmem` |
+  | selfie/wardrobe paths → `wardrobe.json` | selfie generation | unreachable — no selfies in groups (§7) |
+  | `day.txt`, `world.txt`, `schedule.txt` | scheduled jobs, not chat messages | unaffected by groups by construction |
+
+  Per-chat in-memory structures written during group replies (`conversation_history`,
+  `_recent_questions`, mood dict, facts) are keyed by the group's chat_id inside
+  state.json — isolated by construction, allowed.
 - **Reads: the character's life comes in; the private relationship doesn't.** Groups
   read `memories.txt`, `people.txt`, `projects.txt`, `life.txt`, day context, world
   context — Priya in the group is still Priya, same job, same day, same rainstorm
@@ -233,9 +288,10 @@ Multiple humans are explicitly out of scope (§9).
 - **Owner protection (pre-existing bug, fixed as part of this work).** `set_owner` is
   claimed by the *first interaction* today — if a bot were added to a group first, the
   group would capture all proactive messaging (heartbeats, note follow-ups) forever.
-  Guard both claim sites (`handle_message`, `/start`) with `chat_id > 0`, and add a
-  belt-and-suspenders `chat_id > 0` check in the shared proactive send path. This guard
-  ships even for non-GROUP_MODE instances — it's a latent bug today.
+  There are seven `set_owner` call sites, not two, so the guard goes **centrally inside
+  `set_owner()` itself**: a negative (group) chat_id is refused, once, where every
+  caller passes through. This guard ships even for non-GROUP_MODE instances — it's a
+  latent bug today.
 - **Group allowlist — mandatory.** Privacy-off means the bot reads every message in any
   group anyone adds it to. `GROUP_ALLOWED_CHATS` (comma-separated chat ids) is required;
   a group message whose chat_id is not listed is dropped at the top of the handler —
@@ -293,9 +349,10 @@ Multiple humans are explicitly out of scope (§9).
 - Reactions: the in-completion `[react: …]` tag sets a reaction on the message being
   answered — kept, it's charming and free.
 - No TTS, no selfie, no meme, no scheduled follow-up ("did the thing go ok?" pings are
-  a 1:1 intimacy, not group behavior), no typing-indicator *during the claim delay*
-  (typing starts only after winning the claim — otherwise the loser visibly "gives up
-  typing," which reads wrong).
+  a 1:1 intimacy, not group behavior), **no `_check_joke_used`** (§5 — it writes the
+  global `jokes.json`), no typing-indicator *during the claim delay* (typing starts
+  only after winning the claim — otherwise the loser visibly "gives up typing," which
+  reads wrong).
 
 ## 8. Configuration summary
 
@@ -315,6 +372,7 @@ All new, all inert unless `GROUP_MODE=1`:
 | `GROUP_ALTERNATION_PENALTY` | `2.0` | Extra claim delay if this bot spoke last |
 | `GROUP_LEDGER_DIR` | dir of bot.py | Shared dir for ledger + claim files |
 | `GROUP_LEDGER_MAX_AGE_SECONDS` | `600` | Ignore ledger entries older than this at startup |
+| `GROUP_CLAIM_TTL_SECONDS` | `600` | Claim files older than this are pruned |
 
 ## 9. Explicitly out of scope for v1
 
@@ -353,14 +411,22 @@ Acceptance script (all must pass before the pilot is called working):
 
 1. Unaddressed human line → **exactly one** bot answers (repeat ×10, observe both bots
    win some — alternation working).
-2. `@priya what do you think` → only Priya answers, as a threaded reply.
-3. `jules you're wrong about this` (name, no @) → only Jules answers.
+2. `@priya what do you think` → **exactly one reply from Priya, not two** — this probes
+   the live-handler-vs-poll-job double-answer race directly (the poll job must never
+   act on human entries). Repeat ×5 and count Priya's messages.
+3. `jules you're wrong about this` (name, no @) → only Jules answers, once.
 4. Human line → bot A answers → bot B chimes in → **silence** (chain cap 2 holds), ×5.
-5. "priya tell jules she's wrong" chain: verify the cap still stops it at 2 bot messages.
+5. Adversarial loop bait, ×5: `priya, ask jules a question` — the reply will
+   near-certainly name Jules, Jules's reply will near-certainly name Priya. Verify the
+   exchange still stops at 2 bot messages under real poll timing (this probes the
+   addressed-bypasses-nothing rule and the under-lock cap re-check).
 6. Restart one pilot mid-conversation → no replay of old messages (staleness guard).
-7. After an evening of group chat: each pilot's `memories.txt` and `user_notes.txt` are
-   byte-identical to before (read-only policy holds); the group's history/facts exist
-   under the group chat_id in state.json; DM state untouched.
+7. **Full flat-file freeze check.** Before the session:
+   `sha256sum ~/priya-bot/{memories.txt,user_notes.txt,people.txt,projects.txt,life.txt,jokes.json,wardrobe.json,embeddings.json} > /tmp/pre.sha` (same for jules-bot; missing
+   files are skipped). After an evening of group chat: every hash identical. `day.txt`
+   and `state.json` are excluded — jobs legitimately write them — but the group's
+   history/facts must exist under the group chat_id in state.json and the DM chat_id's
+   entries must be unchanged.
 8. DM each pilot → normal 1:1 behavior, heartbeat/note-followups still target the DM
    owner only.
 9. A non-allowed group: add Priya to a second group not in `GROUP_ALLOWED_CHATS`, send
