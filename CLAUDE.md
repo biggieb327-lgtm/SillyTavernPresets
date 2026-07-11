@@ -51,6 +51,10 @@ Rules here are backed by files that run, not prose:
 General method (scoping, evidence, verification, calibrated reporting):
 `.claude/OPERATING_MANUAL.md` — project rules in this file override it.
 
+For complex work (multi-step, behavior-changing, or fleet-touching), read
+`.claude/operating/fable-to-opus.md` before acting — it carries owner-settled
+decisions and session-earned traps. For simple work, do not load it.
+
 Before starting work, inspect relevant project skills in `.claude/skills/`
 (`skill-router/SKILL.md` is the index; staged skills pending review live in
 `.claude/skills/_staging/` — see its README).
