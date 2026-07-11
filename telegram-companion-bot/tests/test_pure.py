@@ -929,3 +929,72 @@ class TestSummarizeSemaphore:
     def test_semaphore_exists(self):
         assert hasattr(bot, '_SUMMARIZE_SEM')
         assert isinstance(bot._SUMMARIZE_SEM, asyncio.Semaphore)
+
+
+# ── _in_quiet_window ─────────────────────────────────────────────────────────
+
+from datetime import datetime
+
+
+class TestInQuietWindow:
+    def _dt(self, dow, hour, minute):
+        """Build a datetime with a specific weekday. 2026-07-06 is a Monday (dow=0)."""
+        from datetime import timedelta
+        base = datetime(2026, 7, 6, hour, minute)  # Monday
+        return base + timedelta(days=dow)
+
+    def test_empty_windows(self):
+        now = self._dt(4, 23, 30)  # Fri 23:30
+        assert bot._in_quiet_window(now, []) is False
+
+    def test_simple_window_inside(self):
+        # Fri 22:00-23:30, check at Fri 22:15
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(4, 22, 15), windows) is True
+
+    def test_simple_window_outside(self):
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(4, 21, 59), windows) is False
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is False
+
+    def test_wrong_day(self):
+        # Window is Friday, check on Saturday same time
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(5, 22, 15), windows) is False
+
+    def test_midnight_crossing_same_night(self):
+        # Fri 23:00-08:00, check at Fri 23:30
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is True
+
+    def test_midnight_crossing_next_morning(self):
+        # Fri 23:00-08:00, check at Sat 07:00 (next day after the window started)
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(5, 7, 0), windows) is True
+
+    def test_midnight_crossing_after_end(self):
+        # Fri 23:00-08:00, check at Sat 08:00 (end, exclusive)
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(5, 8, 0), windows) is False
+
+    def test_midnight_crossing_wrong_day(self):
+        # Fri 23:00-08:00, check on Thu 23:30
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(3, 23, 30), windows) is False
+
+    def test_boundary_start_inclusive(self):
+        windows = [{"dow": 2, "start": 10 * 60, "end": 12 * 60}]
+        assert bot._in_quiet_window(self._dt(2, 10, 0), windows) is True
+
+    def test_boundary_end_exclusive(self):
+        windows = [{"dow": 2, "start": 10 * 60, "end": 12 * 60}]
+        assert bot._in_quiet_window(self._dt(2, 12, 0), windows) is False
+
+    def test_multiple_windows(self):
+        windows = [
+            {"dow": 0, "start": 22 * 60, "end": 6 * 60},  # Mon night
+            {"dow": 4, "start": 23 * 60, "end": 8 * 60},  # Fri night
+        ]
+        assert bot._in_quiet_window(self._dt(0, 23, 0), windows) is True
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is True
+        assert bot._in_quiet_window(self._dt(2, 23, 0), windows) is False

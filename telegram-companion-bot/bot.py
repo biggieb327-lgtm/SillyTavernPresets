@@ -80,7 +80,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.4"
+BOT_VERSION = "2026-07-11.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1330,6 +1330,7 @@ user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
+quiet_windows = {}  # chat_id -> [{"dow": int (0=Mon), "start": int (minutes), "end": int (minutes)}]
 away = {}           # chat_id -> {"reason": str, "since": float, "origin": str, "expires": float|None}
 _just_returned = {} # chat_id -> {"reason": str} — ephemeral, cleared after one reply
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
@@ -1416,6 +1417,8 @@ def load_state():
         nudge_budget[int(cid)] = nb
     for cid, qt in data.get("quiet_until", {}).items():
         quiet_until[int(cid)] = qt
+    for cid, qw in data.get("quiet_windows", {}).items():
+        quiet_windows[int(cid)] = qw
     for cid, vr in data.get("voice_reply", {}).items():
         voice_reply[int(cid)] = vr
     for cid, aw in data.get("away", {}).items():
@@ -1484,6 +1487,7 @@ def _serialize_state() -> str:
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "quiet_until": {str(k): v for k, v in quiet_until.items()},
+        "quiet_windows": {str(k): v for k, v in quiet_windows.items()},
         "away": {str(k): v for k, v in away.items()},
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
@@ -1728,6 +1732,34 @@ def _is_quiet(chat_id: int) -> bool:
         return True
     if ts:
         quiet_until.pop(chat_id, None)  # expired, clean up
+    return False
+
+
+def _in_quiet_window(now, windows) -> bool:
+    """True if `now` (datetime) falls within any recurring quiet window.
+
+    Each window: {"dow": int (0=Mon..6=Sun), "start": int (minutes from midnight),
+    "end": int (minutes from midnight)}.  Midnight crossing supported:
+    start > end means the window spans into the next day.
+    """
+    if not windows:
+        return False
+    cur_dow = now.weekday()  # 0=Mon
+    cur_min = now.hour * 60 + now.minute
+    for w in windows:
+        wdow = w["dow"]
+        ws = w["start"]
+        we = w["end"]
+        if ws <= we:
+            if cur_dow == wdow and ws <= cur_min < we:
+                return True
+        else:
+            # crosses midnight: check same-day after start, or next-day before end
+            if cur_dow == wdow and cur_min >= ws:
+                return True
+            prev_dow = (cur_dow - 1) % 7
+            if prev_dow == wdow and cur_min < we:
+                return True
     return False
 
 
@@ -6067,6 +6099,88 @@ async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
 
 
+_DOW_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_DOW_DISPLAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+async def quietwin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/quietwin add Fri 23:00-08:00 | /quietwin list | /quietwin del <n>"""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    sub = args[0].lower() if args else "list"
+
+    if sub == "list":
+        wins = quiet_windows.get(chat_id, [])
+        if not wins:
+            await update.message.reply_text("No recurring quiet windows set.\nUse: /quietwin add Fri 23:00-08:00")
+            return
+        lines = ["*Quiet windows:*"]
+        for i, w in enumerate(wins, 1):
+            sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
+            eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
+            lines.append(f"{i}. {_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if sub == "del":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /quietwin del <number>")
+            return
+        wins = quiet_windows.get(chat_id, [])
+        try:
+            idx = int(args[1]) - 1
+            if idx < 0 or idx >= len(wins):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(f"Invalid index. You have {len(wins)} window(s).")
+            return
+        removed = wins.pop(idx)
+        if not wins:
+            quiet_windows.pop(chat_id, None)
+        save_state()
+        sh = f"{removed['start'] // 60:02d}:{removed['start'] % 60:02d}"
+        eh = f"{removed['end'] // 60:02d}:{removed['end'] % 60:02d}"
+        await update.message.reply_text(f"Removed: {_DOW_DISPLAY[removed['dow']]} {sh}–{eh}")
+        return
+
+    if sub == "add":
+        if len(args) < 3:
+            await update.message.reply_text("Usage: /quietwin add Fri 23:00-08:00")
+            return
+        dow_str = args[1].lower()[:3]
+        if dow_str not in _DOW_NAMES:
+            await update.message.reply_text(f"Unknown day: {args[1]}. Use Mon/Tue/Wed/Thu/Fri/Sat/Sun.")
+            return
+        dow = _DOW_NAMES.index(dow_str)
+        time_range = args[2]
+        if "-" not in time_range:
+            await update.message.reply_text("Time range format: HH:MM-HH:MM (e.g. 23:00-08:00)")
+            return
+        parts = time_range.split("-", 1)
+        try:
+            sp = parts[0].split(":")
+            ep = parts[1].split(":")
+            start_min = int(sp[0]) * 60 + int(sp[1])
+            end_min = int(ep[0]) * 60 + int(ep[1])
+            if not (0 <= start_min < 1440 and 0 <= end_min < 1440):
+                raise ValueError
+            if start_min == end_min:
+                raise ValueError
+        except (ValueError, IndexError):
+            await update.message.reply_text("Time range format: HH:MM-HH:MM (e.g. 23:00-08:00)")
+            return
+        entry = {"dow": dow, "start": start_min, "end": end_min}
+        quiet_windows.setdefault(chat_id, []).append(entry)
+        save_state()
+        sh = f"{start_min // 60:02d}:{start_min % 60:02d}"
+        eh = f"{end_min // 60:02d}:{end_min % 60:02d}"
+        cross = " (crosses midnight)" if start_min > end_min else ""
+        await update.message.reply_text(f"Added quiet window: {_DOW_DISPLAY[dow]} {sh}–{eh}{cross}")
+        return
+
+    await update.message.reply_text("Usage: /quietwin add|list|del")
+
+
 async def away_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/away <reason> — suppress proactives until /back or next message."""
     chat_id = update.effective_chat.id
@@ -7786,6 +7900,10 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if _is_quiet(owner):
         print("[heartbeat] User /quiet active; skipping.")
         return
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if _in_quiet_window(now_dt, quiet_windows.get(owner, [])):
+        print("[heartbeat] In recurring quiet window; skipping.")
+        return
     if _is_away(owner):
         print("[heartbeat] User /away active; skipping.")
         return
@@ -7816,7 +7934,8 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     At most one follow-up per firing — being remembered should feel rare and real,
     not like a notification system."""
     owner = get_owner()
-    if owner is None or _is_quiet(owner) or _is_away(owner) or in_quiet_hours():
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if owner is None or _is_quiet(owner) or _is_away(owner) or in_quiet_hours() or _in_quiet_window(now_dt, quiet_windows.get(owner, [])):
         return
     if not USER_NOTES_FILE.exists():
         return
@@ -7964,6 +8083,15 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = int((qt - time.time()) / 60)
         lines.append(f"*Quiet mode:* {remaining}m remaining")
 
+    wins = quiet_windows.get(chat_id, [])
+    if wins:
+        win_strs = []
+        for w in wins:
+            sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
+            eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
+            win_strs.append(f"{_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
+        lines.append(f"*Quiet windows:* {', '.join(win_strs)}")
+
     aw = away.get(chat_id)
     if aw and _is_away(chat_id):
         since = aw.get("since", 0)
@@ -7989,6 +8117,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             gap_str = f"{round(gap / 86400)}d ago"
         lines.append(f"*Last chat:* {gap_str}")
+
+    # Conversation tail — last 3 messages truncated to ~80 chars
+    hist = conversation_history.get(chat_id, [])
+    if hist:
+        lines.append("")
+        lines.append("*Recent:*")
+        for msg in hist[-3:]:
+            role = msg.get("role", "user")
+            speaker = "You" if role == "user" else NAME
+            text = (msg.get("content") or "").replace("\n", " ").strip()
+            if len(text) > 80:
+                text = text[:77] + "…"
+            lines.append(f"  {speaker}: {text}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -9035,6 +9176,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("quiet", quiet_cmd))
+    app.add_handler(CommandHandler("quietwin", quietwin_cmd))
     app.add_handler(CommandHandler("away", away_cmd))
     app.add_handler(CommandHandler("back", back_cmd))
     app.add_handler(CommandHandler("life", life_cmd))

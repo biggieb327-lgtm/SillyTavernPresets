@@ -7,6 +7,27 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.5 — R5 UX: status tail & recurring quiet windows
+
+**Root cause this release addresses:** `/status` gave no visibility into what was
+just said (you had to scroll up), and suppressing proactive messages on a schedule
+(e.g. every Friday night) required remembering to `/quiet` each week.
+
+**/status tail:** appends the last 3 conversation messages, speaker-labeled and
+truncated to ~80 chars each, so you can see the recent thread at a glance.
+
+**Recurring quiet windows (`/quietwin`):** three subcommands:
+- `/quietwin add Fri 23:00-08:00` — adds a weekly quiet window (midnight crossing
+  supported: start > end spans into the next day).
+- `/quietwin list` — shows numbered list.
+- `/quietwin del 2` — removes by index.
+
+Per-chat state `quiet_windows` (list of `{dow, start, end}`). Checked via pure
+predicate `_in_quiet_window(now, windows)` in the same proactive gates as
+`quiet_until` (heartbeat and note-followup jobs). Twelve new tests cover midnight
+crossing, wrong day, boundary minutes, and multiple windows. `/status` also shows
+active quiet windows inline.
+
 ## v2026-07-11.4 — R4 prompt hygiene & safety
 
 **Root cause this release addresses:** long conversations could silently exceed the
