@@ -46,7 +46,7 @@ Three rounds of speculative fixes once lost to one pasted log line.
 4. **Opaque error → instrument first.** If the error text doesn't identify the
    cause, ship a small logging change (via `ship-bot-release` — it's still a
    release) that makes the failure self-describing, have the user reproduce, then
-   fix. One instrumented reproduction beats three guesses.
+   fix.
 
 5. **Fix** via `ship-bot-release` if it's code; via the user's hands if it's
    device state (Android settings, venv rebuild, stale `bot.pid`, tmux sessions).

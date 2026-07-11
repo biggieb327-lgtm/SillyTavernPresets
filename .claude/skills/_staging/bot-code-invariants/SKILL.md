@@ -1,6 +1,6 @@
 ---
 name: bot-code-invariants
-description: The code-level rules every bot.py diff must satisfy — concurrency, output choke point, LLM-call budget, memory provenance, phone constraints. Load whenever writing OR reviewing a bot.py change, alongside ship-bot-release. Each rule here was paid for in real debugging time; none is stylistic.
+description: The code-level rules every bot.py diff must satisfy — concurrency, output choke point, LLM-call budget, memory provenance, phone constraints. Load whenever writing OR reviewing a bot.py change, alongside ship-bot-release.
 ---
 
 # bot.py invariants
@@ -22,7 +22,7 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
 **LLM call budget (phone bandwidth)**
 3. NO new per-message LLM side calls. The single combined `post_reply_analysis`
    call is the extension point: add JSON keys to it. A sibling call competes with
-   the user-facing reply for phone bandwidth — this is load-bearing, not style.
+   the user-facing reply for phone bandwidth.
 4. New model-response paths MUST route through the `_do_request` choke point so
    output passes `_strip_thinking` + `_strip_native_tool_calls` + `_fix_mojibake`.
    A path that bypasses it will eventually send raw `<tool_call>` XML or mojibake
@@ -82,7 +82,6 @@ which rule, why, and what replaces its protection.
   provenance (rule 10) because the immediate feature works fine without it.
 - Using `signal.signal` for cleanup because it works in local testing (rule 14 —
   PTB overrides it only at run_polling time).
-- Treating these as review suggestions to note rather than gates to enforce.
 
 ## What to report back
 

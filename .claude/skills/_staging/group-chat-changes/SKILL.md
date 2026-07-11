@@ -5,11 +5,10 @@ description: Rules for touching ANY group-chat code — GROUP_* env vars, the sh
 
 # Group-chat changes
 
-The design survived four adversarial review rounds; rounds 1–2 each found a
-privacy-leaking write path that a hand-kept inventory had missed. The surviving
-protections are *class-level* and two are pinned by CI evals. This is the one part
-of bot.py where a small, plausible-looking change most easily causes a privacy leak
-(group content entering private DM state, or vice versa).
+The protections here are *class-level* (choke points + allowlists, two of them
+CI-pinned) because hand-kept inventories of write paths missed leaks twice during
+design review. A small, plausible-looking change here is how group content leaks
+into private DM state, or vice versa.
 
 ## When NOT to use
 

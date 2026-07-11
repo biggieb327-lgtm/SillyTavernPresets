@@ -69,8 +69,7 @@ Modules: `cli.py`, `core.py`, `schemas.py`, `prompts.py`,
 ## Common mistakes
 
 - Adding an entry to the BOT's changelog or bumping BOT_VERSION for voicekit work
-  (the delivery gate won't fire for voicekit files — nothing forces the mistake,
-  you just look confused).
+  (the delivery gate won't fire for voicekit files, so nothing catches this).
 - Editing the schema without the template/prompts, breaking the repair loop.
 - Committing writing samples or generated profiles containing real personal data
   into a public repo.

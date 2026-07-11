@@ -21,9 +21,9 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 
 1. **Read before editing** (non-negotiable, in this order):
    - `telegram-companion-bot/CHANGELOG.md` — skim ALL headings, then fully read the
-     entries touching the subsystems you'll change. Root causes of every shipped fix
-     live here; if your planned change resembles a past incident, the entry usually
-     contains the constraint that makes the naive fix wrong.
+     entries touching the subsystems you'll change: if your planned change resembles
+     a past incident, the entry usually contains the constraint that makes the naive
+     fix wrong.
    - `telegram-companion-bot/AUDIT-2026-07-10.md` §"rejected" + ROADMAP §"Rejected or
      already covered" — do not re-implement rejected ideas.
    - If touching anything group-related → stop, load `group-chat-changes`.

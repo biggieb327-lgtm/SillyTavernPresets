@@ -39,7 +39,7 @@ deleted, guards nothing) or silently passes forever (worse than nothing).
    - Keep it fast and dependency-light: CI gives the whole suite 5 minutes, and
      the suite must run on a bare container *plus* pip-installed requirements.
 
-3. **Break-test it** (this is what makes it real):
+3. **Break-test it:**
    ```bash
    bash .claude/evals/run-evals.sh          # green baseline
    # inject the old bug with a minimal edit
@@ -73,13 +73,13 @@ deleted, guards nothing) or silently passes forever (worse than nothing).
 
 ## Common mistakes
 
-- Skipping the break-test — an eval that never went red is a hope, not a check.
+- Skipping the break-test — an eval that has never been seen red proves nothing.
 - `git checkout` to undo the injection (see step 1; this is the #1 hazard).
 - Greps that match their own eval file or docs quoting the bad pattern —
   scope with pathspecs like `':!.claude/evals/run-evals.sh'`.
 - Writing an eval for something that happened once and will never recur.
-- Failure messages like "check failed" — a future model at 3am needs the incident
-  and the fix direction in the message itself.
+- Failure messages like "check failed" — the message itself must carry the
+  incident and the fix direction (the reader won't have this context).
 
 ## What to report back
 

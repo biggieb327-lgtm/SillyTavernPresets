@@ -6,10 +6,9 @@ description: Assisting the ROADMAP 1.2 migration of bot instances from the Termu
 # VPS migration (ROADMAP 1.2)
 
 The runbook is `telegram-companion-bot/deploy/MIGRATION.md` — follow it literally;
-don't reconstruct it from memory. This skill exists for the constraints around the
-runbook and the mixed-fleet period, which is where a capable-but-hasty model does
-damage. Sequence: pilot **jules** (lowest-state instance) → 7-day soak → migrate
-the rest one at a time → retire the phone.
+don't reconstruct it from memory. This skill covers only the constraints around the
+runbook and the mixed-fleet period. Sequence: pilot **jules** (lowest-state
+instance) → 7-day soak → migrate the rest one at a time → retire the phone.
 
 ## When NOT to use
 

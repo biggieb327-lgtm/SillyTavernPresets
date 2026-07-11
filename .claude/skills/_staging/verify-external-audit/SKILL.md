@@ -7,8 +7,7 @@ description: Verify-then-fix protocol for claims from external sources — LLM a
 
 History: the 2026-07-10 external LLM audit made 15 claims; only 10 were true, and
 one false positive was labeled "critical" (an import crash that didn't exist).
-Fixing unverified claims adds bugs, churns the fleet, and re-litigates decisions
-already made. Every claim gets a verdict with line evidence before any fix.
+Every claim gets a verdict with line evidence before any fix.
 
 ## When NOT to use
 
@@ -55,8 +54,6 @@ already made. Every claim gets a verdict with line evidence before any fix.
   diff to bot.py is fleet risk for nothing.
 - Every verdict carries evidence a skeptic could check: file:line + quoted code,
   or a changelog/registry citation.
-- Confident tone of the source counts for nothing. "Critical" from an LLM auditor
-  is a label, not a fact.
 
 ## Verification checklist
 

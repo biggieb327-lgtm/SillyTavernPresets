@@ -1,4 +1,4 @@
-# Staged skill library — written 2026-07-11 by the outgoing senior operator
+# Staged skill library — written 2026-07-11
 
 These skills are STAGED, not live. Claude Code only auto-discovers skills directly
 under `.claude/skills/<name>/SKILL.md`, so nothing in `_staging/` loads until promoted.
@@ -25,12 +25,6 @@ under `.claude/skills/<name>/SKILL.md`, so nothing in `_staging/` loads until pr
 | Touching any GROUP_* code, the ledger, or bot-to-bot behavior | `group-chat-changes` |
 | Moving instances from the phone to a VPS (ROADMAP 1.2) | `vps-migration` |
 | Working in voicekit-starter/ | `voicekit-work` |
-
-## Reading order for a new operator
-
-`ship-bot-release` is the trunk — most sessions are a bot change and it chains to
-`bot-code-invariants`, `add-regression-eval`, and `deploy-and-verify-fleet` as needed.
-The rest load on their specific triggers.
 
 ## Known-good baseline when these were written
 
