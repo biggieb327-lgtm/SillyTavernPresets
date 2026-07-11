@@ -7,6 +7,38 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.2 — R2 availability awareness: /away, /back, remote-default framing
+
+**Root cause this release addresses:** characters would "walk over to you" or describe
+being in the same room during normal texting — there was no framing that the
+conversation is remote by default. Proactive messages (heartbeats, note follow-ups,
+traffic alerts) also had no way to be suppressed when the user is driving, in a
+meeting, or otherwise unavailable without using the heavier /quiet command.
+
+**Remote-default framing:** `assemble_messages` now injects a system note when
+`active_vibe` is not `"in-person"`: "You and {user} are texting from different places —
+you're not physically together unless the scene explicitly says so." Kills the class of
+roleplay slips where the character describes physical proximity during texting.
+
+**/away and /back commands:** new `away` state dict persisted in state.json. `/away
+driving` or `/away meeting until 3` stores the reason verbatim and suppresses all
+proactives (heartbeat, note follow-ups, traffic alerts). `/back` clears it manually.
+Any incoming text message auto-clears away status (they're back by definition) and
+injects a one-turn "just got back from: {reason}" prompt note so the character can
+acknowledge naturally.
+
+**Auto-extraction from conversation:** `post_reply_analysis` JSON schema gains an
+`"availability"` field (`"driving"|"working"|"busy"|null`). When the user explicitly
+states availability (e.g. "gotta drive, ttyl"), away is set automatically with
+`origin: auto` and a configurable `AWAY_AUTO_HOURS` (default 3h) expiry as a
+belt-and-suspenders against stuck flags.
+
+**New vibe presets:** `busy`, `working`, `driving` — shorter replies, no long questions,
+low-demand register. `driving` is ultra-short and non-initiating.
+
+**Away in /status and /audit:** `/status` shows current away state with reason, duration,
+origin, and expiry. `/audit` includes `away_users` in its data.
+
 ## v2026-07-11.1 — R1 memory auditor: source-attached memories, quote grounding, review queue
 
 **Root cause this release addresses:** the 2026-07-10 audit found that auto-extracted

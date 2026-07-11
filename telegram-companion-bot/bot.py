@@ -68,7 +68,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.1"
+BOT_VERSION = "2026-07-11.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -396,6 +396,7 @@ MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
 MEMORIES_MAX = _env_int("MEMORIES_MAX", "200")
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
 MEMORY_AUTOCONF = _env_int("MEMORY_AUTOCONF", "7")
+AWAY_AUTO_HOURS = _env_int("AWAY_AUTO_HOURS", "3")
 _memories_cache: dict = {"text": None, "ts": 0.0}
 _memory_lock = threading.Lock()
 
@@ -1270,6 +1271,8 @@ user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
+away = {}           # chat_id -> {"reason": str, "since": float, "origin": str, "expires": float|None}
+_just_returned = {} # chat_id -> {"reason": str} — ephemeral, cleared after one reply
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
@@ -1355,6 +1358,8 @@ def load_state():
         quiet_until[int(cid)] = qt
     for cid, vr in data.get("voice_reply", {}).items():
         voice_reply[int(cid)] = vr
+    for cid, aw in data.get("away", {}).items():
+        away[int(cid)] = aw
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     for cid, lv in data.get("user_location", {}).items():
@@ -1414,6 +1419,7 @@ def _serialize_state() -> str:
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "quiet_until": {str(k): v for k, v in quiet_until.items()},
+        "away": {str(k): v for k, v in away.items()},
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
@@ -1587,6 +1593,12 @@ VIBE_PROMPTS = {
                    "Write with action beats, body language, and sensory detail — what you're doing, "
                    "how you react, the texture of being in the room together. "
                    "Longer, more immersive responses are welcome."),
+    "busy":       ("Texting mode: they're busy. Shorter replies, no long questions. "
+                   "Don't pile up messages. One thought at a time, low-demand."),
+    "working":    ("Texting mode: they're working. Keep it brief and non-disruptive. "
+                   "Short replies, no multi-part questions, nothing that needs a long answer."),
+    "driving":    ("Texting mode: they're driving. Ultra-short replies only if they text first. "
+                   "Don't start conversations. Safety first."),
 }
 
 
@@ -1616,6 +1628,24 @@ def _is_quiet(chat_id: int) -> bool:
     if ts:
         quiet_until.pop(chat_id, None)  # expired, clean up
     return False
+
+
+def _is_away(chat_id: int) -> bool:
+    """True if the user has an active /away (or auto-detected away)."""
+    aw = away.get(chat_id)
+    if not aw:
+        return False
+    exp = aw.get("expires")
+    if exp and time.time() > exp:
+        away.pop(chat_id, None)
+        save_state()
+        return False
+    return True
+
+
+def _clear_away(chat_id: int) -> dict | None:
+    """Remove away state; returns the old entry (or None if not away)."""
+    return away.pop(chat_id, None)
 
 
 def _check_nudge_budget(chat_id: int) -> bool:
@@ -2271,6 +2301,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f"paraphrased, not from {NAME}'s lines. null if memory is null.\n"
         f'"memory_confidence": integer 1-10, how confident you are this is worth remembering '
         f"long-term (10 = clearly important fact, 1 = trivial/ambiguous). null if memory is null.\n"
+        f'"availability": if {uname} EXPLICITLY stated they are driving, working, or busy '
+        f'(e.g. "gotta drive", "heading into a meeting", "at work rn"), return '
+        f'"driving"|"working"|"busy". ONLY when clearly stated — do not infer. Otherwise null.\n'
         f"CRITICAL for user_note and memory: extract ONLY from what {uname} actually said. "
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
         f"statements, events, or plans into notes or memories; they are not real-world facts."
@@ -2348,6 +2381,16 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                     _save_memory_review(queue)
                     _memory_log("REVIEW-QUEUE", mem, f"conf={conf}")
                     print(f"[memories] queued for review (conf={conf}): {mem}")
+
+    avail = _clean_field("availability").lower()
+    if avail in ("driving", "working", "busy") and not _is_away(chat_id):
+        exp = time.time() + AWAY_AUTO_HOURS * 3600 if AWAY_AUTO_HOURS > 0 else None
+        away[chat_id] = {
+            "reason": avail, "since": time.time(),
+            "origin": "auto", "expires": exp,
+        }
+        save_state()
+        print(f"[away] auto-set: {avail} (expires in {AWAY_AUTO_HOURS}h)")
 
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
@@ -2820,6 +2863,27 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     vibe = active_vibe(chat_id)
     if vibe and vibe in VIBE_PROMPTS:
         messages.append({"role": "system", "content": VIBE_PROMPTS[vibe]})
+
+    if vibe != "in-person":
+        messages.append({"role": "system", "content": (
+            f"You and {uname} are texting from different places — you're not physically "
+            f"together unless the scene explicitly says so."
+        )})
+
+    aw = away.get(chat_id)
+    if aw and _is_away(chat_id):
+        reason = aw.get("reason", "away")
+        messages.append({"role": "system", "content": (
+            f"{uname} said they're away: {reason} — don't expect quick replies, "
+            f"don't pile up messages."
+        )})
+    else:
+        ret = _just_returned.pop(chat_id, None)
+        if ret:
+            reason = ret.get("reason", "away")
+            messages.append({"role": "system", "content": (
+                f"{uname} just got back from: {reason}"
+            )})
 
     ue = user_energy.get(chat_id) or {}
     elevel = ue.get("level")
@@ -5853,6 +5917,29 @@ async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
 
 
+async def away_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/away <reason> — suppress proactives until /back or next message."""
+    chat_id = update.effective_chat.id
+    reason = " ".join(context.args).strip() if context.args else "away"
+    away[chat_id] = {
+        "reason": reason, "since": time.time(),
+        "origin": "manual", "expires": None,
+    }
+    save_state()
+    await update.message.reply_text(f"Away mode on: {reason}\nHeartbeats paused. Send /back or any message to clear.")
+
+
+async def back_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/back — clear away mode."""
+    chat_id = update.effective_chat.id
+    old = _clear_away(chat_id)
+    if old:
+        save_state()
+        await update.message.reply_text("Welcome back! Away mode cleared.")
+    else:
+        await update.message.reply_text("You weren't marked as away.")
+
+
 async def life_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View or update the character's life arc (life.txt).
     /life          — show current content
@@ -6969,6 +7056,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if GROUP_MODE and chat_id in GROUP_ALLOWED_CHATS:
             await _handle_group_message(update, context)
         return
+    old_away = _clear_away(chat_id)
+    if old_away:
+        _just_returned[chat_id] = {"reason": old_away.get("reason", "away")}
+        save_state()
+        print(f"[away] auto-cleared for {chat_id} (was: {old_away.get('reason')})")
     user_message = update.message.text
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
@@ -7541,6 +7633,9 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if _is_quiet(owner):
         print("[heartbeat] User /quiet active; skipping.")
         return
+    if _is_away(owner):
+        print("[heartbeat] User /away active; skipping.")
+        return
     if not _check_nudge_budget(owner):
         _save_draft(owner, "had something to say but hit the daily nudge limit")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
@@ -7568,7 +7663,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     At most one follow-up per firing — being remembered should feel rare and real,
     not like a notification system."""
     owner = get_owner()
-    if owner is None or _is_quiet(owner) or in_quiet_hours():
+    if owner is None or _is_quiet(owner) or _is_away(owner) or in_quiet_hours():
         return
     if not USER_NOTES_FILE.exists():
         return
@@ -7715,6 +7810,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if qt and time.time() < qt:
         remaining = int((qt - time.time()) / 60)
         lines.append(f"*Quiet mode:* {remaining}m remaining")
+
+    aw = away.get(chat_id)
+    if aw and _is_away(chat_id):
+        since = aw.get("since", 0)
+        ago = int((time.time() - since) / 60) if since else 0
+        reason = aw.get("reason", "away")
+        origin = aw.get("origin", "manual")
+        exp = aw.get("expires")
+        exp_str = ""
+        if exp:
+            remaining_m = max(0, int((exp - time.time()) / 60))
+            exp_str = f" (auto-expires in {remaining_m}m)"
+        lines.append(f"*Away:* {reason} ({ago}m, {origin}){exp_str}")
 
     last = last_seen.get(chat_id, 0)
     if last:
@@ -8078,6 +8186,8 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
         live_until = loc.get("live_until")
         if not live_until or time.time() > live_until:
             continue  # only proactive alerts when live location is active
+        if _is_away(chat_id):
+            continue
 
         nearby = _filter_nearby(open_alerts, loc["lat"], loc["lon"], TRAFFIC_RADIUS_MILES)
         known = seen_incidents.get(chat_id, set())
@@ -8285,6 +8395,7 @@ def gather_audit_data() -> dict:
         "bot_log_kb": round(bot_log_size / 1024, 1),
         "pid": os.getpid(),
         "memory_review_pending": review_count,
+        "away_users": {str(k): v.get("reason", "away") for k, v in away.items()},
     }
 
 
@@ -8637,6 +8748,8 @@ _BASE_COMMANDS = [
     BotCommand("crons", "List recurring tasks"),
     BotCommand("crondel", "Remove a recurring task"),
     BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("away", "Mark yourself away (suppresses proactives)"),
+    BotCommand("back", "Clear away mode"),
     BotCommand("heartbeat", "Trigger a proactive message now"),
     BotCommand("voice", "Toggle voice replies on/off"),
     BotCommand("model", "Show current model"),
@@ -8750,6 +8863,8 @@ def main():
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("quiet", quiet_cmd))
+    app.add_handler(CommandHandler("away", away_cmd))
+    app.add_handler(CommandHandler("back", back_cmd))
     app.add_handler(CommandHandler("life", life_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("projects", projects_cmd))

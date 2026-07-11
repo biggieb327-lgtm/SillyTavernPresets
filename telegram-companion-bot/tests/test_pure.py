@@ -4,6 +4,7 @@ These cover logic where a regression is fleet-breaking and the functions are pur
 (no I/O, no Telegram, no API calls). See ROADMAP.md item 2.1.
 """
 import json
+import time
 
 import bot
 
@@ -657,3 +658,66 @@ class TestMemoryReplace:
         bot._memories_cache["ts"] = 0.0
         result = bot._memory_replace("nonexistent", None)
         assert result is False
+
+
+# ── Availability awareness (R2) ──────────────────────────────────────────────
+
+class TestIsAway:
+    def setup_method(self):
+        bot.away.clear()
+        self._orig_save = bot.save_state
+        bot.save_state = lambda: None
+
+    def teardown_method(self):
+        bot.away.clear()
+        bot.save_state = self._orig_save
+
+    def test_not_away_when_empty(self):
+        assert bot._is_away(123) is False
+
+    def test_away_when_set(self):
+        bot.away[123] = {"reason": "driving", "since": time.time(), "origin": "manual", "expires": None}
+        assert bot._is_away(123) is True
+
+    def test_expired_away_clears(self):
+        bot.away[123] = {"reason": "meeting", "since": time.time() - 7200,
+                         "origin": "auto", "expires": time.time() - 1}
+        assert bot._is_away(123) is False
+        assert 123 not in bot.away
+
+    def test_no_expiry_stays(self):
+        bot.away[123] = {"reason": "vacation", "since": time.time() - 86400,
+                         "origin": "manual", "expires": None}
+        assert bot._is_away(123) is True
+
+
+class TestClearAway:
+    def setup_method(self):
+        bot.away.clear()
+
+    def teardown_method(self):
+        bot.away.clear()
+
+    def test_clear_returns_old_entry(self):
+        entry = {"reason": "driving", "since": 1.0, "origin": "manual", "expires": None}
+        bot.away[123] = entry
+        old = bot._clear_away(123)
+        assert old == entry
+        assert 123 not in bot.away
+
+    def test_clear_when_not_away_returns_none(self):
+        assert bot._clear_away(999) is None
+
+
+class TestVibePresetsR2:
+    def test_busy_preset_exists(self):
+        assert "busy" in bot.VIBE_PROMPTS
+
+    def test_working_preset_exists(self):
+        assert "working" in bot.VIBE_PROMPTS
+
+    def test_driving_preset_exists(self):
+        assert "driving" in bot.VIBE_PROMPTS
+
+    def test_in_person_still_exists(self):
+        assert "in-person" in bot.VIBE_PROMPTS
