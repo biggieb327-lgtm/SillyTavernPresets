@@ -80,7 +80,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.3"
+BOT_VERSION = "2026-07-11.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -232,6 +232,7 @@ HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
 USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
 MAX_TOKENS = _env_int("MAX_TOKENS", "2048")
+CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -494,6 +495,34 @@ def _memory_log(action: str, text: str = "", extra: str = ""):
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
+
+
+def _trim_history_to_budget(messages: list, budget: int) -> list:
+    if budget <= 0:
+        return messages
+    total = sum(_est_tokens(m.get("content", "") if isinstance(m.get("content"), str)
+                            else str(m.get("content", ""))) for m in messages)
+    if total <= budget:
+        return messages
+    system_indices = {i for i, m in enumerate(messages) if m["role"] == "system"}
+    final_user = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            final_user = i
+            break
+    protected = system_indices | ({final_user} if final_user is not None else set())
+    droppable = [i for i in range(len(messages)) if i not in protected]
+    dropped = 0
+    while total > budget and droppable:
+        i = droppable.pop(0)
+        content = messages[i].get("content", "")
+        total -= _est_tokens(content if isinstance(content, str) else str(content))
+        messages[i] = None
+        dropped += 1
+    messages = [m for m in messages if m is not None]
+    if dropped:
+        log.info("[prompt] trimmed %d msgs, ~%dk tokens over budget", dropped, (total // 1000))
+    return messages
 
 
 def _read_life_file(path: Path, cache: dict) -> str:
@@ -1307,6 +1336,7 @@ voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
+_SUMMARIZE_SEM = asyncio.Semaphore(1)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
@@ -2100,11 +2130,13 @@ def set_owner(chat_id: int):
 def triggered_lore(scan_text: str):
     low = scan_text.lower()
     out = []
+    seen: set[str] = set()
     for entry in LORE:
         hit = entry["constant"] or any(
             re.search(r"\b" + re.escape(k) + r"\b", low) for k in entry["keys"]
         )
-        if hit:
+        if hit and entry["content"] not in seen:
+            seen.add(entry["content"])
             out.append(entry["content"])
     return out
 
@@ -3055,7 +3087,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
 
-    return messages
+    return _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
 
 
 # --- NanoGPT ---
@@ -3133,6 +3165,30 @@ def _strip_thinking(text: str) -> str:
 def _strip_slop(text: str) -> str:
     """Remove hollow AI openers from the start of a response."""
     return _SLOP_OPENER_RE.sub("", text).strip()
+
+
+_PERSONA_BREAK_RE = re.compile(
+    r"(?i)\b(?:"
+    r"I'?m an AI\b"
+    r"|as an AI(?: language model)?"
+    r"|I am an AI\b"
+    r"|large language model"
+    r"|I don'?t have (?:feelings|a body|personal experiences)"
+    r")"
+)
+
+
+def _strip_persona_breaks(text: str) -> str:
+    if not _PERSONA_BREAK_RE.search(text):
+        return text
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    kept = [s for s in sentences if not _PERSONA_BREAK_RE.search(s)]
+    if not kept:
+        _count_error("persona_break")
+        return ""
+    _count_error("persona_break")
+    return " ".join(kept)
+
 
 def _extract_content(choice: dict) -> str:
     """Pull the reply text from a choices entry, falling back to reasoning_content."""
@@ -4166,40 +4222,39 @@ async def maintain_memory(chat_id: int):
         return
     summarizing.add(chat_id)
     try:
-        batch = list(conversation_history.get(chat_id, [])[:drop_count])
-        uname = user_names.get(chat_id, "you")
-        try:
-            # Her own-day entries never go through the LLM merge — it would launder
-            # them into ordinary "facts about the user" (the hallucination bug).
-            real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
-            summary, new_facts = await asyncio.to_thread(
-                _summarize, recent_summaries.get(chat_id, ""), real_facts,
-                batch, uname,
-            )
-            recent_summaries[chat_id] = summary
-            recent_facts[chat_id] = new_facts + own_days
-        except Exception as e:
-            log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
-            _count_error("memory")
-        del conversation_history[chat_id][:drop_count]  # remove exactly what we summarized
-        save_state()
-        print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
-
-        if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
+        async with _SUMMARIZE_SEM:
+            batch = list(conversation_history.get(chat_id, [])[:drop_count])
+            uname = user_names.get(chat_id, "you")
             try:
                 real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
                 summary, new_facts = await asyncio.to_thread(
-                    _consolidate_facts, recent_summaries.get(chat_id, ""),
-                    real_facts, uname, RECENT_FACTS_TARGET,
+                    _summarize, recent_summaries.get(chat_id, ""), real_facts,
+                    batch, uname,
                 )
-                before = len(recent_facts.get(chat_id, []))
                 recent_summaries[chat_id] = summary
                 recent_facts[chat_id] = new_facts + own_days
-                save_state()
-                print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
-                log.warning("[memory] recent fact consolidation failed (kept as-is): %s", e)
+                log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
                 _count_error("memory")
+            del conversation_history[chat_id][:drop_count]
+            save_state()
+            print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
+
+            if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
+                try:
+                    real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
+                    summary, new_facts = await asyncio.to_thread(
+                        _consolidate_facts, recent_summaries.get(chat_id, ""),
+                        real_facts, uname, RECENT_FACTS_TARGET,
+                    )
+                    before = len(recent_facts.get(chat_id, []))
+                    recent_summaries[chat_id] = summary
+                    recent_facts[chat_id] = new_facts + own_days
+                    save_state()
+                    print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] recent fact consolidation failed (kept as-is): %s", e)
+                    _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -4255,43 +4310,42 @@ async def maintain_long_term_memory(chat_id: int):
         return
     summarizing.add(chat_id)
     try:
-        uname = user_names.get(chat_id, "you")
-        if due and has_recent:
-            try:
-                # Own-day fiction is never promoted into permanent facts about the
-                # user; it stays in the recent tier and expires via OWN_DAYS_KEPT.
-                real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
-                summary, new_facts = await asyncio.to_thread(
-                    _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
-                    recent_summaries.get(chat_id, ""), real_facts, uname,
-                )
-                summaries[chat_id] = summary
-                facts[chat_id] = new_facts
-                recent_summaries[chat_id] = ""
-                recent_facts[chat_id] = own_days
+        async with _SUMMARIZE_SEM:
+            uname = user_names.get(chat_id, "you")
+            if due and has_recent:
+                try:
+                    real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
+                    summary, new_facts = await asyncio.to_thread(
+                        _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                        recent_summaries.get(chat_id, ""), real_facts, uname,
+                    )
+                    summaries[chat_id] = summary
+                    facts[chat_id] = new_facts
+                    recent_summaries[chat_id] = ""
+                    recent_facts[chat_id] = own_days
+                    save_state()
+                    print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] promotion failed: %s", e)
+                    _count_error("memory")
+            if due:
+                last_promotion[chat_id] = time.time()
                 save_state()
-                print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
-            except Exception as e:
-                log.warning("[memory] promotion failed: %s", e)
-                _count_error("memory")
-        if due:
-            last_promotion[chat_id] = time.time()
-            save_state()
 
-        if len(facts.get(chat_id, [])) > LONG_FACTS_MAX:
-            try:
-                summary, new_facts = await asyncio.to_thread(
-                    _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []),
-                    uname, LONG_FACTS_TARGET,
-                )
-                before = len(facts.get(chat_id, []))
-                summaries[chat_id] = summary
-                facts[chat_id] = new_facts
-                save_state()
-                print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
-            except Exception as e:
-                log.warning("[memory] long-term fact consolidation failed (kept as-is): %s", e)
-                _count_error("memory")
+            if len(facts.get(chat_id, [])) > LONG_FACTS_MAX:
+                try:
+                    summary, new_facts = await asyncio.to_thread(
+                        _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                        uname, LONG_FACTS_TARGET,
+                    )
+                    before = len(facts.get(chat_id, []))
+                    summaries[chat_id] = summary
+                    facts[chat_id] = new_facts
+                    save_state()
+                    print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] long-term fact consolidation failed (kept as-is): %s", e)
+                    _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -4299,10 +4353,21 @@ async def maintain_long_term_memory(chat_id: int):
 # --- Telegram command handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if context.args and context.args[0].lower() == "full":
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Yes, wipe everything", callback_data="start_full:confirm"),
+            InlineKeyboardButton("Cancel", callback_data="start_full:cancel"),
+        ]])
+        await update.message.reply_text(
+            "⚠️ This will wipe conversation history AND all per-chat memory "
+            "(summaries, facts, milestones, pinned, moods, beliefs) for this chat. "
+            "Character-level memories (memories.txt) are kept.\n\nAre you sure?",
+            reply_markup=kb)
+        return
     conversation_history[chat_id] = []
     last_seen[chat_id] = time.time()
     user_names[chat_id] = update.effective_user.first_name or "you"
-    set_owner(chat_id)  # whoever starts becomes the heartbeat recipient
+    set_owner(chat_id)
     save_state()
     greeting = fill(FIRST_MES_RAW, NAME, user_names[chat_id]) or f"Hi, I'm {NAME}."
     await update.message.reply_text(greeting)
@@ -5366,6 +5431,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_proactive(context, chat_id)
         except Exception as e:
             await _send(f"❌ {e}")
+
+    elif data == "start_full:confirm":
+        conversation_history[chat_id] = []
+        summaries[chat_id] = ""
+        facts[chat_id] = []
+        recent_summaries[chat_id] = ""
+        recent_facts[chat_id] = []
+        milestones[chat_id] = []
+        pinned[chat_id] = []
+        moods.pop(chat_id, None)
+        beliefs.pop(chat_id, None)
+        save_state()
+        greeting = fill(FIRST_MES_RAW, NAME, user_names.get(chat_id, "you")) or f"Hi, I'm {NAME}."
+        await _send(f"🧹 Full reset complete.\n\n{greeting}")
+
+    elif data == "start_full:cancel":
+        await _send("Cancelled — nothing changed.")
 
     elif data == "cmd:nudges":
         today = _today_str()
@@ -6796,6 +6878,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
+        clean = _strip_persona_breaks(clean)
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
         "[sent a meme]" if meme_caption is not None else
@@ -7445,6 +7528,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
+    if clean:
+        clean = _strip_persona_breaks(clean)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
     # the user replies and the history is dumped into the next request.

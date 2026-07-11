@@ -3,6 +3,7 @@
 These cover logic where a regression is fleet-breaking and the functions are pure
 (no I/O, no Telegram, no API calls). See ROADMAP.md item 2.1.
 """
+import asyncio
 import json
 import time
 
@@ -818,3 +819,113 @@ class TestGatherAuditData:
         d = bot.gather_audit_data()
         assert "llm_stats" in d
         assert "calls" in d["llm_stats"]
+
+
+# ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
+
+class TestTrimHistoryToBudget:
+    def test_noop_when_under_budget(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "bye"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 10000)
+        assert len(result) == 4
+
+    def test_disabled_when_zero(self):
+        msgs = [{"role": "user", "content": "x" * 100000}]
+        result = bot._trim_history_to_budget(list(msgs), 0)
+        assert len(result) == 1
+
+    def test_drops_oldest_history_first(self):
+        msgs = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "old message"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "new message"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 20)
+        roles = [m["role"] for m in result]
+        assert "system" in roles
+        assert result[-1]["content"] == "new message"
+
+    def test_never_drops_system(self):
+        msgs = [
+            {"role": "system", "content": "x" * 400},
+            {"role": "user", "content": "hi"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 50)
+        assert any(m["role"] == "system" for m in result)
+
+    def test_never_drops_final_user(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "a" * 400},
+            {"role": "user", "content": "final question"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 30)
+        assert result[-1]["content"] == "final question"
+
+
+class TestTriggeredLoreDedupe:
+    def test_no_duplicates(self):
+        original_lore = list(bot.LORE)
+        bot.LORE.append({"keys": ["testxyz"], "content": "shared entry", "constant": False})
+        bot.LORE.append({"keys": ["testxyz"], "content": "shared entry", "constant": False})
+        try:
+            results = bot.triggered_lore("testxyz is here")
+            assert results.count("shared entry") == 1
+        finally:
+            bot.LORE[:] = original_lore
+
+
+class TestStripPersonaBreaks:
+    def test_strips_ai_admission(self):
+        text = "I'm an AI assistant. How can I help?"
+        result = bot._strip_persona_breaks(text)
+        assert "AI" not in result
+
+    def test_strips_as_an_ai(self):
+        text = "As an AI language model, I cannot feel. But I think it's cool."
+        result = bot._strip_persona_breaks(text)
+        assert "AI" not in result
+        assert "cool" in result
+
+    def test_strips_no_feelings(self):
+        text = "I don't have feelings like humans do. Anyway, what's up?"
+        result = bot._strip_persona_breaks(text)
+        assert "feelings" not in result
+        assert "what's up" in result
+
+    def test_strips_large_language_model(self):
+        text = "I am a large language model. Let me help."
+        result = bot._strip_persona_breaks(text)
+        assert "large language model" not in result
+
+    def test_preserves_third_person_ai_reference(self):
+        text = "My AI coworker shipped a bug today."
+        result = bot._strip_persona_breaks(text)
+        assert result == text
+
+    def test_preserves_non_first_person(self):
+        text = "That AI tool is pretty cool."
+        result = bot._strip_persona_breaks(text)
+        assert result == text
+
+    def test_empty_after_strip_returns_empty(self):
+        text = "I'm an AI and I don't have personal experiences."
+        result = bot._strip_persona_breaks(text)
+        assert result == ""
+
+    def test_clean_text_unchanged(self):
+        text = "I had a great day at work. The weather was nice."
+        assert bot._strip_persona_breaks(text) == text
+
+
+class TestSummarizeSemaphore:
+    def test_semaphore_exists(self):
+        assert hasattr(bot, '_SUMMARIZE_SEM')
+        assert isinstance(bot._SUMMARIZE_SEM, asyncio.Semaphore)

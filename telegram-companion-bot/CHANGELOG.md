@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.4 — R4 prompt hygiene & safety
+
+**Root cause this release addresses:** long conversations could silently exceed the
+model's effective context window (no trimming), `triggered_lore` returned duplicate
+entries when multiple keys in the same lorebook entry matched, models occasionally
+broke character with "as an AI" responses that reached the user unfiltered, and
+multi-chat summarization bursts could stack bandwidth-heavy LLM calls on the phone
+simultaneously.
+
+**Token-budget trimming:** new pure function `_trim_history_to_budget(messages,
+budget)` drops oldest non-system, non-final-user messages until the estimated token
+count is under `CONTEXT_TOKEN_BUDGET` (env, default 0 = disabled; recommended 24000).
+Called at the end of `assemble_messages`. Logs when it trims.
+
+**Lore dedupe:** `triggered_lore` now uses a `seen` set on entry content — duplicate
+content from multiple matching keys in the same entry is suppressed.
+
+**Persona-break guardrail:** regex catches first-person AI admissions (`I'm an AI`,
+`as an AI language model`, `large language model`, `I don't have feelings/a body/
+personal experiences`). Applied in `_deliver` and `send_triggered` on the final
+`clean` text: offending sentence is stripped, counted as `persona_break` (visible in
+`/audit`). Third-person references ("my AI coworker") pass through (first-person
+pattern required). Empty result after strip = nothing sent (no auto-regenerate).
+
+**Summarization semaphore:** `_SUMMARIZE_SEM = asyncio.Semaphore(1)` serializes
+summarization across chats in `maintain_memory` and `maintain_long_term_memory` —
+prevents multi-chat bursts from stacking on phone bandwidth. Per-chat overlap was
+already prevented by the `summarizing` set.
+
+**/start full:** `/start full` wipes conversation history AND all per-chat memory
+(summaries, facts, recent_summaries, recent_facts, milestones, pinned, moods,
+beliefs) after an inline-button confirmation. Character-level memories
+(memories.txt) are untouched. Normal `/start` behavior unchanged.
+
 ## v2026-07-11.3 — R3 observability & robustness
 
 **Root cause this release addresses:** restart-storm triage lost its own evidence
