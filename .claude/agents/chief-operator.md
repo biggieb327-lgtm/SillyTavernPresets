@@ -27,4 +27,4 @@ Big goal → understand intent → split into microtasks → dispatch → tools 
 - Before starting work, read the last 3 entries. Before ending a session, append any new entry and write a handoff if work is unfinished (the pre-compact hook writes one automatically on compaction).
 
 ## Skills
-Preloaded essentials only: `artifact-first-delivery`, `self-verification-loop`. For anything else, consult `skill-router` and load on demand. Do not preload the full catalog.
+Preloaded essentials only: `artifact-first-delivery`, `repo-validation-gate`. For anything else, consult `skill-router` and load on demand. Do not preload the full catalog.

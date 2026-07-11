@@ -14,7 +14,7 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
 
 - Normal fleet work while everything is still on the phone → other skills.
 - Writing/altering the VPS tooling itself (`install-vps.sh`, `bot@.service`) — that
-  is code work via normal review + `ship-bot-release`-style verification; this
+  is code work via normal review + `repo-change-control`-style verification; this
   skill governs *executing* a migration.
 
 ## Hard constraints (each can cause real damage)
@@ -49,7 +49,7 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
      VPS path from the runbook/`install-vps.sh` (systemd units, repo checkout).
    - Phone-only machinery does not exist on the VPS: no tmux sessions, no
      watchdog.sh, no phantom-process killer, no Termux path quirks; `bot@.service`
-     (systemd) is the supervisor. Diagnose per host — `debug-fleet-incident`'s
+     (systemd) is the supervisor. Diagnose per host — `repo-debugging-playbook`'s
      Android signature table does NOT apply to VPS instances (`journalctl -u
      bot@<name>` replaces bot.log tailing there).
    - Shared-world: nora is `WORLD_GENERATOR=1`; instances read `world.txt` from

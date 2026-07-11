@@ -12,9 +12,9 @@ failure mode.
 
 ## When NOT to use
 
-- Work isn't merged to main yet → finish `ship-bot-release` first (deploying a
+- Work isn't merged to main yet → finish `repo-change-control` first (deploying a
   branch is impossible; the curl URLs are pinned to main).
-- The bot is broken for non-deploy reasons → `debug-fleet-incident`.
+- The bot is broken for non-deploy reasons → `repo-debugging-playbook`.
 - VPS hosts → `vps-migration` (systemd, not tmux; different commands).
 
 ## Decision tree — what changed?

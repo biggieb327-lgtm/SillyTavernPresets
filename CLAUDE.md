@@ -53,9 +53,9 @@ Before starting work, inspect relevant project skills in `.claude/skills/`
 `.claude/skills/_staging/` — see its README).
 
 Use:
-- `debug-fleet-incident` (staged) for bugs and regressions
-- `ship-bot-release` + `bot-code-invariants` (staged) for edits that change behavior
-- `self-verification-loop` before declaring done
+- `repo-debugging-playbook` (staged) for bugs and regressions
+- `repo-change-control` + `bot-code-invariants` (staged) for edits that change behavior
+- `repo-validation-gate` before declaring done
 
 Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.

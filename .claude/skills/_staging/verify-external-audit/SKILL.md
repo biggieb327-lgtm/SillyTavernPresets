@@ -12,8 +12,8 @@ Every claim gets a verdict with line evidence before any fix.
 ## When NOT to use
 
 - Findings YOU generated this session by reading the code — you already have the
-  evidence; fix via `ship-bot-release`.
-- A single user-observed bug with a symptom — that's `debug-fleet-incident`.
+  evidence; fix via `repo-change-control`.
+- A single user-observed bug with a symptom — that's `repo-debugging-playbook`.
 - CI/eval failures — those checks are already verified-by-construction; just fix.
 
 ## Procedure
@@ -41,7 +41,7 @@ Every claim gets a verdict with line evidence before any fix.
    next audit's duplicates die in step 1. Small batches: verdicts in the session
    report are enough.
 
-4. **Fix only CONFIRMED claims**, via `ship-bot-release` (one release; audit fixes
+4. **Fix only CONFIRMED claims**, via `repo-change-control` (one release; audit fixes
    are a coherent theme). Order by user impact, not by the auditor's severity
    labels — external severity was wrong before.
 
@@ -60,7 +60,7 @@ Every claim gets a verdict with line evidence before any fix.
 - [ ] Both rejected-claims registries consulted
 - [ ] Every claim has exactly one verdict with evidence
 - [ ] No code changed for FALSE / ALREADY FIXED / REJECTED / UNVERIFIABLE claims
-- [ ] CONFIRMED fixes went through the full ship-bot-release gate
+- [ ] CONFIRMED fixes went through the full repo-change-control gate
 - [ ] Verdicts recorded somewhere durable if the batch was sizable
 
 ## Common mistakes

@@ -15,9 +15,9 @@ under `.claude/skills/<name>/SKILL.md`, so nothing in `_staging/` loads until pr
 
 | Trigger | Load |
 |---|---|
-| Any bot.py change that will ship (feature, fix, refactor) | `ship-bot-release` |
-| Reviewing or writing any bot.py diff (also loaded by ship-bot-release) | `bot-code-invariants` |
-| A live bot is misbehaving, restarting, or silent | `debug-fleet-incident` |
+| Any bot.py change that will ship (feature, fix, refactor) | `repo-change-control` |
+| Reviewing or writing any bot.py diff (also loaded by repo-change-control) | `bot-code-invariants` |
+| A live bot is misbehaving, restarting, or silent | `repo-debugging-playbook` |
 | Work is merged; user needs to get it onto the fleet, or a deploy went wrong | `deploy-and-verify-fleet` |
 | Editing character cards, seed files, preset.txt, or root SillyTavern presets | `edit-cards-and-presets` |
 | Same failure class happened twice, or user asks to pin a check | `add-regression-eval` |

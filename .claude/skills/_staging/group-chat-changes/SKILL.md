@@ -12,7 +12,7 @@ into private DM state, or vice versa.
 
 ## When NOT to use
 
-- Bot changes that don't touch group paths — `ship-bot-release` +
+- Bot changes that don't touch group paths — `repo-change-control` +
   `bot-code-invariants` suffice.
 - Operating the pilot (enabling GROUP_MODE, BotFather settings, adding a chat) —
   that's configuration, documented in `OPS_MANUAL.md` § "Group chat (experimental)"
@@ -53,7 +53,7 @@ into private DM state, or vice versa.
    `python bot.py ~/priya-bot --claim-test` (expect two PASS lines) — ask the user
    to run it after any ledger/claim change.
 
-6. **Ship** via `ship-bot-release` (this skill adds constraints; it doesn't replace
+6. **Ship** via `repo-change-control` (this skill adds constraints; it doesn't replace
    the release process).
 
 ## Quality bar

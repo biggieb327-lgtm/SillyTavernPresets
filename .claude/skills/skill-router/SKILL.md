@@ -3,7 +3,7 @@ name: skill-router
 description: Index of available skills and when to load each. Consult this instead of preloading everything — load skills on demand.
 ---
 
-Load a skill only when its trigger fires. Preloaded always (do not re-load): `artifact-first-delivery`, `self-verification-loop`.
+Load a skill only when its trigger fires. Preloaded always (do not re-load): `artifact-first-delivery`, `repo-validation-gate`.
 
 | Trigger | Load |
 |---|---|

@@ -5,7 +5,7 @@ project, usually expensively. This is the enforcement layer behind
 `telegram-companion-bot/CHANGELOG.md`: the changelog remembers *why*, the eval makes
 sure the *what* can't silently come back.
 
-Run before claiming any change done (the `self-verification-loop` skill and the
+Run before claiming any change done (the `repo-validation-gate` skill and the
 delivery-gate hook both expect it):
 
 ```bash

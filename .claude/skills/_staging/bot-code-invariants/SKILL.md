@@ -1,6 +1,6 @@
 ---
 name: bot-code-invariants
-description: The code-level rules every bot.py diff must satisfy — concurrency, output choke point, LLM-call budget, memory provenance, phone constraints. Load whenever writing OR reviewing a bot.py change, alongside ship-bot-release.
+description: The code-level rules every bot.py diff must satisfy — concurrency, output choke point, LLM-call budget, memory provenance, phone constraints. Load whenever writing OR reviewing a bot.py change, alongside repo-change-control.
 ---
 
 # bot.py invariants

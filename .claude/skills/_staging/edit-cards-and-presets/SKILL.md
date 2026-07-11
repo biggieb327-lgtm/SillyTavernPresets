@@ -21,7 +21,7 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 
 ## When NOT to use
 
-- The change needs bot.py logic (new command, new behavior) → `ship-bot-release`.
+- The change needs bot.py logic (new command, new behavior) → `repo-change-control`.
 - Editing `blank.json` as a template for a NEW character → follow `SETUP_GUIDE.md`
   / `new-bot.sh` instead; this skill is for existing content.
 

@@ -1,5 +1,5 @@
 ---
-name: ship-bot-release
+name: repo-change-control
 description: End-to-end procedure for shipping any bot.py change (feature, bugfix, refactor). Load BEFORE editing bot.py whenever the change is meant to reach the fleet — i.e. almost every bot.py edit. Covers the read-first rules, versioning, changelog, verification, merge to main, and the deploy handoff.
 ---
 
@@ -12,7 +12,7 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 ## When NOT to use
 
 - Card/seed/preset edits with no bot.py change → `edit-cards-and-presets`.
-- Diagnosing a live problem (no fix known yet) → `debug-fleet-incident` first.
+- Diagnosing a live problem (no fix known yet) → `repo-debugging-playbook` first.
 - Docs-only or `.claude/`-only changes: no BOT_VERSION bump, no changelog release
   entry (use a `## YYYY-MM-DD — ...` heading if the change deserves a changelog note
   at all). The delivery gate only fires when bot.py itself changed.

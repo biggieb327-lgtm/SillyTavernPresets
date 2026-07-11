@@ -1,5 +1,5 @@
 ---
-name: self-verification-loop
+name: repo-validation-gate
 description: Prove a change works with executed evidence before calling it done. Use before claiming completion of any change.
 ---
 

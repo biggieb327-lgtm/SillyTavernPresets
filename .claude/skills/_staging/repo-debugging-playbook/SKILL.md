@@ -1,5 +1,5 @@
 ---
-name: debug-fleet-incident
+name: repo-debugging-playbook
 description: Evidence-first protocol for a live bot problem — a bot is silent, restarting, crashing, or behaving wrongly on the phone. Load when the user reports fleet trouble BEFORE proposing any fix. Encodes the triage order that past incidents proved out (phantom killer, watchdog, venv, tzdata).
 ---
 
@@ -12,7 +12,7 @@ Three rounds of speculative fixes once lost to one pasted log line.
 
 ## When NOT to use
 
-- The bug is already understood and reproducible in-repo → `ship-bot-release`.
+- The bug is already understood and reproducible in-repo → `repo-change-control`.
 - Reviewing external audit claims (no live symptom) → `verify-external-audit`.
 - A deploy just happened and something's off → `deploy-and-verify-fleet` first
   (it covers rollback via `bot.py.bak`); come back here if it's not deploy-caused.
@@ -44,11 +44,11 @@ Three rounds of speculative fixes once lost to one pasted log line.
    | Empty/undiagnosable 400s from the API | a response path skipping the `_do_request` force-read pattern | find the new path |
 
 4. **Opaque error → instrument first.** If the error text doesn't identify the
-   cause, ship a small logging change (via `ship-bot-release` — it's still a
+   cause, ship a small logging change (via `repo-change-control` — it's still a
    release) that makes the failure self-describing, have the user reproduce, then
    fix.
 
-5. **Fix** via `ship-bot-release` if it's code; via the user's hands if it's
+5. **Fix** via `repo-change-control` if it's code; via the user's hands if it's
    device state (Android settings, venv rebuild, stale `bot.pid`, tmux sessions).
    Exact device commands live in CLAUDE.md §"Termux / Android quirks" and
    `OPS_MANUAL.md` — quote them precisely, the user copy-pastes.
