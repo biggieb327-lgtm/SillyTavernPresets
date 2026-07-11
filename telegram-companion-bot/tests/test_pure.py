@@ -998,3 +998,32 @@ class TestInQuietWindow:
         assert bot._in_quiet_window(self._dt(0, 23, 0), windows) is True
         assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is True
         assert bot._in_quiet_window(self._dt(2, 23, 0), windows) is False
+
+
+# ── _compute_closeness ───────────────────────────────────────────────────────
+
+class TestComputeCloseness:
+    def test_zero_inputs(self):
+        score, bucket = bot._compute_closeness(0, 0, 0, 0)
+        assert score == 0.0
+        assert bucket == "getting to know each other"
+
+    def test_all_maxed(self):
+        score, bucket = bot._compute_closeness(100, 1000, 20, 10)
+        assert score == 1.0
+        assert bucket == "deeply familiar"
+
+    def test_mid_range(self):
+        score, bucket = bot._compute_closeness(30, 250, 4, 3)
+        assert 0.33 <= score < 0.66
+        assert bucket == "comfortable"
+
+    def test_fresh_user(self):
+        score, bucket = bot._compute_closeness(3, 20, 0, 0)
+        assert score < 0.33
+        assert bucket == "getting to know each other"
+
+    def test_deeply_familiar_threshold(self):
+        score, bucket = bot._compute_closeness(60, 500, 8, 6)
+        assert score >= 0.66
+        assert bucket == "deeply familiar"

@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.6 — R6 evolution experiments (all gated, default off)
+
+**Root cause this release addresses:** the bot had no mechanism for users to
+signal approval/disapproval of individual messages without typing, no derived
+measure of relationship depth to modulate system behavior, `next_goals` was a
+single string that couldn't track parallel conversation threads, and humorous
+callbacks couldn't be surfaced for curation without a dedicated LLM call.
+
+**Reaction feedback (`FEEDBACK_REACTIONS=1`):** registers PTB
+`MessageReactionHandler`; 👍/👎 on bot messages → bounded per-chat `feedback_log`
+(capped 50) + ±0.3 mood nudge. 👎 also injects a one-turn recalibration note
+into the next reply prompt. `allowed_updates` extended to include
+`message_reaction` only when the flag is on.
+
+**Closeness score (`CLOSENESS_ENABLED=1`):** pure `_compute_closeness(days_active,
+message_count, milestones_count, beliefs_count)` → (float 0-1, bucket). Buckets:
+"getting to know each other" / "comfortable" / "deeply familiar". Recomputed
+daily at midnight rotation; shown in `/status`; injected as a one-line system
+note in `assemble_messages`. Five new tests pin the formula.
+
+**Open threads (`THREADS_ENABLED=1`):** migrates `next_goals` str → per-chat
+`open_threads` list (capped 3) on load. `post_reply_analysis` JSON gains
+`"thread_update"` (add/resolved). Prompt block "Open threads between you two"
+replaces the single next-goal line. When THREADS_ENABLED is off, existing
+next_goals behavior is unchanged.
+
+**Auto inside-joke candidates (`JOKE_CANDIDATES=1`):** `post_reply_analysis` JSON
+gains `"joke_candidate"` ({phrase, meaning, tone} | null). Candidates go to the
+existing `/reviewmem` queue — never auto-added to jokes.json.
+
+All four features default off and have zero per-message LLM cost (reactions are
+local, closeness is a formula, threads/jokes piggyback on the existing
+post-reply analysis call that already runs).
+
 ## v2026-07-11.5 — R5 UX: status tail & recurring quiet windows
 
 **Root cause this release addresses:** `/status` gave no visibility into what was

@@ -73,6 +73,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    MessageReactionHandler,
     ContextTypes,
     TypeHandler,
     filters,
@@ -80,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.5"
+BOT_VERSION = "2026-07-11.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -284,9 +285,14 @@ GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "30")
 GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
-# The ONLY commands a bot answers in any group chat. Widening this is a reviewed,
-# deliberate act: the group-cmd-allowlist eval pins it (GROUP_CHAT_DESIGN.md §12).
 GROUP_ALLOWED_COMMANDS = {"chatid"}
+
+# --- R6 evolution experiments (each behind its own flag, default off) ---
+FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")
+CLOSENESS_ENABLED = os.getenv("CLOSENESS_ENABLED", "0").lower() in ("1", "true", "yes")
+THREADS_ENABLED = os.getenv("THREADS_ENABLED", "0").lower() in ("1", "true", "yes")
+JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "yes")
+
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -1344,6 +1350,9 @@ user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic fea
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 group_cursor: dict = {}    # group chat_id -> byte offset into the shared group ledger
 group_bot_sends_today: dict = {}  # group chat_id -> {"date": str, "count": int} (bot-to-bot budget)
+feedback_log: dict = {}    # chat_id -> [{"emoji": str, "ts": float, "msg_snippet": str}] (capped 50)
+closeness: dict = {}       # chat_id -> {"score": float, "bucket": str, "updated": str}
+open_threads: dict = {}    # chat_id -> [str] (capped 3) — replaces str next_goals when THREADS_ENABLED
 
 STATE_FILE = BASE_DIR / "state.json"
 # watchdog.sh (a phone-side script, not part of this repo) treats a stale .alive as a
@@ -1433,6 +1442,17 @@ def load_state():
         group_cursor[int(cid)] = off
     for cid, b in data.get("group_bot_sends_today", {}).items():
         group_bot_sends_today[int(cid)] = b
+    for cid, fl in data.get("feedback_log", {}).items():
+        feedback_log[int(cid)] = fl[-50:]
+    for cid, cl in data.get("closeness", {}).items():
+        closeness[int(cid)] = cl
+    for cid, ot in data.get("open_threads", {}).items():
+        open_threads[int(cid)] = ot[:3]
+    # Migration (THREADS_ENABLED): next_goals str -> open_threads list
+    if THREADS_ENABLED:
+        for cid, g in list(next_goals.items()):
+            if isinstance(g, str) and g.strip() and cid not in open_threads:
+                open_threads[cid] = [g.strip()]
     for cat, ts in data.get("error_counts", {}).items():
         _error_counts[cat] = ts[-200:]
     saved_llm = data.get("llm_stats")
@@ -1496,6 +1516,9 @@ def _serialize_state() -> str:
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
         "group_bot_sends_today": {str(k): v for k, v in group_bot_sends_today.items()},
+        "feedback_log": {str(k): v[-50:] for k, v in feedback_log.items()},
+        "closeness": {str(k): v for k, v in closeness.items()},
+        "open_threads": {str(k): v for k, v in open_threads.items()},
         "error_counts": {cat: list(ts) for cat, ts in list(_error_counts.items())},
         "llm_stats": dict(_llm_stats),
     }
@@ -1761,6 +1784,29 @@ def _in_quiet_window(now, windows) -> bool:
             if prev_dow == wdow and cur_min < we:
                 return True
     return False
+
+
+def _compute_closeness(days_active: int, message_count: int,
+                       milestones_count: int, beliefs_count: int) -> tuple[float, str]:
+    """Pure function: derive closeness score and bucket from relationship signals.
+
+    Returns (score 0-1, bucket label). Bucket thresholds:
+      <0.33 = "getting to know each other"
+      <0.66 = "comfortable"
+      >=0.66 = "deeply familiar"
+    """
+    d = min(days_active / 60, 1.0) * 0.3
+    m = min(message_count / 500, 1.0) * 0.3
+    ms = min(milestones_count / 8, 1.0) * 0.2
+    b = min(beliefs_count / 6, 1.0) * 0.2
+    score = round(d + m + ms + b, 3)
+    if score >= 0.66:
+        bucket = "deeply familiar"
+    elif score >= 0.33:
+        bucket = "comfortable"
+    else:
+        bucket = "getting to know each other"
+    return score, bucket
 
 
 def _is_away(chat_id: int) -> bool:
@@ -2456,6 +2502,18 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
         f"statements, events, or plans into notes or memories; they are not real-world facts."
     )
+    if THREADS_ENABLED:
+        sys_prompt += (
+            f'\n"thread_update": object with "add" (string|null — a new open topic/thread '
+            f"between them, e.g. 'planning weekend trip') and \"resolved\" (string|null — "
+            f"an existing thread that was wrapped up this exchange). Both null if nothing changed."
+        )
+    if JOKE_CANDIDATES:
+        sys_prompt += (
+            f'\n"joke_candidate": object with "phrase", "meaning", "tone" IF both parties '
+            f"laughed at something with callback potential (could become a recurring bit). "
+            f"Extremely strict — most exchanges produce null. null otherwise."
+        )
     now_local = datetime.now(TZ) if TZ else datetime.now()
     user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
             f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
@@ -2549,6 +2607,44 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             away[chat_id] = value
             save_state()
         print(f"[away] auto-set: {avail} (expires in {AWAY_AUTO_HOURS}h)")
+
+    if THREADS_ENABLED:
+        tu = data.get("thread_update")
+        if isinstance(tu, dict):
+            resolved = (tu.get("resolved") or "").strip()
+            add = (tu.get("add") or "").strip()
+            threads = open_threads.get(chat_id, [])
+            changed = False
+            if resolved:
+                threads = [t for t in threads if resolved.lower() not in t.lower()]
+                changed = True
+            if add and add.lower() not in ("null", "none") and len(threads) < 3:
+                threads.append(add[:200])
+                changed = True
+            if changed:
+                def _set_threads():
+                    open_threads[chat_id] = threads
+                    save_state()
+                if _MAIN_LOOP:
+                    _MAIN_LOOP.call_soon_threadsafe(_set_threads)
+                else:
+                    _set_threads()
+                print(f"[threads] updated: {threads}")
+
+    if JOKE_CANDIDATES:
+        jc = data.get("joke_candidate")
+        if isinstance(jc, dict) and jc.get("phrase"):
+            entry = {
+                "text": f"joke candidate: \"{jc['phrase']}\" — {jc.get('meaning', '')} ({jc.get('tone', '')})",
+                "meta": {"ts": time.time(), "chat_id": chat_id, "origin": "joke-candidate",
+                         "confidence": 5, "source": jc.get("phrase", "")[:80]},
+            }
+            queue = _load_memory_review()
+            queue.append(entry)
+            if len(queue) > MEMORY_REVIEW_MAX:
+                queue.pop(0)
+            _save_memory_review(queue)
+            print(f"[jokes] candidate queued for review: {jc['phrase']}")
 
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
@@ -2805,10 +2901,11 @@ def belief_note(chat_id: int) -> str:
         items_txt = "; ".join(r["text"] for r in open_recs[:3])
         note += (f"\n\nThings she's been wondering how they turned out: {items_txt}. If it comes "
                  f"up naturally, she might ask about it — but don't force it.")
-    goal = (next_goals.get(chat_id) or "").strip()
-    if goal:
-        note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
-                 f"it fits — don't force it in.")
+    if not THREADS_ENABLED:
+        goal = (next_goals.get(chat_id) or "").strip()
+        if goal:
+            note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
+                     f"it fits — don't force it in.")
     ms_list = milestones.get(chat_id) or []
     if ms_list:
         recent_ms = "; ".join(m["text"] for m in ms_list[-5:])
@@ -3031,6 +3128,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if bnote:
         messages.append({"role": "system", "content": bnote})
 
+    if CLOSENESS_ENABLED:
+        cl = closeness.get(chat_id)
+        if cl:
+            messages.append({"role": "system", "content": (
+                f"[Relationship stage: you're {cl['bucket']}.]"
+            )})
+
+
     pn = pinned.get(chat_id) or []
     if pn:
         messages.append({"role": "system", "content": (
@@ -3049,6 +3154,23 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
         )})
+
+    # Feedback-miss: one-turn note after a 👎 reaction
+    if FEEDBACK_REACTIONS and chat_id in _feedback_miss:
+        _feedback_miss.discard(chat_id)
+        messages.append({"role": "system", "content": (
+            f"[That last message didn't land — recalibrate, don't apologize.]"
+        )})
+
+    # Open threads (replaces single next_goal when enabled)
+    if THREADS_ENABLED:
+        threads = open_threads.get(chat_id, [])
+        if threads:
+            tl = "\n".join(f"- {t}" for t in threads[:3])
+            messages.append({"role": "system", "content": (
+                f"# Open threads between you two\n{tl}\n"
+                f"Let them surface naturally if one fits — don't force."
+            )})
 
     rq = _recent_questions.get(chat_id) or []
     if rq:
@@ -6181,6 +6303,47 @@ async def quietwin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Usage: /quietwin add|list|del")
 
 
+async def reaction_feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 👍/👎 reactions on bot messages — mood nudge + feedback log."""
+    if not FEEDBACK_REACTIONS:
+        return
+    reaction = update.message_reaction
+    if not reaction or not reaction.new_reaction:
+        return
+    chat_id = reaction.chat.id
+    if not _is_allowed(reaction.user.id if reaction.user else 0):
+        return
+    emoji = None
+    for r in reaction.new_reaction:
+        e = getattr(r, "emoji", None)
+        if e in ("👍", "👎"):
+            emoji = e
+            break
+    if not emoji:
+        return
+    snippet = ""
+    hist = conversation_history.get(chat_id, [])
+    if hist:
+        last_bot = next((m for m in reversed(hist) if m.get("role") == "assistant"), None)
+        if last_bot:
+            snippet = (last_bot.get("content") or "")[:60]
+    entry = {"emoji": emoji, "ts": time.time(), "msg_snippet": snippet}
+    feedback_log.setdefault(chat_id, []).append(entry)
+    if len(feedback_log[chat_id]) > 50:
+        feedback_log[chat_id] = feedback_log[chat_id][-50:]
+    cur = moods.get(chat_id) or {}
+    score = cur.get("score", 0.0)
+    nudge = 0.3 if emoji == "👍" else -0.3
+    new_score = max(-3.0, min(3.0, score + nudge))
+    moods[chat_id] = {**cur, "score": new_score, "ts": time.time()}
+    if emoji == "👎":
+        _feedback_miss.add(chat_id)
+    save_state()
+
+
+_feedback_miss: set = set()
+
+
 async def away_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/away <reason> — suppress proactives until /back or next message."""
     chat_id = update.effective_chat.id
@@ -8055,6 +8218,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mood_str = f"{label}  " if label else ""
     lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
 
+    cl = closeness.get(chat_id)
+    if cl:
+        lines.append(f"*Closeness:* {cl['bucket']} ({cl['score']:.2f})")
+
     outfit = wardrobe.get("current")
     if outfit:
         lines.append(f"*Wearing:* {outfit}")
@@ -8256,6 +8423,29 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             pass
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
+
+    # Recompute closeness for all active chats
+    if CLOSENESS_ENABLED:
+        _recompute_all_closeness()
+
+
+def _recompute_all_closeness():
+    today = _today_str()
+    for cid in list(conversation_history.keys()):
+        hist = conversation_history.get(cid, [])
+        msg_count = len(hist)
+        ms_count = len(milestones.get(cid, []))
+        b_items = (beliefs.get(cid) or {}).get("items") or {}
+        b_count = len(b_items)
+        timestamps = [m.get("ts", 0) for m in hist if m.get("ts")]
+        if timestamps:
+            first_ts = min(timestamps)
+            days_active = max(1, int((time.time() - first_ts) / 86400))
+        else:
+            days_active = 0
+        score, bucket = _compute_closeness(days_active, msg_count, ms_count, b_count)
+        closeness[cid] = {"score": score, "bucket": bucket, "updated": today}
+    save_state()
 
 
 async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9229,6 +9419,9 @@ def main():
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
 
+    if FEEDBACK_REACTIONS:
+        app.add_handler(MessageReactionHandler(reaction_feedback_handler))
+
     if app.job_queue is not None:
         schedule_next_heartbeat(app.job_queue)
         log.info("Heartbeat: random, every %.0f–%.0fh.", HEARTBEAT_MIN / 3600, HEARTBEAT_MAX / 3600)
@@ -9289,7 +9482,12 @@ def main():
     log.info("%s is running (home: %s)", NAME, BASE_DIR)
     if ALLOWED_USERS:
         log.info("Access restricted to user IDs: %s", ALLOWED_USERS)
-    app.run_polling()
+    poll_kwargs = {}
+    if FEEDBACK_REACTIONS:
+        poll_kwargs["allowed_updates"] = [
+            "message", "edited_message", "callback_query", "message_reaction",
+        ]
+    app.run_polling(**poll_kwargs)
 
 
 if __name__ == "__main__":
