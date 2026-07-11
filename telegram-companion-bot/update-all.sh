@@ -8,11 +8,17 @@ REPO="https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/
 BOT_SRC="$HOME/telegram-bot"
 
 echo "==> Pulling latest bot.py..."
-curl -fsSL "$REPO/bot.py" -o "$BOT_SRC/bot.py"
-echo "    Done."
+if ! curl -fSL --retry 2 "$REPO/bot.py" -o "$BOT_SRC/bot.py"; then
+  echo "    FAILED — curl could not download bot.py. Check network." >&2
+  exit 1
+fi
+echo "    Done ($(grep -m1 '^BOT_VERSION' "$BOT_SRC/bot.py" | cut -d'"' -f2))."
 
 echo "==> Pulling latest run-bot.sh..."
-curl -fsSL "$REPO/run-bot.sh" -o "$BOT_SRC/run-bot.sh"
+if ! curl -fSL --retry 2 "$REPO/run-bot.sh" -o "$BOT_SRC/run-bot.sh"; then
+  echo "    FAILED — curl could not download run-bot.sh. Check network." >&2
+  exit 1
+fi
 echo "    Done."
 
 echo ""
