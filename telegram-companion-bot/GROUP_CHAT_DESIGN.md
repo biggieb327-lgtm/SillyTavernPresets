@@ -1,6 +1,6 @@
 # Group Chat / Bot-to-Bot — Design (ROADMAP 3.4)
 
-Status: draft for adversarial-critic review. No bot.py code lands until this survives.
+Status: **Shipped** (v2026-07-10.1). Design and rationale below remain the authoritative reference — read before touching any GROUP_* code.
 
 Goal: two character bots (pilot: **Priya + Jules**) and one human in one Telegram group,
 behind `GROUP_MODE=1` on exactly those two instances.

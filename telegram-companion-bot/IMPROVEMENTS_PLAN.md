@@ -51,118 +51,17 @@ files it names and you have everything needed.
 
 ---
 
-## R1 — Memory auditor (the big one; theme behind the hallucination bug)
+## R1 — Memory auditor ✅ Shipped v2026-07-11.1
 
-Goal: every memory is traceable to its source, correctable from Telegram in under a
-minute, and low-confidence extractions never silently enter memory.
+Source-attached memories (`memory_meta.json`), quote grounding (`_quote_grounded`),
+confidence + review queue (`/reviewmem`), correction flow (`[memcheck:]` tag),
+`/editmem`, `/sourcemem`, memory audit log (`memory_log.txt`). 13 new tests (108
+total). Full details: CHANGELOG v2026-07-11.1.
 
-Current mechanics you must understand first:
-- NPC/world memories = lines in `memories.txt`, written by `_append_memory(text,
-  auto=)` (called from `_post_reply_analysis` and `/addmem`), read by
-  `triggered_memories()` (keyword + semantic merge), embedded per line into
-  `embeddings.json` **keyed by the exact line text** (see `_embed_memory_line`).
-- `/mems` lists numbered; `/delmem <keyword or #>` removes (and must stay in sync
-  with embeddings).
+## R2 — Availability awareness ✅ Shipped v2026-07-11.2
 
-### 1a. Source-attached memories
-- New sidecar `memory_meta.json` (BASE_DIR), same keyed-by-line-text pattern as
-  `embeddings.json`: `{line_text: {"ts": float, "chat_id": int, "origin":
-  "auto"|"manual", "confidence": int|null, "source": "<verbatim snippet>"}}`.
-- `_append_memory` gains optional `meta: dict = None`; `_post_reply_analysis` passes
-  the `hist_tail` lines it extracted from (the snapshot it already receives — do NOT
-  re-read live history in the worker, see ground rule 6). `/addmem` passes
-  `origin: "manual"`.
-- Delete/edit paths must keep all three files in sync (memories.txt, embeddings.json,
-  memory_meta.json). Factor one helper `_memory_replace(old_line, new_line|None,
-  meta=None)` used by delete, edit, and append — one choke point, no drift.
-- Orphaned meta entries (memories edited before this feature) are fine: meta lookup
-  is always `.get()` with a "no source recorded (pre-2026-07)" fallback.
-
-### 1b. Quote grounding (anti-hallucination, mechanical not prompt-hope)
-- `_post_reply_analysis`'s JSON gains `"memory_quote"`: the exact sentence from the
-  exchange that supports the memory. Validation in code, not trust: normalize
-  whitespace/case and require `memory_quote` to be a substring of the `hist_tail`
-  text **from user lines only**. Fails → memory is NOT stored, counted as
-  `_count_error("memory_ungrounded")`.
-- Pure function `_quote_grounded(quote: str, user_lines: list[str]) -> bool` +
-  tests (exact match, case/whitespace tolerance, quote from assistant line → False,
-  fabricated quote → False).
-
-### 1c. Confidence + review queue
-- JSON also gains `"memory_confidence"`: 1–10. `>= MEMORY_AUTOCONF` (env, default 7)
-  AND grounded → stored directly. Grounded but lower → appended to
-  `memory_review.json` instead (same meta shape + the proposed line).
-- `/reviewmem` lists pending numbered with confidence + source; `/reviewmem ok <n>`
-  promotes (through `_memory_replace`), `/reviewmem no <n>` drops. Queue capped at 20
-  (oldest dropped, logged).
-- Wire into `/audit`: one line `memory: N pending review` when nonzero.
-
-### 1d. Correction flow (human stays in the loop — no autonomous deletion)
-- New taught tag `[memcheck: <short query>]` added to the capabilities block in
-  `assemble_messages` (~line 2560s), taught ONLY as: "if {uname} disputes something
-  you remembered ('that never happened', 'I never said that'), include
-  [memcheck: what's disputed]".
-- Tag handling follows the existing `extract_tags` 4-tuple pattern — **note the
-  contract**: `extract_tags` returns a tuple consumed at multiple call sites
-  (`_deliver`, `send_triggered`, `_group_deliver`); extend it carefully and update
-  every consumer, or better: handle `[memcheck:]` with its own regex pass in
-  `_deliver` only (groups don't do memory anyway), leaving the 4-tuple contract
-  untouched. Prefer the latter — the 4-tuple is pinned by tests.
-- On the tag: run the existing recall machinery (`triggered_memories` + semantic
-  recall, same as `/recall`) over the query; DM the numbered hits with their sources
-  and the exact commands to fix (`/delmem N`, `/editmem N <text>`). She says her
-  line; the plumbing message follows as a separate system-style message.
-- Every memcheck + resolution appended to the audit log (1f).
-
-### 1e. /editmem and /sourcemem
-- `/editmem <n> <new text>` — replace line n (numbering identical to `/mems`),
-  through `_memory_replace` (re-embeds, moves meta with `origin: "manual-edit"`,
-  keeps original source).
-- `/sourcemem <n>` — show the stored source snippet + ts + origin + confidence.
-- Both refuse in group chats automatically (the group command guard is default-deny
-  — do NOT add them to `GROUP_ALLOWED_COMMANDS`; the eval pins it).
-
-### 1f. Memory audit log
-- `memory_log.txt` (BASE_DIR), append-only lines:
-  `2026-07-10T18:02 ADD auto conf=8 "text…" src="quote…"` / `EDIT` / `DEL` /
-  `REVIEW-OK` / `REVIEW-NO` / `MEMCHECK "query" -> 2 hits`.
-  Written from `_memory_replace` and the review/memcheck paths. Trim to last 500
-  lines when >1000 (same pattern as the group ledger rotation).
-
-R1 acceptance: (1) new auto-memory has source + confidence visible via `/sourcemem`;
-(2) an ungrounded extraction is rejected (check `/errors` category); (3) low-conf
-lands in `/reviewmem`, promotable; (4) "I never said that" produces a memcheck reply
-naming the offending memory and the exact fix command; (5) `/editmem` survives a
-restart and `/recall` finds the edited text (embedding refreshed); (6) memory_log
-shows the whole story; (7) pytest + evals green.
-
-## R2 — Availability awareness
-
-- **Remote-default framing:** in `assemble_messages`, one system line when
-  `active_vibe(chat_id) != "in-person"`: "You and {uname} are texting from different
-  places — you're not physically together unless the scene explicitly says so."
-  Kills the "walks over to you" class of slip. (Check `VIBE_PROMPTS` for the
-  existing in-person vibe name before hardcoding.)
-- **/away and /back:** new state dict `away = {}  # chat_id -> {"reason": str,
-  "since": ts}` (+ serialize/load — follow the existing pattern in
-  `_serialize_state`/`load_state`; remember it runs on the loop). `/away driving`,
-  `/away meeting until 3` (free text, stored verbatim). Effects: heartbeat +
-  note-followups + traffic alerts skip while away (gate beside the existing
-  quiet_until checks in `heartbeat`, ~line 7100s); prompt gets "{uname} said they're
-  away: {reason} — don't expect quick replies, don't pile up messages."
-- **Auto-clear:** any text message from the user clears away (they're back by
-  definition) — in `handle_message` after the group branch; she may acknowledge
-  naturally (prompt note "they just got back from: {reason}" for that one turn).
-- **Auto-extraction:** `post_reply_analysis` JSON gains `"availability"`:
-  `"driving"|"working"|"busy"|null`, ONLY when explicitly stated. Sets away with
-  `origin: auto` — auto-away expires after `AWAY_AUTO_HOURS` (default 3) as a
-  belt-and-suspenders against a stuck flag.
-- **Vibe presets:** add `busy`, `working`, `driving` to `VIBE_PROMPTS` (short,
-  register-preserving: fewer/shorter replies, no long questions).
-
-Acceptance: `/away driving` → heartbeat window passes silently; first message back
-clears it; "gotta drive, ttyl" sets auto-away without any command; `/status` shows
-away state.
+Remote-default framing, `/away` + `/back`, auto-extraction via `post_reply_analysis`,
+new vibe presets (`busy`, `working`, `driving`). Full details: CHANGELOG v2026-07-11.2.
 
 ## R3 — Observability & robustness
 

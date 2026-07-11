@@ -79,6 +79,11 @@ for s in nora bonnie cass emily priya jules; do tmux kill-session -t $s 2>/dev/n
 | `/addmem <text>` | Manually add an NPC/world memory (auto-collected too — see below) |
 | `/mems` | List all stored NPC/world memories |
 | `/delmem <keyword or #>` | Remove an NPC/world memory |
+| `/editmem <n> <new text>` | Replace an NPC/world memory by number (re-embeds) |
+| `/sourcemem <n>` | Show source snippet, timestamp, origin, and confidence for a memory |
+| `/reviewmem` | List pending low-confidence memories awaiting review |
+| `/reviewmem ok <n>` | Promote a pending memory to permanent storage |
+| `/reviewmem no <n>` | Discard a pending memory |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.
@@ -106,6 +111,8 @@ These files shape what the character knows and references. All are editable from
 | `/vibe <name> [Xh]` | Set a timed vibe: `cozy` / `flirty` / `serious` / `chaotic` / `low-energy` / `playful` / `chill` / `in-person` |
 | `/vent` | Toggle vent mode (listening only, no advice) |
 | `/energy <level>` | Set your energy: `high` / `low` / `crash` |
+| `/away [reason]` | Mark yourself away — suppresses heartbeats, note follow-ups, and traffic alerts. Free-text reason stored verbatim (e.g. `/away driving`, `/away meeting until 3`) |
+| `/back` | Clear away mode manually (also auto-clears on any incoming text message) |
 
 ### Inside Jokes & Wardrobe
 | Command | What it does |

@@ -63,7 +63,8 @@ directory as `sys.argv[1]`.
 
 ## Stack
 
-- Python 3.13 on Termux/Android; `python-telegram-bot >=21.0,<22.0` (async, job-queue)
+- Python 3.13+ on Termux/Android (3.14 compat workaround in `main()`, see CHANGELOG
+  v2026-07-05.6); `python-telegram-bot >=21.0,<22.0` (async, job-queue)
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`
 - SillyTavern `chara_card_v2` JSON cards
 - Repo `biggieb327-lgtm/SillyTavernPresets`; raw URL base
@@ -134,8 +135,9 @@ Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/rest
 Full documented template: `telegram-companion-bot/.env.example`. The constraints that
 aren't obvious from it:
 
-- `NANOGPT_MODEL=zai-org/glm-5:thinking` (chat), `SUMMARY_MODEL`/`REACTION_MODEL`
-  cheap+fast (`glm-4.7-flash`).
+- `NANOGPT_MODEL=zai-org/glm-5:thinking` (chat), `REACTION_MODEL` cheap+fast
+  (`glm-4.7-flash`). `SUMMARY_MODEL` defaults to `NANOGPT_MODEL` (the full chat
+  model) — not flash.
 - `FALLBACK_MODEL` must be roleplay-capable: `anthracite-org/magnum-v4-72b`
   (recommended) or `Sao10K/L3.3-70B-Euryale-v2.3`. Used on 400/429/5xx/timeout;
   `call_nanogpt` = 2 attempts/model, 2s/4s backoff, 150s primary budget.
