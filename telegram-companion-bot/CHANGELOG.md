@@ -7,6 +7,53 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.1 — R1 memory auditor: source-attached memories, quote grounding, review queue
+
+**Root cause this release addresses:** the 2026-07-10 audit found that auto-extracted
+memories had no provenance — no way to know where a memory came from, no mechanical
+check that the extraction was grounded in what the user actually said, no way to
+correct a bad memory from Telegram in under a minute. This release makes every memory
+traceable, every extraction grounded, and every correction fast.
+
+**Source-attached memories:** new sidecar `memory_meta.json` stores provenance for each
+memory line: timestamp, chat_id, origin (`auto`/`manual`/`manual-edit`), confidence
+(1-10), and the verbatim source quote from the user's message. New `_memory_replace`
+helper is the single choke point for all memory mutations (add/edit/delete) — keeps
+`memories.txt`, `embeddings.json`, and `memory_meta.json` in sync. `/delmem` migrated
+to use it. `/sourcemem <n>` shows stored provenance; pre-2026-07 memories show a
+"no source recorded" fallback.
+
+**Quote grounding (anti-hallucination, mechanical not prompt-hope):** the post-reply
+analysis LLM call now returns `memory_quote` (verbatim substring from the user's
+messages) and `memory_confidence` (1-10). Code-side validation requires the quote to be
+a case/whitespace-normalized substring of the user's actual lines — if it fails, the
+memory is rejected and counted as `memory_ungrounded` (visible in `/errors`/`/audit`).
+Pure function `_quote_grounded` with tests (exact match, case tolerance, fabricated
+quote rejection, empty inputs).
+
+**Confidence + review queue:** memories with confidence >= `MEMORY_AUTOCONF` (env,
+default 7) AND grounded are stored directly. Grounded but lower-confidence memories go
+to `memory_review.json` instead (capped at 20, oldest dropped). `/reviewmem` lists
+pending with confidence + source; `/reviewmem ok <n>` promotes, `/reviewmem no <n>`
+drops. `/audit` shows count when nonzero.
+
+**Correction flow (`[memcheck:]` tag):** new capability tag taught to the character:
+when the user disputes a memory ("that never happened"), include
+`[memcheck: what's disputed]`. Tag handling runs existing recall machinery (keyword +
+semantic) over the query, DMs the numbered hits with their sources and exact fix
+commands (`/delmem N`, `/editmem N <text>`). Handled via separate regex in `_deliver`
+only — the `extract_tags` 4-tuple contract is untouched.
+
+**`/editmem <n> <new text>`:** replaces a memory line through `_memory_replace`
+(re-embeds, moves meta with `origin: "manual-edit"`, preserves original source).
+
+**Memory audit log:** `memory_log.txt` (append-only) records every mutation:
+`ADD auto/manual`, `EDIT`, `DEL`, `REVIEW-OK`, `REVIEW-NO`, `REVIEW-DROP`,
+`REVIEW-QUEUE`, `MEMCHECK`. Trims to 500 lines when >1000.
+
+New tests: `TestQuoteGrounded` (9 cases), `TestMemoryReplace` (4 cases). Total test
+count: 108 (was 95).
+
 ## v2026-07-10.2 — audit release: memory hallucination + tool-call leak + concurrency fixes
 
 Triggered by two user-observed symptoms plus an external (Deepseek) audit of bot.py.

@@ -581,3 +581,79 @@ class TestCountError:
         for _ in range(250):
             bot._count_error(cat)
         assert len(bot._error_counts[cat]) == 200
+
+
+# ── Quote grounding (R1 memory auditor, anti-hallucination) ──────────────────
+
+class TestQuoteGrounded:
+    def test_exact_match(self):
+        assert bot._quote_grounded("my sister got married", ["my sister got married last week"])
+
+    def test_case_insensitive(self):
+        assert bot._quote_grounded("My Sister Got Married", ["my sister got married last week"])
+
+    def test_whitespace_tolerance(self):
+        assert bot._quote_grounded("my  sister   got married", ["my sister got married last week"])
+
+    def test_substring_of_user_line(self):
+        assert bot._quote_grounded("job interview", ["I have a job interview on Tuesday"])
+
+    def test_assistant_line_not_matched(self):
+        # Only user lines are passed — but verify the function doesn't match on wrong input
+        assert not bot._quote_grounded("rode my bike to Fremont", [])
+
+    def test_fabricated_quote(self):
+        assert not bot._quote_grounded(
+            "I'm getting a divorce",
+            ["my sister got married last week", "we had dinner on Friday"])
+
+    def test_empty_quote(self):
+        assert not bot._quote_grounded("", ["some user line"])
+
+    def test_empty_user_lines(self):
+        assert not bot._quote_grounded("something", [])
+
+    def test_none_handling(self):
+        assert not bot._quote_grounded(None, ["line"])
+        assert not bot._quote_grounded("quote", None)
+
+
+# ── Memory replace (R1 memory auditor) ───────────────────────────────────────
+
+class TestMemoryReplace:
+    def test_add_new_line(self, tmp_path):
+        bot.MEMORIES_FILE.write_text("line one\nline two\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        result = bot._memory_replace(None, "line three", meta={"origin": "test"})
+        assert result is True
+        content = bot.MEMORIES_FILE.read_text(encoding="utf-8")
+        assert "line three" in content
+        assert bot._memory_meta.get("line three", {}).get("origin") == "test"
+
+    def test_delete_line(self, tmp_path):
+        bot.MEMORIES_FILE.write_text("line one\nline two\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        result = bot._memory_replace("line one", None)
+        assert result is True
+        content = bot.MEMORIES_FILE.read_text(encoding="utf-8")
+        assert "line one" not in content
+        assert "line two" in content
+
+    def test_edit_line(self, tmp_path):
+        bot.MEMORIES_FILE.write_text("old text\nkeep this\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        result = bot._memory_replace("old text", "new text", meta={"origin": "edit"})
+        assert result is True
+        content = bot.MEMORIES_FILE.read_text(encoding="utf-8")
+        assert "old text" not in content
+        assert "new text" in content
+
+    def test_delete_nonexistent_returns_false(self, tmp_path):
+        bot.MEMORIES_FILE.write_text("line one\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        result = bot._memory_replace("nonexistent", None)
+        assert result is False

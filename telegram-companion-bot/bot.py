@@ -68,7 +68,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-10.2"
+BOT_VERSION = "2026-07-11.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -395,8 +395,70 @@ MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
 MEMORIES_MAX = _env_int("MEMORIES_MAX", "200")
 MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
+MEMORY_AUTOCONF = _env_int("MEMORY_AUTOCONF", "7")
 _memories_cache: dict = {"text": None, "ts": 0.0}
 _memory_lock = threading.Lock()
+
+# Memory provenance sidecar (R1 memory auditor)
+MEMORY_META_FILE = BASE_DIR / "memory_meta.json"
+MEMORY_REVIEW_FILE = BASE_DIR / "memory_review.json"
+MEMORY_LOG_FILE = BASE_DIR / "memory_log.txt"
+MEMORY_REVIEW_MAX = 20
+_memory_meta: dict[str, dict] = {}
+
+
+def _load_memory_meta():
+    global _memory_meta
+    try:
+        if MEMORY_META_FILE.exists():
+            _memory_meta = json.loads(MEMORY_META_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _memory_meta = {}
+
+
+def _save_memory_meta():
+    try:
+        MEMORY_META_FILE.write_text(
+            json.dumps(_memory_meta, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log.warning("[memory-meta] save failed: %s", e)
+
+
+def _load_memory_review() -> list[dict]:
+    try:
+        if MEMORY_REVIEW_FILE.exists():
+            return json.loads(MEMORY_REVIEW_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_memory_review(queue: list[dict]):
+    try:
+        MEMORY_REVIEW_FILE.write_text(
+            json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log.warning("[memory-review] save failed: %s", e)
+
+
+def _memory_log(action: str, text: str = "", extra: str = ""):
+    try:
+        now = datetime.now(tz=TZ).strftime("%Y-%m-%dT%H:%M") if TZ else datetime.now().strftime("%Y-%m-%dT%H:%M")
+        entry = f"{now} {action}"
+        if text:
+            entry += f' "{text[:120]}"'
+        if extra:
+            entry += f" {extra}"
+        with open(MEMORY_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+        try:
+            lines = MEMORY_LOG_FILE.read_text(encoding="utf-8").splitlines()
+            if len(lines) > 1000:
+                MEMORY_LOG_FILE.write_text("\n".join(lines[-500:]) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    except Exception as e:
+        log.warning("[memory-log] write failed: %s", e)
 
 
 def _est_tokens(text: str) -> int:
@@ -499,7 +561,40 @@ def _append_user_note(note: str, due: str = ""):
     _user_notes_cache["text"] = None  # invalidate cache
 
 
-def _append_memory(text: str, auto: bool = False):
+def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | None = None):
+    """Single choke point for all memory mutations (add/edit/delete).
+    Keeps memories.txt, embeddings.json, and memory_meta.json in sync."""
+    with _memory_lock:
+        existing = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+        lines = [l for l in existing.splitlines() if l.strip()]
+        if old_line is not None:
+            old_stripped = old_line.strip()
+            try:
+                idx = next(i for i, l in enumerate(lines) if l.strip() == old_stripped)
+            except StopIteration:
+                return False
+            lines.pop(idx)
+            _embeddings_cache.pop(old_stripped, None)
+            _memory_meta.pop(old_stripped, None)
+        if new_line is not None:
+            new_stripped = new_line.strip()
+            if not new_stripped:
+                return old_line is not None
+            lines.append(new_stripped)
+            if len(lines) > MEMORIES_MAX:
+                lines = lines[-MEMORIES_MAX:]
+            _embed_memory_line(new_stripped)
+            if meta:
+                _memory_meta[new_stripped] = meta
+        MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _memories_cache["text"] = None
+        _memories_cache["ts"] = 0.0
+        _save_embeddings()
+        _save_memory_meta()
+    return True
+
+
+def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
     text = text.strip()
     if not text:
         return
@@ -517,16 +612,19 @@ def _append_memory(text: str, auto: bool = False):
                         if w not in stopwords}
             if len(new_words & ex_words) >= threshold:
                 return
-        entry = (f"[auto {date.today()}] {text}" if auto else text)
-        lines = [l for l in existing.splitlines() if l.strip()]
-        lines.append(entry)
-        if len(lines) > MEMORIES_MAX:
-            lines = lines[-MEMORIES_MAX:]
-        MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        _memories_cache["text"] = None
-        _memories_cache["ts"] = 0.0
-        _embed_memory_line(entry)
-        _save_embeddings()
+    entry = (f"[auto {date.today()}] {text}" if auto else text)
+    if meta is None:
+        meta = {"ts": time.time(), "origin": "auto" if auto else "manual"}
+    _memory_replace(None, entry, meta=meta)
+    action = "ADD auto" if auto else "ADD manual"
+    conf = meta.get("confidence")
+    src = meta.get("source", "")
+    extra = ""
+    if conf is not None:
+        extra += f"conf={conf}"
+    if src:
+        extra += f' src="{src[:80]}"'
+    _memory_log(action, text, extra)
 
 
 # --- Semantic memory (embeddings-backed recall) ---
@@ -605,6 +703,21 @@ def semantic_recall(query: str, entries: list[str], top_k: int = 5) -> list[tupl
 
 
 _load_embeddings()
+_load_memory_meta()
+
+
+def _quote_grounded(quote: str, user_lines: list[str]) -> bool:
+    """True if quote is a substring of any user line (case/whitespace-normalized)."""
+    if not quote or not user_lines:
+        return False
+    norm_q = " ".join(quote.lower().split())
+    if not norm_q:
+        return False
+    for line in user_lines:
+        norm_l = " ".join(line.lower().split())
+        if norm_q in norm_l:
+            return True
+    return False
 
 
 # Emoji Telegram allows as message reactions (standard set, no premium custom emoji).
@@ -2153,6 +2266,11 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
         f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
         f"Otherwise null.\n"
+        f'"memory_quote": the EXACT sentence or clause from {uname}\'s messages that supports '
+        f"the memory you extracted. Must be a verbatim substring of what {uname} said — not "
+        f"paraphrased, not from {NAME}'s lines. null if memory is null.\n"
+        f'"memory_confidence": integer 1-10, how confident you are this is worth remembering '
+        f"long-term (10 = clearly important fact, 1 = trivial/ambiguous). null if memory is null.\n"
         f"CRITICAL for user_note and memory: extract ONLY from what {uname} actually said. "
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
         f"statements, events, or plans into notes or memories; they are not real-world facts."
@@ -2203,8 +2321,33 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
     if want_memory:
         mem = _clean_field("memory")
         if mem:
-            _append_memory(mem, auto=True)
-            print(f"[memories] added: {mem}")
+            quote = _clean_field("memory_quote")
+            user_lines = [m["content"] for m in hist_tail if m.get("role") == "user"]
+            grounded = _quote_grounded(quote, user_lines) if quote else False
+            if not grounded:
+                _count_error("memory_ungrounded")
+                print(f"[memories] REJECTED (ungrounded): {mem}")
+            else:
+                try:
+                    conf = max(1, min(10, int(data.get("memory_confidence", 5))))
+                except (TypeError, ValueError):
+                    conf = 5
+                mem_meta = {
+                    "ts": time.time(), "chat_id": chat_id, "origin": "auto",
+                    "confidence": conf, "source": quote[:300],
+                }
+                if conf >= MEMORY_AUTOCONF:
+                    _append_memory(mem, auto=True, meta=mem_meta)
+                    print(f"[memories] added (conf={conf}): {mem}")
+                else:
+                    queue = _load_memory_review()
+                    queue.append({"text": mem, "meta": mem_meta})
+                    if len(queue) > MEMORY_REVIEW_MAX:
+                        dropped = queue.pop(0)
+                        _memory_log("REVIEW-DROP", dropped.get("text", ""), "queue full")
+                    _save_memory_review(queue)
+                    _memory_log("REVIEW-QUEUE", mem, f"conf={conf}")
+                    print(f"[memories] queued for review (conf={conf}): {mem}")
 
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
@@ -2622,6 +2765,12 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"[search: your query] at the end of your reply on its own line. Don't write a "
             f"separate lead-in about looking it up — just reply naturally and include the tag; "
             f"the result will come back and you can follow up then."
+        )
+    if not group:
+        cap_lines.append(
+            f"- If {uname} disputes something you remembered ('that never happened', "
+            f"'I never said that', 'that's wrong'), include [memcheck: short description "
+            f"of what's disputed]. This lets them see the exact memory and fix it."
         )
     messages.append({"role": "system", "content": "\n".join(cap_lines)})
 
@@ -5176,25 +5325,118 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg.isdigit():
         idx = int(arg) - 1
         if 0 <= idx < len(entries):
-            removed = entries.pop(idx)
-            MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
-            _memories_cache["text"] = None
-            _memories_cache["ts"] = 0.0
+            removed = entries[idx]
+            await asyncio.to_thread(_memory_replace, removed, None)
+            _memory_log("DEL", removed)
             await update.message.reply_text(f"✓ Removed: {removed}")
         else:
             await update.message.reply_text("No memory at that number.")
     else:
         before = len(entries)
-        entries = [e for e in entries if arg.lower() not in e.lower()]
-        if len(entries) < before:
-            MEMORIES_FILE.write_text("\n".join(entries) + "\n", encoding="utf-8")
-            _memories_cache["text"] = None
-            _memories_cache["ts"] = 0.0
+        to_remove = [e for e in entries if arg.lower() in e.lower()]
+        if to_remove:
+            for e in to_remove:
+                await asyncio.to_thread(_memory_replace, e, None)
+                _memory_log("DEL", e)
             await update.message.reply_text(
-                f"✓ Removed {before - len(entries)} entr(ies) matching '{arg}'."
+                f"✓ Removed {len(to_remove)} entr(ies) matching '{arg}'."
             )
         else:
             await update.message.reply_text(f"No memories matched '{arg}'.")
+
+
+async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    args = " ".join(context.args).strip() if context.args else ""
+    parts = args.split(None, 1)
+    if len(parts) < 2 or not parts[0].isdigit():
+        await update.message.reply_text("Usage: /editmem <number> <new text>")
+        return
+    idx = int(parts[0]) - 1
+    new_text = parts[1].strip()
+    entries = _read_memories()
+    if not (0 <= idx < len(entries)):
+        await update.message.reply_text("No memory at that number.")
+        return
+    old = entries[idx]
+    old_meta = _memory_meta.get(old.strip(), {})
+    new_meta = {**old_meta, "origin": "manual-edit", "ts": time.time()}
+    await asyncio.to_thread(_memory_replace, old, new_text, new_meta)
+    _memory_log("EDIT", new_text, f'was="{old[:80]}"')
+    await update.message.reply_text(f"✓ Updated #{parts[0]}:\n  was: {old}\n  now: {new_text}")
+
+
+async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    arg = " ".join(context.args).strip() if context.args else ""
+    if not arg or not arg.isdigit():
+        await update.message.reply_text("Usage: /sourcemem <number>")
+        return
+    idx = int(arg) - 1
+    entries = _read_memories()
+    if not (0 <= idx < len(entries)):
+        await update.message.reply_text("No memory at that number.")
+        return
+    entry = entries[idx]
+    meta = _memory_meta.get(entry.strip())
+    if not meta:
+        await update.message.reply_text(
+            f"#{int(arg)}: {entry}\n\n(no source recorded — pre-2026-07)")
+        return
+    ts = meta.get("ts")
+    ts_str = datetime.fromtimestamp(ts, tz=TZ).strftime("%Y-%m-%d %H:%M") if ts and TZ else (
+        datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "?")
+    lines = [
+        f"#{int(arg)}: {entry}",
+        f"Origin: {meta.get('origin', '?')}",
+        f"Recorded: {ts_str}",
+    ]
+    if meta.get("confidence") is not None:
+        lines.append(f"Confidence: {meta['confidence']}/10")
+    if meta.get("source"):
+        lines.append(f'Source: "{meta["source"]}"')
+    await update.message.reply_text("\n".join(lines))
+
+
+async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    args = context.args or []
+    queue = _load_memory_review()
+    if not args:
+        if not queue:
+            await update.message.reply_text("No memories pending review.")
+            return
+        lines = []
+        for i, item in enumerate(queue):
+            conf = item.get("meta", {}).get("confidence", "?")
+            src = item.get("meta", {}).get("source", "")
+            lines.append(f"{i+1}. [conf={conf}] {item['text']}")
+            if src:
+                lines.append(f"   src: \"{src[:80]}\"")
+        await update.message.reply_text(
+            f"📋 {len(queue)} pending review:\n\n" + "\n".join(lines)
+            + "\n\nUse /reviewmem ok <n> or /reviewmem no <n>")
+        return
+    action = args[0].lower()
+    if action not in ("ok", "no") or len(args) < 2 or not args[1].isdigit():
+        await update.message.reply_text("Usage: /reviewmem [ok|no] <number>")
+        return
+    idx = int(args[1]) - 1
+    if not (0 <= idx < len(queue)):
+        await update.message.reply_text("No review item at that number.")
+        return
+    item = queue.pop(idx)
+    _save_memory_review(queue)
+    if action == "ok":
+        _append_memory(item["text"], auto=True, meta=item.get("meta"))
+        _memory_log("REVIEW-OK", item["text"])
+        await update.message.reply_text(f"✓ Promoted to memory: {item['text']}")
+    else:
+        _memory_log("REVIEW-NO", item["text"])
+        await update.message.reply_text(f"✗ Dropped: {item['text']}")
 
 
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6354,9 +6596,48 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+_MEMCHECK_RE = re.compile(r"\[memcheck:\s*(.+?)\]", re.IGNORECASE)
+
+
+async def _handle_memcheck(context, chat_id: int, query: str):
+    """Run recall machinery over the query and DM the numbered hits with fix commands."""
+    entries = await asyncio.to_thread(_read_memories)
+    hits = []
+    for i, e in enumerate(entries):
+        if query.lower() in e.lower():
+            hits.append((i + 1, e))
+    sem = await asyncio.to_thread(semantic_recall, query, entries, 5)
+    seen = {e for _, e in hits}
+    for sim, line in sem:
+        if sim > 0.3 and line not in seen:
+            idx = next((j + 1 for j, el in enumerate(entries) if el == line), None)
+            if idx:
+                hits.append((idx, line))
+                seen.add(line)
+    if not hits:
+        await context.bot.send_message(chat_id=chat_id,
+            text=f"🔍 Memcheck \"{query}\" — no matching memories found.")
+        _memory_log("MEMCHECK", query, "-> 0 hits")
+        return
+    lines = [f"🔍 Memcheck \"{query}\" — {len(hits)} hit(s):\n"]
+    for num, entry in hits[:8]:
+        meta = _memory_meta.get(entry.strip())
+        src_note = ""
+        if meta and meta.get("source"):
+            src_note = f'\n   src: "{meta["source"][:80]}"'
+        lines.append(f"  #{num}: {entry}{src_note}")
+        lines.append(f"  → /delmem {num}  or  /editmem {num} <corrected text>")
+    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+    _memory_log("MEMCHECK", query, f"-> {len(hits)} hits")
+
+
 async def _deliver(update, context, chat_id, user_memory_text, ai_response,
                    voice_input=False):
     """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
+    memcheck_m = _MEMCHECK_RE.search(ai_response)
+    if memcheck_m:
+        ai_response = _MEMCHECK_RE.sub("", ai_response).strip()
+        asyncio.create_task(_handle_memcheck(context, chat_id, memcheck_m.group(1).strip()))
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
@@ -7991,6 +8272,8 @@ def gather_audit_data() -> dict:
     bot_log = BASE_DIR / "bot.log"
     bot_log_size = bot_log.stat().st_size if bot_log.exists() else 0
 
+    review_count = len(_load_memory_review())
+
     return {
         "version": BOT_VERSION,
         "uptime_hours": round(uptime_h, 1),
@@ -8001,6 +8284,7 @@ def gather_audit_data() -> dict:
         "errors_log_kb": round(err_size / 1024, 1),
         "bot_log_kb": round(bot_log_size / 1024, 1),
         "pid": os.getpid(),
+        "memory_review_pending": review_count,
     }
 
 
@@ -8022,6 +8306,8 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
     ]
+    if d.get("memory_review_pending"):
+        lines.append(f"Memory: {d['memory_review_pending']} pending review")
     if GROUP_MODE and GROUP_ALLOWED_CHATS:
         # "Why did she stop replying to Jules?" must be answerable from Telegram:
         # budget or chain cap, and which (GROUP_CHAT_DESIGN.md §11).
@@ -8318,6 +8604,9 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("editmem", "Edit a memory note by number"),
+    BotCommand("sourcemem", "Show source/provenance of a memory"),
+    BotCommand("reviewmem", "Review pending low-confidence memories"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
@@ -8445,6 +8734,9 @@ def main():
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
+    app.add_handler(CommandHandler("editmem", editmem_cmd))
+    app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
+    app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
