@@ -7,6 +7,129 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.6 — R6 evolution experiments (all gated, default off)
+
+**Root cause this release addresses:** the bot had no mechanism for users to
+signal approval/disapproval of individual messages without typing, no derived
+measure of relationship depth to modulate system behavior, `next_goals` was a
+single string that couldn't track parallel conversation threads, and humorous
+callbacks couldn't be surfaced for curation without a dedicated LLM call.
+
+**Reaction feedback (`FEEDBACK_REACTIONS=1`):** registers PTB
+`MessageReactionHandler`; 👍/👎 on bot messages → bounded per-chat `feedback_log`
+(capped 50) + ±0.3 mood nudge. 👎 also injects a one-turn recalibration note
+into the next reply prompt. `allowed_updates` extended to include
+`message_reaction` only when the flag is on.
+
+**Closeness score (`CLOSENESS_ENABLED=1`):** pure `_compute_closeness(days_active,
+message_count, milestones_count, beliefs_count)` → (float 0-1, bucket). Buckets:
+"getting to know each other" / "comfortable" / "deeply familiar". Recomputed
+daily at midnight rotation; shown in `/status`; injected as a one-line system
+note in `assemble_messages`. Five new tests pin the formula.
+
+**Open threads (`THREADS_ENABLED=1`):** migrates `next_goals` str → per-chat
+`open_threads` list (capped 3) on load. `post_reply_analysis` JSON gains
+`"thread_update"` (add/resolved). Prompt block "Open threads between you two"
+replaces the single next-goal line. When THREADS_ENABLED is off, existing
+next_goals behavior is unchanged.
+
+**Auto inside-joke candidates (`JOKE_CANDIDATES=1`):** `post_reply_analysis` JSON
+gains `"joke_candidate"` ({phrase, meaning, tone} | null). Candidates go to the
+existing `/reviewmem` queue — never auto-added to jokes.json.
+
+All four features default off and have zero per-message LLM cost (reactions are
+local, closeness is a formula, threads/jokes piggyback on the existing
+post-reply analysis call that already runs).
+
+## v2026-07-11.5 — R5 UX: status tail & recurring quiet windows
+
+**Root cause this release addresses:** `/status` gave no visibility into what was
+just said (you had to scroll up), and suppressing proactive messages on a schedule
+(e.g. every Friday night) required remembering to `/quiet` each week.
+
+**/status tail:** appends the last 3 conversation messages, speaker-labeled and
+truncated to ~80 chars each, so you can see the recent thread at a glance.
+
+**Recurring quiet windows (`/quietwin`):** three subcommands:
+- `/quietwin add Fri 23:00-08:00` — adds a weekly quiet window (midnight crossing
+  supported: start > end spans into the next day).
+- `/quietwin list` — shows numbered list.
+- `/quietwin del 2` — removes by index.
+
+Per-chat state `quiet_windows` (list of `{dow, start, end}`). Checked via pure
+predicate `_in_quiet_window(now, windows)` in the same proactive gates as
+`quiet_until` (heartbeat and note-followup jobs). Twelve new tests cover midnight
+crossing, wrong day, boundary minutes, and multiple windows. `/status` also shows
+active quiet windows inline.
+
+## v2026-07-11.4 — R4 prompt hygiene & safety
+
+**Root cause this release addresses:** long conversations could silently exceed the
+model's effective context window (no trimming), `triggered_lore` returned duplicate
+entries when multiple keys in the same lorebook entry matched, models occasionally
+broke character with "as an AI" responses that reached the user unfiltered, and
+multi-chat summarization bursts could stack bandwidth-heavy LLM calls on the phone
+simultaneously.
+
+**Token-budget trimming:** new pure function `_trim_history_to_budget(messages,
+budget)` drops oldest non-system, non-final-user messages until the estimated token
+count is under `CONTEXT_TOKEN_BUDGET` (env, default 0 = disabled; recommended 24000).
+Called at the end of `assemble_messages`. Logs when it trims.
+
+**Lore dedupe:** `triggered_lore` now uses a `seen` set on entry content — duplicate
+content from multiple matching keys in the same entry is suppressed.
+
+**Persona-break guardrail:** regex catches first-person AI admissions (`I'm an AI`,
+`as an AI language model`, `large language model`, `I don't have feelings/a body/
+personal experiences`). Applied in `_deliver` and `send_triggered` on the final
+`clean` text: offending sentence is stripped, counted as `persona_break` (visible in
+`/audit`). Third-person references ("my AI coworker") pass through (first-person
+pattern required). Empty result after strip = nothing sent (no auto-regenerate).
+
+**Summarization semaphore:** `_SUMMARIZE_SEM = asyncio.Semaphore(1)` serializes
+summarization across chats in `maintain_memory` and `maintain_long_term_memory` —
+prevents multi-chat bursts from stacking on phone bandwidth. Per-chat overlap was
+already prevented by the `summarizing` set.
+
+**/start full:** `/start full` wipes conversation history AND all per-chat memory
+(summaries, facts, recent_summaries, recent_facts, milestones, pinned, moods,
+beliefs) after an inline-button confirmation. Character-level memories
+(memories.txt) are untouched. Normal `/start` behavior unchanged.
+
+## v2026-07-11.3 — R3 observability & robustness
+
+**Root cause this release addresses:** restart-storm triage lost its own evidence
+because `_error_counts` was memory-only (wiped on every restart). Bad `.env` values
+were warned only to the log file nobody checks from Telegram. Small-file saves
+(jokes, reminders, cron, payments, wardrobe) used non-atomic writes that could
+truncate on a process death. `/update` and `/restart` could cut a reply mid-stream
+because there was no drain. And there was no visibility into LLM call volume.
+
+**Persist `_error_counts`:** error history now survives restarts — serialized into
+`state.json` alongside `_llm_stats`. Restart-storm triage from `/audit` no longer
+loses the evidence it was generated to show.
+
+**Config warnings surfaced:** `_env_int`/`_env_float`/`_parse_id_set` now collect
+warnings into `_CONFIG_WARNINGS` (in addition to logging). `/audit` shows count + first
+3 warnings. All warnings also log at startup in one consolidated message.
+
+**Atomic small-file writes:** new `_atomic_write_text(path, text)` helper (tmp +
+`os.replace`) used by `save_jokes`, `save_reminders`, `save_cron_jobs`,
+`save_payments`, `save_wardrobe`. A death mid-write no longer truncates these files.
+
+**Graceful drain on /restart and /update:** `_schedule_exit` now waits up to 5s for
+`_replies_in_flight == 0` before writing state and exiting. Replies in progress
+complete rather than being cut mid-stream.
+
+**LLM usage counters in /audit:** module dict `_llm_stats` tracks daily calls and
+estimated token counts (via `_est_tokens`). Bumped in `call_nanogpt` on every
+successful call. Persisted in state, resets on date change. `/audit` shows:
+`LLM today: N calls, ~Xk in / ~Yk out (est)`.
+
+**Prune `_last_request`:** `_self_audit` (every 30 min) now drops entries older than
+1h from the rate-limit dict, preventing unbounded growth in long-running instances
+with many unique users.
+
 ## v2026-07-11.2 — R2 availability awareness: /away, /back, remote-default framing
 
 **Root cause this release addresses:** characters would "walk over to you" or describe

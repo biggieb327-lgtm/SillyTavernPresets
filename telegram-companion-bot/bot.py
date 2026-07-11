@@ -73,6 +73,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    MessageReactionHandler,
     ContextTypes,
     TypeHandler,
     filters,
@@ -80,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.2"
+BOT_VERSION = "2026-07-11.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -125,6 +126,7 @@ log.addHandler(_error_handler)
 # --- Error tracking for self-audit ---
 _BOOT_TIME = time.time()
 _error_counts: dict[str, list[float]] = {}
+_llm_stats: dict = {"date": "", "calls": 0, "tok_in": 0, "tok_out": 0}
 
 def _count_error(category: str):
     ts = _error_counts.setdefault(category, [])
@@ -132,18 +134,32 @@ def _count_error(category: str):
     if len(ts) > 200:
         del ts[:-200]
 
+
+def _track_llm_usage(messages: list, reply: str):
+    today = time.strftime("%Y-%m-%d")
+    if _llm_stats["date"] != today:
+        _llm_stats["date"] = today
+        _llm_stats["calls"] = 0
+        _llm_stats["tok_in"] = 0
+        _llm_stats["tok_out"] = 0
+    _llm_stats["calls"] += 1
+    _llm_stats["tok_in"] += sum(_est_tokens(m.get("content", "") or "") for m in messages)
+    _llm_stats["tok_out"] += _est_tokens(reply)
+
 # --- Env parsing that can't brick the fleet ---
 # A non-numeric value in an instance .env used to raise at import and crash-loop
 # that bot until someone reached a shell (/restart can't fix a file that won't
 # import). Bad values now fall back to the default with a loud warning.
+_CONFIG_WARNINGS: list[str] = []
 
 def _env_int(name: str, default: str) -> int:
     raw = os.getenv(name, default)
     try:
         return int(raw)
     except (TypeError, ValueError):
-        logging.warning("[config] %s=%r is not a valid integer — using default %s",
-                        name, raw, default)
+        msg = f"{name}={raw!r} is not a valid integer — using default {default}"
+        logging.warning("[config] %s", msg)
+        _CONFIG_WARNINGS.append(msg)
         return int(default)
 
 
@@ -154,8 +170,9 @@ def _env_float(name: str, default: str = None):
     try:
         return float(raw)
     except (TypeError, ValueError):
-        logging.warning("[config] %s=%r is not a valid number — using default %s",
-                        name, raw, default)
+        msg = f"{name}={raw!r} is not a valid number — using default {default}"
+        logging.warning("[config] %s", msg)
+        _CONFIG_WARNINGS.append(msg)
         return None if default is None else float(default)
 
 # --- Access control ---
@@ -171,7 +188,9 @@ def _parse_id_set(raw: str, name: str) -> set[int]:
         try:
             out.add(int(tok))
         except ValueError:
-            logging.warning("[config] ignoring invalid id %r in %s", tok, name)
+            msg = f"ignoring invalid id {tok!r} in {name}"
+            logging.warning("[config] %s", msg)
+            _CONFIG_WARNINGS.append(msg)
     return out
 
 
@@ -214,6 +233,7 @@ HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
 USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
 MAX_TOKENS = _env_int("MAX_TOKENS", "2048")
+CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -265,9 +285,14 @@ GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "30")
 GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
-# The ONLY commands a bot answers in any group chat. Widening this is a reviewed,
-# deliberate act: the group-cmd-allowlist eval pins it (GROUP_CHAT_DESIGN.md §12).
 GROUP_ALLOWED_COMMANDS = {"chatid"}
+
+# --- R6 evolution experiments (each behind its own flag, default off) ---
+FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")
+CLOSENESS_ENABLED = os.getenv("CLOSENESS_ENABLED", "0").lower() in ("1", "true", "yes")
+THREADS_ENABLED = os.getenv("THREADS_ENABLED", "0").lower() in ("1", "true", "yes")
+JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "yes")
+
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
     "You're texting on a phone, not narrating a scene. Write like a real person types:\n"
@@ -476,6 +501,34 @@ def _memory_log(action: str, text: str = "", extra: str = ""):
 
 def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
+
+
+def _trim_history_to_budget(messages: list, budget: int) -> list:
+    if budget <= 0:
+        return messages
+    total = sum(_est_tokens(m.get("content", "") if isinstance(m.get("content"), str)
+                            else str(m.get("content", ""))) for m in messages)
+    if total <= budget:
+        return messages
+    system_indices = {i for i, m in enumerate(messages) if m["role"] == "system"}
+    final_user = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            final_user = i
+            break
+    protected = system_indices | ({final_user} if final_user is not None else set())
+    droppable = [i for i in range(len(messages)) if i not in protected]
+    dropped = 0
+    while total > budget and droppable:
+        i = droppable.pop(0)
+        content = messages[i].get("content", "")
+        total -= _est_tokens(content if isinstance(content, str) else str(content))
+        messages[i] = None
+        dropped += 1
+    messages = [m for m in messages if m is not None]
+    if dropped:
+        log.info("[prompt] trimmed %d msgs, ~%dk tokens over budget", dropped, (total // 1000))
+    return messages
 
 
 def _read_life_file(path: Path, cache: dict) -> str:
@@ -1283,18 +1336,23 @@ user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
+quiet_windows = {}  # chat_id -> [{"dow": int (0=Mon), "start": int (minutes), "end": int (minutes)}]
 away = {}           # chat_id -> {"reason": str, "since": float, "origin": str, "expires": float|None}
 _just_returned = {} # chat_id -> {"reason": str} — ephemeral, cleared after one reply
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
 summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
+_SUMMARIZE_SEM = asyncio.Semaphore(1)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 group_cursor: dict = {}    # group chat_id -> byte offset into the shared group ledger
 group_bot_sends_today: dict = {}  # group chat_id -> {"date": str, "count": int} (bot-to-bot budget)
+feedback_log: dict = {}    # chat_id -> [{"emoji": str, "ts": float, "msg_snippet": str}] (capped 50)
+closeness: dict = {}       # chat_id -> {"score": float, "bucket": str, "updated": str}
+open_threads: dict = {}    # chat_id -> [str] (capped 3) — replaces str next_goals when THREADS_ENABLED
 
 STATE_FILE = BASE_DIR / "state.json"
 # watchdog.sh (a phone-side script, not part of this repo) treats a stale .alive as a
@@ -1368,6 +1426,8 @@ def load_state():
         nudge_budget[int(cid)] = nb
     for cid, qt in data.get("quiet_until", {}).items():
         quiet_until[int(cid)] = qt
+    for cid, qw in data.get("quiet_windows", {}).items():
+        quiet_windows[int(cid)] = qw
     for cid, vr in data.get("voice_reply", {}).items():
         voice_reply[int(cid)] = vr
     for cid, aw in data.get("away", {}).items():
@@ -1382,6 +1442,22 @@ def load_state():
         group_cursor[int(cid)] = off
     for cid, b in data.get("group_bot_sends_today", {}).items():
         group_bot_sends_today[int(cid)] = b
+    for cid, fl in data.get("feedback_log", {}).items():
+        feedback_log[int(cid)] = fl[-50:]
+    for cid, cl in data.get("closeness", {}).items():
+        closeness[int(cid)] = cl
+    for cid, ot in data.get("open_threads", {}).items():
+        open_threads[int(cid)] = ot[:3]
+    # Migration (THREADS_ENABLED): next_goals str -> open_threads list
+    if THREADS_ENABLED:
+        for cid, g in list(next_goals.items()):
+            if isinstance(g, str) and g.strip() and cid not in open_threads:
+                open_threads[cid] = [g.strip()]
+    for cat, ts in data.get("error_counts", {}).items():
+        _error_counts[cat] = ts[-200:]
+    saved_llm = data.get("llm_stats")
+    if saved_llm and saved_llm.get("date") == time.strftime("%Y-%m-%d"):
+        _llm_stats.update(saved_llm)
     # Migration (v2026-07-10.2): day archives used to be stored as plain "[Jul 09] …"
     # facts — indistinguishable from real user facts, so proactive prompts asserted
     # her own fiction as shared history. Retag them, and move any that were promoted
@@ -1431,6 +1507,7 @@ def _serialize_state() -> str:
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "quiet_until": {str(k): v for k, v in quiet_until.items()},
+        "quiet_windows": {str(k): v for k, v in quiet_windows.items()},
         "away": {str(k): v for k, v in away.items()},
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
@@ -1439,6 +1516,11 @@ def _serialize_state() -> str:
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
         "group_bot_sends_today": {str(k): v for k, v in group_bot_sends_today.items()},
+        "feedback_log": {str(k): v[-50:] for k, v in feedback_log.items()},
+        "closeness": {str(k): v for k, v in closeness.items()},
+        "open_threads": {str(k): v for k, v in open_threads.items()},
+        "error_counts": {cat: list(ts) for cat, ts in list(_error_counts.items())},
+        "llm_stats": dict(_llm_stats),
     }
     return json.dumps(data)
 
@@ -1451,6 +1533,13 @@ def _write_state_text(payload: str):
 
 def _write_state():
     _write_state_text(_serialize_state())
+
+
+def _atomic_write_text(path: Path, text: str):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
 
 _save_scheduled = False
 
@@ -1544,6 +1633,9 @@ def _retag_legacy_day_facts(fl):
 
 load_state()
 
+if _CONFIG_WARNINGS:
+    log.warning("[config] %d warning(s) at startup: %s",
+                len(_CONFIG_WARNINGS), "; ".join(_CONFIG_WARNINGS))
 
 # --- Inside jokes ---
 JOKES_FILE = BASE_DIR / "jokes.json"
@@ -1562,7 +1654,7 @@ def load_jokes():
 
 
 def save_jokes():
-    JOKES_FILE.write_text(json.dumps(inside_jokes, indent=2), encoding="utf-8")
+    _atomic_write_text(JOKES_FILE, json.dumps(inside_jokes, indent=2))
 
 
 def _new_joke_id() -> int:
@@ -1604,7 +1696,7 @@ def load_wardrobe():
 
 
 def save_wardrobe():
-    WARDROBE_FILE.write_text(json.dumps(wardrobe, indent=2), encoding="utf-8")
+    _atomic_write_text(WARDROBE_FILE, json.dumps(wardrobe, indent=2))
 
 
 load_wardrobe()
@@ -1664,6 +1756,57 @@ def _is_quiet(chat_id: int) -> bool:
     if ts:
         quiet_until.pop(chat_id, None)  # expired, clean up
     return False
+
+
+def _in_quiet_window(now, windows) -> bool:
+    """True if `now` (datetime) falls within any recurring quiet window.
+
+    Each window: {"dow": int (0=Mon..6=Sun), "start": int (minutes from midnight),
+    "end": int (minutes from midnight)}.  Midnight crossing supported:
+    start > end means the window spans into the next day.
+    """
+    if not windows:
+        return False
+    cur_dow = now.weekday()  # 0=Mon
+    cur_min = now.hour * 60 + now.minute
+    for w in windows:
+        wdow = w["dow"]
+        ws = w["start"]
+        we = w["end"]
+        if ws <= we:
+            if cur_dow == wdow and ws <= cur_min < we:
+                return True
+        else:
+            # crosses midnight: check same-day after start, or next-day before end
+            if cur_dow == wdow and cur_min >= ws:
+                return True
+            prev_dow = (cur_dow - 1) % 7
+            if prev_dow == wdow and cur_min < we:
+                return True
+    return False
+
+
+def _compute_closeness(days_active: int, message_count: int,
+                       milestones_count: int, beliefs_count: int) -> tuple[float, str]:
+    """Pure function: derive closeness score and bucket from relationship signals.
+
+    Returns (score 0-1, bucket label). Bucket thresholds:
+      <0.33 = "getting to know each other"
+      <0.66 = "comfortable"
+      >=0.66 = "deeply familiar"
+    """
+    d = min(days_active / 60, 1.0) * 0.3
+    m = min(message_count / 500, 1.0) * 0.3
+    ms = min(milestones_count / 8, 1.0) * 0.2
+    b = min(beliefs_count / 6, 1.0) * 0.2
+    score = round(d + m + ms + b, 3)
+    if score >= 0.66:
+        bucket = "deeply familiar"
+    elif score >= 0.33:
+        bucket = "comfortable"
+    else:
+        bucket = "getting to know each other"
+    return score, bucket
 
 
 def _is_away(chat_id: int) -> bool:
@@ -1745,7 +1888,7 @@ def load_payments():
 
 
 def save_payments():
-    PAYMENTS_FILE.write_text(json.dumps(payments, indent=2), encoding="utf-8")
+    _atomic_write_text(PAYMENTS_FILE, json.dumps(payments, indent=2))
 
 
 load_payments()
@@ -1922,7 +2065,7 @@ def load_reminders():
 
 
 def save_reminders():
-    REMINDERS_FILE.write_text(json.dumps(reminders, indent=2), encoding="utf-8")
+    _atomic_write_text(REMINDERS_FILE, json.dumps(reminders, indent=2))
 
 
 load_reminders()
@@ -1949,7 +2092,7 @@ def load_cron_jobs():
 
 
 def save_cron_jobs():
-    CRON_FILE.write_text(json.dumps(cron_jobs, indent=2), encoding="utf-8")
+    _atomic_write_text(CRON_FILE, json.dumps(cron_jobs, indent=2))
 
 
 load_cron_jobs()
@@ -2065,11 +2208,13 @@ def set_owner(chat_id: int):
 def triggered_lore(scan_text: str):
     low = scan_text.lower()
     out = []
+    seen: set[str] = set()
     for entry in LORE:
         hit = entry["constant"] or any(
             re.search(r"\b" + re.escape(k) + r"\b", low) for k in entry["keys"]
         )
-        if hit:
+        if hit and entry["content"] not in seen:
+            seen.add(entry["content"])
             out.append(entry["content"])
     return out
 
@@ -2357,6 +2502,18 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
         f"statements, events, or plans into notes or memories; they are not real-world facts."
     )
+    if THREADS_ENABLED:
+        sys_prompt += (
+            f'\n"thread_update": object with "add" (string|null — a new open topic/thread '
+            f"between them, e.g. 'planning weekend trip') and \"resolved\" (string|null — "
+            f"an existing thread that was wrapped up this exchange). Both null if nothing changed."
+        )
+    if JOKE_CANDIDATES:
+        sys_prompt += (
+            f'\n"joke_candidate": object with "phrase", "meaning", "tone" IF both parties '
+            f"laughed at something with callback potential (could become a recurring bit). "
+            f"Extremely strict — most exchanges produce null. null otherwise."
+        )
     now_local = datetime.now(TZ) if TZ else datetime.now()
     user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
             f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
@@ -2450,6 +2607,44 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             away[chat_id] = value
             save_state()
         print(f"[away] auto-set: {avail} (expires in {AWAY_AUTO_HOURS}h)")
+
+    if THREADS_ENABLED:
+        tu = data.get("thread_update")
+        if isinstance(tu, dict):
+            resolved = (tu.get("resolved") or "").strip()
+            add = (tu.get("add") or "").strip()
+            threads = open_threads.get(chat_id, [])
+            changed = False
+            if resolved:
+                threads = [t for t in threads if resolved.lower() not in t.lower()]
+                changed = True
+            if add and add.lower() not in ("null", "none") and len(threads) < 3:
+                threads.append(add[:200])
+                changed = True
+            if changed:
+                def _set_threads():
+                    open_threads[chat_id] = threads
+                    save_state()
+                if _MAIN_LOOP:
+                    _MAIN_LOOP.call_soon_threadsafe(_set_threads)
+                else:
+                    _set_threads()
+                print(f"[threads] updated: {threads}")
+
+    if JOKE_CANDIDATES:
+        jc = data.get("joke_candidate")
+        if isinstance(jc, dict) and jc.get("phrase"):
+            entry = {
+                "text": f"joke candidate: \"{jc['phrase']}\" — {jc.get('meaning', '')} ({jc.get('tone', '')})",
+                "meta": {"ts": time.time(), "chat_id": chat_id, "origin": "joke-candidate",
+                         "confidence": 5, "source": jc.get("phrase", "")[:80]},
+            }
+            queue = _load_memory_review()
+            queue.append(entry)
+            if len(queue) > MEMORY_REVIEW_MAX:
+                queue.pop(0)
+            _save_memory_review(queue)
+            print(f"[jokes] candidate queued for review: {jc['phrase']}")
 
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
@@ -2706,10 +2901,11 @@ def belief_note(chat_id: int) -> str:
         items_txt = "; ".join(r["text"] for r in open_recs[:3])
         note += (f"\n\nThings she's been wondering how they turned out: {items_txt}. If it comes "
                  f"up naturally, she might ask about it — but don't force it.")
-    goal = (next_goals.get(chat_id) or "").strip()
-    if goal:
-        note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
-                 f"it fits — don't force it in.")
+    if not THREADS_ENABLED:
+        goal = (next_goals.get(chat_id) or "").strip()
+        if goal:
+            note += (f"\n\nSomething on her mind for next time: {goal}. Let it surface naturally if "
+                     f"it fits — don't force it in.")
     ms_list = milestones.get(chat_id) or []
     if ms_list:
         recent_ms = "; ".join(m["text"] for m in ms_list[-5:])
@@ -2932,6 +3128,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if bnote:
         messages.append({"role": "system", "content": bnote})
 
+    if CLOSENESS_ENABLED:
+        cl = closeness.get(chat_id)
+        if cl:
+            messages.append({"role": "system", "content": (
+                f"[Relationship stage: you're {cl['bucket']}.]"
+            )})
+
+
     pn = pinned.get(chat_id) or []
     if pn:
         messages.append({"role": "system", "content": (
@@ -2950,6 +3154,23 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
         )})
+
+    # Feedback-miss: one-turn note after a 👎 reaction
+    if FEEDBACK_REACTIONS and chat_id in _feedback_miss:
+        _feedback_miss.discard(chat_id)
+        messages.append({"role": "system", "content": (
+            f"[That last message didn't land — recalibrate, don't apologize.]"
+        )})
+
+    # Open threads (replaces single next_goal when enabled)
+    if THREADS_ENABLED:
+        threads = open_threads.get(chat_id, [])
+        if threads:
+            tl = "\n".join(f"- {t}" for t in threads[:3])
+            messages.append({"role": "system", "content": (
+                f"# Open threads between you two\n{tl}\n"
+                f"Let them surface naturally if one fits — don't force."
+            )})
 
     rq = _recent_questions.get(chat_id) or []
     if rq:
@@ -3020,7 +3241,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
 
-    return messages
+    return _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
 
 
 # --- NanoGPT ---
@@ -3098,6 +3319,30 @@ def _strip_thinking(text: str) -> str:
 def _strip_slop(text: str) -> str:
     """Remove hollow AI openers from the start of a response."""
     return _SLOP_OPENER_RE.sub("", text).strip()
+
+
+_PERSONA_BREAK_RE = re.compile(
+    r"(?i)\b(?:"
+    r"I'?m an AI\b"
+    r"|as an AI(?: language model)?"
+    r"|I am an AI\b"
+    r"|large language model"
+    r"|I don'?t have (?:feelings|a body|personal experiences)"
+    r")"
+)
+
+
+def _strip_persona_breaks(text: str) -> str:
+    if not _PERSONA_BREAK_RE.search(text):
+        return text
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    kept = [s for s in sentences if not _PERSONA_BREAK_RE.search(s)]
+    if not kept:
+        _count_error("persona_break")
+        return ""
+    _count_error("persona_break")
+    return " ".join(kept)
+
 
 def _extract_content(choice: dict) -> str:
     """Pull the reply text from a choices entry, falling back to reasoning_content."""
@@ -3196,7 +3441,9 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 _count_error("fallback")
                 break
             try:
-                return _one_call(messages, m)
+                result = _one_call(messages, m)
+                _track_llm_usage(messages, result)
+                return result
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
                     requests.exceptions.ConnectionError) as e:
                 last_err = e
@@ -4129,40 +4376,39 @@ async def maintain_memory(chat_id: int):
         return
     summarizing.add(chat_id)
     try:
-        batch = list(conversation_history.get(chat_id, [])[:drop_count])
-        uname = user_names.get(chat_id, "you")
-        try:
-            # Her own-day entries never go through the LLM merge — it would launder
-            # them into ordinary "facts about the user" (the hallucination bug).
-            real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
-            summary, new_facts = await asyncio.to_thread(
-                _summarize, recent_summaries.get(chat_id, ""), real_facts,
-                batch, uname,
-            )
-            recent_summaries[chat_id] = summary
-            recent_facts[chat_id] = new_facts + own_days
-        except Exception as e:
-            log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
-            _count_error("memory")
-        del conversation_history[chat_id][:drop_count]  # remove exactly what we summarized
-        save_state()
-        print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
-
-        if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
+        async with _SUMMARIZE_SEM:
+            batch = list(conversation_history.get(chat_id, [])[:drop_count])
+            uname = user_names.get(chat_id, "you")
             try:
                 real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
                 summary, new_facts = await asyncio.to_thread(
-                    _consolidate_facts, recent_summaries.get(chat_id, ""),
-                    real_facts, uname, RECENT_FACTS_TARGET,
+                    _summarize, recent_summaries.get(chat_id, ""), real_facts,
+                    batch, uname,
                 )
-                before = len(recent_facts.get(chat_id, []))
                 recent_summaries[chat_id] = summary
                 recent_facts[chat_id] = new_facts + own_days
-                save_state()
-                print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
             except Exception as e:
-                log.warning("[memory] recent fact consolidation failed (kept as-is): %s", e)
+                log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
                 _count_error("memory")
+            del conversation_history[chat_id][:drop_count]
+            save_state()
+            print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
+
+            if len(recent_facts.get(chat_id, [])) > RECENT_FACTS_MAX:
+                try:
+                    real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
+                    summary, new_facts = await asyncio.to_thread(
+                        _consolidate_facts, recent_summaries.get(chat_id, ""),
+                        real_facts, uname, RECENT_FACTS_TARGET,
+                    )
+                    before = len(recent_facts.get(chat_id, []))
+                    recent_summaries[chat_id] = summary
+                    recent_facts[chat_id] = new_facts + own_days
+                    save_state()
+                    print(f"[memory] Consolidated recent facts {before} -> {len(new_facts)} for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] recent fact consolidation failed (kept as-is): %s", e)
+                    _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -4218,43 +4464,42 @@ async def maintain_long_term_memory(chat_id: int):
         return
     summarizing.add(chat_id)
     try:
-        uname = user_names.get(chat_id, "you")
-        if due and has_recent:
-            try:
-                # Own-day fiction is never promoted into permanent facts about the
-                # user; it stays in the recent tier and expires via OWN_DAYS_KEPT.
-                real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
-                summary, new_facts = await asyncio.to_thread(
-                    _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
-                    recent_summaries.get(chat_id, ""), real_facts, uname,
-                )
-                summaries[chat_id] = summary
-                facts[chat_id] = new_facts
-                recent_summaries[chat_id] = ""
-                recent_facts[chat_id] = own_days
+        async with _SUMMARIZE_SEM:
+            uname = user_names.get(chat_id, "you")
+            if due and has_recent:
+                try:
+                    real_facts, own_days = _split_own_day_facts(recent_facts.get(chat_id, []))
+                    summary, new_facts = await asyncio.to_thread(
+                        _promote_to_long_term, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                        recent_summaries.get(chat_id, ""), real_facts, uname,
+                    )
+                    summaries[chat_id] = summary
+                    facts[chat_id] = new_facts
+                    recent_summaries[chat_id] = ""
+                    recent_facts[chat_id] = own_days
+                    save_state()
+                    print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] promotion failed: %s", e)
+                    _count_error("memory")
+            if due:
+                last_promotion[chat_id] = time.time()
                 save_state()
-                print(f"[memory] Promoted recent memory to long-term for chat {chat_id}.")
-            except Exception as e:
-                log.warning("[memory] promotion failed: %s", e)
-                _count_error("memory")
-        if due:
-            last_promotion[chat_id] = time.time()
-            save_state()
 
-        if len(facts.get(chat_id, [])) > LONG_FACTS_MAX:
-            try:
-                summary, new_facts = await asyncio.to_thread(
-                    _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []),
-                    uname, LONG_FACTS_TARGET,
-                )
-                before = len(facts.get(chat_id, []))
-                summaries[chat_id] = summary
-                facts[chat_id] = new_facts
-                save_state()
-                print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
-            except Exception as e:
-                log.warning("[memory] long-term fact consolidation failed (kept as-is): %s", e)
-                _count_error("memory")
+            if len(facts.get(chat_id, [])) > LONG_FACTS_MAX:
+                try:
+                    summary, new_facts = await asyncio.to_thread(
+                        _consolidate_facts, summaries.get(chat_id, ""), facts.get(chat_id, []),
+                        uname, LONG_FACTS_TARGET,
+                    )
+                    before = len(facts.get(chat_id, []))
+                    summaries[chat_id] = summary
+                    facts[chat_id] = new_facts
+                    save_state()
+                    print(f"[memory] Consolidated long-term facts {before} -> {len(new_facts)} for chat {chat_id}.")
+                except Exception as e:
+                    log.warning("[memory] long-term fact consolidation failed (kept as-is): %s", e)
+                    _count_error("memory")
     finally:
         summarizing.discard(chat_id)
 
@@ -4262,10 +4507,21 @@ async def maintain_long_term_memory(chat_id: int):
 # --- Telegram command handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if context.args and context.args[0].lower() == "full":
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Yes, wipe everything", callback_data="start_full:confirm"),
+            InlineKeyboardButton("Cancel", callback_data="start_full:cancel"),
+        ]])
+        await update.message.reply_text(
+            "⚠️ This will wipe conversation history AND all per-chat memory "
+            "(summaries, facts, milestones, pinned, moods, beliefs) for this chat. "
+            "Character-level memories (memories.txt) are kept.\n\nAre you sure?",
+            reply_markup=kb)
+        return
     conversation_history[chat_id] = []
     last_seen[chat_id] = time.time()
     user_names[chat_id] = update.effective_user.first_name or "you"
-    set_owner(chat_id)  # whoever starts becomes the heartbeat recipient
+    set_owner(chat_id)
     save_state()
     greeting = fill(FIRST_MES_RAW, NAME, user_names[chat_id]) or f"Hi, I'm {NAME}."
     await update.message.reply_text(greeting)
@@ -5330,6 +5586,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await _send(f"❌ {e}")
 
+    elif data == "start_full:confirm":
+        conversation_history[chat_id] = []
+        summaries[chat_id] = ""
+        facts[chat_id] = []
+        recent_summaries[chat_id] = ""
+        recent_facts[chat_id] = []
+        milestones[chat_id] = []
+        pinned[chat_id] = []
+        moods.pop(chat_id, None)
+        beliefs.pop(chat_id, None)
+        save_state()
+        greeting = fill(FIRST_MES_RAW, NAME, user_names.get(chat_id, "you")) or f"Hi, I'm {NAME}."
+        await _send(f"🧹 Full reset complete.\n\n{greeting}")
+
+    elif data == "start_full:cancel":
+        await _send("Cancelled — nothing changed.")
+
     elif data == "cmd:nudges":
         today = _today_str()
         nb = nudge_budget.get(chat_id, {"limit": 3, "sent_today": 0, "reset_date": today})
@@ -5946,6 +6219,129 @@ async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quiet_until[chat_id] = time.time() + hours * 3600
     save_state()
     await update.message.reply_text(f"Proactive messages paused for {hours:g}h. Send /quiet off to cancel early.")
+
+
+_DOW_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_DOW_DISPLAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+async def quietwin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/quietwin add Fri 23:00-08:00 | /quietwin list | /quietwin del <n>"""
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    sub = args[0].lower() if args else "list"
+
+    if sub == "list":
+        wins = quiet_windows.get(chat_id, [])
+        if not wins:
+            await update.message.reply_text("No recurring quiet windows set.\nUse: /quietwin add Fri 23:00-08:00")
+            return
+        lines = ["*Quiet windows:*"]
+        for i, w in enumerate(wins, 1):
+            sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
+            eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
+            lines.append(f"{i}. {_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if sub == "del":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /quietwin del <number>")
+            return
+        wins = quiet_windows.get(chat_id, [])
+        try:
+            idx = int(args[1]) - 1
+            if idx < 0 or idx >= len(wins):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(f"Invalid index. You have {len(wins)} window(s).")
+            return
+        removed = wins.pop(idx)
+        if not wins:
+            quiet_windows.pop(chat_id, None)
+        save_state()
+        sh = f"{removed['start'] // 60:02d}:{removed['start'] % 60:02d}"
+        eh = f"{removed['end'] // 60:02d}:{removed['end'] % 60:02d}"
+        await update.message.reply_text(f"Removed: {_DOW_DISPLAY[removed['dow']]} {sh}–{eh}")
+        return
+
+    if sub == "add":
+        if len(args) < 3:
+            await update.message.reply_text("Usage: /quietwin add Fri 23:00-08:00")
+            return
+        dow_str = args[1].lower()[:3]
+        if dow_str not in _DOW_NAMES:
+            await update.message.reply_text(f"Unknown day: {args[1]}. Use Mon/Tue/Wed/Thu/Fri/Sat/Sun.")
+            return
+        dow = _DOW_NAMES.index(dow_str)
+        time_range = args[2]
+        if "-" not in time_range:
+            await update.message.reply_text("Time range format: HH:MM-HH:MM (e.g. 23:00-08:00)")
+            return
+        parts = time_range.split("-", 1)
+        try:
+            sp = parts[0].split(":")
+            ep = parts[1].split(":")
+            start_min = int(sp[0]) * 60 + int(sp[1])
+            end_min = int(ep[0]) * 60 + int(ep[1])
+            if not (0 <= start_min < 1440 and 0 <= end_min < 1440):
+                raise ValueError
+            if start_min == end_min:
+                raise ValueError
+        except (ValueError, IndexError):
+            await update.message.reply_text("Time range format: HH:MM-HH:MM (e.g. 23:00-08:00)")
+            return
+        entry = {"dow": dow, "start": start_min, "end": end_min}
+        quiet_windows.setdefault(chat_id, []).append(entry)
+        save_state()
+        sh = f"{start_min // 60:02d}:{start_min % 60:02d}"
+        eh = f"{end_min // 60:02d}:{end_min % 60:02d}"
+        cross = " (crosses midnight)" if start_min > end_min else ""
+        await update.message.reply_text(f"Added quiet window: {_DOW_DISPLAY[dow]} {sh}–{eh}{cross}")
+        return
+
+    await update.message.reply_text("Usage: /quietwin add|list|del")
+
+
+async def reaction_feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 👍/👎 reactions on bot messages — mood nudge + feedback log."""
+    if not FEEDBACK_REACTIONS:
+        return
+    reaction = update.message_reaction
+    if not reaction or not reaction.new_reaction:
+        return
+    chat_id = reaction.chat.id
+    if not _is_allowed(reaction.user.id if reaction.user else 0):
+        return
+    emoji = None
+    for r in reaction.new_reaction:
+        e = getattr(r, "emoji", None)
+        if e in ("👍", "👎"):
+            emoji = e
+            break
+    if not emoji:
+        return
+    snippet = ""
+    hist = conversation_history.get(chat_id, [])
+    if hist:
+        last_bot = next((m for m in reversed(hist) if m.get("role") == "assistant"), None)
+        if last_bot:
+            snippet = (last_bot.get("content") or "")[:60]
+    entry = {"emoji": emoji, "ts": time.time(), "msg_snippet": snippet}
+    feedback_log.setdefault(chat_id, []).append(entry)
+    if len(feedback_log[chat_id]) > 50:
+        feedback_log[chat_id] = feedback_log[chat_id][-50:]
+    cur = moods.get(chat_id) or {}
+    score = cur.get("score", 0.0)
+    nudge = 0.3 if emoji == "👍" else -0.3
+    new_score = max(-3.0, min(3.0, score + nudge))
+    moods[chat_id] = {**cur, "score": new_score, "ts": time.time()}
+    if emoji == "👎":
+        _feedback_miss.add(chat_id)
+    save_state()
+
+
+_feedback_miss: set = set()
 
 
 async def away_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6759,6 +7155,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
+        clean = _strip_persona_breaks(clean)
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
         "[sent a meme]" if meme_caption is not None else
@@ -7408,6 +7805,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
+    if clean:
+        clean = _strip_persona_breaks(clean)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
     # the user replies and the history is dumped into the next request.
@@ -7664,6 +8063,10 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     if _is_quiet(owner):
         print("[heartbeat] User /quiet active; skipping.")
         return
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if _in_quiet_window(now_dt, quiet_windows.get(owner, [])):
+        print("[heartbeat] In recurring quiet window; skipping.")
+        return
     if _is_away(owner):
         print("[heartbeat] User /away active; skipping.")
         return
@@ -7694,7 +8097,8 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     At most one follow-up per firing — being remembered should feel rare and real,
     not like a notification system."""
     owner = get_owner()
-    if owner is None or _is_quiet(owner) or _is_away(owner) or in_quiet_hours():
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if owner is None or _is_quiet(owner) or _is_away(owner) or in_quiet_hours() or _in_quiet_window(now_dt, quiet_windows.get(owner, [])):
         return
     if not USER_NOTES_FILE.exists():
         return
@@ -7814,6 +8218,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mood_str = f"{label}  " if label else ""
     lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
 
+    cl = closeness.get(chat_id)
+    if cl:
+        lines.append(f"*Closeness:* {cl['bucket']} ({cl['score']:.2f})")
+
     outfit = wardrobe.get("current")
     if outfit:
         lines.append(f"*Wearing:* {outfit}")
@@ -7842,6 +8250,15 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = int((qt - time.time()) / 60)
         lines.append(f"*Quiet mode:* {remaining}m remaining")
 
+    wins = quiet_windows.get(chat_id, [])
+    if wins:
+        win_strs = []
+        for w in wins:
+            sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
+            eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
+            win_strs.append(f"{_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
+        lines.append(f"*Quiet windows:* {', '.join(win_strs)}")
+
     aw = away.get(chat_id)
     if aw and _is_away(chat_id):
         since = aw.get("since", 0)
@@ -7867,6 +8284,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             gap_str = f"{round(gap / 86400)}d ago"
         lines.append(f"*Last chat:* {gap_str}")
+
+    # Conversation tail — last 3 messages truncated to ~80 chars
+    hist = conversation_history.get(chat_id, [])
+    if hist:
+        lines.append("")
+        lines.append("*Recent:*")
+        for msg in hist[-3:]:
+            role = msg.get("role", "user")
+            speaker = "You" if role == "user" else NAME
+            text = (msg.get("content") or "").replace("\n", " ").strip()
+            if len(text) > 80:
+                text = text[:77] + "…"
+            lines.append(f"  {speaker}: {text}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -7993,6 +8423,29 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             pass
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
+
+    # Recompute closeness for all active chats
+    if CLOSENESS_ENABLED:
+        _recompute_all_closeness()
+
+
+def _recompute_all_closeness():
+    today = _today_str()
+    for cid in list(conversation_history.keys()):
+        hist = conversation_history.get(cid, [])
+        msg_count = len(hist)
+        ms_count = len(milestones.get(cid, []))
+        b_items = (beliefs.get(cid) or {}).get("items") or {}
+        b_count = len(b_items)
+        timestamps = [m.get("ts", 0) for m in hist if m.get("ts")]
+        if timestamps:
+            first_ts = min(timestamps)
+            days_active = max(1, int((time.time() - first_ts) / 86400))
+        else:
+            days_active = 0
+        score, bucket = _compute_closeness(days_active, msg_count, ms_count, b_count)
+        closeness[cid] = {"score": score, "bucket": bucket, "updated": today}
+    save_state()
 
 
 async def selfimage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8293,6 +8746,9 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
     uptime_h = (time.time() - _BOOT_TIME) / 3600
 
     hour_ago = time.time() - 3600
+    stale = [uid for uid, ts in list(_last_request.items()) if ts < hour_ago]
+    for uid in stale:
+        _last_request.pop(uid, None)
     # snapshot: _count_error appends from worker threads; iterating the live dict/lists
     # here can raise 'changed size during iteration'
     recent = {cat: sum(1 for t in list(ts) if t > hour_ago)
@@ -8427,6 +8883,8 @@ def gather_audit_data() -> dict:
         "pid": os.getpid(),
         "memory_review_pending": review_count,
         "away_users": {str(k): v.get("reason", "away") for k, v in away.items()},
+        "config_warnings": list(_CONFIG_WARNINGS),
+        "llm_stats": dict(_llm_stats),
     }
 
 
@@ -8450,6 +8908,16 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
+    llm = d.get("llm_stats", {})
+    if llm.get("calls"):
+        lines.append(
+            f"LLM today: {llm['calls']} calls, "
+            f"~{llm['tok_in'] // 1000}k in / ~{llm['tok_out'] // 1000}k out (est)")
+    cw = d.get("config_warnings", [])
+    if cw:
+        lines.append(f"Config warnings: {len(cw)}")
+        for w in cw[:3]:
+            lines.append(f"  ⚠️ {w}")
     if GROUP_MODE and GROUP_ALLOWED_CHATS:
         # "Why did she stop replying to Jules?" must be answerable from Telegram:
         # budget or chain cap, and which (GROUP_CHAT_DESIGN.md §11).
@@ -8513,6 +8981,10 @@ def _schedule_exit(delay_s: float = 1.0):
     an admin API request-handling thread.
     """
     def _exit():
+        for _ in range(10):
+            if not _replies_in_flight:
+                break
+            time.sleep(0.5)
         _write_state()
         os._exit(0)
     threading.Timer(delay_s, _exit).start()
@@ -8894,6 +9366,7 @@ def main():
     app.add_handler(CommandHandler("backup", backup_cmd))
     app.add_handler(CommandHandler("recap", recap_cmd))
     app.add_handler(CommandHandler("quiet", quiet_cmd))
+    app.add_handler(CommandHandler("quietwin", quietwin_cmd))
     app.add_handler(CommandHandler("away", away_cmd))
     app.add_handler(CommandHandler("back", back_cmd))
     app.add_handler(CommandHandler("life", life_cmd))
@@ -8945,6 +9418,9 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
+
+    if FEEDBACK_REACTIONS:
+        app.add_handler(MessageReactionHandler(reaction_feedback_handler))
 
     if app.job_queue is not None:
         schedule_next_heartbeat(app.job_queue)
@@ -9006,7 +9482,12 @@ def main():
     log.info("%s is running (home: %s)", NAME, BASE_DIR)
     if ALLOWED_USERS:
         log.info("Access restricted to user IDs: %s", ALLOWED_USERS)
-    app.run_polling()
+    poll_kwargs = {}
+    if FEEDBACK_REACTIONS:
+        poll_kwargs["allowed_updates"] = [
+            "message", "edited_message", "callback_query", "message_reaction",
+        ]
+    app.run_polling(**poll_kwargs)
 
 
 if __name__ == "__main__":

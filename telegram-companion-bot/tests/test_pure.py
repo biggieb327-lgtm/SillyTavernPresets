@@ -3,6 +3,7 @@
 These cover logic where a regression is fleet-breaking and the functions are pure
 (no I/O, no Telegram, no API calls). See ROADMAP.md item 2.1.
 """
+import asyncio
 import json
 import time
 
@@ -721,3 +722,308 @@ class TestVibePresetsR2:
 
     def test_in_person_still_exists(self):
         assert "in-person" in bot.VIBE_PROMPTS
+
+
+# ── R3: Observability & robustness ──────────────────────────────────────────
+
+class TestAtomicWriteText:
+    def test_creates_file(self, tmp_path):
+        p = tmp_path / "test.json"
+        bot._atomic_write_text(p, '{"key": "value"}')
+        assert p.read_text(encoding="utf-8") == '{"key": "value"}'
+
+    def test_overwrites_existing(self, tmp_path):
+        p = tmp_path / "test.json"
+        p.write_text("old", encoding="utf-8")
+        bot._atomic_write_text(p, "new")
+        assert p.read_text(encoding="utf-8") == "new"
+
+    def test_no_partial_write_on_disk(self, tmp_path):
+        p = tmp_path / "data.json"
+        bot._atomic_write_text(p, "complete")
+        tmp = p.with_name(p.name + ".tmp")
+        assert not tmp.exists()
+
+
+class TestConfigWarnings:
+    def test_list_exists(self):
+        assert isinstance(bot._CONFIG_WARNINGS, list)
+
+    def test_env_int_bad_value_collects_warning(self):
+        import os
+        os.environ["_TEST_BAD_INT"] = "not_a_number"
+        before = len(bot._CONFIG_WARNINGS)
+        result = bot._env_int("_TEST_BAD_INT", "42")
+        assert result == 42
+        assert len(bot._CONFIG_WARNINGS) > before
+        assert "_TEST_BAD_INT" in bot._CONFIG_WARNINGS[-1]
+        del os.environ["_TEST_BAD_INT"]
+        bot._CONFIG_WARNINGS.pop()
+
+    def test_env_float_bad_value_collects_warning(self):
+        import os
+        os.environ["_TEST_BAD_FLOAT"] = "xyz"
+        before = len(bot._CONFIG_WARNINGS)
+        result = bot._env_float("_TEST_BAD_FLOAT", "3.14")
+        assert result == 3.14
+        assert len(bot._CONFIG_WARNINGS) > before
+        del os.environ["_TEST_BAD_FLOAT"]
+        bot._CONFIG_WARNINGS.pop()
+
+
+class TestTrackLlmUsage:
+    def test_increments_calls(self):
+        old_calls = bot._llm_stats["calls"]
+        bot._track_llm_usage([{"content": "hello"}], "world")
+        assert bot._llm_stats["calls"] == old_calls + 1
+        assert bot._llm_stats["date"] == time.strftime("%Y-%m-%d")
+
+    def test_resets_on_new_day(self):
+        bot._llm_stats["date"] = "1999-01-01"
+        bot._llm_stats["calls"] = 99
+        bot._track_llm_usage([{"content": "test"}], "reply")
+        assert bot._llm_stats["calls"] == 1
+        assert bot._llm_stats["date"] == time.strftime("%Y-%m-%d")
+
+    def test_estimates_tokens(self):
+        bot._llm_stats["date"] = time.strftime("%Y-%m-%d")
+        bot._llm_stats["tok_in"] = 0
+        bot._llm_stats["tok_out"] = 0
+        msgs = [{"content": "a" * 100}]
+        bot._track_llm_usage(msgs, "b" * 40)
+        assert bot._llm_stats["tok_in"] == 25
+        assert bot._llm_stats["tok_out"] == 10
+
+
+class TestErrorCountsPersistence:
+    def test_serialize_includes_error_counts(self):
+        bot._error_counts["test_cat"] = [1.0, 2.0, 3.0]
+        payload = json.loads(bot._serialize_state())
+        assert "error_counts" in payload
+        assert payload["error_counts"]["test_cat"] == [1.0, 2.0, 3.0]
+        del bot._error_counts["test_cat"]
+
+    def test_serialize_includes_llm_stats(self):
+        payload = json.loads(bot._serialize_state())
+        assert "llm_stats" in payload
+        assert "calls" in payload["llm_stats"]
+
+
+class TestGatherAuditData:
+    def test_includes_config_warnings(self):
+        d = bot.gather_audit_data()
+        assert "config_warnings" in d
+        assert isinstance(d["config_warnings"], list)
+
+    def test_includes_llm_stats(self):
+        d = bot.gather_audit_data()
+        assert "llm_stats" in d
+        assert "calls" in d["llm_stats"]
+
+
+# ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
+
+class TestTrimHistoryToBudget:
+    def test_noop_when_under_budget(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "bye"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 10000)
+        assert len(result) == 4
+
+    def test_disabled_when_zero(self):
+        msgs = [{"role": "user", "content": "x" * 100000}]
+        result = bot._trim_history_to_budget(list(msgs), 0)
+        assert len(result) == 1
+
+    def test_drops_oldest_history_first(self):
+        msgs = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "old message"},
+            {"role": "assistant", "content": "old reply"},
+            {"role": "user", "content": "new message"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 20)
+        roles = [m["role"] for m in result]
+        assert "system" in roles
+        assert result[-1]["content"] == "new message"
+
+    def test_never_drops_system(self):
+        msgs = [
+            {"role": "system", "content": "x" * 400},
+            {"role": "user", "content": "hi"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 50)
+        assert any(m["role"] == "system" for m in result)
+
+    def test_never_drops_final_user(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "a" * 400},
+            {"role": "user", "content": "final question"},
+        ]
+        result = bot._trim_history_to_budget(list(msgs), 30)
+        assert result[-1]["content"] == "final question"
+
+
+class TestTriggeredLoreDedupe:
+    def test_no_duplicates(self):
+        original_lore = list(bot.LORE)
+        bot.LORE.append({"keys": ["testxyz"], "content": "shared entry", "constant": False})
+        bot.LORE.append({"keys": ["testxyz"], "content": "shared entry", "constant": False})
+        try:
+            results = bot.triggered_lore("testxyz is here")
+            assert results.count("shared entry") == 1
+        finally:
+            bot.LORE[:] = original_lore
+
+
+class TestStripPersonaBreaks:
+    def test_strips_ai_admission(self):
+        text = "I'm an AI assistant. How can I help?"
+        result = bot._strip_persona_breaks(text)
+        assert "AI" not in result
+
+    def test_strips_as_an_ai(self):
+        text = "As an AI language model, I cannot feel. But I think it's cool."
+        result = bot._strip_persona_breaks(text)
+        assert "AI" not in result
+        assert "cool" in result
+
+    def test_strips_no_feelings(self):
+        text = "I don't have feelings like humans do. Anyway, what's up?"
+        result = bot._strip_persona_breaks(text)
+        assert "feelings" not in result
+        assert "what's up" in result
+
+    def test_strips_large_language_model(self):
+        text = "I am a large language model. Let me help."
+        result = bot._strip_persona_breaks(text)
+        assert "large language model" not in result
+
+    def test_preserves_third_person_ai_reference(self):
+        text = "My AI coworker shipped a bug today."
+        result = bot._strip_persona_breaks(text)
+        assert result == text
+
+    def test_preserves_non_first_person(self):
+        text = "That AI tool is pretty cool."
+        result = bot._strip_persona_breaks(text)
+        assert result == text
+
+    def test_empty_after_strip_returns_empty(self):
+        text = "I'm an AI and I don't have personal experiences."
+        result = bot._strip_persona_breaks(text)
+        assert result == ""
+
+    def test_clean_text_unchanged(self):
+        text = "I had a great day at work. The weather was nice."
+        assert bot._strip_persona_breaks(text) == text
+
+
+class TestSummarizeSemaphore:
+    def test_semaphore_exists(self):
+        assert hasattr(bot, '_SUMMARIZE_SEM')
+        assert isinstance(bot._SUMMARIZE_SEM, asyncio.Semaphore)
+
+
+# ── _in_quiet_window ─────────────────────────────────────────────────────────
+
+from datetime import datetime
+
+
+class TestInQuietWindow:
+    def _dt(self, dow, hour, minute):
+        """Build a datetime with a specific weekday. 2026-07-06 is a Monday (dow=0)."""
+        from datetime import timedelta
+        base = datetime(2026, 7, 6, hour, minute)  # Monday
+        return base + timedelta(days=dow)
+
+    def test_empty_windows(self):
+        now = self._dt(4, 23, 30)  # Fri 23:30
+        assert bot._in_quiet_window(now, []) is False
+
+    def test_simple_window_inside(self):
+        # Fri 22:00-23:30, check at Fri 22:15
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(4, 22, 15), windows) is True
+
+    def test_simple_window_outside(self):
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(4, 21, 59), windows) is False
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is False
+
+    def test_wrong_day(self):
+        # Window is Friday, check on Saturday same time
+        windows = [{"dow": 4, "start": 22 * 60, "end": 23 * 60 + 30}]
+        assert bot._in_quiet_window(self._dt(5, 22, 15), windows) is False
+
+    def test_midnight_crossing_same_night(self):
+        # Fri 23:00-08:00, check at Fri 23:30
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is True
+
+    def test_midnight_crossing_next_morning(self):
+        # Fri 23:00-08:00, check at Sat 07:00 (next day after the window started)
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(5, 7, 0), windows) is True
+
+    def test_midnight_crossing_after_end(self):
+        # Fri 23:00-08:00, check at Sat 08:00 (end, exclusive)
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(5, 8, 0), windows) is False
+
+    def test_midnight_crossing_wrong_day(self):
+        # Fri 23:00-08:00, check on Thu 23:30
+        windows = [{"dow": 4, "start": 23 * 60, "end": 8 * 60}]
+        assert bot._in_quiet_window(self._dt(3, 23, 30), windows) is False
+
+    def test_boundary_start_inclusive(self):
+        windows = [{"dow": 2, "start": 10 * 60, "end": 12 * 60}]
+        assert bot._in_quiet_window(self._dt(2, 10, 0), windows) is True
+
+    def test_boundary_end_exclusive(self):
+        windows = [{"dow": 2, "start": 10 * 60, "end": 12 * 60}]
+        assert bot._in_quiet_window(self._dt(2, 12, 0), windows) is False
+
+    def test_multiple_windows(self):
+        windows = [
+            {"dow": 0, "start": 22 * 60, "end": 6 * 60},  # Mon night
+            {"dow": 4, "start": 23 * 60, "end": 8 * 60},  # Fri night
+        ]
+        assert bot._in_quiet_window(self._dt(0, 23, 0), windows) is True
+        assert bot._in_quiet_window(self._dt(4, 23, 30), windows) is True
+        assert bot._in_quiet_window(self._dt(2, 23, 0), windows) is False
+
+
+# ── _compute_closeness ───────────────────────────────────────────────────────
+
+class TestComputeCloseness:
+    def test_zero_inputs(self):
+        score, bucket = bot._compute_closeness(0, 0, 0, 0)
+        assert score == 0.0
+        assert bucket == "getting to know each other"
+
+    def test_all_maxed(self):
+        score, bucket = bot._compute_closeness(100, 1000, 20, 10)
+        assert score == 1.0
+        assert bucket == "deeply familiar"
+
+    def test_mid_range(self):
+        score, bucket = bot._compute_closeness(30, 250, 4, 3)
+        assert 0.33 <= score < 0.66
+        assert bucket == "comfortable"
+
+    def test_fresh_user(self):
+        score, bucket = bot._compute_closeness(3, 20, 0, 0)
+        assert score < 0.33
+        assert bucket == "getting to know each other"
+
+    def test_deeply_familiar_threshold(self):
+        score, bucket = bot._compute_closeness(60, 500, 8, 6)
+        assert score >= 0.66
+        assert bucket == "deeply familiar"
