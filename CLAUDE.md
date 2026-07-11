@@ -46,6 +46,21 @@ Rules here are backed by files that run, not prose:
   pushes at most one proposal to `claude/improvement-loop`, never to `main`.
 - Runtime state in `.claude/.runtime/` is gitignored — never commit it.
 
+## Operating rule
+
+Before starting work, inspect relevant project skills in `.claude/skills/`
+(`skill-router/SKILL.md` is the index; staged skills pending review live in
+`.claude/skills/_staging/` — see its README).
+
+Use:
+- `debug-fleet-incident` (staged) for bugs and regressions
+- `ship-bot-release` + `bot-code-invariants` (staged) for edits that change behavior
+- `self-verification-loop` before declaring done
+
+Do not load unrelated skills.
+Do not rewrite large files unless the task requires it.
+Every completion must include the verification command actually run.
+
 ## Bot instances
 
 | Session | Directory | Character card |
