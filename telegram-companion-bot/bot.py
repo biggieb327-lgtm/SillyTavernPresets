@@ -2089,8 +2089,16 @@ def triggered_memories(scan_text: str) -> list[str]:
         if hits > 0:
             keyword_scored[line] = float(hits)
 
-    # Semantic scoring (additive — falls back silently on failure)
-    sem_results = semantic_recall(scan_text, entries, top_k=8)
+    # Semantic scoring (additive — falls back silently on failure).
+    # _embed_text makes a blocking HTTP call; skip it when running on the event
+    # loop (assemble_messages is called from async handlers) to avoid freezing
+    # all other handlers for up to 30s.  Keyword scoring still works fine.
+    try:
+        _loop = asyncio.get_running_loop()
+        on_event_loop = True
+    except RuntimeError:
+        on_event_loop = False
+    sem_results = semantic_recall(scan_text, entries, top_k=8) if not on_event_loop else []
     sem_scored: dict[str, float] = {}
     if sem_results:
         max_sim = max(s for s, _ in sem_results) or 1.0
@@ -2270,8 +2278,13 @@ def _appraise_mood(chat_id: int, convo_tail: str):
     except (TypeError, ValueError):
         valence = cur.get("score", 0.0)
     if label:
-        moods[chat_id] = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
-        save_state()
+        value = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
+        if _MAIN_LOOP:
+            _MAIN_LOOP.call_soon_threadsafe(moods.__setitem__, chat_id, value)
+            _MAIN_LOOP.call_soon_threadsafe(save_state)
+        else:
+            moods[chat_id] = value
+            save_state()
         print(f"[mood] {label} ({valence:+.0f})")
 
 
@@ -2349,8 +2362,13 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         except (TypeError, ValueError):
             valence = cur.get("score", 0.0)
         if label:
-            moods[chat_id] = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
-            save_state()
+            value = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
+            if _MAIN_LOOP:
+                _MAIN_LOOP.call_soon_threadsafe(moods.__setitem__, chat_id, value)
+                _MAIN_LOOP.call_soon_threadsafe(save_state)
+            else:
+                moods[chat_id] = value
+                save_state()
             print(f"[mood] {label} ({valence:+.0f})")
 
     def _clean_field(key: str) -> str:
@@ -2409,11 +2427,16 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
     avail = _clean_field("availability").lower()
     if avail in ("driving", "working", "busy") and not _is_away(chat_id):
         exp = time.time() + AWAY_AUTO_HOURS * 3600 if AWAY_AUTO_HOURS > 0 else None
-        away[chat_id] = {
+        value = {
             "reason": avail, "since": time.time(),
             "origin": "auto", "expires": exp,
         }
-        save_state()
+        if _MAIN_LOOP:
+            _MAIN_LOOP.call_soon_threadsafe(away.__setitem__, chat_id, value)
+            _MAIN_LOOP.call_soon_threadsafe(save_state)
+        else:
+            away[chat_id] = value
+            save_state()
         print(f"[away] auto-set: {avail} (expires in {AWAY_AUTO_HOURS}h)")
 
 
@@ -3166,7 +3189,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                     requests.exceptions.ConnectionError) as e:
                 last_err = e
                 status = getattr(getattr(e, "response", None), "status_code", None)
-                transient = status is None or status in (400, 429) or 500 <= status < 600
+                transient = status is None or status == 429 or 500 <= status < 600
                 if not transient:
                     raise
                 if attempt < _CHAT_RETRIES - 1:
@@ -5873,9 +5896,10 @@ async def recap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"based on the material below. Cover what they've talked about and any meaningful moments. "
         f"No headers, no bullets, no markdown."
     )
-    raw = call_nanogpt(
+    raw = await asyncio.to_thread(
+        call_nanogpt,
         [{"role": "system", "content": sys_msg}, {"role": "user", "content": "\n\n".join(parts)}],
-        model=MOOD_MODEL,
+        MOOD_MODEL,
     )
     await update.message.reply_text(raw.strip() or "Nothing to recap.")
 
