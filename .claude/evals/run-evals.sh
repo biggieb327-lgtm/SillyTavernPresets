@@ -93,6 +93,23 @@ else
   bad "bot-compiles" "bot.py does not compile"
 fi
 
+# Incident v2026-07-11: _retag_legacy_day_facts and helpers were defined AFTER
+# load_state() called them at module level — NameError crash-looped every bot for a day.
+# py_compile can't catch this (it checks syntax, not runtime name resolution).
+if python3 -c "
+import sys, os, tempfile, json; from pathlib import Path
+d = tempfile.mkdtemp()
+(Path(d)/'.env').write_text('TELEGRAM_BOT_TOKEN=t:f\nNANOGPT_API_KEY=k\nCHARACTER_CARD=c.json\nBOT_TIMEZONE=UTC\n')
+(Path(d)/'c.json').write_text(json.dumps({'spec':'chara_card_v2','spec_version':'2.0','data':{'name':'T','description':'','personality':'','scenario':'','first_mes':'H','mes_example':'','system_prompt':'T','post_history_instructions':'','creator_notes':'','character_book':{'entries':[]}}}))
+sys.argv=[sys.argv[0],d]; os.environ['BOT_HOME']=d
+sys.path.insert(0,'telegram-companion-bot')
+import bot
+" 2>/dev/null; then
+  ok "bot-imports: bot.py imports without NameError"
+else
+  bad "bot-imports" "bot.py crashes on import — a function is called before it's defined (load_state NameError class)"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do

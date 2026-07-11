@@ -1506,6 +1506,30 @@ import atexit
 atexit.register(_release_pid_lock)
 
 
+# --- Own-day memory provenance (must be above load_state which uses them) ---
+_OWN_DAY_PREFIX = "[own-day"
+OWN_DAYS_KEPT = _env_int("OWN_DAYS_KEPT", "5")
+_LEGACY_DAY_RE = re.compile(r"^\[[A-Z][a-z]{2} \d{1,2}\] (?!Voice note:)")
+
+
+def _is_own_day_fact(f) -> bool:
+    return isinstance(f, str) and f.startswith(_OWN_DAY_PREFIX)
+
+
+def _split_own_day_facts(fl):
+    """(real_facts, own_day_entries) — keeps LLM memory consumers away from her fiction."""
+    fl = fl or []
+    return ([f for f in fl if not _is_own_day_fact(f)],
+            [f for f in fl if _is_own_day_fact(f)])
+
+
+def _retag_legacy_day_facts(fl):
+    """Migration: day archives used to be stored as plain '[Jul 09] …' facts,
+    indistinguishable from real user facts. Retag them with the own-day prefix."""
+    return [f"[own-day {f[1:]}" if isinstance(f, str) and _LEGACY_DAY_RE.match(f) else f
+            for f in (fl or [])]
+
+
 load_state()
 
 
@@ -2662,35 +2686,6 @@ def belief_note(chat_id: int) -> str:
 # Provenance tag for the character's own generated day events archived into
 # recent_facts by _rotate_day_context. These are HER generated fiction, not user
 # facts — every memory consumer must treat them differently, or she asserts her
-# invented life as shared history (the 2026-07-10 heartbeat-hallucination bug:
-# untagged day archives rendered under "Recent specifics" and even got promoted
-# into permanent long-term facts about the user).
-_OWN_DAY_PREFIX = "[own-day"
-OWN_DAYS_KEPT = _env_int("OWN_DAYS_KEPT", "5")  # her own past days kept in the recent tier
-
-# Negative lookahead: handle_voice stores user voice notes as '[Jul 10] Voice note: …'
-# — those are USER content and must not be retagged as her own fiction.
-_LEGACY_DAY_RE = re.compile(r"^\[[A-Z][a-z]{2} \d{1,2}\] (?!Voice note:)")
-
-
-def _is_own_day_fact(f) -> bool:
-    return isinstance(f, str) and f.startswith(_OWN_DAY_PREFIX)
-
-
-def _split_own_day_facts(fl):
-    """(real_facts, own_day_entries) — keeps LLM memory consumers away from her fiction."""
-    fl = fl or []
-    return ([f for f in fl if not _is_own_day_fact(f)],
-            [f for f in fl if _is_own_day_fact(f)])
-
-
-def _retag_legacy_day_facts(fl):
-    """Migration: day archives used to be stored as plain '[Jul 09] …' facts,
-    indistinguishable from real user facts. Retag them with the own-day prefix."""
-    return [f"[own-day {f[1:]}" if isinstance(f, str) and _LEGACY_DAY_RE.match(f) else f
-            for f in (fl or [])]
-
-
 def memory_block(chat_id: int, uname: str) -> str:
     """Long-term (durable) + recent (last ~week) memory injected every request."""
     blocks = []
