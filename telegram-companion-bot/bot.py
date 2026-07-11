@@ -6,6 +6,18 @@ import math
 import fcntl
 import random
 import asyncio
+# Python 3.14 removed the auto-create fallback from asyncio.get_event_loop().
+# PTB v21 calls it internally in multiple places; patch it once here so the
+# library's assumption holds regardless of Python version.
+_orig_gel = asyncio.get_event_loop
+def _gel_compat():
+    try:
+        return _orig_gel()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+asyncio.get_event_loop = _gel_compat
 import time
 import base64
 import calendar
@@ -8994,14 +9006,6 @@ def main():
     log.info("%s is running (home: %s)", NAME, BASE_DIR)
     if ALLOWED_USERS:
         log.info("Access restricted to user IDs: %s", ALLOWED_USERS)
-    # python-telegram-bot v21's run_polling() internally calls asyncio.get_event_loop()
-    # expecting it to auto-create a loop when none exists for this thread. Newer Python
-    # (3.14+) removed that fallback, so it raises instead — set one explicitly so the
-    # library's assumption still holds regardless of Python version.
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling()
 
 
