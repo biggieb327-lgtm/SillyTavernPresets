@@ -48,6 +48,9 @@ Rules here are backed by files that run, not prose:
 
 ## Operating rule
 
+General method (scoping, evidence, verification, calibrated reporting):
+`.claude/OPERATING_MANUAL.md` — project rules in this file override it.
+
 Before starting work, inspect relevant project skills in `.claude/skills/`
 (`skill-router/SKILL.md` is the index; staged skills pending review live in
 `.claude/skills/_staging/` — see its README).
