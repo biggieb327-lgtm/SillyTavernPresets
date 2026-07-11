@@ -92,6 +92,16 @@ single-device blast radius.
   bots); chain cap 2; fleet-wide fail-closed group posture; two CI evals pin the
   group/private memory boundary. On-device rollout steps in OPS_MANUAL.
 
+### 3.5 TomTom Maps — S
+- **Phase 1 ✅ (shipped v2026-07-11.7):** slash commands `/route`, `/nearby`, `/place`
+  behind `TOMTOM_API_KEY` (fail-closed); per-instance `TOMTOM_TRAVEL_MODE`. Raw
+  `api.tomtom.com` REST, defensive parsers, 20 tests. Owner provisions the key.
+- **Phase 2 (next):** in-character map talk — let Nora/Emily/Priya weave routing and
+  place data into normal conversation via a taught intent tag (like `[search:]`),
+  intercepted and filled at the `_do_request`/tag layer. Must stay within the
+  one-combined-call budget: trigger only on an explicit map-shaped user ask, never a
+  per-message side call. Owner chose "both, slash first" (2026-07-11).
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)

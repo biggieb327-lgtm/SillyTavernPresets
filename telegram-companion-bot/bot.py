@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.6"
+BOT_VERSION = "2026-07-11.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -855,6 +855,12 @@ TRAFFIC_RADIUS_MILES = _env_float("TRAFFIC_RADIUS_MILES", "10")
 TRAFFIC_POLL_MINUTES = _env_int("TRAFFIC_POLL_MINUTES", "10")
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
+# --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
+# Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
+TOMTOM_API_KEY      = os.getenv("TOMTOM_API_KEY", "")
+TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
+# Per-instance default travel mode for /route, validated per-call by _tomtom_mode().
 
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
@@ -4597,6 +4603,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Traffic (Western Washington)*",
         "/traffic — current congestion (near you if location shared)",
         "/incidents — active incidents (near you if location shared)",
+        "",
+        "*Maps (routing & places)*",
+        "/route <from> to <dest> — travel time & distance",
+        "/nearby <thing> — places near your shared location",
+        "/place <name> — look up an address or business",
         "",
         "*Nudges*",
         "/nudges — view today's proactive message budget",
@@ -8488,6 +8499,231 @@ def _reverse_geocode_sync(lat: float, lon: float) -> str:
         return ""
 
 
+# --- TomTom Maps integration (routing, place/POI search) ---
+# bot.py calls the raw api.tomtom.com REST endpoints directly, which return
+# TomTom's NATIVE JSON (results[]/routes[]), not the GeoJSON the MCP tools emit.
+# Every parser below is defensive: each field access degrades to a safe default
+# so a response-shape change can't crash a bot (same discipline as WSDOT below).
+
+_TOMTOM_SEARCH_URL  = "https://api.tomtom.com/search/2/search/{q}.json"
+_TOMTOM_GEOCODE_URL = "https://api.tomtom.com/search/2/geocode/{q}.json"
+_TOMTOM_NEARBY_URL  = "https://api.tomtom.com/search/2/nearbySearch/.json"
+_TOMTOM_ROUTE_URL   = "https://api.tomtom.com/routing/1/calculateRoute/{o}:{d}/json"
+_TOMTOM_MODES       = {"car", "bicycle", "pedestrian", "truck", "taxi", "bus", "van", "motorcycle"}
+
+
+def _tomtom_mode() -> str:
+    """Validated per-instance travel mode; bad value warns and falls back to car."""
+    m = os.getenv("TOMTOM_TRAVEL_MODE", "car").strip().lower()
+    if m not in _TOMTOM_MODES:
+        log.warning("[tomtom] invalid TOMTOM_TRAVEL_MODE %r; using 'car'", m)
+        return "car"
+    return m
+
+
+def _fmt_distance(meters) -> str:
+    """US-unit distance: feet under ~0.1 mi, else miles. Total on bad input."""
+    try:
+        m = float(meters)
+    except (TypeError, ValueError):
+        return "?"
+    mi = m / 1609.344
+    if mi < 0.1:
+        return f"{round(m * 3.28084)} ft"
+    return f"{mi:.1f} mi"
+
+
+def _fmt_duration(seconds) -> str:
+    """Human duration from seconds. Total on bad input."""
+    try:
+        s = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "?"
+    mins = s // 60
+    if mins < 60:
+        return f"{mins} min"
+    h, m = divmod(mins, 60)
+    return f"{h} hr {m} min" if m else f"{h} hr"
+
+
+def _parse_route_query(text: str):
+    """'A to B' or 'from A to B' -> ('A','B'); None if unparseable.
+    Splits on the LAST ' to ' so a destination containing ' to ' still parses."""
+    if not text:
+        return None
+    t = text.strip()
+    if t.lower().startswith("from "):
+        t = t[5:]
+    idx = t.lower().rfind(" to ")
+    if idx == -1:
+        return None
+    origin, dest = t[:idx].strip(), t[idx + 4:].strip()
+    if not origin or not dest:
+        return None
+    return origin, dest
+
+
+def _format_route(route: dict, mode: str) -> str:
+    """TomTom Routing native response -> summary line. Total/defensive."""
+    routes = (route or {}).get("routes") or []
+    if not routes:
+        return "No route found."
+    summ = (routes[0] or {}).get("summary") or {}
+    verb = {"bicycle": "🚲 Bike", "pedestrian": "🚶 Walk"}.get(mode, "🚗 Drive")
+    line = f"{verb}: {_fmt_duration(summ.get('travelTimeInSeconds'))} · {_fmt_distance(summ.get('lengthInMeters'))}"
+    try:
+        if int(summ.get("trafficDelayInSeconds") or 0) >= 60:
+            line += f" (incl. +{_fmt_duration(summ.get('trafficDelayInSeconds'))} traffic)"
+    except (TypeError, ValueError):
+        pass
+    return line
+
+
+def _format_place_results(results: list, limit: int = 3) -> str:
+    """TomTom Search native 'results' -> readable list. Total/defensive."""
+    out = []
+    for r in (results or [])[:limit]:
+        poi = (r or {}).get("poi") or {}
+        addr = (r or {}).get("address") or {}
+        name = poi.get("name") or addr.get("freeformAddress") or "Unknown"
+        line = f"📍 {name}"
+        fa = addr.get("freeformAddress")
+        if fa and fa != name:
+            line += f"\n   {fa}"
+        if poi.get("phone"):
+            line += f"\n   ☎ {poi['phone']}"
+        out.append(line)
+    return "\n\n".join(out) if out else "No matches found."
+
+
+def _format_nearby_results(results: list, limit: int = 5) -> str:
+    """TomTom Search results carrying 'dist' (meters) -> distance-sorted list."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
+    out = []
+    for r in rows[:limit]:
+        poi = r.get("poi") or {}
+        addr = r.get("address") or {}
+        name = poi.get("name") or addr.get("freeformAddress") or "Unknown"
+        dist = r.get("dist")
+        tag = f" · {_fmt_distance(dist)}" if isinstance(dist, (int, float)) else ""
+        line = f"📍 {name}{tag}"
+        street = addr.get("streetName") or addr.get("freeformAddress")
+        if street and street != name:
+            line += f"\n   {street}"
+        out.append(line)
+    return "\n\n".join(out) if out else "Nothing found nearby."
+
+
+def _tomtom_geocode(query: str):
+    """Query -> (lat, lon, label) or None. Network; defensive."""
+    try:
+        from urllib.parse import quote
+        r = _get_session().get(
+            _TOMTOM_GEOCODE_URL.format(q=quote(query)),
+            params={"key": TOMTOM_API_KEY, "limit": 1, "countrySet": "US"},
+            timeout=(10, 30),
+        )
+        r.raise_for_status()
+        results = (r.json() or {}).get("results") or []
+        if not results:
+            return None
+        pos = (results[0] or {}).get("position") or {}
+        lat, lon = pos.get("lat"), pos.get("lon")
+        if lat is None or lon is None:
+            return None
+        label = ((results[0].get("address") or {}).get("freeformAddress")) or query
+        return float(lat), float(lon), label
+    except Exception as e:
+        log.warning("[tomtom] geocode failed for %r: %s", query, e)
+        return None
+
+
+def _fetch_tomtom_route(o, d, mode: str):
+    """o, d are (lat, lon) tuples. Returns native routing dict or None."""
+    try:
+        r = _get_session().get(
+            _TOMTOM_ROUTE_URL.format(o=f"{o[0]},{o[1]}", d=f"{d[0]},{d[1]}"),
+            params={"key": TOMTOM_API_KEY, "travelMode": mode, "traffic": "true", "routeType": "fast"},
+            timeout=(10, 30),
+        )
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning("[tomtom] route fetch failed: %s", e)
+        return None
+
+
+def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
+    """Search/geocode a free-text query, optionally biased to a point. Returns results[]."""
+    try:
+        from urllib.parse import quote
+        params = {"key": TOMTOM_API_KEY, "limit": 5, "countrySet": "US"}
+        if lat is not None and lon is not None:
+            params["lat"], params["lon"] = lat, lon
+            if radius_m:
+                params["radius"] = int(radius_m)
+        r = _get_session().get(_TOMTOM_SEARCH_URL.format(q=quote(query)), params=params, timeout=(10, 30))
+        r.raise_for_status()
+        return (r.json() or {}).get("results") or []
+    except Exception as e:
+        log.warning("[tomtom] search failed for %r: %s", query, e)
+        return []
+
+
+async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TOMTOM_ENABLED:
+        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        return
+    parsed = _parse_route_query(" ".join(context.args) if context.args else "")
+    if not parsed:
+        await update.message.reply_text("Usage: /route <from> to <destination>\ne.g. /route Bellevue to SeaTac airport")
+        return
+    origin_q, dest_q = parsed
+    mode = _tomtom_mode()
+    o = await asyncio.to_thread(_tomtom_geocode, origin_q)
+    if not o:
+        await update.message.reply_text(f"Couldn't find “{origin_q}”.")
+        return
+    d = await asyncio.to_thread(_tomtom_geocode, dest_q)
+    if not d:
+        await update.message.reply_text(f"Couldn't find “{dest_q}”.")
+        return
+    route = await asyncio.to_thread(_fetch_tomtom_route, (o[0], o[1]), (d[0], d[1]), mode)
+    await update.message.reply_text(f"🗺 {o[2]} → {d[2]}\n{_format_route(route, mode)}")
+
+
+async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TOMTOM_ENABLED:
+        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        return
+    loc = user_location.get(update.effective_chat.id)
+    if not loc:
+        await update.message.reply_text("Share your location first (📎 → Location), then /nearby <thing>.")
+        return
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text("Usage: /nearby <thing>\ne.g. /nearby coffee")
+        return
+    results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"], 3000)
+    await update.message.reply_text(f"📍 “{query}” near you\n\n{_format_nearby_results(results)}")
+
+
+async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TOMTOM_ENABLED:
+        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        return
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text("Usage: /place <name or address>\ne.g. /place Pike Place Market")
+        return
+    loc = user_location.get(update.effective_chat.id)
+    lat = loc["lat"] if loc else None
+    lon = loc["lon"] if loc else None
+    results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
+    await update.message.reply_text(f"🔎 {query}\n\n{_format_place_results(results)}")
+
+
 # --- WSDOT Traffic integration ---
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -9418,6 +9654,10 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
+    if TOMTOM_ENABLED:
+        app.add_handler(CommandHandler("route", route_cmd))
+        app.add_handler(CommandHandler("nearby", nearby_cmd))
+        app.add_handler(CommandHandler("place", place_cmd))
 
     if FEEDBACK_REACTIONS:
         app.add_handler(MessageReactionHandler(reaction_feedback_handler))

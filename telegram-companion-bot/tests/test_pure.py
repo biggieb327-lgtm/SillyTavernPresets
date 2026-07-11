@@ -1027,3 +1027,121 @@ class TestComputeCloseness:
         score, bucket = bot._compute_closeness(60, 500, 8, 6)
         assert score >= 0.66
         assert bucket == "deeply familiar"
+
+
+# ── TomTom Maps (routing + place/POI search) ──────────────────────────────────
+# Pure parsers/formatters only; the network fetch helpers are exercised on-device
+# (they need TOMTOM_API_KEY). Formatters are defensive/total — a shape change must
+# degrade to a message, never crash a bot mid-reply.
+
+class TestParseRouteQuery:
+    def test_simple(self):
+        assert bot._parse_route_query("Bellevue to Seattle") == ("Bellevue", "Seattle")
+
+    def test_from_prefix(self):
+        assert bot._parse_route_query("from Bellevue to SeaTac airport") == ("Bellevue", "SeaTac airport")
+
+    def test_splits_on_last_to(self):
+        # 'Toronto' contains no ' to '; a destination that literally does must survive.
+        assert bot._parse_route_query("A to B to C") == ("A to B", "C")
+
+    def test_no_separator(self):
+        assert bot._parse_route_query("just one place") is None
+
+    def test_empty_side(self):
+        assert bot._parse_route_query("to Seattle") is None
+        assert bot._parse_route_query("Bellevue to ") is None
+
+    def test_empty_and_none(self):
+        assert bot._parse_route_query("") is None
+        assert bot._parse_route_query(None) is None
+
+
+class TestFmtDistanceDuration:
+    def test_miles(self):
+        assert bot._fmt_distance(1609.344) == "1.0 mi"
+
+    def test_feet_under_tenth_mile(self):
+        assert bot._fmt_distance(100).endswith("ft")
+
+    def test_distance_bad_input(self):
+        assert bot._fmt_distance(None) == "?"
+        assert bot._fmt_distance("x") == "?"
+
+    def test_minutes(self):
+        assert bot._fmt_duration(1800) == "30 min"
+
+    def test_hours_exact(self):
+        assert bot._fmt_duration(3600) == "1 hr"
+
+    def test_hours_and_minutes(self):
+        assert bot._fmt_duration(3660) == "1 hr 1 min"
+
+    def test_duration_bad_input(self):
+        assert bot._fmt_duration(None) == "?"
+        assert bot._fmt_duration("x") == "?"
+
+
+class TestTomTomMode:
+    def test_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TOMTOM_TRAVEL_MODE", raising=False)
+        assert bot._tomtom_mode() == "car"
+
+    def test_valid_mode(self, monkeypatch):
+        monkeypatch.setenv("TOMTOM_TRAVEL_MODE", "Bicycle")
+        assert bot._tomtom_mode() == "bicycle"
+
+    def test_invalid_falls_back(self, monkeypatch):
+        monkeypatch.setenv("TOMTOM_TRAVEL_MODE", "hovercraft")
+        assert bot._tomtom_mode() == "car"
+
+
+class TestFormatRoute:
+    def test_basic(self):
+        out = bot._format_route(
+            {"routes": [{"summary": {"travelTimeInSeconds": 1830, "lengthInMeters": 21000,
+                                     "trafficDelayInSeconds": 180}}]}, "car")
+        assert "30 min" in out and "13.0 mi" in out and "traffic" in out
+
+    def test_mode_icon(self):
+        out = bot._format_route(
+            {"routes": [{"summary": {"travelTimeInSeconds": 600, "lengthInMeters": 2000}}]}, "bicycle")
+        assert "🚲" in out
+
+    def test_no_traffic_note_when_small(self):
+        out = bot._format_route(
+            {"routes": [{"summary": {"travelTimeInSeconds": 600, "lengthInMeters": 2000,
+                                     "trafficDelayInSeconds": 30}}]}, "car")
+        assert "traffic" not in out
+
+    def test_empty_and_malformed(self):
+        assert bot._format_route({"routes": []}, "car") == "No route found."
+        assert bot._format_route({}, "car") == "No route found."
+        assert bot._format_route(None, "car") == "No route found."
+
+
+class TestFormatPlaceAndNearby:
+    def test_place_name_and_address(self):
+        out = bot._format_place_results(
+            [{"poi": {"name": "Pike Place Market", "phone": "206-555-0100"},
+              "address": {"freeformAddress": "85 Pike St, Seattle"}}])
+        assert "Pike Place Market" in out and "85 Pike St" in out and "206-555-0100" in out
+
+    def test_place_empty(self):
+        assert bot._format_place_results([]) == "No matches found."
+        assert bot._format_place_results(None) == "No matches found."
+
+    def test_nearby_sorted_by_distance(self):
+        out = bot._format_nearby_results([
+            {"poi": {"name": "Far"}, "address": {}, "dist": 900},
+            {"poi": {"name": "Near"}, "address": {}, "dist": 50},
+        ])
+        assert out.index("Near") < out.index("Far")
+
+    def test_nearby_empty(self):
+        assert bot._format_nearby_results([]) == "Nothing found nearby."
+
+    def test_nearby_missing_fields_no_crash(self):
+        # Total: a result with no poi/address/dist must still render a line.
+        out = bot._format_nearby_results([{}])
+        assert "Unknown" in out

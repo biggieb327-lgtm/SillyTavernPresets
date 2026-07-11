@@ -7,6 +7,33 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.7 — TomTom Maps: /route, /nearby, /place (gated, default off)
+
+**Root cause this release addresses:** three characters are grounded in real
+geography (Nora bikes Seattle, Emily does western-WA traffic, Priya references real
+Bellevue/Eastside places) but the bot had no way to answer routing, travel-time, or
+"what's near me" questions with real data — only WSDOT incident feeds for Emily.
+
+**What shipped (slash commands, phase 1 of 2):** three user-initiated commands,
+registered only when `TOMTOM_API_KEY` is set (fail-closed, same gate shape as WSDOT):
+- `/route <from> to <dest>` — geocodes both endpoints, then a traffic-aware TomTom
+  route; reports ETA + distance (+ traffic delay when ≥1 min). Travel mode is
+  per-instance via `TOMTOM_TRAVEL_MODE` (validated; bad value warns → car).
+- `/nearby <thing>` — POI search around the user's shared location, distance-sorted.
+- `/place <name>` — geocode/business lookup, location-biased when a location is shared.
+
+**Architecture notes:** bot.py calls the raw `api.tomtom.com` REST endpoints (native
+JSON), not the GeoJSON the Claude MCP connector returns — so each bot needs its own
+key (documented in `.env.example`). All parsers are defensive/total (deep `.get()`
+chains; a response-shape change degrades to a message, never a crash), mirroring the
+WSDOT integration's discipline. Network fetches run via `asyncio.to_thread`; no new
+per-message LLM calls, no new processes. Pure parsers/formatters covered by 25 new
+tests; live REST round-trip is verified on-device (needs a real key).
+
+**Deferred to phase 2 (owner-approved "both, slash first"):** an in-character layer
+that lets Nora/Emily/Priya weave map data into conversation via a taught intent tag
+(like `[search:]`), rather than only explicit commands. Tracked in ROADMAP 3.5.
+
 ## v2026-07-11.6 — R6 evolution experiments (all gated, default off)
 
 **Root cause this release addresses:** the bot had no mechanism for users to
