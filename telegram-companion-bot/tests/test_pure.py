@@ -721,3 +721,100 @@ class TestVibePresetsR2:
 
     def test_in_person_still_exists(self):
         assert "in-person" in bot.VIBE_PROMPTS
+
+
+# ── R3: Observability & robustness ──────────────────────────────────────────
+
+class TestAtomicWriteText:
+    def test_creates_file(self, tmp_path):
+        p = tmp_path / "test.json"
+        bot._atomic_write_text(p, '{"key": "value"}')
+        assert p.read_text(encoding="utf-8") == '{"key": "value"}'
+
+    def test_overwrites_existing(self, tmp_path):
+        p = tmp_path / "test.json"
+        p.write_text("old", encoding="utf-8")
+        bot._atomic_write_text(p, "new")
+        assert p.read_text(encoding="utf-8") == "new"
+
+    def test_no_partial_write_on_disk(self, tmp_path):
+        p = tmp_path / "data.json"
+        bot._atomic_write_text(p, "complete")
+        tmp = p.with_name(p.name + ".tmp")
+        assert not tmp.exists()
+
+
+class TestConfigWarnings:
+    def test_list_exists(self):
+        assert isinstance(bot._CONFIG_WARNINGS, list)
+
+    def test_env_int_bad_value_collects_warning(self):
+        import os
+        os.environ["_TEST_BAD_INT"] = "not_a_number"
+        before = len(bot._CONFIG_WARNINGS)
+        result = bot._env_int("_TEST_BAD_INT", "42")
+        assert result == 42
+        assert len(bot._CONFIG_WARNINGS) > before
+        assert "_TEST_BAD_INT" in bot._CONFIG_WARNINGS[-1]
+        del os.environ["_TEST_BAD_INT"]
+        bot._CONFIG_WARNINGS.pop()
+
+    def test_env_float_bad_value_collects_warning(self):
+        import os
+        os.environ["_TEST_BAD_FLOAT"] = "xyz"
+        before = len(bot._CONFIG_WARNINGS)
+        result = bot._env_float("_TEST_BAD_FLOAT", "3.14")
+        assert result == 3.14
+        assert len(bot._CONFIG_WARNINGS) > before
+        del os.environ["_TEST_BAD_FLOAT"]
+        bot._CONFIG_WARNINGS.pop()
+
+
+class TestTrackLlmUsage:
+    def test_increments_calls(self):
+        old_calls = bot._llm_stats["calls"]
+        bot._track_llm_usage([{"content": "hello"}], "world")
+        assert bot._llm_stats["calls"] == old_calls + 1
+        assert bot._llm_stats["date"] == time.strftime("%Y-%m-%d")
+
+    def test_resets_on_new_day(self):
+        bot._llm_stats["date"] = "1999-01-01"
+        bot._llm_stats["calls"] = 99
+        bot._track_llm_usage([{"content": "test"}], "reply")
+        assert bot._llm_stats["calls"] == 1
+        assert bot._llm_stats["date"] == time.strftime("%Y-%m-%d")
+
+    def test_estimates_tokens(self):
+        bot._llm_stats["date"] = time.strftime("%Y-%m-%d")
+        bot._llm_stats["tok_in"] = 0
+        bot._llm_stats["tok_out"] = 0
+        msgs = [{"content": "a" * 100}]
+        bot._track_llm_usage(msgs, "b" * 40)
+        assert bot._llm_stats["tok_in"] == 25
+        assert bot._llm_stats["tok_out"] == 10
+
+
+class TestErrorCountsPersistence:
+    def test_serialize_includes_error_counts(self):
+        bot._error_counts["test_cat"] = [1.0, 2.0, 3.0]
+        payload = json.loads(bot._serialize_state())
+        assert "error_counts" in payload
+        assert payload["error_counts"]["test_cat"] == [1.0, 2.0, 3.0]
+        del bot._error_counts["test_cat"]
+
+    def test_serialize_includes_llm_stats(self):
+        payload = json.loads(bot._serialize_state())
+        assert "llm_stats" in payload
+        assert "calls" in payload["llm_stats"]
+
+
+class TestGatherAuditData:
+    def test_includes_config_warnings(self):
+        d = bot.gather_audit_data()
+        assert "config_warnings" in d
+        assert isinstance(d["config_warnings"], list)
+
+    def test_includes_llm_stats(self):
+        d = bot.gather_audit_data()
+        assert "llm_stats" in d
+        assert "calls" in d["llm_stats"]

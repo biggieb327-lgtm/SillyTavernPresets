@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.3 — R3 observability & robustness
+
+**Root cause this release addresses:** restart-storm triage lost its own evidence
+because `_error_counts` was memory-only (wiped on every restart). Bad `.env` values
+were warned only to the log file nobody checks from Telegram. Small-file saves
+(jokes, reminders, cron, payments, wardrobe) used non-atomic writes that could
+truncate on a process death. `/update` and `/restart` could cut a reply mid-stream
+because there was no drain. And there was no visibility into LLM call volume.
+
+**Persist `_error_counts`:** error history now survives restarts — serialized into
+`state.json` alongside `_llm_stats`. Restart-storm triage from `/audit` no longer
+loses the evidence it was generated to show.
+
+**Config warnings surfaced:** `_env_int`/`_env_float`/`_parse_id_set` now collect
+warnings into `_CONFIG_WARNINGS` (in addition to logging). `/audit` shows count + first
+3 warnings. All warnings also log at startup in one consolidated message.
+
+**Atomic small-file writes:** new `_atomic_write_text(path, text)` helper (tmp +
+`os.replace`) used by `save_jokes`, `save_reminders`, `save_cron_jobs`,
+`save_payments`, `save_wardrobe`. A death mid-write no longer truncates these files.
+
+**Graceful drain on /restart and /update:** `_schedule_exit` now waits up to 5s for
+`_replies_in_flight == 0` before writing state and exiting. Replies in progress
+complete rather than being cut mid-stream.
+
+**LLM usage counters in /audit:** module dict `_llm_stats` tracks daily calls and
+estimated token counts (via `_est_tokens`). Bumped in `call_nanogpt` on every
+successful call. Persisted in state, resets on date change. `/audit` shows:
+`LLM today: N calls, ~Xk in / ~Yk out (est)`.
+
+**Prune `_last_request`:** `_self_audit` (every 30 min) now drops entries older than
+1h from the rate-limit dict, preventing unbounded growth in long-running instances
+with many unique users.
+
 ## v2026-07-11.2 — R2 availability awareness: /away, /back, remote-default framing
 
 **Root cause this release addresses:** characters would "walk over to you" or describe

@@ -80,7 +80,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.2"
+BOT_VERSION = "2026-07-11.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -125,6 +125,7 @@ log.addHandler(_error_handler)
 # --- Error tracking for self-audit ---
 _BOOT_TIME = time.time()
 _error_counts: dict[str, list[float]] = {}
+_llm_stats: dict = {"date": "", "calls": 0, "tok_in": 0, "tok_out": 0}
 
 def _count_error(category: str):
     ts = _error_counts.setdefault(category, [])
@@ -132,18 +133,32 @@ def _count_error(category: str):
     if len(ts) > 200:
         del ts[:-200]
 
+
+def _track_llm_usage(messages: list, reply: str):
+    today = time.strftime("%Y-%m-%d")
+    if _llm_stats["date"] != today:
+        _llm_stats["date"] = today
+        _llm_stats["calls"] = 0
+        _llm_stats["tok_in"] = 0
+        _llm_stats["tok_out"] = 0
+    _llm_stats["calls"] += 1
+    _llm_stats["tok_in"] += sum(_est_tokens(m.get("content", "") or "") for m in messages)
+    _llm_stats["tok_out"] += _est_tokens(reply)
+
 # --- Env parsing that can't brick the fleet ---
 # A non-numeric value in an instance .env used to raise at import and crash-loop
 # that bot until someone reached a shell (/restart can't fix a file that won't
 # import). Bad values now fall back to the default with a loud warning.
+_CONFIG_WARNINGS: list[str] = []
 
 def _env_int(name: str, default: str) -> int:
     raw = os.getenv(name, default)
     try:
         return int(raw)
     except (TypeError, ValueError):
-        logging.warning("[config] %s=%r is not a valid integer — using default %s",
-                        name, raw, default)
+        msg = f"{name}={raw!r} is not a valid integer — using default {default}"
+        logging.warning("[config] %s", msg)
+        _CONFIG_WARNINGS.append(msg)
         return int(default)
 
 
@@ -154,8 +169,9 @@ def _env_float(name: str, default: str = None):
     try:
         return float(raw)
     except (TypeError, ValueError):
-        logging.warning("[config] %s=%r is not a valid number — using default %s",
-                        name, raw, default)
+        msg = f"{name}={raw!r} is not a valid number — using default {default}"
+        logging.warning("[config] %s", msg)
+        _CONFIG_WARNINGS.append(msg)
         return None if default is None else float(default)
 
 # --- Access control ---
@@ -171,7 +187,9 @@ def _parse_id_set(raw: str, name: str) -> set[int]:
         try:
             out.add(int(tok))
         except ValueError:
-            logging.warning("[config] ignoring invalid id %r in %s", tok, name)
+            msg = f"ignoring invalid id {tok!r} in {name}"
+            logging.warning("[config] %s", msg)
+            _CONFIG_WARNINGS.append(msg)
     return out
 
 
@@ -1382,6 +1400,11 @@ def load_state():
         group_cursor[int(cid)] = off
     for cid, b in data.get("group_bot_sends_today", {}).items():
         group_bot_sends_today[int(cid)] = b
+    for cat, ts in data.get("error_counts", {}).items():
+        _error_counts[cat] = ts[-200:]
+    saved_llm = data.get("llm_stats")
+    if saved_llm and saved_llm.get("date") == time.strftime("%Y-%m-%d"):
+        _llm_stats.update(saved_llm)
     # Migration (v2026-07-10.2): day archives used to be stored as plain "[Jul 09] …"
     # facts — indistinguishable from real user facts, so proactive prompts asserted
     # her own fiction as shared history. Retag them, and move any that were promoted
@@ -1439,6 +1462,8 @@ def _serialize_state() -> str:
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
         "group_bot_sends_today": {str(k): v for k, v in group_bot_sends_today.items()},
+        "error_counts": {cat: list(ts) for cat, ts in list(_error_counts.items())},
+        "llm_stats": dict(_llm_stats),
     }
     return json.dumps(data)
 
@@ -1451,6 +1476,13 @@ def _write_state_text(payload: str):
 
 def _write_state():
     _write_state_text(_serialize_state())
+
+
+def _atomic_write_text(path: Path, text: str):
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
 
 _save_scheduled = False
 
@@ -1544,6 +1576,9 @@ def _retag_legacy_day_facts(fl):
 
 load_state()
 
+if _CONFIG_WARNINGS:
+    log.warning("[config] %d warning(s) at startup: %s",
+                len(_CONFIG_WARNINGS), "; ".join(_CONFIG_WARNINGS))
 
 # --- Inside jokes ---
 JOKES_FILE = BASE_DIR / "jokes.json"
@@ -1562,7 +1597,7 @@ def load_jokes():
 
 
 def save_jokes():
-    JOKES_FILE.write_text(json.dumps(inside_jokes, indent=2), encoding="utf-8")
+    _atomic_write_text(JOKES_FILE, json.dumps(inside_jokes, indent=2))
 
 
 def _new_joke_id() -> int:
@@ -1604,7 +1639,7 @@ def load_wardrobe():
 
 
 def save_wardrobe():
-    WARDROBE_FILE.write_text(json.dumps(wardrobe, indent=2), encoding="utf-8")
+    _atomic_write_text(WARDROBE_FILE, json.dumps(wardrobe, indent=2))
 
 
 load_wardrobe()
@@ -1745,7 +1780,7 @@ def load_payments():
 
 
 def save_payments():
-    PAYMENTS_FILE.write_text(json.dumps(payments, indent=2), encoding="utf-8")
+    _atomic_write_text(PAYMENTS_FILE, json.dumps(payments, indent=2))
 
 
 load_payments()
@@ -1922,7 +1957,7 @@ def load_reminders():
 
 
 def save_reminders():
-    REMINDERS_FILE.write_text(json.dumps(reminders, indent=2), encoding="utf-8")
+    _atomic_write_text(REMINDERS_FILE, json.dumps(reminders, indent=2))
 
 
 load_reminders()
@@ -1949,7 +1984,7 @@ def load_cron_jobs():
 
 
 def save_cron_jobs():
-    CRON_FILE.write_text(json.dumps(cron_jobs, indent=2), encoding="utf-8")
+    _atomic_write_text(CRON_FILE, json.dumps(cron_jobs, indent=2))
 
 
 load_cron_jobs()
@@ -3196,7 +3231,9 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 _count_error("fallback")
                 break
             try:
-                return _one_call(messages, m)
+                result = _one_call(messages, m)
+                _track_llm_usage(messages, result)
+                return result
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
                     requests.exceptions.ConnectionError) as e:
                 last_err = e
@@ -8293,6 +8330,9 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
     uptime_h = (time.time() - _BOOT_TIME) / 3600
 
     hour_ago = time.time() - 3600
+    stale = [uid for uid, ts in list(_last_request.items()) if ts < hour_ago]
+    for uid in stale:
+        _last_request.pop(uid, None)
     # snapshot: _count_error appends from worker threads; iterating the live dict/lists
     # here can raise 'changed size during iteration'
     recent = {cat: sum(1 for t in list(ts) if t > hour_ago)
@@ -8427,6 +8467,8 @@ def gather_audit_data() -> dict:
         "pid": os.getpid(),
         "memory_review_pending": review_count,
         "away_users": {str(k): v.get("reason", "away") for k, v in away.items()},
+        "config_warnings": list(_CONFIG_WARNINGS),
+        "llm_stats": dict(_llm_stats),
     }
 
 
@@ -8450,6 +8492,16 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
+    llm = d.get("llm_stats", {})
+    if llm.get("calls"):
+        lines.append(
+            f"LLM today: {llm['calls']} calls, "
+            f"~{llm['tok_in'] // 1000}k in / ~{llm['tok_out'] // 1000}k out (est)")
+    cw = d.get("config_warnings", [])
+    if cw:
+        lines.append(f"Config warnings: {len(cw)}")
+        for w in cw[:3]:
+            lines.append(f"  ⚠️ {w}")
     if GROUP_MODE and GROUP_ALLOWED_CHATS:
         # "Why did she stop replying to Jules?" must be answerable from Telegram:
         # budget or chain cap, and which (GROUP_CHAT_DESIGN.md §11).
@@ -8513,6 +8565,10 @@ def _schedule_exit(delay_s: float = 1.0):
     an admin API request-handling thread.
     """
     def _exit():
+        for _ in range(10):
+            if not _replies_in_flight:
+                break
+            time.sleep(0.5)
         _write_state()
         os._exit(0)
     threading.Timer(delay_s, _exit).start()
