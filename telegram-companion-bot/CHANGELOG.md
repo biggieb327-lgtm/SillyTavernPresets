@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.12 — /update cache-busts GitHub's raw CDN
+
+**Root cause this release addresses:** `/update` fetches `main/bot.py` from
+`raw.githubusercontent.com`, which Fastly caches for ~5 min. Running `/update` right
+after a push repeatedly fetched the stale prior version, matched it against the
+running version, and reported "already current" — the deploy appeared stuck (cost
+real time across this session's rapid releases).
+
+**Fix:** `perform_self_update` now requests the raw URL with a unique `_cb=<ms>` query
+param (Fastly keys its cache on the full URL, so a new param = cache miss = fresh
+fetch) plus `Cache-Control: no-cache` / `Pragma: no-cache` headers. Verified the raw
+host still serves the file with an arbitrary query param. `update-all.sh` (the shell
+deploy path) still hits the plain URL — left as a follow-up.
+
 ## v2026-07-11.11 — TomTom routing: routeType "fastest" (REST spelling, not MCP "fast")
 
 **Root cause this release addresses:** the route call sent `routeType=fast` →

@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.11"
+BOT_VERSION = "2026-07-11.12"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -9318,7 +9318,16 @@ def perform_self_update(force: bool = False) -> dict:
     target = code_dir / "bot.py"
     tmp = code_dir / "bot.py.new"
     try:
-        resp = _get_session().get(_RAW_BOT_URL, timeout=(10, 60))
+        # Cache-bust: GitHub's raw CDN caches main/bot.py for ~5 min, so an /update run
+        # shortly after a push can fetch the stale prior version and wrongly report
+        # "already current". A unique query param makes Fastly treat each fetch as a new
+        # object (it keys on the full URL), and the headers ask not to serve a stored copy.
+        resp = _get_session().get(
+            _RAW_BOT_URL,
+            params={"_cb": int(time.time() * 1000)},
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+            timeout=(10, 60),
+        )
         resp.raise_for_status()
         source = resp.text
     except Exception as e:
