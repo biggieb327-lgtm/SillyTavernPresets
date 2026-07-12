@@ -72,7 +72,7 @@ Every completion must include the verification command actually run.
 
 | Session | Directory | Character card |
 |---------|-----------|----------------|
-| `nora` | `~/telegram-bot/` | `nora.json` |
+| `nora` | `~/nora-bot/` | `nora.json` |
 | `bonnie` | `~/bonnie-bot/` | `bonnie.json` |
 | `cass` | `~/cass-bot/` | `cass.json` |
 | `emily` | `~/emily-bot/` | `emily_harper.json` |
@@ -81,7 +81,11 @@ Every completion must include the verification command actually run.
 
 Authoritative instance list = the loop in `update-all.sh`. All share the venv at
 `~/telegram-bot/venv/`. `bot.py` lives in `~/telegram-bot/` and takes the instance
-directory as `sys.argv[1]`.
+directory as `sys.argv[1]`. The instance directory (where each bot's `.env`, card,
+and state live) is the basename shown on the `=== STARTUP AUDIT === … Instance:`
+line — that runtime value is authoritative if it ever disagrees with this table.
+(Nora's was corrected to `~/nora-bot/` on 2026-07-11 after the table drifted and a
+key was edited into the wrong `.env`; verify `update-all.sh` matches on-device.)
 
 ## Stack
 

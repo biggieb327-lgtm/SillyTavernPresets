@@ -1145,3 +1145,38 @@ class TestFormatPlaceAndNearby:
         # Total: a result with no poi/address/dist must still render a line.
         out = bot._format_nearby_results([{}])
         assert "Unknown" in out
+
+
+class TestTomTomErrReason:
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    class _HTTPErr(Exception):
+        def __init__(self, code):
+            self.response = TestTomTomErrReason._Resp(code)
+
+    def test_401_says_key_rejected(self):
+        r = bot._tomtom_err_reason(self._HTTPErr(401))
+        assert "key rejected" in r and "401" in r
+
+    def test_403_says_key_rejected(self):
+        assert "key rejected" in bot._tomtom_err_reason(self._HTTPErr(403))
+
+    def test_429_rate_limited(self):
+        assert "rate limited" in bot._tomtom_err_reason(self._HTTPErr(429))
+
+    def test_other_http_code(self):
+        assert bot._tomtom_err_reason(self._HTTPErr(500)) == "HTTP 500"
+
+    def test_timeout(self):
+        assert bot._tomtom_err_reason(TimeoutError()) == "timed out"
+
+    def test_connection(self):
+        assert bot._tomtom_err_reason(ConnectionError()) == "network/DNS error"
+
+    def test_reason_never_leaks_url_or_key(self):
+        # The whole point: the reason must never carry the request URL (which holds the key).
+        for e in (self._HTTPErr(401), self._HTTPErr(500), TimeoutError(), ConnectionError()):
+            r = bot._tomtom_err_reason(e).lower()
+            assert "tomtom.com" not in r and "key=" not in r

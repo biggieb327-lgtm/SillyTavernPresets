@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.8"
+BOT_VERSION = "2026-07-11.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8614,32 +8614,59 @@ def _format_nearby_results(results: list, limit: int = 5) -> str:
     return "\n\n".join(out) if out else "Nothing found nearby."
 
 
+class _TomTomError(Exception):
+    """A network/HTTP failure talking to TomTom, distinct from a genuine 'not found'.
+    Carries a short, key-free reason so handlers can tell the user what actually broke."""
+
+
+def _tomtom_err_reason(e) -> str:
+    """Classify a requests exception into a short reason that never contains the URL/key
+    (requests puts the API key in the query string, so `str(e)` would leak it into logs)."""
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    if code in (401, 403):
+        return f"HTTP {code} — key rejected (check the key, and that Search + Routing are enabled)"
+    if code == 429:
+        return "rate limited (HTTP 429) — wait a moment"
+    if code:
+        return f"HTTP {code}"
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "timed out"
+    if "Connect" in name or "Connection" in name or "DNS" in name:
+        return "network/DNS error"
+    return name
+
+
 def _tomtom_geocode(query: str):
-    """Query -> (lat, lon, label) or None. Network; defensive."""
+    """Query -> (lat, lon, label), or None if genuinely not found.
+    Raises _TomTomError (key-free reason) on a network/HTTP failure."""
+    from urllib.parse import quote
     try:
-        from urllib.parse import quote
         r = _get_session().get(
             _TOMTOM_GEOCODE_URL.format(q=quote(query)),
             params={"key": TOMTOM_API_KEY, "limit": 1, "countrySet": "US"},
             timeout=(10, 30),
         )
         r.raise_for_status()
-        results = (r.json() or {}).get("results") or []
-        if not results:
-            return None
-        pos = (results[0] or {}).get("position") or {}
-        lat, lon = pos.get("lat"), pos.get("lon")
-        if lat is None or lon is None:
-            return None
-        label = ((results[0].get("address") or {}).get("freeformAddress")) or query
-        return float(lat), float(lon), label
+        data = r.json()
     except Exception as e:
-        log.warning("[tomtom] geocode failed for %r: %s", query, e)
+        reason = _tomtom_err_reason(e)
+        log.warning("[tomtom] geocode failed for %r: %s", query, reason)  # reason only — never the URL/key
+        raise _TomTomError(reason)
+    results = (data or {}).get("results") or []
+    if not results:
         return None
+    pos = (results[0] or {}).get("position") or {}
+    lat, lon = pos.get("lat"), pos.get("lon")
+    if lat is None or lon is None:
+        return None
+    label = ((results[0].get("address") or {}).get("freeformAddress")) or query
+    return float(lat), float(lon), label
 
 
 def _fetch_tomtom_route(o, d, mode: str):
-    """o, d are (lat, lon) tuples. Returns native routing dict or None."""
+    """o, d are (lat, lon) tuples. Returns native routing dict; raises _TomTomError on failure."""
     try:
         r = _get_session().get(
             _TOMTOM_ROUTE_URL.format(o=f"{o[0]},{o[1]}", d=f"{d[0]},{d[1]}"),
@@ -8649,14 +8676,16 @@ def _fetch_tomtom_route(o, d, mode: str):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        log.warning("[tomtom] route fetch failed: %s", e)
-        return None
+        reason = _tomtom_err_reason(e)
+        log.warning("[tomtom] route fetch failed: %s", reason)
+        raise _TomTomError(reason)
 
 
 def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
-    """Search/geocode a free-text query, optionally biased to a point. Returns results[]."""
+    """Search/geocode a free-text query, optionally biased to a point. Returns results[];
+    raises _TomTomError on a network/HTTP failure."""
+    from urllib.parse import quote
     try:
-        from urllib.parse import quote
         params = {"key": TOMTOM_API_KEY, "limit": 5, "countrySet": "US"}
         if lat is not None and lon is not None:
             params["lat"], params["lon"] = lat, lon
@@ -8666,8 +8695,9 @@ def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
         r.raise_for_status()
         return (r.json() or {}).get("results") or []
     except Exception as e:
-        log.warning("[tomtom] search failed for %r: %s", query, e)
-        return []
+        reason = _tomtom_err_reason(e)
+        log.warning("[tomtom] search failed for %r: %s", query, reason)
+        raise _TomTomError(reason)
 
 
 async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8680,15 +8710,19 @@ async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     origin_q, dest_q = parsed
     mode = _tomtom_mode()
-    o = await asyncio.to_thread(_tomtom_geocode, origin_q)
-    if not o:
-        await update.message.reply_text(f"Couldn't find “{origin_q}”.")
+    try:
+        o = await asyncio.to_thread(_tomtom_geocode, origin_q)
+        if not o:
+            await update.message.reply_text(f"Couldn't find “{origin_q}”.")
+            return
+        d = await asyncio.to_thread(_tomtom_geocode, dest_q)
+        if not d:
+            await update.message.reply_text(f"Couldn't find “{dest_q}”.")
+            return
+        route = await asyncio.to_thread(_fetch_tomtom_route, (o[0], o[1]), (d[0], d[1]), mode)
+    except _TomTomError as e:
+        await update.message.reply_text(f"🗺 Maps lookup failed: {e}. Try again in a moment.")
         return
-    d = await asyncio.to_thread(_tomtom_geocode, dest_q)
-    if not d:
-        await update.message.reply_text(f"Couldn't find “{dest_q}”.")
-        return
-    route = await asyncio.to_thread(_fetch_tomtom_route, (o[0], o[1]), (d[0], d[1]), mode)
     await update.message.reply_text(f"🗺 {o[2]} → {d[2]}\n{_format_route(route, mode)}")
 
 
@@ -8704,7 +8738,11 @@ async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         await update.message.reply_text("Usage: /nearby <thing>\ne.g. /nearby coffee")
         return
-    results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"], 3000)
+    try:
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"], 3000)
+    except _TomTomError as e:
+        await update.message.reply_text(f"📍 Maps lookup failed: {e}. Try again in a moment.")
+        return
     await update.message.reply_text(f"📍 “{query}” near you\n\n{_format_nearby_results(results)}")
 
 
@@ -8719,7 +8757,11 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = user_location.get(update.effective_chat.id)
     lat = loc["lat"] if loc else None
     lon = loc["lon"] if loc else None
-    results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
+    try:
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
+    except _TomTomError as e:
+        await update.message.reply_text(f"🔎 Maps lookup failed: {e}. Try again in a moment.")
+        return
     await update.message.reply_text(f"🔎 {query}\n\n{_format_place_results(results)}")
 
 

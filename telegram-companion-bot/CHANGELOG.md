@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.9 — TomTom: honest error messages + key never logged
+
+**Root cause this release addresses (both found during on-device rollout):**
+1. The fetch helpers returned the *same* empty result for a genuine "not found" and
+   for a network/HTTP failure, so `/route` reported "Couldn't find Bellevue" when the
+   real cause was a **401 Unauthorized** (a placeholder key had been pasted into
+   `.env`). The misleading message cost several debugging round-trips.
+2. On failure the helpers logged `str(exception)`, and `requests` puts the API key in
+   the query string — so the **full key was written to `bot.log`/`errors.log`** (and
+   thus into any backup or pasted log). A public-repo fleet must never log secrets.
+
+**Fixes:**
+- New `_TomTomError` carries a short, **key-free** reason. Fetch helpers now raise it
+  on a network/HTTP failure and return empty only for a genuine miss. Handlers reply
+  "Maps lookup failed: HTTP 401 — key rejected …" / "rate limited" / "timed out" /
+  "network/DNS error" instead of a misleading "Couldn't find X".
+- `_tomtom_err_reason()` classifies the exception from `response.status_code` / type
+  name and never includes the URL or key; the log line prints only that reason. 7 new
+  tests, incl. one asserting the reason never contains `tomtom.com` or `key=`.
+
+**Doc fix (confirmed on-device):** CLAUDE.md's instance table listed Nora's directory
+as `~/telegram-bot/`, but her running instance is `~/nora-bot/` (the STARTUP AUDIT
+`Instance:` line is authoritative). Corrected the table and `vault/entities/nora.md`.
+
 ## v2026-07-11.8 — TomTom observability: unsilence disabled state + audit visibility
 
 **Root cause this release addresses:** v.7 registered `/route /nearby /place` only

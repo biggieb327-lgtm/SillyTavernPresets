@@ -4,8 +4,9 @@
 talking not interrogating; Mormor died a year ago, mother left at 8
 ([raw/2026-07-11-characters.md]).
 
-- Instance: `~/telegram-bot/` (the default/original), card `nora.json`, session
-  name `nora` or `telegram-bot` ([raw/2026-07-11-claude-md.md]).
+- Instance dir: `~/nora-bot/` (confirmed 2026-07-11 from the live `STARTUP AUDIT`
+  `Instance: nora-bot` line; CLAUDE.md's table had wrongly listed `~/telegram-bot/`,
+  which is the shared *code* home, not Nora's instance). Card `nora.json`.
 - Fleet role: `WORLD_GENERATOR=1` — writes `world.txt` at midnight; all instances
   read it for shared weather/backdrop ([raw/2026-07-11-claude-md.md]).
 - Lorebook entries: Ingrid/jacket, Mother, Messenger work, The toothbrush,
