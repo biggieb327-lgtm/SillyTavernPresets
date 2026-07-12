@@ -138,7 +138,10 @@ Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/rest
   non-goal; don't propose splitting it.
 - **One combined post-reply analysis call** (`post_reply_analysis`: mood + note +
   memory + any future extraction as extra JSON keys). Never add a per-message side
-  call — side calls compete with user-facing replies for phone bandwidth.
+  *LLM completion* call — they compete with user-facing replies for phone bandwidth.
+  (Documented carve-out: `MEMORY_SEMANTIC_LIVE` adds one small **embedding** round-trip
+  per reply for live semantic recall — owner-approved v2026-07-12.2, off-loop + cached
+  + timeout-bounded + default-on kill switch. Not a completion call; don't "fix" it.)
 - **Memory provenance:** generated content (day events, reflections) must never enter
   user-fact stores unlabeled — the `[own-day …]` tag + per-consumer handling is the
   template. Violating this caused the 2026-07-10 hallucinated-memories bug.

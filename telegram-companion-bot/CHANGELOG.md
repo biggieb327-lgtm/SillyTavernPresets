@@ -7,6 +7,65 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-12.2 — Embeddings that actually recall: live semantic memory + lore, semantic dedup, eviction & provenance fixes
+
+**Root cause (the headline):** every memory write embeds the line via a blocking
+NanoGPT `/embeddings` call, but **those vectors were never read during a live reply.**
+`triggered_memories` skipped semantic scoring whenever it ran on the event loop (a
+guard added so the 30s blocking embed couldn't freeze the loop), and `assemble_messages`
+always runs on the loop — so semantic recall only ever fired for the manual `/recall`
+and `[memcheck:]` commands. Normal chat was keyword-only and the `*3.0` semantic
+weight was dead code. We paid the write cost and got almost none of the read benefit.
+
+**Live semantic recall (`MEMORY_SEMANTIC_LIVE`, default on):** the blocking query
+embed is now hoisted into the async handler via a new `assemble_messages_async`
+wrapper — `_embed_query_cached` runs `_embed_text` in `asyncio.to_thread` bounded by
+`MEMORY_QUERY_EMBED_TIMEOUT` (3s), with a small LRU so repeated openers don't
+re-embed. The vector is threaded through `assemble_messages` → `triggered_memories`,
+which now ranks with a pure-cosine `_semantic_recall_vec` (no HTTP, no event-loop
+skip). Keyword scoring, recency decay, hedging, and the token budget are unchanged —
+they finally operate on a real semantic candidate set. On timeout/failure/disable it
+degrades to exactly today's keyword-only behavior.
+
+*Deliberate, recorded decision:* this adds **one embedding round-trip per reply** — a
+per-message side call, which the bot-code-invariants caution against for phone
+bandwidth. The owner accepted it explicitly: an embedding is a tiny, fast request (not
+a 150s chat completion), it is cached + timeout-bounded + off-loop, and it has a
+default-on kill switch (`MEMORY_SEMANTIC_LIVE=0`). It is NOT a new LLM analysis call,
+so the "one combined `post_reply_analysis` call" invariant is untouched. Logged in
+`.claude/memory/operational-log.md` so it isn't later flagged as a regression.
+
+**Semantic lorebook matching:** the same per-reply vector now also powers
+`triggered_lore` — non-constant lore entries are embedded once into
+`lore_embeddings.json` by a startup job (`_embed_lore_job`, off-loop), and up to
+`MEMORY_LORE_SEMANTIC_TOPK` (3) semantically-close entries above the 0.3 floor are
+added to the keyword hits. A user paraphrasing a topic without hitting a lore keyword
+now surfaces the relevant lore. No extra call — reuses the memory query vector.
+
+**Semantic write-dedup (`MEMORY_DEDUP_SIM`, 0.92):** the lexical dedup in
+`_append_memory` missed reworded duplicates ("lives in Seattle" → "moved to
+Portland"). The auto path now embeds the entry once (the embed `_memory_replace`
+would do anyway — passed through via `precomputed_vec`, so it is not embedded twice)
+and skips it if `_is_semantic_dup` finds a near-duplicate already stored. Manual adds
+and audit-merges are intentional and bypass it.
+
+**Sidecar orphan leak fixed + confidence-aware eviction:** `MEMORIES_MAX` overflow
+used a FIFO slice that dropped lines but **never popped their `memory_meta.json` /
+`embeddings.json` entries** — both sidecars grew unbounded and stale meta could shadow
+a new identical line. New pure `_evict_by_value` drops the lowest-value entries
+(confidence, ties broken by oldest ts; legacy no-meta = neutral 5) and the caller pops
+every evicted key from both sidecars — so a hand-corrected conf-10 fact now outlives a
+trivial conf-3 one, and R1's "three files stay in sync" holds on the eviction path too.
+
+**Provenance shown to the model:** `_hedge_memory_lines` now appends the recorded
+source snippet to hedged (low-confidence) memories — `(unsure) <line> [you recall this
+from: "<source>"]` — so the character can self-check a shaky memory against the
+sentence that created it, instead of provenance being admin-only (`/sourcemem`).
+
+27 new tests (semantic recall vec, semantic dedup, value eviction, lore semantic hits,
+provenance hedge, query-embed cache, and a live-path regression proving semantic recall
+now returns a hit that shares no keywords with the query).
+
 ## v2026-07-12.1 — Memory loops: weekly audit → review queue, recency decay, confidence hedging
 
 **Root cause (all three, one theme):** the memory system had a write path with

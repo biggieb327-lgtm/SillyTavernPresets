@@ -27,6 +27,7 @@ import tempfile
 import threading
 import secrets
 import zipfile
+import collections
 import http.server
 import html as _html_module
 from io import BytesIO
@@ -81,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-12.1"
+BOT_VERSION = "2026-07-12.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -457,6 +458,21 @@ MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
 MEMORY_AUDIT_SEEN_MAX = 100
 
+# Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
+# add were never read during a live reply (semantic_recall was skipped on the event
+# loop). These make the reply path embed the user's message once — off the loop, via
+# to_thread — so semantic recall and semantic lore actually fire. Default ON with a
+# kill switch; degrades to keyword-only on timeout/failure.
+MEMORY_SEMANTIC_LIVE = os.getenv("MEMORY_SEMANTIC_LIVE", "1").strip() not in ("0", "false", "no")
+MEMORY_QUERY_EMBED_TIMEOUT = _env_float("MEMORY_QUERY_EMBED_TIMEOUT", "3.0")
+MEMORY_DEDUP_SIM = _env_float("MEMORY_DEDUP_SIM", "0.92")
+MEMORY_LORE_SEMANTIC_TOPK = _env_int("MEMORY_LORE_SEMANTIC_TOPK", "3")
+LORE_EMB_FILE = BASE_DIR / "lore_embeddings.json"
+_lore_embeddings: dict[str, list[float]] = {}   # keyed by lore entry content
+_lore_emb_dirty = False
+_QUERY_EMBED_CACHE: "collections.OrderedDict[str, list[float]]" = collections.OrderedDict()
+_QUERY_EMBED_CACHE_MAX = 64
+
 
 def _load_memory_meta():
     global _memory_meta
@@ -812,7 +828,33 @@ def _append_user_note(note: str, due: str = ""):
     _user_notes_cache["text"] = None  # invalidate cache
 
 
-def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | None = None):
+def _evict_by_value(lines: list[str], meta: dict[str, dict],
+                    cap: int) -> tuple[list[str], list[str]]:
+    """Trim `lines` to `cap` by dropping the lowest-value entries first, where value
+    = recorded confidence (default 5 for legacy/no-meta), ties broken by oldest ts.
+    Returns (kept_lines_in_original_order, dropped_keys). A hand-corrected conf-10
+    fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO."""
+    if len(lines) <= cap:
+        return lines, []
+
+    def _score(line: str, idx: int) -> tuple:
+        m = meta.get(line.strip(), {}) or {}
+        conf = m.get("confidence")
+        conf = conf if isinstance(conf, int) else 5
+        ts = m.get("ts")
+        ts = ts if isinstance(ts, (int, float)) else 0.0
+        # Higher = more worth keeping. Insertion index as final tie-break (newer wins).
+        return (conf, ts, idx)
+
+    ranked = sorted(range(len(lines)), key=lambda i: _score(lines[i], i))
+    drop_idx = set(ranked[: len(lines) - cap])
+    kept = [l for i, l in enumerate(lines) if i not in drop_idx]
+    dropped_keys = [lines[i].strip() for i in drop_idx]
+    return kept, dropped_keys
+
+
+def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | None = None,
+                    precomputed_vec: list[float] | None = None):
     """Single choke point for all memory mutations (add/edit/delete).
     Keeps memories.txt, embeddings.json, and memory_meta.json in sync."""
     with _memory_lock:
@@ -832,11 +874,16 @@ def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | Non
             if not new_stripped:
                 return old_line is not None
             lines.append(new_stripped)
-            if len(lines) > MEMORIES_MAX:
-                lines = lines[-MEMORIES_MAX:]
-            _embed_memory_line(new_stripped)
+            _embed_memory_line(new_stripped, precomputed_vec=precomputed_vec)
             if meta:
                 _memory_meta[new_stripped] = meta
+            if len(lines) > MEMORIES_MAX:
+                # Value-based eviction (not FIFO) + pop evicted keys from BOTH
+                # sidecars so memory_meta.json / embeddings.json never orphan-leak.
+                lines, dropped = _evict_by_value(lines, _memory_meta, MEMORIES_MAX)
+                for k in dropped:
+                    _embeddings_cache.pop(k, None)
+                    _memory_meta.pop(k, None)
         MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
         _memories_cache["text"] = None
         _memories_cache["ts"] = 0.0
@@ -866,7 +913,24 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
     entry = (f"[auto {date.today()}] {text}" if auto else text)
     if meta is None:
         meta = {"ts": time.time(), "origin": "auto" if auto else "manual"}
-    _memory_replace(None, entry, meta=meta)
+    # Semantic write-dedup (auto path only): embed the entry once — the embed
+    # _memory_replace would do anyway — and skip it if it's a reworded near-duplicate
+    # of something already stored (what the lexical check above can't see). The
+    # vector is handed to _memory_replace so it is not embedded twice. Manual adds
+    # and audit-merges are intentional and skip this.
+    precomputed = None
+    if auto and MEMORY_DEDUP_SIM > 0:
+        vec = _embed_text(entry)
+        if vec:
+            existing_vecs = [_embeddings_cache.get(l.strip())
+                             for l in existing.splitlines()
+                             if l.strip() and not l.startswith("#")]
+            existing_vecs = [v for v in existing_vecs if v]
+            if _is_semantic_dup(vec, existing_vecs, MEMORY_DEDUP_SIM):
+                _memory_log("DEDUP-SEM", text)
+                return
+            precomputed = vec
+    _memory_replace(None, entry, meta=meta, precomputed_vec=precomputed)
     action = "ADD auto" if auto else "ADD manual"
     conf = meta.get("confidence")
     src = meta.get("source", "")
@@ -928,33 +992,155 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def _embed_memory_line(line: str):
+def _embed_memory_line(line: str, precomputed_vec: list[float] | None = None):
     global _embeddings_dirty
     key = line.strip()
     if key in _embeddings_cache:
         return
-    vec = _embed_text(key)
+    vec = precomputed_vec if precomputed_vec else _embed_text(key)
     if vec:
         _embeddings_cache[key] = vec
         _embeddings_dirty = True
 
 
-def semantic_recall(query: str, entries: list[str], top_k: int = 5) -> list[tuple[float, str]]:
-    q_vec = _embed_text(query)
+def _semantic_recall_vec(q_vec: list[float], entries: list[str],
+                         top_k: int = 5) -> list[tuple[float, str]]:
+    """Pure cosine ranking of entries against a precomputed query vector (no HTTP).
+    Only scores entries that already have a cached embedding."""
     if not q_vec:
         return []
     scored = []
     for line in entries:
-        key = line.strip()
-        vec = _embeddings_cache.get(key)
+        vec = _embeddings_cache.get(line.strip())
         if vec:
             scored.append((_cosine_sim(q_vec, vec), line))
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[:top_k]
 
 
+def semantic_recall(query: str, entries: list[str], top_k: int = 5) -> list[tuple[float, str]]:
+    """Embed the query (blocking HTTP) then rank — for off-loop callers (/recall,
+    [memcheck:]). The live reply path uses _semantic_recall_vec with a vector
+    already embedded off-loop in the handler, so it never blocks the event loop."""
+    q_vec = _embed_text(query)
+    if not q_vec:
+        return []
+    return _semantic_recall_vec(q_vec, entries, top_k)
+
+
+def _is_semantic_dup(vec: list[float], existing_vecs: list[list[float]],
+                     threshold: float) -> bool:
+    """True if vec is within cosine `threshold` of any existing vector — catches
+    reworded near-duplicates the lexical dedup misses. Empty/absent inputs -> False."""
+    if not vec or not existing_vecs or threshold <= 0:
+        return False
+    return any(_cosine_sim(vec, ev) >= threshold for ev in existing_vecs if ev)
+
+
+def _load_lore_embeddings():
+    global _lore_embeddings
+    try:
+        if LORE_EMB_FILE.exists():
+            _lore_embeddings = json.loads(LORE_EMB_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        _lore_embeddings = {}
+
+
+def _save_lore_embeddings():
+    global _lore_emb_dirty
+    if not _lore_emb_dirty:
+        return
+    try:
+        LORE_EMB_FILE.write_text(
+            json.dumps(_lore_embeddings, ensure_ascii=False), encoding="utf-8")
+        _lore_emb_dirty = False
+    except Exception as e:
+        log.warning("[lore-emb] save failed: %s", e)
+
+
+def _lore_semantic_hits(q_vec: list[float], top_k: int) -> list[str]:
+    """Top-k lore entry contents whose cached embedding is closest to q_vec
+    (cosine > 0.3, the shared recall floor). Pure — no HTTP. Entries not yet
+    embedded simply don't match this turn."""
+    if not q_vec or top_k <= 0:
+        return []
+    scored = []
+    for entry in LORE:
+        if entry["constant"]:
+            continue  # already always-injected by the keyword path
+        content = entry["content"]
+        vec = _lore_embeddings.get(content)
+        if vec:
+            sim = _cosine_sim(q_vec, vec)
+            if sim > 0.3:
+                scored.append((sim, content))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:top_k]]
+
+
+def _embed_lore_worker() -> int:
+    """Embed any not-yet-cached non-constant lore entries (blocking; runs in a
+    thread). Returns how many were newly embedded. Idempotent — a warm cache is a
+    no-op, and a network failure just leaves entries unembedded for next time."""
+    global _lore_emb_dirty
+    added = 0
+    for entry in LORE:
+        if entry["constant"]:
+            continue
+        content = entry["content"]
+        if not content or content in _lore_embeddings:
+            continue
+        vec = _embed_text(content)
+        if vec:
+            _lore_embeddings[content] = vec
+            _lore_emb_dirty = True
+            added += 1
+    if added:
+        _save_lore_embeddings()
+    return added
+
+
+async def _embed_lore_job(context: ContextTypes.DEFAULT_TYPE):
+    """Startup job: warm the semantic-lorebook cache off the event loop so live
+    replies can match lore the keyword path misses. Cache misses degrade gracefully
+    (keyword lore still fires)."""
+    try:
+        added = await asyncio.to_thread(_embed_lore_worker)
+        if added:
+            log.info("[lore-emb] embedded %d lore entries.", added)
+    except Exception as e:
+        log.warning("[lore-emb] warm failed: %s", e)
+
+
+async def _embed_query_cached(text: str) -> list[float] | None:
+    """Embed a user message for live semantic recall, off the event loop and
+    bounded by MEMORY_QUERY_EMBED_TIMEOUT. Small LRU so repeated openers
+    ('good morning') don't re-embed. Returns None on miss/timeout/failure — the
+    caller then falls back to keyword-only recall."""
+    key = " ".join((text or "").lower().split())[:200]
+    if not key:
+        return None
+    cached = _QUERY_EMBED_CACHE.get(key)
+    if cached is not None:
+        _QUERY_EMBED_CACHE.move_to_end(key)
+        return cached
+    try:
+        vec = await asyncio.wait_for(
+            asyncio.to_thread(_embed_text, text), MEMORY_QUERY_EMBED_TIMEOUT)
+    except (asyncio.TimeoutError, Exception) as e:
+        log.debug("[embeddings] query embed skipped: %s", e)
+        return None
+    if vec:
+        _QUERY_EMBED_CACHE[key] = vec
+        _QUERY_EMBED_CACHE.move_to_end(key)
+        while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
+            _QUERY_EMBED_CACHE.popitem(last=False)
+    return vec
+
+
 _load_embeddings()
 _load_memory_meta()
+_load_lore_embeddings()
 
 
 def _quote_grounded(quote: str, user_lines: list[str]) -> bool:
@@ -2396,7 +2582,7 @@ def set_owner(chat_id: int):
         OWNER_FILE.write_text(str(chat_id))
 
 
-def triggered_lore(scan_text: str):
+def triggered_lore(scan_text: str, query_vec: list[float] | None = None):
     low = scan_text.lower()
     out = []
     seen: set[str] = set()
@@ -2407,6 +2593,13 @@ def triggered_lore(scan_text: str):
         if hit and entry["content"] not in seen:
             seen.add(entry["content"])
             out.append(entry["content"])
+    # Semantic lore: add entries close to the query that keywords missed (reuses
+    # the reply's query vector — no extra call). Constant entries are already in.
+    if query_vec:
+        for content in _lore_semantic_hits(query_vec, MEMORY_LORE_SEMANTIC_TOPK):
+            if content not in seen:
+                seen.add(content)
+                out.append(content)
     return out
 
 
@@ -2435,22 +2628,31 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
     autoconf (review-approved low-confidence entries), so the character hedges
     instead of asserting. Legacy entries with no meta/confidence stay unmarked.
-    Display-time only — never written back to memories.txt."""
+    Display-time only — never written back to memories.txt.
+
+    For a hedged line that has a recorded source snippet, the snippet is appended
+    so the model can self-check the shaky memory against the sentence that created
+    it, instead of provenance being admin-only (/sourcemem)."""
     if not enabled:
         return list(lines), False
     out = []
     hedged = False
     for line in lines:
-        conf = (meta.get(line.strip(), {}) or {}).get("confidence")
+        m = meta.get(line.strip(), {}) or {}
+        conf = m.get("confidence")
         if isinstance(conf, int) and conf < autoconf:
-            out.append("(unsure) " + line)
+            marked = "(unsure) " + line
+            src = m.get("source")
+            if isinstance(src, str) and src.strip():
+                marked += f' [you recall this from: "{src.strip()[:80]}"]'
+            out.append(marked)
             hedged = True
         else:
             out.append(line)
     return out, hedged
 
 
-def triggered_memories(scan_text: str) -> list[str]:
+def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> list[str]:
     entries = _read_memories()
     if not entries:
         return []
@@ -2468,16 +2670,19 @@ def triggered_memories(scan_text: str) -> list[str]:
         if hits > 0:
             keyword_scored[line] = float(hits)
 
-    # Semantic scoring (additive — falls back silently on failure).
-    # _embed_text makes a blocking HTTP call; skip it when running on the event
-    # loop (assemble_messages is called from async handlers) to avoid freezing
-    # all other handlers for up to 30s.  Keyword scoring still works fine.
-    try:
-        _loop = asyncio.get_running_loop()
-        on_event_loop = True
-    except RuntimeError:
-        on_event_loop = False
-    sem_results = semantic_recall(scan_text, entries, top_k=8) if not on_event_loop else []
+    # Semantic scoring (additive). Preferred path: the handler already embedded the
+    # user message off-loop and passed query_vec, so we rank with pure cosine here —
+    # no HTTP, safe on the event loop. Fallback (query_vec=None): only embed inline
+    # when NOT on the loop (e.g. /recall), never blocking a live reply.
+    if query_vec:
+        sem_results = _semantic_recall_vec(query_vec, entries, top_k=8)
+    else:
+        try:
+            asyncio.get_running_loop()
+            on_event_loop = True
+        except RuntimeError:
+            on_event_loop = False
+        sem_results = semantic_recall(scan_text, entries, top_k=8) if not on_event_loop else []
     sem_scored: dict[str, float] = {}
     if sem_results:
         max_sim = max(s for s, _ in sem_results) or 1.0
@@ -3185,8 +3390,24 @@ def memory_block(chat_id: int, uname: str) -> str:
     return "\n\n".join(blocks)
 
 
+async def assemble_messages_async(chat_id: int, latest_user_content: str,
+                                  image_data_url: str = None, inner_voice: str = None,
+                                  group: bool = False):
+    """Reply-path entry to assemble_messages: embeds the user's message off the event
+    loop (MEMORY_SEMANTIC_LIVE) so semantic recall + semantic lore actually fire this
+    turn. Degrades to keyword-only when disabled, when there's nothing to search, or
+    when the embed times out. Proactive/heartbeat paths call assemble_messages directly
+    (no user query to embed)."""
+    query_vec = None
+    if MEMORY_SEMANTIC_LIVE and latest_user_content and (_read_memories() or _lore_embeddings):
+        query_vec = await _embed_query_cached(latest_user_content)
+    return assemble_messages(chat_id, latest_user_content, image_data_url=image_data_url,
+                             inner_voice=inner_voice, group=group, query_vec=query_vec)
+
+
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
-                      inner_voice: str = None, group: bool = False):
+                      inner_voice: str = None, group: bool = False,
+                      query_vec: list[float] | None = None):
     """Build the OpenAI-style message list the way SillyTavern layers a card.
 
     group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
@@ -3407,14 +3628,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )})
 
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-8:])
-    lore = triggered_lore(scan_text)
+    lore = triggered_lore(scan_text, query_vec=query_vec)
     if lore:
         messages.append({
             "role": "system",
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
 
-    mems = triggered_memories(scan_text)
+    mems = triggered_memories(scan_text, query_vec=query_vec)
     if mems:
         mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
                                                MEMORY_HEDGE)
@@ -7006,7 +7227,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         content = f"[voice message]: {transcript}"
-        messages = assemble_messages(chat_id, content)
+        messages = await assemble_messages_async(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         await _deliver(update, context, chat_id, transcript, ai_response,
@@ -7126,7 +7347,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ensure_weather()
         model = VISION_MODEL if frame_data_url else NANOGPT_MODEL
         fallback = VISION_FALLBACK if frame_data_url else FALLBACK_MODEL
-        messages = assemble_messages(chat_id, prompt, image_data_url=frame_data_url)
+        messages = await assemble_messages_async(chat_id, prompt, image_data_url=frame_data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
                                               model=model, fallback=fallback)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
@@ -7192,7 +7413,7 @@ async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
         user_prompt = f"{lead}\n\n[PDF contents]\n{extracted_text}"
         user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
         await ensure_weather()
-        messages = assemble_messages(chat_id, user_prompt)
+        messages = await assemble_messages_async(chat_id, user_prompt)
         ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
@@ -7326,7 +7547,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_mem = f"[sent PDF: {fname}] {caption}".strip()
             try:
                 await ensure_weather()
-                messages = assemble_messages(chat_id, user_prompt)
+                messages = await assemble_messages_async(chat_id, user_prompt)
                 ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
                 ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                                  model=DOCUMENT_MODEL)
@@ -7381,7 +7602,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await ensure_weather()
-        messages = assemble_messages(chat_id, user_prompt)
+        messages = await assemble_messages_async(chat_id, user_prompt)
         ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
@@ -7677,7 +7898,7 @@ async def _handle_group_message(update: Update, context: ContextTypes.DEFAULT_TY
         remember(chat_id, "user", content)
         return
     try:
-        messages = assemble_messages(chat_id, content, group=True)
+        messages = await assemble_messages_async(chat_id, content, group=True)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         await _group_deliver(context, chat_id, content, ai_response,
                              reply_to=msg.message_id if addressed else None,
@@ -7741,7 +7962,7 @@ async def _maybe_reply_to_bot(context, chat_id: int, e: dict):
         remember(chat_id, "user", content)
         return
     try:
-        messages = assemble_messages(chat_id, content, group=True)
+        messages = await assemble_messages_async(chat_id, content, group=True)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         # Pre-send cap re-check (design §3): if the chain filled while we generated,
         # discard the reply — a wasted model call is the price of never exceeding it.
@@ -7912,7 +8133,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "(📎 → Location) instead of naming specific restaurants you can't verify.]"
                 )
 
-        messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
+        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -8000,7 +8221,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 loc_ctx = f" They're near {place} ({loc['lat']:.4f}, {loc['lon']:.4f})."
         prompt = caption or f"{uname} just sent you this photo.{loc_ctx} React to it in character."
         await ensure_weather()
-        messages = assemble_messages(chat_id, prompt, image_data_url=data_url)
+        messages = await assemble_messages_async(chat_id, prompt, image_data_url=data_url)
         ai_response = await reply_with_typing(context, chat_id, messages,
                                               model=VISION_MODEL, fallback=VISION_FALLBACK)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
@@ -8044,7 +8265,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         await ensure_weather()
-        messages = assemble_messages(chat_id, prompt)
+        messages = await assemble_messages_async(chat_id, prompt)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         user_mem = f"[sent a sticker: {desc}]"
         reacted = await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -10243,6 +10464,9 @@ def main():
         log.info("Self-audit: every 30 minutes.")
         app.job_queue.run_repeating(_touch_alive, interval=60, first=5)
         log.info("Alive heartbeat: every 60s (for watchdog.sh, if present).")
+        if MEMORY_SEMANTIC_LIVE and LORE:
+            app.job_queue.run_once(_embed_lore_job, when=20)
+            log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
         if TRAFFIC_ENABLED:
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)

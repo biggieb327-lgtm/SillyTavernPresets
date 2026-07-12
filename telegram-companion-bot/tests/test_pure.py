@@ -1559,3 +1559,219 @@ class TestApplyAuditItem:
     def test_no_targets(self):
         ok, msg = bot._apply_audit_item({"kind": "audit", "action": "delete", "targets": []})
         assert ok is False
+
+
+# ── Embedding-based memory (v2026-07-12.2) ────────────────────────────────────
+
+class TestSemanticRecallVec:
+    def setup_method(self):
+        self._orig = dict(bot._embeddings_cache)
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig)
+
+    def test_ranks_by_cosine(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache["a"] = [1.0, 0.0]
+        bot._embeddings_cache["b"] = [0.0, 1.0]
+        bot._embeddings_cache["c"] = [0.9, 0.1]
+        out = bot._semantic_recall_vec([1.0, 0.0], ["a", "b", "c"], top_k=3)
+        assert [line for _, line in out] == ["a", "c", "b"]
+
+    def test_top_k(self):
+        bot._embeddings_cache.clear()
+        for i in range(5):
+            bot._embeddings_cache[str(i)] = [1.0, float(i)]
+        out = bot._semantic_recall_vec([1.0, 0.0], [str(i) for i in range(5)], top_k=2)
+        assert len(out) == 2
+
+    def test_empty_query_vec(self):
+        assert bot._semantic_recall_vec([], ["a"], top_k=3) == []
+
+    def test_entries_without_cached_vector_skipped(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache["a"] = [1.0, 0.0]
+        out = bot._semantic_recall_vec([1.0, 0.0], ["a", "uncached"], top_k=3)
+        assert [line for _, line in out] == ["a"]
+
+
+class TestIsSemanticDup:
+    def test_dup_above_threshold(self):
+        assert bot._is_semantic_dup([1.0, 0.0], [[0.99, 0.01]], 0.92) is True
+
+    def test_distinct_below_threshold(self):
+        assert bot._is_semantic_dup([1.0, 0.0], [[0.0, 1.0]], 0.92) is False
+
+    def test_empty_existing(self):
+        assert bot._is_semantic_dup([1.0, 0.0], [], 0.92) is False
+
+    def test_empty_vec(self):
+        assert bot._is_semantic_dup([], [[1.0, 0.0]], 0.92) is False
+
+    def test_threshold_zero_disables(self):
+        assert bot._is_semantic_dup([1.0, 0.0], [[1.0, 0.0]], 0.0) is False
+
+    def test_skips_falsy_existing(self):
+        assert bot._is_semantic_dup([1.0, 0.0], [None, [], [1.0, 0.0]], 0.92) is True
+
+
+class TestEvictByValue:
+    def test_no_op_under_cap(self):
+        lines = ["a", "b"]
+        kept, dropped = bot._evict_by_value(lines, {}, 5)
+        assert kept == lines and dropped == []
+
+    def test_low_confidence_evicted_first(self):
+        lines = ["keep", "drop"]
+        meta = {"keep": {"confidence": 9, "ts": 100.0},
+                "drop": {"confidence": 2, "ts": 100.0}}
+        kept, dropped = bot._evict_by_value(lines, meta, 1)
+        assert kept == ["keep"] and dropped == ["drop"]
+
+    def test_tie_broken_by_oldest_ts(self):
+        lines = ["old", "new"]
+        meta = {"old": {"confidence": 5, "ts": 100.0},
+                "new": {"confidence": 5, "ts": 200.0}}
+        kept, dropped = bot._evict_by_value(lines, meta, 1)
+        assert kept == ["new"] and dropped == ["old"]
+
+    def test_legacy_no_meta_neutral(self):
+        # No-meta defaults to confidence 5; a conf-2 line loses to it.
+        lines = ["legacy", "lowconf"]
+        meta = {"lowconf": {"confidence": 2, "ts": 100.0}}
+        kept, dropped = bot._evict_by_value(lines, meta, 1)
+        assert kept == ["legacy"] and dropped == ["lowconf"]
+
+    def test_keeps_original_order(self):
+        lines = ["a", "b", "c", "d"]
+        meta = {"a": {"confidence": 1}, "b": {"confidence": 9},
+                "c": {"confidence": 1}, "d": {"confidence": 9}}
+        kept, dropped = bot._evict_by_value(lines, meta, 2)
+        assert kept == ["b", "d"] and set(dropped) == {"a", "c"}
+
+
+class TestLoreSemanticHits:
+    def setup_method(self):
+        self._orig_lore = bot.LORE
+        self._orig_emb = dict(bot._lore_embeddings)
+
+    def teardown_method(self):
+        bot.LORE = self._orig_lore
+        bot._lore_embeddings.clear()
+        bot._lore_embeddings.update(self._orig_emb)
+
+    def test_ranks_and_respects_topk_and_floor(self):
+        bot.LORE = [
+            {"keys": [], "content": "near", "constant": False},
+            {"keys": [], "content": "far", "constant": False},
+            {"keys": [], "content": "orthogonal", "constant": False},
+        ]
+        bot._lore_embeddings.clear()
+        bot._lore_embeddings["near"] = [1.0, 0.0]
+        bot._lore_embeddings["far"] = [0.8, 0.6]
+        bot._lore_embeddings["orthogonal"] = [0.0, 1.0]  # cosine 0 < 0.3 floor
+        hits = bot._lore_semantic_hits([1.0, 0.0], top_k=3)
+        assert hits == ["near", "far"]  # orthogonal filtered by 0.3 floor
+
+    def test_constant_entries_ignored(self):
+        bot.LORE = [{"keys": [], "content": "always", "constant": True}]
+        bot._lore_embeddings.clear()
+        bot._lore_embeddings["always"] = [1.0, 0.0]
+        assert bot._lore_semantic_hits([1.0, 0.0], top_k=3) == []
+
+    def test_empty_vec_or_zero_topk(self):
+        assert bot._lore_semantic_hits([], top_k=3) == []
+        assert bot._lore_semantic_hits([1.0, 0.0], top_k=0) == []
+
+
+class TestProvenanceHedge:
+    def test_hedged_line_gets_source_suffix(self):
+        meta = {"saw a fox": {"confidence": 4, "source": "there was a fox"}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert hedged is True
+        assert out[0].startswith("(unsure) saw a fox")
+        assert 'you recall this from: "there was a fox"' in out[0]
+
+    def test_hedged_without_source_plain(self):
+        meta = {"saw a fox": {"confidence": 4}}
+        out, _ = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert out == ["(unsure) saw a fox"]
+
+    def test_high_confidence_no_source_shown(self):
+        meta = {"saw a fox": {"confidence": 9, "source": "secret"}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert out == ["saw a fox"] and hedged is False
+
+
+class TestQueryEmbedCache:
+    def setup_method(self):
+        self._orig_embed = bot._embed_text
+        bot._QUERY_EMBED_CACHE.clear()
+
+    def teardown_method(self):
+        bot._embed_text = self._orig_embed
+        bot._QUERY_EMBED_CACHE.clear()
+
+    def test_cache_hit_avoids_reembed(self):
+        calls = {"n": 0}
+        def fake(text):
+            calls["n"] += 1
+            return [1.0, 0.0]
+        bot._embed_text = fake
+        v1 = asyncio.run(bot._embed_query_cached("Hello There"))
+        v2 = asyncio.run(bot._embed_query_cached("hello there"))  # normalized -> same key
+        assert v1 == v2 == [1.0, 0.0]
+        assert calls["n"] == 1
+
+    def test_none_on_failed_embed(self):
+        bot._embed_text = lambda text: None
+        assert asyncio.run(bot._embed_query_cached("anything")) is None
+
+    def test_empty_text_returns_none_without_call(self):
+        calls = {"n": 0}
+        def fake(text):
+            calls["n"] += 1
+            return [1.0]
+        bot._embed_text = fake
+        assert asyncio.run(bot._embed_query_cached("   ")) is None
+        assert calls["n"] == 0
+
+    def test_lru_eviction(self):
+        bot._embed_text = lambda text: [1.0, 0.0]
+        for i in range(bot._QUERY_EMBED_CACHE_MAX + 10):
+            asyncio.run(bot._embed_query_cached(f"msg {i}"))
+        assert len(bot._QUERY_EMBED_CACHE) <= bot._QUERY_EMBED_CACHE_MAX
+
+
+class TestTriggeredMemoriesLivePath:
+    """Proves semantic recall now fires on the reply path when a query vector is
+    passed — the whole point of v2026-07-12.2."""
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        bot.MEMORIES_FILE.write_text("the vessel departed at dawn\nunrelated grocery list\n",
+                                     encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        # "ship" query vector is close to the "vessel" line, far from groceries,
+        # and shares NO keywords with it.
+        bot._embeddings_cache["the vessel departed at dawn"] = [1.0, 0.0]
+        bot._embeddings_cache["unrelated grocery list"] = [0.0, 1.0]
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+
+    def test_semantic_hit_with_no_keyword_overlap(self):
+        out = bot.triggered_memories("tell me about the ship", query_vec=[1.0, 0.0])
+        assert "the vessel departed at dawn" in out
+
+    def test_without_query_vec_on_loop_is_keyword_only(self):
+        async def run():
+            return bot.triggered_memories("tell me about the ship")
+        out = asyncio.run(run())
+        assert "the vessel departed at dawn" not in out
