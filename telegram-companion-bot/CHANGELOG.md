@@ -7,6 +7,24 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.10 — TomTom routing: no traffic= for bike/pedestrian; surface 4xx body
+
+**Root cause this release addresses:** `/route` sent `traffic=true` on *every* route,
+but TomTom's Routing API only accepts that parameter for motorized modes — so a
+bicycle (Nora) or pedestrian (Priya) route came back **HTTP 400**. And v.9's key
+redaction had over-corrected: it dropped TomTom's error *body*, so the 400 surfaced
+as a bare "HTTP 400" with no reason.
+
+**Fixes:**
+- `_tomtom_route_params(mode)` adds `traffic=true` only for `_TOMTOM_TRAFFIC_MODES`
+  (car/truck/taxi/bus/van/motorcycle); bicycle/pedestrian omit it. Fixes the 400 for
+  Nora and Priya.
+- `_tomtom_err_detail(resp)` extracts TomTom's human error message from the response
+  body (`detailedError.message` / `error.description` / `message`) and appends it to
+  HTTP-error reasons, so a 400 now reads e.g. "HTTP 400 — <TomTom's reason>". The body
+  is key-free (the key is only ever in the query string, which we never log); a guard
+  drops anything containing a `key=` token just in case. 6 new tests.
+
 ## v2026-07-11.9 — TomTom: honest error messages + key never logged
 
 **Root cause this release addresses (both found during on-device rollout):**

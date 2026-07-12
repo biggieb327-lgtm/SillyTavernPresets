@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.9"
+BOT_VERSION = "2026-07-11.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8619,9 +8619,31 @@ class _TomTomError(Exception):
     Carries a short, key-free reason so handlers can tell the user what actually broke."""
 
 
+def _tomtom_err_detail(resp) -> str:
+    """TomTom error body's human message, or '' — never anything key-shaped. TomTom's
+    400/4xx bodies carry a plain message (e.g. an unsupported param for the mode) and
+    do NOT contain the key, so this is safe to surface and log."""
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    de = body.get("detailedError")
+    detail = de.get("message") if isinstance(de, dict) else ""
+    if not detail:
+        err = body.get("error")
+        detail = (err.get("description") or err.get("message")) if isinstance(err, dict) else (err if isinstance(err, str) else "")
+    detail = str(detail or body.get("message") or "").strip()
+    if "key=" in detail.lower():  # defense: never echo a key-shaped token
+        return ""
+    return detail[:200]
+
+
 def _tomtom_err_reason(e) -> str:
     """Classify a requests exception into a short reason that never contains the URL/key
-    (requests puts the API key in the query string, so `str(e)` would leak it into logs)."""
+    (requests puts the API key in the query string, so `str(e)` would leak it into logs).
+    HTTP errors append TomTom's own key-free message so 400s are self-explaining."""
     resp = getattr(e, "response", None)
     code = getattr(resp, "status_code", None)
     if code in (401, 403):
@@ -8629,7 +8651,8 @@ def _tomtom_err_reason(e) -> str:
     if code == 429:
         return "rate limited (HTTP 429) — wait a moment"
     if code:
-        return f"HTTP {code}"
+        detail = _tomtom_err_detail(resp)
+        return f"HTTP {code}" + (f" — {detail}" if detail else "")
     name = type(e).__name__
     if "Timeout" in name:
         return "timed out"
@@ -8665,12 +8688,24 @@ def _tomtom_geocode(query: str):
     return float(lat), float(lon), label
 
 
+_TOMTOM_TRAFFIC_MODES = {"car", "truck", "taxi", "bus", "van", "motorcycle"}
+
+
+def _tomtom_route_params(mode: str) -> dict:
+    """Routing query params (minus key). `traffic=true` is only valid for motorized
+    modes — sending it with bicycle/pedestrian makes TomTom reject the request (400)."""
+    p = {"travelMode": mode, "routeType": "fast"}
+    if mode in _TOMTOM_TRAFFIC_MODES:
+        p["traffic"] = "true"
+    return p
+
+
 def _fetch_tomtom_route(o, d, mode: str):
     """o, d are (lat, lon) tuples. Returns native routing dict; raises _TomTomError on failure."""
     try:
         r = _get_session().get(
             _TOMTOM_ROUTE_URL.format(o=f"{o[0]},{o[1]}", d=f"{d[0]},{d[1]}"),
-            params={"key": TOMTOM_API_KEY, "travelMode": mode, "traffic": "true", "routeType": "fast"},
+            params={"key": TOMTOM_API_KEY, **_tomtom_route_params(mode)},
             timeout=(10, 30),
         )
         r.raise_for_status()

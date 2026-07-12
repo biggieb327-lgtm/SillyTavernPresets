@@ -1147,14 +1147,33 @@ class TestFormatPlaceAndNearby:
         assert "Unknown" in out
 
 
+class TestTomTomRouteParams:
+    def test_motorized_gets_traffic(self):
+        p = bot._tomtom_route_params("car")
+        assert p["travelMode"] == "car" and p.get("traffic") == "true"
+
+    def test_bicycle_no_traffic(self):
+        # traffic=true + bicycle makes TomTom 400; it must be omitted.
+        assert "traffic" not in bot._tomtom_route_params("bicycle")
+
+    def test_pedestrian_no_traffic(self):
+        assert "traffic" not in bot._tomtom_route_params("pedestrian")
+
+
 class TestTomTomErrReason:
     class _Resp:
-        def __init__(self, code):
+        def __init__(self, code, body=None):
             self.status_code = code
+            self._body = body
+
+        def json(self):
+            if self._body is None:
+                raise ValueError("no json")
+            return self._body
 
     class _HTTPErr(Exception):
-        def __init__(self, code):
-            self.response = TestTomTomErrReason._Resp(code)
+        def __init__(self, code, body=None):
+            self.response = TestTomTomErrReason._Resp(code, body)
 
     def test_401_says_key_rejected(self):
         r = bot._tomtom_err_reason(self._HTTPErr(401))
@@ -1166,8 +1185,17 @@ class TestTomTomErrReason:
     def test_429_rate_limited(self):
         assert "rate limited" in bot._tomtom_err_reason(self._HTTPErr(429))
 
-    def test_other_http_code(self):
+    def test_other_http_code_no_body(self):
         assert bot._tomtom_err_reason(self._HTTPErr(500)) == "HTTP 500"
+
+    def test_400_includes_tomtom_message(self):
+        e = self._HTTPErr(400, {"detailedError": {"message": "Traffic unsupported for Bicycle"}})
+        r = bot._tomtom_err_reason(e)
+        assert "400" in r and "Traffic unsupported for Bicycle" in r
+
+    def test_400_error_description_shape(self):
+        e = self._HTTPErr(400, {"error": {"description": "bad param"}})
+        assert "bad param" in bot._tomtom_err_reason(e)
 
     def test_timeout(self):
         assert bot._tomtom_err_reason(TimeoutError()) == "timed out"
@@ -1177,6 +1205,10 @@ class TestTomTomErrReason:
 
     def test_reason_never_leaks_url_or_key(self):
         # The whole point: the reason must never carry the request URL (which holds the key).
-        for e in (self._HTTPErr(401), self._HTTPErr(500), TimeoutError(), ConnectionError()):
-            r = bot._tomtom_err_reason(e).lower()
-            assert "tomtom.com" not in r and "key=" not in r
+        bodies = [None, {"message": "key=SECRET leaked"}, {"detailedError": {"message": "ok"}}]
+        for code in (401, 500, 400):
+            for b in bodies:
+                r = bot._tomtom_err_reason(self._HTTPErr(code, b)).lower()
+                assert "tomtom.com" not in r and "key=" not in r
+        for e in (TimeoutError(), ConnectionError()):
+            assert "key=" not in bot._tomtom_err_reason(e).lower()
