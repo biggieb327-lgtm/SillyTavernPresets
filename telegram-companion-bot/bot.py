@@ -8507,7 +8507,6 @@ def _reverse_geocode_sync(lat: float, lon: float) -> str:
 
 _TOMTOM_SEARCH_URL  = "https://api.tomtom.com/search/2/search/{q}.json"
 _TOMTOM_GEOCODE_URL = "https://api.tomtom.com/search/2/geocode/{q}.json"
-_TOMTOM_NEARBY_URL  = "https://api.tomtom.com/search/2/nearbySearch/.json"
 _TOMTOM_ROUTE_URL   = "https://api.tomtom.com/routing/1/calculateRoute/{o}:{d}/json"
 _TOMTOM_MODES       = {"car", "bicycle", "pedestrian", "truck", "taxi", "bus", "van", "motorcycle"}
 
