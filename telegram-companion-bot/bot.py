@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.13"
+BOT_VERSION = "2026-07-11.14"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -292,6 +292,10 @@ FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true
 CLOSENESS_ENABLED = os.getenv("CLOSENESS_ENABLED", "0").lower() in ("1", "true", "yes")
 THREADS_ENABLED = os.getenv("THREADS_ENABLED", "0").lower() in ("1", "true", "yes")
 JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "yes")
+# In-character restaurant recs: when the user asks about food and has shared a
+# location, hand the model real nearby places so it recommends from fact, not
+# imagination. Rides the single reply (no extra LLM call). Needs TOMTOM_API_KEY too.
+FOOD_SUGGESTIONS = os.getenv("FOOD_SUGGESTIONS", "0").lower() in ("1", "true", "yes")
 
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
@@ -7590,6 +7594,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
+        # In-character restaurant recs (FOOD_SUGGESTIONS, ROADMAP 3.5 release B):
+        # on a food-ish message, hand the model real nearby places so it recommends
+        # from fact, not imagination. Rides THIS reply — no extra LLM call
+        # (bot-code-invariants #3); the TomTom fetch is off-loop via to_thread.
+        if FOOD_SUGGESTIONS and TOMTOM_ENABLED and _is_food_query(user_message):
+            _floc = user_location.get(chat_id)
+            if _floc:
+                try:
+                    _fres = await asyncio.to_thread(
+                        _fetch_tomtom_search, "restaurant", _floc["lat"], _floc["lon"], 5000)
+                except _TomTomError:
+                    _fres = []
+                _brief = _restaurants_brief(_fres)
+                if _brief:
+                    content_for_model += (
+                        "\n[Real restaurants near them right now — if you recommend food, use "
+                        "ONLY these, in your own voice; do NOT invent places or name ones not "
+                        f"in this list:\n{_brief}\n]"
+                    )
+            else:
+                content_for_model += (
+                    "\n[They're asking about food but haven't shared their location, so you "
+                    "can't look up real nearby places — nudge them to drop a pin "
+                    "(📎 → Location) instead of naming specific restaurants you can't verify.]"
+                )
+
         messages = assemble_messages(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -8643,6 +8673,37 @@ def _format_restaurants(results: list, limit: int = 6) -> str:
         tail = " · ".join(bits)
         out.append(f"🍽 {name}" + (f" · {tail}" if tail else ""))
     return "\n".join(out) if out else "No restaurants found nearby."
+
+
+_FOOD_QUERY_RE = re.compile(
+    r"\b(hungry|starving|eat|eats|food|restaurant|restaurants|dinner|lunch|breakfast|"
+    r"brunch|takeout|take-?out|dining|somewhere to eat|place to eat|grab a bite|"
+    r"where should i (?:go|eat)|what should i eat)\b",
+    re.I,
+)
+
+
+def _is_food_query(text: str) -> bool:
+    """Heuristic: is the user asking about where/what to eat? (v1 keyword match)."""
+    return bool(text and _FOOD_QUERY_RE.search(text))
+
+
+def _restaurants_brief(results: list, limit: int = 5) -> str:
+    """Plain 'Name (cuisine, dist)' lines for injecting into the reply prompt — no
+    emoji, distance-sorted. '' if nothing usable."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
+    out = []
+    for r in rows[:limit]:
+        poi = r.get("poi") or {}
+        name = poi.get("name")
+        if not name:
+            continue
+        cui = _poi_cuisine(poi)
+        dist = r.get("dist")
+        meta = ", ".join(x for x in [cui, _fmt_distance(dist) if isinstance(dist, (int, float)) else ""] if x)
+        out.append(f"- {name}" + (f" ({meta})" if meta else ""))
+    return "\n".join(out)
 
 
 class _TomTomError(Exception):

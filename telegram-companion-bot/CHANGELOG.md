@@ -7,6 +7,28 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.14 — In-character restaurant recs (release B; FOOD_SUGGESTIONS)
+
+**What this adds (the "they recommend" layer):** with `FOOD_SUGGESTIONS=1` (+ a
+TomTom key), when the user sends a food-ish message and has shared their location,
+`handle_message` pre-fetches real nearby restaurants and appends them to the user
+content as a bracketed note before `assemble_messages`. The character then
+recommends *those real places in her own voice* — no list, no command.
+
+**Invariant compliance (bot-code-invariants):** this rides the **single** existing
+reply call — NO new per-message LLM call (#3). The TomTom fetch is off the event
+loop via `asyncio.to_thread` (#8) and wrapped so a failure degrades to a normal
+reply. It reuses the exact one-turn `[Note: …]` injection pattern the gap-aware and
+lull-detection notes already use. Default off (#16): unset = today's behavior.
+
+**Anti-hallucination:** the injected note says use ONLY the listed places and don't
+invent restaurants. If no location is shared, a different note tells her to ask the
+user to drop a pin rather than name places she can't verify.
+
+**Pure helpers + tests:** `_is_food_query` (keyword heuristic, v1), `_restaurants_brief`
+(plain prompt-format lines). 6 new tests. Trigger is keyword-based for v1 — it will
+miss creative phrasings; broadening it is a future tweak.
+
 ## v2026-07-11.13 — /food: nearby restaurant recommendations (release A of 2)
 
 **What this adds:** `/food [cuisine]` uses the user's shared GPS location to list real

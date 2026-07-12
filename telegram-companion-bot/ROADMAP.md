@@ -98,11 +98,14 @@ single-device blast radius.
   `api.tomtom.com` REST, defensive parsers, 20 tests. Owner provisions the key.
 - **`/food` ✅ (shipped v2026-07-11.13):** GPS-based nearby restaurant list
   (`/food [cuisine]`); "open now" held for a follow-up (tz-safe opening-hours parse).
-- **Phase 2 (next):** in-character map talk — let Nora/Emily/Priya weave routing and
-  place data into normal conversation via a taught intent tag (like `[search:]`),
-  intercepted and filled at the `_do_request`/tag layer. Must stay within the
-  one-combined-call budget: trigger only on an explicit map-shaped user ask, never a
-  per-message side call. Owner chose "both, slash first" (2026-07-11).
+- **In-character restaurant recs ✅ (shipped v2026-07-11.14, `FOOD_SUGGESTIONS`):**
+  food-ish message + shared location → real nearby restaurants pre-fetched and
+  injected into the single reply so the character recommends them in her own voice.
+  No extra LLM call; default off. Proves the pre-fetch-and-inject pattern.
+- **Phase 2 remainder (future):** generalize beyond restaurants — routing/place data
+  woven into conversation the same pre-fetch-and-inject way (broaden `_is_food_query`
+  into intent detection for "how do I get to X", "what's near Y"). Same budget rule:
+  pre-fetch on an explicit map-shaped ask, never a per-message LLM side call.
 
 ---
 

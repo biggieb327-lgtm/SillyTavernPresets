@@ -1175,6 +1175,37 @@ class TestFoodFormatting:
         assert "Unknown" in bot._format_restaurants([{}])
 
 
+class TestFoodQueryDetection:
+    def test_positive_phrases(self):
+        for t in ["where should i eat?", "i'm starving", "any good restaurants nearby",
+                  "what should i eat", "let's grab a bite", "somewhere to eat for dinner"]:
+            assert bot._is_food_query(t), t
+
+    def test_negative_phrases(self):
+        for t in ["how's your day", "i love you", "did you finish the report",
+                  "the weather is nice", ""]:
+            assert not bot._is_food_query(t), t
+
+    def test_none_safe(self):
+        assert bot._is_food_query(None) is False
+
+
+class TestRestaurantsBrief:
+    def test_plain_sorted_no_emoji(self):
+        out = bot._restaurants_brief([
+            {"poi": {"name": "Far", "categories": ["restaurant", "thai"]}, "dist": 800},
+            {"poi": {"name": "Near", "categories": ["restaurant", "ramen"]}, "dist": 90},
+        ])
+        assert out.index("Near") < out.index("Far")
+        assert "🍽" not in out and "(ramen, " in out
+
+    def test_skips_nameless(self):
+        assert bot._restaurants_brief([{"poi": {}}, {"address": {}}]) == ""
+
+    def test_empty(self):
+        assert bot._restaurants_brief([]) == ""
+
+
 class TestTomTomRouteParams:
     def test_route_type_is_rest_spelling(self):
         # The raw REST API uses "fastest", not the MCP tool's "fast" — pin it so the
