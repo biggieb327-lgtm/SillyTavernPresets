@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.14"
+BOT_VERSION = "2026-07-11.15"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -9138,30 +9138,45 @@ _restart_alert_ts = 0.0  # cooldown: a restart storm alerts once, not every 30 m
 _fallback_alert_ts = 0.0
 _budget_alert_ts = 0.0
 
-def _count_recent_restarts(window_s: int = 3600) -> int:
-    """Count STARTUP AUDIT lines in errors.log newer than window_s seconds.
-    Each line marks a process start, so >1 in an hour means something is killing us.
+def _tally_unexpected_restarts(lines, cutoff) -> int:
+    """Pure: count STARTUP AUDIT lines at/after `cutoff`, EXCLUDING starts caused by a
+    user/self-initiated /restart or /update. Those log a '[restart] requested' or
+    '[update] …; restarting' marker just before the start, so the storm alert only
+    counts crashes/kills (SIGKILL, watchdog, battery manager) — not the owner
+    deliberately restarting the bot, which used to trip a false 'something is killing
+    the process' warning during ordinary maintenance.
 
-    Compares naive wall-clock datetimes directly (never converting through Unix epoch)
-    so this stays correct even if the OS's local-time calibration is off — e.g. right
-    after a pkg upgrade disrupts tzdata. time.mktime() would silently misjudge every
-    historical line as "recent" in that case, which is exactly the false-alarm bug this
-    replaced (every bot on the same phone would misfire identically)."""
+    Compares naive wall-clock datetimes directly (never via Unix epoch) so it stays
+    correct even if the OS local-time calibration is off after a tzdata disruption."""
+    n = 0
+    pending_intentional = False
+    for line in lines:
+        if "[restart] requested" in line or "; restarting" in line:
+            pending_intentional = True
+            continue
+        if "=== STARTUP AUDIT ===" not in line:
+            continue
+        was_intentional = pending_intentional
+        pending_intentional = False
+        if was_intentional:
+            continue
+        try:
+            ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            n += 1
+    return n
+
+
+def _count_recent_restarts(window_s: int = 3600) -> int:
+    """Unexpected process starts in the last window (see _tally_unexpected_restarts)."""
     try:
         if not _error_log_path.exists():
             return 0
         cutoff = datetime.now() - timedelta(seconds=window_s)
-        n = 0
-        for line in _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "=== STARTUP AUDIT ===" not in line:
-                continue
-            try:
-                ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                continue
-            if ts >= cutoff:
-                n += 1
-        return n
+        lines = _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return _tally_unexpected_restarts(lines, cutoff)
     except Exception:
         return 0
 
@@ -9711,10 +9726,35 @@ _PAYMENT_COMMANDS = [
     BotCommand("remindpayments", "Trigger payment reminder now"),
 ]
 
+# Maps handlers are registered unconditionally (they reply "Maps aren't set up"
+# without a key), so they always belong in the autocomplete menu.
+_MAPS_COMMANDS = [
+    BotCommand("route", "Travel time & directions (from X to Y)"),
+    BotCommand("nearby", "Places near your shared location"),
+    BotCommand("place", "Look up an address or business"),
+    BotCommand("food", "Restaurants near your shared location"),
+]
+
+# Traffic handlers register only when WSDOT_API_KEY is set, so the menu mirrors that.
+_TRAFFIC_COMMANDS = [
+    BotCommand("traffic", "Current congestion (near you if location shared)"),
+    BotCommand("incidents", "Active incidents (near you if location shared)"),
+]
+
+
+def _build_command_menu(traffic_enabled: bool, payments_enabled: bool) -> list:
+    """The autocomplete menu, mirroring which command handlers are actually registered.
+    Hand-kept alongside the handler registrations — keep the two in sync."""
+    cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
+    if traffic_enabled:
+        cmds += _TRAFFIC_COMMANDS
+    if payments_enabled:
+        cmds += _PAYMENT_COMMANDS
+    return cmds
+
 
 async def _register_commands(application):
-    cmds = _BASE_COMMANDS + (_PAYMENT_COMMANDS if PAYMENTS_ENABLED else [])
-    await application.bot.set_my_commands(cmds)
+    await application.bot.set_my_commands(_build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED))
 
 
 async def _post_init(application):

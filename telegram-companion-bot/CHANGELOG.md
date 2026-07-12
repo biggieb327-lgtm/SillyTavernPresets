@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.15 — Two niggles: command menu completeness + restart-storm false alarm
+
+**Command autocomplete menu (`set_my_commands`):** the hand-kept menu list had drifted
+from the actual handler registrations — the maps commands (`/route /nearby /place
+/food`) and traffic commands (`/traffic /incidents`) were registered but absent from
+the menu, so they didn't autocomplete. Added them via a testable `_build_command_menu`:
+maps always (those handlers are unconditional), traffic only when `WSDOT_API_KEY` is
+set (mirrors registration), payments as before.
+
+**Restart-storm false alarm:** `_self_audit`'s "restarted Nx in the last hour —
+something is killing the process" counted every `STARTUP AUDIT`, including the owner's
+own `/restart` and `/update`. During ordinary maintenance (like this session's rapid
+deploys) that tripped a false alarm. `_tally_unexpected_restarts` (pure, tested) now
+skips any start preceded by a `[restart] requested` or `[update] …; restarting` marker,
+so only real crashes/kills (SIGKILL, watchdog, battery manager) count — a graceful-stop
+with no such marker (a battery-manager SIGTERM) still counts.
+
+8 new tests.
+
 ## v2026-07-11.14 — In-character restaurant recs (release B; FOOD_SUGGESTIONS)
 
 **What this adds (the "they recommend" layer):** with `FOOD_SUGGESTIONS=1` (+ a

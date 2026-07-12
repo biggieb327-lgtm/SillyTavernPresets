@@ -1206,6 +1206,67 @@ class TestRestaurantsBrief:
         assert bot._restaurants_brief([]) == ""
 
 
+class TestBuildCommandMenu:
+    @staticmethod
+    def _names(cmds):
+        return {c.command for c in cmds}
+
+    def test_maps_always_present(self):
+        # The maps handlers are registered unconditionally, so the menu must list them.
+        assert {"route", "nearby", "place", "food"} <= self._names(bot._build_command_menu(False, False))
+
+    def test_traffic_and_payments_gated(self):
+        off = self._names(bot._build_command_menu(False, False))
+        assert "traffic" not in off and "addpayment" not in off
+        on = self._names(bot._build_command_menu(True, True))
+        assert {"traffic", "incidents", "addpayment"} <= on
+
+    def test_base_present(self):
+        assert "help" in self._names(bot._build_command_menu(False, False))
+
+
+class TestTallyUnexpectedRestarts:
+    CUT = bot.datetime(2026, 7, 11, 17, 0, 0)
+
+    @staticmethod
+    def _audit(t):
+        return f"2026-07-11 {t} [WARNING] companion: === STARTUP AUDIT === v1 | Instance: x"
+
+    def test_crashes_counted(self):
+        lines = [self._audit("17:05:00"), self._audit("17:20:00"), self._audit("17:40:00")]
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 3
+
+    def test_user_restart_and_update_excluded(self):
+        lines = [
+            "2026-07-11 17:05:00 [WARNING] companion: [restart] requested via /restart",
+            self._audit("17:05:05"),
+            "2026-07-11 17:20:00 [WARNING] companion: [update] v1 -> v2; restarting",
+            self._audit("17:20:05"),
+        ]
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 0
+
+    def test_mixed_counts_only_crash(self):
+        lines = [
+            "2026-07-11 17:05:00 [WARNING] companion: [restart] requested via /restart",
+            self._audit("17:05:05"),      # intentional → excluded
+            self._audit("17:30:00"),      # crash → counted
+        ]
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 1
+
+    def test_outside_window_excluded(self):
+        lines = [self._audit("16:30:00"), self._audit("17:30:00")]  # first is before cutoff
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 1
+
+    def test_graceful_stop_alone_still_counts(self):
+        # A graceful-stop WITHOUT a /restart or /update marker (e.g. a battery-manager
+        # SIGTERM) is a real restart and must still be counted.
+        lines = [
+            "2026-07-11 17:10:00 [WARNING] companion: [shutdown] graceful stop — saving state.",
+            self._audit("17:10:07"),
+        ]
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 1
+
+
 class TestTomTomRouteParams:
     def test_route_type_is_rest_spelling(self):
         # The raw REST API uses "fastest", not the MCP tool's "fast" — pin it so the
