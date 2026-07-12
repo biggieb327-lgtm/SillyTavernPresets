@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.8 — TomTom observability: unsilence disabled state + audit visibility
+
+**Root cause this release addresses:** v.7 registered `/route /nearby /place` only
+when `TOMTOM_API_KEY` was present (the WSDOT pattern). When the key wasn't loaded,
+the commands weren't registered, so Telegram returned **no reply at all** — an
+undiagnosable silence. During rollout this made "is the key actually loaded?"
+impossible to answer from the user side (the bot exposed no TomTom state anywhere),
+which cost several debugging round-trips.
+
+**Fixes (observability, no behavior change when a key is set):**
+- `/route /nearby /place` are now registered **unconditionally**; with no key they
+  reply "Maps aren't set up (TOMTOM_API_KEY missing)." instead of going silent.
+- The `STARTUP AUDIT` log line now includes `Maps: <mode>|off`, so a restart shows
+  whether the running process actually loaded the key (and which travel mode).
+- `/audit` and `gather_audit_data()` now report `Maps (TomTom): <mode>|off`.
+
+This is the repo's "opaque error → instrument first" rule applied: make the failure
+self-describing rather than guess at it from outside.
+
 ## v2026-07-11.7 — TomTom Maps: /route, /nearby, /place (gated, default off)
 
 **Root cause this release addresses:** three characters are grounded in real

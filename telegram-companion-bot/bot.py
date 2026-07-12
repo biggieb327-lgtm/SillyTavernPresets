@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.7"
+BOT_VERSION = "2026-07-11.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8934,10 +8934,11 @@ def _log_startup_diagnostic():
     log.warning(
         "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
-        "Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
+        "Maps: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
         STREAM_TIMEOUT, MAX_TOKENS,
+        (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"),
         disk.free // (1024 * 1024), state_size, err_size,
         len(conversation_history), os.getpid(),
     )
@@ -9120,6 +9121,7 @@ def gather_audit_data() -> dict:
         "away_users": {str(k): v.get("reason", "away") for k, v in away.items()},
         "config_warnings": list(_CONFIG_WARNINGS),
         "llm_stats": dict(_llm_stats),
+        "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
     }
 
 
@@ -9140,6 +9142,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"errors.log: {d['errors_log_kb']} KB",
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
+        f"Maps (TomTom): {d.get('tomtom', 'off')}",
     ]
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
@@ -9653,10 +9656,12 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
-    if TOMTOM_ENABLED:
-        app.add_handler(CommandHandler("route", route_cmd))
-        app.add_handler(CommandHandler("nearby", nearby_cmd))
-        app.add_handler(CommandHandler("place", place_cmd))
+    # Registered unconditionally: when TOMTOM_API_KEY is unset the handlers reply
+    # "Maps aren't set up" instead of going silent (an unregistered command gives
+    # no response at all, which is undiagnosable from the user side).
+    app.add_handler(CommandHandler("route", route_cmd))
+    app.add_handler(CommandHandler("nearby", nearby_cmd))
+    app.add_handler(CommandHandler("place", place_cmd))
 
     if FEEDBACK_REACTIONS:
         app.add_handler(MessageReactionHandler(reaction_feedback_handler))
