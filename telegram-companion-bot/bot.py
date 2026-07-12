@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-12.3"
+BOT_VERSION = "2026-07-12.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -806,7 +806,69 @@ USER_NOTES_MAX = _env_int("USER_NOTES_MAX", "15")
 # Kill switch for recurring-note capture + rollover; unset = on. Off = recurring
 # mentions degrade to today's one-off behavior (asked once, then retired).
 NOTE_RECURRING = os.getenv("NOTE_RECURRING", "1").strip() not in ("0", "false", "no")
+# Reject notes whose supporting quote isn't verbatim from the user's own lines —
+# same defense memories got after the 2026-07-10 hallucination bug. 0 = old behavior.
+NOTE_GROUNDED = os.getenv("NOTE_GROUNDED", "1").strip() not in ("0", "false", "no")
+NOTE_ASKED_TTL_DAYS = _env_int("NOTE_ASKED_TTL_DAYS", "7")  # retire (asked …) notes after N days; 0 = keep
+NOTE_DEDUP_SIM = _env_float("NOTE_DEDUP_SIM", "0.8")  # word-containment dup threshold; 0 = prefix-only
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
+
+# Machinery-shaped parentheticals: our own markers plus JSON debris the analysis
+# model has leaked into note text ("(valence null)", "(noted today)"). Stripped on
+# write so stored (due …)/(every …) markers are only ever appended by us — a
+# model-emitted "(due 2026-99-99)" must never reach the follow-up parser unvalidated.
+_NOTE_DEBRIS_RE = re.compile(
+    r"\s*\((?:due|every|asked|noted|valence|mood|confidence)\b[^)]*\)", re.IGNORECASE)
+
+
+def _sanitize_note(note) -> str:
+    if not isinstance(note, str):
+        return ""
+    note = _NOTE_DEBRIS_RE.sub("", note)
+    return re.sub(r"\s{2,}", " ", note).strip().strip('"').strip()
+
+
+def _note_words(s: str) -> set:
+    return set(re.findall(r"[a-z0-9']{3,}", s.lower()))
+
+
+def _note_is_dup(note: str, existing_lines: list, sim: float) -> bool:
+    """Legacy prefix check plus word-containment: 'has a 2pm call with Yuen' and
+    'has a call with Yuen in eight minutes' share a 20-char prefix with nothing,
+    but nearly every token — both were stored on 2026-07-08/09."""
+    nl = note.lower()
+    for line in existing_lines:
+        body = _NOTE_DEBRIS_RE.sub("", line).strip().lower()
+        if not body:
+            continue
+        if nl[:20] in body or body[:20] in nl:
+            return True
+        if sim > 0:
+            a, b = _note_words(nl), _note_words(body)
+            if a and b and len(a & b) / min(len(a), len(b)) >= sim:
+                return True
+    return False
+
+
+_ASKED_MARKER_RE = re.compile(r"\(asked (\d{4}-\d{2}-\d{2})\)\s*$")
+
+
+def _expire_asked_notes(lines: list, today: date, ttl_days: int) -> list:
+    """Drop retired '(asked …)' notes older than ttl_days — they linger in the
+    prompt block long after the follow-up happened. Anything unparseable is kept."""
+    if ttl_days <= 0:
+        return lines
+    kept = []
+    for line in lines:
+        m = _ASKED_MARKER_RE.search(line.strip())
+        if m:
+            try:
+                if (today - date.fromisoformat(m.group(1))).days > ttl_days:
+                    continue
+            except ValueError:
+                pass
+        kept.append(line)
+    return kept
 
 _WEEKDAY_ABBREVS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -862,12 +924,12 @@ def _read_user_notes() -> str:
 
 
 def _append_user_note(note: str, due: str = "", every: str = ""):
-    note = note.strip()
+    note = _sanitize_note(note)
     if not note:
         return
     existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
-    if existing and note[:20].lower() in existing.lower():
-        return  # simple dedup
+    if existing and _note_is_dup(note, existing.splitlines(), NOTE_DEDUP_SIM):
+        return
     if due:
         # Suffix markers (keeps the prefix dedup working); note_followup_job fires on
         # (due …) and rolls (every …) notes forward instead of retiring them.
@@ -2967,7 +3029,11 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"valence": integer from -3 to 3 for that mood.\n'
         f'"user_note": if {uname} mentioned something specific and upcoming — an event, appointment, '
         f"deadline, worry, or plan that would be natural to ask about later — a single brief "
-        f"third-person note (e.g. 'has a job interview on Tuesday'). Otherwise null.\n"
+        f"third-person note (e.g. 'has a job interview on Tuesday'). ONE event per note — "
+        f"never merge unrelated facts into one note. Otherwise null.\n"
+        f'"user_note_quote": the EXACT sentence or clause from {uname}\'s messages that states '
+        f"the user_note event. Must be a verbatim substring of what {uname} said — not "
+        f"paraphrased, not from {NAME}'s lines. null if user_note is null.\n"
         f'"user_note_date": if the user_note refers to a specific or inferable day '
         f"('Tuesday', 'tomorrow', 'next week' means its first day), that date as YYYY-MM-DD. "
         f"Otherwise null.\n"
@@ -3037,8 +3103,18 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         val = val.strip()
         return "" if re.match(r"^(none|null|no|nothing|n/a|not\b)", val.lower()) else val
 
+    user_lines = [m["content"] for m in hist_tail if m.get("role") == "user"]
+
     if want_note:
-        note = _clean_field("user_note")
+        note = _sanitize_note(_clean_field("user_note"))
+        if note and NOTE_GROUNDED:
+            nquote = _clean_field("user_note_quote")
+            if not (_quote_grounded(nquote, user_lines) if nquote else False):
+                # Same failure mode as ungrounded memories: her own scene/roleplay
+                # lines extracted as real-world facts about the user.
+                _count_error("note_ungrounded")
+                print(f"[user-notes] REJECTED (ungrounded): {note}")
+                note = ""
         if note:
             due = _clean_field("user_note_date")
             # Sanity: proper format, today..+1y — a hallucinated date is worse than none.
@@ -3066,7 +3142,6 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         mem = _clean_field("memory")
         if mem:
             quote = _clean_field("memory_quote")
-            user_lines = [m["content"] for m in hist_tail if m.get("role") == "user"]
             grounded = _quote_grounded(quote, user_lines) if quote else False
             if not grounded:
                 _count_error("memory_ungrounded")
@@ -8733,6 +8808,12 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         return
     today = (datetime.now(TZ) if TZ else datetime.now()).date()
     lines = USER_NOTES_FILE.read_text(encoding="utf-8").splitlines()
+    kept = _expire_asked_notes(lines, today, NOTE_ASKED_TTL_DAYS)
+    if len(kept) != len(lines):
+        USER_NOTES_FILE.write_text("\n".join(kept), encoding="utf-8")
+        _user_notes_cache["text"] = None
+        print(f"[note-followup] expired {len(lines) - len(kept)} stale (asked) note(s)")
+        lines = kept
     hit = None  # (line index, note text, due date, recurrence rule) — oldest due wins
     for i, line in enumerate(lines):
         rule = ""

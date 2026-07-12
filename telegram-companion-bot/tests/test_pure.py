@@ -1908,3 +1908,84 @@ class TestAppendUserNoteRecurring:
         bot._append_user_note("plays board games", due="", every="weekly:fri")
         line = bot.USER_NOTES_FILE.read_text(encoding="utf-8").strip()
         assert line == "plays board games"
+
+
+class TestSanitizeNote:
+    def test_strips_json_debris(self):
+        # Verbatim from the owner's live file, 2026-07-12.
+        assert (bot._sanitize_note("mentions his upcoming DOR audit tour with long, "
+                                   "hour-long stops (valence null)")
+                == "mentions his upcoming DOR audit tour with long, hour-long stops")
+
+    def test_strips_mid_text_noted_marker(self):
+        assert (bot._sanitize_note("has a 'walk thing' scheduled for Wednesdays (noted today)")
+                == "has a 'walk thing' scheduled for Wednesdays")
+
+    def test_strips_model_emitted_due_marker(self):
+        # A model-written (due …) must never reach the follow-up parser unvalidated.
+        assert bot._sanitize_note("has a dentist visit (due 2026-99-99)") == "has a dentist visit"
+
+    def test_keeps_ordinary_parentheticals(self):
+        assert (bot._sanitize_note("has a shift at the DSHS office (Capitol Hill)")
+                == "has a shift at the DSHS office (Capitol Hill)")
+
+    def test_non_string_and_empty(self):
+        assert bot._sanitize_note(None) == ""
+        assert bot._sanitize_note("") == ""
+        assert bot._sanitize_note("(valence null)") == ""
+
+
+class TestNoteIsDup:
+    def test_yuen_call_variants_are_dups(self):
+        # Both were stored on-device 2026-07-08/09: the 20-char prefix check
+        # can't see past the differing sentence opening.
+        existing = ["has a call with Yuen in eight minutes (asked 2026-07-08)"]
+        assert bot._note_is_dup("has a 2pm call with Yuen", existing, 0.8)
+
+    def test_distinct_events_are_not_dups(self):
+        existing = ["has a job interview on Tuesday (due 2026-07-14)"]
+        assert not bot._note_is_dup("has a dentist appointment Friday", existing, 0.8)
+
+    def test_prefix_match_still_works_with_sim_disabled(self):
+        existing = ["has a job interview on Tuesday"]
+        assert bot._note_is_dup("has a job interview on Tuesday afternoon", existing, 0)
+
+    def test_sim_zero_disables_word_overlap(self):
+        existing = ["has a call with Yuen in eight minutes"]
+        assert not bot._note_is_dup("has a 2pm call with Yuen", existing, 0)
+
+    def test_markers_ignored_when_comparing(self):
+        existing = ["goes to derby practice (every weekly:thu) (due 2026-07-16)"]
+        assert bot._note_is_dup("goes to derby practice on Thursdays", existing, 0.8)
+
+
+class TestExpireAskedNotes:
+    TODAY = _date(2026, 7, 12)
+
+    def test_old_asked_note_dropped(self):
+        lines = ["has a job interview on Tuesday (asked 2026-07-01)"]
+        assert bot._expire_asked_notes(lines, self.TODAY, 7) == []
+
+    def test_recent_asked_note_kept(self):
+        lines = ["went whale watching (asked 2026-07-11)"]
+        assert bot._expire_asked_notes(lines, self.TODAY, 7) == lines
+
+    def test_boundary_is_strictly_older_than_ttl(self):
+        lines = ["something (asked 2026-07-05)"]  # exactly 7 days ago
+        assert bot._expire_asked_notes(lines, self.TODAY, 7) == lines
+
+    def test_ttl_zero_keeps_everything(self):
+        lines = ["ancient (asked 2020-01-01)"]
+        assert bot._expire_asked_notes(lines, self.TODAY, 0) == lines
+
+    def test_due_and_every_lines_untouched(self):
+        lines = [
+            "has practice (every weekly:thu) (due 2026-07-16)",
+            "interview (due 2026-07-14)",
+            "plain undated note",
+        ]
+        assert bot._expire_asked_notes(lines, self.TODAY, 7) == lines
+
+    def test_malformed_date_kept(self):
+        lines = ["weird (asked 2026-13-99)"]
+        assert bot._expire_asked_notes(lines, self.TODAY, 7) == lines

@@ -7,6 +7,41 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-12.4 — User-note quality: grounding, debris sanitation, real dedup, stale-note expiry
+
+**Root cause (owner's live user_notes.txt, reviewed 2026-07-12):** a 15-note file
+where ~12 entries were garbage, four distinct failure modes visible at once:
+
+1. **Character fiction stored as user facts** ("has a husband trapped in the bedroom
+   who is confused by her performance", her own banana bread as *his* baking). The
+   extraction prompt forbids this, but during roleplay scenes the analysis model does
+   it anyway. This is the exact failure class as the 2026-07-10 hallucinated-memories
+   bug — and the memory path got quote-grounding as its fix while **the notes path had
+   no grounding check at all**.
+2. **JSON debris in note text**: "mentions his upcoming DOR audit tour… (valence
+   null)" — the model leaks schema fragments into the note string. Worse than
+   cosmetic: a model-emitted "(due …)" would reach the follow-up parser without
+   passing the caller's date validation.
+3. **Dedup misses obvious duplicates**: "has a call with Yuen in eight minutes" and
+   "has a 2pm call with Yuen" were both stored — the 20-char-prefix check can't see
+   past a differing sentence opening.
+4. **Retired notes never leave**: "(asked …)" lines linger in the prompt block every
+   reply until the 15-note cap happens to evict them.
+
+**Fixes (each with its own kill switch, unset = on):**
+- `user_note_quote` added to the combined analysis JSON (zero new LLM calls); the
+  note is rejected unless the quote is a verbatim substring of the user's own lines
+  (reuses `_quote_grounded`). Rejections logged as `note_ungrounded`. `NOTE_GROUNDED=0`
+  restores old behavior. Prompt also now demands ONE event per note (the "walk thing +
+  Yuen tab" mashup).
+- `_sanitize_note` strips machinery-shaped parentheticals — `(due|every|asked|noted|
+  valence|mood|confidence …)` — from model-supplied note text before markers are
+  appended, so stored markers are only ever written by us.
+- `_note_is_dup`: legacy prefix check plus word-containment (shared tokens / smaller
+  set ≥ `NOTE_DEDUP_SIM`, default 0.8; 0 = prefix-only).
+- `note_followup_job` prunes `(asked …)` notes older than `NOTE_ASKED_TTL_DAYS`
+  (default 7; 0 = keep forever) in its daily pass.
+
 ## v2026-07-12.3 — Recurring events from conversation actually recur (and stay in character)
 
 **Root cause (owner-reported):** "recurring event reminders added via conversation get
