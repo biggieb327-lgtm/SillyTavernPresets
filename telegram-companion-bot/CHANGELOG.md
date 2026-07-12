@@ -7,6 +7,15 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.11 — TomTom routing: routeType "fastest" (REST spelling, not MCP "fast")
+
+**Root cause this release addresses:** the route call sent `routeType=fast` →
+TomTom "HTTP 400 — Invalid route type: [fast]" (surfaced by v.10's error-body
+plumbing). `fast` is the *MCP tool's* parameter name; the raw `api.tomtom.com`
+Routing REST API uses **`fastest`**. Same MCP-names-≠-REST-names trap that the
+GeoJSON-vs-native response shape hit earlier — copying an MCP param value into the
+REST call. Fixed to `fastest`; a test pins the REST spelling so it can't regress.
+
 ## v2026-07-11.10 — TomTom routing: no traffic= for bike/pedestrian; surface 4xx body
 
 **Root cause this release addresses:** `/route` sent `traffic=true` on *every* route,

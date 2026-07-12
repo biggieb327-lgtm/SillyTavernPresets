@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.10"
+BOT_VERSION = "2026-07-11.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8694,7 +8694,9 @@ _TOMTOM_TRAFFIC_MODES = {"car", "truck", "taxi", "bus", "van", "motorcycle"}
 def _tomtom_route_params(mode: str) -> dict:
     """Routing query params (minus key). `traffic=true` is only valid for motorized
     modes — sending it with bicycle/pedestrian makes TomTom reject the request (400)."""
-    p = {"travelMode": mode, "routeType": "fast"}
+    # NB: the raw Routing REST API uses "fastest" (the MCP tool's name is "fast" —
+    # do not copy MCP param values into the REST call; that mismatch caused HTTP 400s).
+    p = {"travelMode": mode, "routeType": "fastest"}
     if mode in _TOMTOM_TRAFFIC_MODES:
         p["traffic"] = "true"
     return p

@@ -1148,6 +1148,12 @@ class TestFormatPlaceAndNearby:
 
 
 class TestTomTomRouteParams:
+    def test_route_type_is_rest_spelling(self):
+        # The raw REST API uses "fastest", not the MCP tool's "fast" — pin it so the
+        # HTTP-400 ("Invalid route type: [fast]") regression can't come back.
+        assert bot._tomtom_route_params("car")["routeType"] == "fastest"
+        assert bot._tomtom_route_params("bicycle")["routeType"] == "fastest"
+
     def test_motorized_gets_traffic(self):
         p = bot._tomtom_route_params("car")
         assert p["travelMode"] == "car" and p.get("traffic") == "true"
