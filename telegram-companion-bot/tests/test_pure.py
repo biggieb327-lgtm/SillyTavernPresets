@@ -1338,3 +1338,224 @@ class TestTomTomErrReason:
                 assert "tomtom.com" not in r and "key=" not in r
         for e in (TimeoutError(), ConnectionError()):
             assert "key=" not in bot._tomtom_err_reason(e).lower()
+
+
+# ── Memory loops (v2026-07-12.1): recency decay, hedging, weekly audit ────────
+
+class TestRecencyWeight:
+    def test_disabled_halflife_is_neutral(self):
+        assert bot._recency_weight(time.time() - 86400 * 365, time.time(), 0) == 1.0
+
+    def test_no_timestamp_is_neutral(self):
+        # Legacy pre-meta memories are never punished.
+        assert bot._recency_weight(None, time.time(), 90) == 1.0
+        assert bot._recency_weight(0, time.time(), 90) == 1.0
+        assert bot._recency_weight("bogus", time.time(), 90) == 1.0
+
+    def test_fresh_memory_full_weight(self):
+        now = time.time()
+        assert bot._recency_weight(now, now, 90) == 1.0
+
+    def test_half_at_halflife(self):
+        now = time.time()
+        w = bot._recency_weight(now - 90 * 86400, now, 90)
+        assert abs(w - 0.5) < 0.01
+
+    def test_floor_at_point_one(self):
+        now = time.time()
+        assert bot._recency_weight(now - 90 * 86400 * 50, now, 90) == 0.1
+
+    def test_monotonic_decreasing(self):
+        now = time.time()
+        weights = [bot._recency_weight(now - d * 86400, now, 90)
+                   for d in (0, 30, 90, 180, 365)]
+        assert weights == sorted(weights, reverse=True)
+
+
+class TestHedgeMemoryLines:
+    def test_low_confidence_hedged(self):
+        meta = {"saw a fox": {"confidence": 4}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert out == ["(unsure) saw a fox"] and hedged is True
+
+    def test_high_confidence_unmarked(self):
+        meta = {"saw a fox": {"confidence": 9}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert out == ["saw a fox"] and hedged is False
+
+    def test_at_threshold_unmarked(self):
+        meta = {"saw a fox": {"confidence": 7}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, True)
+        assert out == ["saw a fox"] and hedged is False
+
+    def test_legacy_no_meta_unmarked(self):
+        out, hedged = bot._hedge_memory_lines(["old memory"], {}, 7, True)
+        assert out == ["old memory"] and hedged is False
+
+    def test_disabled_passthrough(self):
+        meta = {"saw a fox": {"confidence": 1}}
+        out, hedged = bot._hedge_memory_lines(["saw a fox"], meta, 7, False)
+        assert out == ["saw a fox"] and hedged is False
+
+    def test_input_not_mutated(self):
+        lines = ["saw a fox"]
+        bot._hedge_memory_lines(lines, {"saw a fox": {"confidence": 1}}, 7, True)
+        assert lines == ["saw a fox"]
+
+
+class TestAuditPairKey:
+    def test_order_insensitive(self):
+        assert bot._audit_pair_key(["a b", "c d"]) == bot._audit_pair_key(["c d", "a b"])
+
+    def test_whitespace_and_case_normalized(self):
+        assert bot._audit_pair_key(["A  b "]) == bot._audit_pair_key(["a b"])
+
+    def test_distinct_pairs_distinct(self):
+        assert bot._audit_pair_key(["a", "b"]) != bot._audit_pair_key(["a", "c"])
+
+
+class TestParseAuditFindings:
+    entries = ["likes tea", "hates tea", "moved to Austin", "moved to Bellevue",
+               "has a dog", "plays chess", "runs daily", "reads sci-fi"]
+
+    def test_valid_merge(self):
+        data = {"findings": [{"type": "contradiction", "lines": [1, 2],
+                              "action": "merge", "merged_text": "tea feelings evolved",
+                              "reason": "conflict"}]}
+        out = bot._parse_audit_findings(data, self.entries, 3)
+        assert len(out) == 1
+        assert out[0]["targets"] == ["likes tea", "hates tea"]
+        assert out[0]["merged_text"] == "tea feelings evolved"
+
+    def test_valid_delete(self):
+        data = {"findings": [{"type": "superseded", "lines": [3],
+                              "action": "delete", "reason": "moved again"}]}
+        out = bot._parse_audit_findings(data, self.entries, 3)
+        assert out[0]["targets"] == ["moved to Austin"]
+        assert out[0]["merged_text"] is None
+
+    def test_out_of_range_dropped(self):
+        data = {"findings": [{"type": "stale", "lines": [99], "action": "delete"}]}
+        assert bot._parse_audit_findings(data, self.entries, 3) == []
+
+    def test_merge_without_text_dropped(self):
+        data = {"findings": [{"type": "contradiction", "lines": [1, 2], "action": "merge"}]}
+        assert bot._parse_audit_findings(data, self.entries, 3) == []
+
+    def test_single_line_merge_dropped(self):
+        data = {"findings": [{"type": "contradiction", "lines": [1],
+                              "action": "merge", "merged_text": "x"}]}
+        assert bot._parse_audit_findings(data, self.entries, 3) == []
+
+    def test_caps_at_max(self):
+        f = {"type": "stale", "lines": [1], "action": "delete"}
+        data = {"findings": [dict(f, lines=[i]) for i in range(1, 7)]}
+        assert len(bot._parse_audit_findings(data, self.entries, 3)) == 3
+
+    def test_bad_shapes_empty(self):
+        assert bot._parse_audit_findings({}, self.entries, 3) == []
+        assert bot._parse_audit_findings({"findings": "nope"}, self.entries, 3) == []
+        assert bot._parse_audit_findings({"findings": [42]}, self.entries, 3) == []
+        assert bot._parse_audit_findings(None, self.entries, 3) == []
+
+    def test_bad_type_or_action_dropped(self):
+        data = {"findings": [
+            {"type": "vibes", "lines": [1], "action": "delete"},
+            {"type": "stale", "lines": [1], "action": "explode"},
+        ]}
+        assert bot._parse_audit_findings(data, self.entries, 3) == []
+
+
+class TestAuditReviewItem:
+    def test_merge_item_shape(self):
+        item = bot._audit_review_item({"type": "contradiction", "action": "merge",
+                                       "targets": ["a", "b"], "merged_text": "c",
+                                       "reason": "conflict"})
+        assert item["kind"] == "audit" and item["action"] == "merge"
+        assert item["targets"] == ["a", "b"] and item["merged_text"] == "c"
+        assert "AUDIT merge" in item["text"] and "conflict" in item["text"]
+        assert item["meta"]["origin"] == "audit"
+
+    def test_delete_item_shape(self):
+        item = bot._audit_review_item({"type": "stale", "action": "delete",
+                                       "targets": ["a"], "merged_text": None,
+                                       "reason": ""})
+        assert item["action"] == "delete" and "AUDIT delete" in item["text"]
+
+
+class TestEnqueueAuditProposals:
+    def _p(self, targets):
+        return {"type": "stale", "action": "delete", "targets": targets,
+                "merged_text": None, "reason": "r"}
+
+    def test_adds_new(self):
+        q, added = bot._enqueue_audit_proposals([], [self._p(["a"])], {}, 20)
+        assert added == 1 and q[0]["kind"] == "audit"
+
+    def test_rejected_key_skipped(self):
+        seen = {bot._audit_pair_key(["a"]): time.time()}
+        q, added = bot._enqueue_audit_proposals([], [self._p(["a"])], seen, 20)
+        assert added == 0 and q == []
+
+    def test_already_pending_skipped(self):
+        q = [bot._audit_review_item(self._p(["a"]))]
+        q2, added = bot._enqueue_audit_proposals(q, [self._p(["a"])], {}, 20)
+        assert added == 0 and len(q2) == 1
+
+    def test_cap_never_evicts(self):
+        q = [{"kind": "memory", "text": f"organic {i}"} for i in range(20)]
+        q2, added = bot._enqueue_audit_proposals(q, [self._p(["a"])], {}, 20)
+        assert added == 0 and len(q2) == 20 and q2[0]["text"] == "organic 0"
+
+
+class TestApplyAuditItem:
+    def _reset(self, lines, meta=None):
+        bot.MEMORIES_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._memory_meta.clear()
+        bot._memory_meta.update(meta or {})
+
+    def test_delete(self):
+        self._reset(["fact one", "fact two"], {"fact one": {"confidence": 8}})
+        ok, msg = bot._apply_audit_item(
+            {"kind": "audit", "action": "delete", "targets": ["fact one"]})
+        assert ok is True
+        content = bot.MEMORIES_FILE.read_text(encoding="utf-8")
+        assert "fact one" not in content and "fact two" in content
+        assert "fact one" not in bot._memory_meta
+
+    def test_merge(self):
+        self._reset(["likes tea", "hates tea", "other"],
+                    {"likes tea": {"confidence": 8}, "hates tea": {"confidence": 4}})
+        ok, msg = bot._apply_audit_item(
+            {"kind": "audit", "action": "merge",
+             "targets": ["likes tea", "hates tea"],
+             "merged_text": "tea feelings evolved over time"})
+        assert ok is True
+        content = bot.MEMORIES_FILE.read_text(encoding="utf-8")
+        assert "tea feelings evolved over time" in content
+        assert "likes tea" not in content and "hates tea" not in content
+        m = bot._memory_meta.get("tea feelings evolved over time", {})
+        assert m.get("origin") == "audit-merge"
+        assert m.get("confidence") == 4  # min of the merged entries
+        assert "merged:" in m.get("source", "")
+
+    def test_vanished_target_delete(self):
+        self._reset(["fact two"])
+        ok, msg = bot._apply_audit_item(
+            {"kind": "audit", "action": "delete", "targets": ["gone"]})
+        assert ok is False
+        assert "fact two" in bot.MEMORIES_FILE.read_text(encoding="utf-8")
+
+    def test_vanished_target_merge(self):
+        self._reset(["fact two"])
+        ok, msg = bot._apply_audit_item(
+            {"kind": "audit", "action": "merge", "targets": ["gone", "fact two"],
+             "merged_text": "merged"})
+        assert ok is False
+        assert "fact two" in bot.MEMORIES_FILE.read_text(encoding="utf-8")
+
+    def test_no_targets(self):
+        ok, msg = bot._apply_audit_item({"kind": "audit", "action": "delete", "targets": []})
+        assert ok is False

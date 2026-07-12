@@ -7,6 +7,53 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-12.1 — Memory loops: weekly audit → review queue, recency decay, confidence hedging
+
+**Root cause (all three, one theme):** the memory system had a write path with
+provenance (R1) but no *loop* — nothing ever went back over what was stored.
+memories.txt was append-only apart from manual `/delmem`/`/editmem`: contradictions
+and superseded facts accumulated until the count cap evicted something arbitrary.
+Recall ranked purely by keyword hits + cosine similarity, so a 6-month-old one-off
+outranked yesterday's correction if it shared a keyword. And a low-confidence memory
+the owner approved from the review queue was asserted at recall with the same
+certainty as a conf-10 quote-grounded fact — the meta confidence existed but was
+never consulted at injection.
+
+**Weekly memory audit (`MEMORY_AUDIT`, off by default):** `memory_audit_job` rides
+the nightly `reflection_job` and fires once a week (`MEMORY_AUDIT_WEEKDAY`): one
+batched `SUMMARY_MODEL` call over memories.txt (+ age/conf annotations from
+memory_meta) proposing at most `MEMORY_AUDIT_MAX_PROPOSALS` contradiction/
+superseded/stale findings. Proposals land in the EXISTING `memory_review.json` →
+`/reviewmem` flow as `kind: "audit"` items — the bot never deletes or merges on its
+own. Approving applies delete/merge through `_memory_replace` (meta+embeddings stay
+in sync; merges get `origin: audit-merge`, min-of-parents confidence, and a
+`merged: a | b` source trail for `/sourcemem`); a target edited since the proposal
+aborts safely ("memory changed since proposed"). Rejecting records an
+order-insensitive pair key in `memory_audit_seen.json` so a declined proposal never
+returns; queue-cap overflow just re-proposes next week (never evicts pending items).
+
+**Recency decay (`MEMORY_DECAY_HALFLIFE_DAYS`, off by default, recommend 90):**
+`triggered_memories` now multiplies the merged keyword+semantic score by
+`_recency_weight` — exponential half-life on the memory_meta timestamp, floored at
+0.1 so old memories fade in the ranking but never disappear from it. Entries with
+no recorded ts (legacy, pre-meta) stay at neutral 1.0 — never punished.
+
+**Confidence hedging (`MEMORY_HEDGE`, off by default):** at injection,
+`_hedge_memory_lines` prefixes `(unsure)` on recalled memories whose meta
+confidence is below `MEMORY_AUTOCONF` and appends one instruction line telling the
+character to hedge rather than assert. Display-time only; the stored line is
+untouched.
+
+**Invariant compliance:** zero new per-message LLM calls (the audit is a weekly
+scheduled call under `_SUMMARIZE_SEM`, via `asyncio.to_thread`); all mutations go
+through the `_memory_replace` choke point behind the owner's explicit `/reviewmem
+ok`; audit-merged text is labeled provenance (origin + source), honoring the
+generated-content rule. Also fixed in passing: `/reviewmem ok` called
+`_append_memory` directly on the event loop — `_memory_replace → _embed_memory_line`
+makes a blocking HTTP call (up to 30s stall); now wrapped in `asyncio.to_thread`.
+
+34 new tests (recency weight, hedging, audit parse/dedup/queue/apply).
+
 ## 2026-07-12 — Ops: eval-fix retry loop (Stop hook) + improvement Routine activated
 
 Not a bot release (bot.py untouched). Two workflow loops from the AI-loops gap

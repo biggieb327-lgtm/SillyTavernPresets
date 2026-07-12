@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.15"
+BOT_VERSION = "2026-07-12.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -448,6 +448,15 @@ MEMORY_LOG_FILE = BASE_DIR / "memory_log.txt"
 MEMORY_REVIEW_MAX = 20
 _memory_meta: dict[str, dict] = {}
 
+# Memory loops (all default OFF — unset keeps today's behavior)
+MEMORY_DECAY_HALFLIFE_DAYS = _env_float("MEMORY_DECAY_HALFLIFE_DAYS", "0")
+MEMORY_HEDGE = os.getenv("MEMORY_HEDGE", "0").strip() not in ("0", "false", "no")
+MEMORY_AUDIT = os.getenv("MEMORY_AUDIT", "0").strip() not in ("0", "false", "no")
+MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
+MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
+MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
+MEMORY_AUDIT_SEEN_MAX = 100
+
 
 def _load_memory_meta():
     global _memory_meta
@@ -501,6 +510,178 @@ def _memory_log(action: str, text: str = "", extra: str = ""):
             pass
     except Exception as e:
         log.warning("[memory-log] write failed: %s", e)
+
+
+# --- Weekly memory audit loop (MEMORY_AUDIT) ---
+# One cheap-model pass over memories.txt proposing contradiction/superseded/stale
+# cleanups into the existing /reviewmem queue. Proposals only — every mutation
+# still goes through the owner's ok/no and then _memory_replace.
+
+def _load_audit_seen() -> dict[str, float]:
+    """Pair keys of audit proposals the owner explicitly rejected — never re-propose."""
+    try:
+        if MEMORY_AUDIT_SEEN_FILE.exists():
+            data = json.loads(MEMORY_AUDIT_SEEN_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_audit_seen(seen: dict[str, float]):
+    if len(seen) > MEMORY_AUDIT_SEEN_MAX:
+        keep = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:MEMORY_AUDIT_SEEN_MAX]
+        seen = dict(keep)
+    try:
+        MEMORY_AUDIT_SEEN_FILE.write_text(
+            json.dumps(seen, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log.warning("[memory-audit] seen save failed: %s", e)
+
+
+def _audit_pair_key(targets: list[str]) -> str:
+    """Order-insensitive, whitespace/case-normalized dedup key for a proposal."""
+    return "|".join(sorted(" ".join(t.lower().split()) for t in targets))
+
+
+def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float) -> str:
+    """Numbered entry list for the audit prompt, annotated with age and confidence."""
+    out = []
+    for i, line in enumerate(entries):
+        m = meta.get(line.strip(), {})
+        notes = []
+        ts = m.get("ts")
+        if isinstance(ts, (int, float)) and ts > 0:
+            notes.append(f"age: {max(0, int((now - ts) / 86400))}d")
+        conf = m.get("confidence")
+        if isinstance(conf, int):
+            notes.append(f"conf={conf}")
+        tag = f" ({', '.join(notes)})" if notes else ""
+        out.append(f"{i + 1}.{tag} {line}")
+    return "\n".join(out)
+
+
+def _parse_audit_findings(data: dict, entries: list[str], max_findings: int) -> list[dict]:
+    """Validate the audit model's JSON; map 1-based indices back to exact entry text.
+    Drops malformed/out-of-range findings rather than guessing."""
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return []
+    out = []
+    for f in findings:
+        if len(out) >= max_findings:
+            break
+        if not isinstance(f, dict):
+            continue
+        ftype = f.get("type")
+        action = f.get("action")
+        idxs = f.get("lines")
+        if ftype not in ("contradiction", "superseded", "stale"):
+            continue
+        if action not in ("delete", "merge"):
+            continue
+        if not isinstance(idxs, list) or not idxs:
+            continue
+        try:
+            uniq = sorted({int(i) for i in idxs})
+        except (TypeError, ValueError):
+            continue
+        if any(i < 1 or i > len(entries) for i in uniq):
+            continue
+        merged_text = f.get("merged_text")
+        if action == "merge":
+            if len(uniq) < 2:
+                continue  # merging a line with itself is meaningless
+            if not isinstance(merged_text, str) or not merged_text.strip():
+                continue
+            merged_text = merged_text.strip()
+        else:
+            merged_text = None
+        reason = f.get("reason") if isinstance(f.get("reason"), str) else ""
+        out.append({
+            "type": ftype,
+            "action": action,
+            "targets": [entries[i - 1] for i in uniq],
+            "merged_text": merged_text,
+            "reason": reason.strip()[:200],
+        })
+    return out
+
+
+def _audit_review_item(finding: dict) -> dict:
+    """Shape an audit finding as a /reviewmem queue item (kind='audit')."""
+    targets = finding["targets"]
+    reason = finding.get("reason") or finding.get("type", "")
+    if finding["action"] == "merge":
+        text = ("AUDIT merge: " + " + ".join(f"'{t}'" for t in targets)
+                + f" -> '{finding['merged_text']}'")
+    else:
+        text = "AUDIT delete: " + " + ".join(f"'{t}'" for t in targets)
+    if reason:
+        text += f" ({reason})"
+    return {
+        "kind": "audit",
+        "action": finding["action"],
+        "targets": targets,
+        "merged_text": finding.get("merged_text"),
+        "text": text,
+        "meta": {"ts": time.time(), "origin": "audit", "reason": reason},
+    }
+
+
+def _enqueue_audit_proposals(queue: list[dict], proposals: list[dict],
+                             seen: dict[str, float], cap: int) -> tuple[list[dict], int]:
+    """Add audit proposals to the review queue. Skips owner-rejected pair keys and
+    already-pending duplicates; never evicts existing items — stops at the cap
+    (an evicted/unreviewed proposal simply gets re-proposed on a later run)."""
+    pending = {_audit_pair_key(item.get("targets", []))
+               for item in queue if item.get("kind") == "audit"}
+    added = 0
+    for p in proposals:
+        key = _audit_pair_key(p["targets"])
+        if key in seen or key in pending:
+            continue
+        if len(queue) >= cap:
+            break
+        queue.append(_audit_review_item(p))
+        pending.add(key)
+        added += 1
+    return queue, added
+
+
+def _apply_audit_item(item: dict) -> tuple[bool, str]:
+    """Apply an owner-approved audit proposal via the _memory_replace choke point
+    (keeps memories.txt, embeddings.json, memory_meta.json in sync). A target that
+    vanished since the proposal (edited/deleted meanwhile) aborts that step safely."""
+    targets = item.get("targets") or []
+    if not targets:
+        return False, "no targets recorded"
+    if item.get("action") == "merge":
+        merged = (item.get("merged_text") or "").strip()
+        if not merged:
+            return False, "merge item without merged text"
+        confs = [(_memory_meta.get(t.strip(), {}) or {}).get("confidence")
+                 for t in targets]
+        confs = [c for c in confs if isinstance(c, int)]
+        meta = {
+            "ts": time.time(),
+            "origin": "audit-merge",
+            "confidence": min(confs) if confs else 5,
+            "source": "merged: " + " | ".join(t.strip()[:80] for t in targets),
+        }
+        if not _memory_replace(targets[0], merged, meta=meta):
+            return False, "memory changed since proposed"
+        for t in targets[1:]:
+            _memory_replace(t, None)
+        return True, f"merged {len(targets)} entries -> '{merged[:80]}'"
+    removed = 0
+    for t in targets:
+        if _memory_replace(t, None):
+            removed += 1
+    if removed == 0:
+        return False, "memory changed since proposed"
+    return True, f"deleted {removed} of {len(targets)} entries"
 
 
 def _est_tokens(text: str) -> int:
@@ -2238,6 +2419,37 @@ _MEMORY_STOPWORDS = frozenset({
 })
 
 
+def _recency_weight(ts, now: float, halflife_days: float) -> float:
+    """Exponential age decay for memory ranking. Neutral (1.0) when disabled
+    (halflife <= 0) or when the entry has no recorded timestamp — legacy pre-meta
+    memories are never punished. Floored at 0.1 so old memories are demoted in
+    the ranking, never erased by it."""
+    if halflife_days <= 0 or not isinstance(ts, (int, float)) or ts <= 0:
+        return 1.0
+    age_days = max(0.0, (now - ts) / 86400.0)
+    return max(0.1, 0.5 ** (age_days / halflife_days))
+
+
+def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
+                        enabled: bool) -> tuple[list[str], bool]:
+    """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
+    autoconf (review-approved low-confidence entries), so the character hedges
+    instead of asserting. Legacy entries with no meta/confidence stay unmarked.
+    Display-time only — never written back to memories.txt."""
+    if not enabled:
+        return list(lines), False
+    out = []
+    hedged = False
+    for line in lines:
+        conf = (meta.get(line.strip(), {}) or {}).get("confidence")
+        if isinstance(conf, int) and conf < autoconf:
+            out.append("(unsure) " + line)
+            hedged = True
+        else:
+            out.append(line)
+    return out, hedged
+
+
 def triggered_memories(scan_text: str) -> list[str]:
     entries = _read_memories()
     if not entries:
@@ -2273,9 +2485,14 @@ def triggered_memories(scan_text: str) -> list[str]:
             if sim > 0.3:
                 sem_scored[line] = (sim / max_sim) * 3.0
 
-    # Merge: union of both, sum their scores
+    # Merge: union of both, sum their scores, then age-decay the ranking
+    # (MEMORY_DECAY_HALFLIFE_DAYS; 0/unset = off, no-ts legacy entries neutral).
+    now = time.time()
     all_lines = set(keyword_scored) | set(sem_scored)
-    merged = [(keyword_scored.get(l, 0) + sem_scored.get(l, 0), l) for l in all_lines]
+    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
+               * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
+                                 now, MEMORY_DECAY_HALFLIFE_DAYS), l)
+              for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
     out = []
@@ -3199,9 +3416,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     mems = triggered_memories(scan_text)
     if mems:
-        messages.append({"role": "system", "content": (
-            "# Relevant memories\n" + "\n".join("- " + m for m in mems)
-        )})
+        mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
+                                               MEMORY_HEDGE)
+        block = "# Relevant memories\n" + "\n".join("- " + m for m in mems)
+        if any_hedged:
+            block += ("\nEntries marked (unsure) are things you only half-remember"
+                      " — hedge or ask rather than assert them as fact.")
+        messages.append({"role": "system", "content": block})
 
     bds = boundaries.get(chat_id) or []
     if bds:
@@ -4514,6 +4735,59 @@ async def maintain_long_term_memory(chat_id: int):
         summarizing.discard(chat_id)
 
 
+def _memory_audit_scan(entries: list[str], meta_snapshot: dict[str, dict]) -> list[dict]:
+    """Sync worker (runs in a thread): one cheap-model pass over memories.txt asking
+    for contradictions / superseded / stale entries. Returns validated findings."""
+    payload = _audit_prompt_payload(entries, meta_snapshot, time.time())
+    prompt = (
+        "You are auditing a list of stored memories for quality problems.\n"
+        "Memories (age = days since recorded, conf = extraction confidence 1-10):\n\n"
+        f"{payload}\n\n"
+        "Find entries that CONTRADICT each other, are SUPERSEDED by a newer entry, "
+        "or are clearly STALE (a one-off detail that no longer matters). "
+        f"Report at most {MEMORY_AUDIT_MAX_PROPOSALS} findings, most confident first. "
+        "If nothing clearly qualifies, return an empty list — do not invent problems.\n\n"
+        "Respond with ONLY a JSON object, no prose:\n"
+        '{"findings": [{"type": "contradiction|superseded|stale", '
+        '"lines": [<1-based line numbers>], "action": "delete|merge", '
+        '"merged_text": "<single replacement memory, only when action is merge>", '
+        '"reason": "<one short sentence>"}]}'
+    )
+    raw = call_nanogpt(
+        [{"role": "user", "content": prompt}], model=SUMMARY_MODEL)
+    return _parse_audit_findings(_extract_json(raw), entries, MEMORY_AUDIT_MAX_PROPOSALS)
+
+
+async def memory_audit_job(chat_id: int):
+    """Weekly memory audit loop: propose contradiction/superseded/stale cleanups
+    into the /reviewmem queue. Proposals only — the owner approves each one, and
+    approved mutations go through _memory_replace. Rides the nightly reflection
+    job's cadence; MEMORY_AUDIT_WEEKDAY gates it to once a week."""
+    if not MEMORY_AUDIT or _today().weekday() != MEMORY_AUDIT_WEEKDAY:
+        return
+    entries = _read_memories()
+    if len(entries) < 8:
+        return  # too few memories for contradictions to be worth a model call
+    meta_snapshot = {k: dict(v) for k, v in _memory_meta.items() if isinstance(v, dict)}
+    async with _SUMMARIZE_SEM:
+        findings = await asyncio.to_thread(_memory_audit_scan, entries, meta_snapshot)
+    if not findings:
+        _memory_log("AUDIT-SCAN", extra="findings=0")
+        return
+    # Re-validate against the live file — an entry may have changed while scanning.
+    current = set(_read_memories())
+    findings = [f for f in findings if all(t in current for t in f["targets"])]
+    queue = _load_memory_review()
+    queue, added = _enqueue_audit_proposals(
+        queue, findings, _load_audit_seen(), MEMORY_REVIEW_MAX)
+    if added:
+        _save_memory_review(queue)
+    _memory_log("AUDIT-SCAN", extra=f"findings={len(findings)} queued={added}")
+    if added and len(queue) >= MEMORY_REVIEW_MAX:
+        log.info("[memory-audit] review queue full (%d) — remaining proposals will "
+                 "re-surface on a later run", len(queue))
+
+
 # --- Telegram command handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -5794,6 +6068,9 @@ async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = []
         for i, item in enumerate(queue):
+            if item.get("kind") == "audit":
+                lines.append(f"{i+1}. [audit] {item['text']}")
+                continue
             conf = item.get("meta", {}).get("confidence", "?")
             src = item.get("meta", {}).get("source", "")
             lines.append(f"{i+1}. [conf={conf}] {item['text']}")
@@ -5814,10 +6091,25 @@ async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     item = queue.pop(idx)
     _save_memory_review(queue)
     if action == "ok":
-        _append_memory(item["text"], auto=True, meta=item.get("meta"))
+        if item.get("kind") == "audit":
+            # Audit proposals mutate EXISTING lines (delete/merge) — never
+            # _append_memory, which would store the proposal text as a new memory.
+            ok, msg = await asyncio.to_thread(_apply_audit_item, item)
+            _memory_log("AUDIT-OK" if ok else "AUDIT-STALE", item["text"])
+            await update.message.reply_text(
+                ("✓ Applied: " if ok else "⚠ Not applied: ") + msg)
+            return
+        # to_thread: _append_memory -> _memory_replace -> _embed_memory_line makes a
+        # blocking HTTP call; keep it off the event loop.
+        await asyncio.to_thread(_append_memory, item["text"], True, item.get("meta"))
         _memory_log("REVIEW-OK", item["text"])
         await update.message.reply_text(f"✓ Promoted to memory: {item['text']}")
     else:
+        if item.get("kind") == "audit":
+            # Owner said no — record the pair key so this proposal never returns.
+            seen = _load_audit_seen()
+            seen[_audit_pair_key(item.get("targets", []))] = time.time()
+            _save_audit_seen(seen)
         _memory_log("REVIEW-NO", item["text"])
         await update.message.reply_text(f"✗ Dropped: {item['text']}")
 
@@ -8235,6 +8527,11 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await maintain_long_term_memory(owner)
     except Exception as e:
         log.warning("[memory] long-term promotion error: %s", e)
+        _count_error("memory")
+    try:
+        await memory_audit_job(owner)
+    except Exception as e:
+        log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
     _overnight_mood_reset(owner)
 
