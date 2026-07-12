@@ -1147,6 +1147,34 @@ class TestFormatPlaceAndNearby:
         assert "Unknown" in out
 
 
+class TestFoodFormatting:
+    def test_cuisine_prefers_specific(self):
+        assert bot._poi_cuisine({"categories": ["restaurant", "thai"]}) == "thai"
+
+    def test_cuisine_generic_only(self):
+        assert bot._poi_cuisine({"categories": ["restaurant"]}) == "restaurant"
+
+    def test_cuisine_underscores_spaced(self):
+        assert bot._poi_cuisine({"categories": ["restaurant", "fast_food"]}) == "fast food"
+
+    def test_cuisine_empty(self):
+        assert bot._poi_cuisine({}) == "" and bot._poi_cuisine(None) == ""
+
+    def test_restaurants_sorted_with_cuisine_and_distance(self):
+        out = bot._format_restaurants([
+            {"poi": {"name": "Far Thai", "categories": ["restaurant", "thai"]}, "dist": 900},
+            {"poi": {"name": "Near Ramen", "categories": ["restaurant", "ramen"]}, "dist": 100},
+        ])
+        assert out.index("Near Ramen") < out.index("Far Thai")
+        assert "thai" in out and "ramen" in out and "mi" in out
+
+    def test_restaurants_empty(self):
+        assert bot._format_restaurants([]) == "No restaurants found nearby."
+
+    def test_restaurants_missing_fields_no_crash(self):
+        assert "Unknown" in bot._format_restaurants([{}])
+
+
 class TestTomTomRouteParams:
     def test_route_type_is_rest_spelling(self):
         # The raw REST API uses "fastest", not the MCP tool's "fast" — pin it so the

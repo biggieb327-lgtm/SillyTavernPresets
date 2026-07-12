@@ -96,6 +96,8 @@ single-device blast radius.
 - **Phase 1 ✅ (shipped v2026-07-11.7):** slash commands `/route`, `/nearby`, `/place`
   behind `TOMTOM_API_KEY` (fail-closed); per-instance `TOMTOM_TRAVEL_MODE`. Raw
   `api.tomtom.com` REST, defensive parsers, 20 tests. Owner provisions the key.
+- **`/food` ✅ (shipped v2026-07-11.13):** GPS-based nearby restaurant list
+  (`/food [cuisine]`); "open now" held for a follow-up (tz-safe opening-hours parse).
 - **Phase 2 (next):** in-character map talk — let Nora/Emily/Priya weave routing and
   place data into normal conversation via a taught intent tag (like `[search:]`),
   intercepted and filled at the `_do_request`/tag layer. Must stay within the

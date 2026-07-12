@@ -7,6 +7,24 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-11.13 — /food: nearby restaurant recommendations (release A of 2)
+
+**What this adds:** `/food [cuisine]` uses the user's shared GPS location to list real
+nearby restaurants (name · cuisine · distance, nearest first). `/food` alone lists
+restaurants generally; `/food thai` filters by cuisine. Registered unconditionally
+like the other maps commands (replies "Maps aren't set up" without a key); requires a
+shared location. Reuses `_fetch_tomtom_search` (5 km bias). New pure helpers
+`_poi_cuisine` + `_format_restaurants`, 7 tests.
+
+**Deliberately out of v1:** "open now". It needs opening-hours parsing + local-time
+comparison, and this project has a scar from tz-aware-vs-naive `datetime` (fleet
+startup crash, v2026-07-05.5) — shipping it correct is a fast follow-up, not a guess.
+
+**This is release A of the owner's "both" choice.** Release B (ROADMAP 3.5) is the
+in-character layer: when a location is shared and the user asks something food-ish,
+pre-fetch nearby restaurants and inject them into the *single* reply so the character
+recommends in her own voice — no extra per-message LLM call.
+
 ## v2026-07-11.12 — /update cache-busts GitHub's raw CDN
 
 **Root cause this release addresses:** `/update` fetches `main/bot.py` from

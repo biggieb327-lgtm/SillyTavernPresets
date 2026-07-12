@@ -81,7 +81,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-11.12"
+BOT_VERSION = "2026-07-11.13"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4608,6 +4608,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/route <from> to <dest> — travel time & distance",
         "/nearby <thing> — places near your shared location",
         "/place <name> — look up an address or business",
+        "/food [cuisine] — restaurants near your shared location",
         "",
         "*Nudges*",
         "/nudges — view today's proactive message budget",
@@ -8614,6 +8615,36 @@ def _format_nearby_results(results: list, limit: int = 5) -> str:
     return "\n\n".join(out) if out else "Nothing found nearby."
 
 
+def _poi_cuisine(poi) -> str:
+    """A short cuisine/type label from a TomTom POI's categories, or '' — prefers a
+    specific cuisine ('thai') over the generic 'restaurant'."""
+    cats = [c for c in ((poi or {}).get("categories") or []) if isinstance(c, str)]
+    specific = [c for c in cats if c.lower() != "restaurant"]
+    label = (specific[0] if specific else (cats[0] if cats else "")).strip()
+    return label.replace("_", " ")
+
+
+def _format_restaurants(results: list, limit: int = 6) -> str:
+    """TomTom results -> distance-sorted restaurant list (name · cuisine · distance).
+    Total/defensive: a result missing any field still renders."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
+    out = []
+    for r in rows[:limit]:
+        poi = r.get("poi") or {}
+        name = poi.get("name") or "Unknown"
+        bits = []
+        cuisine = _poi_cuisine(poi)
+        if cuisine and cuisine.lower() != name.lower():
+            bits.append(cuisine)
+        dist = r.get("dist")
+        if isinstance(dist, (int, float)):
+            bits.append(_fmt_distance(dist))
+        tail = " · ".join(bits)
+        out.append(f"🍽 {name}" + (f" · {tail}" if tail else ""))
+    return "\n".join(out) if out else "No restaurants found nearby."
+
+
 class _TomTomError(Exception):
     """A network/HTTP failure talking to TomTom, distinct from a genuine 'not found'.
     Carries a short, key-free reason so handlers can tell the user what actually broke."""
@@ -8800,6 +8831,25 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔎 Maps lookup failed: {e}. Try again in a moment.")
         return
     await update.message.reply_text(f"🔎 {query}\n\n{_format_place_results(results)}")
+
+
+async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TOMTOM_ENABLED:
+        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        return
+    loc = user_location.get(update.effective_chat.id)
+    if not loc:
+        await update.message.reply_text("Share your location first (📎 → Location), then /food [cuisine].")
+        return
+    cuisine = " ".join(context.args).strip() if context.args else ""
+    query = f"{cuisine} restaurant" if cuisine else "restaurant"
+    try:
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"], 5000)
+    except _TomTomError as e:
+        await update.message.reply_text(f"🍽 Maps lookup failed: {e}. Try again in a moment.")
+        return
+    header = f"🍽 {cuisine.title() + ' ' if cuisine else ''}restaurants near you"
+    await update.message.reply_text(f"{header}\n\n{_format_restaurants(results)}")
 
 
 # --- WSDOT Traffic integration ---
@@ -9750,6 +9800,7 @@ def main():
     app.add_handler(CommandHandler("route", route_cmd))
     app.add_handler(CommandHandler("nearby", nearby_cmd))
     app.add_handler(CommandHandler("place", place_cmd))
+    app.add_handler(CommandHandler("food", food_cmd))
 
     if FEEDBACK_REACTIONS:
         app.add_handler(MessageReactionHandler(reaction_feedback_handler))
