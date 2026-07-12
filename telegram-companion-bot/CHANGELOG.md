@@ -7,6 +7,27 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-12 — Ops: eval-fix retry loop (Stop hook) + improvement Routine activated
+
+Not a bot release (bot.py untouched). Two workflow loops from the AI-loops gap
+analysis, `.claude/` only:
+
+**Eval-fix retry loop (`.claude/hooks/eval-gate.sh`, new Stop hook):** the evals
+could fail with nothing feeding the failure back — the delivery gate blocks once,
+CI blocks on push, but no mechanism re-presented the failing output for another fix
+round; a session could end its turn with red evals it caused. The new hook runs
+`run-evals.sh` (+ pytest when evals are green) whenever the session has uncommitted
+changes to gated surfaces, and on failure blocks turn-end with the failing lines: 3
+bounded fix rounds, then one escalation block (summarize for the owner, never edit
+an eval to pass), then it stands aside so the turn can always end. Counter in
+gitignored `.claude/.runtime/`, keyed by session id.
+
+**Improvement Routine activated:** CLAUDE.md described a "monthly Routine" that had
+never actually been scheduled — the improvement loop existed only as prose. Created
+`improvement-loop-monthly` (cron `0 9 1 * *`, fresh session per firing) and recorded
+its schedule + verbatim prompt in `.claude/operating/routines.md` with a sync rule so
+the live trigger can't silently drift from the repo's record.
+
 ## v2026-07-11.15 — Two niggles: command menu completeness + restart-storm false alarm
 
 **Command autocomplete menu (`set_my_commands`):** the hand-kept menu list had drifted

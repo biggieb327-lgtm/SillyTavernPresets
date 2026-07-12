@@ -50,6 +50,12 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/eval-gate.sh\"",
+            "timeout": 120,
+            "statusMessage": "Eval gate"
           }
         ]
       }

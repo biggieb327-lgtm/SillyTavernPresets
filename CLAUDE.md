@@ -44,6 +44,8 @@ Rules here are backed by files that run, not prose:
   `main`/`claude/**`. Deploys curl from `main` — a red run on main is a deploy blocker.
 - **Improvement loop**: monthly Routine runs `improvement-analyst` over the logs;
   pushes at most one proposal to `claude/improvement-loop`, never to `main`.
+  Live since 2026-07-12 — schedule + verbatim prompt recorded in
+  `.claude/operating/routines.md` (keep file and Routine in sync).
 - Runtime state in `.claude/.runtime/` is gitignored — never commit it.
 
 ## Operating rule
