@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-12.2"
+BOT_VERSION = "2026-07-12.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -803,14 +803,65 @@ def _read_schedule_today() -> str:
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
 USER_NOTES_MAX = _env_int("USER_NOTES_MAX", "15")
+# Kill switch for recurring-note capture + rollover; unset = on. Off = recurring
+# mentions degrade to today's one-off behavior (asked once, then retired).
+NOTE_RECURRING = os.getenv("NOTE_RECURRING", "1").strip() not in ("0", "false", "no")
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
+
+_WEEKDAY_ABBREVS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _parse_recurrence(raw) -> str:
+    """Normalize a recurrence rule to 'weekly:thu' | 'monthly:15' | 'yearly:07-22'.
+    Returns "" for anything else — a garbled model rule (or a hand-edited note)
+    must degrade to a one-off note, never crash the analysis or follow-up pass."""
+    if not isinstance(raw, str):
+        return ""
+    m = re.match(r"^weekly:([a-z]+)$", raw.strip().lower())
+    if m:
+        day = m.group(1)[:3]
+        return f"weekly:{day}" if day in _WEEKDAY_ABBREVS else ""
+    m = re.match(r"^monthly:(\d{1,2})$", raw.strip().lower())
+    if m and 1 <= int(m.group(1)) <= 31:
+        return f"monthly:{int(m.group(1))}"
+    m = re.match(r"^yearly:(\d{1,2})-(\d{1,2})$", raw.strip().lower())
+    if m and 1 <= int(m.group(1)) <= 12 and 1 <= int(m.group(2)) <= 31:
+        return f"yearly:{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def _next_recurrence(rule: str, after: date):
+    """First date STRICTLY after `after` matching a _parse_recurrence-normalized rule.
+    Monthly/yearly days that overflow a short month clamp to its last day (a
+    'monthly:31' note fires Apr 30). Returns None for an unparseable rule."""
+    kind, _, arg = rule.partition(":")
+    if kind == "weekly" and arg in _WEEKDAY_ABBREVS:
+        days = (_WEEKDAY_ABBREVS.index(arg) - after.weekday()) % 7 or 7
+        return after + timedelta(days=days)
+    if kind == "monthly" and arg.isdigit():
+        day, y, mo = int(arg), after.year, after.month
+        for _ in range(2):  # this month's (clamped) date, else next month's
+            cand = date(y, mo, min(day, calendar.monthrange(y, mo)[1]))
+            if cand > after:
+                return cand
+            y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+        return date(y, mo, min(day, calendar.monthrange(y, mo)[1]))
+    if kind == "yearly":
+        m = re.match(r"^(\d{2})-(\d{2})$", arg)
+        if m and 1 <= int(m.group(1)) <= 12:
+            mo, day = int(m.group(1)), int(m.group(2))
+            for y in (after.year, after.year + 1):
+                cand = date(y, mo, min(day, calendar.monthrange(y, mo)[1]))
+                if cand > after:
+                    return cand
+    return None
 
 
 def _read_user_notes() -> str:
     return _read_life_file(USER_NOTES_FILE, _user_notes_cache)
 
 
-def _append_user_note(note: str, due: str = ""):
+def _append_user_note(note: str, due: str = "", every: str = ""):
     note = note.strip()
     if not note:
         return
@@ -818,8 +869,10 @@ def _append_user_note(note: str, due: str = ""):
     if existing and note[:20].lower() in existing.lower():
         return  # simple dedup
     if due:
-        # Suffix marker (keeps the prefix dedup working); note_followup_job fires on it.
-        note = f"{note} (due {due})"
+        # Suffix markers (keeps the prefix dedup working); note_followup_job fires on
+        # (due …) and rolls (every …) notes forward instead of retiring them.
+        marker = f" (every {every})" if every else ""
+        note = f"{note}{marker} (due {due})"
     lines = [l for l in existing.splitlines() if l.strip()]
     lines.append(note)
     if len(lines) > USER_NOTES_MAX:
@@ -2918,6 +2971,11 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"user_note_date": if the user_note refers to a specific or inferable day '
         f"('Tuesday', 'tomorrow', 'next week' means its first day), that date as YYYY-MM-DD. "
         f"Otherwise null.\n"
+        f'"user_note_recurring": if the user_note is something that repeats on a schedule '
+        f"{uname} stated ('every Thursday', 'the 1st of each month', a birthday or "
+        f'anniversary), the rule as "weekly:<mon|tue|wed|thu|fri|sat|sun>", '
+        f'"monthly:<1-31>", or "yearly:<MM-DD>". One-off events and vaguer cadences '
+        f"('every so often', 'most weekends') are null.\n"
         f'"memory": if the exchange revealed something notable about a third party, NPC, or '
         f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
         f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
@@ -2991,8 +3049,18 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                         due = ""
                 except ValueError:
                     due = ""
-            _append_user_note(note, due=due)
-            print(f"[user-notes] added: {note}" + (f" (due {due})" if due else ""))
+            every = _parse_recurrence(data.get("user_note_recurring")) if NOTE_RECURRING else ""
+            if every and not due:
+                # Recurring but no explicit first date ("every Thursday") — anchor the
+                # first follow-up at the next occurrence.
+                nxt = _next_recurrence(every, now_local.date())
+                due = nxt.isoformat() if nxt else ""
+            if every and not due:
+                every = ""  # never store a recurrence without a due anchor to fire on
+            _append_user_note(note, due=due, every=every)
+            print(f"[user-notes] added: {note}"
+                  + (f" (every {every})" if every else "")
+                  + (f" (due {due})" if due else ""))
 
     if want_memory:
         mem = _clean_field("memory")
@@ -8645,9 +8713,15 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
 
 
 _DUE_NOTE_RE = re.compile(r"^(?P<note>.*\S)\s+\(due (?P<date>\d{4}-\d{2}-\d{2})\)\s*$")
+# Recurring variant — must be tried FIRST: _DUE_NOTE_RE's greedy note group would
+# otherwise swallow the (every …) marker into the note text.
+_RECUR_NOTE_RE = re.compile(
+    r"^(?P<note>.*\S)\s+\(every (?P<rule>[a-z]+:[a-z0-9\-]+)\)\s+\(due (?P<date>\d{4}-\d{2}-\d{2})\)\s*$")
 
 async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     """Daily: if a dated user note has come due, reach out and ask how it went.
+    One-off notes are then retired with an (asked …) marker; recurring notes roll
+    their due date forward to the next occurrence instead.
 
     At most one follow-up per firing — being remembered should feel rare and real,
     not like a notification system."""
@@ -8659,9 +8733,15 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         return
     today = (datetime.now(TZ) if TZ else datetime.now()).date()
     lines = USER_NOTES_FILE.read_text(encoding="utf-8").splitlines()
-    hit = None  # (line index, note text, due date) — oldest due note wins
+    hit = None  # (line index, note text, due date, recurrence rule) — oldest due wins
     for i, line in enumerate(lines):
-        m = _DUE_NOTE_RE.match(line.strip())
+        rule = ""
+        m = _RECUR_NOTE_RE.match(line.strip())
+        if m:
+            # An unparseable rule (hand-edited note) degrades to one-off handling.
+            rule = _parse_recurrence(m.group("rule")) if NOTE_RECURRING else ""
+        else:
+            m = _DUE_NOTE_RE.match(line.strip())
         if not m:
             continue
         try:
@@ -8669,12 +8749,12 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             continue
         if d <= today and (hit is None or d < hit[2]):
-            hit = (i, m.group("note"), d)
+            hit = (i, m.group("note"), d, rule)
     if hit is None:
         return
     if not _check_nudge_budget(owner):
         return  # budget spent; the (due) marker survives, so we retry tomorrow
-    i, note, d = hit
+    i, note, d, rule = hit
     days_ago = (today - d).days
     when = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
     uname = user_names.get(owner, "you")
@@ -8686,10 +8766,18 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
-        lines[i] = f"{note} (asked {today.isoformat()})"
+        nxt = _next_recurrence(rule, today) if rule else None
+        if nxt:
+            # Next occurrence is computed from TODAY, not from the stored due date —
+            # a note overdue by weeks (phone off) must not roll to a date still in
+            # the past and refire daily until it catches up.
+            lines[i] = f"{note} (every {rule}) (due {nxt.isoformat()})"
+        else:
+            lines[i] = f"{note} (asked {today.isoformat()})"
         USER_NOTES_FILE.write_text("\n".join(lines), encoding="utf-8")
         _user_notes_cache["text"] = None
-        print(f"[note-followup] asked about: {note}")
+        print(f"[note-followup] asked about: {note}"
+              + (f" (next {nxt.isoformat()})" if nxt else ""))
     except Exception as e:
         log.warning("[note-followup] failed: %s", e)
         _count_error("heartbeat")

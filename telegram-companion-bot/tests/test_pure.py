@@ -1775,3 +1775,136 @@ class TestTriggeredMemoriesLivePath:
             return bot.triggered_memories("tell me about the ship")
         out = asyncio.run(run())
         assert "the vessel departed at dawn" not in out
+
+
+from datetime import date as _date
+
+
+class TestParseRecurrence:
+    def test_weekly_valid(self):
+        assert bot._parse_recurrence("weekly:thu") == "weekly:thu"
+
+    def test_weekly_full_day_name_normalized(self):
+        assert bot._parse_recurrence("weekly:thursday") == "weekly:thu"
+        assert bot._parse_recurrence("Weekly:MONDAY") == "weekly:mon"
+
+    def test_weekly_garbage_day_rejected(self):
+        assert bot._parse_recurrence("weekly:xyz") == ""
+
+    def test_monthly_valid_and_bounds(self):
+        assert bot._parse_recurrence("monthly:15") == "monthly:15"
+        assert bot._parse_recurrence("monthly:01") == "monthly:1"
+        assert bot._parse_recurrence("monthly:31") == "monthly:31"
+        assert bot._parse_recurrence("monthly:0") == ""
+        assert bot._parse_recurrence("monthly:32") == ""
+
+    def test_yearly_valid_and_zero_padded(self):
+        assert bot._parse_recurrence("yearly:07-22") == "yearly:07-22"
+        assert bot._parse_recurrence("yearly:7-2") == "yearly:07-02"
+        assert bot._parse_recurrence("yearly:13-01") == ""
+        assert bot._parse_recurrence("yearly:00-10") == ""
+
+    def test_non_string_and_junk(self):
+        assert bot._parse_recurrence(None) == ""
+        assert bot._parse_recurrence(7) == ""
+        assert bot._parse_recurrence("") == ""
+        assert bot._parse_recurrence("daily") == ""
+        assert bot._parse_recurrence("every thursday") == ""
+
+
+class TestNextRecurrence:
+    def test_weekly_same_day_is_strictly_after(self):
+        # 2026-07-16 is a Thursday — next thu must be a week out, not today.
+        assert bot._next_recurrence("weekly:thu", _date(2026, 7, 16)) == _date(2026, 7, 23)
+
+    def test_weekly_other_day(self):
+        # From a Sunday (2026-07-12), next thu is the 16th.
+        assert bot._next_recurrence("weekly:thu", _date(2026, 7, 12)) == _date(2026, 7, 16)
+
+    def test_monthly_later_this_month(self):
+        assert bot._next_recurrence("monthly:20", _date(2026, 7, 12)) == _date(2026, 7, 20)
+
+    def test_monthly_rolls_to_next_month(self):
+        assert bot._next_recurrence("monthly:5", _date(2026, 7, 12)) == _date(2026, 8, 5)
+
+    def test_monthly_day_31_clamps_to_short_month(self):
+        assert bot._next_recurrence("monthly:31", _date(2026, 4, 15)) == _date(2026, 4, 30)
+
+    def test_monthly_december_rolls_to_january(self):
+        assert bot._next_recurrence("monthly:5", _date(2026, 12, 20)) == _date(2027, 1, 5)
+
+    def test_yearly_later_this_year(self):
+        assert bot._next_recurrence("yearly:09-01", _date(2026, 7, 12)) == _date(2026, 9, 1)
+
+    def test_yearly_rolls_to_next_year(self):
+        assert bot._next_recurrence("yearly:03-14", _date(2026, 7, 12)) == _date(2027, 3, 14)
+
+    def test_yearly_same_day_is_strictly_after(self):
+        assert bot._next_recurrence("yearly:07-12", _date(2026, 7, 12)) == _date(2027, 7, 12)
+
+    def test_yearly_feb_29_clamps_on_non_leap_year(self):
+        assert bot._next_recurrence("yearly:02-29", _date(2026, 3, 1)) == _date(2027, 2, 28)
+
+    def test_invalid_rule_returns_none(self):
+        assert bot._next_recurrence("", _date(2026, 7, 12)) is None
+        assert bot._next_recurrence("weekly:xyz", _date(2026, 7, 12)) is None
+        assert bot._next_recurrence("daily", _date(2026, 7, 12)) is None
+
+
+class TestRecurNoteRegex:
+    def test_recurring_line_parses_with_clean_note(self):
+        m = bot._RECUR_NOTE_RE.match("has derby practice (every weekly:thu) (due 2026-07-16)")
+        assert m
+        assert m.group("note") == "has derby practice"
+        assert m.group("rule") == "weekly:thu"
+        assert m.group("date") == "2026-07-16"
+
+    def test_plain_due_line_still_matches_due_re(self):
+        m = bot._DUE_NOTE_RE.match("has a job interview (due 2026-07-14)")
+        assert m
+        assert m.group("note") == "has a job interview"
+
+    def test_recur_re_does_not_match_plain_due_line(self):
+        assert bot._RECUR_NOTE_RE.match("has a job interview (due 2026-07-14)") is None
+
+    def test_due_re_greedily_matches_recurring_line_hence_recur_first(self):
+        # Documents WHY note_followup_job must try _RECUR_NOTE_RE first: the plain
+        # regex matches too, but swallows the (every …) marker into the note text.
+        m = bot._DUE_NOTE_RE.match("has derby practice (every weekly:thu) (due 2026-07-16)")
+        assert m
+        assert "(every" in m.group("note")
+
+
+class TestAppendUserNoteRecurring:
+    def setup_method(self):
+        self._orig = (bot.USER_NOTES_FILE.read_text(encoding="utf-8")
+                      if bot.USER_NOTES_FILE.exists() else None)
+        if bot.USER_NOTES_FILE.exists():
+            bot.USER_NOTES_FILE.unlink()
+        bot._user_notes_cache["text"] = None
+
+    def teardown_method(self):
+        if self._orig is None:
+            if bot.USER_NOTES_FILE.exists():
+                bot.USER_NOTES_FILE.unlink()
+        else:
+            bot.USER_NOTES_FILE.write_text(self._orig, encoding="utf-8")
+        bot._user_notes_cache["text"] = None
+
+    def test_recurring_note_gets_both_markers_in_followup_parseable_order(self):
+        bot._append_user_note("has derby practice", due="2026-07-16", every="weekly:thu")
+        line = bot.USER_NOTES_FILE.read_text(encoding="utf-8").strip()
+        assert line == "has derby practice (every weekly:thu) (due 2026-07-16)"
+        assert bot._RECUR_NOTE_RE.match(line)
+
+    def test_one_off_note_unchanged(self):
+        bot._append_user_note("has a job interview", due="2026-07-14")
+        line = bot.USER_NOTES_FILE.read_text(encoding="utf-8").strip()
+        assert line == "has a job interview (due 2026-07-14)"
+
+    def test_every_without_due_stores_bare_note(self):
+        # The caller guards against this, but the writer itself must not emit an
+        # (every …) marker that can never fire.
+        bot._append_user_note("plays board games", due="", every="weekly:fri")
+        line = bot.USER_NOTES_FILE.read_text(encoding="utf-8").strip()
+        assert line == "plays board games"

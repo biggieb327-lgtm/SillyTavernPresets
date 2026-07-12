@@ -7,6 +7,41 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-12.3 — Recurring events from conversation actually recur (and stay in character)
+
+**Root cause (owner-reported):** "recurring event reminders added via conversation get
+logged but never come up naturally — just a regular reminder message." Recurring events
+fell into a gap between three disconnected subsystems. (1) The conversation-capture
+path (`post_reply_analysis`) only had a single `user_note_date` — "practice every
+Thursday" captured at most the first Thursday, and after `note_followup_job` asked
+about it once, the line was rewritten to `(asked …)` and retired forever. (2) The only
+recurring machinery, `/setreminder`, delivers through `fire_reminder`'s literal
+`⏰ Reminder: <text>` — mechanical, no character voice, no LLM involved. (3) The
+natural-delivery machinery (`send_triggered`, used by cron jobs and note follow-ups)
+existed but nothing recurring was ever wired into it.
+
+**Fix — wire the existing pieces together, per the owner's chosen split:**
+- `post_reply_analysis` gains a `user_note_recurring` JSON key in the same combined
+  call (zero new LLM calls, per the invariant): `weekly:<day>` / `monthly:<1-31>` /
+  `yearly:<MM-DD>`, null for one-offs and vague cadences.
+- Recurring notes are stored as `<note> (every <rule>) (due <date>)` in
+  user_notes.txt; if the model gave a rule but no date, the first due anchor is the
+  next occurrence. Rules are validated by `_parse_recurrence` — anything garbled
+  degrades to a one-off note rather than crashing the pass.
+- `note_followup_job` (already natural, in-character, quiet-hours- and
+  nudge-budget-aware) now rolls a recurring note's due date forward via
+  `_next_recurrence` after asking, instead of retiring it. Next occurrence is
+  computed from *today*, not the stored due date, so a note overdue by weeks (phone
+  off) can't roll to a past date and refire daily while catching up. Overflow days
+  clamp (monthly:31 fires Apr 30).
+- **Deliberately NOT changed:** `/remindme` and `/setreminder` keep the mechanical
+  `⏰` format — owner-confirmed split. Hard reminders (meds, timers) should be
+  unambiguous and never lost in character flavor; only conversation-captured events
+  go the natural route.
+- Kill switch `NOTE_RECURRING=0` (default on — owner requested the behavior;
+  disabling restores exact previous behavior: capture as one-off, `(asked …)` retire).
+  Cancel a recurring note anytime with `/notes del <n>`.
+
 ## v2026-07-12.2 — Embeddings that actually recall: live semantic memory + lore, semantic dedup, eviction & provenance fixes
 
 **Root cause (the headline):** every memory write embeds the line via a blocking
