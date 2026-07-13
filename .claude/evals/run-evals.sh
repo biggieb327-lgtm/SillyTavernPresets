@@ -155,6 +155,21 @@ else
   bad "group-cmd-allowlist" "GROUP_ALLOWED_COMMANDS changed — group chats may now execute commands that write private state"
 fi
 
+# Ownership boundary (v2026-07-13.1). /start once rewrote the owner file on every
+# call — any stranger who found the bot's username could capture heartbeats and
+# follow-ups. Claim-once in set_owner and the private-chat gate are pinned here.
+so_body=$(awk '/^def set_owner/{f=1; next} f && /^(async def |def )/{exit} f' "$BOT")
+if echo "$so_body" | grep -q 'get_owner() is None'; then
+  ok "owner-claim-once: set_owner cannot reassign an existing owner"
+else
+  bad "owner-claim-once" "set_owner lost its claim-once guard — any /start can steal ownership again"
+fi
+if grep -q 'TypeHandler(Update, _private_gate), group=-1' "$BOT"; then
+  ok "private-gate-registered: ALLOWED_USERS enforced at one choke point (group -1)"
+else
+  bad "private-gate-registered" "_private_gate not registered in handler group -1 — per-handler checks drift (that is how /start was missed)"
+fi
+
 echo
 echo "evals: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]

@@ -1989,3 +1989,106 @@ class TestExpireAskedNotes:
     def test_malformed_date_kept(self):
         lines = ["weird (asked 2026-13-99)"]
         assert bot._expire_asked_notes(lines, self.TODAY, 7) == lines
+
+
+from types import SimpleNamespace
+import pytest
+from telegram.ext import ApplicationHandlerStop
+
+
+class TestSetOwnerClaimOnce:
+    def setup_method(self):
+        self._env = bot.OWNER_CHAT_ID_ENV
+        self._orig = bot.OWNER_FILE.read_text() if bot.OWNER_FILE.exists() else None
+        bot.OWNER_CHAT_ID_ENV = None
+        if bot.OWNER_FILE.exists():
+            bot.OWNER_FILE.unlink()
+
+    def teardown_method(self):
+        bot.OWNER_CHAT_ID_ENV = self._env
+        if self._orig is None:
+            if bot.OWNER_FILE.exists():
+                bot.OWNER_FILE.unlink()
+        else:
+            bot.OWNER_FILE.write_text(self._orig)
+
+    def test_first_contact_claims(self):
+        bot.set_owner(111)
+        assert bot.get_owner() == 111
+
+    def test_second_chat_cannot_steal_ownership(self):
+        bot.set_owner(111)
+        bot.set_owner(222)  # the pre-fix /start takeover path
+        assert bot.get_owner() == 111
+
+    def test_group_id_refused(self):
+        bot.set_owner(-100123)
+        assert bot.get_owner() is None
+
+    def test_env_owner_is_authoritative_and_file_untouched(self):
+        bot.OWNER_CHAT_ID_ENV = "999"
+        bot.set_owner(123)
+        assert not bot.OWNER_FILE.exists()
+        assert bot.get_owner() == 999
+
+    def test_restart_preserves_claimed_owner(self):
+        bot.set_owner(111)
+        # get_owner reads the file fresh each call — same as a process restart.
+        assert bot.get_owner() == 111
+        bot.set_owner(333)
+        assert bot.get_owner() == 111
+
+
+def _gate_update(chat_id, user_id):
+    chat = SimpleNamespace(id=chat_id)
+    user = SimpleNamespace(id=user_id) if user_id is not None else None
+    return SimpleNamespace(effective_chat=chat, effective_user=user)
+
+
+class TestPrivateGate:
+    def setup_method(self):
+        self._users = set(bot.ALLOWED_USERS)
+        self._env = bot.OWNER_CHAT_ID_ENV
+        self._orig = bot.OWNER_FILE.read_text() if bot.OWNER_FILE.exists() else None
+        bot.OWNER_CHAT_ID_ENV = None
+        if bot.OWNER_FILE.exists():
+            bot.OWNER_FILE.unlink()
+        bot.ALLOWED_USERS.clear()
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._users)
+        bot.OWNER_CHAT_ID_ENV = self._env
+        if self._orig is None:
+            if bot.OWNER_FILE.exists():
+                bot.OWNER_FILE.unlink()
+        else:
+            bot.OWNER_FILE.write_text(self._orig)
+
+    def _run(self, update):
+        return asyncio.run(bot._private_gate(update, None))
+
+    def test_empty_allowlist_is_open(self):
+        self._run(_gate_update(10, 6))  # no raise
+
+    def test_stranger_stopped_in_private(self):
+        bot.ALLOWED_USERS.add(5)
+        with pytest.raises(ApplicationHandlerStop):
+            self._run(_gate_update(10, 6))
+
+    def test_allowed_user_passes(self):
+        bot.ALLOWED_USERS.add(5)
+        self._run(_gate_update(10, 5))
+
+    def test_owner_passes_even_if_not_in_allowlist(self):
+        bot.ALLOWED_USERS.add(5)
+        bot.OWNER_FILE.write_text("7")
+        self._run(_gate_update(7, 7))
+
+    def test_group_chats_are_not_this_gates_jurisdiction(self):
+        bot.ALLOWED_USERS.add(5)
+        self._run(_gate_update(-100123, 6))  # group_guard owns this boundary
+
+    def test_userless_update_passes(self):
+        bot.ALLOWED_USERS.add(5)
+        self._run(_gate_update(10, None))

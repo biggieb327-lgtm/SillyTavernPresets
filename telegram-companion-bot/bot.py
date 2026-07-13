@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-12.4"
+BOT_VERSION = "2026-07-13.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2693,7 +2693,12 @@ def set_owner(chat_id: int):
     # interaction — refusing negative ids here closes every one (GROUP_CHAT_DESIGN.md §6).
     if chat_id < 0:
         return
-    if not OWNER_CHAT_ID_ENV:
+    # Claim-once: ownership binds on FIRST contact and is never reassigned by chat
+    # traffic. /start used to rewrite the owner file on every call, so anyone who
+    # found the bot's username could silently capture heartbeats, follow-ups, and
+    # user notes. Transfer ownership deliberately: edit owner_chat.txt on-device,
+    # or set OWNER_CHAT_ID in .env (env is always authoritative). Eval-pinned.
+    if not OWNER_CHAT_ID_ENV and get_owner() is None:
         OWNER_FILE.write_text(str(chat_id))
 
 
@@ -8005,6 +8010,28 @@ async def group_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop
 
 
+async def _private_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Private-chat counterpart of group_guard, same handler group -1: when
+    ALLOWED_USERS is set, updates from anyone else stop here — one choke point
+    instead of per-handler _is_allowed checks. The per-handler approach drifted:
+    media handlers had the check, /start and most commands never did, so with an
+    allowlist configured a stranger could still run commands (and, before
+    set_owner's claim-once guard, capture ownership via /start). Empty
+    ALLOWED_USERS keeps today's open behavior. The owner (env or claimed file)
+    always passes even if left out of ALLOWED_USERS — locking the owner out of
+    their own fleet is worse than any redundancy. Group updates are
+    group_guard's jurisdiction, untouched here. Eval-pinned."""
+    chat = update.effective_chat
+    if chat is None or chat.id < 0:
+        return  # group chat: group_guard owns that boundary
+    user = update.effective_user
+    if user is None:
+        return
+    if _is_allowed(user.id) or _is_admin(user.id):
+        return
+    raise ApplicationHandlerStop  # same total silence as the per-handler checks
+
+
 async def _handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Group counterpart of handle_message's core: ledger, turn-taking, reply.
     Reached only for live human text in a participating group (guard + branch)."""
@@ -10491,6 +10518,7 @@ def main():
     # Group choke point — runs before every other handler (group -1) and stops all
     # group-chat traffic except allowlisted commands and participating plain text.
     app.add_handler(TypeHandler(Update, group_guard), group=-1)
+    app.add_handler(TypeHandler(Update, _private_gate), group=-1)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))

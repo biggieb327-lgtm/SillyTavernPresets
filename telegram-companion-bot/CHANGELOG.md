@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-13.1 — Ownership hardening: claim-once owner + private-chat gate (R1, security)
+
+**Root cause (found while fact-checking an external review, confirmed in code):**
+two authorization gaps, one severe.
+
+1. **Ownership takeover via /start.** `set_owner` refused group ids but had no
+   "already claimed" guard — it rewrote `owner_chat.txt` on every call whenever
+   `OWNER_CHAT_ID` was unset. Six of its seven call sites wrapped it in
+   `if get_owner() is None:`; the `/start` handler called it bare. Telegram bots are
+   publicly addressable by username, so any stranger who found the bot and sent
+   `/start` silently became the owner — heartbeats, note follow-ups, and every
+   proactive message redirected to them, and the real owner got no signal.
+2. **ALLOWED_USERS only half-enforced.** `_is_allowed` was a per-handler check that
+   drifted: media/text handlers had it, `/start` and most of the ~80 commands never
+   got it. With an allowlist configured, a stranger couldn't send a photo but could
+   run `/notes`, `/mems`, `/settings` — and `/start`.
+
+**Fixes (both eval-pinned, mirroring how the group boundary is protected):**
+- `set_owner` claims once: first contact binds ownership, chat traffic can never
+  reassign it. Deliberate transfer = edit `owner_chat.txt` on-device or set
+  `OWNER_CHAT_ID` (env stays authoritative). Behavior change to know about: sending
+  /start from a NEW chat no longer moves ownership there.
+- `_private_gate`, a sibling of `group_guard` in handler group -1: when
+  ALLOWED_USERS is set, private-chat updates from anyone else stop at one choke
+  point — commands, messages, media, callbacks, and any future update type — instead
+  of relying on per-handler checks (which is exactly how the gap formed). The owner
+  always passes even if left out of ALLOWED_USERS (locking the owner out of their
+  own fleet is worse than redundancy). Empty ALLOWED_USERS = today's open behavior;
+  group chats are untouched (group_guard's jurisdiction, GROUP_CHAT_DESIGN.md).
+  Existing per-handler checks stay as defense in depth.
+
+New evals: `owner-claim-once` (set_owner keeps its guard) and
+`private-gate-registered` (the gate stays wired in group -1).
+
 ## v2026-07-12.4 — User-note quality: grounding, debris sanitation, real dedup, stale-note expiry
 
 **Root cause (owner's live user_notes.txt, reviewed 2026-07-12):** a 15-note file
