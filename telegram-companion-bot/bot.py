@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-13.1"
+BOT_VERSION = "2026-07-13.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6243,7 +6243,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await send_proactive(context, chat_id)
         except Exception as e:
-            await _send(f"❌ {e}")
+            log.error("menu heartbeat error: %s", e)
+            await _send("❌ that broke on my end — details in /errors")
 
     elif data == "start_full:confirm":
         conversation_history[chat_id] = []
@@ -7391,7 +7392,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
     except Exception as e:
         log.error("Voice handler error: %s", e)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
 async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
@@ -7473,7 +7474,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error("Video processing error: %s", e)
         await context.bot.send_message(chat_id=chat_id,
-            text=f"❌ Couldn't process that video: {e}")
+            text="❌ Couldn't process that video — details in /errors")
         return
 
     if not frame_data_url and not transcript:
@@ -7503,7 +7504,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver(update, context, chat_id, user_mem, ai_response)
     except Exception as e:
         log.error("Video handler reply error: %s", e)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
 PDF_MAX_SIZE_MB = _env_int("PDF_MAX_SIZE_MB", "20")
@@ -7672,7 +7673,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pdf_text = await asyncio.to_thread(_extract_pdf_text, raw_bytes)
             except Exception as e:
                 log.error("PDF download/read error: %s", e)
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that PDF: {e}")
+                await context.bot.send_message(chat_id=chat_id, text="❌ Couldn't read that PDF — details in /errors")
                 return
             if not pdf_text.strip():
                 try:
@@ -7685,7 +7686,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     log.error("PDF OCR fallback failed: %s", e)
                     await context.bot.send_message(
-                        chat_id=chat_id, text=f"[couldn't read that PDF as an image either: {e}]",
+                        chat_id=chat_id, text="[couldn't read that PDF, even as an image — details in /errors]",
                     )
                 return
             if len(pdf_text) > PDF_MAX_CHARS:
@@ -7702,7 +7703,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await _deliver(update, context, chat_id, user_mem, ai_response)
             except Exception as e:
                 log.error("PDF handler reply error: %s", e)
-                await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+                await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
         finally:
             _pdf_in_flight.discard(key)
         return
@@ -7723,11 +7724,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = json.loads(raw_bytes.decode("utf-8"))
     except json.JSONDecodeError as e:
         await context.bot.send_message(chat_id=chat_id,
-            text=f"[couldn't parse that JSON: {e}]")
+            text=f"[couldn't parse that JSON: {e.msg} at line {e.lineno}]")
         return
     except Exception as e:
         log.error("Document download error: %s", e)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Couldn't read that file: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ Couldn't read that file — details in /errors")
         return
 
     formatted = _format_json_for_prompt(data, fname)
@@ -7757,7 +7758,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _deliver(update, context, chat_id, user_mem, ai_response)
     except Exception as e:
         log.error("Document handler reply error: %s", e)
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Something went wrong: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10350,13 +10351,16 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
     log.error("[unhandled]\n%s", tb)
     _count_error("unhandled")
-    # Surface the error to the user so button failures aren't silent
+    # Surface a generic note so button failures aren't silent — but never the raw
+    # exception: it leaks internals, and via group updates it would leak them to
+    # every human in the pilot group. Full traceback is in the log two lines up;
+    # /errors (admin-gated) shows the tally. Private chats only. Eval-pinned.
     try:
-        if update and hasattr(update, "callback_query") and update.callback_query:
-            await update.callback_query.message.reply_text(f"❌ {type(err).__name__}: {err}")
-        elif update and hasattr(update, "effective_chat") and update.effective_chat:
+        chat = getattr(update, "effective_chat", None) if update else None
+        if chat is not None and chat.id >= 0:
             await context.bot.send_message(
-                chat_id=update.effective_chat.id, text=f"❌ {type(err).__name__}: {err}"
+                chat_id=chat.id,
+                text="❌ something broke on my end — that didn't finish. Details in /errors",
             )
     except Exception:
         pass
@@ -10492,7 +10496,77 @@ async def _on_shutdown(application):
     await _stop_admin_api(application)
 
 
+def _run_config_check() -> bool:
+    """--check-config: preflight an instance with no network and no Telegram.
+    Import already hard-fails (with actionable SystemExit messages) on a missing
+    token/key/card, so reaching here means the essentials load; this checks the
+    things that otherwise fail quietly at 3am — timezone resolution, writable
+    paths, state-file integrity, access config. Run:
+        python bot.py <instance-dir> --check-config
+    Exit 0 = ready to launch."""
+    results: list[tuple[bool, str]] = []
+
+    def check(okay: bool, label: str, detail: str):
+        results.append((okay, f"{label} — {detail}"))
+
+    tok = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    check(":" in tok and len(tok) > 20, "bot token",
+          "present" if ":" in tok and len(tok) > 20
+          else "malformed — want the full '<id>:<secret>' string from BotFather")
+    tz_env = os.getenv("BOT_TIMEZONE", "")
+    if tz_env and TZ is None:
+        check(False, "timezone",
+              f"BOT_TIMEZONE={tz_env!r} did not resolve — bad name or missing tzdata "
+              f"(pkg install tzdata); reminders and quiet hours would drift to naive local time")
+    else:
+        check(True, "timezone", str(TZ) if TZ else "unset — naive local time")
+    check(bool(NAME), "character card", f"{CARD_NAME} → {NAME or 'NO NAME'}")
+    try:
+        probe = BASE_DIR / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        check(True, "instance dir writable", str(BASE_DIR))
+    except OSError as e:
+        check(False, "instance dir writable", f"{BASE_DIR}: {e}")
+    for fname in ("state.json", "reminders.json", "payments.json",
+                  "cron_jobs.json", "jokes.json"):
+        f = BASE_DIR / fname
+        if not f.exists():
+            continue  # fresh instance — absence is fine
+        try:
+            json.loads(f.read_text(encoding="utf-8"))
+            check(True, fname, "valid JSON")
+        except (OSError, ValueError):
+            check(False, fname, "CORRUPT — the bot would start from empty state; "
+                                "restore it from a backup before launching")
+    # A corrupt state.json never reaches the loop above: module init quarantines
+    # it to state.corrupted (loudly) and starts empty. Surface the quarantine so
+    # a preflight can't say "all clear" right after state was lost.
+    if (BASE_DIR / "state.corrupted").exists():
+        check(False, "state.json",
+              "was corrupt and auto-quarantined to state.corrupted — restore from a "
+              "backup, or delete the quarantine file if losing that state is acceptable")
+    owner = get_owner()
+    check(True, "owner", str(owner) if owner is not None
+          else "unclaimed — the first private chat to /start will claim it")
+    check(True, "ALLOWED_USERS",
+          f"{len(ALLOWED_USERS)} user id(s)" if ALLOWED_USERS
+          else "EMPTY — anyone who finds the bot can chat with it (see .env.example)")
+    check(bool(NANOGPT_MODEL), "chat model", NANOGPT_MODEL or "missing")
+    check(True, "fallback model",
+          FALLBACK_MODEL or "unset — provider outages will surface in chat")
+
+    failed = sum(1 for okay, _ in results if not okay)
+    for okay, line in results:
+        print(("  ok    " if okay else "  FAIL  ") + line)
+    print(f"config check ({BASE_DIR.name}): {len(results) - failed} ok, {failed} failed")
+    return failed == 0
+
+
 def main():
+    if "--check-config" in sys.argv:
+        # Preflight only — validate and exit before any Telegram/provider setup.
+        raise SystemExit(0 if _run_config_check() else 1)
     if "--claim-test" in sys.argv:
         # On-device atomicity smoke test for the group primitives — run once before
         # trusting the pilot (GROUP_CHAT_DESIGN.md §10.5). Usage:

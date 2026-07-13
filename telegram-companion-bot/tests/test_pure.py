@@ -2092,3 +2092,67 @@ class TestPrivateGate:
     def test_userless_update_passes(self):
         bot.ALLOWED_USERS.add(5)
         self._run(_gate_update(10, None))
+
+
+class TestOnErrorHygiene:
+    class _Bot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, chat_id, text):
+            self.sent.append((chat_id, text))
+
+    def _ctx(self, fake_bot):
+        return SimpleNamespace(error=ValueError("secret internal detail"), bot=fake_bot)
+
+    def test_private_chat_gets_generic_text_only(self):
+        fake = self._Bot()
+        upd = SimpleNamespace(callback_query=None,
+                              effective_chat=SimpleNamespace(id=10))
+        asyncio.run(bot.on_error(upd, self._ctx(fake)))
+        assert len(fake.sent) == 1
+        _, text = fake.sent[0]
+        assert "secret internal detail" not in text
+        assert "ValueError" not in text
+        assert "/errors" in text
+
+    def test_group_chat_gets_nothing(self):
+        fake = self._Bot()
+        upd = SimpleNamespace(callback_query=None,
+                              effective_chat=SimpleNamespace(id=-100123))
+        asyncio.run(bot.on_error(upd, self._ctx(fake)))
+        assert fake.sent == []
+
+    def test_no_update_is_safe(self):
+        fake = self._Bot()
+        asyncio.run(bot.on_error(None, self._ctx(fake)))
+        assert fake.sent == []
+
+
+import os
+
+
+class TestRunConfigCheck:
+    def test_fixture_instance_passes(self):
+        assert bot._run_config_check() is True
+
+    def test_malformed_token_fails(self):
+        orig = os.environ.get("TELEGRAM_BOT_TOKEN")
+        os.environ["TELEGRAM_BOT_TOKEN"] = "not-a-token"
+        try:
+            assert bot._run_config_check() is False
+        finally:
+            if orig is not None:
+                os.environ["TELEGRAM_BOT_TOKEN"] = orig
+
+    def test_corrupt_state_file_fails(self):
+        f = bot.BASE_DIR / "cron_jobs.json"
+        orig = f.read_text(encoding="utf-8") if f.exists() else None
+        f.write_text("{corrupt", encoding="utf-8")
+        try:
+            assert bot._run_config_check() is False
+        finally:
+            if orig is None:
+                f.unlink()
+            else:
+                f.write_text(orig, encoding="utf-8")

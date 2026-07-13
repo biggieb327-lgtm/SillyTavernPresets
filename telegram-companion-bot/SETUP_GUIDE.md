@@ -101,6 +101,12 @@ CHARACTER_CARD=nora.json
 BOT_TIMEZONE=America/New_York
 ```
 
+Preflight the config before launching (checks token shape, timezone, card,
+writable paths, state-file integrity — no network, exit 0 = ready):
+```bash
+~/telegram-bot/venv/bin/python ~/telegram-bot/bot.py ~/nora-bot --check-config
+```
+
 Start the bot:
 ```bash
 bash ~/telegram-bot/run-bot.sh ~/nora-bot nora

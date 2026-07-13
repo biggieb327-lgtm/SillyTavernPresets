@@ -170,6 +170,14 @@ else
   bad "private-gate-registered" "_private_gate not registered in handler group -1 — per-handler checks drift (that is how /start was missed)"
 fi
 
+# v2026-07-13.2: raw exception text was interpolated into chat messages — leaks
+# internals, and on_error would post them into the pilot GROUP chat.
+if grep -qE '\{type\(err\)|❌[^"]*\{e' "$BOT"; then
+  bad "no-exception-leak" "a user-facing ❌ message interpolates a raw exception again — internals leak to chat (and to groups via on_error)"
+else
+  ok "no-exception-leak: user-facing errors are generic; details stay in the log"
+fi
+
 echo
 echo "evals: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]

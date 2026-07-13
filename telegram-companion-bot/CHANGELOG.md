@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-13.2 — Error hygiene + --check-config preflight (R2+R3, operability)
+
+Two small items from the same hardening plan as v2026-07-13.1, shipped together.
+
+**R2 — raw exceptions no longer reach chat.** Eight handler sites sent
+`❌ Something went wrong: {e}` (and variants) and the global `on_error` sent
+`{type(err).__name__}: {err}` to whatever chat triggered the failure. That leaks
+internals (paths, library errors, provider details) and — the sharp edge — `on_error`
+would post them into a *group* chat, i.e. to every human in the pilot group. All
+user-facing errors are now a fixed generic line pointing at `/errors` (admin-gated,
+where the detail already lives via the existing `log.error` calls; the one site that
+didn't log, the menu heartbeat button, now does). `on_error` additionally goes silent
+in group chats. Kept as-is: human-authored messages ("file's too big"), and the JSON
+upload parse error now shows only the structured `e.msg`/`e.lineno` from
+JSONDecodeError — that's about the user's own file, not internals. Eval-pinned
+(`no-exception-leak`).
+
+**R3 — `python bot.py <dir> --check-config`.** No-network preflight for standing up
+an instance: token shape, timezone actually resolving (`BOT_TIMEZONE` set but
+`ZoneInfo` failing = missing tzdata, the silent naive-time failure mode), card
+loaded, instance dir writable, every present state file parses as JSON (a corrupt
+one means silent empty-state startup — restore from backup first), owner claimed or
+not, ALLOWED_USERS empty or not, models set. Exit 0 = ready to launch. Missing
+token/key/card already hard-fail at import with actionable messages, so the check
+covers the failures that were previously only discoverable at 3am.
+
 ## v2026-07-13.1 — Ownership hardening: claim-once owner + private-chat gate (R1, security)
 
 **Root cause (found while fact-checking an external review, confirmed in code):**
