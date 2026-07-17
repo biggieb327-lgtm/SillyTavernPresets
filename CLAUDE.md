@@ -58,12 +58,13 @@ For complex work (multi-step, behavior-changing, or fleet-touching), read
 decisions and session-earned traps. For simple work, do not load it.
 
 Before starting work, inspect relevant project skills in `.claude/skills/`
-(`skill-router/SKILL.md` is the index; staged skills pending review live in
-`.claude/skills/_staging/` — see its README).
+(`skill-router/SKILL.md` is the index; the 2026-07-11 staged batch was owner-reviewed
+and promoted in full on 2026-07-17 — `_staging/` now holds only the promotion
+procedure for future skills).
 
 Use:
-- `repo-debugging-playbook` (staged) for bugs and regressions
-- `repo-change-control` + `bot-code-invariants` (staged) for edits that change behavior
+- `repo-debugging-playbook` for bugs and regressions
+- `repo-change-control` + `bot-code-invariants` for edits that change behavior
 - `repo-validation-gate` before declaring done
 
 Do not load unrelated skills.
