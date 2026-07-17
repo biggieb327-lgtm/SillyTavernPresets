@@ -1206,6 +1206,111 @@ class TestRestaurantsBrief:
         assert bot._restaurants_brief([]) == ""
 
 
+class TestMapIntent:
+    def test_route_positives(self):
+        cases = {
+            "how do I get to the airport": "the airport",
+            "directions to pike place market": "pike place market",
+            "give me directions to the ferry terminal": "the ferry terminal",
+            "how far is bellevue square from here?": "bellevue square",  # filler stripped
+            "how far is it to snoqualmie falls": "snoqualmie falls",
+            "how long does it take to get to sea-tac": "sea-tac",
+            "how long to bike to green lake": "green lake",
+            "what's the commute like to redmond": "redmond",
+        }
+        for text, dest in cases.items():
+            assert bot._map_intent(text) == ("route", dest), text
+
+    def test_nearby_positives(self):
+        cases = {
+            "is there a pharmacy nearby": "pharmacy",
+            "any coffee shops around here": "coffee shops",
+            "closest gas station?": "gas station",
+            "nearest atm to me": "atm",
+        }
+        for text, cat in cases.items():
+            assert bot._map_intent(text) == ("nearby", cat), text
+
+    def test_figurative_negatives(self):
+        for t in ["how do I get to sleep", "how do I get to know you better",
+                  "you're so far away", "how far along are you", "how far is too far",
+                  "how long have you been up", "how long until you reply",
+                  "how long to get over him", "get to the point",
+                  "is there anything nearby", "is there any hope for us",
+                  "you're the closest thing to heaven", "stay close to me",
+                  "are you around?", "how's your day"]:
+            assert bot._map_intent(t) is None, t
+
+    def test_none_and_empty_safe(self):
+        assert bot._map_intent(None) is None
+        assert bot._map_intent("") is None
+
+    def test_clean_dest_bounds(self):
+        assert bot._clean_map_dest("x") == ""            # too short
+        assert bot._clean_map_dest("a" * 61) == ""       # too long
+        assert bot._clean_map_dest(" Knoxville? ") == "Knoxville"  # \b-anchored reject
+
+
+class TestRouteBrief:
+    _route = {"routes": [{"summary": {
+        "travelTimeInSeconds": 1080, "lengthInMeters": 12713, "trafficDelayInSeconds": 240}}]}
+
+    def test_summary_with_traffic(self):
+        out = bot._route_brief(self._route, "car", "Bellevue Square")
+        assert out.startswith("drive to Bellevue Square: 18 min, 7.9 mi")
+        assert "+4 min traffic" in out and "🚗" not in out
+
+    def test_small_delay_excluded(self):
+        r = {"routes": [{"summary": {"travelTimeInSeconds": 600, "lengthInMeters": 3000,
+                                     "trafficDelayInSeconds": 45}}]}
+        assert "traffic" not in bot._route_brief(r, "car", "X")
+
+    def test_bicycle_verb(self):
+        assert bot._route_brief(self._route, "bicycle", "X").startswith("bike to X")
+
+    def test_pedestrian_verb(self):
+        assert bot._route_brief(self._route, "pedestrian", "X").startswith("walk to X")
+
+    def test_empty_and_malformed(self):
+        assert bot._route_brief({}, "car", "X") == ""
+        assert bot._route_brief(None, "car", "X") == ""
+        assert bot._route_brief({"routes": [{"summary": {}}]}, "car", "X") == ""
+
+
+class TestPlacesBrief:
+    def test_non_restaurant_category(self):
+        out = bot._places_brief([
+            {"poi": {"name": "Bartell Drugs", "categories": ["pharmacy"]}, "dist": 400}])
+        assert "Bartell Drugs" in out and "(pharmacy, " in out and "📍" not in out
+
+    def test_sorted_by_distance(self):
+        out = bot._places_brief([
+            {"poi": {"name": "Far", "categories": ["atm"]}, "dist": 900},
+            {"poi": {"name": "Near", "categories": ["atm"]}, "dist": 100},
+        ])
+        assert out.index("Near") < out.index("Far")
+
+    def test_skips_nameless_and_empty(self):
+        assert bot._places_brief([{"poi": {}}]) == ""
+        assert bot._places_brief([]) == ""
+
+
+class TestFreshLocation:
+    def test_fresh_passes(self):
+        assert bot._fresh_location({"lat": 1, "lon": 2, "ts": 1000.0, "live_until": None}, now=1100.0)
+
+    def test_stale_fails(self):
+        assert not bot._fresh_location({"ts": 0.0, "live_until": None}, now=5 * 3600.0)
+
+    def test_live_share_overrides_stale_ts(self):
+        assert bot._fresh_location({"ts": 0.0, "live_until": 6 * 3600.0}, now=5 * 3600.0)
+
+    def test_none_and_missing_keys_safe(self):
+        assert not bot._fresh_location(None)
+        assert not bot._fresh_location({})
+        assert not bot._fresh_location({"lat": 1, "lon": 2})
+
+
 class TestBuildCommandMenu:
     @staticmethod
     def _names(cmds):

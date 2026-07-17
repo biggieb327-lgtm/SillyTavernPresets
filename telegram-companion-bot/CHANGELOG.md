@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-17.1 — Generalized map intent (MAP_INTENT; ROADMAP 3.5 phase 2)
+
+**Root cause this release addresses:** FOOD_SUGGESTIONS (v2026-07-11.14) proved that
+pre-fetching real TomTom data into the single reply stops the character inventing
+places — but only for food. Asked "how far is bellevue square" or "is there a
+pharmacy nearby", she still answered from imagination: fabricated minutes, distances,
+and place names, exactly the hallucination class the food path closed.
+
+**What shipped:** behind `MAP_INTENT=1` (default off; unset = prior behavior), an
+explicit map-shaped ask in a 1:1 chat pre-fetches real data and injects it as the
+same one-turn bracketed note the food path uses, riding the single existing reply:
+- **Route asks** ("how do I get to X", "how far is (it to) X", "directions to X",
+  "how long to bike/drive/walk to X", "what's the commute to X"): geocode the
+  destination, route from the user's stored location with the instance's
+  `TOMTOM_TRAVEL_MODE`, inject a plain `_route_brief` ("drive to X: 18 min, 7.9 mi
+  (incl. +4 min traffic)") with use-ONLY-these-facts phrasing. Max 2 REST calls.
+- **Nearby asks** ("is there a <thing> nearby", "any <thing> around here",
+  "closest/nearest <thing>"): POI search around the user's location (5 km), injected
+  via `_places_brief` (`_restaurants_brief` generalized; the old name delegates so the
+  food path and its tests are untouched). 1 REST call.
+
+**Design decisions (why, so they aren't re-litigated):**
+- **Keyword regex intent, not an LLM classifier** — intent runs on every 1:1 message
+  and a per-message LLM side call is banned (bot-code-invariants #3, same reason
+  `_is_food_query` is a regex). The negative space is test-pinned: "how do I get to
+  sleep", "how far is too far", "closest thing to heaven" etc. must never fire; a
+  destination stoplist (`_MAP_DEST_REJECT`) catches figurative objects, \b-anchored
+  so real places ("Knoxville") survive. Misses on creative phrasings are accepted v1
+  cost, same as food.
+- **Location freshness gate** (`_fresh_location`): route origins and nearby centers
+  use the stored location only when <4h old (the photo path's precedent) or inside a
+  live-share window — a route from last week's pin would be confidently wrong.
+  Without one she nudges for a pin instead of guessing (food-path pattern).
+- **Un-geocodable destinations fail honestly:** "home"/"work" geocode literally,
+  usually miss, and inject a "you couldn't find it — say so, don't invent" note.
+  Resolving them from her memory of the user is a deliberate follow-up
+  (owner-settled 2026-07-17), as is "what's near <remote place>" — v1 nearby is
+  user-location-only.
+- **No cooldown/cache** (owner-approved): the precise intent gate is the budget
+  control, matching how FOOD_SUGGESTIONS shipped; a `[map] intent=...` log line
+  instruments the fire rate. If fleet logs show over-firing, a per-chat cooldown is
+  the pre-agreed follow-up.
+- Food wins when both flags fire (elif chain) — at most one injection + one TomTom
+  fetch sequence per message. Group chats never reach the block (it lives in the 1:1
+  `handle_message` path); `_TomTomError` anywhere degrades silently to a normal
+  reply; error logging stays key-free via the existing `_tomtom_err_reason` path.
+
+**Pure helpers + tests:** `_map_intent`, `_clean_map_dest`, `_route_brief`,
+`_places_brief`, `_fresh_location`. 17 new tests; `TestRestaurantsBrief` passes
+unmodified against the delegate, proving the refactor is behavior-preserving.
+
 ## v2026-07-13.2 — Error hygiene + --check-config preflight (R2+R3, operability)
 
 Two small items from the same hardening plan as v2026-07-13.1, shipped together.

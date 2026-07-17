@@ -102,10 +102,13 @@ single-device blast radius.
   food-ish message + shared location → real nearby restaurants pre-fetched and
   injected into the single reply so the character recommends them in her own voice.
   No extra LLM call; default off. Proves the pre-fetch-and-inject pattern.
-- **Phase 2 remainder (future):** generalize beyond restaurants — routing/place data
-  woven into conversation the same pre-fetch-and-inject way (broaden `_is_food_query`
-  into intent detection for "how do I get to X", "what's near Y"). Same budget rule:
-  pre-fetch on an explicit map-shaped ask, never a per-message LLM side call.
+- **Phase 2 ✅ (shipped v2026-07-17.1, `MAP_INTENT`):** generalized map intent —
+  route asks ("how do I get to X", "how far is X") and nearby asks ("is there a
+  <thing> nearby") pre-fetch real TomTom data into the single reply via regex intent
+  detection (`_map_intent`), honoring the budget rule (no per-message LLM side call).
+  Deferred follow-ups (owner-settled 2026-07-17): "what's near <remote place>",
+  memory-resolved "home"/"work" destinations, and a per-chat cooldown if the `[map]`
+  log line ever shows over-firing.
 
 ---
 
@@ -158,7 +161,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
 | **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
-| **Next** | 3.5 TomTom Phase 2 — generalized map intent | Pre-fetch-and-inject pattern proven by FOOD_SUGGESTIONS (v2026-07-11.14) |
+| ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,

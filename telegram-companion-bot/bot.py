@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-13.2"
+BOT_VERSION = "2026-07-17.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -297,6 +297,10 @@ JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "ye
 # location, hand the model real nearby places so it recommends from fact, not
 # imagination. Rides the single reply (no extra LLM call). Needs TOMTOM_API_KEY too.
 FOOD_SUGGESTIONS = os.getenv("FOOD_SUGGESTIONS", "0").lower() in ("1", "true", "yes")
+# Generalized map intent (ROADMAP 3.5 phase 2): "how do I get to X" / "is there a
+# <thing> nearby" pre-fetch real TomTom route/place data into the single reply, the
+# same way FOOD_SUGGESTIONS does. Independent of FOOD_SUGGESTIONS; needs TOMTOM_API_KEY.
+MAP_INTENT = os.getenv("MAP_INTENT", "0").lower() in ("1", "true", "yes")
 
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
@@ -8304,6 +8308,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "(📎 → Location) instead of naming specific restaurants you can't verify.]"
                 )
 
+        # Generalized map intent (MAP_INTENT, ROADMAP 3.5 phase 2): on an explicit
+        # map-shaped ask ("how do I get to X", "is there a <thing> nearby"), pre-fetch
+        # real TomTom data so times/distances/places come from fact, not imagination.
+        # Rides THIS reply — no extra LLM call (bot-code-invariants #3); fetches are
+        # off-loop via to_thread; a TomTom failure degrades to a normal reply.
+        # elif keeps it to at most one injection per message — food (above) wins.
+        elif MAP_INTENT and TOMTOM_ENABLED and (_mi := _map_intent(user_message)) is not None:
+            _mkind, _mquery = _mi
+            log.info("[map] intent=%s payload=%r", _mkind, _mquery)  # fire-rate instrument
+            _mloc = user_location.get(chat_id)
+            if not _fresh_location(_mloc):
+                content_for_model += (
+                    "\n[They're asking about "
+                    + ("getting somewhere" if _mkind == "route" else "what's nearby")
+                    + ", but you don't have a recent location for them — nudge them to "
+                    "drop a pin (📎 → Location) instead of guessing distances or naming "
+                    "places you can't verify.]"
+                )
+            elif _mkind == "route":
+                try:
+                    _mgeo = await asyncio.to_thread(_tomtom_geocode, _mquery)
+                    if _mgeo is None:
+                        content_for_model += (
+                            f"\n[You tried to look up \"{_mquery}\" on the map but couldn't "
+                            "find it — say so or ask them to be more specific; do NOT invent "
+                            "directions, times, or distances.]"
+                        )
+                    else:
+                        _mmode = _tomtom_mode()
+                        _mroute = await asyncio.to_thread(
+                            _fetch_tomtom_route, (_mloc["lat"], _mloc["lon"]),
+                            (_mgeo[0], _mgeo[1]), _mmode)
+                        _mbrief = _route_brief(_mroute, _mmode, _mgeo[2])
+                        if _mbrief:
+                            content_for_model += (
+                                f"\n[Real route info from the map — they asked how to get to "
+                                f"{_mgeo[2]}. Use ONLY these facts; do NOT invent times, "
+                                f"distances, or street names:\n{_mbrief}\n"
+                                "Work it in naturally, in your own voice.]"
+                            )
+                except _TomTomError:
+                    pass  # degrade silently to a normal reply, same as the food path
+            else:  # nearby
+                try:
+                    _mres = await asyncio.to_thread(
+                        _fetch_tomtom_search, _mquery, _mloc["lat"], _mloc["lon"], 5000)
+                except _TomTomError:
+                    _mres = []
+                _mbrief = _places_brief(_mres)
+                if _mbrief:
+                    content_for_model += (
+                        f"\n[Real {_mquery} options near them right now — if you name places, "
+                        "use ONLY these, in your own voice; do NOT invent places or name ones "
+                        f"not in this list:\n{_mbrief}\n]"
+                    )
+
         messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -9403,9 +9463,10 @@ def _is_food_query(text: str) -> bool:
     return bool(text and _FOOD_QUERY_RE.search(text))
 
 
-def _restaurants_brief(results: list, limit: int = 5) -> str:
-    """Plain 'Name (cuisine, dist)' lines for injecting into the reply prompt — no
-    emoji, distance-sorted. '' if nothing usable."""
+def _places_brief(results: list, limit: int = 5) -> str:
+    """Plain 'Name (category, dist)' lines for injecting into the reply prompt — no
+    emoji, distance-sorted. '' if nothing usable. Works for any POI category
+    (_poi_cuisine only special-cases the generic 'restaurant' label)."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
     rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
     out = []
@@ -9419,6 +9480,121 @@ def _restaurants_brief(results: list, limit: int = 5) -> str:
         meta = ", ".join(x for x in [cui, _fmt_distance(dist) if isinstance(dist, (int, float)) else ""] if x)
         out.append(f"- {name}" + (f" ({meta})" if meta else ""))
     return "\n".join(out)
+
+
+def _restaurants_brief(results: list, limit: int = 5) -> str:
+    """Restaurant-flavored alias of _places_brief, kept for the FOOD_SUGGESTIONS path."""
+    return _places_brief(results, limit)
+
+
+# --- Generalized map intent (MAP_INTENT, ROADMAP 3.5 phase 2) ---
+# Keyword/regex detection, deliberately NOT an LLM classifier: intent runs on every
+# 1:1 message, and a per-message LLM side call is banned (bot-code-invariants #3).
+# v1 scope (owner-settled 2026-07-17): route asks use the user's fresh location as
+# origin; nearby asks search categories around the user's location only ("what's
+# near <remote place>" is a follow-up); "home"/"work" destinations geocode literally
+# and fail honestly rather than reading bot memory.
+
+_MAP_DEST = r"(?P<dest>[^?.!,;\n]{2,60})"
+_MAP_ROUTE_RES = [
+    re.compile(r"\bhow (?:do|would|can|should) (?:i|we) get to " + _MAP_DEST, re.I),
+    re.compile(r"\b(?:give me )?directions to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow to get to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow far is it to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow far (?:is|to) " + _MAP_DEST, re.I),
+    re.compile(r"\bhow long (?:does it take|will it take|would it take) to (?:get|drive|walk|bike|ride) to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow long to (?:get|drive|walk|bike|ride) to " + _MAP_DEST, re.I),
+    re.compile(r"\bwhat'?s the (?:drive|commute)(?: like)? to " + _MAP_DEST, re.I),
+]
+# Destinations that mean the ask was figurative ("get to sleep", "how far is too
+# far") or unresolvable pronouns. First-word match, \b-anchored so real places
+# survive ("Knoxville" is not "know").
+_MAP_DEST_REJECT = re.compile(
+    r"^(?:sleep|know|be|feel|the point|too|over|you|your|him|her|it|this|that|there|me|us|them)\b",
+    re.I,
+)
+_MAP_DEST_FILLERS = re.compile(
+    r"\s*(?:from (?:here|my place|home)|right now|tonight|today|tomorrow)\s*$", re.I)
+
+_MAP_CAT = r"(?P<cat>[a-z][a-z '&-]{1,40}?)"
+_MAP_NEARBY_RES = [
+    re.compile(r"\b(?:is|are) there (?:a|an|any|some) " + _MAP_CAT
+               + r" (?:near ?by|near me|near here|around here|close by|close to me)\b", re.I),
+    re.compile(r"\bany " + _MAP_CAT + r" (?:near ?by|near me|near here|around here|close by)\b", re.I),
+    re.compile(r"\b(?:closest|nearest) " + _MAP_CAT + r"(?:\s+(?:to me|near ?by|around here))?\s*[?.!]*$", re.I),
+]
+# Category first-words that mean the sentence wasn't a place search at all
+# ("closest thing to heaven", "is there anyone around").
+_MAP_CAT_REJECT = {"thing", "one", "anything", "anyone", "anybody", "person", "friend", "way", "you"}
+
+
+def _clean_map_dest(dest: str) -> str:
+    """Normalize a captured route destination; '' if it isn't a plausible place."""
+    d = (dest or "").strip().strip("\"'").rstrip("?!.,;: ").strip()
+    while True:
+        new = _MAP_DEST_FILLERS.sub("", d).rstrip("?!.,;: ").strip()
+        if new == d:
+            break
+        d = new
+    if len(d) < 2 or len(d) > 60 or _MAP_DEST_REJECT.match(d):
+        return ""
+    return d
+
+
+def _map_intent(text: str):
+    """-> ("route", destination) | ("nearby", category) | None. v1 keyword/regex —
+    like _is_food_query it will miss creative phrasings; it must never fire on
+    figurative ones (the negatives are test-pinned)."""
+    if not text:
+        return None
+    for rx in _MAP_ROUTE_RES:
+        m = rx.search(text)
+        if m:
+            dest = _clean_map_dest(m.group("dest"))
+            if dest:
+                return ("route", dest)
+    for rx in _MAP_NEARBY_RES:
+        m = rx.search(text)
+        if m:
+            cat = m.group("cat").strip().rstrip("?!.,")
+            if cat and cat.split()[0].lower() not in _MAP_CAT_REJECT:
+                return ("nearby", cat)
+    return None
+
+
+def _route_brief(route: dict, mode: str, dest_label: str) -> str:
+    """Plain no-emoji route summary for prompt injection; '' when there's no usable
+    route so the caller skips injecting. Same traffic threshold as _format_route."""
+    routes = (route or {}).get("routes") or []
+    if not routes:
+        return ""
+    summ = (routes[0] or {}).get("summary") or {}
+    dur = _fmt_duration(summ.get("travelTimeInSeconds"))
+    dist = _fmt_distance(summ.get("lengthInMeters"))
+    if dur == "?" and dist == "?":
+        return ""
+    verb = {"bicycle": "bike", "pedestrian": "walk"}.get(mode, "drive")
+    line = f"{verb} to {dest_label}: {dur}, {dist}"
+    try:
+        if int(summ.get("trafficDelayInSeconds") or 0) >= 60:
+            line += f" (incl. +{_fmt_duration(summ.get('trafficDelayInSeconds'))} traffic)"
+    except (TypeError, ValueError):
+        pass
+    return line
+
+
+def _fresh_location(loc, now=None, max_age: int = 4 * 3600) -> bool:
+    """True if a stored user_location entry is usable for map answers: shared within
+    max_age (4h — the photo path's precedent) OR still inside a live-share period."""
+    if not isinstance(loc, dict):
+        return False
+    now = time.time() if now is None else now
+    try:
+        if loc.get("live_until") and float(loc["live_until"]) > now:
+            return True
+        return (now - float(loc["ts"])) < max_age
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 class _TomTomError(Exception):
