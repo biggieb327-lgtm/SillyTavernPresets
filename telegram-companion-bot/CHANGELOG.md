@@ -7,6 +7,41 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-18.2 — Schedule-driven unavailability (SCHED_BUSY; ROADMAP 3.6)
+
+**Root cause this release addresses:** `schedule.txt` was injected into context every
+turn but nothing **enforced** it behaviorally — the character read as always instantly
+available, never mid-anything, never having to leave. The always-on companion is the
+single biggest "puppet" tell (identified in `REVIEW-BRAINENGINE-2026-07-18.md`, the
+one idea from that review worth its weight). Context alone doesn't shift register;
+models treat an injected schedule as trivia unless the prompt states what it means
+*right now*.
+
+**What shipped (zero extra LLM calls):** behind `SCHED_BUSY` (default **on**, `0`
+disables without redeploy):
+- New pure `_parse_busy_blocks(sched_text)`: extracts `(start_min, end_min, activity)`
+  from today's schedule lines carrying an **explicit** `HH:MM-HH:MM` range (hyphen/en
+  dash/em dash). Deliberately conservative — loose wording ("morning shift", "gym
+  later") never fires; invalid clock values and overnight ranges (end ≤ start) are
+  skipped rather than guessed. `_busy_now(sched_text, now)` returns the activity the
+  current time falls inside, else "".
+- `assemble_messages`: when mid-block, one system line after the schedule — she's
+  answering from her phone in stolen moments, shorter replies, and may say she has to
+  get back to it. Logs `[sched-busy] <activity>` per assembly so over-firing is
+  visible in bot.log (the ROADMAP-specified tripwire).
+- Private reply path: compose delay (`_typing_delay_secs`) is multiplied by
+  `SCHED_BUSY_DELAY_MULT` (default 3.0, clamped 1–10 at use) while busy. The **group
+  path keeps its own timing untouched** — no group-behavior change in this release.
+- Proactive sends unchanged: quiet hours + nudge budget stay authoritative; this
+  feature only adds restraint, never sends.
+
+**Config:** `SCHED_BUSY`, `SCHED_BUSY_DELAY_MULT` documented in `.env.example`.
+Numeric parsing via `_env_float` (bad values warn + fall back).
+
+**Pure helpers + tests:** `_parse_busy_blocks`, `_busy_now`; `TestBusyBlocks` (8
+tests: explicit ranges, loose-wording immunity, dash variants, overnight/invalid
+skip, boundary minutes, empty schedule).
+
 ## v2026-07-18.1 — Stop memory latching (MEMORY_REPEAT_SUPPRESS_TURNS)
 
 **Root cause this release addresses:** `triggered_memories` is deterministic and

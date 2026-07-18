@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-18.1"
+BOT_VERSION = "2026-07-18.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -431,6 +431,11 @@ PEOPLE_FILE = BASE_DIR / "people.txt"
 PROJECTS_FILE = BASE_DIR / "projects.txt"
 SCHEDULE_FILE = BASE_DIR / "schedule.txt"
 LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
+# Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
+# explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
+# shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
+SCHED_BUSY = os.getenv("SCHED_BUSY", "1").lower() not in ("0", "false", "no", "off")
+SCHED_BUSY_DELAY_MULT = _env_float("SCHED_BUSY_DELAY_MULT", "3.0")
 _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
@@ -814,6 +819,43 @@ def _read_schedule_today() -> str:
         elif in_today:
             result.append(stripped)
     return "\n".join(result).strip()
+
+
+# ROADMAP 3.6: only explicit HH:MM-HH:MM ranges count as busy blocks — loosely worded
+# schedule lines ("morning shift", "gym later") must never fire the busy state.
+_BUSY_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})(?!\d)")
+
+
+def _parse_busy_blocks(sched_text: str) -> list[tuple[int, int, str]]:
+    """(start_minute, end_minute, activity) per schedule line carrying an explicit
+    time range. Overnight ranges (end <= start) are skipped rather than guessed."""
+    blocks = []
+    for line in (sched_text or "").splitlines():
+        m = _BUSY_RANGE_RE.search(line)
+        if not m:
+            continue
+        h1, m1, h2, m2 = (int(x) for x in m.groups())
+        if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
+            continue
+        start, end = h1 * 60 + m1, h2 * 60 + m2
+        if end <= start:
+            continue
+        activity = (line[:m.start()] + " " + line[m.end():]).strip(" \t-–—:•,")
+        blocks.append((start, end, activity[:120] or "something on her schedule"))
+    return blocks
+
+
+def _busy_now(sched_text: str, now=None) -> str:
+    """The activity she's mid-way through right now per today's schedule, or ''."""
+    if not sched_text:
+        return ""
+    if now is None:
+        now = datetime.now(tz=TZ) if TZ else datetime.now()
+    minutes = now.hour * 60 + now.minute
+    for start, end, activity in _parse_busy_blocks(sched_text):
+        if start <= minutes < end:
+            return activity
+    return ""
 
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
@@ -3868,6 +3910,19 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     sched = _read_schedule_today()
     if sched:
         messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
+        # ROADMAP 3.6: a schedule entry she's mid-way through changes her register —
+        # she's living her day, not waiting by the phone.
+        if SCHED_BUSY:
+            busy = _busy_now(sched)
+            if busy:
+                messages.append({"role": "system", "content": (
+                    f"# Right now\nPer her schedule, {NAME} is currently in the middle of: "
+                    f"{busy}. She's answering from her phone in stolen moments — replies come "
+                    f"shorter and less polished than usual. If the conversation stretches on, "
+                    f"it's natural for her to say she has to get back to it and pick the "
+                    f"thread up later. She doesn't owe long answers right now."
+                )})
+                print(f"[sched-busy] {busy}")
 
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
@@ -7905,7 +7960,12 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         except Exception as e:
             log.warning("[react] failed: %s", e)
     if clean:
-        await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
+        pre = _typing_delay_secs(clean)
+        # ROADMAP 3.6: mid-busy-block she types in stolen moments — stretch the
+        # compose delay. Private chats only; the group path keeps its own timing.
+        if SCHED_BUSY and pre > 0 and _busy_now(_read_schedule_today()):
+            pre *= max(1.0, min(10.0, SCHED_BUSY_DELAY_MULT))
+        await send_bubbles(context, chat_id, clean, pre_delay=pre)
         tts_prob = VOICE_REPLY_TO_VOICE if voice_input else TTS_CHANCE
         if voice_reply.get(chat_id) and random.random() < tts_prob:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))

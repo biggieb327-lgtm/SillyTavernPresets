@@ -2352,3 +2352,50 @@ class TestRunConfigCheck:
                 f.unlink()
             else:
                 f.write_text(orig, encoding="utf-8")
+
+
+# ── _parse_busy_blocks / _busy_now (ROADMAP 3.6) ─────────────────────────────
+# Only explicit HH:MM-HH:MM ranges may fire the busy state; loose wording never does.
+
+class TestBusyBlocks:
+    def test_explicit_range_parsed(self):
+        blocks = bot._parse_busy_blocks("9:00-17:30 shift at the depot")
+        assert blocks == [(540, 1050, "shift at the depot")]
+
+    def test_loose_lines_never_fire(self):
+        sched = "Monday:\nmorning shift\ngym later\nlunch around noon"
+        assert bot._parse_busy_blocks(sched) == []
+
+    def test_en_dash_and_embedded_range(self):
+        blocks = bot._parse_busy_blocks("- tutoring 14:00–15:00 (Maya)")
+        assert len(blocks) == 1
+        start, end, activity = blocks[0]
+        assert (start, end) == (14 * 60, 15 * 60)
+        assert "tutoring" in activity and "Maya" in activity
+
+    def test_overnight_and_invalid_ranges_skipped(self):
+        assert bot._parse_busy_blocks("23:00-07:00 sleep") == []
+        assert bot._parse_busy_blocks("25:00-26:00 nonsense") == []
+        assert bot._parse_busy_blocks("10:75-11:80 typo") == []
+
+    def test_activity_falls_back_when_line_is_only_times(self):
+        blocks = bot._parse_busy_blocks("10:00-11:00")
+        assert blocks[0][2] == "something on her schedule"
+
+    def test_busy_now_inside_and_outside(self):
+        from datetime import datetime
+        sched = "9:00-17:00 shift"
+        inside = datetime(2026, 7, 18, 12, 0)
+        outside = datetime(2026, 7, 18, 18, 0)
+        assert bot._busy_now(sched, now=inside) == "shift"
+        assert bot._busy_now(sched, now=outside) == ""
+
+    def test_busy_now_boundaries(self):
+        from datetime import datetime
+        sched = "9:00-17:00 shift"
+        assert bot._busy_now(sched, now=datetime(2026, 7, 18, 9, 0)) == "shift"
+        assert bot._busy_now(sched, now=datetime(2026, 7, 18, 17, 0)) == ""
+
+    def test_empty_schedule(self):
+        assert bot._busy_now("", now=None) == ""
+        assert bot._parse_busy_blocks("") == []
