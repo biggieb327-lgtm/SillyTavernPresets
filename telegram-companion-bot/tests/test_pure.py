@@ -2399,3 +2399,76 @@ class TestBusyBlocks:
     def test_empty_schedule(self):
         assert bot._busy_now("", now=None) == ""
         assert bot._parse_busy_blocks("") == []
+
+
+# ── _fatigue_update / _fatigue_effective (ROADMAP 3.7) ───────────────────────
+# Arithmetic-only social battery: intensity drains regardless of sign, calm-positive
+# recharges, idle time decays. Clamped to [0, 100].
+
+class TestFatigue:
+    def test_intense_exchange_drains_both_signs(self):
+        assert bot._fatigue_update(50.0, 2.5, 0) == 62.0
+        assert bot._fatigue_update(50.0, -2.0, 0) == 62.0
+
+    def test_calm_positive_recharges(self):
+        assert bot._fatigue_update(50.0, 1.0, 0) == 35.0
+        assert bot._fatigue_update(50.0, 1.9, 0) == 35.0
+
+    def test_neutral_drifts_down(self):
+        assert bot._fatigue_update(50.0, 0.0, 0) == 45.0
+        assert bot._fatigue_update(50.0, -1.5, 0) == 45.0
+
+    def test_clamped_to_bounds(self):
+        assert bot._fatigue_update(98.0, 3.0, 0) == 100.0
+        assert bot._fatigue_update(2.0, 1.0, 0) == 0.0
+
+    def test_gap_decay_applies_before_exchange(self):
+        # 3h gap at 10/h wipes 30 before the +12 intense hit lands.
+        assert bot._fatigue_update(80.0, 3.0, 3.0, decay_per_hour=10.0) == 62.0
+
+    def test_negative_gap_ignored(self):
+        assert bot._fatigue_update(50.0, 0.0, -5.0) == 45.0
+
+    def test_effective_decays_at_read_time(self):
+        now = 1_000_000.0
+        two_hours_ago = now - 7200
+        assert bot._fatigue_effective(80.0, two_hours_ago, now, 10.0) == 60.0
+
+    def test_effective_never_negative_and_zero_ts_safe(self):
+        assert bot._fatigue_effective(30.0, 0.0, 1_000_000.0, 10.0) == 0.0
+
+
+# ── _split_opening_mood (ROADMAP 3.7 day-mood residue) ───────────────────────
+# The MOOD meta line must be peeled off before day.txt is written; a model that
+# ignores the instruction degrades gracefully to no residue.
+
+class TestSplitOpeningMood:
+    def test_mood_line_parsed_and_stripped(self):
+        text = "Flat tire on the route this morning.\nMOOD: annoyed but rolling with it | -1"
+        events, opening = bot._split_opening_mood(text)
+        assert events == "Flat tire on the route this morning."
+        assert opening == ("annoyed but rolling with it", -1)
+
+    def test_no_mood_line_returns_none(self):
+        events, opening = bot._split_opening_mood("Just a normal day.")
+        assert events == "Just a normal day."
+        assert opening is None
+
+    def test_valence_clamped(self):
+        _, opening = bot._split_opening_mood("day stuff\nMOOD: euphoric | 9")
+        assert opening == ("euphoric", 3)
+
+    def test_last_mood_line_wins_and_mid_text_mood_not_matched(self):
+        text = "She texted 'MOOD: weird flex' to Maya.\nGood day overall.\nMOOD: content | 2"
+        events, opening = bot._split_opening_mood(text)
+        assert opening == ("content", 2)
+        assert "Maya" in events and "Good day" in events
+
+    def test_empty_and_none_safe(self):
+        assert bot._split_opening_mood("") == ("", None)
+        assert bot._split_opening_mood(None) == ("", None)
+
+    def test_empty_label_discarded(self):
+        events, opening = bot._split_opening_mood("day.\nMOOD:  | 2")
+        assert opening is None
+        assert events == "day."

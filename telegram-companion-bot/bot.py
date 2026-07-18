@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-18.2"
+BOT_VERSION = "2026-07-18.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -240,6 +240,15 @@ REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/ch
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
+# Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
+# feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
+# FATIGUE_STATE is also the master switch for the minimal-reply license.
+FATIGUE_STATE = os.getenv("FATIGUE_STATE", "1").lower() not in ("0", "false", "no", "off")
+FATIGUE_THRESHOLD = _env_float("FATIGUE_THRESHOLD", "70")
+FATIGUE_DECAY_PER_HOUR = _env_float("FATIGUE_DECAY_PER_HOUR", "10")
+# Day-mood residue (ROADMAP 3.7 / Yuralume review): her generated day seeds how she
+# opens — one extra line parsed from the existing midnight day-generation call.
+DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "false", "no", "off")
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
@@ -1872,6 +1881,7 @@ recent_summaries = {}  # chat_id -> short-term summary covering roughly the last
 recent_facts = {}      # chat_id -> list of recent/situational facts (last ~week)
 last_promotion = {}    # chat_id -> unix timestamp recent memory was last folded into long-term
 moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotional state
+fatigue = {}        # chat_id -> {"level": float 0-100, "ts": epoch} social battery (3.7)
 beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
 recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
 rec_seq = {}        # chat_id -> next recommendation id
@@ -1949,6 +1959,8 @@ def load_state():
         last_promotion[int(cid)] = ts
     for cid, mv in data.get("moods", {}).items():
         moods[int(cid)] = mv
+    for cid, fv in data.get("fatigue", {}).items():
+        fatigue[int(cid)] = fv
     for cid, bv in data.get("beliefs", {}).items():
         beliefs[int(cid)] = bv
     for cid, rl in data.get("recommendations", {}).items():
@@ -2043,6 +2055,7 @@ def _serialize_state() -> str:
         "recent_facts": {str(k): v for k, v in recent_facts.items()},
         "last_promotion": {str(k): v for k, v in last_promotion.items()},
         "moods": {str(k): v for k, v in moods.items()},
+        "fatigue": {str(k): v for k, v in fatigue.items()},
         "beliefs": {str(k): v for k, v in beliefs.items()},
         "recommendations": {str(k): v for k, v in recommendations.items()},
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
@@ -3178,12 +3191,14 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
     )
     data = _extract_json(raw)
 
+    try:
+        _valence = max(-3.0, min(3.0, float(data.get("valence"))))
+    except (TypeError, ValueError):
+        _valence = cur.get("score", 0.0)
+
     if want_mood:
         label = (data.get("mood") or "").strip() if isinstance(data.get("mood"), str) else ""
-        try:
-            valence = max(-3.0, min(3.0, float(data.get("valence"))))
-        except (TypeError, ValueError):
-            valence = cur.get("score", 0.0)
+        valence = _valence
         if label:
             value = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
             if _MAIN_LOOP:
@@ -3193,6 +3208,22 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                 moods[chat_id] = value
                 save_state()
             print(f"[mood] {label} ({valence:+.0f})")
+
+    if FATIGUE_STATE:
+        # Runs on the worker thread — state writes go back via call_soon_threadsafe
+        # exactly like the mood write above (invariant #6).
+        old_level = (fatigue.get(chat_id) or {}).get("level", 0.0)
+        new_level = _fatigue_update(old_level, _valence, gap_hours, FATIGUE_DECAY_PER_HOUR)
+        fvalue = {"level": round(new_level, 1), "ts": time.time()}
+        if _MAIN_LOOP:
+            _MAIN_LOOP.call_soon_threadsafe(fatigue.__setitem__, chat_id, fvalue)
+            _MAIN_LOOP.call_soon_threadsafe(save_state)
+        else:
+            fatigue[chat_id] = fvalue
+            save_state()
+        if (old_level >= FATIGUE_THRESHOLD) != (new_level >= FATIGUE_THRESHOLD):
+            state = "drained" if new_level >= FATIGUE_THRESHOLD else "recovered"
+            print(f"[fatigue] {state} ({old_level:.0f} -> {new_level:.0f})")
 
     def _clean_field(key: str) -> str:
         val = data.get(key)
@@ -3345,6 +3376,51 @@ async def post_reply_analysis(chat_id: int, user_msg: str):
     except Exception as e:
         log.warning("[analysis] post-reply pass failed: %s", e)
         _count_error("memory")
+
+
+def _fatigue_update(level: float, valence: float, gap_hours: float,
+                    decay_per_hour: float = 10.0) -> float:
+    """Arithmetic-only social-battery update (ROADMAP 3.7): time decay first, then the
+    exchange's cost. Intensity drains regardless of sign — a big emotional high costs
+    energy too; only calm-positive exchanges actively recharge."""
+    level = max(0.0, level - max(0.0, gap_hours or 0.0) * decay_per_hour)
+    if abs(valence) >= 2.0:
+        level += 12.0
+    elif valence >= 1.0:
+        level -= 15.0
+    else:
+        level -= 5.0
+    return max(0.0, min(100.0, level))
+
+
+def _fatigue_effective(level: float, ts: float, now_ts: float,
+                       decay_per_hour: float = 10.0) -> float:
+    """Level with passive decay applied at read time, so a long silent gap recovers
+    her before the first exchange of a new conversation (not one reply late)."""
+    hours = max(0.0, (now_ts - (ts or 0)) / 3600.0)
+    return max(0.0, level - hours * decay_per_hour)
+
+
+# ROADMAP 3.7 day-mood residue: the day generator ends its output with one
+# "MOOD: <label> | <valence>" line. Parsed out here so the meta line never
+# reaches day.txt (and therefore never reaches prompts or memory).
+_OPENING_MOOD_RE = re.compile(r"(?im)^\s*MOOD:\s*(.+?)\s*\|\s*(-?\d+)\s*$")
+
+
+def _split_opening_mood(text: str):
+    """(events_without_mood_line, (label, valence) | None). Uses the LAST matching
+    line; a model that ignores the instruction just yields (text, None)."""
+    m = None
+    for m in _OPENING_MOOD_RE.finditer(text or ""):
+        pass
+    if m is None:
+        return (text or "").strip(), None
+    label = m.group(1).strip()
+    valence = max(-3, min(3, int(m.group(2))))
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    if not label:
+        return cleaned, None
+    return cleaned, (label, valence)
 
 
 def _mood_behavior(s: float) -> str:
@@ -3768,6 +3844,31 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
+    # ROADMAP 3.7: social battery + minimal-reply license. Schedule is read once here
+    # and reused by the schedule section below.
+    sched = _read_schedule_today()
+    busy_activity = _busy_now(sched) if SCHED_BUSY else ""
+    if FATIGUE_STATE:
+        f = fatigue.get(chat_id) or {}
+        eff = _fatigue_effective(f.get("level", 0.0), f.get("ts", 0.0), time.time(),
+                                 FATIGUE_DECAY_PER_HOUR)
+        drained = eff >= FATIGUE_THRESHOLD
+        if drained:
+            messages.append({"role": "system", "content": (
+                f"# Social battery\n{NAME} is socially drained right now — a lot of "
+                f"conversation lately. Shorter replies, less patience for big or heavy "
+                f"topics, more likely to wind the chat down. It passes after a break. "
+                f"Don't announce it; let it show."
+            )})
+        if drained or busy_activity or mood_now(chat_id) <= -1.2:
+            reason = "busy" if busy_activity else "running on empty"
+            messages.append({"role": "system", "content": (
+                f"# Minimal replies allowed\nRight now a bare minimal reply — 'k', 'lol', "
+                f"a one-liner, or just an emoji — is a legitimate complete response. "
+                f"Don't pad it into a paragraph out of politeness; match how a real "
+                f"person texts when they're {reason}."
+            )})
+
     if vent_mode.get(chat_id):
         messages.append({"role": "system", "content": (
             f"VENT MODE: {uname} needs to vent, not be fixed. Validate first, always. "
@@ -3907,22 +4008,20 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     messages.append({"role": "system", "content": environment_note()})
 
     # Today's schedule section, if a schedule file exists for this instance.
-    sched = _read_schedule_today()
+    # (sched/busy_activity computed once above, next to the mood note.)
     if sched:
         messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
         # ROADMAP 3.6: a schedule entry she's mid-way through changes her register —
         # she's living her day, not waiting by the phone.
-        if SCHED_BUSY:
-            busy = _busy_now(sched)
-            if busy:
-                messages.append({"role": "system", "content": (
-                    f"# Right now\nPer her schedule, {NAME} is currently in the middle of: "
-                    f"{busy}. She's answering from her phone in stolen moments — replies come "
-                    f"shorter and less polished than usual. If the conversation stretches on, "
-                    f"it's natural for her to say she has to get back to it and pick the "
-                    f"thread up later. She doesn't owe long answers right now."
-                )})
-                print(f"[sched-busy] {busy}")
+        if busy_activity:
+            messages.append({"role": "system", "content": (
+                f"# Right now\nPer her schedule, {NAME} is currently in the middle of: "
+                f"{busy_activity}. She's answering from her phone in stolen moments — replies "
+                f"come shorter and less polished than usual. If the conversation stretches on, "
+                f"it's natural for her to say she has to get back to it and pick the "
+                f"thread up later. She doesn't owe long answers right now."
+            )})
+            print(f"[sched-busy] {busy_activity}")
 
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
@@ -9272,6 +9371,12 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
             f"Reference her actual people and projects naturally when they fit — don't force them."
             + (f"\n\n{ctx_block}" if ctx_block else "")
             + "\n\nWrite only the events, no headers, bullets, or numbering."
+            + (
+                f"\n\nThen, on the very last line by itself, write exactly:\n"
+                f"MOOD: <how {NAME} feels heading into today because of these events, "
+                f"a few words in her own voice> | <integer -3 to 3>"
+                if DAY_MOOD_RESIDUE else ""
+            )
         )
         msgs = [
             {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
@@ -9279,11 +9384,21 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
         ]
         events = await asyncio.to_thread(call_nanogpt, msgs, SUMMARY_MODEL)
         events = _strip_thinking(events).strip()
+        # ROADMAP 3.7 residue: peel the MOOD line off before day.txt is written so
+        # the meta line never enters prompts; seed the owner's mood state from it.
+        events, opening = _split_opening_mood(events)
         if events:
             DAY_FILE.write_text(events, encoding="utf-8")
             _day_cache["text"] = events
             _day_cache["ts"] = time.time()
             print(f"[day-events] {NAME}: {events[:100]}…")
+        if DAY_MOOD_RESIDUE and opening and events:
+            label, valence = opening
+            # On the event loop (async job) — direct state write is the correct
+            # pattern here, mirroring other on-loop writers.
+            moods[owner] = {"score": float(valence), "label": label[:160], "ts": time.time()}
+            save_state()
+            print(f"[residue] opening mood: {label} ({valence:+d})")
     except Exception as e:
         log.error("[day-events] failed: %s", e)
 

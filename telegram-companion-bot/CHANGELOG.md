@@ -7,6 +7,56 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-18.3 — Social battery + minimal-reply license + day-mood residue (ROADMAP 3.7)
+
+**Root causes this release addresses (three related realism tells, one plumbing area):**
+1. Mood tracks what she feels *about* things, but nothing tracked remaining social
+   capacity — a six-hour intense conversation left her exactly as available as minute
+   one. Single-axis mood can't express "great day, no energy left."
+2. Every incoming message earned a full-length reply — no real person pads "k" into a
+   paragraph, but the prompt never licensed anything less.
+3. Her generated life (`day.txt`) never colored how she *opened* — mood changed ONLY
+   through conversation (`post_reply_analysis` + gap decay in `nudge_mood`), so the
+   flat tire in her day was invisible unless the user happened to ask
+   (`REVIEW-YURALUME-2026-07-18.md`, the one adoption from that review).
+
+**What shipped (zero extra LLM calls; `FATIGUE_STATE=0` / `DAY_MOOD_RESIDUE=0` kill
+switches, default on):**
+- **Social battery:** per-chat `fatigue` 0–100, persisted with state. Pure
+  `_fatigue_update` runs inside the existing analysis worker on the valence it
+  already extracts: time decay first (`FATIGUE_DECAY_PER_HOUR`, default 10), then
+  |valence| ≥ 2 → +12 (intensity drains regardless of sign — a big high costs energy
+  too), calm-positive → −15, else −5. Worker-thread writes go back via
+  `call_soon_threadsafe`, mirroring the adjacent mood write. `[fatigue]` log line on
+  threshold crossings only.
+- **Read-time decay:** `_fatigue_effective` applies passive decay at prompt-assembly
+  time so a long silent gap recovers her *before* the first reply of a new
+  conversation, not one reply late.
+- **Drained register:** above `FATIGUE_THRESHOLD` (default 70), one system line —
+  shorter replies, less patience, winds the chat down; explicitly not
+  BrainEngine's "ego depletion" (losing social regulation was rejected in the
+  review as a liability for a long-running relationship).
+- **Minimal-reply license:** when drained, mid-busy-block (3.6), or in a low mood
+  (≤ −1.2), a system line makes 'k'/'lol'/an emoji a legitimate complete reply.
+  Master switch is `FATIGUE_STATE`.
+- **Day-mood residue:** the midnight day generator now ends with one
+  `MOOD: <label> | <valence>` line. Pure `_split_opening_mood` peels it off BEFORE
+  `day.txt` is written — the meta line never reaches prompts or memory — and seeds
+  the owner's mood state (on-loop job, direct write is correct there). A model that
+  ignores the instruction degrades to no residue that day. Provenance unaffected:
+  mood is presentation state, not a fact store; the `[own-day]` rule is untouched.
+- `assemble_messages` now reads `schedule.txt` once per assembly (previously the 3.6
+  block re-read it); busy state is shared between the license and the schedule
+  section.
+
+**Config:** `FATIGUE_STATE`, `FATIGUE_THRESHOLD`, `FATIGUE_DECAY_PER_HOUR`,
+`DAY_MOOD_RESIDUE` in `.env.example`; numerics via `_env_float`.
+
+**Pure helpers + tests:** `_fatigue_update`, `_fatigue_effective`,
+`_split_opening_mood`; `TestFatigue` (8) + `TestSplitOpeningMood` (6): drain/recharge
+arithmetic, clamps, gap decay ordering, read-time decay, MOOD-line parse/strip/clamp,
+mid-text immunity, graceful absence.
+
 ## v2026-07-18.2 — Schedule-driven unavailability (SCHED_BUSY; ROADMAP 3.6)
 
 **Root cause this release addresses:** `schedule.txt` was injected into context every
