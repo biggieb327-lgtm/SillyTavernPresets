@@ -119,15 +119,16 @@ single-device blast radius.
 - **Plan:** parse today's schedule section for time-ranged entries; when `now` falls
   inside a busy block, inject a system line (replying in stolen moments, shorter,
   may say she has to go and pick the thread up later) and optionally scale typing
-  delay via the existing `send_bubbles` `pre_delay` plumbing. Env-flagged, default
-  off. Zero extra LLM calls. Proactive sends unchanged — existing quiet-hours/nudge
-  checks stay authoritative; this only adds restraint.
+  delay via the existing `send_bubbles` `pre_delay` plumbing. Env kill switch per
+  owner policy 2026-07-18 (default on, `0` disables without redeploy). Zero extra
+  LLM calls. Proactive sends unchanged — existing quiet-hours/nudge checks stay
+  authoritative; this only adds restraint.
 - **Risk:** low — prompt + arithmetic only. Main hazard is over-firing on loosely
   formatted schedule entries; parse conservatively (explicit `HH:MM-HH:MM` ranges
   only) and log a `[sched-busy]` line so over-firing is visible.
 - **Done when:** a bot with a busy block active visibly changes register (and can
   exit a conversation), verified in a live exchange; no behavior change when the
-  flag is off or schedule.txt has no timed entries.
+  kill switch is set to `0` or schedule.txt has no timed entries.
 
 ### 3.7 Fatigue accumulator + silence license — S
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` items B + C (owner-approved
@@ -139,13 +140,14 @@ single-device blast radius.
   positive −15, else −5; decay with `_gap_hours`). No LLM call. Above a threshold,
   one system line ("socially drained — shorter replies, less patience"), plus a
   license for a bare "k"/reaction to be a complete reply when drained, busy (3.6),
-  or low-mood. Env-flagged, default off. Explicitly NOT adopting BrainEngine's
+  or low-mood. Env kill switch per owner policy 2026-07-18 (default on, `0`
+  disables without redeploy). Explicitly NOT adopting BrainEngine's
   "ego depletion" (dropping social regulation) — recorded rejection in the review.
 - **Risk:** low — tuning risk only (fatigue that accumulates too fast reads as
   sulking). Start with conservative constants; log `[fatigue]` transitions.
 - **Done when:** a long intense conversation produces a visible register shift that
-  recovers after a gap; minimal replies occur but stay rare; flag-off behavior
-  identical to today.
+  recovers after a gap; minimal replies occur but stay rare; behavior with the
+  kill switch set to `0` identical to today.
 
 ---
 

@@ -121,8 +121,9 @@ have reaction infrastructure (`REACTION_MODEL`). Prompt + small plumbing only.
 
 Promote **A** (schedule-driven unavailability) to ROADMAP Track 3 as its own item;
 **B + C** together as a second item (they share the state plumbing and the same
-prompt-injection point). None of the three adds an LLM call, all three are
-default-off-able via env flags per house style. Owner call on whether/when to spec
-them into IMPROVEMENTS_PLAN.md.
+prompt-injection point). None of the three adds an LLM call, and all three carry an
+env kill switch (default on, `0` disables without redeploy — owner policy
+2026-07-18; this review originally said "default off" and was aligned when that
+policy landed). Owner call on whether/when to spec them into IMPROVEMENTS_PLAN.md.
 
 No bot.py changes made in this review.
