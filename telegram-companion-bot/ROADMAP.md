@@ -130,23 +130,30 @@ single-device blast radius.
   exit a conversation), verified in a live exchange; no behavior change when the
   kill switch is set to `0` or schedule.txt has no timed entries.
 
-### 3.7 Fatigue accumulator + silence license — S
+### 3.7 Fatigue accumulator + silence license + day-mood residue — S
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` items B + C (owner-approved
   2026-07-18, bundled — they share the state plumbing and injection point). Mood
   tracks what she feels *about* things but nothing tracks remaining social capacity;
-  and every message currently earns a full reply, another realism tell.
+  and every message currently earns a full reply, another realism tell. Residue
+  sub-item from `REVIEW-YURALUME-2026-07-18.md`: mood changes ONLY through
+  conversation, so her generated day (`day.txt`) never colors how she opens.
 - **Plan:** per-chat `fatigue` float 0–100 updated arithmetically where
   `post_reply_analysis` already lands valence (intense exchange +10–15, calm
   positive −15, else −5; decay with `_gap_hours`). No LLM call. Above a threshold,
   one system line ("socially drained — shorter replies, less patience"), plus a
   license for a bare "k"/reaction to be a complete reply when drained, busy (3.6),
-  or low-mood. Env kill switch per owner policy 2026-07-18 (default on, `0`
-  disables without redeploy). Explicitly NOT adopting BrainEngine's
-  "ego depletion" (dropping social regulation) — recorded rejection in the review.
+  or low-mood. **Residue:** one extra JSON key (`opening_mood`: label + valence)
+  on the existing midnight day-generation call, written into the normal mood state
+  at rotation so her day seeds how she shows up — mood is presentation state, not
+  a fact store, so the `[own-day]` provenance rule is untouched. Env kill switch
+  per owner policy 2026-07-18 (default on, `0` disables without redeploy).
+  Explicitly NOT adopting BrainEngine's "ego depletion" (dropping social
+  regulation) — recorded rejection in the review.
 - **Risk:** low — tuning risk only (fatigue that accumulates too fast reads as
   sulking). Start with conservative constants; log `[fatigue]` transitions.
 - **Done when:** a long intense conversation produces a visible register shift that
-  recovers after a gap; minimal replies occur but stay rare; behavior with the
+  recovers after a gap; minimal replies occur but stay rare; a notable day.txt
+  event visibly colors her first exchange after rotation; behavior with the
   kill switch set to `0` identical to today.
 
 ---
@@ -201,7 +208,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
 | **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
-| **Next** | 3.6 schedule-driven unavailability, then 3.7 fatigue + silence license | Approved 2026-07-18 from the BrainEngine review; 3.6 first — 3.7's silence license keys off 3.6's busy state. |
+| **Next** | 3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue | Approved 2026-07-18 from the BrainEngine review; 3.6 first — 3.7's silence license keys off 3.6's busy state. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
