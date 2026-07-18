@@ -110,7 +110,7 @@ single-device blast radius.
   memory-resolved "home"/"work" destinations, and a per-chat cooldown if the `[map]`
   log line ever shows over-firing.
 
-### 3.6 Schedule-driven unavailability — S–M
+### 3.6 ~~Schedule-driven unavailability~~ ✅ (shipped v2026-07-18.2, `SCHED_BUSY`)
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` item A (owner-approved 2026-07-18).
   `schedule.txt` is injected into context every turn (`_read_schedule_today`) but
   nothing enforces it behaviorally — the character is always instantly available,
@@ -130,7 +130,7 @@ single-device blast radius.
   exit a conversation), verified in a live exchange; no behavior change when the
   kill switch is set to `0` or schedule.txt has no timed entries.
 
-### 3.7 Fatigue accumulator + silence license + day-mood residue — S
+### 3.7 ~~Fatigue accumulator + silence license + day-mood residue~~ ✅ (shipped v2026-07-18.3, `FATIGUE_STATE`/`DAY_MOOD_RESIDUE`)
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` items B + C (owner-approved
   2026-07-18, bundled — they share the state plumbing and injection point). Mood
   tracks what she feels *about* things but nothing tracks remaining social capacity;
@@ -208,7 +208,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
 | **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
-| **Next** | 3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue | Approved 2026-07-18 from the BrainEngine review; 3.6 first — 3.7's silence license keys off 3.6's busy state. |
+| ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
