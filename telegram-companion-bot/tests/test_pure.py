@@ -1477,6 +1477,30 @@ class TestRecencyWeight:
         assert weights == sorted(weights, reverse=True)
 
 
+class TestRepeatPenalty:
+    def test_disabled_window_is_neutral(self):
+        # window <= 0 = kill switch: no penalty regardless of history.
+        assert bot._repeat_penalty(5, 6, 0, 0.15) == 1.0
+        assert bot._repeat_penalty(5, 6, -1, 0.15) == 1.0
+
+    def test_never_injected_is_neutral(self):
+        assert bot._repeat_penalty(None, 6, 6, 0.15) == 1.0
+
+    def test_full_penalty_turn_after_injection(self):
+        # ago == 1 (injected last turn) → exactly the floor.
+        assert bot._repeat_penalty(5, 6, 6, 0.15) == 0.15
+
+    def test_fades_back_to_neutral_after_window(self):
+        assert bot._repeat_penalty(1, 7, 6, 0.15) == 1.0     # ago == window
+        assert bot._repeat_penalty(1, 20, 6, 0.15) == 1.0    # ago > window
+
+    def test_monotonic_increasing_within_window(self):
+        # Penalty relaxes each turn away from the injection until it's neutral.
+        vals = [bot._repeat_penalty(0, ago, 6, 0.15) for ago in (1, 2, 3, 4, 5)]
+        assert vals == sorted(vals)
+        assert all(0.15 <= v < 1.0 for v in vals)
+
+
 class TestHedgeMemoryLines:
     def test_low_confidence_hedged(self):
         meta = {"saw a fox": {"confidence": 4}}
@@ -1880,6 +1904,73 @@ class TestTriggeredMemoriesLivePath:
             return bot.triggered_memories("tell me about the ship")
         out = asyncio.run(run())
         assert "the vessel departed at dawn" not in out
+
+
+class TestTriggeredMemoriesRepeatSuppression:
+    """MEMORY_REPEAT_SUPPRESS_TURNS: the same top memory must not win the budget every
+    turn. Two equal-length lines, both semantically close to the query, but the budget
+    fits only one — so which one surfaces reveals whether suppression rotated it."""
+    LINE_A = "alpha memory line"
+    LINE_B = "bravo memory line"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_budget = bot.MEMORY_TOKEN_BUDGET
+        self._orig_suppress = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        bot.MEMORIES_FILE.write_text(self.LINE_A + "\n" + self.LINE_B + "\n",
+                                     encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache[self.LINE_A] = [1.0, 0.0]   # cosine 1.0 vs the query
+        bot._embeddings_cache[self.LINE_B] = [0.8, 0.6]   # cosine 0.8 vs the query
+        bot._mem_inject_turn.clear()
+        bot._mem_last_injected.clear()
+        # Budget fits exactly one line (equal length → equal cost), so ranking decides.
+        bot.MEMORY_TOKEN_BUDGET = bot._est_tokens(self.LINE_A)
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = 6
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_TOKEN_BUDGET = self._orig_budget
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = self._orig_suppress
+        bot._mem_inject_turn.clear()
+        bot._mem_last_injected.clear()
+
+    def _call(self, chat_id):
+        return bot.triggered_memories("tell me something", query_vec=[1.0, 0.0],
+                                      chat_id=chat_id)
+
+    def test_top_memory_rotates_on_consecutive_turns(self):
+        first = self._call(1)
+        second = self._call(1)
+        assert first == [self.LINE_A]      # highest score wins turn 1
+        assert second == [self.LINE_B]     # A suppressed → B wins turn 2
+
+    def test_suppression_fades_after_window(self):
+        # A injected on turn 1; jump the counter so the next call is a full window later.
+        self._call(1)
+        bot._mem_inject_turn[1] = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        assert self._call(1) == [self.LINE_A]   # penalty relaxed → A wins again
+
+    def test_kill_switch_restores_old_behavior(self):
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = 0
+        assert self._call(1) == [self.LINE_A]
+        assert self._call(1) == [self.LINE_A]   # identical, no rotation
+        assert bot._mem_last_injected == {}     # nothing recorded
+
+    def test_no_chat_id_records_nothing(self):
+        assert self._call(None) == [self.LINE_A]
+        assert self._call(None) == [self.LINE_A]
+        assert bot._mem_last_injected == {}
+
+    def test_per_chat_isolation(self):
+        self._call(1)                       # records A for chat 1
+        assert self._call(2) == [self.LINE_A]   # chat 2 has no history → A still wins
 
 
 from datetime import date as _date

@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-17.1"
+BOT_VERSION = "2026-07-18.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -461,6 +461,17 @@ MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
 MEMORY_AUDIT_SEEN_MAX = 100
+
+# Repeat-injection suppression (v2026-07-18.1): triggered_memories is stateless across
+# turns, so while a conversation stays on one theme the same top-scoring lines win the
+# token budget every turn and the character re-tells one memory (reworded) endlessly.
+# This down-weights (never excludes) memories injected on recent turns so near-ties
+# rotate. In-memory only, like _recent_questions — a restart just clears suppression.
+# Default ON (window 6, owner default-on policy); set 0 to disable without a redeploy.
+MEMORY_REPEAT_SUPPRESS_TURNS = _env_int("MEMORY_REPEAT_SUPPRESS_TURNS", "6")
+MEMORY_REPEAT_PENALTY = _env_float("MEMORY_REPEAT_PENALTY", "0.15")
+_mem_inject_turn: dict = {}    # chat_id -> per-chat reply-turn counter
+_mem_last_injected: dict = {}  # chat_id -> {memory line: turn last injected}
 
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
@@ -2747,6 +2758,20 @@ def _recency_weight(ts, now: float, halflife_days: float) -> float:
     return max(0.1, 0.5 ** (age_days / halflife_days))
 
 
+def _repeat_penalty(last_turn, current_turn: int, window: int, floor: float) -> float:
+    """Down-weight a memory injected on a recent turn, so one theme can't win the recall
+    budget every turn. Neutral (1.0) when disabled (window <= 0) or the line was never
+    injected. Full penalty (floor) on the turn right after injection, fading linearly
+    back to 1.0 over `window` turns. A multiplier, never exclusion — a strongly relevant
+    memory can still outscore the penalty and surface again."""
+    if window <= 0 or last_turn is None:
+        return 1.0
+    ago = current_turn - last_turn
+    if ago >= window:
+        return 1.0
+    return floor + (1.0 - floor) * (max(ago - 1, 0) / window)
+
+
 def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
                         enabled: bool) -> tuple[list[str], bool]:
     """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
@@ -2776,7 +2801,8 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     return out, hedged
 
 
-def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> list[str]:
+def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
+                       chat_id: int | None = None) -> list[str]:
     entries = _read_memories()
     if not entries:
         return []
@@ -2817,10 +2843,28 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> 
     # Merge: union of both, sum their scores, then age-decay the ranking
     # (MEMORY_DECAY_HALFLIFE_DAYS; 0/unset = off, no-ts legacy entries neutral).
     now = time.time()
+
+    # Repeat-injection suppression: down-weight lines injected on recent turns so one
+    # theme can't win the budget every turn. Only on the live reply path (a chat_id is
+    # passed) and when enabled — /recall-style callers pass chat_id=None and are
+    # unaffected, so their ranking and existing tests stay byte-identical.
+    suppress = chat_id is not None and MEMORY_REPEAT_SUPPRESS_TURNS > 0
+    if suppress:
+        turn = _mem_inject_turn.get(chat_id, 0) + 1
+        _mem_inject_turn[chat_id] = turn
+        seen = _mem_last_injected.setdefault(chat_id, {})
+        for l, t in list(seen.items()):          # prune aged-out / deleted lines
+            if turn - t >= MEMORY_REPEAT_SUPPRESS_TURNS:
+                del seen[l]
+        win = MEMORY_REPEAT_SUPPRESS_TURNS
+    else:
+        turn, seen, win = 0, {}, 0
+
     all_lines = set(keyword_scored) | set(sem_scored)
     merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
-                                 now, MEMORY_DECAY_HALFLIFE_DAYS), l)
+                                 now, MEMORY_DECAY_HALFLIFE_DAYS)
+               * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY), l)
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
@@ -2832,6 +2876,9 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> 
             continue
         out.append(line)
         budget -= cost
+    if suppress:                                  # record winners on the raw lines,
+        for line in out:                          # before _hedge rewrites them for display
+            seen[line] = turn
     return out
 
 
@@ -3787,7 +3834,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
 
-    mems = triggered_memories(scan_text, query_vec=query_vec)
+    mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
         mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
                                                MEMORY_HEDGE)
@@ -3795,6 +3842,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         if any_hedged:
             block += ("\nEntries marked (unsure) are things you only half-remember"
                       " — hedge or ask rather than assert them as fact.")
+        if MEMORY_REPEAT_SUPPRESS_TURNS > 0:
+            block += (f"\nThese are context, not conversation topics — don't bring one"
+                      f" up again if you've referenced it recently; let it go unless"
+                      f" {uname} raises it.")
         messages.append({"role": "system", "content": block})
 
     bds = boundaries.get(chat_id) or []
