@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-18.1 — Stop memory latching (MEMORY_REPEAT_SUPPRESS_TURNS)
+
+**Root cause this release addresses:** `triggered_memories` is deterministic and
+**stateless across turns** — every reply it re-scores all of `memories.txt` against the
+recent conversation (keyword overlap + cosine ×3.0), sorts, and greedily fills the
+300-token budget. Nothing recorded which memories were injected on prior turns, so while
+a conversation stayed on one theme the *same* top-scoring lines won the budget every
+single turn and the character re-told one memory endlessly, reworded each time. It's a
+feedback loop: the memory she mentions lands in the recent-history scan text, which
+re-ranks it to the top again next turn. The repo already solved this exact shape for
+*questions* (`_recent_questions` → "don't repeat these") but had no equivalent for
+memories; write-time dedup (`MEMORY_DEDUP_SIM`) only stops *storing* duplicates, not
+re-injecting the same stored line.
+
+**What shipped:** behind `MEMORY_REPEAT_SUPPRESS_TURNS` (default 0 = off; unset = prior
+behavior), per-chat in-memory tracking of recently-injected memory lines, consumed as a
+score multiplier in `triggered_memories`:
+- New pure `_repeat_penalty(last_turn, current_turn, window, floor)`: full penalty
+  (`MEMORY_REPEAT_PENALTY`, default 0.15) the turn right after a line is injected, fading
+  linearly back to 1.0 over `window` turns. A **multiplier, never exclusion** — a memory
+  the user directly asks about still outscores the penalty and surfaces.
+- `triggered_memories` gains `chat_id=None`. With a `chat_id` (the live reply path) and
+  the flag on, it increments a per-chat turn counter, down-weights recently-seen lines,
+  and records the winners. `chat_id=None` (e.g. `/recall`) and the flag off are both
+  byte-identical to old behavior, so existing callers/tests are untouched.
+- Trackers (`_mem_inject_turn`, `_mem_last_injected`) are **in-memory only**, matching
+  `_recent_questions` — no state-serialization changes, no cross-thread concerns; a
+  restart just clears suppression (worst case: one repeated theme after a restart).
+- A gated one-liner is appended to the `# Relevant memories` block telling the character
+  not to re-raise a memory she's referenced recently unless the user brings it up. The
+  kill switch (0) restores the exact old prompt.
+
+**Preset (`preset.txt`, ships alongside; content, no BOT_VERSION dependency):** added a
+contrastive `[ANTI-ECHO / NO REHASH]` section and inline bad→good example pairs under
+several existing abstract rules (narrated emotion, narrator tipping off lies, generic
+voice, repeated sensory detail, NPC servility) — bad→good pairs steer models harder than
+abstract prose. Deploys via the card/seed path (`sync-cards.sh` / curl into instance
+dirs), not `/update`.
+
+**Deliberately out of scope (so it isn't re-litigated):**
+- `MEMORY_DECAY_HALFLIFE_DAYS` (default 0) remains a config-only, orthogonal mitigation
+  for *old* memories dominating — it does nothing about within-conversation latching,
+  which is what this release fixes.
+- Lore, `memory_block` facts/summaries, `user_notes`, pinned, and `day.txt` can also
+  carry a latching theme but are injected wholesale (not ranked), so suppression there is
+  a different mechanism — left for a future release to keep this diff minimal.
+
+**Pure helper + tests:** `_repeat_penalty`. New `TestRepeatPenalty` and
+`TestTriggeredMemoriesRepeatSuppression` (suppression rotates the winner, fades after the
+window, kill switch and `chat_id=None` preserve old behavior, per-chat isolation).
+
 ## v2026-07-17.1 — Generalized map intent (MAP_INTENT; ROADMAP 3.5 phase 2)
 
 **Root cause this release addresses:** FOOD_SUGGESTIONS (v2026-07-11.14) proved that
