@@ -110,6 +110,43 @@ single-device blast radius.
   memory-resolved "home"/"work" destinations, and a per-chat cooldown if the `[map]`
   log line ever shows over-firing.
 
+### 3.6 Schedule-driven unavailability — S–M
+- **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` item A (owner-approved 2026-07-18).
+  `schedule.txt` is injected into context every turn (`_read_schedule_today`) but
+  nothing enforces it behaviorally — the character is always instantly available,
+  never says she has to go, never replies slower mid-commitment. The always-on
+  companion is the single biggest "puppet" tell.
+- **Plan:** parse today's schedule section for time-ranged entries; when `now` falls
+  inside a busy block, inject a system line (replying in stolen moments, shorter,
+  may say she has to go and pick the thread up later) and optionally scale typing
+  delay via the existing `send_bubbles` `pre_delay` plumbing. Env-flagged, default
+  off. Zero extra LLM calls. Proactive sends unchanged — existing quiet-hours/nudge
+  checks stay authoritative; this only adds restraint.
+- **Risk:** low — prompt + arithmetic only. Main hazard is over-firing on loosely
+  formatted schedule entries; parse conservatively (explicit `HH:MM-HH:MM` ranges
+  only) and log a `[sched-busy]` line so over-firing is visible.
+- **Done when:** a bot with a busy block active visibly changes register (and can
+  exit a conversation), verified in a live exchange; no behavior change when the
+  flag is off or schedule.txt has no timed entries.
+
+### 3.7 Fatigue accumulator + silence license — S
+- **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` items B + C (owner-approved
+  2026-07-18, bundled — they share the state plumbing and injection point). Mood
+  tracks what she feels *about* things but nothing tracks remaining social capacity;
+  and every message currently earns a full reply, another realism tell.
+- **Plan:** per-chat `fatigue` float 0–100 updated arithmetically where
+  `post_reply_analysis` already lands valence (intense exchange +10–15, calm
+  positive −15, else −5; decay with `_gap_hours`). No LLM call. Above a threshold,
+  one system line ("socially drained — shorter replies, less patience"), plus a
+  license for a bare "k"/reaction to be a complete reply when drained, busy (3.6),
+  or low-mood. Env-flagged, default off. Explicitly NOT adopting BrainEngine's
+  "ego depletion" (dropping social regulation) — recorded rejection in the review.
+- **Risk:** low — tuning risk only (fatigue that accumulates too fast reads as
+  sulking). Start with conservative constants; log `[fatigue]` transitions.
+- **Done when:** a long intense conversation produces a visible register shift that
+  recovers after a gap; minimal replies occur but stay rare; flag-off behavior
+  identical to today.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
@@ -162,6 +199,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
 | **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
+| **Next** | 3.6 schedule-driven unavailability, then 3.7 fatigue + silence license | Approved 2026-07-18 from the BrainEngine review; 3.6 first — 3.7's silence license keys off 3.6's busy state. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
