@@ -21,9 +21,10 @@ re-ranks it to the top again next turn. The repo already solved this exact shape
 memories; write-time dedup (`MEMORY_DEDUP_SIM`) only stops *storing* duplicates, not
 re-injecting the same stored line.
 
-**What shipped:** behind `MEMORY_REPEAT_SUPPRESS_TURNS` (default 0 = off; unset = prior
-behavior), per-chat in-memory tracking of recently-injected memory lines, consumed as a
-score multiplier in `triggered_memories`:
+**What shipped:** behind `MEMORY_REPEAT_SUPPRESS_TURNS` (default **6 = on**; set 0 to
+disable — the first release under the new owner default-on policy, see below), per-chat
+in-memory tracking of recently-injected memory lines, consumed as a score multiplier in
+`triggered_memories`:
 - New pure `_repeat_penalty(last_turn, current_turn, window, floor)`: full penalty
   (`MEMORY_REPEAT_PENALTY`, default 0.15) the turn right after a line is injected, fading
   linearly back to 1.0 over `window` turns. A **multiplier, never exclusion** — a memory
@@ -38,6 +39,12 @@ score multiplier in `triggered_memories`:
 - A gated one-liner is appended to the `# Relevant memories` block telling the character
   not to re-raise a memory she's referenced recently unless the user brings it up. The
   kill switch (0) restores the exact old prompt.
+
+**Policy change (owner, 2026-07-18):** new features now default **ON** with a mandatory
+env kill switch (unset = active, `0` = off), reversing the prior default-off convention.
+The kill switch is now the required safety mechanism rather than the off-by-default state.
+Recorded in `CLAUDE.md`, `bot-code-invariants` #16, and `repo-change-control`. This
+release is the first under it — hence `MEMORY_REPEAT_SUPPRESS_TURNS=6` by default.
 
 **Preset (`preset.txt`, ships alongside; content, no BOT_VERSION dependency):** added a
 contrastive `[ANTI-ECHO / NO REHASH]` section and inline bad→good example pairs under

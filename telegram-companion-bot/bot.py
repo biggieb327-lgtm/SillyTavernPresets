@@ -467,8 +467,8 @@ MEMORY_AUDIT_SEEN_MAX = 100
 # token budget every turn and the character re-tells one memory (reworded) endlessly.
 # This down-weights (never excludes) memories injected on recent turns so near-ties
 # rotate. In-memory only, like _recent_questions — a restart just clears suppression.
-# Default OFF (unset = today's behavior); set the turn window to enable, 0 = off.
-MEMORY_REPEAT_SUPPRESS_TURNS = _env_int("MEMORY_REPEAT_SUPPRESS_TURNS", "0")
+# Default ON (window 6, owner default-on policy); set 0 to disable without a redeploy.
+MEMORY_REPEAT_SUPPRESS_TURNS = _env_int("MEMORY_REPEAT_SUPPRESS_TURNS", "6")
 MEMORY_REPEAT_PENALTY = _env_float("MEMORY_REPEAT_PENALTY", "0.15")
 _mem_inject_turn: dict = {}    # chat_id -> per-chat reply-turn counter
 _mem_last_injected: dict = {}  # chat_id -> {memory line: turn last injected}
