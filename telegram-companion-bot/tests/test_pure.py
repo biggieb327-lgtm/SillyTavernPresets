@@ -2472,3 +2472,31 @@ class TestSplitOpeningMood:
         events, opening = bot._split_opening_mood("day.\nMOOD:  | 2")
         assert opening is None
         assert events == "day."
+
+
+# ── _usage_summary (v2026-07-18.4) ───────────────────────────────────────────
+# The subscription-usage endpoint returned active=true without 'daily' and /usage
+# crashed with a KeyError. Never index an external API response directly.
+
+class TestUsageSummary:
+    def test_full_shape_formats(self):
+        data = {"active": True,
+                "daily": {"used": 10, "remaining": 90},
+                "monthly": {"used": 100, "remaining": 900},
+                "limits": {"daily": 100, "monthly": 1000}}
+        msg = bot._usage_summary(data)
+        assert "10 / 100" in msg and "100 / 1000" in msg
+
+    def test_missing_daily_returns_none(self):
+        assert bot._usage_summary({"active": True, "monthly": {}, "limits": {}}) is None
+
+    def test_wrong_types_return_none(self):
+        assert bot._usage_summary({"daily": "5", "monthly": {}, "limits": {}}) is None
+
+    def test_missing_inner_keys_degrade_to_question_marks(self):
+        data = {"daily": {}, "monthly": {}, "limits": {}}
+        msg = bot._usage_summary(data)
+        assert msg is not None and "?" in msg
+
+    def test_empty_dict_returns_none(self):
+        assert bot._usage_summary({}) is None

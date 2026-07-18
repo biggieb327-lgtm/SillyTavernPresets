@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-18.3"
+BOT_VERSION = "2026-07-18.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -7970,6 +7970,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
+def _usage_summary(data: dict):
+    """Pure formatter for the NanoGPT subscription-usage response.
+    Returns the message text, or None when the response doesn't carry the
+    expected daily/monthly/limits shape (v2026-07-18.4: the endpoint returned
+    active=true without a 'daily' key and /usage crashed with a KeyError —
+    never index an external API response directly)."""
+    daily = data.get("daily")
+    monthly = data.get("monthly")
+    limits = data.get("limits")
+    if not (isinstance(daily, dict) and isinstance(monthly, dict)
+            and isinstance(limits, dict)):
+        return None
+    return (
+        f"📊 *NanoGPT Subscription Usage*\n\n"
+        f"📅 *Daily:* {daily.get('used', '?')} / {limits.get('daily', '?')} used "
+        f"({daily.get('remaining', '?')} remaining)\n"
+        f"📆 *Monthly:* {monthly.get('used', '?')} / {limits.get('monthly', '?')} used "
+        f"({monthly.get('remaining', '?')} remaining)\n"
+    )
+
+
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     # to_thread: a bare requests call here would freeze the whole event loop for
@@ -7980,20 +8001,31 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             headers=headers,
             timeout=30,
         ))
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        log.warning("[usage] non-JSON response (HTTP %s): %.300s",
+                    response.status_code, response.text)
+        await update.message.reply_text(
+            f"⚠️ Usage endpoint returned something unreadable (HTTP {response.status_code}) "
+            f"— details in /errors.")
+        return
     if not data.get("active"):
         await update.message.reply_text("⚠️ No active subscription found.")
         return
-    daily = data["daily"]
-    monthly = data["monthly"]
-    limits = data["limits"]
-    msg = (
-        f"📊 *NanoGPT Subscription Usage*\n\n"
-        f"📅 *Daily:* {daily['used']} / {limits['daily']} used "
-        f"({daily['remaining']} remaining)\n"
-        f"📆 *Monthly:* {monthly['used']} / {limits['monthly']} used "
-        f"({monthly['remaining']} remaining)\n"
-    )
+    msg = _usage_summary(data)
+    if msg is None:
+        # Active subscription but a response shape we don't recognize — make the
+        # failure self-describing instead of crashing (debugging protocol #3).
+        log.warning("[usage] unexpected response shape, keys=%s body=%.500s",
+                    sorted(data.keys()), str(data))
+        await update.message.reply_text(
+            f"⚠️ Usage endpoint answered with an unexpected shape "
+            f"(keys: {', '.join(sorted(data.keys())) or 'none'}) — full body in /errors. "
+            f"The API may have changed; the subscription itself looks active.")
+        return
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 

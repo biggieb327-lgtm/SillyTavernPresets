@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-18.4 — /usage no longer crashes on an unexpected API response shape
+
+**Root cause:** `check_usage` trusted the NanoGPT subscription endpoint's response
+shape — it gated on `data.get("active")` but then indexed `data["daily"]` /
+`data["monthly"]` / `data["limits"]` directly. On Jules the endpoint returned
+`active` truthy **without** a `daily` key (account tier or API shape change — the
+crash destroyed the evidence of which), so `/usage` died with
+`KeyError: 'daily'` and an `[unhandled]` traceback instead of telling anyone what
+the API actually said. Same defect class as the streaming-error-body rule: an
+external response consumed without validation is undiagnosable when it changes.
+
+**What shipped:**
+- New pure `_usage_summary(data)`: validates the daily/monthly/limits shape
+  (returns None on mismatch), tolerates missing inner keys with `?` placeholders.
+- `check_usage` now handles all three failure modes gracefully: non-JSON body
+  (HTTP status to chat, body to log), inactive subscription (unchanged), and
+  active-but-unrecognized shape — the reply names the keys the API returned and
+  the full body goes to the log, so the *next* shape change is self-describing
+  (debugging protocol #3) instead of a KeyError.
+- No new env vars; bugfix to an existing command, no kill switch needed.
+
+**Tests:** `TestUsageSummary` (5) — full shape, missing/wrong-typed sections,
+missing inner keys, empty response.
+
 ## v2026-07-18.3 — Social battery + minimal-reply license + day-mood residue (ROADMAP 3.7)
 
 **Root causes this release addresses (three related realism tells, one plumbing area):**
