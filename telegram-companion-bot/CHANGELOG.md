@@ -7,6 +7,26 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-18.5 — /usage speaks NanoGPT's token-based subscription shape
+
+**Root cause:** the v2026-07-18.4 self-describing error did its job — the owner's
+very next `/usage` captured the real response. NanoGPT's subscription API is no
+longer daily/monthly request counts; it's **token-based**: top-level per-section
+usage dicts (`weeklyInputTokens`, `dailyInputTokens`, `dailyImages`, each
+`{used, remaining, percentUsed}`) keyed identically to the `limits` dict, plus
+`period.currentPeriodEnd`. Jules's real numbers: 60M weekly input tokens limit,
+`dailyInputTokens` limit null (= uncapped), 100 daily images.
+
+**What shipped:** `_usage_summary` now recognizes the token shape first (sections
+missing their usage dict are skipped; a null limit renders as ∞; renewal date
+appended) and falls back to the legacy daily/monthly shape, else None → the
+v2026-07-18.4 self-describing path. New pure `_fmt_count` humanizes counts
+(60000000 → 60M, 15400 → 15.4k). The captured real body is pinned in the tests
+so the next API drift fails loudly against known-good data.
+
+**Tests:** `TestUsageSummaryTokenShape` (4, incl. the real captured body) +
+`TestFmtCount` (2); legacy-shape tests unchanged and still green.
+
 ## v2026-07-18.4 — /usage no longer crashes on an unexpected API response shape
 
 **Root cause:** `check_usage` trusted the NanoGPT subscription endpoint's response

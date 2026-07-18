@@ -2500,3 +2500,58 @@ class TestUsageSummary:
 
     def test_empty_dict_returns_none(self):
         assert bot._usage_summary({}) is None
+
+
+# ── _usage_summary new token-based shape + _fmt_count (v2026-07-18.5) ────────
+# Real response captured from Jules 2026-07-18: token-based subscription with
+# per-section {used, remaining, percentUsed} dicts keyed like the limits dict.
+
+class TestUsageSummaryTokenShape:
+    REAL_BODY = {
+        "active": True, "provider": "stripe", "providerStatus": "active",
+        "limits": {"weeklyInputTokens": 60000000, "dailyInputTokens": None,
+                   "dailyImages": 100},
+        "allowOverage": False,
+        "period": {"currentPeriodEnd": "2026-08-10T15:15:09.000Z"},
+        "dailyImages": {"used": 0, "remaining": 100, "percentUsed": 0},
+        "weeklyInputTokens": {"used": 15400, "remaining": 59984600,
+                              "percentUsed": 0.03},
+    }
+
+    def test_real_body_formats(self):
+        msg = bot._usage_summary(self.REAL_BODY)
+        assert msg is not None
+        assert "15.4k / 60M" in msg
+        assert "Daily images" in msg and "0 / 100" in msg
+        assert "Renews: 2026-08-10" in msg
+
+    def test_null_limit_renders_infinity(self):
+        body = dict(self.REAL_BODY)
+        body["dailyInputTokens"] = {"used": 5, "remaining": 995, "percentUsed": 1}
+        msg = bot._usage_summary(body)
+        assert "∞" in msg
+
+    def test_sections_missing_usage_dicts_skipped(self):
+        body = {"active": True, "limits": {"weeklyInputTokens": 100},
+                "weeklyInputTokens": {"used": 1, "remaining": 99}}
+        msg = bot._usage_summary(body)
+        assert msg is not None and "Weekly" in msg and "images" not in msg
+
+    def test_legacy_shape_still_works(self):
+        data = {"daily": {"used": 10, "remaining": 90},
+                "monthly": {"used": 100, "remaining": 900},
+                "limits": {"daily": 100, "monthly": 1000}}
+        assert "10 / 100" in bot._usage_summary(data)
+
+
+class TestFmtCount:
+    def test_millions_and_thousands(self):
+        assert bot._fmt_count(60000000) == "60M"
+        assert bot._fmt_count(15400) == "15.4k"
+        assert bot._fmt_count(59984600) == "60M"
+
+    def test_small_and_non_numeric(self):
+        assert bot._fmt_count(0) == "0"
+        assert bot._fmt_count(100) == "100"
+        assert bot._fmt_count("?") == "?"
+        assert bot._fmt_count(0.03) == "0.03"

@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-18.4"
+BOT_VERSION = "2026-07-18.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -7970,25 +7970,72 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
+def _fmt_count(n) -> str:
+    """60000000 -> '60M', 15400 -> '15.4k', small ints unchanged, non-numbers as-is."""
+    if not isinstance(n, (int, float)):
+        return str(n)
+    if n >= 1_000_000:
+        s = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{s}M"
+    if n >= 1_000:
+        s = f"{n / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"{s}k"
+    return str(int(n)) if float(n).is_integer() else str(n)
+
+
+# (label, key) pairs shared by the limits dict and the top-level usage sections
+# in NanoGPT's 2026-07 token-based subscription shape.
+_USAGE_SECTIONS = [
+    ("📅 *Weekly input tokens:*", "weeklyInputTokens"),
+    ("📅 *Daily input tokens:*", "dailyInputTokens"),
+    ("🖼 *Daily images:*", "dailyImages"),
+]
+
+
 def _usage_summary(data: dict):
     """Pure formatter for the NanoGPT subscription-usage response.
-    Returns the message text, or None when the response doesn't carry the
-    expected daily/monthly/limits shape (v2026-07-18.4: the endpoint returned
-    active=true without a 'daily' key and /usage crashed with a KeyError —
-    never index an external API response directly)."""
+    Returns the message text, or None when no recognizable shape is present
+    (v2026-07-18.4: the endpoint returned active=true without a 'daily' key and
+    /usage crashed with a KeyError — never index an external API response
+    directly; v2026-07-18.5: the actual new shape is token-based — per-section
+    {used, remaining, percentUsed} dicts keyed like the limits dict)."""
+    limits = data.get("limits")
+    limits = limits if isinstance(limits, dict) else {}
+
+    # 2026-07 token-based shape: top-level usage sections mirroring limits keys.
+    if any(isinstance(data.get(key), dict) for _, key in _USAGE_SECTIONS):
+        lines = ["📊 *NanoGPT Subscription Usage*", ""]
+        for label, key in _USAGE_SECTIONS:
+            usage = data.get(key)
+            if not isinstance(usage, dict):
+                continue
+            lim = limits.get(key)
+            lim_s = _fmt_count(lim) if lim is not None else "∞"
+            pct = usage.get("percentUsed")
+            pct_s = f", {_fmt_count(pct)}% used" if isinstance(pct, (int, float)) else ""
+            lines.append(
+                f"{label} {_fmt_count(usage.get('used', '?'))} / {lim_s} "
+                f"({_fmt_count(usage.get('remaining', '?'))} left{pct_s})"
+            )
+        period_end = (data.get("period") or {}).get("currentPeriodEnd") \
+            if isinstance(data.get("period"), dict) else None
+        if isinstance(period_end, str) and period_end:
+            lines.append(f"🔄 Renews: {period_end[:10]}")
+        if len(lines) > 2:
+            return "\n".join(lines)
+
+    # Legacy daily/monthly shape.
     daily = data.get("daily")
     monthly = data.get("monthly")
-    limits = data.get("limits")
-    if not (isinstance(daily, dict) and isinstance(monthly, dict)
-            and isinstance(limits, dict)):
-        return None
-    return (
-        f"📊 *NanoGPT Subscription Usage*\n\n"
-        f"📅 *Daily:* {daily.get('used', '?')} / {limits.get('daily', '?')} used "
-        f"({daily.get('remaining', '?')} remaining)\n"
-        f"📆 *Monthly:* {monthly.get('used', '?')} / {limits.get('monthly', '?')} used "
-        f"({monthly.get('remaining', '?')} remaining)\n"
-    )
+    if isinstance(daily, dict) and isinstance(monthly, dict):
+        return (
+            f"📊 *NanoGPT Subscription Usage*\n\n"
+            f"📅 *Daily:* {daily.get('used', '?')} / {limits.get('daily', '?')} used "
+            f"({daily.get('remaining', '?')} remaining)\n"
+            f"📆 *Monthly:* {monthly.get('used', '?')} / {limits.get('monthly', '?')} used "
+            f"({monthly.get('remaining', '?')} remaining)\n"
+        )
+    return None
 
 
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
