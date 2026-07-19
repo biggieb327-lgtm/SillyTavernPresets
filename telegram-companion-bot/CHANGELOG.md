@@ -7,6 +7,33 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-19.2 — Note ownership: her events no longer become the user's calendar
+
+**Root cause (owner-reported):** bots brought up events from *their own* fictional
+lives and then asked the owner "how it went" as if it were the owner's plan. Third
+generation of the provenance-leak class (2026-07-10 hallucinated memories,
+v2026-07-12.4 note grounding): the v2026-07-12.4 fix requires `user_note_quote` to
+be a verbatim substring of the *user's* lines — a topic gate, not an ownership
+gate. When the character has a scrimmage Saturday and the user replies "good luck
+at the scrimmage," the user's own line states the event verbatim, the note passes
+grounding legitimately, and is stored ownerless. `note_followup_job`'s trigger then
+hard-codes ownership the wrong way ("{user} mentioned this — ask how it went"),
+completing the flip. Every guard checked whose *mouth* the words came from; none
+checked whose *life* the event belonged to.
+
+**Fix (prompt-level, both ends of the pipe, zero new LLM calls, no new code paths):**
+- Extraction (`post_reply_analysis`): `user_note` now requires the event to be part
+  of the user's OWN life; the user asking about / reacting to / wishing luck on the
+  character's event is explicitly null. The CRITICAL clause adds the principle:
+  ownership of the event decides, not whose message mentioned it.
+- Follow-up backstop (`note_followup_job` trigger): if a stored note actually
+  describes the character's own event, she must not ask the user how it went — she
+  tells them how it went for her instead. This degrades already-polluted notes
+  gracefully instead of gaslighting the owner.
+- No kill switch: pure prompt-text bugfix on existing behavior — "off" would mean
+  "keep the bug." Existing polluted entries should be pruned manually via
+  `/notes` + `/notes del <n>` on affected bots; the backstop covers what remains.
+
 ## v2026-07-19.1 — /fleet: Telegram-native fleet console over the admin API
 
 **Root cause (a gap, not a bug):** fleet visibility required a shell.
