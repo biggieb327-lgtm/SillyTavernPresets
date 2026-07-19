@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-19.1"
+BOT_VERSION = "2026-07-19.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3141,7 +3141,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"user_note": if {uname} mentioned something specific and upcoming — an event, appointment, '
         f"deadline, worry, or plan that would be natural to ask about later — a single brief "
         f"third-person note (e.g. 'has a job interview on Tuesday'). ONE event per note — "
-        f"never merge unrelated facts into one note. Otherwise null.\n"
+        f"never merge unrelated facts into one note. The event must be part of {uname}'s OWN "
+        f"life. If {uname} is asking about, reacting to, or wishing {NAME} luck on something "
+        f"in {NAME}'s life, that is {NAME}'s event, not a user_note — null. Otherwise null.\n"
         f'"user_note_quote": the EXACT sentence or clause from {uname}\'s messages that states '
         f"the user_note event. Must be a verbatim substring of what {uname} said — not "
         f"paraphrased, not from {NAME}'s lines. null if user_note is null.\n"
@@ -3167,7 +3169,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"driving"|"working"|"busy". ONLY when clearly stated — do not infer. Otherwise null.\n'
         f"CRITICAL for user_note and memory: extract ONLY from what {uname} actually said. "
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
-        f"statements, events, or plans into notes or memories; they are not real-world facts."
+        f"statements, events, or plans into notes or memories; they are not real-world facts. "
+        f"Ownership of the event decides, not whose message mentioned it: {NAME}'s plans stay "
+        f"hers even when {uname} is the one talking about them."
     )
     if THREADS_ENABLED:
         sys_prompt += (
@@ -9219,7 +9223,10 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     trigger = (
         f'[SYSTEM: {uname} mentioned this: "{note}" — that was {when}. Reach out unprompted '
         f"and ask how it went, specific and in character, 1-2 sentences. If it clearly hasn't "
-        f"happened yet today, wish them luck instead. Don't mention this message is automated.]"
+        f"happened yet today, wish them luck instead. BUT if the note actually describes "
+        f"{NAME}'s own event rather than something in {uname}'s life, do NOT ask {uname} how "
+        f"it went — it's {NAME}'s news: tell them briefly how it went for her instead. "
+        f"Don't mention this message is automated.]"
     )
     try:
         await send_triggered(context, owner, trigger)

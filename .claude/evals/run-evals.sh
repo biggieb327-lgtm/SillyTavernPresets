@@ -186,6 +186,22 @@ else
   bad "private-gate-registered" "_private_gate not registered in handler group -1 — per-handler checks drift (that is how /start was missed)"
 fi
 
+# v2026-07-19.2, third generation of the provenance-leak class (2026-07-10 memories,
+# v2026-07-12.4 note grounding): quote-grounding is a topic gate, not an ownership
+# gate — the character's own events entered user_notes via the USER's lines ("good
+# luck at the scrimmage") and note_followup_job then asked the owner how the
+# character's event went. Both ends of the ownership fix are pinned here.
+if grep -q "not a user_note" "$BOT" && grep -q "not whose message mentioned it" "$BOT"; then
+  ok "note-ownership-extraction: user_note requires the event to belong to the user's own life"
+else
+  bad "note-ownership-extraction" "ownership clause missing from post_reply_analysis — her events will re-enter user_notes through the user's lines"
+fi
+if grep -q "how it went for her instead" "$BOT"; then
+  ok "note-ownership-followup: follow-up backstop for character-owned notes present"
+else
+  bad "note-ownership-followup" "note_followup_job backstop missing — polluted notes will again be asked back at the owner as their own"
+fi
+
 # v2026-07-13.2: raw exception text was interpolated into chat messages — leaks
 # internals, and on_error would post them into the pilot GROUP chat.
 if grep -qE '\{type\(err\)|❌[^"]*\{e' "$BOT"; then
