@@ -206,7 +206,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
-| **Now** | 1.2 VPS Phase 2 — pilot jules | Runbook written (`deploy/MIGRATION.md`). Needs a provisioned VPS to execute. |
+| **Now** | 1.2 VPS Phase 2 — pilot jules | **Jules migrated to the VPS 2026-07-19** (Contabo, Ubuntu 24.04, systemd `bot@jules`, PID live); in 7-day soak. Pending: re-point `HEALTHCHECK_URL` to the VPS, remove the phone-side `~/jules-bot` after soak. Runbook updated with the stop-supervisor + whole-dir-tar fixes the pilot surfaced (see operational-log 2026-07-19). Remaining five bots next, same procedure. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 
