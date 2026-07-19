@@ -37,20 +37,48 @@ def get_model(override: str | None = None) -> str:
 def get_client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Set it and re-run:\n"
+            '  export OPENAI_API_KEY="sk-..."\n'
+            "For local OpenAI-compatible servers (ollama, vLLM, LM Studio), also set:\n"
+            '  export OPENAI_BASE_URL="http://localhost:11434/v1"'
+        )
     base_url = os.environ.get("OPENAI_BASE_URL")
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
+def slugify(name: str) -> str:
+    """Turn an author name into a safe filename fragment."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "author"
+
+
+def _collect_from_dir(d: Path, paths: set[Path]) -> int:
+    """Add supported files from a directory; return how many were found."""
+    found = 0
+    for p in sorted(d.iterdir()):
+        if p.suffix.lower() in ALLOWED_EXTENSIONS and p.is_file():
+            paths.add(p)
+            found += 1
+    return found
+
+
 def collect_samples(files: list[str] | None, samples_dir: str | None) -> list[Path]:
-    """Collect and de-duplicate sample file paths, reporting skipped files."""
+    """Collect and de-duplicate sample file paths, reporting skipped files.
+
+    Entries in ``files`` may be individual files or directories; directories
+    are expanded to their supported files.
+    """
     paths: set[Path] = set()
     skipped: list[str] = []
     if files:
         for f in files:
             p = Path(f).resolve()
             if not p.exists():
-                skipped.append(f"{f} (file not found)")
+                skipped.append(f"{f} (not found)")
+            elif p.is_dir():
+                if _collect_from_dir(p, paths) == 0:
+                    skipped.append(f"{f} (directory contains no .txt, .md, or .markdown files)")
             elif not p.is_file():
                 skipped.append(f"{f} (not a regular file)")
             elif p.suffix.lower() not in ALLOWED_EXTENSIONS:
@@ -59,10 +87,9 @@ def collect_samples(files: list[str] | None, samples_dir: str | None) -> list[Pa
                 paths.add(p)
     if samples_dir:
         d = Path(samples_dir).resolve()
-        if d.is_dir():
-            for p in d.iterdir():
-                if p.suffix.lower() in ALLOWED_EXTENSIONS and p.is_file():
-                    paths.add(p)
+        if not d.is_dir():
+            raise ValueError(f"--samples-dir {samples_dir!r} is not a directory")
+        _collect_from_dir(d, paths)
     if skipped:
         print(f"Skipped {len(skipped)} file(s):", file=sys.stderr)
         for reason in skipped:
@@ -143,7 +170,7 @@ def build_profile(
     author: str,
     files: list[str] | None,
     samples_dir: str | None,
-    out: str,
+    out: str | None = None,
     project_name: str | None = None,
     source_type: str | None = None,
     use_cases: str | None = None,
@@ -151,10 +178,14 @@ def build_profile(
     model: str | None = None,
 ) -> Path:
     """Extract a voice profile from a writing corpus."""
-    client = get_client()
-    resolved_model = get_model(model)
     paths = collect_samples(files, samples_dir)
     corpus_text, total_words, sources = build_corpus_text(paths)
+    client = get_client()
+    resolved_model = get_model(model)
+    print(
+        f"Read {len(paths)} sample file(s), {total_words:,} words total.",
+        file=sys.stderr,
+    )
     template = load_template()
     template_json = json.dumps(template, indent=2)
 
@@ -182,6 +213,10 @@ def build_profile(
         if last_error:
             prompt += PROFILE_REPAIR_ADDENDUM.format(error=last_error)
 
+        print(
+            f"Extracting voice profile with {resolved_model} (attempt {attempt}/{retries})...",
+            file=sys.stderr,
+        )
         raw = call_llm(client, resolved_model, PROFILE_BUILDER_SYSTEM, prompt, json_mode=True)
         raw = strip_markdown_fences(raw)
 
@@ -191,6 +226,7 @@ def build_profile(
             last_error = f"Invalid JSON: {e}"
             if attempt == retries:
                 raise RuntimeError(f"Failed to get valid JSON after {retries} attempts: {last_error}")
+            print("Output was not valid JSON; retrying with repair guidance.", file=sys.stderr)
             continue
 
         try:
@@ -199,10 +235,11 @@ def build_profile(
             last_error = f"{e.message} (path: {list(e.absolute_path)})"
             if attempt == retries:
                 raise RuntimeError(f"Schema validation failed after {retries} attempts: {last_error}")
+            print("Output failed schema validation; retrying with repair guidance.", file=sys.stderr)
             continue
 
         # Success
-        out_path = Path(out)
+        out_path = Path(out) if out else Path(f"{slugify(author)}-profile.json")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
         return out_path
@@ -213,18 +250,24 @@ def build_profile(
 def generate(
     profile_path: str,
     task_file: str,
-    facts_file: str,
+    facts_file: str | None,
     register: str,
-    out: str,
+    out: str | None = None,
     model: str | None = None,
-) -> Path:
-    """Generate a draft using a voice profile."""
-    client = get_client()
-    resolved_model = get_model(model)
+) -> tuple[str, Path | None]:
+    """Generate a draft using a voice profile.
 
+    Returns the draft text and the path it was written to (None when no
+    output path was given — the caller decides how to present the text).
+    """
     profile_json = Path(profile_path).read_text(encoding="utf-8")
     task_text = Path(task_file).read_text(encoding="utf-8")
-    facts_text = Path(facts_file).read_text(encoding="utf-8")
+    if facts_file:
+        facts_text = Path(facts_file).read_text(encoding="utf-8")
+    else:
+        facts_text = "(no separate facts file; use only facts stated in the task/brief)"
+    client = get_client()
+    resolved_model = get_model(model)
 
     user_prompt = GENERATOR_USER.format(
         profile_json=profile_json,
@@ -233,27 +276,35 @@ def generate(
         facts_text=facts_text,
     )
 
+    print(f"Generating {register} draft with {resolved_model}...", file=sys.stderr)
     result = call_llm(client, resolved_model, GENERATOR_SYSTEM, user_prompt)
 
+    if not out:
+        return result, None
     out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(result, encoding="utf-8")
-    return out_path
+    return result, out_path
 
 
 def judge(
     profile_path: str,
     draft_file: str,
     register: str,
-    out: str,
+    out: str | None = None,
     model: str | None = None,
-) -> Path:
-    """Judge a draft against a voice profile."""
+) -> tuple[dict | None, Path]:
+    """Judge a draft against a voice profile.
+
+    Returns the parsed evaluation (None if the model returned unparseable
+    JSON) and the path the evaluation was written to. Defaults the output
+    path to ``<draft-stem>-eval.json`` next to the draft.
+    """
+    draft_path = Path(draft_file)
+    profile_json = Path(profile_path).read_text(encoding="utf-8")
+    draft_text = draft_path.read_text(encoding="utf-8")
     client = get_client()
     resolved_model = get_model(model)
-
-    profile_json = Path(profile_path).read_text(encoding="utf-8")
-    draft_text = Path(draft_file).read_text(encoding="utf-8")
 
     user_prompt = JUDGE_USER.format(
         profile_json=profile_json,
@@ -261,19 +312,23 @@ def judge(
         draft_text=draft_text,
     )
 
+    print(f"Judging draft with {resolved_model}...", file=sys.stderr)
     raw = call_llm(client, resolved_model, JUDGE_SYSTEM, user_prompt, json_mode=True)
     raw = strip_markdown_fences(raw)
 
     # Validate that judge output is parseable JSON before saving
+    parsed: dict | None = None
     try:
-        parsed = json.loads(raw)
-        result = json.dumps(parsed, indent=2, ensure_ascii=False)
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            parsed = loaded
+        result = json.dumps(loaded, indent=2, ensure_ascii=False)
     except json.JSONDecodeError:
         # Save raw output but warn the user
         result = raw
         print("Warning: judge output is not valid JSON; saving raw response.", file=sys.stderr)
 
-    out_path = Path(out)
+    out_path = Path(out) if out else draft_path.with_name(f"{draft_path.stem}-eval.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(result, encoding="utf-8")
-    return out_path
+    return parsed, out_path
