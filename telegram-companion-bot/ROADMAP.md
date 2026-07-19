@@ -52,6 +52,11 @@ single-device blast radius.
 - `_self_audit` watches fallback rate (≥3/hr → DM) and optional `USAGE_BUDGET_MONTHLY`
   (DM at 80%/100%). Both use the existing 2h-cooldown DM pattern.
 
+### 1.5 ~~Telegram-native fleet console~~ ✅ (shipped v2026-07-19.1)
+- `/fleet` on a designated instance probes every peer's admin API (`FLEET_PEERS`,
+  works across phone+VPS hosts mid-migration) and replies with one up/down /
+  version / uptime / errors table — `fleet-status.sh` without the shell.
+
 ---
 
 ## Track 2 — Engineering workflow

@@ -177,6 +177,7 @@ These files shape what the character knows and references. All are editable from
 | Command | What it does |
 |---|---|
 | `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health |
+| `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
 | `/update` | Self-deploy: pull latest `bot.py` from `main`, verify it compiles, restart (`force` to reinstall the same version) |
 | `/restart` | Clean restart via the supervisor — picks up `.env` edits and a swapped `bot.py` |

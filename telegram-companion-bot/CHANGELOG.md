@@ -7,6 +7,38 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-19.1 — /fleet: Telegram-native fleet console over the admin API
+
+**Root cause (a gap, not a bug):** fleet visibility required a shell.
+`fleet-status.sh` answers "is everyone up, what version" but only from a terminal
+— and the VPS migration is exactly when that answer is needed from a phone with
+no SSH at hand: instances now live on two hosts, and the jules pilot's failure
+mode (two hosts polling one token) is the kind of thing a glanceable per-host
+view catches early. The admin API already served all the data
+(`/admin/health`, `/admin/audit`); nothing consumed it from inside Telegram.
+
+**What shipped:**
+- `/fleet` (admin-gated, `_is_admin`): probes every peer in `FLEET_PEERS`
+  concurrently (`asyncio.gather` over `asyncio.to_thread` — no bare `requests`
+  in the async handler) and replies with one table: UP/DOWN, version, uptime,
+  and `err:<n>` last-hour error count when the fleet shares one
+  `ADMIN_API_TOKEN` (audit probe degrades to `?` on a token mismatch or older
+  peer). DOWN is labeled as "admin API unreachable", not "bot dead" — the
+  common case is `ADMIN_API_ENABLED` unset on a healthy bot.
+- `FLEET_PEERS=name=port,name=host:port,…` — host defaults to localhost, so
+  the same config works on-phone now and across the tailnet mid-migration.
+  Parsed by pure `_fleet_parse_peers`; bad entries warn via `_CONFIG_WARNINGS`
+  and are skipped (the .env-typo-must-not-brick rule, v2026-07-10.2).
+- `/admin/health` now includes `instance` and `uptime_hours` (still
+  unauthenticated liveness only) — `fleet-status.sh` already tried to read
+  `uptime_hours` and rendered 0.0h for everyone; now it's real.
+- Kill switch `FLEET_CMD` (unset = on, `0` = off) per owner policy 2026-07-18;
+  feature is inert without `FLEET_PEERS` regardless. `FLEET_TIMEOUT` (default
+  4s) bounds each probe. Group-safe automatically: commands in groups are
+  default-deny (`GROUP_ALLOWED_COMMANDS`), untouched.
+
+**Tests:** `TestFleetParsePeers` (5) + `TestFleetFormat` (3) in test_pure.py.
+
 ## v2026-07-18.5 — /usage speaks NanoGPT's token-based subscription shape
 
 **Root cause:** the v2026-07-18.4 self-describing error did its job — the owner's

@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-18.5"
+BOT_VERSION = "2026-07-19.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -10753,7 +10753,11 @@ class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/admin/health":
-            self._json(200, {"ok": True, "version": BOT_VERSION})
+            # Unauthenticated liveness only — nothing here beyond what a peer on the
+            # tailnet may see. fleet-status.sh and /fleet both read uptime_hours.
+            self._json(200, {"ok": True, "version": BOT_VERSION,
+                             "instance": BASE_DIR.name,
+                             "uptime_hours": round((time.time() - _BOOT_TIME) / 3600, 1)})
             return
         if not _admin_authorized(self):
             self._json(401, {"ok": False, "error": "unauthorized"})
@@ -10818,6 +10822,117 @@ async def _stop_admin_api(application):
     if _admin_httpd is not None:
         _admin_httpd.shutdown()
         _admin_httpd = None
+
+
+# --- /fleet — fleet console over the admin API ---
+# One designated instance answers /fleet by probing every peer's /admin/health
+# (unauthenticated liveness: version, uptime) and, when the fleet shares one
+# ADMIN_API_TOKEN, /admin/audit for the last-hour error count. Peers come from
+# FLEET_PEERS — "name=port" for same-host peers, "name=host:port" across the
+# tailnet — so the same command keeps working mid-VPS-migration while instances
+# live on two hosts. Inert without FLEET_PEERS; FLEET_CMD=0 is the kill switch.
+FLEET_CMD = os.getenv("FLEET_CMD", "1").strip().lower() not in ("0", "false", "no", "off")
+FLEET_TIMEOUT = _env_float("FLEET_TIMEOUT", "4.0")
+
+
+def _fleet_parse_peers(raw: str) -> list[tuple[str, str, int]]:
+    """"nora=8080,jules=100.64.0.5:8085" → [(name, host, port), ...].
+    Bad entries are skipped with a config warning — one typo must not take the
+    whole console down."""
+    peers: list[tuple[str, str, int]] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, sep, addr = tok.partition("=")
+        name = name.strip()
+        host, _, port_s = addr.strip().rpartition(":")
+        host = host.strip() or "127.0.0.1"
+        try:
+            port = int(port_s.strip())
+        except ValueError:
+            port = 0
+        if not (name and sep and 0 < port < 65536):
+            msg = (f"ignoring invalid FLEET_PEERS entry {tok!r} "
+                   "(want name=port or name=host:port)")
+            logging.warning("[config] %s", msg)
+            _CONFIG_WARNINGS.append(msg)
+            continue
+        peers.append((name, host, port))
+    return peers
+
+
+FLEET_PEERS = _fleet_parse_peers(os.getenv("FLEET_PEERS", ""))
+
+
+def _fleet_probe(name: str, host: str, port: int) -> dict:
+    """Blocking probe of one peer's admin API — call via asyncio.to_thread.
+    Returns display fields only; never raises."""
+    base = f"http://{host}:{port}"
+    row = {"name": name, "up": False, "version": "", "uptime": "", "errors": "", "detail": ""}
+    try:
+        r = requests.get(f"{base}/admin/health", timeout=FLEET_TIMEOUT)
+        _ = r.content  # force-read before raise_for_status, same as _do_request
+        r.raise_for_status()
+        h = r.json()
+    except Exception as e:
+        row["detail"] = e.__class__.__name__
+        return row
+    row["up"] = True
+    row["version"] = str(h.get("version", "?"))
+    if isinstance(h.get("uptime_hours"), (int, float)):
+        row["uptime"] = f"{h['uptime_hours']:.1f}h"
+    if ADMIN_API_TOKEN:
+        try:
+            r = requests.get(f"{base}/admin/audit", timeout=FLEET_TIMEOUT,
+                             headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"})
+            _ = r.content
+            r.raise_for_status()
+            row["errors"] = str(r.json().get("errors_last_hour_total", "?"))
+        except Exception:
+            # peer up but audit refused — different token or older version
+            row["errors"] = "?"
+    return row
+
+
+def _fleet_format(rows: list[dict]) -> str:
+    """One line per peer, sized for a phone screen inside a code block."""
+    lines = []
+    for row in rows:
+        if not row["up"]:
+            lines.append(f"{row['name']:<7} DOWN  {row.get('detail', '')}".rstrip())
+            continue
+        bits = [f"{row['name']:<7} UP", row["version"] or "?"]
+        if row["uptime"]:
+            bits.append(row["uptime"])
+        if row["errors"]:
+            bits.append(f"err:{row['errors']}")
+        lines.append("  ".join(bits))
+    return "\n".join(lines)
+
+
+async def fleet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fleet — probe every configured peer's admin API, reply with one table."""
+    if not _is_admin(update.effective_user.id):
+        return
+    if not FLEET_CMD:
+        await update.message.reply_text("Fleet console is disabled (FLEET_CMD=0).")
+        return
+    if not FLEET_PEERS:
+        await update.message.reply_text(
+            "No peers configured. Set FLEET_PEERS in this instance's .env, e.g.\n"
+            "FLEET_PEERS=nora=8080,bonnie=8081,jules=100.x.y.z:8085\n"
+            "(each peer needs ADMIN_API_ENABLED=1; port = its ADMIN_API_PORT)")
+        return
+    rows = await asyncio.gather(
+        *(asyncio.to_thread(_fleet_probe, n, h, p) for n, h, p in FLEET_PEERS))
+    rows = list(rows)
+    up = sum(1 for r in rows if r["up"])
+    text = (f"🛰 Fleet: {up}/{len(rows)} up\n"
+            f"```\n{_fleet_format(rows)}\n```\n"
+            "DOWN = admin API unreachable — the bot itself may still be fine "
+            "(check ADMIN_API_ENABLED / host / port).")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # --- Main ---
@@ -11150,6 +11265,7 @@ def main():
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
+    app.add_handler(CommandHandler("fleet", fleet_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))

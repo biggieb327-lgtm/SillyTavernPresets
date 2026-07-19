@@ -2555,3 +2555,50 @@ class TestFmtCount:
         assert bot._fmt_count(100) == "100"
         assert bot._fmt_count("?") == "?"
         assert bot._fmt_count(0.03) == "0.03"
+
+
+# ── /fleet console (v2026-07-19.1) ────────────────────────────────────────────
+
+class TestFleetParsePeers:
+    def test_port_only_defaults_to_localhost(self):
+        assert bot._fleet_parse_peers("nora=8080") == [("nora", "127.0.0.1", 8080)]
+
+    def test_host_and_port(self):
+        assert bot._fleet_parse_peers("jules=100.64.0.5:8085") == \
+            [("jules", "100.64.0.5", 8085)]
+
+    def test_full_fleet_mixed(self):
+        peers = bot._fleet_parse_peers(
+            "nora=8080, bonnie=8081,jules=100.64.0.5:8085")
+        assert peers == [("nora", "127.0.0.1", 8080),
+                         ("bonnie", "127.0.0.1", 8081),
+                         ("jules", "100.64.0.5", 8085)]
+
+    def test_bad_entries_skipped_not_fatal(self):
+        before = len(bot._CONFIG_WARNINGS)
+        peers = bot._fleet_parse_peers("nora=8080,oops,cass=notaport,=8082,priya=0")
+        assert peers == [("nora", "127.0.0.1", 8080)]
+        assert len(bot._CONFIG_WARNINGS) == before + 4
+
+    def test_empty_string(self):
+        assert bot._fleet_parse_peers("") == []
+
+
+class TestFleetFormat:
+    def test_up_row_with_all_fields(self):
+        rows = [{"name": "nora", "up": True, "version": "2026-07-19.1",
+                 "uptime": "45.2h", "errors": "0"}]
+        out = bot._fleet_format(rows)
+        assert "nora" in out and "UP" in out
+        assert "2026-07-19.1" in out and "45.2h" in out and "err:0" in out
+
+    def test_down_row_shows_detail(self):
+        out = bot._fleet_format(
+            [{"name": "cass", "up": False, "detail": "ConnectTimeout"}])
+        assert "cass" in out and "DOWN" in out and "ConnectTimeout" in out
+
+    def test_missing_optional_fields_omitted(self):
+        out = bot._fleet_format(
+            [{"name": "emily", "up": True, "version": "2026-07-18.5",
+              "uptime": "", "errors": ""}])
+        assert "err:" not in out and "UP" in out
