@@ -40,6 +40,16 @@ export OPENAI_BASE_URL="http://localhost:11434/v1"
 
 ## Usage
 
+### Quick start
+
+Point `build-profile` at your samples (files and/or directories) and give it an
+author name — the profile lands in `<author>-profile.json`:
+
+```bash
+voicekit build-profile ./writing-samples/ --author "Jane Smith"
+# Profile saved to jane-smith-profile.json
+```
+
 ### Build a profile from multiple files
 
 ```bash
@@ -91,15 +101,24 @@ voicekit generate \
   --out drafts/announcement-email.md
 ```
 
+`--facts-file` is optional — without it the draft uses only facts stated in the
+task/brief. `--out` is optional too; omit it to print the draft to stdout:
+
+```bash
+voicekit generate --profile profiles/jane.json --task-file briefs/announcement.md --register email
+```
+
 ### Judge a draft
 
 ```bash
 voicekit judge \
   --profile profiles/jane.json \
   --draft-file drafts/announcement-email.md \
-  --register email \
-  --out evaluations/announcement-eval.json
+  --register email
 ```
+
+Prints a score summary and top revision priorities, and saves the full
+evaluation to `<draft>-eval.json` next to the draft (override with `--out`).
 
 ## How it works
 

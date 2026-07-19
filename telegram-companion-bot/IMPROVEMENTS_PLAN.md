@@ -1,5 +1,10 @@
 # Improvements Implementation Plan — for the next implementing agent
 
+> **Status (2026-07-17): fully executed.** All six releases shipped 2026-07-11 as
+> v2026-07-11.1–.6 (one release per phase, per ground rule 4) — see CHANGELOG.md for
+> what each actually did and ROADMAP.md Track 4 for the closed backlog items. This
+> document is retained as the handoff spec of record; do not re-implement from it.
+
 Written 2026-07-10 against bot.py v2026-07-10.2 (~8,450 lines). This turns the
 triaged improvement suggestions from the 2026-07-10 audit (see `AUDIT-2026-07-10.md`)
 into an executable, release-by-release plan. It is self-contained: read this + the
@@ -40,14 +45,14 @@ files it names and you have everything needed.
 
 ## Release sequencing
 
-| Release | Theme | Items |
-|---|---|---|
-| R1 | Memory auditor | source-attached memories, quote grounding, review queue, /editmem //sourcemem, memcheck flow, audit log |
-| R2 | Availability | remote-default framing, /away //back, auto-extraction, new vibe presets |
-| R3 | Observability & robustness | persisted error counts, config warnings surfaced, atomic small-file writes, graceful drain, usage counters in /audit, _last_request prune |
-| R4 | Prompt hygiene & safety | token-budget trimming, lore dedupe, persona-break guardrail, summarization semaphore, /start full |
-| R5 | UX | /status tail, recurring quiet windows |
-| R6 | Evolution experiments (each behind its own env flag, ship one at a time) | reaction feedback, closeness score, open-threads list, joke candidates via review queue |
+| Release | Theme | Items | Status |
+|---|---|---|---|
+| R1 | Memory auditor | source-attached memories, quote grounding, review queue, /editmem //sourcemem, memcheck flow, audit log | ✅ v2026-07-11.1 |
+| R2 | Availability | remote-default framing, /away //back, auto-extraction, new vibe presets | ✅ v2026-07-11.2 |
+| R3 | Observability & robustness | persisted error counts, config warnings surfaced, atomic small-file writes, graceful drain, usage counters in /audit, _last_request prune | ✅ v2026-07-11.3 |
+| R4 | Prompt hygiene & safety | token-budget trimming, lore dedupe, persona-break guardrail, summarization semaphore, /start full | ✅ v2026-07-11.4 |
+| R5 | UX | /status tail, recurring quiet windows | ✅ v2026-07-11.5 |
+| R6 | Evolution experiments (each behind its own env flag, ship one at a time) | reaction feedback, closeness score, open-threads list, joke candidates via review queue | ✅ v2026-07-11.6 |
 
 ---
 
