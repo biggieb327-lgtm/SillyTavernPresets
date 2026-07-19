@@ -25,8 +25,10 @@ single-device blast radius.
 - **Evidence:** Changelog v2026-07-05.12 is explicitly "Phase 1 of VPS migration":
   `deploy/bot@.service` (Restart=always) and `deploy/install-vps.sh` already exist and
   are confirmed compatible with the PID-lock/exit patterns. Phase 2 was never specced.
-- **Status:** Migration runbook written (`deploy/MIGRATION.md`). Pilot with jules is
-  next — requires a VPS to be provisioned and `install-vps.sh` run once.
+- **Status:** Pilot LIVE — jules cut over to the VPS 2026-07-19 (two incidents during
+  cutover, both recorded in the operational log; runbook gained steps 7b/7c and
+  `deploy/vps-sync.sh` is now the VPS deploy path). 7-day soak underway; Phase-2
+  migrations start after soak passes (~2026-07-26).
 - **Plan:**
   1. Pilot with one low-state bot (jules). Cutover is per-bot and brief: stop the
      instance on the phone → restore its directory from the latest backup-all.sh
@@ -40,6 +42,24 @@ single-device blast radius.
 - **Risk:** state divergence if a bot runs on both hosts — the stop-before-start rule
   is the whole safety story. Timezone: verify tzdata + TIMEZONE on the VPS before the
   first start (the v2026-07-05.5 startup-crash class).
+- **Cleanup batch (owner, deferred to "all six migrated" — ask Claude to walk this
+  list when Phase 2 completes; items accumulated during the 2026-07-19 pilot):**
+  - [ ] VPS: `rm /opt/telegram-bots/jules/jules.json` (stale renamed card copy;
+        `CHARACTER_CARD` now normalized to `jules_nakagawa.json`)
+  - [ ] VPS: delete `/opt/telegram-bots/nora.parked` — do NOT revive it for nora's
+        migration (rebuild from the runbook tar instead; its `.env` has duplicate
+        `TELEGRAM_BOT_TOKEN` lines and cloned state)
+  - [ ] Re-point `HEALTHCHECK_URL` to the VPS for jules + every instance as it moves
+  - [ ] Phone: delete `~/jules-migrate.tar.gz` (jules's rollback copy — keep until
+        soak passes; same per-instance after each successful migration)
+  - [ ] Phone: as each instance migrates, remove/rename its `~/<name>-bot/` dir —
+        `watchdog.sh` hard-codes the instance list and resurrects any dir it sees;
+        retire watchdog.sh entirely when the phone empties
+  - [ ] Verify Jules's proactive texts stayed free of fabricated `[sent HH:MM]`
+        headers (card fix 2026-07-19); if recurred, ship the regex strip at the
+        `_do_request` choke point as a versioned release
+  - [ ] OPS_MANUAL "VPS operations" section; mark CLAUDE.md Termux quirks historical
+        (these two are also the 1.2 done-when criteria)
 - **Done when:** all six instances on systemd, healthchecks green for 14 days,
   OPS_MANUAL has a "VPS operations" section, and the Termux quirks in CLAUDE.md are
   marked historical.
