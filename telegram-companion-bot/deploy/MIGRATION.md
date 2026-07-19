@@ -126,6 +126,48 @@ Wait for the bot to respond to `/audit` from Telegram. Confirm:
 - No errors on startup
 - Memories/notes are present (`/memory`, check user notes)
 
+### 7b. Enable the unit + prove a single poller
+
+`systemctl start` does not survive a reboot — enable the unit:
+```bash
+sudo systemctl enable bot@jules
+```
+
+Then prove exactly ONE process polls this token:
+```bash
+systemctl list-units 'bot@*' --no-pager    # only the units you intend, nothing else
+pgrep -af bot.py                           # exactly one line per intended instance
+journalctl -u bot@jules --since "-10 min" | grep -c Conflict   # 0
+```
+From Telegram, `/audit` twice a few minutes apart: the PID must be stable and
+uptime monotonically increasing. Two consecutive audits that disagree on
+PID/uptime/log sizes are the signature of a hidden second poller — different
+processes are answering in turn.
+
+> **Learned 2026-07-19 (second incident, same pilot):** a staging dir cloned from
+> a live instance sat on the VPS with a populated token in its `.env`; a
+> `systemctl start bot@<name>` turned it into a second poller, and its cloned
+> `errors.log` (full of old phone tracebacks) poisoned diagnosis for hours.
+> Never leave a start-able instance dir seeded from a live instance — park
+> anything not yet migrated (`mv nora nora.parked`). Never stack a second
+> `TELEGRAM_BOT_TOKEN=` line in an `.env`: the loader takes the last value, and
+> a blank-then-filled pair hides which token is live. And when reading pasted
+> `/audit`/`/errors` evidence, remember log *content* proves where lines were
+> written, not which host is answering — tar'd logs travel.
+
+### 7c. Updating a VPS instance after cutover
+
+`/update` and `sync-cards.sh` are phone tooling and know nothing of the VPS.
+For content or bot.py deploys to a VPS instance use:
+```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
+```
+It pulls preset + card + bot.py from main, compile-checks bot.py before the swap
+(keeps `bot.py.bak`), normalizes `CHARACTER_CARD` to the repo card filename
+(a renamed on-device card silently exempts the instance from every card deploy —
+found the hard way with `jules.json`), restarts + enables the unit, and prints
+hash + STARTUP AUDIT verification.
+
 ### 8. Set up dead man's switch
 
 In the VPS `.env`:
