@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — Clean API error reporting
+
+- API connection failures, HTTP error statuses, and other OpenAI client errors
+  now surface as one-line `Error: ...` messages instead of raw tracebacks
+  (found during a live test: an unreachable endpoint dumped ~60 lines of
+  httpx/openai traceback)
+
 ## 0.2.0 — Usability
 
 All existing flags and invocations keep working; changes are additive.

@@ -11,7 +11,7 @@ import warnings
 from pathlib import Path
 
 import jsonschema
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI, OpenAIError
 
 from voicekit.prompts import (
     GENERATOR_SYSTEM,
@@ -159,7 +159,20 @@ def call_llm(
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    response = client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except APIConnectionError as e:
+        base = os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        raise RuntimeError(
+            f"Could not reach the API at {base} ({e}). "
+            "Check your network connection, proxy settings, and OPENAI_BASE_URL."
+        ) from e
+    except APIStatusError as e:
+        raise RuntimeError(
+            f"API returned status {e.status_code} for model {model!r}: {e}"
+        ) from e
+    except OpenAIError as e:
+        raise RuntimeError(f"API request failed: {e}") from e
     content = response.choices[0].message.content
     if not content:
         raise RuntimeError("LLM returned empty response")
