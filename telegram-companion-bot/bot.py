@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-13.2"
+BOT_VERSION = "2026-07-19.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -240,6 +240,15 @@ REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/ch
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
+# Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
+# feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
+# FATIGUE_STATE is also the master switch for the minimal-reply license.
+FATIGUE_STATE = os.getenv("FATIGUE_STATE", "1").lower() not in ("0", "false", "no", "off")
+FATIGUE_THRESHOLD = _env_float("FATIGUE_THRESHOLD", "70")
+FATIGUE_DECAY_PER_HOUR = _env_float("FATIGUE_DECAY_PER_HOUR", "10")
+# Day-mood residue (ROADMAP 3.7 / Yuralume review): her generated day seeds how she
+# opens — one extra line parsed from the existing midnight day-generation call.
+DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "false", "no", "off")
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
@@ -297,6 +306,10 @@ JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "ye
 # location, hand the model real nearby places so it recommends from fact, not
 # imagination. Rides the single reply (no extra LLM call). Needs TOMTOM_API_KEY too.
 FOOD_SUGGESTIONS = os.getenv("FOOD_SUGGESTIONS", "0").lower() in ("1", "true", "yes")
+# Generalized map intent (ROADMAP 3.5 phase 2): "how do I get to X" / "is there a
+# <thing> nearby" pre-fetch real TomTom route/place data into the single reply, the
+# same way FOOD_SUGGESTIONS does. Independent of FOOD_SUGGESTIONS; needs TOMTOM_API_KEY.
+MAP_INTENT = os.getenv("MAP_INTENT", "0").lower() in ("1", "true", "yes")
 
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
@@ -427,6 +440,11 @@ PEOPLE_FILE = BASE_DIR / "people.txt"
 PROJECTS_FILE = BASE_DIR / "projects.txt"
 SCHEDULE_FILE = BASE_DIR / "schedule.txt"
 LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
+# Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
+# explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
+# shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
+SCHED_BUSY = os.getenv("SCHED_BUSY", "1").lower() not in ("0", "false", "no", "off")
+SCHED_BUSY_DELAY_MULT = _env_float("SCHED_BUSY_DELAY_MULT", "3.0")
 _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
@@ -457,6 +475,17 @@ MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
 MEMORY_AUDIT_SEEN_MAX = 100
+
+# Repeat-injection suppression (v2026-07-18.1): triggered_memories is stateless across
+# turns, so while a conversation stays on one theme the same top-scoring lines win the
+# token budget every turn and the character re-tells one memory (reworded) endlessly.
+# This down-weights (never excludes) memories injected on recent turns so near-ties
+# rotate. In-memory only, like _recent_questions — a restart just clears suppression.
+# Default ON (window 6, owner default-on policy); set 0 to disable without a redeploy.
+MEMORY_REPEAT_SUPPRESS_TURNS = _env_int("MEMORY_REPEAT_SUPPRESS_TURNS", "6")
+MEMORY_REPEAT_PENALTY = _env_float("MEMORY_REPEAT_PENALTY", "0.15")
+_mem_inject_turn: dict = {}    # chat_id -> per-chat reply-turn counter
+_mem_last_injected: dict = {}  # chat_id -> {memory line: turn last injected}
 
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
@@ -799,6 +828,43 @@ def _read_schedule_today() -> str:
         elif in_today:
             result.append(stripped)
     return "\n".join(result).strip()
+
+
+# ROADMAP 3.6: only explicit HH:MM-HH:MM ranges count as busy blocks — loosely worded
+# schedule lines ("morning shift", "gym later") must never fire the busy state.
+_BUSY_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})(?!\d)")
+
+
+def _parse_busy_blocks(sched_text: str) -> list[tuple[int, int, str]]:
+    """(start_minute, end_minute, activity) per schedule line carrying an explicit
+    time range. Overnight ranges (end <= start) are skipped rather than guessed."""
+    blocks = []
+    for line in (sched_text or "").splitlines():
+        m = _BUSY_RANGE_RE.search(line)
+        if not m:
+            continue
+        h1, m1, h2, m2 = (int(x) for x in m.groups())
+        if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
+            continue
+        start, end = h1 * 60 + m1, h2 * 60 + m2
+        if end <= start:
+            continue
+        activity = (line[:m.start()] + " " + line[m.end():]).strip(" \t-–—:•,")
+        blocks.append((start, end, activity[:120] or "something on her schedule"))
+    return blocks
+
+
+def _busy_now(sched_text: str, now=None) -> str:
+    """The activity she's mid-way through right now per today's schedule, or ''."""
+    if not sched_text:
+        return ""
+    if now is None:
+        now = datetime.now(tz=TZ) if TZ else datetime.now()
+    minutes = now.hour * 60 + now.minute
+    for start, end, activity in _parse_busy_blocks(sched_text):
+        if start <= minutes < end:
+            return activity
+    return ""
 
 # User memory — upcoming things the user mentions that the character should follow up on
 USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
@@ -1815,6 +1881,7 @@ recent_summaries = {}  # chat_id -> short-term summary covering roughly the last
 recent_facts = {}      # chat_id -> list of recent/situational facts (last ~week)
 last_promotion = {}    # chat_id -> unix timestamp recent memory was last folded into long-term
 moods = {}          # chat_id -> {"score": float, "ts": epoch} drifting emotional state
+fatigue = {}        # chat_id -> {"level": float 0-100, "ts": epoch} social battery (3.7)
 beliefs = {}        # chat_id -> {"items": {trait: {"score": float, "anchor": float}}}
 recommendations = {}  # chat_id -> [{"id", "text", "ts", "status", "outcome", "note"}]
 rec_seq = {}        # chat_id -> next recommendation id
@@ -1892,6 +1959,8 @@ def load_state():
         last_promotion[int(cid)] = ts
     for cid, mv in data.get("moods", {}).items():
         moods[int(cid)] = mv
+    for cid, fv in data.get("fatigue", {}).items():
+        fatigue[int(cid)] = fv
     for cid, bv in data.get("beliefs", {}).items():
         beliefs[int(cid)] = bv
     for cid, rl in data.get("recommendations", {}).items():
@@ -1986,6 +2055,7 @@ def _serialize_state() -> str:
         "recent_facts": {str(k): v for k, v in recent_facts.items()},
         "last_promotion": {str(k): v for k, v in last_promotion.items()},
         "moods": {str(k): v for k, v in moods.items()},
+        "fatigue": {str(k): v for k, v in fatigue.items()},
         "beliefs": {str(k): v for k, v in beliefs.items()},
         "recommendations": {str(k): v for k, v in recommendations.items()},
         "rec_seq": {str(k): v for k, v in rec_seq.items()},
@@ -2743,6 +2813,20 @@ def _recency_weight(ts, now: float, halflife_days: float) -> float:
     return max(0.1, 0.5 ** (age_days / halflife_days))
 
 
+def _repeat_penalty(last_turn, current_turn: int, window: int, floor: float) -> float:
+    """Down-weight a memory injected on a recent turn, so one theme can't win the recall
+    budget every turn. Neutral (1.0) when disabled (window <= 0) or the line was never
+    injected. Full penalty (floor) on the turn right after injection, fading linearly
+    back to 1.0 over `window` turns. A multiplier, never exclusion — a strongly relevant
+    memory can still outscore the penalty and surface again."""
+    if window <= 0 or last_turn is None:
+        return 1.0
+    ago = current_turn - last_turn
+    if ago >= window:
+        return 1.0
+    return floor + (1.0 - floor) * (max(ago - 1, 0) / window)
+
+
 def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
                         enabled: bool) -> tuple[list[str], bool]:
     """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
@@ -2772,7 +2856,8 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     return out, hedged
 
 
-def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> list[str]:
+def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
+                       chat_id: int | None = None) -> list[str]:
     entries = _read_memories()
     if not entries:
         return []
@@ -2813,10 +2898,28 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> 
     # Merge: union of both, sum their scores, then age-decay the ranking
     # (MEMORY_DECAY_HALFLIFE_DAYS; 0/unset = off, no-ts legacy entries neutral).
     now = time.time()
+
+    # Repeat-injection suppression: down-weight lines injected on recent turns so one
+    # theme can't win the budget every turn. Only on the live reply path (a chat_id is
+    # passed) and when enabled — /recall-style callers pass chat_id=None and are
+    # unaffected, so their ranking and existing tests stay byte-identical.
+    suppress = chat_id is not None and MEMORY_REPEAT_SUPPRESS_TURNS > 0
+    if suppress:
+        turn = _mem_inject_turn.get(chat_id, 0) + 1
+        _mem_inject_turn[chat_id] = turn
+        seen = _mem_last_injected.setdefault(chat_id, {})
+        for l, t in list(seen.items()):          # prune aged-out / deleted lines
+            if turn - t >= MEMORY_REPEAT_SUPPRESS_TURNS:
+                del seen[l]
+        win = MEMORY_REPEAT_SUPPRESS_TURNS
+    else:
+        turn, seen, win = 0, {}, 0
+
     all_lines = set(keyword_scored) | set(sem_scored)
     merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
-                                 now, MEMORY_DECAY_HALFLIFE_DAYS), l)
+                                 now, MEMORY_DECAY_HALFLIFE_DAYS)
+               * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY), l)
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
@@ -2828,6 +2931,9 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None) -> 
             continue
         out.append(line)
         budget -= cost
+    if suppress:                                  # record winners on the raw lines,
+        for line in out:                          # before _hedge rewrites them for display
+            seen[line] = turn
     return out
 
 
@@ -3035,7 +3141,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"user_note": if {uname} mentioned something specific and upcoming — an event, appointment, '
         f"deadline, worry, or plan that would be natural to ask about later — a single brief "
         f"third-person note (e.g. 'has a job interview on Tuesday'). ONE event per note — "
-        f"never merge unrelated facts into one note. Otherwise null.\n"
+        f"never merge unrelated facts into one note. The event must be part of {uname}'s OWN "
+        f"life. If {uname} is asking about, reacting to, or wishing {NAME} luck on something "
+        f"in {NAME}'s life, that is {NAME}'s event, not a user_note — null. Otherwise null.\n"
         f'"user_note_quote": the EXACT sentence or clause from {uname}\'s messages that states '
         f"the user_note event. Must be a verbatim substring of what {uname} said — not "
         f"paraphrased, not from {NAME}'s lines. null if user_note is null.\n"
@@ -3061,7 +3169,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'"driving"|"working"|"busy". ONLY when clearly stated — do not infer. Otherwise null.\n'
         f"CRITICAL for user_note and memory: extract ONLY from what {uname} actually said. "
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
-        f"statements, events, or plans into notes or memories; they are not real-world facts."
+        f"statements, events, or plans into notes or memories; they are not real-world facts. "
+        f"Ownership of the event decides, not whose message mentioned it: {NAME}'s plans stay "
+        f"hers even when {uname} is the one talking about them."
     )
     if THREADS_ENABLED:
         sys_prompt += (
@@ -3085,12 +3195,14 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
     )
     data = _extract_json(raw)
 
+    try:
+        _valence = max(-3.0, min(3.0, float(data.get("valence"))))
+    except (TypeError, ValueError):
+        _valence = cur.get("score", 0.0)
+
     if want_mood:
         label = (data.get("mood") or "").strip() if isinstance(data.get("mood"), str) else ""
-        try:
-            valence = max(-3.0, min(3.0, float(data.get("valence"))))
-        except (TypeError, ValueError):
-            valence = cur.get("score", 0.0)
+        valence = _valence
         if label:
             value = {"score": round(valence, 3), "label": label[:160], "ts": time.time()}
             if _MAIN_LOOP:
@@ -3100,6 +3212,22 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                 moods[chat_id] = value
                 save_state()
             print(f"[mood] {label} ({valence:+.0f})")
+
+    if FATIGUE_STATE:
+        # Runs on the worker thread — state writes go back via call_soon_threadsafe
+        # exactly like the mood write above (invariant #6).
+        old_level = (fatigue.get(chat_id) or {}).get("level", 0.0)
+        new_level = _fatigue_update(old_level, _valence, gap_hours, FATIGUE_DECAY_PER_HOUR)
+        fvalue = {"level": round(new_level, 1), "ts": time.time()}
+        if _MAIN_LOOP:
+            _MAIN_LOOP.call_soon_threadsafe(fatigue.__setitem__, chat_id, fvalue)
+            _MAIN_LOOP.call_soon_threadsafe(save_state)
+        else:
+            fatigue[chat_id] = fvalue
+            save_state()
+        if (old_level >= FATIGUE_THRESHOLD) != (new_level >= FATIGUE_THRESHOLD):
+            state = "drained" if new_level >= FATIGUE_THRESHOLD else "recovered"
+            print(f"[fatigue] {state} ({old_level:.0f} -> {new_level:.0f})")
 
     def _clean_field(key: str) -> str:
         val = data.get(key)
@@ -3252,6 +3380,51 @@ async def post_reply_analysis(chat_id: int, user_msg: str):
     except Exception as e:
         log.warning("[analysis] post-reply pass failed: %s", e)
         _count_error("memory")
+
+
+def _fatigue_update(level: float, valence: float, gap_hours: float,
+                    decay_per_hour: float = 10.0) -> float:
+    """Arithmetic-only social-battery update (ROADMAP 3.7): time decay first, then the
+    exchange's cost. Intensity drains regardless of sign — a big emotional high costs
+    energy too; only calm-positive exchanges actively recharge."""
+    level = max(0.0, level - max(0.0, gap_hours or 0.0) * decay_per_hour)
+    if abs(valence) >= 2.0:
+        level += 12.0
+    elif valence >= 1.0:
+        level -= 15.0
+    else:
+        level -= 5.0
+    return max(0.0, min(100.0, level))
+
+
+def _fatigue_effective(level: float, ts: float, now_ts: float,
+                       decay_per_hour: float = 10.0) -> float:
+    """Level with passive decay applied at read time, so a long silent gap recovers
+    her before the first exchange of a new conversation (not one reply late)."""
+    hours = max(0.0, (now_ts - (ts or 0)) / 3600.0)
+    return max(0.0, level - hours * decay_per_hour)
+
+
+# ROADMAP 3.7 day-mood residue: the day generator ends its output with one
+# "MOOD: <label> | <valence>" line. Parsed out here so the meta line never
+# reaches day.txt (and therefore never reaches prompts or memory).
+_OPENING_MOOD_RE = re.compile(r"(?im)^\s*MOOD:\s*(.+?)\s*\|\s*(-?\d+)\s*$")
+
+
+def _split_opening_mood(text: str):
+    """(events_without_mood_line, (label, valence) | None). Uses the LAST matching
+    line; a model that ignores the instruction just yields (text, None)."""
+    m = None
+    for m in _OPENING_MOOD_RE.finditer(text or ""):
+        pass
+    if m is None:
+        return (text or "").strip(), None
+    label = m.group(1).strip()
+    valence = max(-3, min(3, int(m.group(2))))
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    if not label:
+        return cleaned, None
+    return cleaned, (label, valence)
 
 
 def _mood_behavior(s: float) -> str:
@@ -3675,6 +3848,31 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
 
+    # ROADMAP 3.7: social battery + minimal-reply license. Schedule is read once here
+    # and reused by the schedule section below.
+    sched = _read_schedule_today()
+    busy_activity = _busy_now(sched) if SCHED_BUSY else ""
+    if FATIGUE_STATE:
+        f = fatigue.get(chat_id) or {}
+        eff = _fatigue_effective(f.get("level", 0.0), f.get("ts", 0.0), time.time(),
+                                 FATIGUE_DECAY_PER_HOUR)
+        drained = eff >= FATIGUE_THRESHOLD
+        if drained:
+            messages.append({"role": "system", "content": (
+                f"# Social battery\n{NAME} is socially drained right now — a lot of "
+                f"conversation lately. Shorter replies, less patience for big or heavy "
+                f"topics, more likely to wind the chat down. It passes after a break. "
+                f"Don't announce it; let it show."
+            )})
+        if drained or busy_activity or mood_now(chat_id) <= -1.2:
+            reason = "busy" if busy_activity else "running on empty"
+            messages.append({"role": "system", "content": (
+                f"# Minimal replies allowed\nRight now a bare minimal reply — 'k', 'lol', "
+                f"a one-liner, or just an emoji — is a legitimate complete response. "
+                f"Don't pad it into a paragraph out of politeness; match how a real "
+                f"person texts when they're {reason}."
+            )})
+
     if vent_mode.get(chat_id):
         messages.append({"role": "system", "content": (
             f"VENT MODE: {uname} needs to vent, not be fixed. Validate first, always. "
@@ -3783,7 +3981,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
         })
 
-    mems = triggered_memories(scan_text, query_vec=query_vec)
+    mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
         mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
                                                MEMORY_HEDGE)
@@ -3791,6 +3989,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         if any_hedged:
             block += ("\nEntries marked (unsure) are things you only half-remember"
                       " — hedge or ask rather than assert them as fact.")
+        if MEMORY_REPEAT_SUPPRESS_TURNS > 0:
+            block += (f"\nThese are context, not conversation topics — don't bring one"
+                      f" up again if you've referenced it recently; let it go unless"
+                      f" {uname} raises it.")
         messages.append({"role": "system", "content": block})
 
     bds = boundaries.get(chat_id) or []
@@ -3810,9 +4012,20 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     messages.append({"role": "system", "content": environment_note()})
 
     # Today's schedule section, if a schedule file exists for this instance.
-    sched = _read_schedule_today()
+    # (sched/busy_activity computed once above, next to the mood note.)
     if sched:
         messages.append({"role": "system", "content": f"# {NAME}'s schedule today\n{sched}"})
+        # ROADMAP 3.6: a schedule entry she's mid-way through changes her register —
+        # she's living her day, not waiting by the phone.
+        if busy_activity:
+            messages.append({"role": "system", "content": (
+                f"# Right now\nPer her schedule, {NAME} is currently in the middle of: "
+                f"{busy_activity}. She's answering from her phone in stolen moments — replies "
+                f"come shorter and less polished than usual. If the conversation stretches on, "
+                f"it's natural for her to say she has to get back to it and pick the "
+                f"thread up later. She doesn't owe long answers right now."
+            )})
+            print(f"[sched-busy] {busy_activity}")
 
     # What she looks like — so she can reference her own appearance naturally.
     if SELFIE_APPEARANCE:
@@ -7761,6 +7974,74 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=chat_id, text="❌ something broke on my end — details in /errors")
 
 
+def _fmt_count(n) -> str:
+    """60000000 -> '60M', 15400 -> '15.4k', small ints unchanged, non-numbers as-is."""
+    if not isinstance(n, (int, float)):
+        return str(n)
+    if n >= 1_000_000:
+        s = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{s}M"
+    if n >= 1_000:
+        s = f"{n / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"{s}k"
+    return str(int(n)) if float(n).is_integer() else str(n)
+
+
+# (label, key) pairs shared by the limits dict and the top-level usage sections
+# in NanoGPT's 2026-07 token-based subscription shape.
+_USAGE_SECTIONS = [
+    ("📅 *Weekly input tokens:*", "weeklyInputTokens"),
+    ("📅 *Daily input tokens:*", "dailyInputTokens"),
+    ("🖼 *Daily images:*", "dailyImages"),
+]
+
+
+def _usage_summary(data: dict):
+    """Pure formatter for the NanoGPT subscription-usage response.
+    Returns the message text, or None when no recognizable shape is present
+    (v2026-07-18.4: the endpoint returned active=true without a 'daily' key and
+    /usage crashed with a KeyError — never index an external API response
+    directly; v2026-07-18.5: the actual new shape is token-based — per-section
+    {used, remaining, percentUsed} dicts keyed like the limits dict)."""
+    limits = data.get("limits")
+    limits = limits if isinstance(limits, dict) else {}
+
+    # 2026-07 token-based shape: top-level usage sections mirroring limits keys.
+    if any(isinstance(data.get(key), dict) for _, key in _USAGE_SECTIONS):
+        lines = ["📊 *NanoGPT Subscription Usage*", ""]
+        for label, key in _USAGE_SECTIONS:
+            usage = data.get(key)
+            if not isinstance(usage, dict):
+                continue
+            lim = limits.get(key)
+            lim_s = _fmt_count(lim) if lim is not None else "∞"
+            pct = usage.get("percentUsed")
+            pct_s = f", {_fmt_count(pct)}% used" if isinstance(pct, (int, float)) else ""
+            lines.append(
+                f"{label} {_fmt_count(usage.get('used', '?'))} / {lim_s} "
+                f"({_fmt_count(usage.get('remaining', '?'))} left{pct_s})"
+            )
+        period_end = (data.get("period") or {}).get("currentPeriodEnd") \
+            if isinstance(data.get("period"), dict) else None
+        if isinstance(period_end, str) and period_end:
+            lines.append(f"🔄 Renews: {period_end[:10]}")
+        if len(lines) > 2:
+            return "\n".join(lines)
+
+    # Legacy daily/monthly shape.
+    daily = data.get("daily")
+    monthly = data.get("monthly")
+    if isinstance(daily, dict) and isinstance(monthly, dict):
+        return (
+            f"📊 *NanoGPT Subscription Usage*\n\n"
+            f"📅 *Daily:* {daily.get('used', '?')} / {limits.get('daily', '?')} used "
+            f"({daily.get('remaining', '?')} remaining)\n"
+            f"📆 *Monthly:* {monthly.get('used', '?')} / {limits.get('monthly', '?')} used "
+            f"({monthly.get('remaining', '?')} remaining)\n"
+        )
+    return None
+
+
 async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}"}
     # to_thread: a bare requests call here would freeze the whole event loop for
@@ -7771,20 +8052,31 @@ async def check_usage(update: Update, context: ContextTypes.DEFAULT_TYPE):
             headers=headers,
             timeout=30,
         ))
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        log.warning("[usage] non-JSON response (HTTP %s): %.300s",
+                    response.status_code, response.text)
+        await update.message.reply_text(
+            f"⚠️ Usage endpoint returned something unreadable (HTTP {response.status_code}) "
+            f"— details in /errors.")
+        return
     if not data.get("active"):
         await update.message.reply_text("⚠️ No active subscription found.")
         return
-    daily = data["daily"]
-    monthly = data["monthly"]
-    limits = data["limits"]
-    msg = (
-        f"📊 *NanoGPT Subscription Usage*\n\n"
-        f"📅 *Daily:* {daily['used']} / {limits['daily']} used "
-        f"({daily['remaining']} remaining)\n"
-        f"📆 *Monthly:* {monthly['used']} / {limits['monthly']} used "
-        f"({monthly['remaining']} remaining)\n"
-    )
+    msg = _usage_summary(data)
+    if msg is None:
+        # Active subscription but a response shape we don't recognize — make the
+        # failure self-describing instead of crashing (debugging protocol #3).
+        log.warning("[usage] unexpected response shape, keys=%s body=%.500s",
+                    sorted(data.keys()), str(data))
+        await update.message.reply_text(
+            f"⚠️ Usage endpoint answered with an unexpected shape "
+            f"(keys: {', '.join(sorted(data.keys())) or 'none'}) — full body in /errors. "
+            f"The API may have changed; the subscription itself looks active.")
+        return
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -7850,7 +8142,12 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         except Exception as e:
             log.warning("[react] failed: %s", e)
     if clean:
-        await send_bubbles(context, chat_id, clean, pre_delay=_typing_delay_secs(clean))
+        pre = _typing_delay_secs(clean)
+        # ROADMAP 3.6: mid-busy-block she types in stolen moments — stretch the
+        # compose delay. Private chats only; the group path keeps its own timing.
+        if SCHED_BUSY and pre > 0 and _busy_now(_read_schedule_today()):
+            pre *= max(1.0, min(10.0, SCHED_BUSY_DELAY_MULT))
+        await send_bubbles(context, chat_id, clean, pre_delay=pre)
         tts_prob = VOICE_REPLY_TO_VOICE if voice_input else TTS_CHANCE
         if voice_reply.get(chat_id) and random.random() < tts_prob:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
@@ -8303,6 +8600,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "can't look up real nearby places — nudge them to drop a pin "
                     "(📎 → Location) instead of naming specific restaurants you can't verify.]"
                 )
+
+        # Generalized map intent (MAP_INTENT, ROADMAP 3.5 phase 2): on an explicit
+        # map-shaped ask ("how do I get to X", "is there a <thing> nearby"), pre-fetch
+        # real TomTom data so times/distances/places come from fact, not imagination.
+        # Rides THIS reply — no extra LLM call (bot-code-invariants #3); fetches are
+        # off-loop via to_thread; a TomTom failure degrades to a normal reply.
+        # elif keeps it to at most one injection per message — food (above) wins.
+        elif MAP_INTENT and TOMTOM_ENABLED and (_mi := _map_intent(user_message)) is not None:
+            _mkind, _mquery = _mi
+            log.info("[map] intent=%s payload=%r", _mkind, _mquery)  # fire-rate instrument
+            _mloc = user_location.get(chat_id)
+            if not _fresh_location(_mloc):
+                content_for_model += (
+                    "\n[They're asking about "
+                    + ("getting somewhere" if _mkind == "route" else "what's nearby")
+                    + ", but you don't have a recent location for them — nudge them to "
+                    "drop a pin (📎 → Location) instead of guessing distances or naming "
+                    "places you can't verify.]"
+                )
+            elif _mkind == "route":
+                try:
+                    _mgeo = await asyncio.to_thread(_tomtom_geocode, _mquery)
+                    if _mgeo is None:
+                        content_for_model += (
+                            f"\n[You tried to look up \"{_mquery}\" on the map but couldn't "
+                            "find it — say so or ask them to be more specific; do NOT invent "
+                            "directions, times, or distances.]"
+                        )
+                    else:
+                        _mmode = _tomtom_mode()
+                        _mroute = await asyncio.to_thread(
+                            _fetch_tomtom_route, (_mloc["lat"], _mloc["lon"]),
+                            (_mgeo[0], _mgeo[1]), _mmode)
+                        _mbrief = _route_brief(_mroute, _mmode, _mgeo[2])
+                        if _mbrief:
+                            content_for_model += (
+                                f"\n[Real route info from the map — they asked how to get to "
+                                f"{_mgeo[2]}. Use ONLY these facts; do NOT invent times, "
+                                f"distances, or street names:\n{_mbrief}\n"
+                                "Work it in naturally, in your own voice.]"
+                            )
+                except _TomTomError:
+                    pass  # degrade silently to a normal reply, same as the food path
+            else:  # nearby
+                try:
+                    _mres = await asyncio.to_thread(
+                        _fetch_tomtom_search, _mquery, _mloc["lat"], _mloc["lon"], 5000)
+                except _TomTomError:
+                    _mres = []
+                _mbrief = _places_brief(_mres)
+                if _mbrief:
+                    content_for_model += (
+                        f"\n[Real {_mquery} options near them right now — if you name places, "
+                        "use ONLY these, in your own voice; do NOT invent places or name ones "
+                        f"not in this list:\n{_mbrief}\n]"
+                    )
 
         messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
@@ -8870,7 +9223,10 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     trigger = (
         f'[SYSTEM: {uname} mentioned this: "{note}" — that was {when}. Reach out unprompted '
         f"and ask how it went, specific and in character, 1-2 sentences. If it clearly hasn't "
-        f"happened yet today, wish them luck instead. Don't mention this message is automated.]"
+        f"happened yet today, wish them luck instead. BUT if the note actually describes "
+        f"{NAME}'s own event rather than something in {uname}'s life, do NOT ask {uname} how "
+        f"it went — it's {NAME}'s news: tell them briefly how it went for her instead. "
+        f"Don't mention this message is automated.]"
     )
     try:
         await send_triggered(context, owner, trigger)
@@ -9101,6 +9457,12 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
             f"Reference her actual people and projects naturally when they fit — don't force them."
             + (f"\n\n{ctx_block}" if ctx_block else "")
             + "\n\nWrite only the events, no headers, bullets, or numbering."
+            + (
+                f"\n\nThen, on the very last line by itself, write exactly:\n"
+                f"MOOD: <how {NAME} feels heading into today because of these events, "
+                f"a few words in her own voice> | <integer -3 to 3>"
+                if DAY_MOOD_RESIDUE else ""
+            )
         )
         msgs = [
             {"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
@@ -9108,11 +9470,21 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
         ]
         events = await asyncio.to_thread(call_nanogpt, msgs, SUMMARY_MODEL)
         events = _strip_thinking(events).strip()
+        # ROADMAP 3.7 residue: peel the MOOD line off before day.txt is written so
+        # the meta line never enters prompts; seed the owner's mood state from it.
+        events, opening = _split_opening_mood(events)
         if events:
             DAY_FILE.write_text(events, encoding="utf-8")
             _day_cache["text"] = events
             _day_cache["ts"] = time.time()
             print(f"[day-events] {NAME}: {events[:100]}…")
+        if DAY_MOOD_RESIDUE and opening and events:
+            label, valence = opening
+            # On the event loop (async job) — direct state write is the correct
+            # pattern here, mirroring other on-loop writers.
+            moods[owner] = {"score": float(valence), "label": label[:160], "ts": time.time()}
+            save_state()
+            print(f"[residue] opening mood: {label} ({valence:+d})")
     except Exception as e:
         log.error("[day-events] failed: %s", e)
 
@@ -9403,9 +9775,10 @@ def _is_food_query(text: str) -> bool:
     return bool(text and _FOOD_QUERY_RE.search(text))
 
 
-def _restaurants_brief(results: list, limit: int = 5) -> str:
-    """Plain 'Name (cuisine, dist)' lines for injecting into the reply prompt — no
-    emoji, distance-sorted. '' if nothing usable."""
+def _places_brief(results: list, limit: int = 5) -> str:
+    """Plain 'Name (category, dist)' lines for injecting into the reply prompt — no
+    emoji, distance-sorted. '' if nothing usable. Works for any POI category
+    (_poi_cuisine only special-cases the generic 'restaurant' label)."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
     rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
     out = []
@@ -9419,6 +9792,121 @@ def _restaurants_brief(results: list, limit: int = 5) -> str:
         meta = ", ".join(x for x in [cui, _fmt_distance(dist) if isinstance(dist, (int, float)) else ""] if x)
         out.append(f"- {name}" + (f" ({meta})" if meta else ""))
     return "\n".join(out)
+
+
+def _restaurants_brief(results: list, limit: int = 5) -> str:
+    """Restaurant-flavored alias of _places_brief, kept for the FOOD_SUGGESTIONS path."""
+    return _places_brief(results, limit)
+
+
+# --- Generalized map intent (MAP_INTENT, ROADMAP 3.5 phase 2) ---
+# Keyword/regex detection, deliberately NOT an LLM classifier: intent runs on every
+# 1:1 message, and a per-message LLM side call is banned (bot-code-invariants #3).
+# v1 scope (owner-settled 2026-07-17): route asks use the user's fresh location as
+# origin; nearby asks search categories around the user's location only ("what's
+# near <remote place>" is a follow-up); "home"/"work" destinations geocode literally
+# and fail honestly rather than reading bot memory.
+
+_MAP_DEST = r"(?P<dest>[^?.!,;\n]{2,60})"
+_MAP_ROUTE_RES = [
+    re.compile(r"\bhow (?:do|would|can|should) (?:i|we) get to " + _MAP_DEST, re.I),
+    re.compile(r"\b(?:give me )?directions to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow to get to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow far is it to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow far (?:is|to) " + _MAP_DEST, re.I),
+    re.compile(r"\bhow long (?:does it take|will it take|would it take) to (?:get|drive|walk|bike|ride) to " + _MAP_DEST, re.I),
+    re.compile(r"\bhow long to (?:get|drive|walk|bike|ride) to " + _MAP_DEST, re.I),
+    re.compile(r"\bwhat'?s the (?:drive|commute)(?: like)? to " + _MAP_DEST, re.I),
+]
+# Destinations that mean the ask was figurative ("get to sleep", "how far is too
+# far") or unresolvable pronouns. First-word match, \b-anchored so real places
+# survive ("Knoxville" is not "know").
+_MAP_DEST_REJECT = re.compile(
+    r"^(?:sleep|know|be|feel|the point|too|over|you|your|him|her|it|this|that|there|me|us|them)\b",
+    re.I,
+)
+_MAP_DEST_FILLERS = re.compile(
+    r"\s*(?:from (?:here|my place|home)|right now|tonight|today|tomorrow)\s*$", re.I)
+
+_MAP_CAT = r"(?P<cat>[a-z][a-z '&-]{1,40}?)"
+_MAP_NEARBY_RES = [
+    re.compile(r"\b(?:is|are) there (?:a|an|any|some) " + _MAP_CAT
+               + r" (?:near ?by|near me|near here|around here|close by|close to me)\b", re.I),
+    re.compile(r"\bany " + _MAP_CAT + r" (?:near ?by|near me|near here|around here|close by)\b", re.I),
+    re.compile(r"\b(?:closest|nearest) " + _MAP_CAT + r"(?:\s+(?:to me|near ?by|around here))?\s*[?.!]*$", re.I),
+]
+# Category first-words that mean the sentence wasn't a place search at all
+# ("closest thing to heaven", "is there anyone around").
+_MAP_CAT_REJECT = {"thing", "one", "anything", "anyone", "anybody", "person", "friend", "way", "you"}
+
+
+def _clean_map_dest(dest: str) -> str:
+    """Normalize a captured route destination; '' if it isn't a plausible place."""
+    d = (dest or "").strip().strip("\"'").rstrip("?!.,;: ").strip()
+    while True:
+        new = _MAP_DEST_FILLERS.sub("", d).rstrip("?!.,;: ").strip()
+        if new == d:
+            break
+        d = new
+    if len(d) < 2 or len(d) > 60 or _MAP_DEST_REJECT.match(d):
+        return ""
+    return d
+
+
+def _map_intent(text: str):
+    """-> ("route", destination) | ("nearby", category) | None. v1 keyword/regex —
+    like _is_food_query it will miss creative phrasings; it must never fire on
+    figurative ones (the negatives are test-pinned)."""
+    if not text:
+        return None
+    for rx in _MAP_ROUTE_RES:
+        m = rx.search(text)
+        if m:
+            dest = _clean_map_dest(m.group("dest"))
+            if dest:
+                return ("route", dest)
+    for rx in _MAP_NEARBY_RES:
+        m = rx.search(text)
+        if m:
+            cat = m.group("cat").strip().rstrip("?!.,")
+            if cat and cat.split()[0].lower() not in _MAP_CAT_REJECT:
+                return ("nearby", cat)
+    return None
+
+
+def _route_brief(route: dict, mode: str, dest_label: str) -> str:
+    """Plain no-emoji route summary for prompt injection; '' when there's no usable
+    route so the caller skips injecting. Same traffic threshold as _format_route."""
+    routes = (route or {}).get("routes") or []
+    if not routes:
+        return ""
+    summ = (routes[0] or {}).get("summary") or {}
+    dur = _fmt_duration(summ.get("travelTimeInSeconds"))
+    dist = _fmt_distance(summ.get("lengthInMeters"))
+    if dur == "?" and dist == "?":
+        return ""
+    verb = {"bicycle": "bike", "pedestrian": "walk"}.get(mode, "drive")
+    line = f"{verb} to {dest_label}: {dur}, {dist}"
+    try:
+        if int(summ.get("trafficDelayInSeconds") or 0) >= 60:
+            line += f" (incl. +{_fmt_duration(summ.get('trafficDelayInSeconds'))} traffic)"
+    except (TypeError, ValueError):
+        pass
+    return line
+
+
+def _fresh_location(loc, now=None, max_age: int = 4 * 3600) -> bool:
+    """True if a stored user_location entry is usable for map answers: shared within
+    max_age (4h — the photo path's precedent) OR still inside a live-share period."""
+    if not isinstance(loc, dict):
+        return False
+    now = time.time() if now is None else now
+    try:
+        if loc.get("live_until") and float(loc["live_until"]) > now:
+            return True
+        return (now - float(loc["ts"])) < max_age
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 class _TomTomError(Exception):
@@ -10272,7 +10760,11 @@ class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/admin/health":
-            self._json(200, {"ok": True, "version": BOT_VERSION})
+            # Unauthenticated liveness only — nothing here beyond what a peer on the
+            # tailnet may see. fleet-status.sh and /fleet both read uptime_hours.
+            self._json(200, {"ok": True, "version": BOT_VERSION,
+                             "instance": BASE_DIR.name,
+                             "uptime_hours": round((time.time() - _BOOT_TIME) / 3600, 1)})
             return
         if not _admin_authorized(self):
             self._json(401, {"ok": False, "error": "unauthorized"})
@@ -10337,6 +10829,117 @@ async def _stop_admin_api(application):
     if _admin_httpd is not None:
         _admin_httpd.shutdown()
         _admin_httpd = None
+
+
+# --- /fleet — fleet console over the admin API ---
+# One designated instance answers /fleet by probing every peer's /admin/health
+# (unauthenticated liveness: version, uptime) and, when the fleet shares one
+# ADMIN_API_TOKEN, /admin/audit for the last-hour error count. Peers come from
+# FLEET_PEERS — "name=port" for same-host peers, "name=host:port" across the
+# tailnet — so the same command keeps working mid-VPS-migration while instances
+# live on two hosts. Inert without FLEET_PEERS; FLEET_CMD=0 is the kill switch.
+FLEET_CMD = os.getenv("FLEET_CMD", "1").strip().lower() not in ("0", "false", "no", "off")
+FLEET_TIMEOUT = _env_float("FLEET_TIMEOUT", "4.0")
+
+
+def _fleet_parse_peers(raw: str) -> list[tuple[str, str, int]]:
+    """"nora=8080,jules=100.64.0.5:8085" → [(name, host, port), ...].
+    Bad entries are skipped with a config warning — one typo must not take the
+    whole console down."""
+    peers: list[tuple[str, str, int]] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, sep, addr = tok.partition("=")
+        name = name.strip()
+        host, _, port_s = addr.strip().rpartition(":")
+        host = host.strip() or "127.0.0.1"
+        try:
+            port = int(port_s.strip())
+        except ValueError:
+            port = 0
+        if not (name and sep and 0 < port < 65536):
+            msg = (f"ignoring invalid FLEET_PEERS entry {tok!r} "
+                   "(want name=port or name=host:port)")
+            logging.warning("[config] %s", msg)
+            _CONFIG_WARNINGS.append(msg)
+            continue
+        peers.append((name, host, port))
+    return peers
+
+
+FLEET_PEERS = _fleet_parse_peers(os.getenv("FLEET_PEERS", ""))
+
+
+def _fleet_probe(name: str, host: str, port: int) -> dict:
+    """Blocking probe of one peer's admin API — call via asyncio.to_thread.
+    Returns display fields only; never raises."""
+    base = f"http://{host}:{port}"
+    row = {"name": name, "up": False, "version": "", "uptime": "", "errors": "", "detail": ""}
+    try:
+        r = requests.get(f"{base}/admin/health", timeout=FLEET_TIMEOUT)
+        _ = r.content  # force-read before raise_for_status, same as _do_request
+        r.raise_for_status()
+        h = r.json()
+    except Exception as e:
+        row["detail"] = e.__class__.__name__
+        return row
+    row["up"] = True
+    row["version"] = str(h.get("version", "?"))
+    if isinstance(h.get("uptime_hours"), (int, float)):
+        row["uptime"] = f"{h['uptime_hours']:.1f}h"
+    if ADMIN_API_TOKEN:
+        try:
+            r = requests.get(f"{base}/admin/audit", timeout=FLEET_TIMEOUT,
+                             headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"})
+            _ = r.content
+            r.raise_for_status()
+            row["errors"] = str(r.json().get("errors_last_hour_total", "?"))
+        except Exception:
+            # peer up but audit refused — different token or older version
+            row["errors"] = "?"
+    return row
+
+
+def _fleet_format(rows: list[dict]) -> str:
+    """One line per peer, sized for a phone screen inside a code block."""
+    lines = []
+    for row in rows:
+        if not row["up"]:
+            lines.append(f"{row['name']:<7} DOWN  {row.get('detail', '')}".rstrip())
+            continue
+        bits = [f"{row['name']:<7} UP", row["version"] or "?"]
+        if row["uptime"]:
+            bits.append(row["uptime"])
+        if row["errors"]:
+            bits.append(f"err:{row['errors']}")
+        lines.append("  ".join(bits))
+    return "\n".join(lines)
+
+
+async def fleet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fleet — probe every configured peer's admin API, reply with one table."""
+    if not _is_admin(update.effective_user.id):
+        return
+    if not FLEET_CMD:
+        await update.message.reply_text("Fleet console is disabled (FLEET_CMD=0).")
+        return
+    if not FLEET_PEERS:
+        await update.message.reply_text(
+            "No peers configured. Set FLEET_PEERS in this instance's .env, e.g.\n"
+            "FLEET_PEERS=nora=8080,bonnie=8081,jules=100.x.y.z:8085\n"
+            "(each peer needs ADMIN_API_ENABLED=1; port = its ADMIN_API_PORT)")
+        return
+    rows = await asyncio.gather(
+        *(asyncio.to_thread(_fleet_probe, n, h, p) for n, h, p in FLEET_PEERS))
+    rows = list(rows)
+    up = sum(1 for r in rows if r["up"])
+    text = (f"🛰 Fleet: {up}/{len(rows)} up\n"
+            f"```\n{_fleet_format(rows)}\n```\n"
+            "DOWN = admin API unreachable — the bot itself may still be fine "
+            "(check ADMIN_API_ENABLED / host / port).")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 # --- Main ---
@@ -10669,6 +11272,7 @@ def main():
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
+    app.add_handler(CommandHandler("fleet", fleet_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))

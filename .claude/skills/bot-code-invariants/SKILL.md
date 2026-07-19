@@ -56,8 +56,12 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
 **Config**
 15. Numeric env parsing goes through `_env_int`/`_env_float` (bad values warn and
     fall back — a typo must never brick the fleet).
-16. New features default OFF: unset env = today's behavior, so the flag doubles as
-    the kill switch when a release misbehaves on-device.
+16. New features default ON, but MUST ship with an env kill switch (owner policy,
+    2026-07-18). Unset env = feature active; setting the flag to 0/off disables it
+    without a redeploy when a release misbehaves on-device. The kill switch is
+    mandatory — a feature with no way to turn it off is the violation now, not a
+    default-on one. (Higher-cost or higher-risk behavior may still default off with
+    a one-line rationale; when in doubt, ask the owner.)
 
 ## Quality bar
 

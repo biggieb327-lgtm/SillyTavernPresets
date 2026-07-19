@@ -1206,6 +1206,111 @@ class TestRestaurantsBrief:
         assert bot._restaurants_brief([]) == ""
 
 
+class TestMapIntent:
+    def test_route_positives(self):
+        cases = {
+            "how do I get to the airport": "the airport",
+            "directions to pike place market": "pike place market",
+            "give me directions to the ferry terminal": "the ferry terminal",
+            "how far is bellevue square from here?": "bellevue square",  # filler stripped
+            "how far is it to snoqualmie falls": "snoqualmie falls",
+            "how long does it take to get to sea-tac": "sea-tac",
+            "how long to bike to green lake": "green lake",
+            "what's the commute like to redmond": "redmond",
+        }
+        for text, dest in cases.items():
+            assert bot._map_intent(text) == ("route", dest), text
+
+    def test_nearby_positives(self):
+        cases = {
+            "is there a pharmacy nearby": "pharmacy",
+            "any coffee shops around here": "coffee shops",
+            "closest gas station?": "gas station",
+            "nearest atm to me": "atm",
+        }
+        for text, cat in cases.items():
+            assert bot._map_intent(text) == ("nearby", cat), text
+
+    def test_figurative_negatives(self):
+        for t in ["how do I get to sleep", "how do I get to know you better",
+                  "you're so far away", "how far along are you", "how far is too far",
+                  "how long have you been up", "how long until you reply",
+                  "how long to get over him", "get to the point",
+                  "is there anything nearby", "is there any hope for us",
+                  "you're the closest thing to heaven", "stay close to me",
+                  "are you around?", "how's your day"]:
+            assert bot._map_intent(t) is None, t
+
+    def test_none_and_empty_safe(self):
+        assert bot._map_intent(None) is None
+        assert bot._map_intent("") is None
+
+    def test_clean_dest_bounds(self):
+        assert bot._clean_map_dest("x") == ""            # too short
+        assert bot._clean_map_dest("a" * 61) == ""       # too long
+        assert bot._clean_map_dest(" Knoxville? ") == "Knoxville"  # \b-anchored reject
+
+
+class TestRouteBrief:
+    _route = {"routes": [{"summary": {
+        "travelTimeInSeconds": 1080, "lengthInMeters": 12713, "trafficDelayInSeconds": 240}}]}
+
+    def test_summary_with_traffic(self):
+        out = bot._route_brief(self._route, "car", "Bellevue Square")
+        assert out.startswith("drive to Bellevue Square: 18 min, 7.9 mi")
+        assert "+4 min traffic" in out and "🚗" not in out
+
+    def test_small_delay_excluded(self):
+        r = {"routes": [{"summary": {"travelTimeInSeconds": 600, "lengthInMeters": 3000,
+                                     "trafficDelayInSeconds": 45}}]}
+        assert "traffic" not in bot._route_brief(r, "car", "X")
+
+    def test_bicycle_verb(self):
+        assert bot._route_brief(self._route, "bicycle", "X").startswith("bike to X")
+
+    def test_pedestrian_verb(self):
+        assert bot._route_brief(self._route, "pedestrian", "X").startswith("walk to X")
+
+    def test_empty_and_malformed(self):
+        assert bot._route_brief({}, "car", "X") == ""
+        assert bot._route_brief(None, "car", "X") == ""
+        assert bot._route_brief({"routes": [{"summary": {}}]}, "car", "X") == ""
+
+
+class TestPlacesBrief:
+    def test_non_restaurant_category(self):
+        out = bot._places_brief([
+            {"poi": {"name": "Bartell Drugs", "categories": ["pharmacy"]}, "dist": 400}])
+        assert "Bartell Drugs" in out and "(pharmacy, " in out and "📍" not in out
+
+    def test_sorted_by_distance(self):
+        out = bot._places_brief([
+            {"poi": {"name": "Far", "categories": ["atm"]}, "dist": 900},
+            {"poi": {"name": "Near", "categories": ["atm"]}, "dist": 100},
+        ])
+        assert out.index("Near") < out.index("Far")
+
+    def test_skips_nameless_and_empty(self):
+        assert bot._places_brief([{"poi": {}}]) == ""
+        assert bot._places_brief([]) == ""
+
+
+class TestFreshLocation:
+    def test_fresh_passes(self):
+        assert bot._fresh_location({"lat": 1, "lon": 2, "ts": 1000.0, "live_until": None}, now=1100.0)
+
+    def test_stale_fails(self):
+        assert not bot._fresh_location({"ts": 0.0, "live_until": None}, now=5 * 3600.0)
+
+    def test_live_share_overrides_stale_ts(self):
+        assert bot._fresh_location({"ts": 0.0, "live_until": 6 * 3600.0}, now=5 * 3600.0)
+
+    def test_none_and_missing_keys_safe(self):
+        assert not bot._fresh_location(None)
+        assert not bot._fresh_location({})
+        assert not bot._fresh_location({"lat": 1, "lon": 2})
+
+
 class TestBuildCommandMenu:
     @staticmethod
     def _names(cmds):
@@ -1370,6 +1475,30 @@ class TestRecencyWeight:
         weights = [bot._recency_weight(now - d * 86400, now, 90)
                    for d in (0, 30, 90, 180, 365)]
         assert weights == sorted(weights, reverse=True)
+
+
+class TestRepeatPenalty:
+    def test_disabled_window_is_neutral(self):
+        # window <= 0 = kill switch: no penalty regardless of history.
+        assert bot._repeat_penalty(5, 6, 0, 0.15) == 1.0
+        assert bot._repeat_penalty(5, 6, -1, 0.15) == 1.0
+
+    def test_never_injected_is_neutral(self):
+        assert bot._repeat_penalty(None, 6, 6, 0.15) == 1.0
+
+    def test_full_penalty_turn_after_injection(self):
+        # ago == 1 (injected last turn) → exactly the floor.
+        assert bot._repeat_penalty(5, 6, 6, 0.15) == 0.15
+
+    def test_fades_back_to_neutral_after_window(self):
+        assert bot._repeat_penalty(1, 7, 6, 0.15) == 1.0     # ago == window
+        assert bot._repeat_penalty(1, 20, 6, 0.15) == 1.0    # ago > window
+
+    def test_monotonic_increasing_within_window(self):
+        # Penalty relaxes each turn away from the injection until it's neutral.
+        vals = [bot._repeat_penalty(0, ago, 6, 0.15) for ago in (1, 2, 3, 4, 5)]
+        assert vals == sorted(vals)
+        assert all(0.15 <= v < 1.0 for v in vals)
 
 
 class TestHedgeMemoryLines:
@@ -1777,6 +1906,73 @@ class TestTriggeredMemoriesLivePath:
         assert "the vessel departed at dawn" not in out
 
 
+class TestTriggeredMemoriesRepeatSuppression:
+    """MEMORY_REPEAT_SUPPRESS_TURNS: the same top memory must not win the budget every
+    turn. Two equal-length lines, both semantically close to the query, but the budget
+    fits only one — so which one surfaces reveals whether suppression rotated it."""
+    LINE_A = "alpha memory line"
+    LINE_B = "bravo memory line"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_budget = bot.MEMORY_TOKEN_BUDGET
+        self._orig_suppress = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        bot.MEMORIES_FILE.write_text(self.LINE_A + "\n" + self.LINE_B + "\n",
+                                     encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache[self.LINE_A] = [1.0, 0.0]   # cosine 1.0 vs the query
+        bot._embeddings_cache[self.LINE_B] = [0.8, 0.6]   # cosine 0.8 vs the query
+        bot._mem_inject_turn.clear()
+        bot._mem_last_injected.clear()
+        # Budget fits exactly one line (equal length → equal cost), so ranking decides.
+        bot.MEMORY_TOKEN_BUDGET = bot._est_tokens(self.LINE_A)
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = 6
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_TOKEN_BUDGET = self._orig_budget
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = self._orig_suppress
+        bot._mem_inject_turn.clear()
+        bot._mem_last_injected.clear()
+
+    def _call(self, chat_id):
+        return bot.triggered_memories("tell me something", query_vec=[1.0, 0.0],
+                                      chat_id=chat_id)
+
+    def test_top_memory_rotates_on_consecutive_turns(self):
+        first = self._call(1)
+        second = self._call(1)
+        assert first == [self.LINE_A]      # highest score wins turn 1
+        assert second == [self.LINE_B]     # A suppressed → B wins turn 2
+
+    def test_suppression_fades_after_window(self):
+        # A injected on turn 1; jump the counter so the next call is a full window later.
+        self._call(1)
+        bot._mem_inject_turn[1] = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        assert self._call(1) == [self.LINE_A]   # penalty relaxed → A wins again
+
+    def test_kill_switch_restores_old_behavior(self):
+        bot.MEMORY_REPEAT_SUPPRESS_TURNS = 0
+        assert self._call(1) == [self.LINE_A]
+        assert self._call(1) == [self.LINE_A]   # identical, no rotation
+        assert bot._mem_last_injected == {}     # nothing recorded
+
+    def test_no_chat_id_records_nothing(self):
+        assert self._call(None) == [self.LINE_A]
+        assert self._call(None) == [self.LINE_A]
+        assert bot._mem_last_injected == {}
+
+    def test_per_chat_isolation(self):
+        self._call(1)                       # records A for chat 1
+        assert self._call(2) == [self.LINE_A]   # chat 2 has no history → A still wins
+
+
 from datetime import date as _date
 
 
@@ -2156,3 +2352,253 @@ class TestRunConfigCheck:
                 f.unlink()
             else:
                 f.write_text(orig, encoding="utf-8")
+
+
+# ── _parse_busy_blocks / _busy_now (ROADMAP 3.6) ─────────────────────────────
+# Only explicit HH:MM-HH:MM ranges may fire the busy state; loose wording never does.
+
+class TestBusyBlocks:
+    def test_explicit_range_parsed(self):
+        blocks = bot._parse_busy_blocks("9:00-17:30 shift at the depot")
+        assert blocks == [(540, 1050, "shift at the depot")]
+
+    def test_loose_lines_never_fire(self):
+        sched = "Monday:\nmorning shift\ngym later\nlunch around noon"
+        assert bot._parse_busy_blocks(sched) == []
+
+    def test_en_dash_and_embedded_range(self):
+        blocks = bot._parse_busy_blocks("- tutoring 14:00–15:00 (Maya)")
+        assert len(blocks) == 1
+        start, end, activity = blocks[0]
+        assert (start, end) == (14 * 60, 15 * 60)
+        assert "tutoring" in activity and "Maya" in activity
+
+    def test_overnight_and_invalid_ranges_skipped(self):
+        assert bot._parse_busy_blocks("23:00-07:00 sleep") == []
+        assert bot._parse_busy_blocks("25:00-26:00 nonsense") == []
+        assert bot._parse_busy_blocks("10:75-11:80 typo") == []
+
+    def test_activity_falls_back_when_line_is_only_times(self):
+        blocks = bot._parse_busy_blocks("10:00-11:00")
+        assert blocks[0][2] == "something on her schedule"
+
+    def test_busy_now_inside_and_outside(self):
+        from datetime import datetime
+        sched = "9:00-17:00 shift"
+        inside = datetime(2026, 7, 18, 12, 0)
+        outside = datetime(2026, 7, 18, 18, 0)
+        assert bot._busy_now(sched, now=inside) == "shift"
+        assert bot._busy_now(sched, now=outside) == ""
+
+    def test_busy_now_boundaries(self):
+        from datetime import datetime
+        sched = "9:00-17:00 shift"
+        assert bot._busy_now(sched, now=datetime(2026, 7, 18, 9, 0)) == "shift"
+        assert bot._busy_now(sched, now=datetime(2026, 7, 18, 17, 0)) == ""
+
+    def test_empty_schedule(self):
+        assert bot._busy_now("", now=None) == ""
+        assert bot._parse_busy_blocks("") == []
+
+
+# ── _fatigue_update / _fatigue_effective (ROADMAP 3.7) ───────────────────────
+# Arithmetic-only social battery: intensity drains regardless of sign, calm-positive
+# recharges, idle time decays. Clamped to [0, 100].
+
+class TestFatigue:
+    def test_intense_exchange_drains_both_signs(self):
+        assert bot._fatigue_update(50.0, 2.5, 0) == 62.0
+        assert bot._fatigue_update(50.0, -2.0, 0) == 62.0
+
+    def test_calm_positive_recharges(self):
+        assert bot._fatigue_update(50.0, 1.0, 0) == 35.0
+        assert bot._fatigue_update(50.0, 1.9, 0) == 35.0
+
+    def test_neutral_drifts_down(self):
+        assert bot._fatigue_update(50.0, 0.0, 0) == 45.0
+        assert bot._fatigue_update(50.0, -1.5, 0) == 45.0
+
+    def test_clamped_to_bounds(self):
+        assert bot._fatigue_update(98.0, 3.0, 0) == 100.0
+        assert bot._fatigue_update(2.0, 1.0, 0) == 0.0
+
+    def test_gap_decay_applies_before_exchange(self):
+        # 3h gap at 10/h wipes 30 before the +12 intense hit lands.
+        assert bot._fatigue_update(80.0, 3.0, 3.0, decay_per_hour=10.0) == 62.0
+
+    def test_negative_gap_ignored(self):
+        assert bot._fatigue_update(50.0, 0.0, -5.0) == 45.0
+
+    def test_effective_decays_at_read_time(self):
+        now = 1_000_000.0
+        two_hours_ago = now - 7200
+        assert bot._fatigue_effective(80.0, two_hours_ago, now, 10.0) == 60.0
+
+    def test_effective_never_negative_and_zero_ts_safe(self):
+        assert bot._fatigue_effective(30.0, 0.0, 1_000_000.0, 10.0) == 0.0
+
+
+# ── _split_opening_mood (ROADMAP 3.7 day-mood residue) ───────────────────────
+# The MOOD meta line must be peeled off before day.txt is written; a model that
+# ignores the instruction degrades gracefully to no residue.
+
+class TestSplitOpeningMood:
+    def test_mood_line_parsed_and_stripped(self):
+        text = "Flat tire on the route this morning.\nMOOD: annoyed but rolling with it | -1"
+        events, opening = bot._split_opening_mood(text)
+        assert events == "Flat tire on the route this morning."
+        assert opening == ("annoyed but rolling with it", -1)
+
+    def test_no_mood_line_returns_none(self):
+        events, opening = bot._split_opening_mood("Just a normal day.")
+        assert events == "Just a normal day."
+        assert opening is None
+
+    def test_valence_clamped(self):
+        _, opening = bot._split_opening_mood("day stuff\nMOOD: euphoric | 9")
+        assert opening == ("euphoric", 3)
+
+    def test_last_mood_line_wins_and_mid_text_mood_not_matched(self):
+        text = "She texted 'MOOD: weird flex' to Maya.\nGood day overall.\nMOOD: content | 2"
+        events, opening = bot._split_opening_mood(text)
+        assert opening == ("content", 2)
+        assert "Maya" in events and "Good day" in events
+
+    def test_empty_and_none_safe(self):
+        assert bot._split_opening_mood("") == ("", None)
+        assert bot._split_opening_mood(None) == ("", None)
+
+    def test_empty_label_discarded(self):
+        events, opening = bot._split_opening_mood("day.\nMOOD:  | 2")
+        assert opening is None
+        assert events == "day."
+
+
+# ── _usage_summary (v2026-07-18.4) ───────────────────────────────────────────
+# The subscription-usage endpoint returned active=true without 'daily' and /usage
+# crashed with a KeyError. Never index an external API response directly.
+
+class TestUsageSummary:
+    def test_full_shape_formats(self):
+        data = {"active": True,
+                "daily": {"used": 10, "remaining": 90},
+                "monthly": {"used": 100, "remaining": 900},
+                "limits": {"daily": 100, "monthly": 1000}}
+        msg = bot._usage_summary(data)
+        assert "10 / 100" in msg and "100 / 1000" in msg
+
+    def test_missing_daily_returns_none(self):
+        assert bot._usage_summary({"active": True, "monthly": {}, "limits": {}}) is None
+
+    def test_wrong_types_return_none(self):
+        assert bot._usage_summary({"daily": "5", "monthly": {}, "limits": {}}) is None
+
+    def test_missing_inner_keys_degrade_to_question_marks(self):
+        data = {"daily": {}, "monthly": {}, "limits": {}}
+        msg = bot._usage_summary(data)
+        assert msg is not None and "?" in msg
+
+    def test_empty_dict_returns_none(self):
+        assert bot._usage_summary({}) is None
+
+
+# ── _usage_summary new token-based shape + _fmt_count (v2026-07-18.5) ────────
+# Real response captured from Jules 2026-07-18: token-based subscription with
+# per-section {used, remaining, percentUsed} dicts keyed like the limits dict.
+
+class TestUsageSummaryTokenShape:
+    REAL_BODY = {
+        "active": True, "provider": "stripe", "providerStatus": "active",
+        "limits": {"weeklyInputTokens": 60000000, "dailyInputTokens": None,
+                   "dailyImages": 100},
+        "allowOverage": False,
+        "period": {"currentPeriodEnd": "2026-08-10T15:15:09.000Z"},
+        "dailyImages": {"used": 0, "remaining": 100, "percentUsed": 0},
+        "weeklyInputTokens": {"used": 15400, "remaining": 59984600,
+                              "percentUsed": 0.03},
+    }
+
+    def test_real_body_formats(self):
+        msg = bot._usage_summary(self.REAL_BODY)
+        assert msg is not None
+        assert "15.4k / 60M" in msg
+        assert "Daily images" in msg and "0 / 100" in msg
+        assert "Renews: 2026-08-10" in msg
+
+    def test_null_limit_renders_infinity(self):
+        body = dict(self.REAL_BODY)
+        body["dailyInputTokens"] = {"used": 5, "remaining": 995, "percentUsed": 1}
+        msg = bot._usage_summary(body)
+        assert "∞" in msg
+
+    def test_sections_missing_usage_dicts_skipped(self):
+        body = {"active": True, "limits": {"weeklyInputTokens": 100},
+                "weeklyInputTokens": {"used": 1, "remaining": 99}}
+        msg = bot._usage_summary(body)
+        assert msg is not None and "Weekly" in msg and "images" not in msg
+
+    def test_legacy_shape_still_works(self):
+        data = {"daily": {"used": 10, "remaining": 90},
+                "monthly": {"used": 100, "remaining": 900},
+                "limits": {"daily": 100, "monthly": 1000}}
+        assert "10 / 100" in bot._usage_summary(data)
+
+
+class TestFmtCount:
+    def test_millions_and_thousands(self):
+        assert bot._fmt_count(60000000) == "60M"
+        assert bot._fmt_count(15400) == "15.4k"
+        assert bot._fmt_count(59984600) == "60M"
+
+    def test_small_and_non_numeric(self):
+        assert bot._fmt_count(0) == "0"
+        assert bot._fmt_count(100) == "100"
+        assert bot._fmt_count("?") == "?"
+        assert bot._fmt_count(0.03) == "0.03"
+
+
+# ── /fleet console (v2026-07-19.1) ────────────────────────────────────────────
+
+class TestFleetParsePeers:
+    def test_port_only_defaults_to_localhost(self):
+        assert bot._fleet_parse_peers("nora=8080") == [("nora", "127.0.0.1", 8080)]
+
+    def test_host_and_port(self):
+        assert bot._fleet_parse_peers("jules=100.64.0.5:8085") == \
+            [("jules", "100.64.0.5", 8085)]
+
+    def test_full_fleet_mixed(self):
+        peers = bot._fleet_parse_peers(
+            "nora=8080, bonnie=8081,jules=100.64.0.5:8085")
+        assert peers == [("nora", "127.0.0.1", 8080),
+                         ("bonnie", "127.0.0.1", 8081),
+                         ("jules", "100.64.0.5", 8085)]
+
+    def test_bad_entries_skipped_not_fatal(self):
+        before = len(bot._CONFIG_WARNINGS)
+        peers = bot._fleet_parse_peers("nora=8080,oops,cass=notaport,=8082,priya=0")
+        assert peers == [("nora", "127.0.0.1", 8080)]
+        assert len(bot._CONFIG_WARNINGS) == before + 4
+
+    def test_empty_string(self):
+        assert bot._fleet_parse_peers("") == []
+
+
+class TestFleetFormat:
+    def test_up_row_with_all_fields(self):
+        rows = [{"name": "nora", "up": True, "version": "2026-07-19.1",
+                 "uptime": "45.2h", "errors": "0"}]
+        out = bot._fleet_format(rows)
+        assert "nora" in out and "UP" in out
+        assert "2026-07-19.1" in out and "45.2h" in out and "err:0" in out
+
+    def test_down_row_shows_detail(self):
+        out = bot._fleet_format(
+            [{"name": "cass", "up": False, "detail": "ConnectTimeout"}])
+        assert "cass" in out and "DOWN" in out and "ConnectTimeout" in out
+
+    def test_missing_optional_fields_omitted(self):
+        out = bot._fleet_format(
+            [{"name": "emily", "up": True, "version": "2026-07-18.5",
+              "uptime": "", "errors": ""}])
+        assert "err:" not in out and "UP" in out

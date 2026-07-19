@@ -5,9 +5,12 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 ok()  { echo "PASS  $1"; pass=$((pass+1)); }
 bad() { echo "FAIL  $1 — $2"; fail=$((fail+1)); }
+# skip = the check could not run in THIS environment (never in CI, which installs
+# deps first). Doesn't fail the suite, but says so loudly instead of lying either way.
+skip() { echo "SKIP  $1 — $2"; skipped=$((skipped+1)); }
 
 BOT=telegram-companion-bot/bot.py
 
@@ -96,7 +99,12 @@ fi
 # Incident v2026-07-11: _retag_legacy_day_facts and helpers were defined AFTER
 # load_state() called them at module level — NameError crash-looped every bot for a day.
 # py_compile can't catch this (it checks syntax, not runtime name resolution).
-if python3 -c "
+# Amended 2026-07-18: the check used to hide stderr and blame EVERY failure on that
+# NameError incident — in one session two pure environment breaks (Pillow not
+# installed; broken system cryptography) were misreported as bot.py defects. It now
+# surfaces the real exception line, and a missing third-party dependency SKIPs
+# instead of failing (CI installs requirements first, so it can never skip there).
+import_err=$(python3 -c "
 import sys, os, tempfile, json; from pathlib import Path
 d = tempfile.mkdtemp()
 (Path(d)/'.env').write_text('TELEGRAM_BOT_TOKEN=t:f\nNANOGPT_API_KEY=k\nCHARACTER_CARD=c.json\nBOT_TIMEZONE=UTC\n')
@@ -104,10 +112,18 @@ d = tempfile.mkdtemp()
 sys.argv=[sys.argv[0],d]; os.environ['BOT_HOME']=d
 sys.path.insert(0,'telegram-companion-bot')
 import bot
-" 2>/dev/null; then
-  ok "bot-imports: bot.py imports without NameError"
+" 2>&1 >/dev/null); import_rc=$?
+if [ "$import_rc" -eq 0 ]; then
+  ok "bot-imports: bot.py imports cleanly"
 else
-  bad "bot-imports" "bot.py crashes on import — a function is called before it's defined (load_state NameError class)"
+  # Last "SomeError: ..." line of the traceback; fall back to the raw last line.
+  import_exc=$(printf '%s\n' "$import_err" | grep -E '^[A-Za-z_][A-Za-z_0-9.]*(Error|Exception|Warning|Exit)[A-Za-z]*:' | tail -1)
+  [ -n "$import_exc" ] || import_exc=$(printf '%s\n' "$import_err" | tail -1)
+  if printf '%s' "$import_exc" | grep -q '^ModuleNotFoundError'; then
+    skip "bot-imports" "dependency missing in this environment ($import_exc). Run 'pip install -r telegram-companion-bot/requirements.txt' to make this check runnable — this is NOT a bot.py defect"
+  else
+    bad "bot-imports" "bot.py crashes on import: $import_exc — if the traceback points into bot.py, this is the v2026-07-11 class (a name used at module level before it's defined); if it points into site-packages/dist-packages, the environment's packages are broken, not bot.py"
+  fi
 fi
 
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
@@ -170,6 +186,22 @@ else
   bad "private-gate-registered" "_private_gate not registered in handler group -1 — per-handler checks drift (that is how /start was missed)"
 fi
 
+# v2026-07-19.2, third generation of the provenance-leak class (2026-07-10 memories,
+# v2026-07-12.4 note grounding): quote-grounding is a topic gate, not an ownership
+# gate — the character's own events entered user_notes via the USER's lines ("good
+# luck at the scrimmage") and note_followup_job then asked the owner how the
+# character's event went. Both ends of the ownership fix are pinned here.
+if grep -q "not a user_note" "$BOT" && grep -q "not whose message mentioned it" "$BOT"; then
+  ok "note-ownership-extraction: user_note requires the event to belong to the user's own life"
+else
+  bad "note-ownership-extraction" "ownership clause missing from post_reply_analysis — her events will re-enter user_notes through the user's lines"
+fi
+if grep -q "how it went for her instead" "$BOT"; then
+  ok "note-ownership-followup: follow-up backstop for character-owned notes present"
+else
+  bad "note-ownership-followup" "note_followup_job backstop missing — polluted notes will again be asked back at the owner as their own"
+fi
+
 # v2026-07-13.2: raw exception text was interpolated into chat messages — leaks
 # internals, and on_error would post them into the pilot GROUP chat.
 if grep -qE '\{type\(err\)|❌[^"]*\{e' "$BOT"; then
@@ -179,5 +211,9 @@ else
 fi
 
 echo
-echo "evals: ${pass} passed, ${fail} failed"
+if [ "$skipped" -gt 0 ]; then
+  echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"
+else
+  echo "evals: ${pass} passed, ${fail} failed"
+fi
 [ "$fail" -eq 0 ]

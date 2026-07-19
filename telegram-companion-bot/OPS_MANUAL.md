@@ -177,6 +177,7 @@ These files shape what the character knows and references. All are editable from
 | Command | What it does |
 |---|---|
 | `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health |
+| `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
 | `/update` | Self-deploy: pull latest `bot.py` from `main`, verify it compiles, restart (`force` to reinstall the same version) |
 | `/restart` | Clean restart via the supervisor — picks up `.env` edits and a swapped `bot.py` |
@@ -451,6 +452,38 @@ tail -f ~/nora-bot/bot.log      # everything the supervisor has seen (trimmed at
 tail -f ~/nora-bot/errors.log   # warnings/errors only (rotates at 2 MB)
 ```
 Or from Telegram, no shell needed: `/errors [N]` tails `errors.log` straight into chat.
+
+---
+
+## Monitoring
+
+### Dead man's switch (`HEALTHCHECK_URL`)
+
+A crash-loop that dies at import (a missing/bad `.env` value, for example) never
+reaches `_self_audit` or the `.alive` heartbeat job — those only run once a bot is
+actually up. `HEALTHCHECK_URL` is the one mechanism that catches that case without
+you noticing manually: it happened on 2026-07-17, when Nora crash-looped silently
+after losing `NANOGPT_API_KEY` from her `.env`, and none of the other monitoring
+caught it because none of the six instances had this configured.
+
+**Setup, per bot:**
+1. At [healthchecks.io](https://healthchecks.io) (free tier is enough), create one
+   check per bot. Set period **30 min**, grace **15 min**.
+2. Copy that check's **Ping URL** — `https://hc-ping.com/<uuid>`. This is *not* the
+   `healthchecks.io/checks/<uuid>/details/` dashboard link (that's the management
+   page, requires login); the Ping URL is a separate field shown on that page.
+3. Add it to that instance's `.env`:
+   ```
+   HEALTHCHECK_URL=https://hc-ping.com/<that-bot's-uuid>
+   ```
+4. `/restart` that bot so it picks up the new variable.
+
+**Use a distinct check/URL per bot.** Reusing one URL across instances collapses
+their signals into a single check, so a dead bot can hide behind another one's
+healthy pings.
+
+**Verify:** the check flips to "up" on healthchecks.io within 30 min, or immediately
+after sending that bot `/audit` (`_self_audit` fires the ping inline with that job).
 
 ---
 

@@ -1,5 +1,10 @@
 # Staged skill library — written 2026-07-11
 
+> **2026-07-17:** the original ten-skill batch was owner-reviewed and promoted in
+> full (each skill fact-checked against the repo per step 1 below; router rows
+> added in the same commit). `_staging/` is now empty except this README, which
+> stays as the procedure for any future staged skill.
+
 These skills are STAGED, not live. Claude Code only auto-discovers skills directly
 under `.claude/skills/<name>/SKILL.md`, so nothing in `_staging/` loads until promoted.
 

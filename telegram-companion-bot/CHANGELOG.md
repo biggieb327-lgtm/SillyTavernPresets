@@ -7,6 +7,303 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-19.2 — Note ownership: her events no longer become the user's calendar
+
+**Root cause (owner-reported):** bots brought up events from *their own* fictional
+lives and then asked the owner "how it went" as if it were the owner's plan. Third
+generation of the provenance-leak class (2026-07-10 hallucinated memories,
+v2026-07-12.4 note grounding): the v2026-07-12.4 fix requires `user_note_quote` to
+be a verbatim substring of the *user's* lines — a topic gate, not an ownership
+gate. When the character has a scrimmage Saturday and the user replies "good luck
+at the scrimmage," the user's own line states the event verbatim, the note passes
+grounding legitimately, and is stored ownerless. `note_followup_job`'s trigger then
+hard-codes ownership the wrong way ("{user} mentioned this — ask how it went"),
+completing the flip. Every guard checked whose *mouth* the words came from; none
+checked whose *life* the event belonged to.
+
+**Fix (prompt-level, both ends of the pipe, zero new LLM calls, no new code paths):**
+- Extraction (`post_reply_analysis`): `user_note` now requires the event to be part
+  of the user's OWN life; the user asking about / reacting to / wishing luck on the
+  character's event is explicitly null. The CRITICAL clause adds the principle:
+  ownership of the event decides, not whose message mentioned it.
+- Follow-up backstop (`note_followup_job` trigger): if a stored note actually
+  describes the character's own event, she must not ask the user how it went — she
+  tells them how it went for her instead. This degrades already-polluted notes
+  gracefully instead of gaslighting the owner.
+- No kill switch: pure prompt-text bugfix on existing behavior — "off" would mean
+  "keep the bug." Existing polluted entries should be pruned manually via
+  `/notes` + `/notes del <n>` on affected bots; the backstop covers what remains.
+
+## v2026-07-19.1 — /fleet: Telegram-native fleet console over the admin API
+
+**Root cause (a gap, not a bug):** fleet visibility required a shell.
+`fleet-status.sh` answers "is everyone up, what version" but only from a terminal
+— and the VPS migration is exactly when that answer is needed from a phone with
+no SSH at hand: instances now live on two hosts, and the jules pilot's failure
+mode (two hosts polling one token) is the kind of thing a glanceable per-host
+view catches early. The admin API already served all the data
+(`/admin/health`, `/admin/audit`); nothing consumed it from inside Telegram.
+
+**What shipped:**
+- `/fleet` (admin-gated, `_is_admin`): probes every peer in `FLEET_PEERS`
+  concurrently (`asyncio.gather` over `asyncio.to_thread` — no bare `requests`
+  in the async handler) and replies with one table: UP/DOWN, version, uptime,
+  and `err:<n>` last-hour error count when the fleet shares one
+  `ADMIN_API_TOKEN` (audit probe degrades to `?` on a token mismatch or older
+  peer). DOWN is labeled as "admin API unreachable", not "bot dead" — the
+  common case is `ADMIN_API_ENABLED` unset on a healthy bot.
+- `FLEET_PEERS=name=port,name=host:port,…` — host defaults to localhost, so
+  the same config works on-phone now and across the tailnet mid-migration.
+  Parsed by pure `_fleet_parse_peers`; bad entries warn via `_CONFIG_WARNINGS`
+  and are skipped (the .env-typo-must-not-brick rule, v2026-07-10.2).
+- `/admin/health` now includes `instance` and `uptime_hours` (still
+  unauthenticated liveness only) — `fleet-status.sh` already tried to read
+  `uptime_hours` and rendered 0.0h for everyone; now it's real.
+- Kill switch `FLEET_CMD` (unset = on, `0` = off) per owner policy 2026-07-18;
+  feature is inert without `FLEET_PEERS` regardless. `FLEET_TIMEOUT` (default
+  4s) bounds each probe. Group-safe automatically: commands in groups are
+  default-deny (`GROUP_ALLOWED_COMMANDS`), untouched.
+
+**Tests:** `TestFleetParsePeers` (5) + `TestFleetFormat` (3) in test_pure.py.
+
+## v2026-07-18.5 — /usage speaks NanoGPT's token-based subscription shape
+
+**Root cause:** the v2026-07-18.4 self-describing error did its job — the owner's
+very next `/usage` captured the real response. NanoGPT's subscription API is no
+longer daily/monthly request counts; it's **token-based**: top-level per-section
+usage dicts (`weeklyInputTokens`, `dailyInputTokens`, `dailyImages`, each
+`{used, remaining, percentUsed}`) keyed identically to the `limits` dict, plus
+`period.currentPeriodEnd`. Jules's real numbers: 60M weekly input tokens limit,
+`dailyInputTokens` limit null (= uncapped), 100 daily images.
+
+**What shipped:** `_usage_summary` now recognizes the token shape first (sections
+missing their usage dict are skipped; a null limit renders as ∞; renewal date
+appended) and falls back to the legacy daily/monthly shape, else None → the
+v2026-07-18.4 self-describing path. New pure `_fmt_count` humanizes counts
+(60000000 → 60M, 15400 → 15.4k). The captured real body is pinned in the tests
+so the next API drift fails loudly against known-good data.
+
+**Tests:** `TestUsageSummaryTokenShape` (4, incl. the real captured body) +
+`TestFmtCount` (2); legacy-shape tests unchanged and still green.
+
+## v2026-07-18.4 — /usage no longer crashes on an unexpected API response shape
+
+**Root cause:** `check_usage` trusted the NanoGPT subscription endpoint's response
+shape — it gated on `data.get("active")` but then indexed `data["daily"]` /
+`data["monthly"]` / `data["limits"]` directly. On Jules the endpoint returned
+`active` truthy **without** a `daily` key (account tier or API shape change — the
+crash destroyed the evidence of which), so `/usage` died with
+`KeyError: 'daily'` and an `[unhandled]` traceback instead of telling anyone what
+the API actually said. Same defect class as the streaming-error-body rule: an
+external response consumed without validation is undiagnosable when it changes.
+
+**What shipped:**
+- New pure `_usage_summary(data)`: validates the daily/monthly/limits shape
+  (returns None on mismatch), tolerates missing inner keys with `?` placeholders.
+- `check_usage` now handles all three failure modes gracefully: non-JSON body
+  (HTTP status to chat, body to log), inactive subscription (unchanged), and
+  active-but-unrecognized shape — the reply names the keys the API returned and
+  the full body goes to the log, so the *next* shape change is self-describing
+  (debugging protocol #3) instead of a KeyError.
+- No new env vars; bugfix to an existing command, no kill switch needed.
+
+**Tests:** `TestUsageSummary` (5) — full shape, missing/wrong-typed sections,
+missing inner keys, empty response.
+
+## v2026-07-18.3 — Social battery + minimal-reply license + day-mood residue (ROADMAP 3.7)
+
+**Root causes this release addresses (three related realism tells, one plumbing area):**
+1. Mood tracks what she feels *about* things, but nothing tracked remaining social
+   capacity — a six-hour intense conversation left her exactly as available as minute
+   one. Single-axis mood can't express "great day, no energy left."
+2. Every incoming message earned a full-length reply — no real person pads "k" into a
+   paragraph, but the prompt never licensed anything less.
+3. Her generated life (`day.txt`) never colored how she *opened* — mood changed ONLY
+   through conversation (`post_reply_analysis` + gap decay in `nudge_mood`), so the
+   flat tire in her day was invisible unless the user happened to ask
+   (`REVIEW-YURALUME-2026-07-18.md`, the one adoption from that review).
+
+**What shipped (zero extra LLM calls; `FATIGUE_STATE=0` / `DAY_MOOD_RESIDUE=0` kill
+switches, default on):**
+- **Social battery:** per-chat `fatigue` 0–100, persisted with state. Pure
+  `_fatigue_update` runs inside the existing analysis worker on the valence it
+  already extracts: time decay first (`FATIGUE_DECAY_PER_HOUR`, default 10), then
+  |valence| ≥ 2 → +12 (intensity drains regardless of sign — a big high costs energy
+  too), calm-positive → −15, else −5. Worker-thread writes go back via
+  `call_soon_threadsafe`, mirroring the adjacent mood write. `[fatigue]` log line on
+  threshold crossings only.
+- **Read-time decay:** `_fatigue_effective` applies passive decay at prompt-assembly
+  time so a long silent gap recovers her *before* the first reply of a new
+  conversation, not one reply late.
+- **Drained register:** above `FATIGUE_THRESHOLD` (default 70), one system line —
+  shorter replies, less patience, winds the chat down; explicitly not
+  BrainEngine's "ego depletion" (losing social regulation was rejected in the
+  review as a liability for a long-running relationship).
+- **Minimal-reply license:** when drained, mid-busy-block (3.6), or in a low mood
+  (≤ −1.2), a system line makes 'k'/'lol'/an emoji a legitimate complete reply.
+  Master switch is `FATIGUE_STATE`.
+- **Day-mood residue:** the midnight day generator now ends with one
+  `MOOD: <label> | <valence>` line. Pure `_split_opening_mood` peels it off BEFORE
+  `day.txt` is written — the meta line never reaches prompts or memory — and seeds
+  the owner's mood state (on-loop job, direct write is correct there). A model that
+  ignores the instruction degrades to no residue that day. Provenance unaffected:
+  mood is presentation state, not a fact store; the `[own-day]` rule is untouched.
+- `assemble_messages` now reads `schedule.txt` once per assembly (previously the 3.6
+  block re-read it); busy state is shared between the license and the schedule
+  section.
+
+**Config:** `FATIGUE_STATE`, `FATIGUE_THRESHOLD`, `FATIGUE_DECAY_PER_HOUR`,
+`DAY_MOOD_RESIDUE` in `.env.example`; numerics via `_env_float`.
+
+**Pure helpers + tests:** `_fatigue_update`, `_fatigue_effective`,
+`_split_opening_mood`; `TestFatigue` (8) + `TestSplitOpeningMood` (6): drain/recharge
+arithmetic, clamps, gap decay ordering, read-time decay, MOOD-line parse/strip/clamp,
+mid-text immunity, graceful absence.
+
+## v2026-07-18.2 — Schedule-driven unavailability (SCHED_BUSY; ROADMAP 3.6)
+
+**Root cause this release addresses:** `schedule.txt` was injected into context every
+turn but nothing **enforced** it behaviorally — the character read as always instantly
+available, never mid-anything, never having to leave. The always-on companion is the
+single biggest "puppet" tell (identified in `REVIEW-BRAINENGINE-2026-07-18.md`, the
+one idea from that review worth its weight). Context alone doesn't shift register;
+models treat an injected schedule as trivia unless the prompt states what it means
+*right now*.
+
+**What shipped (zero extra LLM calls):** behind `SCHED_BUSY` (default **on**, `0`
+disables without redeploy):
+- New pure `_parse_busy_blocks(sched_text)`: extracts `(start_min, end_min, activity)`
+  from today's schedule lines carrying an **explicit** `HH:MM-HH:MM` range (hyphen/en
+  dash/em dash). Deliberately conservative — loose wording ("morning shift", "gym
+  later") never fires; invalid clock values and overnight ranges (end ≤ start) are
+  skipped rather than guessed. `_busy_now(sched_text, now)` returns the activity the
+  current time falls inside, else "".
+- `assemble_messages`: when mid-block, one system line after the schedule — she's
+  answering from her phone in stolen moments, shorter replies, and may say she has to
+  get back to it. Logs `[sched-busy] <activity>` per assembly so over-firing is
+  visible in bot.log (the ROADMAP-specified tripwire).
+- Private reply path: compose delay (`_typing_delay_secs`) is multiplied by
+  `SCHED_BUSY_DELAY_MULT` (default 3.0, clamped 1–10 at use) while busy. The **group
+  path keeps its own timing untouched** — no group-behavior change in this release.
+- Proactive sends unchanged: quiet hours + nudge budget stay authoritative; this
+  feature only adds restraint, never sends.
+
+**Config:** `SCHED_BUSY`, `SCHED_BUSY_DELAY_MULT` documented in `.env.example`.
+Numeric parsing via `_env_float` (bad values warn + fall back).
+
+**Pure helpers + tests:** `_parse_busy_blocks`, `_busy_now`; `TestBusyBlocks` (8
+tests: explicit ranges, loose-wording immunity, dash variants, overnight/invalid
+skip, boundary minutes, empty schedule).
+
+## v2026-07-18.1 — Stop memory latching (MEMORY_REPEAT_SUPPRESS_TURNS)
+
+**Root cause this release addresses:** `triggered_memories` is deterministic and
+**stateless across turns** — every reply it re-scores all of `memories.txt` against the
+recent conversation (keyword overlap + cosine ×3.0), sorts, and greedily fills the
+300-token budget. Nothing recorded which memories were injected on prior turns, so while
+a conversation stayed on one theme the *same* top-scoring lines won the budget every
+single turn and the character re-told one memory endlessly, reworded each time. It's a
+feedback loop: the memory she mentions lands in the recent-history scan text, which
+re-ranks it to the top again next turn. The repo already solved this exact shape for
+*questions* (`_recent_questions` → "don't repeat these") but had no equivalent for
+memories; write-time dedup (`MEMORY_DEDUP_SIM`) only stops *storing* duplicates, not
+re-injecting the same stored line.
+
+**What shipped:** behind `MEMORY_REPEAT_SUPPRESS_TURNS` (default **6 = on**; set 0 to
+disable — the first release under the new owner default-on policy, see below), per-chat
+in-memory tracking of recently-injected memory lines, consumed as a score multiplier in
+`triggered_memories`:
+- New pure `_repeat_penalty(last_turn, current_turn, window, floor)`: full penalty
+  (`MEMORY_REPEAT_PENALTY`, default 0.15) the turn right after a line is injected, fading
+  linearly back to 1.0 over `window` turns. A **multiplier, never exclusion** — a memory
+  the user directly asks about still outscores the penalty and surfaces.
+- `triggered_memories` gains `chat_id=None`. With a `chat_id` (the live reply path) and
+  the flag on, it increments a per-chat turn counter, down-weights recently-seen lines,
+  and records the winners. `chat_id=None` (e.g. `/recall`) and the flag off are both
+  byte-identical to old behavior, so existing callers/tests are untouched.
+- Trackers (`_mem_inject_turn`, `_mem_last_injected`) are **in-memory only**, matching
+  `_recent_questions` — no state-serialization changes, no cross-thread concerns; a
+  restart just clears suppression (worst case: one repeated theme after a restart).
+- A gated one-liner is appended to the `# Relevant memories` block telling the character
+  not to re-raise a memory she's referenced recently unless the user brings it up. The
+  kill switch (0) restores the exact old prompt.
+
+**Policy change (owner, 2026-07-18):** new features now default **ON** with a mandatory
+env kill switch (unset = active, `0` = off), reversing the prior default-off convention.
+The kill switch is now the required safety mechanism rather than the off-by-default state.
+Recorded in `CLAUDE.md`, `bot-code-invariants` #16, and `repo-change-control`. This
+release is the first under it — hence `MEMORY_REPEAT_SUPPRESS_TURNS=6` by default.
+
+**Preset (`preset.txt`, ships alongside; content, no BOT_VERSION dependency):** added a
+contrastive `[ANTI-ECHO / NO REHASH]` section and inline bad→good example pairs under
+several existing abstract rules (narrated emotion, narrator tipping off lies, generic
+voice, repeated sensory detail, NPC servility) — bad→good pairs steer models harder than
+abstract prose. Deploys via the card/seed path (`sync-cards.sh` / curl into instance
+dirs), not `/update`.
+
+**Deliberately out of scope (so it isn't re-litigated):**
+- `MEMORY_DECAY_HALFLIFE_DAYS` (default 0) remains a config-only, orthogonal mitigation
+  for *old* memories dominating — it does nothing about within-conversation latching,
+  which is what this release fixes.
+- Lore, `memory_block` facts/summaries, `user_notes`, pinned, and `day.txt` can also
+  carry a latching theme but are injected wholesale (not ranked), so suppression there is
+  a different mechanism — left for a future release to keep this diff minimal.
+
+**Pure helper + tests:** `_repeat_penalty`. New `TestRepeatPenalty` and
+`TestTriggeredMemoriesRepeatSuppression` (suppression rotates the winner, fades after the
+window, kill switch and `chat_id=None` preserve old behavior, per-chat isolation).
+
+## v2026-07-17.1 — Generalized map intent (MAP_INTENT; ROADMAP 3.5 phase 2)
+
+**Root cause this release addresses:** FOOD_SUGGESTIONS (v2026-07-11.14) proved that
+pre-fetching real TomTom data into the single reply stops the character inventing
+places — but only for food. Asked "how far is bellevue square" or "is there a
+pharmacy nearby", she still answered from imagination: fabricated minutes, distances,
+and place names, exactly the hallucination class the food path closed.
+
+**What shipped:** behind `MAP_INTENT=1` (default off; unset = prior behavior), an
+explicit map-shaped ask in a 1:1 chat pre-fetches real data and injects it as the
+same one-turn bracketed note the food path uses, riding the single existing reply:
+- **Route asks** ("how do I get to X", "how far is (it to) X", "directions to X",
+  "how long to bike/drive/walk to X", "what's the commute to X"): geocode the
+  destination, route from the user's stored location with the instance's
+  `TOMTOM_TRAVEL_MODE`, inject a plain `_route_brief` ("drive to X: 18 min, 7.9 mi
+  (incl. +4 min traffic)") with use-ONLY-these-facts phrasing. Max 2 REST calls.
+- **Nearby asks** ("is there a <thing> nearby", "any <thing> around here",
+  "closest/nearest <thing>"): POI search around the user's location (5 km), injected
+  via `_places_brief` (`_restaurants_brief` generalized; the old name delegates so the
+  food path and its tests are untouched). 1 REST call.
+
+**Design decisions (why, so they aren't re-litigated):**
+- **Keyword regex intent, not an LLM classifier** — intent runs on every 1:1 message
+  and a per-message LLM side call is banned (bot-code-invariants #3, same reason
+  `_is_food_query` is a regex). The negative space is test-pinned: "how do I get to
+  sleep", "how far is too far", "closest thing to heaven" etc. must never fire; a
+  destination stoplist (`_MAP_DEST_REJECT`) catches figurative objects, \b-anchored
+  so real places ("Knoxville") survive. Misses on creative phrasings are accepted v1
+  cost, same as food.
+- **Location freshness gate** (`_fresh_location`): route origins and nearby centers
+  use the stored location only when <4h old (the photo path's precedent) or inside a
+  live-share window — a route from last week's pin would be confidently wrong.
+  Without one she nudges for a pin instead of guessing (food-path pattern).
+- **Un-geocodable destinations fail honestly:** "home"/"work" geocode literally,
+  usually miss, and inject a "you couldn't find it — say so, don't invent" note.
+  Resolving them from her memory of the user is a deliberate follow-up
+  (owner-settled 2026-07-17), as is "what's near <remote place>" — v1 nearby is
+  user-location-only.
+- **No cooldown/cache** (owner-approved): the precise intent gate is the budget
+  control, matching how FOOD_SUGGESTIONS shipped; a `[map] intent=...` log line
+  instruments the fire rate. If fleet logs show over-firing, a per-chat cooldown is
+  the pre-agreed follow-up.
+- Food wins when both flags fire (elif chain) — at most one injection + one TomTom
+  fetch sequence per message. Group chats never reach the block (it lives in the 1:1
+  `handle_message` path); `_TomTomError` anywhere degrades silently to a normal
+  reply; error logging stays key-free via the existing `_tomtom_err_reason` path.
+
+**Pure helpers + tests:** `_map_intent`, `_clean_map_dest`, `_route_brief`,
+`_places_brief`, `_fresh_location`. 17 new tests; `TestRestaurantsBrief` passes
+unmodified against the delegate, proving the refactor is behavior-preserving.
+
 ## v2026-07-13.2 — Error hygiene + --check-config preflight (R2+R3, operability)
 
 Two small items from the same hardening plan as v2026-07-13.1, shipped together.

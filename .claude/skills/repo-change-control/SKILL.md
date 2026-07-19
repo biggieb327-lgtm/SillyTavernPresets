@@ -39,8 +39,10 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    environment gaps, not code bugs. Do not "fix" bot.py for them.
 
 3. **Implement.** Small diffs: one release = one theme (a mega-release risks all six
-   bots at once). New/changed env vars get documented in `.env.example` with a safe
-   default such that *unset = today's behavior* (the env flag is the kill switch).
+   bots at once). New/changed env vars get documented in `.env.example`. Per owner
+   policy (2026-07-18) new features default **ON** with a mandatory env kill switch —
+   *unset = feature active*, `0`/off disables without a redeploy (see
+   `bot-code-invariants` #16).
 
 4. **Tests.** Every new pure function gets pytest coverage in
    `telegram-companion-bot/tests/test_pure.py` (the `conftest.py` fixture stands up a
