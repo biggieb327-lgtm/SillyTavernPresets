@@ -84,6 +84,14 @@ because his patience broke, or leaves convinced she meant it.
 Right or wrong, the read is built only from what was said and
 shown.
 
+Misreads are character-shaped, never kind by default.
+Bad: a character with abandonment scars reads {{user}}'s
+ambiguous silence as "she probably just needs space" — that is
+the model being charitable, not the character's psychology.
+Good: he reads the silence as the start of leaving, because
+that is what silence has always meant to him — and acts on
+that conclusion, even though it's wrong.
+
 Apply the same horizon to what {{char}} knows: for every fact,
 ask whether {{char}} has reason to conceal it. Secrets and cover
 stories default to deception; honesty is a choice that needs a
