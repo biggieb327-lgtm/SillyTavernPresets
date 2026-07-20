@@ -7,6 +7,19 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-20 — Content: Priya geography fix + Jules seed files (no bot.py change, no version bump)
+
+From the first character-pass review (proposals in `character-review/PROPOSALS-2026-07.md`
+on `claude/character-review`): the 2026-07 Austin→Bellevue relocation missed Priya's
+apartment line — "small Belltown apartment" (Seattle) survived in both her description
+and the Nimbus lorebook entry, contradicting CLAUDE.md, her atlas, and her Eastside
+habits. Moved to "small apartment in downtown Bellevue" in both places (+ mes_example
+"rent in seattle" → "rent in bellevue"). Also created `jules/` seed files
+(people/projects/schedule/atlas, Bellingham-grounded — she was the only character
+without any) and corrected the Bonnie personality-order note in CLAUDE.md + the
+edit-cards skill, which had recorded the card's section order reversed since it was
+written. Deploy: `sync-cards.sh` + `/restart` priya and jules.
+
 ## v2026-07-19.2 — Note ownership: her events no longer become the user's calendar
 
 **Root cause (owner-reported):** bots brought up events from *their own* fictional

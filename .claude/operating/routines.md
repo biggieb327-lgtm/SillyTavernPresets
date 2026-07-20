@@ -15,10 +15,16 @@ in `list_triggers` without an entry here and that is not drift.
 
 ## improvement-loop-monthly
 
-- **Created:** 2026-07-12; recreated 2026-07-20 twice — first to add completion
-  notifications, then to add the owner-approved Reddit-ideas step (trigger id
-  `trig_01FucVg8ikSvULSzB5H4Swpt`; previous ids `trig_014UoejLm5Wv7TkqJC4j9CjJ`
-  and `trig_01TyGUFRHqMrPVWhju4ZPyxE` deleted).
+- **Created:** 2026-07-12; recreated 2026-07-20 three times — completion
+  notifications, then the owner-approved Reddit-ideas step, then the curl-based
+  Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
+  `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
+  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
+- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
+  against the public JSON API. As of 2026-07-20 the environment's network policy
+  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
+  reddit.com in the environment's network settings, the step self-reports
+  SKIPPED.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -52,14 +58,19 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    .claude/memory/improvement-proposals/<YYYY-MM>.md. If nothing qualifies, write
    no proposal — do not invent a pattern.
 3. Reddit ideas (runs whether or not a pattern qualified): bounded external scan
-   — max ~5 WebSearch queries (site:reddit.com — r/SillyTavernAI, r/LocalLLaMA,
-   r/TelegramBots or similar) for ideas genuinely applicable to this
-   companion-bot fleet (companion features, python-telegram-bot pitfalls,
-   model/API practices). If any apply, add an "External ideas (unvetted — owner
-   approval required)" section to the same <YYYY-MM>.md file: max 3 ideas, each
-   with its thread URL and one line on why it fits this fleet. Ideas only — they
-   are not evidence-based proposals and must never be implemented by this loop.
-   If Reddit is unreachable, say so in the summary; never fabricate sources.
+   for ideas genuinely applicable to this companion-bot fleet (companion
+   features, python-telegram-bot pitfalls, model/API practices). Reddit access:
+   WebFetch cannot reach reddit — use Bash curl against the public JSON API, e.g.
+   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
+   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
+   for r/SillyTavernAI, r/LocalLLaMA, r/TelegramBots (max ~5 requests; WebSearch
+   may supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
+   environment's network policy blocks reddit.com — report this step as "SKIPPED
+   (network policy blocks reddit.com; owner can allow it in the environment's
+   network settings)". Never fabricate sources. If any ideas apply, add an
+   "External ideas (unvetted — owner approval required)" section to the same
+   <YYYY-MM>.md file: max 3 ideas, each with its thread URL and one line on why
+   it fits this fleet. Ideas only — never implemented by this loop.
 4. If the <YYYY-MM>.md file has content: commit only that file to the branch
    claude/improvement-loop (reset it to origin/main first if it already exists)
    and push ONLY to claude/improvement-loop. NEVER push to main or any other
@@ -185,7 +196,9 @@ brief — do not claim anything is new or recurring. Fix nothing.
 
 ## character-pass-monthly
 
-- **Created:** 2026-07-20 (trigger id `trig_01Df8nyGoMAoau5fidB9dhSn`), owner-requested.
+- **Created:** 2026-07-20, owner-requested; recreated same day for the curl-based
+  Reddit access path (trigger id `trig_01T9Jjcn2ehwGGAJWovRFdNg`; previous id
+  `trig_01Df8nyGoMAoau5fidB9dhSn` deleted).
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -197,9 +210,12 @@ brief — do not claim anything is new or recurring. Fix nothing.
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
   accepted proposals interactively under `edit-cards-and-presets`.
-- **Known limitation:** same as the other Routines — fired sessions carry no MCP
-  connectors; Reddit access is via WebSearch/WebFetch and may be blocked, in which
-  case that step is reported as SKIPPED.
+- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
+  against the public JSON API. As of 2026-07-20 the environment's network policy
+  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
+  reddit.com in the environment's network settings, the step self-reports
+  SKIPPED. Fired sessions also carry no MCP connectors (same as the other
+  Routines).
 
 ### Verbatim prompt
 
@@ -221,12 +237,19 @@ binding; these cards ship to relationships someone actually has.
 2. Fleet spot-check: review the six live cards named in CLAUDE.md's instance
    table (telegram-companion-bot/*.json) plus their seed dirs for internal
    contradictions and drift (e.g. Priya's geography must stay Bellevue/Eastside-
-   consistent). Findings only; fix nothing.
-3. Reddit ideas: bounded pass — max ~5 WebSearch queries (site:reddit.com —
-   r/SillyTavernAI and similar character/roleplay-writing subreddits), WebFetch
-   promising threads, and collect card-writing techniques applicable to the
-   characters reviewed above. Cite every external idea with its thread URL. If
-   Reddit or the fetches are blocked, report this step as SKIPPED — never
+   consistent; Jules's must stay Bellingham-consistent). Findings only; fix
+   nothing.
+3. Reddit ideas: bounded pass for card-writing techniques applicable to the
+   characters reviewed above. Reddit access: WebFetch cannot reach reddit — use
+   Bash curl against the public JSON API, e.g.
+   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
+   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
+   (and thread permalinks with .json appended) for r/SillyTavernAI and similar
+   character/roleplay-writing subreddits (max ~5 requests; WebSearch may
+   supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
+   environment's network policy blocks reddit.com — report this step as "SKIPPED
+   (network policy blocks reddit.com; owner can allow it in the environment's
+   network settings)". Cite every external idea with its thread URL; never
    fabricate sources.
 4. If there are findings or ideas: write ONE file
    character-review/PROPOSALS-<YYYY-MM>.md — specific per-character suggestions,

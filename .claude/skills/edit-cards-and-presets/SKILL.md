@@ -37,8 +37,9 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 2. **Respect per-character canon** (CLAUDE.md §Character notes is authoritative;
    highlights that are easy to violate):
    - *Nora*: casual register; grief backstory (Mormor, mother) is load-bearing.
-   - *Bonnie*: personality section ORDER matters — Friction → Core → OCEAN →
-     Energy States → Surface. Don't reorder while editing.
+   - *Bonnie*: personality section ORDER matters — Surface → Core → Energy
+     States → OCEAN → Friction (the card's actual file order; docs had it
+     reversed until 2026-07-20). Don't reorder while editing.
    - *Priya*: lowercase, sardonic, never performative; her atlas references real
      Bellevue/Eastside places — keep new geography real and consistent.
    - *Jules*: gets meaner when she likes you, not warmer. Softening her is a

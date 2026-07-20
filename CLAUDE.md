@@ -225,8 +225,9 @@ Lorebook: Ingrid/jacket, Mother, Messenger work, The toothbrush, Money/The City,
 Religion/Politics.
 
 **Bonnie** (`bonnie.json`) — libertarian gremlin housewife; chaotic surface over
-abandonment terror. Personality order: Friction → Core → OCEAN → Energy States →
-Surface. Four-state calm opening in first_mes.
+abandonment terror. Personality order: Surface → Core → Energy States → OCEAN →
+Friction (the card's actual file order; docs had it reversed until 2026-07-20).
+Four-state calm opening in first_mes.
 
 **Cass** (`cass.json`) — writing collaborator / developmental editor; send a `.json`
 card for substantive critique (uses `DOCUMENT_MODEL`). Forward-momentum rule: leads
