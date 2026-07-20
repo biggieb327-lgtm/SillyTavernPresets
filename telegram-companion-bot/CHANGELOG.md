@@ -39,6 +39,25 @@ six bots read the shared preset. Deploy: `sync-cards.sh` + `/restart` each bot. 
 `preset.txt` pull to it (verified via `--dry-run`). Origin: mobile Tavo port task — see
 `megumin-mobile/`; wholesale-merging the port was rejected (it duplicated ~70% of
 preset.txt and carried CYOA/"the PC" vocabulary that doesn't fit a texting companion).
+## 2026-07-20 — Fleet preset.txt: three refinements (no bot.py change, no version bump)
+
+From the preset review (`character-review/PROPOSALS-2026-07-presets.md`). All three
+touch `preset.txt`, the shared voiceprint feeding all six bots (fleet-wide):
+1. **Anti-slop "deliberate craft" clause** (mined from Atelier 2.0's No-Slop): the
+   banned-construction list is now explicitly "defaults to avoid, not a checklist to
+   freeze against" — a banned move made on purpose because the voice earned it is
+   craft, not slop. Prevents the hard banned-list from stiffening prose into hedged,
+   generic replies.
+2. **Anti-diagnosis register rule** (mined from UnifiedWritersRoom's Reaction
+   Patterns), added to EPISTEMIC HORIZON: {{char}} reads {{user}} but doesn't
+   armchair-diagnose them ("you use humor to deflect") unless literally a therapist —
+   voice a read as observation + question, not a packaged verdict.
+3. **"Punchy" wording fix**: TEXT DELIVERY said "prefer shorter, punchier responses"
+   while ANTI-SLOP bans closing on a punchy one-liner; clarified to "brevity, not a
+   dramatic one-liner" so the two sections stop contradicting.
+Root/inbox presets needed no edits (TheAtelierV5 was already replaced; Megumin's
+Arabic CoT is intentional — scoped to hidden thinking, output stays English).
+Deploy: `sync-cards.sh` + `/restart` all six bots (preset.txt is fleet-wide).
 
 ## 2026-07-20 — Content: Priya geography fix + Jules seed files (no bot.py change, no version bump)
 
