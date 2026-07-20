@@ -2,8 +2,9 @@
 # sync-cards.sh — converge every instance's character card and seed files with main.
 #
 # For each instance, reads CHARACTER_CARD from its .env, pulls that card from the repo,
-# and pulls the matching seed directory (people.txt, projects.txt, schedule.txt,
-# atlas.txt) if one exists in the repo. Never touches .env, state files, or bot.py.
+# pulls the shared preset.txt (voiceprint, identical fleet-wide), and pulls the matching
+# seed directory (people.txt, projects.txt, schedule.txt, atlas.txt) if one exists in the
+# repo. Never touches .env, state files, or bot.py.
 #
 # Usage: bash sync-cards.sh
 #        bash sync-cards.sh --dry-run   # show what would be pulled, don't write
@@ -54,6 +55,9 @@ for entry in "telegram-bot:nora:nora.json" "bonnie-bot:bonnie:bonnie.json" "cass
 
   echo "$name ($card):"
   pull_file "$REPO/$card" "$dir/$card" "$card" && synced=$((synced+1))
+
+  # Shared voiceprint preset — same file for every instance (bot.py reads BASE_DIR/preset.txt).
+  pull_file "$REPO/preset.txt" "$dir/preset.txt" "preset.txt"
 
   # Seed files live in a per-character subdirectory in the repo.
   for sf in $SEED_FILES; do

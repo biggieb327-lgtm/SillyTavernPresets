@@ -18,8 +18,10 @@ bullets (action+symbolic-meaning double, mask-drop announcements, feelings-as-ma
 verbs) and inline phrases ("washed over," "flooded through," "let out a breath she didn't
 know she was holding," "before she could stop herself," "seemed to physically flinch,"
 "hit like a physical blow," "the weight of it" as standalone metaphor). Fleet-wide: all
-six bots read the shared preset. Deploy: `sync-cards.sh` (or curl preset.txt into each
-instance dir) + `/restart` each bot. Origin: mobile Tavo port task — see
+six bots read the shared preset. Deploy: `sync-cards.sh` + `/restart` each bot. Note:
+`sync-cards.sh` previously synced only the card + seed files and never touched
+`preset.txt` — a shared fleet-wide file with no deploy path — so this change adds a
+`preset.txt` pull to it (verified via `--dry-run`). Origin: mobile Tavo port task — see
 `megumin-mobile/`; wholesale-merging the port was rejected (it duplicated ~70% of
 preset.txt and carried CYOA/"the PC" vocabulary that doesn't fit a texting companion).
 
