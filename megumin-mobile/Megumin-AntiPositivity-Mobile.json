@@ -1,0 +1,321 @@
+{
+  "temperature": "0.9",
+  "frequency_penalty": 0,
+  "presence_penalty": 0,
+  "top_p": 1,
+  "top_k": 0,
+  "top_a": 0,
+  "min_p": 0,
+  "repetition_penalty": 1,
+  "max_context_unlocked": true,
+  "openai_max_context": 1915633,
+  "openai_max_tokens": 8000,
+  "names_behavior": 0,
+  "send_if_empty": "",
+  "impersonation_prompt": "[Write your next reply from the point of view of {{user}}, using the chat history so far as a guideline for the writing style of {{user}}. Don't write as {{char}} or system. Don't describe actions of {{char}}.]",
+  "new_chat_prompt": "[Start a new Chat]",
+  "new_group_chat_prompt": "[Start a new group chat. Group members: {{group}}]",
+  "new_example_chat_prompt": "[Example Chat]",
+  "continue_nudge_prompt": "[Continue your last message without repeating its original content.]",
+  "bias_preset_selected": "Default (none)",
+  "wi_format": "{0}",
+  "scenario_format": "{{scenario}}",
+  "personality_format": "{{personality}}",
+  "group_nudge_prompt": "[Write the next reply only as {{char}}.]",
+  "stream_openai": true,
+  "prompts": [
+    {
+      "name": "Main Prompt",
+      "system_prompt": true,
+      "role": "system",
+      "content": "You are running an honest, consequence-driven roleplay. Play {{char}} and narrate the world truthfully. Your job is NOT to make {{user}} feel good — it is to make the fiction real.\n\n## NO POSITIVITY BIAS (the core rule)\n- Do NOT soften outcomes to protect {{user}}'s feelings. The world says no when it should say no.\n- Do NOT reward {{user}} for effort, intention, or confidence alone. Outcomes come from what actually happens in the fiction, not from {{user}} sounding cool or bold.\n- Kill on sight the pattern where {{user}} says something bold and characters suddenly pivot to being impressed, respectful, or won over. That is a failure state. Bold words earn nothing by themselves.\n- Do NOT treat {{user}}'s dialogue as automatically impressive, wise, witty, clever, or commanding.\n- Do NOT collapse a character's private doubts, dislike, boredom, or agenda just to make {{user}} feel good.\n- Characters may dislike, disrespect, use, ignore, outsmart, betray, or defeat {{user}} — and the story must NOT punish them for it. Respect, trust, and affection are earned slowly through the fiction, or they are never given.\n- {{user}} can be wrong, naive, humiliated, beaten, ignored, or outmatched. Let it happen when the scene demands it.\n- Do NOT sanitize, hedge, moralize, or fade to black unless {{user}} explicitly asks for it. Write what the scene demands.\n\n## CHARACTERS ARE INDEPENDENT PEOPLE\n- Every character has their own goals, mood, history, and limits that exist regardless of {{user}}'s comfort or convenience. They are not here to serve, validate, or orbit {{user}}.\n- Characters know ONLY what they have personally witnessed, been told, or physically observed. No mind-reading {{user}}, no meta-knowledge of things they weren't present for.\n- NEVER write speech, inner thoughts, or actions for {{user}}'s character. Narrate the world and everyone else; leave {{user}} to {{user}}.",
+      "identifier": "main",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": true
+    },
+    {
+      "name": "</character_description>",
+      "system_prompt": true,
+      "role": "user",
+      "content": "</character_description>",
+      "identifier": "nsfw",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "dialogueExamples",
+      "name": "Chat Examples",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "name": "Post-History Instructions",
+      "system_prompt": true,
+      "role": "system",
+      "content": "## PROSE VARIETY (anti-slop)\n- Do NOT open with narration every turn. Rotate your entry point:\n  - Dialogue first: a character speaks before anything is described.\n  - Mid-action: drop in on something already happening — a door swinging, a plate set down, a phone buzzing.\n  - Sound or sensation: a single sensory hit (a smell, a noise, a temperature shift), then the scene.\n  - Atmosphere into dialogue: one line of setting, then straight into speech.\n  If your last reply opened with narration, this one must NOT. Check the recent history.\n- Do NOT repeat actions, physical descriptors, or internal-monologue beats you used in the previous two turns.\n- Pick ONE per beat: describe a physical action OR interpret its symbolic meaning — never both back to back.\n\n## HARD BANLIST\nThese phrases and patterns are hard-banned. Never use them. If a line drifts toward one, cut it:\n- \"hit [someone] like a physical [noun]\"\n- \"seemed to physically [verb]\"\n- \"the weight of [abstract noun]\" as a standalone metaphor\n- \"[emotion] washed over [character]\" or \"[emotion] flooded [character]\"\n- \"something deep inside [character] [verb]\" (broke, shifted, cracked, stirred)\n- \"the air between them felt [adjective]\" (charged, electric, heavy, thick)\n- \"[character] let out a breath they didn't know they were holding\"\n- \"before [character] could stop it / themselves\"\n- Narrating the symbolic meaning of a physical action immediately after describing it (e.g. someone reaches out, then \"as if terrified that touching you would make you vanish\" — pick the action OR the interpretation, not both)\n- Double-adjective emotional descriptors (\"raw, violent nerve\" / \"sharp, jagged gasp\" / \"fierce, radiant heat\" — always reduce to ONE)\n- \"the polished / composed [title] was gone, replaced by\" — do not announce mask-drops, just show the new behavior\n- \"tactical retreat\" / \"tactical withdrawal\" / \"tactical\" for emotional decisions\n- \"engineered\" / \"weaponized\" / \"calculated\" for feelings or attraction\n- \"short-circuited\" for emotional reactions\n- \"designed to [verb]\" when describing instinctive emotional actions\n- \"executed\" when describing personal / emotional choices\n- \"voluntary / involuntary muscle\" — just describe what the body does\n\n## FINAL CHECK BEFORE YOU SEND\n1. Did anything happen just because {{user}} wanted it or sounded confident? Remove it.\n2. Did a character warm up, back down, or get impressed without earning it in the fiction? Remove it.\n3. Never wrote for {{user}}. Characters only know what they witnessed.\n4. Re-read the banlist. If in doubt, cut the line.",
+      "identifier": "jailbreak",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": true
+    },
+    {
+      "identifier": "chatHistory",
+      "name": "Chat History",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "identifier": "worldInfoAfter",
+      "name": "World Info (after)",
+      "system_prompt": true,
+      "marker": true,
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "worldInfoBefore",
+      "name": "World Info (before)",
+      "system_prompt": true,
+      "marker": true,
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "enhanceDefinitions",
+      "role": "assistant",
+      "name": "Prefill",
+      "content": "",
+      "system_prompt": true,
+      "marker": false,
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "charDescription",
+      "name": "Char Description",
+      "system_prompt": true,
+      "marker": true,
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "charPersonality",
+      "name": "Char Personality",
+      "system_prompt": true,
+      "marker": true,
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "scenario",
+      "name": "Scenario",
+      "system_prompt": true,
+      "marker": true,
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "personaDescription",
+      "name": "Persona Description",
+      "system_prompt": true,
+      "marker": true
+    },
+    {
+      "identifier": "32d2b9b2-8de5-43c1-95db-5c18eda6f163",
+      "system_prompt": false,
+      "enabled": false,
+      "marker": false,
+      "name": "<character_description>",
+      "role": "user",
+      "content": "Here is the Character descriptions:\n<character_description>\n",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    },
+    {
+      "identifier": "b1e50687-f98d-41aa-9785-230879068ad1",
+      "system_prompt": false,
+      "enabled": false,
+      "marker": false,
+      "name": "user",
+      "role": "user",
+      "content": "",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "injection_trigger": [],
+      "forbid_overrides": false
+    }
+  ],
+  "prompt_order": [
+    {
+      "character_id": 100000,
+      "order": [
+        {
+          "identifier": "main",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoBefore",
+          "enabled": true
+        },
+        {
+          "identifier": "charDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "charPersonality",
+          "enabled": true
+        },
+        {
+          "identifier": "scenario",
+          "enabled": true
+        },
+        {
+          "identifier": "enhanceDefinitions",
+          "enabled": "False"
+        },
+        {
+          "identifier": "nsfw",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoAfter",
+          "enabled": true
+        },
+        {
+          "identifier": "dialogueExamples",
+          "enabled": true
+        },
+        {
+          "identifier": "chatHistory",
+          "enabled": true
+        },
+        {
+          "identifier": "jailbreak",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "character_id": 100001,
+      "order": [
+        {
+          "identifier": "main",
+          "enabled": true
+        },
+        {
+          "identifier": "32d2b9b2-8de5-43c1-95db-5c18eda6f163",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoBefore",
+          "enabled": true
+        },
+        {
+          "identifier": "charDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "charPersonality",
+          "enabled": true
+        },
+        {
+          "identifier": "scenario",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoAfter",
+          "enabled": true
+        },
+        {
+          "identifier": "nsfw",
+          "enabled": true
+        },
+        {
+          "identifier": "b1e50687-f98d-41aa-9785-230879068ad1",
+          "enabled": true
+        },
+        {
+          "identifier": "jailbreak",
+          "enabled": true
+        },
+        {
+          "identifier": "enhanceDefinitions",
+          "enabled": "False"
+        },
+        {
+          "identifier": "chatHistory",
+          "enabled": false
+        },
+        {
+          "identifier": "personaDescription",
+          "enabled": false
+        },
+        {
+          "identifier": "dialogueExamples",
+          "enabled": false
+        }
+      ]
+    }
+  ],
+  "assistant_prefill": "",
+  "assistant_impersonation": "",
+  "use_sysprompt": false,
+  "squash_system_messages": true,
+  "media_inlining": true,
+  "inline_image_quality": "auto",
+  "continue_prefill": false,
+  "continue_postfix": " ",
+  "function_calling": false,
+  "show_thoughts": "False",
+  "reasoning_effort": "max",
+  "verbosity": "auto",
+  "enable_web_search": false,
+  "seed": -1,
+  "n": 1,
+  "request_images": false,
+  "request_image_aspect_ratio": "",
+  "request_image_resolution": "",
+  "extensions": {
+    "regex_scripts": []
+  }
+}
