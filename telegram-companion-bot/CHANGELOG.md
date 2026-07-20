@@ -72,6 +72,29 @@ without any) and corrected the Bonnie personality-order note in CLAUDE.md + the
 edit-cards skill, which had recorded the card's section order reversed since it was
 written. Deploy: `sync-cards.sh` + `/restart` priya and jules.
 
+## v2026-07-20.1 — Reasoning models no longer leak raw chain-of-thought as the reply
+
+**Root cause:** both model-output paths fell back to `reasoning_content` when `content`
+came back empty (`_extract_content` for non-streaming; the `reasoning_parts` join in
+`_do_request` for streaming). `reasoning_content` is raw chain-of-thought with **no
+`<think>` tags**, so `_strip_thinking` (which only removes `<think>…</think>`) can't
+touch it — it went to the user verbatim. This fired when a reasoning model (e.g. the
+default `glm-5:thinking`) spent its whole token budget *thinking* and emitted an empty
+`content`: Priya replied to a normal message with her planning monologue ("Current
+state: … I should incorporate the Asha thing naturally … maybe"), truncated mid-sentence
+where the token budget ran out. The `reasoning_content` fallback was explicitly called a
+"leak vector" in the 2026-07-10 audit, but that pass only stripped tool-call XML from it,
+never plain reasoning — so the hole stayed open.
+
+**Fix:** neither path delivers `reasoning_content` anymore. Empty `content` → empty
+string, and `call_nanogpt` now treats an empty completion like a transient miss —
+retry, then fall through to the non-thinking `FALLBACK_MODEL` (`magnum-v4-72b`), which
+reliably produces `content`. A one-line `[model] … reasoning but no content` warning
+makes the condition visible in `/errors`. Contributing config trigger (handled
+separately, per instance): `MAX_TOKENS` set too low for a thinking model leaves no room
+for a final answer after the reasoning — raise it on affected instances. Pinned by
+`test_extract_content_never_returns_reasoning` and the `no-reasoning-content-leak` eval.
+
 ## v2026-07-19.2 — Note ownership: her events no longer become the user's calendar
 
 **Root cause (owner-reported):** bots brought up events from *their own* fictional

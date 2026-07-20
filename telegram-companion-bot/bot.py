@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-19.2"
+BOT_VERSION = "2026-07-20.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4158,11 +4158,18 @@ def _strip_persona_breaks(text: str) -> str:
 
 
 def _extract_content(choice: dict) -> str:
-    """Pull the reply text from a choices entry, falling back to reasoning_content."""
+    """Pull the reply text from a choices entry.
+
+    Deliberately does NOT fall back to `reasoning_content`: that field is raw
+    chain-of-thought with no <think> tags for `_strip_thinking` to remove, so it
+    reached the user verbatim when a reasoning model spent its whole token budget
+    thinking and returned an empty `content` (Priya leaked her planning monologue,
+    2026-07-20; the fallback was flagged a leak vector back in the 2026-07-10 audit
+    but only tool-call XML was stripped from it, not plain reasoning). Empty content
+    -> empty string; `call_nanogpt` then retries / falls back to a non-thinking model.
+    """
     msg = choice.get("message", {})
     text = (msg.get("content") or "").strip()
-    if not text:
-        text = (msg.get("reasoning_content") or "").strip()
     return _strip_native_tool_calls(_strip_thinking(text))
 
 _no_stream_models: set[str] = set()
@@ -4200,8 +4207,12 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
         finally:
             resp.close()
         text = "".join(content_parts)
-        if not text:
-            text = "".join(reasoning_parts)
+        # Do NOT fall back to reasoning_parts: raw chain-of-thought (no <think> tags)
+        # would reach the user (Priya, 2026-07-20). Empty content -> empty; call_nanogpt
+        # then retries / falls back to a non-thinking model.
+        if not text and reasoning_parts:
+            log.warning("[model] %s streamed reasoning but no content (likely hit the "
+                        "token budget mid-think); treating as empty", model)
         return _fix_mojibake(_strip_native_tool_calls(_strip_thinking(text)))
     else:
         resp = _get_session().post(
@@ -4255,6 +4266,24 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 break
             try:
                 result = _one_call(messages, m)
+                if not result.strip():
+                    # Empty completion — e.g. a reasoning model burned its token
+                    # budget thinking and returned no content (we refuse to deliver
+                    # raw reasoning_content). Treat like a transient miss: retry, then
+                    # fall through to the non-thinking fallback model.
+                    _count_error("api")
+                    last_err = last_err or RuntimeError("empty completion")
+                    if attempt < _CHAT_RETRIES - 1:
+                        wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+                        log.warning("[model] %s returned empty content, retry %d/%d in %ds...",
+                                   m, attempt + 1, _CHAT_RETRIES - 1, wait)
+                        time.sleep(wait)
+                        continue
+                    if i < len(models) - 1:
+                        log.warning("[model] %s empty after %d attempts; falling back to %s",
+                                   m, _CHAT_RETRIES, models[i + 1])
+                        _count_error("fallback")
+                    break
                 _track_llm_usage(messages, result)
                 return result
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,

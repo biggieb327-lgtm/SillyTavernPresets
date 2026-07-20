@@ -2602,3 +2602,25 @@ class TestFleetFormat:
             [{"name": "emily", "up": True, "version": "2026-07-18.5",
               "uptime": "", "errors": ""}])
         assert "err:" not in out and "UP" in out
+
+
+class TestExtractContentNoReasoningLeak:
+    """v2026-07-20.1: _extract_content must never deliver reasoning_content — it is
+    raw chain-of-thought with no <think> tags for _strip_thinking to remove, so it
+    leaked verbatim (Priya, 2026-07-20)."""
+
+    def test_extract_content_uses_content(self):
+        choice = {"message": {"content": "hey, running late for golf?",
+                              "reasoning_content": "The user mentioned coffee. I should..."}}
+        assert bot._extract_content(choice) == "hey, running late for golf?"
+
+    def test_extract_content_never_returns_reasoning(self):
+        # Empty content + populated reasoning (the leak scenario) -> empty, NOT the CoT.
+        choice = {"message": {"content": "",
+                              "reasoning_content": "Current state: Monday 10:36am. "
+                                                   "I should incorporate the Asha thing maybe"}}
+        assert bot._extract_content(choice) == ""
+
+    def test_extract_content_strips_think_tags_from_content(self):
+        choice = {"message": {"content": "<think>plan</think>the actual line"}}
+        assert bot._extract_content(choice) == "the actual line"

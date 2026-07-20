@@ -126,6 +126,16 @@ else
   fi
 fi
 
+# v2026-07-20.1: reasoning models leaked raw chain-of-thought when `content` came back
+# empty and the code fell back to `reasoning_content` (no <think> tags, so _strip_thinking
+# couldn't clean it) — Priya sent her planning monologue as a reply. _extract_content must
+# never read reasoning_content, and the streaming path must not join reasoning as the reply.
+if grep -q 'msg.get("reasoning_content")' "$BOT" || grep -q 'text = "".join(reasoning_parts)' "$BOT"; then
+  bad "no-reasoning-content-leak" "reasoning_content is being used as reply text again — raw chain-of-thought will leak to users (see v2026-07-20.1)"
+else
+  ok "no-reasoning-content-leak: reasoning_content is never delivered as the reply"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do
