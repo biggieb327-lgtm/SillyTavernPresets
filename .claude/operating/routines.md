@@ -15,9 +15,10 @@ in `list_triggers` without an entry here and that is not drift.
 
 ## improvement-loop-monthly
 
-- **Created:** 2026-07-12; recreated 2026-07-20 to add completion notifications —
-  same prompt, schedule, and mode (trigger id `trig_01TyGUFRHqMrPVWhju4ZPyxE`;
-  previous id `trig_014UoejLm5Wv7TkqJC4j9CjJ` deleted).
+- **Created:** 2026-07-12; recreated 2026-07-20 twice — first to add completion
+  notifications, then to add the owner-approved Reddit-ideas step (trigger id
+  `trig_01FucVg8ikSvULSzB5H4Swpt`; previous ids `trig_014UoejLm5Wv7TkqJC4j9CjJ`
+  and `trig_01TyGUFRHqMrPVWhju4ZPyxE` deleted).
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -25,8 +26,11 @@ in `list_triggers` without an entry here and that is not drift.
 - **Notifications:** push on completion (email off) — `update_trigger` cannot add
   notifications, hence the delete-and-recreate.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
-  `improvement-analyst` role over the logs and pushes at most one proposal to
-  `claude/improvement-loop`, never to `main`.
+  `improvement-analyst` role over the logs and pushes at most one evidence-based
+  proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
+  runs a bounded Reddit scan (max ~5 searches) and may append up to 3 URL-cited
+  "External ideas (unvetted — owner approval required)" to the same proposal file
+  — ideas only, never implemented by the loop.
 
 ### Verbatim prompt
 
@@ -37,22 +41,32 @@ file disagree, stop and report the drift to the owner instead of proceeding.
 
 Act as the improvement-analyst agent: read .claude/agents/improvement-analyst.md
 and follow its mission, method, evidence requirement, and 20-line output limit
-exactly.
+exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract.)
 
 1. Read .claude/memory/operational-log.md and telegram-companion-bot/CHANGELOG.md.
 2. Look for the same failure shape appearing >= 2 times that no existing hook,
    eval, or skill prevented. Required evidence: quote the >= 2 occurrences with
-   dates/versions.
-3. If nothing qualifies: push NOTHING, create NO branch, and end with the one-line
-   summary "improvement-loop: no qualifying pattern this month".
-4. If one qualifies: write EXACTLY ONE proposal (the pattern, the quoted
-   occurrences, the one proposed patch with exact file + change, and the eval that
-   would prove it worked) to .claude/memory/improvement-proposals/<YYYY-MM>.md.
-5. Commit only that file to the branch claude/improvement-loop (reset it to
-   origin/main first if it already exists) and push ONLY to
-   claude/improvement-loop. NEVER push to main or any other branch.
-6. Do NOT implement the patch, do NOT modify bot.py, hooks, evals, or any other
-   file — implementation belongs to system-fixer in a reviewed session.
+   dates/versions. If one qualifies, write EXACTLY ONE proposal (the pattern, the
+   quoted occurrences, the one proposed patch with exact file + change, and the
+   eval that would prove it worked) to
+   .claude/memory/improvement-proposals/<YYYY-MM>.md. If nothing qualifies, write
+   no proposal — do not invent a pattern.
+3. Reddit ideas (runs whether or not a pattern qualified): bounded external scan
+   — max ~5 WebSearch queries (site:reddit.com — r/SillyTavernAI, r/LocalLLaMA,
+   r/TelegramBots or similar) for ideas genuinely applicable to this
+   companion-bot fleet (companion features, python-telegram-bot pitfalls,
+   model/API practices). If any apply, add an "External ideas (unvetted — owner
+   approval required)" section to the same <YYYY-MM>.md file: max 3 ideas, each
+   with its thread URL and one line on why it fits this fleet. Ideas only — they
+   are not evidence-based proposals and must never be implemented by this loop.
+   If Reddit is unreachable, say so in the summary; never fabricate sources.
+4. If the <YYYY-MM>.md file has content: commit only that file to the branch
+   claude/improvement-loop (reset it to origin/main first if it already exists)
+   and push ONLY to claude/improvement-loop. NEVER push to main or any other
+   branch. If the file has no content: push NOTHING, create NO branch, and end
+   with the one-line summary "improvement-loop: nothing this month".
+5. Do NOT implement anything, and do NOT modify bot.py, hooks, evals, or any
+   other file — implementation belongs to system-fixer in a reviewed session.
 ```
 
 ---
@@ -115,7 +129,10 @@ owner and the monthly improvement loop own that judgment. Fix nothing.
 
 ## ops-brief-daily
 
-- **Created:** 2026-07-20 (trigger id `trig_018aJrJZqMVmf585Ps41aKzF`), owner-requested.
+- **Created:** 2026-07-20, owner-requested; recreated same day to add
+  `claude/character-review` to the proposal-branch exception (trigger id
+  `trig_01PJiuYuNH28cotoMoFZbD9m`; previous id `trig_018aJrJZqMVmf585Ps41aKzF`
+  deleted).
 - **Schedule:** cron `0 14 * * *` — 14:00 UTC daily, chosen as ~07:00 Pacific so it
   lands as a morning brief (assumption: owner is on Pacific time; not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -153,14 +170,73 @@ Check:
 4. Stalled work: `git branch -r` — any claude/* branch ahead of origin/main
    (check with `git log origin/main..origin/<branch> --oneline`)? Per owner
    policy, an unmerged green branch ships nothing — list any, with commit count.
-   Exception: claude/improvement-loop ahead of main is a proposal awaiting owner
-   review — report it as that, not as stalled.
+   Exception: claude/improvement-loop and claude/character-review ahead of main
+   are proposal branches awaiting owner review — report them as that, not as
+   stalled.
 
 If a check's tooling is unavailable, report it as "SKIPPED (tooling unavailable)"
 — never guess and never report a skipped check as green. Keep the whole brief
 under ~10 lines, most severe first. If nothing needs the owner, end with exactly
 "ops-brief: all quiet". You run in a fresh session and cannot see yesterday's
 brief — do not claim anything is new or recurring. Fix nothing.
+```
+
+---
+
+## character-pass-monthly
+
+- **Created:** 2026-07-20 (trigger id `trig_01Df8nyGoMAoau5fidB9dhSn`), owner-requested.
+- **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
+  month, offset from the improvement loop's 1st-of-month slot.
+- **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
+- **Notifications:** push on completion (email off).
+- **What it does:** proposal-only character content pass — reviews cards dropped in
+  `character-review/` (the inbox; see its README), spot-checks the six live fleet
+  cards/seeds for internal contradictions and drift, and runs a bounded Reddit scan
+  for card-writing techniques (every idea URL-cited). Findings go to
+  `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
+  never to `main`, and no card/seed/preset is ever edited — the owner applies
+  accepted proposals interactively under `edit-cards-and-presets`.
+- **Known limitation:** same as the other Routines — fired sessions carry no MCP
+  connectors; Reddit access is via WebSearch/WebFetch and may be blocked, in which
+  case that step is reported as SKIPPED.
+
+### Verbatim prompt
+
+```
+Monthly character content pass for the SillyTavernPresets repo. This Routine is
+recorded in .claude/operating/routines.md — read that file first; if this prompt
+and that file disagree, stop and report the drift to the owner instead of
+proceeding.
+
+PROPOSAL-ONLY: never edit any character card, seed file, or preset. Before
+judging any content, read .claude/skills/edit-cards-and-presets/SKILL.md and the
+Character notes section of CLAUDE.md — the per-character register rules are
+binding; these cards ship to relationships someone actually has.
+
+1. Review inbox: list character-review/ (ignore README.md and PROPOSALS-*
+   files). Review each card found there against the edit-cards-and-presets
+   rules: chara_card_v2 validity, internal consistency, register, lorebook
+   coherence.
+2. Fleet spot-check: review the six live cards named in CLAUDE.md's instance
+   table (telegram-companion-bot/*.json) plus their seed dirs for internal
+   contradictions and drift (e.g. Priya's geography must stay Bellevue/Eastside-
+   consistent). Findings only; fix nothing.
+3. Reddit ideas: bounded pass — max ~5 WebSearch queries (site:reddit.com —
+   r/SillyTavernAI and similar character/roleplay-writing subreddits), WebFetch
+   promising threads, and collect card-writing techniques applicable to the
+   characters reviewed above. Cite every external idea with its thread URL. If
+   Reddit or the fetches are blocked, report this step as SKIPPED — never
+   fabricate sources.
+4. If there are findings or ideas: write ONE file
+   character-review/PROPOSALS-<YYYY-MM>.md — specific per-character suggestions,
+   each tagged [inbox card] / [fleet card] / [reddit idea] with its evidence or
+   URL, phrased as concrete edits the owner could apply. NOTHING is applied
+   without owner approval. Commit only that file to the branch
+   claude/character-review (reset it to origin/main first if it already exists)
+   and push ONLY to claude/character-review — NEVER to main or any other branch.
+5. If nothing to propose: push NOTHING, create NO branch, and end with
+   "character-pass: no proposals this month".
 ```
 
 ---

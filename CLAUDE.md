@@ -43,9 +43,11 @@ Rules here are backed by files that run, not prose:
 - **CI** (`.github/workflows/evals.yml`): same evals + pytest on every push to
   `main`/`claude/**`. Deploys curl from `main` — a red run on main is a deploy blocker.
 - **Improvement loop**: monthly Routine runs `improvement-analyst` over the logs;
-  pushes at most one proposal to `claude/improvement-loop`, never to `main`.
-  Live since 2026-07-12 — schedule + verbatim prompt recorded in
-  `.claude/operating/routines.md` (keep file and Routine in sync).
+  pushes at most one evidence-based proposal (plus up to 3 URL-cited, unvetted
+  Reddit ideas, owner-approved addition 2026-07-20) to `claude/improvement-loop`,
+  never to `main`. Live since 2026-07-12 — schedule + verbatim prompt recorded in
+  `.claude/operating/routines.md` (keep file and Routine in sync; the daily ops
+  brief, weekly hygiene check, and monthly character pass live there too).
 - Runtime state in `.claude/.runtime/` is gitignored — never commit it.
 
 ## Operating rule
@@ -330,6 +332,7 @@ pilot pair with Priya.
 │   ├── tests/                       # pytest (pure-logic regression suite)
 │   ├── deploy/                      # VPS: bot@.service, install-vps.sh, MIGRATION.md
 │   └── *.md                         # docs — see Docs map above
+├── character-review/                # card inbox for the monthly character pass (see its README)
 ├── caa16137-nora.json               # SillyTavern archive copy
 ├── voicekit-starter/                # separate project (not the bot)
 └── [other SillyTavern presets/cards]
