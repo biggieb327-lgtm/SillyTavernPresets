@@ -7,15 +7,23 @@ exists only in the scheduler (or only as prose) is invisible and will drift.
 Inspect/pause/edit from any Claude Code Remote session on this repo with the
 `list_triggers` / `update_trigger` / `delete_trigger` tools (claude-code-remote MCP).
 
+Exempt from this file: `send_later` one-shots (names like `send_later <timestamp>`),
+which are session-bound reminders that self-disable after firing — they may appear
+in `list_triggers` without an entry here and that is not drift.
+
 ---
 
 ## improvement-loop-monthly
 
-- **Created:** 2026-07-12 (trigger id `trig_014UoejLm5Wv7TkqJC4j9CjJ`)
+- **Created:** 2026-07-12; recreated 2026-07-20 to add completion notifications —
+  same prompt, schedule, and mode (trigger id `trig_01TyGUFRHqMrPVWhju4ZPyxE`;
+  previous id `trig_014UoejLm5Wv7TkqJC4j9CjJ` deleted).
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
   analysis must not inherit a stale conversation.
+- **Notifications:** push on completion (email off) — `update_trigger` cannot add
+  notifications, hence the delete-and-recreate.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one proposal to
   `claude/improvement-loop`, never to `main`.
@@ -51,10 +59,13 @@ exactly.
 
 ## hygiene-check-weekly
 
-- **Created:** 2026-07-17 (trigger id `trig_01NuXwchCqAdYNsZ92493Gi3`)
+- **Created:** 2026-07-17; recreated 2026-07-20 to add completion notifications —
+  same prompt, schedule, and mode (trigger id `trig_011WdoTbyPKJvqz9j9TtNAW3`;
+  previous id `trig_01NuXwchCqAdYNsZ92493Gi3` deleted).
 - **Schedule:** cron `0 9 * * 1` — 09:00 every Monday (assumed UTC; offset from the
   monthly improvement loop, which owns the 1st of the month).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
+- **Notifications:** push on completion (email off).
 - **What it does:** report-only context-librarian pass — version/changelog sync,
   ROADMAP/IMPROVEMENTS_PLAN status drift, CI state on `main`, Routine↔this-file
   sync, operational-log format. It fixes nothing and pushes nothing; findings go
@@ -99,3 +110,13 @@ otherwise one line per finding, most severe first. You run in a fresh session an
 cannot see last week's report — do not claim a finding is new or recurring; the
 owner and the monthly improvement loop own that judgment. Fix nothing.
 ```
+
+---
+
+## Retired
+
+- **"Monthly improvement loop — SillyTavernPresets"** (`trig_01Hmkj9LUnXbKadzXTnXraq5`,
+  created 2026-07-06, cron `0 16 1 * *`): undocumented predecessor of
+  `improvement-loop-monthly` with a looser contract (it was allowed to *implement*
+  small patches, not just propose). Superseded by the 2026-07-12 Routine above but
+  never deleted — both would have fired on Aug 1. Deleted 2026-07-20.
