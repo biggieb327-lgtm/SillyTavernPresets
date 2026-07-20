@@ -196,20 +196,26 @@ brief — do not claim anything is new or recurring. Fix nothing.
 
 ## character-pass-monthly
 
-- **Created:** 2026-07-20, owner-requested; recreated same day for the curl-based
-  Reddit access path (trigger id `trig_01T9Jjcn2ehwGGAJWovRFdNg`; previous id
-  `trig_01Df8nyGoMAoau5fidB9dhSn` deleted).
+- **Created:** 2026-07-20, owner-requested; recreated twice same day — first for
+  the curl-based Reddit access path, then to add preset review (trigger id
+  `trig_01F9vhqcJXw2VWkGkzgwcW7i`; previous ids `trig_01Df8nyGoMAoau5fidB9dhSn`
+  and `trig_01T9Jjcn2ehwGGAJWovRFdNg` deleted).
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
 - **Notifications:** push on completion (email off).
-- **What it does:** proposal-only character content pass — reviews cards dropped in
+- **What it does:** proposal-only content pass — reviews cards dropped in
   `character-review/` (the inbox; see its README), spot-checks the six live fleet
-  cards/seeds for internal contradictions and drift, and runs a bounded Reddit scan
-  for card-writing techniques (every idea URL-cited). Findings go to
+  cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
+  2026-07-20: the latest root SillyTavern presets — currently `TheAtelierV5.json`
+  and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
+  fleet-wide texting voiceprint), and runs a bounded Reddit scan for card-writing
+  techniques (every idea URL-cited). Findings go to
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
-  accepted proposals interactively under `edit-cards-and-presets`.
+  accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
+  proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
+  note (it feeds all six bots).
 - **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
   against the public JSON API. As of 2026-07-20 the environment's network policy
   blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
@@ -239,9 +245,23 @@ binding; these cards ship to relationships someone actually has.
    contradictions and drift (e.g. Priya's geography must stay Bellevue/Eastside-
    consistent; Jules's must stay Bellingham-consistent). Findings only; fix
    nothing.
-3. Reddit ideas: bounded pass for card-writing techniques applicable to the
-   characters reviewed above. Reddit access: WebFetch cannot reach reddit — use
-   Bash curl against the public JSON API, e.g.
+3. Preset review (proposal-only, same as everything else):
+   a. Root SillyTavern generation presets — review only the LATEST version of
+      each family (currently TheAtelierV5.json and UnifiedWritersRoom_V32.json;
+      pick the highest version number of each family and skip superseded
+      versions and TheAtelierFieldKit). These deploy nowhere (the owner loads
+      them into SillyTavern by hand), so this is prompt/instruction-quality
+      critique: internal contradictions, redundant or conflicting directives,
+      structural clarity. Tag proposals [root preset].
+   b. telegram-companion-bot/preset.txt — the shared texting voiceprint feeding
+      ALL SIX live bots. Review for internal consistency, contradictions, and
+      drift from the characters' registers. This is the highest-blast-radius
+      file in the repo: any change hits the whole fleet at once, so every
+      preset.txt proposal MUST include a before/after quote and an explicit note
+      of the fleet-wide effect. Tag proposals [fleet preset].
+4. Reddit ideas: bounded pass for card-writing techniques applicable to the
+   characters/presets reviewed above. Reddit access: WebFetch cannot reach
+   reddit — use Bash curl against the public JSON API, e.g.
    curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
    "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
    (and thread permalinks with .json appended) for r/SillyTavernAI and similar
@@ -251,14 +271,14 @@ binding; these cards ship to relationships someone actually has.
    (network policy blocks reddit.com; owner can allow it in the environment's
    network settings)". Cite every external idea with its thread URL; never
    fabricate sources.
-4. If there are findings or ideas: write ONE file
-   character-review/PROPOSALS-<YYYY-MM>.md — specific per-character suggestions,
-   each tagged [inbox card] / [fleet card] / [reddit idea] with its evidence or
-   URL, phrased as concrete edits the owner could apply. NOTHING is applied
-   without owner approval. Commit only that file to the branch
+5. If there are findings or ideas: write ONE file
+   character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
+   [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea]
+   with its evidence or URL, phrased as concrete edits the owner could apply.
+   NOTHING is applied without owner approval. Commit only that file to the branch
    claude/character-review (reset it to origin/main first if it already exists)
    and push ONLY to claude/character-review — NEVER to main or any other branch.
-5. If nothing to propose: push NOTHING, create NO branch, and end with
+6. If nothing to propose: push NOTHING, create NO branch, and end with
    "character-pass: no proposals this month".
 ```
 

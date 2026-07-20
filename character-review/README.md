@@ -5,11 +5,14 @@ them for the monthly character content pass (`character-pass-monthly` Routine,
 14:00 UTC on the 15th — schedule and verbatim prompt in
 `.claude/operating/routines.md`).
 
-The pass reviews inbox cards and the live fleet cards/seeds against the
-`edit-cards-and-presets` rules, gleans card-writing ideas from Reddit (every
-external idea cited with its thread URL), and writes its suggestions to
-`PROPOSALS-<YYYY-MM>.md` on the `claude/character-review` branch — never to
-`main`, and never as direct edits to any card.
+The pass reviews inbox cards, the live fleet cards/seeds, and presets — the
+latest root SillyTavern presets (`TheAtelierV5.json`, `UnifiedWritersRoom_V32.json`)
+plus `telegram-companion-bot/preset.txt`, the fleet-wide texting voiceprint — all
+against the `edit-cards-and-presets` rules. It gleans card-writing ideas from
+Reddit (every external idea cited with its thread URL) and writes its suggestions
+to `PROPOSALS-<YYYY-MM>.md` on the `claude/character-review` branch — never to
+`main`, and never as a direct edit to any card or preset. `preset.txt` proposals
+carry a before/after quote and a fleet-wide-blast-radius note.
 
 **Nothing is applied without owner approval.** To accept a proposal, apply it in
 an interactive session under the `edit-cards-and-presets` skill, then delete the
