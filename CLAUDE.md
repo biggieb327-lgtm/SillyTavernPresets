@@ -90,7 +90,12 @@ directory as `sys.argv[1]`. The instance directory (where each bot's `.env`, car
 and state live) is the basename shown on the `=== STARTUP AUDIT === … Instance:`
 line — that runtime value is authoritative if it ever disagrees with this table.
 (Nora's was corrected to `~/nora-bot/` on 2026-07-11 after the table drifted and a
-key was edited into the wrong `.env`; verify `update-all.sh` matches on-device.)
+key was edited into the wrong `.env`. On 2026-07-20 the launch/sync scripts were
+reconciled to match: `update-all.sh`, `watchdog.sh`, and `sync-cards.sh` had still
+been passing `$BOT_SRC` (`~/telegram-bot`, the shared *code* dir) as Nora's *instance*
+dir — a latent bug that would surface on the next full redeploy or post-crash
+relaunch. All three now use `~/nora-bot`; `$BOT_SRC` remains the code dir only. Pinned
+by the `nora-instance-dir` eval.)
 
 ## Stack
 

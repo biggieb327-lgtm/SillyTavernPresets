@@ -7,6 +7,21 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-20 — Ops: reconcile Nora's instance dir in launch/sync scripts (no bot.py change, no version bump)
+
+Root cause: `update-all.sh`, `watchdog.sh`, and `sync-cards.sh` all passed `$BOT_SRC`
+(`~/telegram-bot`, the shared *code* dir) as Nora's *instance* dir, but her instance dir
+is `~/nora-bot` (confirmed on-device 2026-07-11 via the STARTUP AUDIT `Instance:` line;
+recorded in CLAUDE.md, vault/entities/nora.md, SETUP_GUIDE, OPS_MANUAL). This was the
+open item CLAUDE.md flagged ("verify update-all.sh matches on-device") and never closed.
+Latent, not yet fired: `/restart` restarts the running process in place and watchdog only
+relaunches a *down* session, so the wrong dir never executed — but the next `update-all.sh`
+full redeploy or post-crash watchdog relaunch would have brought Nora up from `~/telegram-bot`
+(wrong `.env`/token/state), and watchdog's freeze check was already reading the wrong
+`~/telegram-bot/.alive` heartbeat. Fixed all three to use `~/nora-bot`; `$BOT_SRC` stays the
+code dir (run-bot.sh is still invoked from it). Pinned by the new `nora-instance-dir` eval
+(break-tested red-green). Surfaced during the preset.txt deploy-path work below.
+
 ## 2026-07-20 — Content: preset.txt anti-slop banlist extended, fleet-wide (no bot.py change, no version bump)
 
 Cherry-picked the emotional-narration clichés from the Megumin Suite V9 banlist that our

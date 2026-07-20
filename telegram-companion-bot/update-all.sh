@@ -24,11 +24,15 @@ echo "    Done."
 echo ""
 echo "==> Restarting bots..."
 
-# Nora — default instance; session may be named "nora" or "telegram-bot" depending
-# on how it was first started, so kill both before restarting with the supervisor.
+# Nora — instance dir is ~/nora-bot (confirmed on-device 2026-07-11 via the STARTUP
+# AUDIT "Instance:" line). ~/telegram-bot ($BOT_SRC) is the shared CODE dir (bot.py +
+# venv + run-bot.sh), NOT her instance dir — keep the two distinct. Her tmux session
+# may be named "nora" or "telegram-bot" depending on how it was first started, so kill
+# both before restarting with the supervisor.
+NORA_DIR="$HOME/nora-bot"
 tmux kill-session -t nora 2>/dev/null || true
 tmux kill-session -t telegram-bot 2>/dev/null || true
-bash "$BOT_SRC/run-bot.sh" "$BOT_SRC" nora
+bash "$BOT_SRC/run-bot.sh" "$NORA_DIR" nora
 echo "    nora: restarted"
 
 # Named instances — run-bot.sh <instance-dir> <session-name>

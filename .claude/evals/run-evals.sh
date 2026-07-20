@@ -144,6 +144,26 @@ if [ -f .claude/settings.json ]; then
   fi
 fi
 
+# Nora's instance dir drifted twice (table drift 2026-07-11; launch/sync scripts still
+# pointing at $BOT_SRC 2026-07-20). Her instance dir is ~/nora-bot; ~/telegram-bot is the
+# shared CODE dir. The scripts must not pass ~/telegram-bot (or bare $BOT_SRC) as Nora's
+# INSTANCE dir, or a full redeploy / post-crash relaunch brings her up from the wrong dir.
+nid_bad=""
+if grep -Eq 'run-bot\.sh" +"\$BOT_SRC" +nora' telegram-companion-bot/update-all.sh; then
+  nid_bad="$nid_bad update-all.sh"
+fi
+if grep -q '"telegram-bot:nora' telegram-companion-bot/sync-cards.sh; then
+  nid_bad="$nid_bad sync-cards.sh"
+fi
+if grep -Eq 'check_instance +"\$BOT_SRC"' telegram-companion-bot/watchdog.sh; then
+  nid_bad="$nid_bad watchdog.sh"
+fi
+if [ -z "$nid_bad" ]; then
+  ok "nora-instance-dir: launch/sync scripts use ~/nora-bot, not the code dir, for Nora"
+else
+  bad "nora-instance-dir" "these pass the code dir as Nora's instance dir:$nid_bad — redeploy/relaunch would load the wrong .env/state (see CLAUDE.md §Bot instances)"
+fi
+
 # Group chat boundary (GROUP_CHAT_DESIGN.md §12). Two adversarial-review rounds each
 # found a flat-file write path a hand-kept list had missed, so the boundary is pinned
 # here as class-level checks, not left to memory.

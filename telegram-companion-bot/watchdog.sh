@@ -74,19 +74,22 @@ check_instance() {
 run_checks() {
   _trim_log
 
-  # Instance list mirrors update-all.sh (the authoritative list). Nora's tmux session
-  # may be named "nora" or "telegram-bot" — check both names.
+  # Instance list mirrors update-all.sh (the authoritative list). Nora's instance dir is
+  # ~/nora-bot (confirmed on-device 2026-07-11 via the STARTUP AUDIT "Instance:" line) —
+  # NOT $BOT_SRC (~/telegram-bot), which is the shared CODE dir. Her tmux session may be
+  # named "nora" or "telegram-bot", so check both session names against the same dir.
+  local nora_dir="$HOME/nora-bot"
   local nora_up=false
   if tmux has-session -t nora 2>/dev/null; then
     nora_up=true
-    check_instance "$BOT_SRC" "nora"
+    check_instance "$nora_dir" "nora"
   elif tmux has-session -t telegram-bot 2>/dev/null; then
     nora_up=true
-    check_instance "$BOT_SRC" "telegram-bot"
+    check_instance "$nora_dir" "telegram-bot"
   fi
   if [ "$nora_up" = false ]; then
     _log "RELAUNCH nora: session down (neither 'nora' nor 'telegram-bot' tmux session found)"
-    bash "$BOT_SRC/run-bot.sh" "$BOT_SRC" nora
+    bash "$BOT_SRC/run-bot.sh" "$nora_dir" nora
   fi
 
   for entry in "bonnie-bot:bonnie" "cass-bot:cass" "emily-bot:emily" "priya-bot:priya" "jules-bot:jules"; do
