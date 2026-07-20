@@ -196,10 +196,11 @@ brief — do not claim anything is new or recurring. Fix nothing.
 
 ## character-pass-monthly
 
-- **Created:** 2026-07-20, owner-requested; recreated twice same day — first for
-  the curl-based Reddit access path, then to add preset review (trigger id
-  `trig_01F9vhqcJXw2VWkGkzgwcW7i`; previous ids `trig_01Df8nyGoMAoau5fidB9dhSn`
-  and `trig_01T9Jjcn2ehwGGAJWovRFdNg` deleted).
+- **Created:** 2026-07-20, owner-requested; recreated 3× same day — curl Reddit
+  path, then preset review, then the `TheAtelierV5`→`TheAtelier_2.0` rename
+  (trigger id `trig_01VXMxTLk8ZKwQ61tC3JxkCA`; previous ids
+  `trig_01Df8nyGoMAoau5fidB9dhSn`, `trig_01T9Jjcn2ehwGGAJWovRFdNg`,
+  `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted).
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -207,7 +208,7 @@ brief — do not claim anything is new or recurring. Fix nothing.
 - **What it does:** proposal-only content pass — reviews cards dropped in
   `character-review/` (the inbox; see its README), spot-checks the six live fleet
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
-  2026-07-20: the latest root SillyTavern presets — currently `TheAtelierV5.json`
+  2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
   fleet-wide texting voiceprint), and runs a bounded Reddit scan for card-writing
   techniques (every idea URL-cited). Findings go to
@@ -247,9 +248,11 @@ binding; these cards ship to relationships someone actually has.
    nothing.
 3. Preset review (proposal-only, same as everything else):
    a. Root SillyTavern generation presets — review only the LATEST version of
-      each family (currently TheAtelierV5.json and UnifiedWritersRoom_V32.json;
-      pick the highest version number of each family and skip superseded
-      versions and TheAtelierFieldKit). These deploy nowhere (the owner loads
+      each family (currently TheAtelier_2.0.json and UnifiedWritersRoom_V32.json;
+      pick the newest of each family and skip superseded versions. Note the
+      Atelier numbering RESET: the "2.0" rebuild is newer than the old V-series,
+      so "2.0" > "V28" > "V5" despite the smaller number — don't be fooled by a
+      leftover high V-number). These deploy nowhere (the owner loads
       them into SillyTavern by hand), so this is prompt/instruction-quality
       critique: internal contradictions, redundant or conflicting directives,
       structural clarity. Tag proposals [root preset].

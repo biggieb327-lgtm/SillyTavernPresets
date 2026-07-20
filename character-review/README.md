@@ -6,7 +6,7 @@ them for the monthly character content pass (`character-pass-monthly` Routine,
 `.claude/operating/routines.md`).
 
 The pass reviews inbox cards, the live fleet cards/seeds, and presets — the
-latest root SillyTavern presets (`TheAtelierV5.json`, `UnifiedWritersRoom_V32.json`)
+latest root SillyTavern presets (`TheAtelier_2.0.json`, `UnifiedWritersRoom_V32.json`)
 plus `telegram-companion-bot/preset.txt`, the fleet-wide texting voiceprint — all
 against the `edit-cards-and-presets` rules. It gleans card-writing ideas from
 Reddit (every external idea cited with its thread URL) and writes its suggestions
