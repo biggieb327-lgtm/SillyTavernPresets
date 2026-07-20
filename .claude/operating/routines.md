@@ -113,6 +113,58 @@ owner and the monthly improvement loop own that judgment. Fix nothing.
 
 ---
 
+## ops-brief-daily
+
+- **Created:** 2026-07-20 (trigger id `trig_018aJrJZqMVmf585Ps41aKzF`), owner-requested.
+- **Schedule:** cron `0 14 * * *` — 14:00 UTC daily, chosen as ~07:00 Pacific so it
+  lands as a morning brief (assumption: owner is on Pacific time; not load-bearing).
+- **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
+- **Notifications:** push on completion (email off).
+- **What it does:** fast repo-side morning triage — CI on main, commits shipped in
+  the last day, BOT_VERSION↔changelog sync, and unmerged claude/* branches ahead of
+  main. Report-only; fixes nothing; explicitly does NOT cover the fleet/phone (it
+  can't see them) and does not duplicate the weekly hygiene check's deeper passes.
+- **Known limitation:** same as hygiene-check-weekly — fired sessions carry no MCP
+  connectors, so the CI check falls back to the public GitHub API via WebFetch.
+
+### Verbatim prompt
+
+```
+Daily ops brief for the SillyTavernPresets repo. This Routine is recorded in
+.claude/operating/routines.md — read that file first; if this prompt and that file
+disagree, stop and report the drift to the owner instead of proceeding.
+
+This is a fast morning triage read, REPORT-ONLY: make no commits, push nothing,
+create no branches, modify no Routines, and edit no files. Read-only actions only.
+The deeper weekly hygiene check owns doc drift, Routine sync, and log format — do
+not duplicate it. This brief cannot see the phone or the bots; it covers the repo
+side only, and must not speculate about fleet health.
+
+Check:
+1. CI on main: latest evals-workflow run. Use github MCP tools if this session has
+   them; otherwise WebFetch
+   https://api.github.com/repos/biggieb327-lgtm/SillyTavernPresets/actions/runs?branch=main&per_page=1
+   (public repo). A red run on main is a deploy blocker — if found, lead with it.
+2. What shipped: `git fetch origin main` then `git log --since="26 hours ago"
+   --oneline origin/main` — list the commits (or "nothing new").
+3. Version sync: BOT_VERSION in telegram-companion-bot/bot.py (on origin/main) vs
+   the newest "## v" heading in telegram-companion-bot/CHANGELOG.md — one line,
+   match or mismatch.
+4. Stalled work: `git branch -r` — any claude/* branch ahead of origin/main
+   (check with `git log origin/main..origin/<branch> --oneline`)? Per owner
+   policy, an unmerged green branch ships nothing — list any, with commit count.
+   Exception: claude/improvement-loop ahead of main is a proposal awaiting owner
+   review — report it as that, not as stalled.
+
+If a check's tooling is unavailable, report it as "SKIPPED (tooling unavailable)"
+— never guess and never report a skipped check as green. Keep the whole brief
+under ~10 lines, most severe first. If nothing needs the owner, end with exactly
+"ops-brief: all quiet". You run in a fresh session and cannot see yesterday's
+brief — do not claim anything is new or recurring. Fix nothing.
+```
+
+---
+
 ## Retired
 
 - **"Monthly improvement loop — SillyTavernPresets"** (`trig_01Hmkj9LUnXbKadzXTnXraq5`,
