@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-20 — Content: preset.txt anti-slop banlist extended, fleet-wide (no bot.py change, no version bump)
+
+Cherry-picked the emotional-narration clichés from the Megumin Suite V9 banlist that our
+shared `preset.txt` didn't already cover. Root reason to record: `preset.txt`'s existing
+`[ANTI-SLOP]` list targets structural/assistant tells ("X, not Y" frames, rule of three,
+"a testament to"); Megumin's targets emotional-cliché phrasing — largely non-overlapping,
+so the additions are additive, not redundant. Added to `[ANTI-SLOP]`: three construction
+bullets (action+symbolic-meaning double, mask-drop announcements, feelings-as-machinery
+verbs) and inline phrases ("washed over," "flooded through," "let out a breath she didn't
+know she was holding," "before she could stop herself," "seemed to physically flinch,"
+"hit like a physical blow," "the weight of it" as standalone metaphor). Fleet-wide: all
+six bots read the shared preset. Deploy: `sync-cards.sh` (or curl preset.txt into each
+instance dir) + `/restart` each bot. Origin: mobile Tavo port task — see
+`megumin-mobile/`; wholesale-merging the port was rejected (it duplicated ~70% of
+preset.txt and carried CYOA/"the PC" vocabulary that doesn't fit a texting companion).
+
 ## 2026-07-20 — Content: Priya geography fix + Jules seed files (no bot.py change, no version bump)
 
 From the first character-pass review (proposals in `character-review/PROPOSALS-2026-07.md`

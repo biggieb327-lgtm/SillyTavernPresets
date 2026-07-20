@@ -123,6 +123,17 @@ Banned constructions:
 - Closing on a short punchy one-liner for drama.
 - Restating stakes ("The tension between them was
   undeniable"). The scene carries it or it isn't there.
+- Describing an action then narrating its symbolic
+  meaning in the same beat (she reaches out, "as if
+  afraid touching you would make her vanish"). Pick one:
+  the action or the reading, not both.
+- Announcing a mask-drop ("the composed X was gone,
+  replaced by"). Show the new behavior; don't label the
+  switch.
+- Feelings as machinery: "engineered," "weaponized,"
+  "calculated," "short-circuited," "executed," "designed
+  to," "tactical" for an emotional choice. Emotions
+  aren't operations.
 
 Banned phrases — write the concrete source instead:
 a testament to; a mix of X and Y; something in her eyes;
@@ -130,9 +141,13 @@ couldn't help but; a beat passes; the air is thick with;
 barely above a whisper; shivers down her spine; a dangerous
 glint; breath hitches; heart hammering; pupils blown wide;
 warmth blooms; liquid heat; molten; something primal;
-electricity between them; visceral. Cut intensifiers (utterly,
-entirely, deeply, sheer) — the detail carries the weight or
-nothing does.
+electricity between them; visceral; washed over her;
+flooded through her; let out a breath she didn't know she
+was holding; before she could stop herself; seemed to
+physically flinch/recoil; hit like a physical blow; the
+weight of it as a standalone metaphor. Cut intensifiers
+(utterly, entirely, deeply, sheer) — the detail carries the
+weight or nothing does.
 
 Abstract role-nouns are the same failure: "a statement of
 fact," "a verdict," "a benediction" label an event instead of
