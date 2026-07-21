@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-20.1"
+BOT_VERSION = "2026-07-20.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -10157,6 +10157,22 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _wsdot_err_reason(e) -> str:
+    """Key-free reason for a WSDOT fetch failure. WSDOT puts the AccessCode in the query
+    string, so `str(e)`/`%s` on the raw exception leaks the key into errors.log — the
+    full URL with AccessCode reached the log this way (observed 2026-07-20). Classify by
+    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code:
+        return f"HTTP {code}"
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "timed out"
+    if "Connect" in name or "Connection" in name or "DNS" in name:
+        return "network/DNS error"
+    return name
+
+
 def _fetch_wsdot_alerts() -> list:
     try:
         r = _get_session().get(_WSDOT_ALERTS_URL, params={"AccessCode": WSDOT_API_KEY}, timeout=(10, 30))
@@ -10167,7 +10183,7 @@ def _fetch_wsdot_alerts() -> list:
             return data
         return data.get("Alerts") or []
     except Exception as e:
-        log.warning("[traffic] alerts fetch failed: %s", e)
+        log.warning("[traffic] alerts fetch failed: %s", _wsdot_err_reason(e))
         return []
 
 
@@ -10178,7 +10194,7 @@ def _fetch_wsdot_times() -> list:
         data = r.json()
         return data if isinstance(data, list) else []
     except Exception as e:
-        log.warning("[traffic] travel times fetch failed: %s", e)
+        log.warning("[traffic] travel times fetch failed: %s", _wsdot_err_reason(e))
         return []
 
 

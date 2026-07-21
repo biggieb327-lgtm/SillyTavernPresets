@@ -2624,3 +2624,34 @@ class TestExtractContentNoReasoningLeak:
     def test_extract_content_strips_think_tags_from_content(self):
         choice = {"message": {"content": "<think>plan</think>the actual line"}}
         assert bot._extract_content(choice) == "the actual line"
+
+
+class TestWsdotErrReasonNoKeyLeak:
+    """v2026-07-20.2: WSDOT puts the AccessCode in the query string, so logging the raw
+    requests exception leaked the key into errors.log. _wsdot_err_reason must classify by
+    type/status and never echo the exception string (which carries the URL + key)."""
+
+    def test_never_leaks_key(self):
+        # Simulate the real leak: an exception whose str() contains the AccessCode URL.
+        leaky = ("HTTPSConnectionPool(host='www.wsdot.wa.gov', port=443): Max retries "
+                 "exceeded with url: /Traffic/api/...?AccessCode=SECRET-KEY-123 (Caused by "
+                 "ReadTimeoutError('read timed out'))")
+
+        class FakeReadTimeout(Exception):
+            pass
+        reason = bot._wsdot_err_reason(FakeReadTimeout(leaky))
+        assert "SECRET-KEY-123" not in reason
+        assert "AccessCode" not in reason
+        assert reason == "timed out"  # classified by the "Timeout" in the class name
+
+    def test_http_status_key_free(self):
+        class FakeResp:
+            status_code = 403
+        class FakeHTTPError(Exception):
+            response = FakeResp()
+        assert bot._wsdot_err_reason(FakeHTTPError("...AccessCode=SECRET...")) == "HTTP 403"
+
+    def test_connection_error(self):
+        class ConnectionError_(Exception):
+            pass
+        assert bot._wsdot_err_reason(ConnectionError_("...AccessCode=SECRET...")) == "network/DNS error"

@@ -72,6 +72,22 @@ without any) and corrected the Bonnie personality-order note in CLAUDE.md + the
 edit-cards skill, which had recorded the card's section order reversed since it was
 written. Deploy: `sync-cards.sh` + `/restart` priya and jules.
 
+## v2026-07-20.2 — WSDOT traffic errors no longer leak the AccessCode into the log
+
+**Root cause:** `_fetch_wsdot_alerts` / `_fetch_wsdot_times` logged the raw requests
+exception (`log.warning("… failed: %s", e)`). WSDOT takes its API key as an `AccessCode`
+query-string param, and a requests connection/timeout error's string contains the full
+URL — so the key landed in `errors.log` in plaintext and reached a shared paste
+(observed 2026-07-20 on Emily). This is the same class the TomTom path already fixed in
+v2026-07-11.9 (errors made key-free); the WSDOT path predated that discipline.
+
+**Fix:** new `_wsdot_err_reason(e)` classifies the exception by status/type into a short,
+key-free reason ("HTTP 500" / "timed out" / "network/DNS error" / the exception class
+name) — never `str(e)`. Both WSDOT fetches log the reason instead of the raw exception,
+mirroring `_tomtom_err_reason`. Pinned by `test_wsdot_err_reason_never_leaks_key` and the
+`wsdot-key-not-logged` eval. (Owners with an exposed AccessCode should rotate it — the
+log fix doesn't unspill what already leaked.)
+
 ## v2026-07-20.1 — Reasoning models no longer leak raw chain-of-thought as the reply
 
 **Root cause:** both model-output paths fell back to `reasoning_content` when `content`

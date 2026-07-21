@@ -136,6 +136,15 @@ else
   ok "no-reasoning-content-leak: reasoning_content is never delivered as the reply"
 fi
 
+# v2026-07-20.2: WSDOT fetch errors logged the raw requests exception, whose string
+# carries the URL with the AccessCode query param — the key leaked into errors.log. The
+# WSDOT fetches must log a classified reason (_wsdot_err_reason), never the raw exception.
+if grep -qE '(alerts|travel times) fetch failed: %s", *e\b' "$BOT"; then
+  bad "wsdot-key-not-logged" "a WSDOT fetch logs the raw exception (%s\", e) — str(e) carries the AccessCode URL and leaks the key into errors.log (see v2026-07-20.2)"
+else
+  ok "wsdot-key-not-logged: WSDOT fetch errors log a key-free reason, not the raw exception"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do
