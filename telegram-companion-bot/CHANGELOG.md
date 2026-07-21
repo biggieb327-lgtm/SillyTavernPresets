@@ -72,6 +72,22 @@ without any) and corrected the Bonnie personality-order note in CLAUDE.md + the
 edit-cards skill, which had recorded the card's section order reversed since it was
 written. Deploy: `sync-cards.sh` + `/restart` priya and jules.
 
+## v2026-07-20.3 — Default MAX_TOKENS 2048 → 4096 (headroom for thinking models)
+
+**Root cause:** the whole fleet runs thinking models (`glm-5:thinking` chat,
+often the same for summaries), which spend tokens reasoning *before* the answer. With
+the default cap at 2048 an instance with no `MAX_TOKENS` line (Emily) regularly hit the
+cap mid-reasoning and returned empty content — the trigger behind the repeated
+`returned empty content, retry` / `recent fact consolidation … empty completion` lines.
+v2026-07-20.1 made that safe (no chain-of-thought leak, falls back), but the empties
+themselves were pure waste.
+
+**Fix:** default `MAX_TOKENS` is now 4096. It's a cap, not a target — replies stay short,
+so cost is unaffected for normal turns while thinking models get room to reason and still
+answer. Only streaming calls apply the cap; per-instance `.env` can still override (lower
+it for a non-thinking model to bound cost). `.env.example` updated. No behavior change for
+any instance that already sets `MAX_TOKENS` explicitly.
+
 ## v2026-07-20.2 — WSDOT traffic errors no longer leak the AccessCode into the log
 
 **Root cause:** `_fetch_wsdot_alerts` / `_fetch_wsdot_times` logged the raw requests

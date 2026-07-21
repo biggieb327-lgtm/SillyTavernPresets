@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-20.2"
+BOT_VERSION = "2026-07-20.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -233,7 +233,7 @@ REQUEST_TIMEOUT = _env_int("REQUEST_TIMEOUT", "120")  # hard cap per request
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
 USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
-MAX_TOKENS = _env_int("MAX_TOKENS", "2048")
+MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reason AND answer
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
