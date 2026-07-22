@@ -1,0 +1,17 @@
+{
+  "id": "38c1042e-b581-489b-9e74-08fff4e46ef4",
+  "scriptName": "Strip leading OOC / thinking preamble (Kimi K2 fix)",
+  "findRegex": "/^\\s*(?:\\[OOC:[\\s\\S]*?\\]|<think>[\\s\\S]*?<\\/think>)\\s*(?=\\S)/i",
+  "replaceString": "",
+  "trimStrings": [],
+  "placement": [
+    2
+  ],
+  "disabled": false,
+  "markdownOnly": false,
+  "promptOnly": false,
+  "runOnEdit": true,
+  "substituteRegex": 0,
+  "minDepth": null,
+  "maxDepth": null
+}
