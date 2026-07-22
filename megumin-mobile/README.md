@@ -33,8 +33,11 @@ to be exactly the anti-positivity-bias core:
 
 `[[macro]]` toggles, the Dynamic Ban List (needs the extension to scan chat), regex scripts,
 CYOA / story-tracker / info-block / NPC-dossier / inner-chatter blocks, the image-gen pipeline,
-memory management, and the forced `<think>` reasoning wrapper (dropped so your mobile chat isn't
-polluted with raw think blocks — the regex that normally hides them doesn't exist on mobile).
+memory management, and the forced `<think>` reasoning wrapper (dropped to keep this port
+self-contained). Note: Tavo *does* have a regex feature (Settings → Regex → Edit regex, with
+Find/Replace, Placement, Timing, etc.), so if a model still leaks raw `<think>` or `[OOC:]`
+blocks you can strip them there rather than rely on the prompt alone — see
+`../StripOOCPreamble.json` in the repo root for a ready-made strip pattern and its field values.
 
 ## How to use in Tavo
 
