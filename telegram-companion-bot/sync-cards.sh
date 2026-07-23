@@ -45,7 +45,7 @@ synced=0
 
 # Instance list mirrors update-all.sh. The seed directory name is the character name
 # (lowercase), not the card filename — e.g. nora/ not nora.json/.
-for entry in "nora-bot:nora:nora.json" "bonnie-bot:bonnie:bonnie.json" "cass-bot:cass:cass.json" "emily-bot:emily:emily_harper.json" "priya-bot:priya:priya.json" "jules-bot:jules:jules_nakagawa.json"; do
+for entry in "nora-bot:nora:nora.json" "bonnie-bot:bonnie:bonnie.json" "emily-bot:emily:emily_harper.json" "priya-bot:priya:priya.json"; do
   dir="$HOME/${entry%%:*}"
   rest="${entry#*:}"
   name="${rest%%:*}"

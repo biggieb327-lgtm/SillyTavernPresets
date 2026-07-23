@@ -92,7 +92,7 @@ run_checks() {
     bash "$BOT_SRC/run-bot.sh" "$nora_dir" nora
   fi
 
-  for entry in "bonnie-bot:bonnie" "cass-bot:cass" "emily-bot:emily" "priya-bot:priya" "jules-bot:jules"; do
+  for entry in "bonnie-bot:bonnie" "emily-bot:emily" "priya-bot:priya"; do
     local dir="$HOME/${entry%%:*}"
     local session="${entry##*:}"
     check_instance "$dir" "$session"
