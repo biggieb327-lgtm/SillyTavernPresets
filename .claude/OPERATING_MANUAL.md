@@ -60,6 +60,13 @@ run that counts is the one *after* the last edit.
 
 **Prevents.** Shipping a confident wrong number because it was well-formatted.
 
+**Never report success from intention, memory, or an empty tool response.** A plan
+to run a command is not the same as having run it. A tool call that returned an
+empty response is not confirmation that the action worked — verify from the target
+system. After a file write, check it exists. After a deploy, check the endpoint.
+After an edit, run the tests. The difference between "I ran it" and "I intended to
+run it" is the entire difference between a verified claim and a hallucination.
+
 ## 5. Use tools before guessing
 
 **Procedure.** If a fact is checkable in under a minute with an available tool —

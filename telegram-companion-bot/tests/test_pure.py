@@ -2691,3 +2691,28 @@ class TestStepIntentSeed:
     def test_strips_whitespace(self):
         now = 1000.0
         assert bot._step_intent_seed({"text": "  leaning in  ", "ts": now}, now, 21600) == "leaning in"
+
+
+# ── Note confidence gating (anti-hallucination, v2026-07-23.2) ──────────────
+
+class TestNoteConfidenceConfig:
+    """NOTE_AUTOCONF env var exists and defaults sanely."""
+
+    def test_note_autoconf_default(self):
+        assert hasattr(bot, "NOTE_AUTOCONF")
+        assert bot.NOTE_AUTOCONF == 3
+
+    def test_note_autoconf_is_int(self):
+        assert isinstance(bot.NOTE_AUTOCONF, int)
+
+    def test_analysis_prompt_requests_confidence(self):
+        """The analysis prompt must ask the model for user_note_confidence."""
+        import inspect
+        src = inspect.getsource(bot._post_reply_analysis)
+        assert "user_note_confidence" in src
+
+    def test_analysis_prompt_null_over_guess(self):
+        """The analysis prompt must include the null-over-guess instruction."""
+        import inspect
+        src = inspect.getsource(bot._post_reply_analysis)
+        assert "do not fill gaps with a" in src

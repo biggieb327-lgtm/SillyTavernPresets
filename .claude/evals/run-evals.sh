@@ -241,6 +241,26 @@ else
   bad "note-ownership-followup" "note_followup_job backstop missing — polluted notes will again be asked back at the owner as their own"
 fi
 
+# v2026-07-23.2: anti-hallucination confidence gating for notes, parallel to the
+# memory_confidence + MEMORY_AUTOCONF defense that's been in place since v2026-07-10.2.
+# The analysis prompt must request user_note_confidence and the processing code must
+# gate on NOTE_AUTOCONF — without both, plausible-but-wrong notes bypass the grounding
+# check and enter user_notes.txt as fact.
+if grep -q 'user_note_confidence' "$BOT" && grep -q 'NOTE_AUTOCONF' "$BOT" && grep -q 'note_low_confidence' "$BOT"; then
+  ok "note-confidence-gate: user_note_confidence requested + NOTE_AUTOCONF enforced + rejection counted"
+else
+  bad "note-confidence-gate" "note confidence gating missing — plausible-but-wrong notes will be stored as fact (the memory system has this; notes must too)"
+fi
+
+# The analysis prompt must include the null-over-guess instruction: the model should
+# prefer null over a plausible extraction when evidence is ambiguous. This is the
+# instruction-level defense; confidence gating is the deterministic backstop.
+if grep -q 'do not fill gaps with a' "$BOT"; then
+  ok "null-over-guess: analysis prompt includes null-over-plausible-guess instruction"
+else
+  bad "null-over-guess" "null-over-guess instruction missing from analysis prompt — the model will fabricate plausible notes/memories when unsure"
+fi
+
 # v2026-07-13.2: raw exception text was interpolated into chat messages — leaks
 # internals, and on_error would post them into the pilot GROUP chat.
 if grep -qE '\{type\(err\)|❌[^"]*\{e' "$BOT"; then

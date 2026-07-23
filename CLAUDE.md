@@ -160,6 +160,10 @@ Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/rest
 - **Memory provenance:** generated content (day events, reflections) must never enter
   user-fact stores unlabeled — the `[own-day …]` tag + per-consumer handling is the
   template. Violating this caused the 2026-07-10 hallucinated-memories bug.
+- **Null over plausible guess:** both notes and memories have confidence gating
+  (`NOTE_AUTOCONF`, `MEMORY_AUTOCONF`) + quote grounding + an explicit "do not fill
+  gaps with a plausible extraction" prompt instruction. All three layers must stay —
+  prompt-only defense drifts; deterministic-only defense can't steer ambiguous cases.
 - **Concurrency:** state serialization happens on the event loop only (worker threads
   hand `save_state` back via `call_soon_threadsafe`); never iterate live state dicts
   from a worker thread; never run bare `requests` calls in an async handler (use

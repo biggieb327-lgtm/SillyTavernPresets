@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-23.2
+
+Anti-hallucination: note confidence gating (article: "Stop AI Hallucinations Before
+They Start"). Root cause class: notes lacked the confidence-gating defense that memories
+already had. A plausible-but-wrong note that passed quote grounding (because the user
+happened to mention the character's event verbatim) was stored as fact. Memories have
+had `memory_confidence` + `MEMORY_AUTOCONF` since v2026-07-10.2; notes had no equivalent.
+
+Changes:
+1. **`user_note_confidence` field** in `post_reply_analysis` — the analysis model now
+   self-reports 1-10 confidence on each note extraction, parallel to `memory_confidence`.
+2. **`NOTE_AUTOCONF` env var** (default 3, kill switch 0) — deterministic backstop rejects
+   notes below the confidence threshold, even if quote-grounded. Mirrors the article's
+   "supported=true but no evidence → blocked" pattern.
+3. **"Null over plausible guess" instruction** — explicit language added to the analysis
+   prompt: "When evidence is missing or ambiguous, return null. A missed real event is
+   recoverable; a stored fabrication is not." The existing CRITICAL instruction told the
+   model *what* to extract; this tells it *when not to*.
+4. **Workflow**: OPERATING_MANUAL §4 updated with explicit false-success prevention
+   ("never report success from intention, memory, or an empty tool response") and eval
+   suite extended with anti-hallucination trap evals.
+
+Deploy: `/update` one bot, `/restart` the rest, verify `/audit` shows 2026-07-23.2.
+
 ## v2026-07-23.1
 
 Feature: stepped-thinking "intent" seed (owner request — port the idea behind the

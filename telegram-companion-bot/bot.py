@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-23.1"
+BOT_VERSION = "2026-07-23.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -882,6 +882,7 @@ NOTE_RECURRING = os.getenv("NOTE_RECURRING", "1").strip() not in ("0", "false", 
 # Reject notes whose supporting quote isn't verbatim from the user's own lines —
 # same defense memories got after the 2026-07-10 hallucination bug. 0 = old behavior.
 NOTE_GROUNDED = os.getenv("NOTE_GROUNDED", "1").strip() not in ("0", "false", "no")
+NOTE_AUTOCONF = _env_int("NOTE_AUTOCONF", "3")  # min self-reported confidence to auto-accept a note; below = reject
 NOTE_ASKED_TTL_DAYS = _env_int("NOTE_ASKED_TTL_DAYS", "7")  # retire (asked …) notes after N days; 0 = keep
 NOTE_DEDUP_SIM = _env_float("NOTE_DEDUP_SIM", "0.8")  # word-containment dup threshold; 0 = prefix-only
 _user_notes_cache: dict = {"text": None, "ts": 0.0}
@@ -3163,6 +3164,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f'anniversary), the rule as "weekly:<mon|tue|wed|thu|fri|sat|sun>", '
         f'"monthly:<1-31>", or "yearly:<MM-DD>". One-off events and vaguer cadences '
         f"('every so often', 'most weekends') are null.\n"
+        f'"user_note_confidence": integer 1-10, how confident you are this note captures '
+        f"something real from {uname}'s own life that they actually stated (10 = explicitly "
+        f"said, 1 = vague inference or ambiguous). null if user_note is null.\n"
         f'"memory": if the exchange revealed something notable about a third party, NPC, or '
         f"relationship dynamic (not about {uname} themselves) worth remembering — one brief memory "
         f"line in third person (e.g. 'Bob reacted badly when {uname} mentioned their ex'). "
@@ -3179,7 +3183,9 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         f"{NAME}'s own lines describe her fictional day-to-day life — never turn {NAME}'s own "
         f"statements, events, or plans into notes or memories; they are not real-world facts. "
         f"Ownership of the event decides, not whose message mentioned it: {NAME}'s plans stay "
-        f"hers even when {uname} is the one talking about them."
+        f"hers even when {uname} is the one talking about them.\n"
+        f"When evidence is missing or ambiguous, return null — do not fill gaps with a "
+        f"plausible extraction. A missed real event is recoverable; a stored fabrication is not."
     )
     if THREADS_ENABLED:
         sys_prompt += (
@@ -3260,10 +3266,17 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
         if note and NOTE_GROUNDED:
             nquote = _clean_field("user_note_quote")
             if not (_quote_grounded(nquote, user_lines) if nquote else False):
-                # Same failure mode as ungrounded memories: her own scene/roleplay
-                # lines extracted as real-world facts about the user.
                 _count_error("note_ungrounded")
                 print(f"[user-notes] REJECTED (ungrounded): {note}")
+                note = ""
+        if note and NOTE_AUTOCONF > 0:
+            try:
+                note_conf = max(1, min(10, int(data.get("user_note_confidence", 5))))
+            except (TypeError, ValueError):
+                note_conf = 5
+            if note_conf < NOTE_AUTOCONF:
+                _count_error("note_low_confidence")
+                print(f"[user-notes] REJECTED (confidence={note_conf}): {note}")
                 note = ""
         if note:
             due = _clean_field("user_note_date")
