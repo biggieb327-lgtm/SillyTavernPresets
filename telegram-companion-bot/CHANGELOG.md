@@ -7,6 +7,38 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-23.1
+
+Feature: stepped-thinking "intent" seed (owner request — port the idea behind the
+SillyTavern `st-stepped-thinking` extension). That extension improves replies by making
+the model think as the character *before* answering; its native mechanism is one extra
+LLM completion per configured thinking-prompt, per message. That mechanism is a
+non-starter here: invariant #3 forbids per-message side completion calls because six
+bots share one phone radio, and even post-VPS those calls still cost latency on the
+user-facing reply plus money. So the idea is folded into the machinery we already have,
+on **zero extra calls**:
+
+1. **bot.py — forward-looking intent, on the existing single call.** The combined
+   `post_reply_analysis` pass now emits one extra JSON key, `"intent"`: a one-line,
+   third-person "frame of mind" note for {{char}} going into her *next* reply (an
+   emotional read / a guard / a small want). It's stored in a new ephemeral
+   `next_intent` dict — NOT persisted, NOT written to any user-fact store. Provenance
+   (invariant #10): intent is generated content, so it lives only where mood lives —
+   injected into the next reply's system prompt, never into `user_notes`/memory. The
+   next reply builder injects it right after the mood note, freshness-gated by
+   `_step_intent_seed` (pure, unit-tested) so a stale seed (>`STEP_INTENT_TTL_SEC`,
+   default 6h) never resurfaces. Worker→loop writes go via `call_soon_threadsafe`
+   (invariant #6). Default ON with kill switch `STEP_INTENT` (owner policy 2026-07-18).
+2. **preset.txt — `[STEPPED THINKING]` block (fleet-wide, content).** A staged
+   plan-then-write instruction (feel → want → write) that shapes the hidden reasoning
+   the `:thinking` chat model already produces, at no cost. Mirrors the existing
+   `[SELF-CHECK]` "silently, keep it out of the reply" framing precisely — that framing
+   is the guard against the documented planning-leak class (Priya once leaked her
+   planning monologue) on fallback models that don't wrap reasoning in `<think>`.
+
+Two deploy paths: bot.py via `/update` (+ `/restart` the rest, verify `/audit` shows
+2026-07-23.1); preset.txt via `sync-cards.sh` + `/restart` each bot (fleet-wide file).
+
 ## 2026-07-20 — Ops: reconcile Nora's instance dir in launch/sync scripts (no bot.py change, no version bump)
 
 Root cause: `update-all.sh`, `watchdog.sh`, and `sync-cards.sh` all passed `$BOT_SRC`
