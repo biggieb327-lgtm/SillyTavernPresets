@@ -312,6 +312,12 @@ pilot pair with Priya.
 - **`backup-all.sh`** (cron, on-device): nightly state archive to shared storage,
   `.env` excluded, 14-day retention, optional rclone. Curl-installed once; not managed
   by update-all.sh.
+- **`cleanup-all.sh`** (cron, on-device): disk janitor — sweeps pip cache,
+  `__pycache__`, SIGKILL-orphaned `.backup-stage.*` dirs, and stale `*.tmp` sidecars so
+  the phone doesn't silently fill up. **Dry-run by default** (measures only); `--force`
+  deletes. Never touches state, `.env`, `bot.py`/`.bak`, or live logs; character-card
+  orphans are reported, never auto-deleted. Curl-installed once; not managed by
+  update-all.sh.
 - **`watchdog.sh`** (on-device at `~/telegram-bot/watchdog.sh`; source now in repo,
   still installed manually): relaunches vanished tmux sessions AND bots whose `.alive`
   heartbeat is stale (>300s). **bot.py must touch `.alive` every 60s** (`_touch_alive`
@@ -328,6 +334,7 @@ pilot pair with Priya.
 │   ├── bot.py                       # single codebase, all instances
 │   ├── run-bot.sh / update-all.sh   # start one / redeploy all
 │   ├── watchdog.sh / backup-all.sh  # on-device helpers (curl-installed once)
+│   ├── cleanup-all.sh               # on-device disk janitor (curl-installed once)
 │   ├── fleet-status.sh / sync-cards.sh / new-bot.sh   # ops tooling
 │   ├── requirements.txt             # single source of truth for pip installs
 │   ├── .env.example                 # documented config template
