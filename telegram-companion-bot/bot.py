@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-20.3"
+BOT_VERSION = "2026-07-23.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -240,6 +240,13 @@ REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/ch
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
+# Stepped intent (SillyTavern st-stepped-thinking, folded in): the combined
+# post-reply analysis pass also emits a one-line forward-looking "frame of mind"
+# note, injected into the NEXT reply's prompt so she plans-then-speaks. Rides the
+# existing single call — NO extra LLM round-trip (invariant #3). Default ON with a
+# kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
+STEP_INTENT = os.getenv("STEP_INTENT", "1").lower() not in ("0", "false", "no", "off")
+_STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
 # FATIGUE_STATE is also the master switch for the minimal-reply license.
@@ -1898,6 +1905,7 @@ quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
 quiet_windows = {}  # chat_id -> [{"dow": int (0=Mon), "start": int (minutes), "end": int (minutes)}]
 away = {}           # chat_id -> {"reason": str, "since": float, "origin": str, "expires": float|None}
 _just_returned = {} # chat_id -> {"reason": str} — ephemeral, cleared after one reply
+next_intent = {}    # chat_id -> {"text": str, "ts": float} — stepped-thinking frame-of-mind seed for the next reply; ephemeral, not persisted, overwritten each exchange
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
@@ -3185,6 +3193,15 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             f"laughed at something with callback potential (could become a recurring bit). "
             f"Extremely strict — most exchanges produce null. null otherwise."
         )
+    if STEP_INTENT:
+        sys_prompt += (
+            f'\n"intent": one brief third-person note of {NAME}\'s frame of mind going '
+            f"into her next reply — an emotional read, a guard she's holding, or a small "
+            f"thing she wants from the exchange (e.g. 'wants to lighten things after the "
+            f"argument', 'still stung, keeping her guard up', 'curious where this is "
+            f"going, leaning in'). One short present-tense clause about {NAME} herself, "
+            f"never a plan for {uname}. null if nothing notable."
+        )
     now_local = datetime.now(TZ) if TZ else datetime.now()
     user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
             f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
@@ -3354,6 +3371,19 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             _save_memory_review(queue)
             print(f"[jokes] candidate queued for review: {jc['phrase']}")
 
+    if STEP_INTENT:
+        # Stepped-thinking: her forward-looking frame of mind seeds the NEXT reply.
+        # Generated content, so it stays OUT of every user-fact store (invariant #10) —
+        # it lives only in the ephemeral next_intent dict, exactly like mood.
+        intent_txt = _clean_field("intent")
+        value = {"text": intent_txt[:200], "ts": time.time()} if intent_txt else None
+        if value:
+            if _MAIN_LOOP:
+                _MAIN_LOOP.call_soon_threadsafe(next_intent.__setitem__, chat_id, value)
+            else:
+                next_intent[chat_id] = value
+            print(f"[intent] {intent_txt}")
+
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
     """One combined background pass per exchange: mood + user note + NPC memory.
@@ -3403,6 +3433,21 @@ def _fatigue_effective(level: float, ts: float, now_ts: float,
     her before the first exchange of a new conversation (not one reply late)."""
     hours = max(0.0, (now_ts - (ts or 0)) / 3600.0)
     return max(0.0, level - hours * decay_per_hour)
+
+
+def _step_intent_seed(intent: dict, now_ts: float, ttl: float) -> str:
+    """Stepped-thinking frame-of-mind note from the previous exchange's analysis pass,
+    for injection into the next reply's prompt. Returns '' when absent, non-string, or
+    older than ttl — a long-idle intent must never resurface as a stale seed. Pure so
+    the freshness gate is unit-testable; the caller supplies the character framing."""
+    if not isinstance(intent, dict):
+        return ""
+    txt = intent.get("text")
+    if not isinstance(txt, str) or not txt.strip():
+        return ""
+    if now_ts - intent.get("ts", 0) > ttl:
+        return ""
+    return txt.strip()
 
 
 # ROADMAP 3.7 day-mood residue: the day generator ends its output with one
@@ -3847,6 +3892,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         )})
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
+
+    # Stepped-thinking seed: the frame of mind the last analysis pass read for her,
+    # placed right after mood so it's salient for this reply. Ephemeral + freshness-gated.
+    if STEP_INTENT:
+        seed = _step_intent_seed(next_intent.get(chat_id) or {}, time.time(), _STEP_INTENT_TTL)
+        if seed:
+            messages.append({"role": "system", "content": (
+                f"[Going into this reply, {NAME}'s frame of mind: {seed}. Let it shape "
+                f"her tone and what she reaches for — don't state it outright.]"
+            )})
 
     # ROADMAP 3.7: social battery + minimal-reply license. Schedule is read once here
     # and reused by the schedule section below.

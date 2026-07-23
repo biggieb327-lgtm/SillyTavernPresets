@@ -2655,3 +2655,39 @@ class TestWsdotErrReasonNoKeyLeak:
         class ConnectionError_(Exception):
             pass
         assert bot._wsdot_err_reason(ConnectionError_("...AccessCode=SECRET...")) == "network/DNS error"
+
+
+# ── _step_intent_seed ─────────────────────────────────────────────────────────
+# v2026-07-23.1: stepped-thinking frame-of-mind seed. Pure freshness/validation gate;
+# returns the note text or "" so a stale or missing intent never seeds the next reply.
+
+class TestStepIntentSeed:
+    def test_fresh_returns_text(self):
+        now = 1000.0
+        intent = {"text": "still stung, keeping her guard up", "ts": now - 60}
+        assert bot._step_intent_seed(intent, now, 21600) == "still stung, keeping her guard up"
+
+    def test_stale_dropped(self):
+        now = 1000.0
+        intent = {"text": "wants to lighten the mood", "ts": now - 30000}  # older than 6h
+        assert bot._step_intent_seed(intent, now, 21600) == ""
+
+    def test_missing_or_empty(self):
+        now = 1000.0
+        assert bot._step_intent_seed({}, now, 21600) == ""
+        assert bot._step_intent_seed({"text": "", "ts": now}, now, 21600) == ""
+        assert bot._step_intent_seed({"text": "   ", "ts": now}, now, 21600) == ""
+
+    def test_non_dict_and_bad_types(self):
+        now = 1000.0
+        assert bot._step_intent_seed(None, now, 21600) == ""
+        assert bot._step_intent_seed({"text": 123, "ts": now}, now, 21600) == ""
+
+    def test_missing_ts_treated_as_stale(self):
+        # No ts -> defaults to 0; at a real epoch now, now - 0 >> ttl -> dropped,
+        # never a raw crash.
+        assert bot._step_intent_seed({"text": "curious"}, 1_700_000_000.0, 21600) == ""
+
+    def test_strips_whitespace(self):
+        now = 1000.0
+        assert bot._step_intent_seed({"text": "  leaning in  ", "ts": now}, now, 21600) == "leaning in"
