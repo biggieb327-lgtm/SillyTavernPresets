@@ -124,17 +124,30 @@ fi
 # stays reversible. Over many switches these accumulate, but the *active* card can't
 # be told from an orphan here without parsing each .env — so we only surface them and
 # let a human delete by hand. Never auto-removed, even with --force.
+#
+# state.json / reminders.json / payments.json are ALSO .json but are protected state,
+# not cards — they're excluded so the count reflects real cards, not a false alarm on
+# every instance (a fresh dir has 1 card + up to 3 state files).
+STATE_JSON=" state.json reminders.json payments.json "
 card_note_printed=false
 for dir in $INSTANCE_DIRS; do
   [ -d "$dir" ] || continue
-  cards=$(find "$dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l)
-  if [ "$cards" -gt 1 ]; then
+  card_names=""
+  while IFS= read -r cf; do
+    [ -n "$cf" ] || continue
+    base=$(basename "$cf")
+    case "$STATE_JSON" in *" $base "*) continue ;; esac
+    card_names="$card_names $base"
+  done < <(find "$dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null)
+  ncards=$(echo "$card_names" | wc -w)
+  if [ "$ncards" -gt 1 ]; then
     if [ "$card_note_printed" = false ]; then
       echo
-      echo "REVIEW (not deleted) — instance dirs holding >1 card .json (possible sync-cards orphans):"
+      echo "REVIEW (not deleted) — instance dirs with >1 character card (state files excluded;"
+      echo "keep the active one, delete stale sync-cards orphans by hand):"
       card_note_printed=true
     fi
-    echo "  $dir  ($cards json files)"
+    echo "  $dir  ($ncards cards:$card_names )"
   fi
 done
 
