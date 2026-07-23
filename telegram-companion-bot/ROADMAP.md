@@ -63,6 +63,10 @@ single-device blast radius.
 - **Done when:** all six instances on systemd, healthchecks green for 14 days,
   OPS_MANUAL has a "VPS operations" section, and the Termux quirks in CLAUDE.md are
   marked historical.
+- **Unlocks on completion:** item 3.8 Phase 2 (a host-gated pre-reply thinking *call*)
+  is deliberately blocked until this item's done-when is met — the phone-bandwidth
+  constraint that forbids per-message side completions only lifts once no instance
+  runs on the phone. Revisit 3.8 when walking the cleanup batch above.
 
 ### 1.3 ~~Fleet status one-shot~~ ✅ (shipped v2026-07-06.3)
 - Committed as `telegram-companion-bot/fleet-status.sh`. Hits `/admin/health` per
@@ -180,6 +184,58 @@ single-device blast radius.
   recovers after a gap; minimal replies occur but stay rare; a notable day.txt
   event visibly colors her first exchange after rotation; behavior with the
   kill switch set to `0` identical to today.
+
+### 3.8 Stepped thinking — plan-then-speak — S (Phase 1 shipped; Phase 2 gated on VPS)
+- **Evidence:** owner request 2026-07-23 to port the idea behind the SillyTavern
+  `st-stepped-thinking` extension (make the model think *as the character* before it
+  answers). The extension's native mechanism is one extra LLM completion per configured
+  thinking-prompt, per message — a direct violation of the phone-bandwidth invariant
+  (`bot-code-invariants` #3, one combined `post_reply_analysis` call, no per-message
+  side completions).
+- **Phase 1 ✅ (shipped v2026-07-23.1, `STEP_INTENT`):** the idea folded into the
+  machinery we already have, on **zero extra calls**. `post_reply_analysis` emits one
+  extra JSON key (`intent`): a one-line forward-looking "frame of mind" note stored in
+  the ephemeral `next_intent` dict (not persisted, never a user-fact store — provenance
+  handled exactly like mood) and injected into her *next* reply after the mood note,
+  freshness-gated (`STEP_INTENT_TTL_SEC`, default 6h) by pure `_step_intent_seed`.
+  Companion content change: a `[STEPPED THINKING]` block in the fleet-wide `preset.txt`
+  stages the `:thinking` chat model's hidden reasoning (feel → want → write), mirroring
+  `[SELF-CHECK]`'s leak-safe "silently, keep it out of the reply" framing. Default on,
+  kill switch `STEP_INTENT`.
+- **Phase 2 — a real hidden thinking *call* before the reply — DEFERRED until after the
+  1.2 VPS migration completes.** The reason Phase 1 avoids an extra call is
+  phone-bandwidth-specific: six bots share one Android radio, and a sibling completion
+  competes with the user-facing reply for it. **Once every instance is on the VPS (1.2
+  done-when met), that specific constraint is gone** — a VPS has real bandwidth, so the
+  hard block on per-message side completions can be relaxed *for VPS-hosted instances*.
+  What does NOT go away on the VPS: (a) **latency** — an extra pre-reply call still
+  delays every user-facing reply by a full round-trip, so it must be measured, not
+  assumed free; (b) **money** — each call bills on NanoGPT, multiplied across six bots ×
+  every message; (c) **the mid-migration split** — until all six have moved, any code
+  path that adds a call must stay gated so it never fires on a still-on-phone instance.
+- **Plan (when Phase 2 is picked up):**
+  1. Do NOT lift invariant #3 globally. Add the extra call behind its own env flag
+     (e.g. `STEP_THINK_CALL`, **default off** — this is the higher-cost/higher-risk
+     carve-out that `bot-code-invariants` #16 says may default off with a rationale),
+     and additionally gate it on a host signal so it can only activate on VPS
+     instances (reuse the migration's host detection rather than inventing a new one).
+  2. Keep it ONE extra call max (a single hidden "how does she read this, what does she
+     want" pass whose output seeds the visible reply) — never N-per-thinking-prompt like
+     the source extension. Route any model output through the `_do_request` choke point
+     (invariant #4) even though the thought is internal, and never let the raw thought
+     reach the user (the documented planning-leak class — Priya's leaked monologue).
+  3. A/B against Phase 1's free `STEP_INTENT` seed before committing: if the paid call
+     doesn't beat the free prompt-shaped reasoning on reply quality, don't ship it.
+     Log latency + a per-day call count so the cost is visible on `/audit`.
+  4. Update this invariant's wording if adopted: invariant #3 becomes "no per-message
+     side completion on **phone-hosted** instances," with the VPS carve-out named.
+- **Risk:** medium — it's the first deliberate loosening of the LLM-call-budget
+  invariant, so the guardrails (default-off, host-gated, one-call cap, choke-point
+  routing, A/B gate) are the whole safety story. Getting the host gate wrong would fire
+  paid calls on a phone bot mid-migration.
+- **Done when (Phase 2):** all six on VPS; a host-gated, default-off single pre-reply
+  thinking call demonstrably improves replies over the free `STEP_INTENT` seed in an
+  A/B, with latency and call-count logged; phone-hosted behavior provably unchanged.
 
 ---
 
