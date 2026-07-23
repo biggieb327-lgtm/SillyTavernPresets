@@ -75,27 +75,28 @@ Every completion must include the verification command actually run.
 
 ## Bot instances
 
-| Session | Directory | Character card |
-|---------|-----------|----------------|
-| `nora` | `~/nora-bot/` | `nora.json` |
-| `bonnie` | `~/bonnie-bot/` | `bonnie.json` |
-| `cass` | `~/cass-bot/` | `cass.json` |
-| `emily` | `~/emily-bot/` | `emily_harper.json` |
-| `priya` | `~/priya-bot/` | `priya.json` |
-| `jules` | `~/jules-bot/` | `jules_nakagawa.json` |
+| Session | Platform | Directory | Character card |
+|---------|----------|-----------|----------------|
+| `nora` | phone | `~/nora-bot/` | `nora.json` |
+| `bonnie` | phone | `~/bonnie-bot/` | `bonnie.json` |
+| `cass` | **VPS** | `/opt/telegram-bots/cass/` | `cass.json` |
+| `emily` | phone | `~/emily-bot/` | `emily_harper.json` |
+| `priya` | phone | `~/priya-bot/` | `priya.json` |
+| `jules` | **VPS** | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
 
-Authoritative instance list = the loop in `update-all.sh`. All share the venv at
-`~/telegram-bot/venv/`. `bot.py` lives in `~/telegram-bot/` and takes the instance
-directory as `sys.argv[1]`. The instance directory (where each bot's `.env`, card,
-and state live) is the basename shown on the `=== STARTUP AUDIT === … Instance:`
-line — that runtime value is authoritative if it ever disagrees with this table.
-(Nora's was corrected to `~/nora-bot/` on 2026-07-11 after the table drifted and a
-key was edited into the wrong `.env`. On 2026-07-20 the launch/sync scripts were
-reconciled to match: `update-all.sh`, `watchdog.sh`, and `sync-cards.sh` had still
-been passing `$BOT_SRC` (`~/telegram-bot`, the shared *code* dir) as Nora's *instance*
-dir — a latent bug that would surface on the next full redeploy or post-crash
-relaunch. All three now use `~/nora-bot`; `$BOT_SRC` remains the code dir only. Pinned
-by the `nora-instance-dir` eval.)
+Phone instances share the venv at `~/telegram-bot/venv/`; VPS instances share
+`/opt/telegram-bots/venv/`. `bot.py` lives at `~/telegram-bot/bot.py` (phone) and
+`/opt/telegram-bots/bot.py` (VPS). The instance directory (where each bot's `.env`,
+card, and state live) is the basename shown on the `=== STARTUP AUDIT === …
+Instance:` line — that runtime value is authoritative if it ever disagrees with
+this table.
+
+Authoritative instance list = the loop in `update-all.sh` (phone) and the
+`bot@<instance>` systemd units (VPS). Phone scripts (`update-all.sh`,
+`sync-cards.sh`, `watchdog.sh`) skip VPS instances automatically (no local dir).
+(Nora's instance dir was corrected to `~/nora-bot/` on 2026-07-11 after the table
+drifted. On 2026-07-20 the launch/sync scripts were reconciled to match. Pinned by
+the `nora-instance-dir` eval.)
 
 ## Stack
 
@@ -107,19 +108,37 @@ by the `nora-instance-dir` eval.)
 
 ## Deployment
 
-**Preferred (no shell):** push to `main`, send `/update` to **one** bot (verifies
-compile, keeps `bot.py.bak`, swaps the shared file, restarts), then `/restart` to the
-others. Verify each with `/audit` (shows BOT_VERSION). **Bump `BOT_VERSION` on every
-release** — it's how `/update` detects new versions and `/audit` proves deploys.
+The fleet is split across phone (nora, bonnie, emily, priya) and VPS (jules, cass).
+Deploy commands differ by platform; both pull from `main`.
 
-**When run-bot.sh changed (shell required)** — `/update` never regenerates the
-supervisor:
+**Phone bots — code update (no shell):** push to `main`, send `/update` to **one**
+phone bot (verifies compile, keeps `bot.py.bak`, swaps the shared file, restarts),
+then `/restart` to the other phone bots. Verify each with `/audit`.
+
+**Phone bots — card/seed/preset-only update:**
+```bash
+cd ~/telegram-bot && bash sync-cards.sh        # dry-run first with --dry-run
+```
+Then `/restart` each phone bot. (VPS bots are skipped automatically — no local dir.)
+
+**VPS bots — any update (code, card, or preset):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- cass
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
+```
+`vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
+`CHARACTER_CARD`, restarts + enables the systemd unit, and prints verification.
+
+**When run-bot.sh changed (phone, shell required)** — `/update` never regenerates
+the supervisor:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
 ```
 
-**Card/seed-only update:** `sync-cards.sh`, or curl the card into the instance dir and
-rerun `run-bot.sh <dir> <name>`. **.env edit:** edit on-device, then `/restart` that bot.
+**.env edit:** edit on-device (phone) or on the VPS, then `/restart` that bot.
+
+**Bump `BOT_VERSION` on every release** — it's how `/update` detects new versions
+and `/audit` proves deploys.
 
 Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/restart`
 `/audit` `/errors [N]` `/backup`.
