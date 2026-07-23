@@ -125,26 +125,27 @@ fi
 # be told from an orphan here without parsing each .env — so we only surface them and
 # let a human delete by hand. Never auto-removed, even with --force.
 #
-# state.json / reminders.json / payments.json are ALSO .json but are protected state,
-# not cards — they're excluded so the count reflects real cards, not a false alarm on
-# every instance (a fresh dir has 1 card + up to 3 state files).
-STATE_JSON=" state.json reminders.json payments.json "
+# A card is identified by CONTENT, not filename: every SillyTavern card carries a
+# "first_mes" key. The bot writes many other .json runtime files in the same dir —
+# state.json, reminders.json, payments.json, and the semantic-memory set
+# (embeddings.json, lore_embeddings.json, .memory_vectors.json, memory_meta.json),
+# plus cron_jobs.json, wardrobe.json, .rhr_history.json — none of which are cards and
+# none of which must ever be offered for deletion. The marker grep skips all of them.
 card_note_printed=false
 for dir in $INSTANCE_DIRS; do
   [ -d "$dir" ] || continue
   card_names=""
   while IFS= read -r cf; do
     [ -n "$cf" ] || continue
-    base=$(basename "$cf")
-    case "$STATE_JSON" in *" $base "*) continue ;; esac
-    card_names="$card_names $base"
+    grep -q '"first_mes"' "$cf" 2>/dev/null || continue
+    card_names="$card_names $(basename "$cf")"
   done < <(find "$dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null)
   ncards=$(echo "$card_names" | wc -w)
   if [ "$ncards" -gt 1 ]; then
     if [ "$card_note_printed" = false ]; then
       echo
-      echo "REVIEW (not deleted) — instance dirs with >1 character card (state files excluded;"
-      echo "keep the active one, delete stale sync-cards orphans by hand):"
+      echo "REVIEW (not deleted) — instance dirs with >1 character card (runtime .json"
+      echo "files are excluded; keep the .env's CHARACTER_CARD, delete stale orphans by hand):"
       card_note_printed=true
     fi
     echo "  $dir  ($ncards cards:$card_names )"
