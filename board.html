@@ -340,44 +340,194 @@
 <script id="seed" type="application/json">
 {
   "config": {
-    "boardId": "demo",
-    "title": "Mission Control — Demo",
-    "wordmarkHTML": "MISSION<span class=\"accent\">CONTROL</span>",
-    "eyebrow": "Demo board · edit the seed to make it yours",
+    "boardId": "botfleet",
+    "title": "Bot Fleet — Mission Control",
+    "wordmarkHTML": "BOT<span class=\"accent\">FLEET</span>",
+    "eyebrow": "Mission Control",
+    "mapLabel": "MAP",
+    "terminusMessage": "🎉 FLEET ON VPS 🎉",
+
     "lanes": [
-      { "id": "me",    "label": "ME",    "name": "Me",    "subtitle": "your whole plate, one list", "glyph": "M", "color": "#FFB020", "world": true },
-      { "id": "agent", "label": "AGENT", "name": "Agent", "subtitle": "the assistant's plate",       "glyph": "A", "color": "#45E0FF" }
+      { "id": "me",    "label": "ME",     "name": "Me",     "subtitle": "on-device & VPS ops",
+        "glyph": "M", "color": "#FFB020", "world": true },
+      { "id": "agent", "label": "CLAUDE", "name": "Claude", "subtitle": "code, docs, features",
+        "glyph": "C", "color": "#45E0FF" }
     ],
-    "ext": { "label": "WORLD", "glyph": "⧗", "color": "#8B95AC" },
-    "terminusMessage": "🎉🎉 LAUNCHED 🎉🎉"
+    "ext": { "label": "WORLD", "glyph": "⧗", "color": "#8B95AC" }
   },
+
   "rev": 1,
   "updated": "2026-07-24",
+
   "tracks": [
-    { "id": "build",  "name": "Build",  "color": "#F472B6" },
-    { "id": "infra",  "name": "Infra",  "color": "#3ECF8E" },
-    { "id": "launch", "name": "Launch", "color": "#A78BFA" },
-    { "id": "growth", "name": "Growth", "color": "#FF6B6B" }
+    { "id": "migrate", "name": "VPS Migration", "color": "#F472B6" },
+    { "id": "cleanup", "name": "Cleanup",       "color": "#A78BFA" },
+    { "id": "docs",    "name": "Docs",          "color": "#34D399" },
+    { "id": "feature", "name": "Features",      "color": "#FBBF24" }
   ],
+
   "tasks": [
-    { "id": "b-scaffold", "title": "Scaffold the app", "short": "Scaffold", "owner": "agent", "status": "done", "track": "build", "deps": [], "priority": "high", "detail": "Project skeleton, routing, a blank page that renders." },
-    { "id": "b-core", "title": "Build the core feature", "short": "Core", "owner": "agent", "status": "open", "track": "build", "deps": ["b-scaffold"], "priority": "high", "doing": true, "detail": "The one thing the app is actually for." },
-    { "id": "b-polish", "title": "Polish + empty states", "short": "Polish", "owner": "agent", "status": "open", "track": "build", "deps": ["b-core"], "priority": "medium", "detail": "Loading, error, and empty states so it doesn't feel broken." },
+    {
+      "id": "m-jules-cut",
+      "title": "Jules pilot cutover to VPS",
+      "short": "Jules cut",
+      "owner": "me",
+      "status": "done",
+      "track": "migrate",
+      "deps": [],
+      "priority": "high",
+      "detail": "Contabo Ubuntu 24.04, systemd bot@jules. Completed 2026-07-19."
+    },
+    {
+      "id": "m-cass-cut",
+      "title": "Cass cutover to VPS",
+      "short": "Cass cut",
+      "owner": "me",
+      "status": "done",
+      "track": "migrate",
+      "deps": [],
+      "priority": "high",
+      "detail": "systemd bot@cass, live on Contabo."
+    },
+    {
+      "id": "m-jules-soak",
+      "title": "Jules 7-day soak passes",
+      "short": "Soak",
+      "owner": "ext",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["m-jules-cut"],
+      "priority": "high",
+      "doing": true,
+      "detail": "Started 2026-07-19, target ~2026-07-26. Watch /audit error counts vs phone baseline."
+    },
+    {
+      "id": "m-bonnie",
+      "title": "Migrate Bonnie to VPS",
+      "short": "Bonnie",
+      "owner": "me",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["m-jules-soak"],
+      "priority": "high",
+      "detail": "Same runbook as jules: stop supervisor, whole-dir tar, restore on VPS, systemctl start."
+    },
+    {
+      "id": "m-emily",
+      "title": "Migrate Emily to VPS",
+      "short": "Emily",
+      "owner": "me",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["m-bonnie"],
+      "priority": "high",
+      "detail": "Emily has WSDOT + Inworld voice — verify WSDOT_API_KEY + INWORLD_API_KEY on VPS .env."
+    },
+    {
+      "id": "m-priya",
+      "title": "Migrate Priya to VPS",
+      "short": "Priya",
+      "owner": "me",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["m-emily"],
+      "priority": "high",
+      "detail": "Group-chat pilot pair with Jules — verify GROUP_MODE + ledger path on VPS."
+    },
+    {
+      "id": "m-nora",
+      "title": "Migrate Nora to VPS (last)",
+      "short": "Nora",
+      "owner": "me",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["m-priya"],
+      "priority": "high",
+      "detail": "She's the shared-venv home instance. Retire the phone (or keep as spare) when she moves."
+    },
 
-    { "id": "i-repo", "title": "Create the repo", "short": "Repo", "owner": "me", "status": "done", "track": "infra", "deps": [], "priority": "high", "detail": "Git repo, README, license." },
-    { "id": "i-ci", "title": "Set up CI", "short": "CI", "owner": "agent", "status": "open", "track": "infra", "deps": ["i-repo"], "priority": "medium", "detail": "Lint + test on every push." },
-    { "id": "i-db", "title": "Provision the database", "short": "Database", "owner": "me", "status": "open", "track": "infra", "deps": ["i-repo"], "priority": "medium", "detail": "Pick a host, create the instance, save the connection string." },
-    { "id": "i-deploy", "title": "Deploy to staging", "short": "Staging", "owner": "agent", "status": "open", "track": "infra", "deps": ["i-ci", "b-core"], "priority": "medium", "detail": "First real URL for the core feature." },
+    {
+      "id": "c-jules-post",
+      "title": "Jules post-soak cleanup",
+      "short": "Jules clean",
+      "owner": "me",
+      "status": "open",
+      "track": "cleanup",
+      "deps": ["m-jules-soak"],
+      "priority": "medium",
+      "detail": "Re-point HEALTHCHECK_URL to VPS, rm ~/jules-bot + ~/jules-migrate.tar.gz from phone, rm stale jules.json from VPS, verify proactive texts have no fabricated [sent HH:MM] headers."
+    },
+    {
+      "id": "c-nora-parked",
+      "title": "Delete nora.parked staging dir on VPS",
+      "short": "nora.parked",
+      "owner": "me",
+      "status": "open",
+      "track": "cleanup",
+      "deps": [],
+      "priority": "low",
+      "detail": "Do NOT revive for nora's migration — rebuild from runbook tar instead. Has duplicate TELEGRAM_BOT_TOKEN lines and cloned state."
+    },
+    {
+      "id": "c-phone-retire",
+      "title": "Retire phone bot infrastructure",
+      "short": "Phone retire",
+      "owner": "me",
+      "status": "open",
+      "track": "cleanup",
+      "deps": ["m-nora"],
+      "priority": "medium",
+      "detail": "Remove/rename all bot dirs (watchdog resurrects any it sees), retire watchdog.sh, re-point all HEALTHCHECK_URLs to VPS."
+    },
 
-    { "id": "l-domain-buy", "title": "Buy the domain", "short": "Domain", "owner": "me", "status": "open", "track": "launch", "deps": [], "priority": "medium", "detail": "Pick the name, buy it, point the nameservers." },
-    { "id": "l-domain-dns", "title": "DNS propagates", "short": "DNS", "owner": "ext", "status": "open", "track": "launch", "deps": ["l-domain-buy"], "priority": "low", "detail": "Out of your hands — tap ✓ once the domain resolves. (Example of a 'world' task.)" },
-    { "id": "l-copy", "title": "Write the landing copy", "short": "Copy", "owner": "me", "status": "open", "track": "launch", "deps": [], "priority": "medium", "detail": "Headline, three benefits, one call to action." },
-    { "id": "l-prod", "title": "Deploy to production", "short": "Production", "owner": "agent", "status": "open", "track": "launch", "deps": ["i-deploy", "i-db", "l-domain-dns"], "priority": "high", "detail": "Real domain, real database, real users can hit it." },
-    { "id": "launch", "title": "LAUNCH", "short": "GO LIVE", "owner": "agent", "status": "open", "track": "launch", "deps": ["l-prod", "l-copy", "b-polish"], "priority": "high", "terminus": true, "detail": "The terminus. Everything converges here. 🎉" },
+    {
+      "id": "d-ops-vps",
+      "title": "OPS_MANUAL: VPS operations section",
+      "short": "VPS ops doc",
+      "owner": "agent",
+      "status": "open",
+      "track": "docs",
+      "deps": ["m-nora"],
+      "priority": "medium",
+      "detail": "Part of 1.2 done-when. Cover systemd commands, vps-sync.sh, log locations, healthcheck setup."
+    },
+    {
+      "id": "d-termux",
+      "title": "Mark CLAUDE.md Termux quirks historical",
+      "short": "Termux docs",
+      "owner": "agent",
+      "status": "open",
+      "track": "docs",
+      "deps": ["m-nora"],
+      "priority": "medium",
+      "detail": "Part of 1.2 done-when. Phantom killer, venv, /tmp — still documented but marked as legacy."
+    },
 
-    { "id": "g-analytics", "title": "Add analytics", "short": "Analytics", "owner": "agent", "status": "open", "track": "growth", "deps": ["b-scaffold"], "priority": "low", "detail": "Know whether anyone showed up." },
-    { "id": "g-list", "title": "Build the launch list", "short": "List", "owner": "me", "status": "open", "track": "growth", "deps": [], "priority": "low", "detail": "The people you'll tell on day one." },
-    { "id": "g-post", "title": "Write the launch posts", "short": "Posts", "owner": "me", "status": "open", "track": "growth", "deps": ["l-copy"], "priority": "low", "detail": "Reuse the landing copy; one post per channel." }
+    {
+      "id": "f-step-think",
+      "title": "3.8 Phase 2: pre-reply thinking call",
+      "short": "Think call",
+      "owner": "agent",
+      "status": "open",
+      "track": "feature",
+      "deps": ["m-nora"],
+      "priority": "low",
+      "detail": "Gated on VPS migration. Host-gated, default-off, one-call cap, A/B vs Phase 1's free STEP_INTENT seed. Only pick up if the free seed isn't good enough.",
+      "ref": { "label": "roadmap §3.8", "href": "https://github.com/biggieb327-lgtm/SillyTavernPresets/blob/main/telegram-companion-bot/ROADMAP.md" }
+    },
+
+    {
+      "id": "t-go-live",
+      "title": "Fleet fully migrated",
+      "short": "DONE",
+      "owner": "me",
+      "status": "open",
+      "track": "migrate",
+      "deps": ["c-phone-retire", "d-ops-vps", "d-termux"],
+      "priority": "high",
+      "terminus": true,
+      "detail": "All six on systemd, healthchecks green 14 days, OPS_MANUAL has VPS section, Termux quirks marked historical."
+    }
   ]
 }
 </script>
