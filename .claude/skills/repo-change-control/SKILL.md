@@ -72,7 +72,9 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 
 8. **Update planning docs in the same session**: mark the shipped item done in
    `ROADMAP.md` (this was skipped after R1–R6 and the docs drifted). If the release
-   closed an operational-log "Next" item, note it there.
+   closed an operational-log "Next" item, note it there. If the shipped work
+   corresponds to a task on the Mission Control board, load `update-board` and
+   mark it done (seed + rebuild + test).
 
 9. **Hand off the deploy.** Tell the user exactly:
    - `/update` to ONE bot → verify its `/audit` shows the new BOT_VERSION →

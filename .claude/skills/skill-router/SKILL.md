@@ -17,6 +17,7 @@ Load a skill only when its trigger fires. Preloaded always (do not re-load): `ar
 | External audit/review output (LLM or human) lists claimed bugs | `verify-external-audit` |
 | Touching any GROUP_* code, the ledger, or bot-to-bot behavior | `group-chat-changes` |
 | Moving instances from the phone to a VPS (ROADMAP 1.2) | `vps-migration` |
+| A roadmap step shipped or user reports an on-device step done | `update-board` |
 | Working in voicekit-starter/ | `voicekit-work` |
 | Designing unattended/overnight iterative work (a Routine, /loop, or autonomous session) | `unattended-loops` |
 | Anything else | Check `ListSkills`/`SearchSkills` for harness-provided skills (code-review, verify, security-review, update-config, …) — prefer those over improvising |

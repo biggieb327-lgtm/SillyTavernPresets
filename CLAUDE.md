@@ -73,6 +73,10 @@ Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.
 Every completion must include the verification command actually run.
 
+When a roadmap step ships or the user reports an on-device step done (migration,
+cleanup), load `update-board` and mark the corresponding task done on the Mission
+Control board (`botfleet.seed.json` → rebuild `board.html` → smoke test).
+
 ## Bot instances
 
 | Session | Platform | Directory | Character card |
