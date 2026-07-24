@@ -108,40 +108,10 @@ the `nora-instance-dir` eval.)
 
 ## Deployment
 
-The fleet is split across phone (nora, bonnie, emily, priya) and VPS (jules, cass).
-Deploy commands differ by platform; both pull from `main`.
-
-**Phone bots — code update (no shell):** push to `main`, send `/update` to **one**
-phone bot (verifies compile, keeps `bot.py.bak`, swaps the shared file, restarts),
-then `/restart` to the other phone bots. Verify each with `/audit`.
-
-**Phone bots — card/seed/preset-only update:**
-```bash
-cd ~/telegram-bot && bash sync-cards.sh        # dry-run first with --dry-run
-```
-Then `/restart` each phone bot. (VPS bots are skipped automatically — no local dir.)
-
-**VPS bots — any update (code, card, or preset):**
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- cass
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
-```
-`vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
-`CHARACTER_CARD`, restarts + enables the systemd unit, and prints verification.
-
-**When run-bot.sh changed (phone, shell required)** — `/update` never regenerates
-the supervisor:
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
-```
-
-**.env edit:** edit on-device (phone) or on the VPS, then `/restart` that bot.
-
-**Bump `BOT_VERSION` on every release** — it's how `/update` detects new versions
-and `/audit` proves deploys.
-
-Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/restart`
-`/audit` `/errors [N]` `/backup`.
+Fleet is phone (nora, bonnie, emily, priya) + VPS (jules, cass). Both pull from
+`main`. Load `deploy-and-verify-fleet` for the procedure (four paths: code, cards,
+supervisor, .env). Bump `BOT_VERSION` on every release. Full command reference:
+`OPS_MANUAL.md`.
 
 ## Working principles
 
@@ -160,43 +130,12 @@ Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/rest
   verification block is green; a designated feature branch is where you *develop*, not
   a place work should stop. (If a session-level instruction pins you to a branch and
   forbids pushing elsewhere, that owner standing permission is your explicit go-ahead.)
-- Commit real work **before** break-testing evals; revert test injections by
-  re-editing, never `git checkout` on a file with uncommitted changes.
-- **New-feature default policy (owner, 2026-07-18):** new features default **ON** with a
-  mandatory env kill switch (unset = active, `0` = off). The kill switch is required;
-  default-on is the norm. Details in `bot-code-invariants` #16.
 
-## Code invariants (each one paid for in debugging time)
+## Code invariants
 
-- **bot.py stays a single file.** The whole deploy model depends on it. Recorded
-  non-goal; don't propose splitting it.
-- **One combined post-reply analysis call** (`post_reply_analysis`: mood + note +
-  memory + any future extraction as extra JSON keys). Never add a per-message side
-  *LLM completion* call — they compete with user-facing replies for phone bandwidth.
-  (Documented carve-out: `MEMORY_SEMANTIC_LIVE` adds one small **embedding** round-trip
-  per reply for live semantic recall — owner-approved v2026-07-12.2, off-loop + cached
-  + timeout-bounded + default-on kill switch. Not a completion call; don't "fix" it.)
-- **Memory provenance:** generated content (day events, reflections) must never enter
-  user-fact stores unlabeled — the `[own-day …]` tag + per-consumer handling is the
-  template. Violating this caused the 2026-07-10 hallucinated-memories bug.
-- **Null over plausible guess:** both notes and memories have confidence gating
-  (`NOTE_AUTOCONF`, `MEMORY_AUTOCONF`) + quote grounding + an explicit "do not fill
-  gaps with a plausible extraction" prompt instruction. All three layers must stay —
-  prompt-only defense drifts; deterministic-only defense can't steer ambiguous cases.
-- **Concurrency:** state serialization happens on the event loop only (worker threads
-  hand `save_state` back via `call_soon_threadsafe`); never iterate live state dicts
-  from a worker thread; never run bare `requests` calls in an async handler (use
-  `asyncio.to_thread`); never hold the group-ledger flock across an `await`.
-- **Streaming error bodies must be force-read (`_ = resp.content`) before
-  `raise_for_status()`** or 400s arrive empty and undiagnosable (`_do_request` does
-  this; keep the pattern).
-- Model output passes through `_strip_thinking` + `_strip_native_tool_calls` +
-  `_fix_mojibake` at the `_do_request` choke point — new response paths must too.
-- PTB's `run_polling()` silently overrides `signal.signal()` handlers — shutdown work
-  goes in `post_shutdown` (see CHANGELOG v2026-07-05.8).
-- Group chats: commands are default-deny (`GROUP_ALLOWED_COMMANDS = {"chatid"}`) and
-  `_group_deliver` is allowlist-built — both pinned by CI evals; widen only with the
-  eval in the same commit.
+Load `bot-code-invariants` for any bot.py diff — 16 rules covering architecture,
+LLM-call budget, concurrency, memory provenance, and platform constraints, each
+eval-pinned or incident-earned.
 
 ## Models & config constraints
 
@@ -221,17 +160,9 @@ aren't obvious from it:
   engine; `TTS_VOICE` is then an Inworld voice ID.
 - **WSDOT traffic (Emily):** `WSDOT_API_KEY` + `TRAFFIC_RADIUS_MILES` +
   `TRAFFIC_POLL_MINUTES`.
-- **Group-chat pilot (Priya + Jules, experimental):** read `GROUP_CHAT_DESIGN.md`
-  first — Telegram never delivers one bot's messages to another bot, so the feature
-  runs on a shared flock'd ledger + atomic claim files. Fleet-wide even when unset:
-  bots ignore all group chats (only `/chatid` answers) and `set_owner` refuses group
-  chat_ids. Enable with `GROUP_MODE=1` + `GROUP_ALLOWED_CHATS` (fail closed) +
-  `GROUP_PEERS`; loop caps `GROUP_BOT_CHAIN_MAX=2`, `GROUP_DAILY_BOT_BUDGET=30`.
-  BotFather privacy must be DISABLED for pilot bots (re-add to group after changing).
-  One-time on-device check: `python bot.py ~/priya-bot --claim-test` (two PASS lines).
-- Bad numeric `.env` values no longer crash the bot (v2026-07-10.2): `_env_int`/
-  `_env_float` fall back to defaults with a `[config]` warning — check logs after
-  editing an `.env`.
+- **Group-chat pilot (Priya + Jules, experimental):** load `group-chat-changes`
+  before touching any GROUP_* code. Setup and operation documented in `OPS_MANUAL.md`
+  and `GROUP_CHAT_DESIGN.md`.
 
 ## Continuity features (all characters)
 
@@ -276,54 +207,23 @@ pilot pair with Priya.
 
 ## Termux / Android quirks
 
-- **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
-  processes when >32 exist system-wide; 6 bots sit at that limit. Signature:
-  `STARTUP AUDIT` lines piling up in `/errors` with **no** `[shutdown] graceful stop`
-  line before them (SIGKILL can't be caught). One-time fix via adb:
-  `adb shell settings put global settings_enable_monitor_phantom_procs false`
-  plus Termux battery → Unrestricted. **The setting reverts after an Android OS
-  update/factory reset** — if silent restarts return, check
-  `settings get global settings_enable_monitor_phantom_procs` before debugging
-  anything else. Conversely, repeated *clean* `exited (code 0)` restarts WITH a
-  graceful-stop line are NOT the phantom killer — that's a real SIGTERM, most likely
-  an OEM battery manager (see dontkillmyapp.com for the manufacturer).
-- run-bot.sh launches `~/telegram-bot/venv/bin/python` **explicitly** — bare `python`
-  crash-loops on `ModuleNotFoundError` when the venv isn't on tmux's PATH. Never
-  regress this.
-- **`pkg upgrade` hazards:** android-tools can break (libprotobuf symbol —
-  `pkg reinstall android-tools`); a Python **minor**-version bump breaks the shared
-  venv — rebuild with `python -m venv --clear ~/telegram-bot/venv &&
-  ~/telegram-bot/venv/bin/pip install -r ~/telegram-bot/requirements.txt`
-  (`requirements.txt` is the single source of truth — hand-typing the list caused the
-  tzdata bug). Pillow may need `pkg install libjpeg-turbo zlib freetype` first, or
-  `pkg install python-pillow` + `--system-site-packages` venv. A big Python jump
-  (3.13→3.14) can outrun PTB v21's deprecated `asyncio.get_event_loop()` call —
-  bot.py works around it in `main()` (v2026-07-05.6); if worse appears, hold Termux's
-  `python` package back.
-- **Don't drop `tzdata`** — Termux has no system tz database; without it `ZoneInfo`
-  silently degrades to naive local time, and a stored tz-aware reminder vs naive
-  `now()` once crashed startup fleet-wide (`schedule_reminder` now normalizes
-  defensively, v2026-07-05.5 — but reinstall tzdata rather than rely on that).
-- `/tmp` is not writable — use `~/` for temp files.
-- Stale `bot.pid` after a crash: delete it before restarting (run-bot.sh also clears).
-- `tmux kill-session -t <name>` before reusing a session name; `httpx.ConnectError`
-  at startup = transient network blip, restart the session.
-- Wake lock is acquired automatically (`termux-wake-lock`). The supervisor writes
-  `bot.log` via `>>` (no tee — fewer processes for the phantom limit), trims at 5 MB;
-  `errors.log` rotates at 2 MB.
+Key facts that shape every bot decision (fix procedures are in
+`repo-debugging-playbook`):
 
-## Debugging protocol (lessons learned)
+- **Phantom process killer:** Android 12+ SIGKILLs at >32 background processes; 6
+  bots sit at that limit. The adb setting reverts after OS updates.
+- **Venv path must be explicit:** run-bot.sh launches `~/telegram-bot/venv/bin/python`;
+  bare `python` crash-loops on `ModuleNotFoundError`. Never regress this.
+- **`tzdata` is required:** Termux has no system tz database; without it `ZoneInfo`
+  silently degrades to naive local time.
+- **`/tmp` is not writable** — use `~/` for temp files.
+- **Process budget is tight:** no `tee`, no subprocess spawns, no background helpers.
+  The supervisor writes `bot.log` via `>>` (fewer processes for the phantom limit).
 
-1. **Evidence before fixes.** Get `/errors` (or `tail -50 ~/<dir>/bot.log`) and the
-   exact error text first. Three rounds of speculative fixes once lost to one pasted
-   log line.
-2. **Differential diagnosis.** Which bots work, which don't — the broken one's delta
-   (.env, model, features) is usually the answer.
-3. **Opaque error → instrument first.** Make the failure self-describing, deploy,
-   reproduce, then fix.
-4. **A bot that can't answer `/errors` is a startup crash** — go to `bot.log`; the
-   supervisor lines show exit codes and cadence.
-5. **Verify every deploy** with `/audit`.
+## Debugging protocol
+
+Load `repo-debugging-playbook` before proposing any fix for a live bot problem.
+Evidence-first triage with a signature table for known causes.
 
 ## Monitoring
 
