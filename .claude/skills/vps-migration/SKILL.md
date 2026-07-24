@@ -56,7 +56,12 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
      their local filesystem. Until nora and a given bot are on the same host, that
      bot won't see fresh world files — known mixed-fleet limitation; don't "fix"
      it mid-migration.
-5. After each migrated instance, update `ROADMAP.md` 1.2 status and add an
+5. **Remove migrated bot from phone scripts immediately after cutover.**
+   `sync-cards.sh`, `update-all.sh`, and `watchdog.sh` each have an instance
+   list — delete the migrated entry from all three in the same commit. A stale
+   entry is harmless only until someone runs the script and gets confused about
+   why it was skipped. The VPS deploy path (`vps-sync.sh`) is the replacement.
+6. After each migrated instance, update `ROADMAP.md` 1.2 status and add an
    operational-log row if anything failed and taught something.
 
 ## Quality bar
@@ -72,6 +77,7 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
 - [ ] Old poller verified dead before new one started (both checks, pasted)
 - [ ] Migrated bot: Telegram reply + `/audit` + `/errors` clean + healthcheck ping
 - [ ] No `.env` or state file ever staged into git (`git status` clean of them)
+- [ ] Migrated bot removed from phone script instance lists (sync-cards.sh, update-all.sh, watchdog.sh)
 - [ ] ROADMAP 1.2 status updated after each instance
 
 ## Common mistakes
