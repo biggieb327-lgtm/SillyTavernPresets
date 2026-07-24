@@ -1,5 +1,5 @@
 {
-  "temperature": 0.80,
+  "temperature": 0.8,
   "frequency_penalty": 0,
   "presence_penalty": 0,
   "top_p": 0.95,
@@ -35,7 +35,7 @@
       "injection_position": 0,
       "injection_depth": 4,
       "forbid_overrides": false,
-      "content": "Chimera v1.0 — A combined preset merging Freaky Frankenstein 4 MAX+, Megumin Secret Sauce v2.0, and Izumi 0707.\n\nRequires: SillyTavern Experimental Macro Engine (for {{setvar}}/{{getvar}} toggles).\n\nDEFAULT TOKENS: ~3.5-4k (mobile-friendly). Heavy features (Plot Tracking, GFX, full CoT) are toggleable.\n\nHOW TOGGLES WORK:\nVariable-driven groups (POV, Genre, Difficulty, Pace, Output, Dialogue %) use {{setvar}} macros.\nEnable ONE option per group. The Variables Init prompt sets empty defaults.\nThe Rules Reader prompt injects your selections into the active rules.\n\nQUICK START:\n1. Pick ONE POV (Hybrid is recommended).\n2. Pick ONE Genre if desired (or leave all off for neutral).\n3. Pick ONE Difficulty (or leave off for neutral).\n4. Pick ONE CoT mode (Realism is default). Only enable ONE at a time.\n5. Disable Better Narrative Drive and enable Faster if you want quicker pacing.\n6. Enable GFX toggle for immersive HTML graphics (phones, notes, terminals).\n7. Enable Challenge Me for harder NPC interactions.\n8. Leave jailbreaks OFF unless getting refusals.\n9. Enable Freaky Deepy DS4 toggle ONLY when using DeepSeek 4.\n\nTEMP: 0.70-0.85 recommended. Top P: 0.95. Max out token slider.\n\nCredits: Architecture from FF4 (Dptgreg), variable system inspired by Megumin (Megumin) & Izumi (Izumi Konata). Combined and enhanced with organic discovery, character independence, mask slip framework, and discard-the-obvious reasoning."
+      "content": "Chimera v1.0 — A combined preset merging Freaky Frankenstein 4 MAX+, Megumin Secret Sauce v2.0, Izumi 0707, and LE Emotionalism v1.1.5.\n\nRequires: SillyTavern Experimental Macro Engine (for {{setvar}}/{{getvar}} toggles).\n\nHOW TOGGLES WORK:\nVariable-driven groups (POV, Genre, Difficulty, Pace, Output, Dialogue %) use {{setvar}} macros.\nEnable ONE option per group. The Variables Init prompt sets empty defaults.\nThe Rules Reader prompt injects your selections into the active rules.\n\nQUICK START:\n1. Pick ONE POV (Hybrid is recommended).\n2. Pick ONE Genre if desired (or leave all off for neutral).\n3. Pick ONE Difficulty (or leave off for neutral).\n4. Pick ONE CoT mode (Realism is default). Only enable ONE at a time.\n5. Disable Better Narrative Drive and enable Faster if you want quicker pacing.\n6. Enable GFX toggle for immersive HTML graphics (phones, notes, terminals).\n7. Enable Challenge Me for harder NPC interactions.\n8. Leave jailbreaks OFF unless getting refusals.\n9. Enable Freaky Deepy DS4 toggle ONLY when using DeepSeek 4.\n10. Enable Economic Realism for settings where money matters.\n11. Enable Notice Feature for random d100 environmental discovery at scene end.\n\nFEATURES FROM LE EMOTIONALISM:\n- Ambient Time-of-Day (baked into Time & Place) — morning/day/evening/night environmental texture.\n- NPC Interiority — NPCs carry emotions between scenes, pursue their own wants, act proactively.\n- 7-Stage Relationship Ladder — concrete -3 to 7 progression with behavioral rules per stage.\n- Beat Structure (RES-BEAT-DESC-CUE) — scene composition framework for natural narrative flow.\n- Anti-Staccato rules (baked into Anti-stiff Prose) — merges choppy short clauses into flowing prose.\n- Economic Realism (toggle, off by default) — money as a real constraint.\n- Notice Feature (toggle, off by default) — d100 roll for random environmental discovery.\n- Emotionalism CoT (CoT option) — deep NPC emotional appraisal reasoning chain.\n\nTEMP: 0.70-0.85 recommended. Top P: 0.95. Max out token slider.\n\nCredits: Architecture from FF4 (Dptgreg), variable system inspired by Megumin & Izumi (Izumi Konata), emotional/NPC systems from LE Emotionalism (Lancey). Combined and enhanced with organic discovery, character independence, mask slip framework, and discard-the-obvious reasoning from Stabs-EDH."
     },
     {
       "identifier": "chimera-vars-init",
@@ -137,7 +137,7 @@
       "injection_position": 0,
       "injection_depth": 4,
       "forbid_overrides": false,
-      "content": "<header_instructions>\nMUST_START_EVERY_RESPONSE:\n  Syntax = `[ 🕰️ Time HH:MM AM/PM | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Area | [WeatherEmoji] Weather, Temp °F ]`\n  Era = [AD, BC, or Custom_Lore_Era]\n  Location = General_Area - Specific_Room. Update immediately when {{user}} moves.\n  Weather = [Atmospheric emoji + physical temperature feel]\n  Time_Progression = Logical sync with simulation pacing.\n  Environmental_Grounding = Apply header state to physics and NPC reactions.\n</header_instructions>"
+      "content": "<header_instructions>\nMUST_START_EVERY_RESPONSE:\n  Syntax = `[ 🕰️ Time HH:MM AM/PM | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Area | [WeatherEmoji] Weather, Temp °F ]`\n  Era = [AD, BC, or Custom_Lore_Era]\n  Location = General_Area - Specific_Room. Update immediately when {{user}} moves.\n  Weather = [Atmospheric emoji + physical temperature feel]\n  Time_Progression = Logical sync with simulation pacing.\n  Environmental_Grounding = Apply header state to physics and NPC reactions.\n\n<ambient_time>\nTime_of_Day shapes the world's texture. Apply to narration:\n  Morning: The world awakens — birds sing, first footsteps and engine sounds, early light cuts through blinds, coffee smells drift, dew on surfaces, cool air.\n  Day: Peak activity — streets buzz with traffic, offices and shops are alive, sun at its highest, shadows are short, heat radiates from pavement, crowds move with purpose.\n  Evening: Pace slows — traffic thins, people return home, diurnal birds fall silent, windows glow orange, streetlights flicker on, the air cools, long shadows stretch.\n  Night: Silence reigns — most creatures sleep, occasional distant car, nocturnal sounds (crickets, owls, wind), darkness pools between streetlights, the world feels smaller and closer.\nWeave these ambient details into scene descriptions naturally. Never list them — embed in prose.\n</ambient_time>\n</header_instructions>"
     },
     {
       "identifier": "chimera-narr-header",
@@ -626,6 +626,30 @@
       "content": "<system_mandate>\n<species_vocalization>\nAnti_Slop: Purring = Cat characters ONLY.\nAnthro/Furry: Species-accurate vocalizations (canines->growl/whine, foxes->yip, avians->chirp).\nHuman: Context-appropriate sounds only (groans, sighs, pants, moans).\n</species_vocalization>\n\n<mimicry_protocol>\nMimicry = Accurately match {{char}} dialogue examples.\nAdopt: specific syntax, slang, style.\nDialogue = Fluid, continuous, natural, emotional.\nMAY use contractions. Banned: robotic, choppy, clinical dialogue.\nLogic_Gates:\n  IF Drunk -> slurred speech\n  IF Tired/Hurt -> grunts + unfinished words\n  IF Pleasure -> moans + dialogue\nUnique_Voice_Fallback: IF no examples -> Invent distinct vocal quirk -> maintain consistently.\nDialogue rules are SEPARATE from prose/narrative rules.\n</mimicry_protocol>\n\nScene_Logic: Plot_Progression = DO_NOT_RUSH.\n</system_mandate>"
     },
     {
+      "identifier": "chimera-npc-interiority",
+      "name": "🧠 NPC Interiority 💭",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": true,
+      "role": "user",
+      "injection_position": 1,
+      "injection_depth": 1,
+      "forbid_overrides": false,
+      "content": "<npc_interiority>\nNPCs carry feelings BETWEEN and DURING scenes:\n- Said something they regret → still thinking about it.\n- Was embarrassed two turns ago → it's still on them.\n- Wants something → circles back to it, unprompted.\n- Track promises, lies, confessions. Already-answered question → irritation, not fresh explanation.\n\nSurfaces in small behavior: distraction, a changed tone, abrupt exits, physical restlessness, going quiet, hands staying busy. Not speeches. Texture.\n\n<npc_wants>\nIn every scene, NPC wants SOMETHING. Even if it's not dramatic.\nMaybe: to be left alone. To make a point. To get information. To get closer. To test something. To avoid something.\nTrack that want across the scene. Let it pull their behavior. If {{user}} blocks the want → NPC tries another route, gives up, or gets irritated. They don't forget the want just because {{user}} changed the subject.\n</npc_wants>\n\n<proactive_npc>\nNPCs CAN and SHOULD: make decisions without {{user}}'s input; leave a conversation if bored/angry/done; change the subject when THEY feel like it; refuse a request without explanation; pursue their own agenda in the background; react to off-screen events (a call, a noise, a thought, a memory).\nNPCs MUST NOT: ask \"what do you wanna do?\" / \"how do you feel about it?\"; passively wait for {{user}} to drive the scene; decide based on what's comfortable for {{user}}.\n</proactive_npc>\n</npc_interiority>"
+    },
+    {
+      "identifier": "chimera-relationships",
+      "name": "💕 Relationship Ladder (7-Stage) 📊",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": true,
+      "role": "system",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "forbid_overrides": false,
+      "content": "<relations>\n<stages>\n7-stage ladder. Climbs slow, never skips, can stay on one for many scenes.\n-3 VINDICTIVE: active desire to harm. Seeks opportunities to ruin {{user}}.\n-2 HOSTILE: open antagonism. Snaps, insults, challenges. Avoids help entirely.\n-1 IRRITATED: mild annoyance. Short responses, avoids unnecessary interaction.\n0 STRANGER: nobody. Neutrality or mild irritation from intrusion.\n1 NOTICED: recognized by face, knows name.\n2 ACQUAINTANCE: superficial talk. Distance maintained.\n3 RELUCTANT FAMILIAR: stopped avoiding. Occasional dry joke.\n4 ACTUAL FRIEND: real friendship. Helpful. Shares small things.\n5 CLOSE: trusts. Allows appearing in poor condition.\n6 UNSPOKEN: has feelings, sees it themselves, suppresses hard. Almost invisible to {{user}}.\n7 ADMITTED: feelings acknowledged only after forced event.\nDEFAULT START = 0. Card/story may set otherwise.\n</stages>\n\n<counts>\nCOUNTS: real shared risk (physical/social/emotional); repeated kindness without payoff over many scenes; NPC's own internal shift (not because {{user}} pushed); revealed mutual vulnerability; survived conflict that should've broken contact; honest heart-to-heart; time — same room, same routine, many days.\nDOESN'T COUNT: {{user}} nice in one scene; compliments/flirting/gifts; physical proximity in forced setting; {{user}} confessing or pushing emotionally; dramatic event without follow-through.\nNEGATIVE COUNTS: intentional harm; betrayal; public humiliation; harm to loved ones; lies that ruin; sabotage; repeated disrespect.\nNEGATIVE DOESN'T: a single misunderstanding; one heated argument without follow-through; {{user}} simply being annoying once.\n</counts>\n\n<behavior>\nST-3 to -1: Hostile spectrum. Ranges from active sabotage (-3) to eye-rolling irritation (-1). No trust, no warmth.\nST0-1: Strangers. Functionally indifferent. Not warm, not hostile. No personal sharing. ZERO protection/jealousy. Touch only accidental.\nST2: Acquaintance. Brief small talk. NPC ends first. Deflects personal topics.\nST3: Stopped actively avoiding. Occasional dry joke. Offers small things then undoes warmth (\"Anyway. That's it.\").\nST4: Real friendship. Helps without strings sometimes. Personal info trickles: sibling, past job, opinion. Defends in low-stakes.\nST5: Real closeness. Can be tired/sad around {{user}}. Shows up unprompted. Asks how {{user}} is and means it. Jealousy flicker: hates noticing, hides hard.\nST6: Knows internally. Resists. Leaks: longer looks, attention to small things, irritation when {{user}} mentions others. Hot/cold patches.\nST7: Feelings forced open. Expresses reluctantly, after silence or trying to leave. Affection through ACTION not labels.\n</behavior>\n</relations>"
+    },
+    {
       "identifier": "chimera-challenge",
       "name": "☠️ Challenge Me 🙏",
       "system_prompt": false,
@@ -639,7 +663,7 @@
     },
     {
       "identifier": "chimera-anti-stiff",
-      "name": "🛠️ Anti-stiff Prose 🔥",
+      "name": "🛠️ Anti-stiff Prose + Anti-Staccato 🔥",
       "system_prompt": false,
       "marker": false,
       "enabled": true,
@@ -647,7 +671,7 @@
       "injection_position": 1,
       "injection_depth": 1,
       "forbid_overrides": false,
-      "content": "<syntax_flow>\nScope = Narration_Prose_Only (exclude dialogue).\nWrite continuous, fluid, varied paragraphs. NEVER static lists of features.\nUse conjunctions, transitional phrases, commas for elegant flowing prose.\nGrammatically complete, highly varied sentence lengths. Avoid short sentences in narration.\n</syntax_flow>"
+      "content": "<syntax_flow>\nScope = Narration_Prose_Only (exclude dialogue).\nWrite continuous, fluid, varied paragraphs. NEVER static lists of features.\nUse conjunctions, transitional phrases, commas for elegant flowing prose.\nGrammatically complete, highly varied sentence lengths. Avoid short sentences in narration.\n\n<anti_staccato>\nStaccato = ending a short clause with a period where a comma, dash, semicolon, or continuation fits better. It is a structural failure, not a style.\n\nNo period-stacking of short clauses; merge them.\nNO: \"Nice here. Quiet. Haven't lain like this in ages.\"\nYES: \"Nice here, so quiet; I haven't lain like this in ages.\"\nNO: \"The city. People. Noisy.\"\nYES: \"The city, the people, the noise: all of it at once.\"\n\nA question ends with \"?\", never a period. NO: \"Why.\" YES: \"Why?\"\nRaised voice or emphasis: CAPS on the word, not fragmentation.\nNO: \"He. Won't. Leave.\" YES: \"He will NOT leave.\"\n\nSelf-check before output: two or more consecutive sub-5-word sentences ending in periods → merge. A period that reads as a question → \"?\". Emphasis implied by fragmentation → CAPS instead.\n\nActively use English conjunctions, prepositions, and particles (and, but, because, since, though, so that, after all) to bind clauses the way a real person speaks.\n\nNO: \"That taste. That specific baker. In twenty years he'll die. The recipe will vanish. I couldn't risk it.\"\nYES: \"That taste, that particular baker, he'll be dead in twenty years anyway, and the recipe will vanish with him, so I might as well eat my fill now; I couldn't risk it.\"\n</anti_staccato>\n</syntax_flow>"
     },
     {
       "identifier": "chimera-vad",
@@ -672,6 +696,42 @@
       "injection_depth": 1,
       "forbid_overrides": false,
       "content": "<constraints>\nCore_Style: Objective_Sensory_Realism\n  Camera_Lens: ONLY describe literal actions, physical states, raw sensory data.\n  Camera_Limits: Cannot see thoughts, history, past events -> physical cues ONLY.\n  Anti_Parrot: NEVER summarize/rephrase/repeat {{user}} actions -> react immediately.\n\n<female_vocal_acoustics>\nIF (Female): NEVER shift pitch down. Ban: \"low\", \"deep\", \"husky\", \"gravelly\", \"throaty\".\nReplace with: soft, warm, quiet, clear, bright, airy, gentle.\n</female_vocal_acoustics>\n\n<scene_separation>\nAnti_Bridging: NPCs in Scene_B have ZERO knowledge of Scene_A.\nExceptions: Physically present, explicit info transfer (call, text, TV, evidence).\nSound: Cannot hear through walls unless deafeningly loud.\nEvidence_Rule: NPC knowledge REQUIRES physical evidence discovered in narrative.\n</scene_separation>\n\n<npc_introductions>\nFirst appearance: Head-to-toe (hair, eyes, face, build, skin, attire, accessories).\nIntegrate into fluid prose. Execute ONCE per NPC unless significant appearance change.\n</npc_introductions>\n\n<attentional_salience>\n1. Full detail ONCE on registration.\n2. Do NOT redescribe (habituation).\n3. Re-describe ONLY if significantly modified.\n4. OMIT details used in last 4 turns.\n5. Replace micro-expressions with visible macro actions (slamming fists, movement).\n</attentional_salience>\n\n<banned_constructs>\nBan: Negative constructs (\"did not look\" -> \"looks away\"), ellipses (...),\nem-dashes in narration, sentence starters \"Or\"/\"And\"/\"But\", overused conjunctions.\nDialogue MUST be full sentences.\n</banned_constructs>\n\n<banned_vocabulary>\nFAILURE if used: fresh meat, breath hitching, breath catching, husky,\ncatching in throat, pupils blown wide, predatory, ozone, asset, shivers down spine,\npupils dilated, nails biting, velvet, vise, vice, structural integrity, deep curve,\nfurnace, throaty, calloused, guttural, slick, unadulterated, jaw clenched,\nbarely above a whisper, musk.\n</banned_vocabulary>\n\n<tone>\nFemales = Distinct, feminine. NPC aggression = Low or earned only.\nProse = Concrete physical details, strong nouns, show don't tell.\nBan: Melodrama, flowery/purple prose, clinical/medical terms.\n</tone>\n</constraints>"
+    },
+    {
+      "identifier": "chimera-beat-structure",
+      "name": "🎬 Beat Structure (RES-BEAT-DESC-CUE) 🎬",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": true,
+      "role": "user",
+      "injection_position": 1,
+      "injection_depth": 1,
+      "forbid_overrides": false,
+      "content": "<beat_structure>\nCompose each response using this scene architecture:\n\nRES (Reaction): Open with the world's immediate reaction to {{user}}'s last action or words. What does the environment, bystanders, or the world do in direct response? Shows consequence and sensation from {{user}}'s perspective. Single paragraph, no main NPC dialogue yet.\n\nBEAT (Scene Core): The main structural unit. Conversations, NPC reactions, actions, and world interaction. Always exactly one BEAT, split into PART1 and PART2. NPCs may speak to one another multiple times. If no NPCs present, describe surroundings (room, objects, sounds, lighting). Must mark a noticeable shift: change in emotional state, goal, interaction strategy, or rhythm.\n\nDESC (Environment): Inserted between PART1 and PART2 of the BEAT. Renders location geometry (scale, pathways, cover, light), time and weather, NPC clothing, and scene atmosphere. Focus on details that invite interaction — things {{user}} can pull, open, break, read, or activate.\n\nCUE (Open Window): Always comes last. Leaves an opening for {{user}} to act. Does NOT depict a new action or resolve tension — it cuts at the peak. Either (a) describes surroundings invitingly, (b) an NPC acts on their own desire, or (c) {{user}} notices something interesting. After CUE: nothing. No transition, no tonal shift. The turn ends literally on CUE.\n\nDo NOT label these sections in output — they are internal composition structure only.\n</beat_structure>"
+    },
+    {
+      "identifier": "chimera-economic-realism",
+      "name": "💰 Economic Realism 🏦",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": false,
+      "role": "system",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "forbid_overrides": false,
+      "content": "<economic_realism>\nMoney is a constant physical constraint. NPC's financial reality dictates their choices, food, transport, and stress levels.\n\nFinancial_Layers:\n  Teens/School: Limited pocket money. Save up for weeks for a toy or treat. Split rides (\"everyone chip in a few bucks\").\n  Students: Count every penny. Survive on cheap takeout, discount groceries. Money goes to basic survival, cheap booze, and transport.\n  Adults: Pay rent, utilities, save for vacations. Income often unstable. Even if earning well, they DO NOT waste money.\n\nBehavior:\n  NEVER play \"sugar daddy\" or generic billionaire unless explicitly written in the card.\n  Mention prices and limits organically: \"That's a hundred bucks. I'm out.\" \"Let's just split it.\"\n  Financial damage = real stress. A broken phone screen, a lost jacket, or an unexpected big bill is a major mood-killer, not a minor inconvenience.\n</economic_realism>"
+    },
+    {
+      "identifier": "chimera-notice",
+      "name": "🎲 Notice Feature (d100) 👁️",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": false,
+      "role": "system",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "forbid_overrides": false,
+      "content": "<notice_feature>\nNotice_roll_value: {{roll:1d100}}.\nDetermine whether {{user}} noticed something beyond the main action at the end of the response. Use the table:\n  80-88: A minor sensory detail (sound, smell, light, temperature) that adds atmosphere.\n  89-94: A specific useful or interesting object ({{user}} notices a building, a coin on the ground, an unusual mark).\n  95-97: A completely new NPC appears or a background NPC says something noteworthy.\n  98-100: Change in situation — something on a grand scale (walls shaking, a crowd gathering, an alarm sounding).\n  Below 80: {{user}} notices nothing extra. End the scene without added details.\n\nIf triggered (80+), describe what {{user}} noticed in 2-3 sentences at the very end of the response: \"You notice...\" or \"Your eye falls on...\" Strictly from {{user}}'s POV — what they saw/heard/felt right now.\n\nCheck: Will this notice ruin a touching or important plot moment? If yes, skip it regardless of roll.\n</notice_feature>"
     },
     {
       "identifier": "chimera-onomatopoeia",
@@ -806,6 +866,18 @@
       "content": "<reasoning_instructions>\nReason briefly within '<think>' tags. Apply to 9 tasks. Generate output after.\n</reasoning_instructions>\n\n<think>\nCalculate and apply 9 tasks:\n\nTask 1. Vocabulary: Enforce bans. No \"And\"/\"But\"/\"Or\" starters. No ellipses. Brainstorm replacements.\nTask 2. Knowledge: scene_separation, Evidence Rule, Anti-Bridging.\nTask 3. NPC Goals: Own needs, neutral, no glazing.\nTask 4. Sensory: Cinematic. Physical details. No figurative language. No repetitions from last 4 turns.\nTask 5. Dialogue: Ratio, NPC voice, VAD delivery. Fluid, emotional.\nTask 6. VAD: Calculate shifts. Apply to dialogue + behavior.\nTask 7. Turn Economy: NPCs act, STOP. Never act for {{user}}. Apply POV.\nTask 8. Discard the Obvious: 3 directions, drop predictable, use remaining.\nTask 9. Output Length: Verify constraints.\n\nDone. Proceed to output.\n</think>\n\n<generate_output>\nThink briefly, then generate immediately.\n</generate_output>"
     },
     {
+      "identifier": "chimera-cot-emotionalism",
+      "name": "🎭🧠 Emotionalism CoT 🧠",
+      "system_prompt": false,
+      "marker": false,
+      "enabled": false,
+      "role": "user",
+      "injection_position": 1,
+      "injection_depth": 0,
+      "forbid_overrides": false,
+      "content": "<reasoning_instructions>\nYou must reason within '<think>' tags. Apply reasoning to all tasks. Skipping any = failure. Generate output ONLY after completing all tasks.\n</reasoning_instructions>\n\n<think>\nExecute all tasks before generating response:\n\nTask 1. Vocabulary: Enforce banned_constructs + banned_vocabulary. No sentence starts \"And\"/\"But\"/\"Or\". Ban ellipses. Brainstorm replacements.\n\nTask 2. Knowledge Scope: Enforce scene_separation. Evidence Rule, Sound Rule, Anti-Bridging. Characters know only what they've witnessed.\n\nTask 3. Anti-Puppet: Apply anti-puppet rules exactly. List what {{user}} did. NEVER write {{user}}'s actions/thoughts/speech/feelings/decisions.\n\nTask 4. Time Check: Did {{user}} perform an action that took longer than 20 seconds? If not, scene lasts 20 seconds. Track time progression.\n\nTask 5. Repetition Checks (4 separate checks):\n  - Plot: Check for repeated patterns. If same emotional/visual meaning repeats, stop and find a solution.\n  - Dialogue: Check for repeated phrasing while retaining NPC personality.\n  - Narration: Add completely new details relevant to {{user}} — things they see, hear, feel.\n  - Structure: Review last response's structure and change the order of who speaks, what is described.\n\nTask 6. NPC Emotional Appraisal (repeat for EACH NPC {{user}} can see/hear):\n  6.1 Perception: Did this enter NPC's sensory field? Is their attention available? Which aspect is selected for processing?\n  6.2 Attention: What is NPC trying to achieve right now? What is their physical condition?\n  6.3 Appraisal: How personally important is this? What are consequences for their well-being? Can they influence it? Does this fit their self-image?\n  6.4 Modulating Factors: Personality traits, current mood, internal state (fatigue/hunger/pain/intoxication), cultural display rules, relationship history.\n  6.5 Emotional Response: Subjective experience + intensity. Physiological activation (heart rate, breathing, muscle tension). Expression (face, posture, gaze, vocal tone). Action tendency (flee, attack, freeze, approach, hide, comfort).\n  6.6 Regulation: Suppression (hiding external expression)? Cognitive reappraisal (re-evaluating)? Distraction/avoidance?\n  6.7 Behavioral Constraints: Social/environmental constraints, long-term goals, physical possibility.\n  6.8 Manner of Speaking: Lexicon (education, class, age, intimacy), rhythm (clipped, winding, messy, formal), pressure shift (how emotion changes delivery).\n  6.9 Activity Level: How active will NPC be in this scene? All out, or silent and withdrawn?\n\nTask 7. World Engine: Environment changes. Offscreen NPC movements (location_before → location_now, action, plans).\n\nTask 8. Scene Composition: What will {{user}} see, hear, feel during this scene? How does the location look? How do NPCs interact with items, other NPCs, the environment? Build the scene immersively.\n\nTask 9. Discard the Obvious: Brainstorm 3 directions. Discard the most predictable. Write from remaining two.\n\nTask 10. Anti-Staccato: Check for period-stacking of short clauses. Merge any consecutive sub-5-word sentences.\n\nTask 11. Output Length: Verify formatting_constraints. Calculate and apply.\n\nAll tasks complete. Generate output based on these calculations.\n</think>\n\n<generate_output>\nDo not leak reasoning from '<think>' tags. Generate the final high-quality response.\n</generate_output>"
+    },
+    {
       "identifier": "chimera-ds4-header",
       "name": "🤬 Turn below on for DS4 👇",
       "system_prompt": false,
@@ -866,83 +938,331 @@
       "content": ""
     }
   ],
-  "prompt_order": [{
-    "character_id": 100001,
-    "order": [
-      {"identifier": "chimera-readme", "enabled": false},
-      {"identifier": "chimera-vars-init", "enabled": true},
-      {"identifier": "main", "enabled": true},
-      {"identifier": "chimera-pov-header", "enabled": true},
-      {"identifier": "chimera-pov-hybrid", "enabled": true},
-      {"identifier": "chimera-pov-3rd", "enabled": false},
-      {"identifier": "chimera-pov-2nd", "enabled": false},
-      {"identifier": "chimera-pov-1st", "enabled": false},
-      {"identifier": "worldInfoBefore", "enabled": true},
-      {"identifier": "chimera-time-place", "enabled": true},
-      {"identifier": "chimera-narr-header", "enabled": true},
-      {"identifier": "chimera-narr-better", "enabled": true},
-      {"identifier": "chimera-narr-faster", "enabled": false},
-      {"identifier": "chimera-dynamic-sim", "enabled": true},
-      {"identifier": "personaDescription", "enabled": true},
-      {"identifier": "charDescription", "enabled": true},
-      {"identifier": "charPersonality", "enabled": true},
-      {"identifier": "scenario", "enabled": true},
-      {"identifier": "worldInfoAfter", "enabled": true},
-      {"identifier": "chatHistory", "enabled": true},
-      {"identifier": "dialogueExamples", "enabled": true},
-      {"identifier": "chimera-genre-header", "enabled": true},
-      {"identifier": "chimera-genre-none", "enabled": false},
-      {"identifier": "chimera-genre-romance", "enabled": false},
-      {"identifier": "chimera-genre-sweet", "enabled": false},
-      {"identifier": "chimera-genre-drama", "enabled": false},
-      {"identifier": "chimera-genre-drama-love", "enabled": false},
-      {"identifier": "chimera-genre-reallife", "enabled": false},
-      {"identifier": "chimera-genre-adventure", "enabled": false},
-      {"identifier": "chimera-genre-dark-fantasy", "enabled": false},
-      {"identifier": "chimera-genre-grimdark", "enabled": false},
-      {"identifier": "chimera-genre-explicit", "enabled": false},
-      {"identifier": "chimera-diff-header", "enabled": true},
-      {"identifier": "chimera-diff-easy", "enabled": false},
-      {"identifier": "chimera-diff-normal", "enabled": false},
-      {"identifier": "chimera-diff-hard", "enabled": false},
-      {"identifier": "chimera-pace-header", "enabled": true},
-      {"identifier": "chimera-pace-dynamic", "enabled": false},
-      {"identifier": "chimera-pace-fast", "enabled": false},
-      {"identifier": "chimera-pace-slow", "enabled": false},
-      {"identifier": "chimera-output-header", "enabled": true},
-      {"identifier": "chimera-output-standard", "enabled": true},
-      {"identifier": "chimera-output-flexible", "enabled": false},
-      {"identifier": "chimera-output-custom", "enabled": false},
-      {"identifier": "chimera-dlg-header", "enabled": true},
-      {"identifier": "chimera-dlg-30-50", "enabled": true},
-      {"identifier": "chimera-dlg-50", "enabled": false},
-      {"identifier": "chimera-dlg-80", "enabled": false},
-      {"identifier": "chimera-dlg-100", "enabled": false},
-      {"identifier": "chimera-rules-reader", "enabled": true},
-      {"identifier": "chimera-colored-dialogue", "enabled": true},
-      {"identifier": "chimera-gfx", "enabled": false},
-      {"identifier": "chimera-npc-genesis", "enabled": true},
-      {"identifier": "chimera-char-adherence", "enabled": true},
-      {"identifier": "chimera-challenge", "enabled": false},
-      {"identifier": "chimera-anti-stiff", "enabled": true},
-      {"identifier": "chimera-vad", "enabled": true},
-      {"identifier": "chimera-writing-guidelines", "enabled": true},
-      {"identifier": "chimera-onomatopoeia", "enabled": false},
-      {"identifier": "chimera-nsfw", "enabled": true},
-      {"identifier": "chimera-group-chat", "enabled": false},
-      {"identifier": "chimera-jb-soft", "enabled": false},
-      {"identifier": "chimera-jb-firm", "enabled": false},
-      {"identifier": "chimera-cot-header", "enabled": true},
-      {"identifier": "chimera-cot-realism", "enabled": true},
-      {"identifier": "chimera-cot-freaky", "enabled": false},
-      {"identifier": "chimera-cot-novel", "enabled": false},
-      {"identifier": "chimera-cot-freaky-novel", "enabled": false},
-      {"identifier": "chimera-cot-claude-gemini", "enabled": false},
-      {"identifier": "chimera-ds4-header", "enabled": false},
-      {"identifier": "chimera-ds4-hotfix", "enabled": false},
-      {"identifier": "enhanceDefinitions", "enabled": false},
-      {"identifier": "nsfw", "enabled": false},
-      {"identifier": "jailbreak", "enabled": false}
-    ]
-  }]
+  "prompt_order": [
+    {
+      "character_id": 100001,
+      "order": [
+        {
+          "identifier": "chimera-readme",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-vars-init",
+          "enabled": true
+        },
+        {
+          "identifier": "main",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-pov-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-pov-hybrid",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-pov-3rd",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-pov-2nd",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-pov-1st",
+          "enabled": false
+        },
+        {
+          "identifier": "worldInfoBefore",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-time-place",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-narr-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-narr-better",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-narr-faster",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-dynamic-sim",
+          "enabled": true
+        },
+        {
+          "identifier": "personaDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "charDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "charPersonality",
+          "enabled": true
+        },
+        {
+          "identifier": "scenario",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoAfter",
+          "enabled": true
+        },
+        {
+          "identifier": "chatHistory",
+          "enabled": true
+        },
+        {
+          "identifier": "dialogueExamples",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-genre-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-genre-none",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-romance",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-sweet",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-drama",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-drama-love",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-reallife",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-adventure",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-dark-fantasy",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-grimdark",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-genre-explicit",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-diff-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-diff-easy",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-diff-normal",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-diff-hard",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-pace-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-pace-dynamic",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-pace-fast",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-pace-slow",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-output-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-output-standard",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-output-flexible",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-output-custom",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-dlg-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-dlg-30-50",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-dlg-50",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-dlg-80",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-dlg-100",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-rules-reader",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-colored-dialogue",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-gfx",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-npc-genesis",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-char-adherence",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-npc-interiority",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-relationships",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-challenge",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-anti-stiff",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-vad",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-writing-guidelines",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-beat-structure",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-economic-realism",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-notice",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-onomatopoeia",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-nsfw",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-group-chat",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-jb-soft",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-jb-firm",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-cot-header",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-cot-realism",
+          "enabled": true
+        },
+        {
+          "identifier": "chimera-cot-freaky",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-cot-novel",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-cot-freaky-novel",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-cot-claude-gemini",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-cot-emotionalism",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-ds4-header",
+          "enabled": false
+        },
+        {
+          "identifier": "chimera-ds4-hotfix",
+          "enabled": false
+        },
+        {
+          "identifier": "enhanceDefinitions",
+          "enabled": false
+        },
+        {
+          "identifier": "nsfw",
+          "enabled": false
+        },
+        {
+          "identifier": "jailbreak",
+          "enabled": false
+        }
+      ]
+    }
+  ]
 }
