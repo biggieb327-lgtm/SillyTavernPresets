@@ -282,16 +282,29 @@ pilot pair with Priya.
 ## Termux / Android quirks
 
 - **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
-  processes when >32 exist system-wide; 6 bots sit at that limit. Signature:
-  `STARTUP AUDIT` lines piling up in `/errors` with **no** `[shutdown] graceful stop`
-  line before them (SIGKILL can't be caught). One-time fix via adb:
+  processes when >32 exist system-wide; 6 bots sit at that limit.
+  **Triage by the EXIT CODE in the `[run-bot] … exited (code N)` line of `bot.log`** —
+  run-bot.sh logs the real `$?` (corrected 2026-07-25; the old "no graceful-stop line"
+  signature was wrong and cost two debugging rounds):
+
+  | exit code | meaning |
+  |---|---|
+  | `0` | Clean. `/update` and `/restart` exit here via `os._exit(0)` in `_schedule_exit()` (so the Telegram reply and admin-API response flush first). **No graceful-stop line is logged for these** — that's expected, not a kill. |
+  | `137` | SIGKILL (128+9) — phantom-process killer or OOM killer. Can't be caught, so no graceful-stop line either. |
+  | `143` | SIGTERM (128+15) that PTB didn't convert to a clean stop — most likely an OEM battery manager (see dontkillmyapp.com). |
+
+  So `[shutdown] graceful stop` being **absent does NOT imply SIGKILL** — an ordinary
+  deploy looks identical in that respect. Only the exit code separates them. The
+  restart-storm detector (`_tally_unexpected_restarts`) is unaffected: it keys off the
+  `[restart] requested` / `[update] …; restarting` markers in `errors.log`, not the
+  graceful-stop line.
+
+  One-time fix via adb:
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
   plus Termux battery → Unrestricted. **The setting reverts after an Android OS
-  update/factory reset** — if silent restarts return, check
+  update/factory reset** — if `code 137` restarts return, check
   `settings get global settings_enable_monitor_phantom_procs` before debugging
-  anything else. Conversely, repeated *clean* `exited (code 0)` restarts WITH a
-  graceful-stop line are NOT the phantom killer — that's a real SIGTERM, most likely
-  an OEM battery manager (see dontkillmyapp.com for the manufacturer).
+  anything else.
 - run-bot.sh launches `~/telegram-bot/venv/bin/python` **explicitly** — bare `python`
   crash-loops on `ModuleNotFoundError` when the venv isn't on tmux's PATH. Never
   regress this.
@@ -333,8 +346,12 @@ pilot pair with Priya.
 ## Monitoring
 
 - **Restart-storm self-report**: `_self_audit` (every 30 min) DMs the owner at ≥3
-  `STARTUP AUDIT` lines/hour (2h cooldown). Graceful-stop line present = catchable
-  SIGTERM (battery manager or watchdog); absent = SIGKILL (phantom killer).
+  *unexpected* `STARTUP AUDIT` lines/hour (2h cooldown). `_tally_unexpected_restarts`
+  excludes owner-initiated starts via the `[restart] requested` / `[update] …; restarting`
+  markers, so ordinary deploys don't trip it. To classify a restart, read the **exit code**
+  in `bot.log`'s `[run-bot] … exited (code N)` line — see §Termux/Android quirks. Do not
+  use the graceful-stop line for this: `/update` and `/restart` exit via `os._exit(0)` and
+  never log one either.
 - **Dead man's switch**: set `HEALTHCHECK_URL` per instance (healthchecks.io, 30 min
   period + 15 min grace) — silence alerts on bot-down AND phone-dead.
 - **`backup-all.sh`** (cron, on-device): nightly state archive to shared storage,

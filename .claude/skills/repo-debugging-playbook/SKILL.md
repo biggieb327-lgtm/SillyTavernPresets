@@ -35,8 +35,9 @@ Three rounds of speculative fixes once lost to one pasted log line.
 
    | Signature | Cause | Check |
    |---|---|---|
-   | `STARTUP AUDIT` lines piling up, NO `[shutdown] graceful stop` before them | Android phantom-process killer (SIGKILL) | `settings get global settings_enable_monitor_phantom_procs` — reverts after OS updates |
-   | Repeated clean `exited (code 0)` WITH graceful-stop line | Real SIGTERM — OEM battery manager, not phantom killer | dontkillmyapp.com for the manufacturer |
+   | `[run-bot] … exited (code 137)` | SIGKILL — Android phantom-process killer or OOM | `settings get global settings_enable_monitor_phantom_procs` — reverts after OS updates |
+   | `[run-bot] … exited (code 143)` | SIGTERM PTB didn't convert to a clean stop — OEM battery manager | dontkillmyapp.com for the manufacturer |
+   | `[run-bot] … exited (code 0)`, no graceful-stop line | **Normal.** `/update` and `/restart` exit via `os._exit(0)` in `_schedule_exit()` and never log a graceful stop. NOT a kill | correlate the timestamps with deploys before investigating further |
    | Whole fleet restarting every ~5 min | watchdog.sh judging bots frozen | `tail ~/telegram-bot/watchdog.log` — it states its reason before every relaunch. Check this FIRST for any restart storm |
    | `ModuleNotFoundError` crash-loop | bare `python` instead of venv interpreter, or venv broken by a Python minor-version bump | `run-bot.sh` uses `venv/bin/python`? `pkg upgrade` recently? |
    | Startup `TypeError: offset-naive vs offset-aware` | tzdata missing from venv | reinstall tzdata / rebuild venv from requirements.txt |
