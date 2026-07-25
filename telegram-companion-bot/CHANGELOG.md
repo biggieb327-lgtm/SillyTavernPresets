@@ -7,6 +7,36 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-25 — Ops: watchdog.sh single-instance guard (no bot.py change, no version bump)
+
+**Root cause:** `watchdog.sh` supports two install modes — `--once` (cron) and a bare
+invocation that enters `while true; do run_checks; sleep $WATCHDOG_INTERVAL; done` and
+never exits. Installed in cron **without** `--once`, every invocation starts another
+immortal loop. Nothing stopped it: the script had no duplicate-instance guard of any kind.
+
+Observed on-device 2026-07-25: **92 `bash` + 91 `sleep` processes**, ~183 of the phone's
+191 Termux-uid processes, against an Android phantom-process limit of 32. Diagnosed by
+grouping `ps -u $(id -u)` by command — the paired bash/sleep counts are the signature of
+N shell loops each parked in a sleep.
+
+**The process count was the lesser problem.** Every accumulated watchdog polls the same
+`.alive` heartbeat files, so a single stale heartbeat would produce ~91 simultaneous
+kill-and-relaunch decisions against one bot. That is the 2026-07-05 incident this script
+was written to prevent, multiplied by however many copies have piled up.
+
+**Fix:** a PID-file guard ahead of the mode dispatch. A live owner (`kill -0` succeeds)
+makes the new instance log why and exit; a stale file is cleared and taken over; `trap …
+EXIT INT TERM` removes it on the way out. PID file rather than `flock` to avoid a
+util-linux dependency on Termux — the theoretical race between two simultaneous starts is
+irrelevant against a 5-minute cron cadence.
+
+Break-tested through all four paths: clean start, refusal while a live instance holds the
+file, self-heal from a stale PID, and cleanup on exit.
+
+**`watchdog.sh` is curl-installed and NOT pulled by `update-all.sh`** — re-install it by
+hand to get this (command in the script header). Also check `crontab -l`: the cron line
+must include `--once`.
+
 ## v2026-07-25.9 — A partial Garmin pull explains itself
 
 **Root cause:** on 2026-07-25 `/healthnow` returned only today's step count. The feature
