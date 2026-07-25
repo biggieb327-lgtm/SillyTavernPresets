@@ -82,7 +82,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-23.2"
+BOT_VERSION = "2026-07-25.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -279,6 +279,11 @@ LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+# Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
+# only blocks carrying an explicit "raise this" instruction, while her live context (her day,
+# her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
+# restore the pre-v2026-07-25.1 prompt text exactly.
+PROMPT_BALANCE = os.getenv("PROMPT_BALANCE", "1").lower() not in ("0", "false", "no", "off")
 TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
@@ -3033,6 +3038,25 @@ def environment_note() -> str:
     return "[" + line + "]"
 
 
+def _initiative_note(name: str, uname: str) -> str:
+    """The topic-initiative balance block (gated on PROMPT_BALANCE).
+
+    Recall blocks (notes, threads, memories, pinned) each told her to raise their
+    contents; the live-context blocks (her day, her schedule, weather, whatever a
+    feature put in front of her) said either nothing or "don't foreground this".
+    Net effect: remembering was the only sanctioned way to open a topic. This says
+    plainly that it isn't. Pure so the wording is testable."""
+    return (
+        f"# Bringing things up\n"
+        f"When {name} starts a topic rather than answering one, remembering something is "
+        f"only one option and shouldn't be the default. What she's doing right now, what's "
+        f"around her, what she's got coming up, something she noticed about {uname} today — "
+        f"all of these are as real to reach for as anything she recalls, and often better, "
+        f"because they're happening now. Recalled facts are context she has, not a supply "
+        f"of conversation topics to draw down. If two openings fit equally, take the live one."
+    )
+
+
 def mood_now(chat_id: int) -> float:
     """Current mood, decaying toward neutral over time (half-life ~24h)."""
     m = moods.get(chat_id)
@@ -3899,9 +3923,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # prompts (GROUP_CHAT_DESIGN.md §5).
     unotes = "" if group else _read_user_notes()
     if unotes:
-        messages.append({"role": "system", "content": (
-            f"# Things you know {uname} has going on\n{unotes}\n"
+        _unote_tail = (
             f"Ask about these naturally if one fits the moment — don't force it."
+            if not PROMPT_BALANCE else
+            f"Ask about one naturally if the moment genuinely calls for it — don't force it. "
+            f"This is a list you happen to know, not a checklist to work through and not your "
+            f"default way of showing you care. Most messages shouldn't touch it at all."
+        )
+        messages.append({"role": "system", "content": (
+            f"# Things you know {uname} has going on\n{unotes}\n{_unote_tail}"
         )})
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
@@ -4029,9 +4059,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         threads = open_threads.get(chat_id, [])
         if threads:
             tl = "\n".join(f"- {t}" for t in threads[:3])
-            messages.append({"role": "system", "content": (
-                f"# Open threads between you two\n{tl}\n"
+            _thread_tail = (
                 f"Let them surface naturally if one fits — don't force."
+                if not PROMPT_BALANCE else
+                f"Let one surface naturally if it fits — don't force, and don't reach for these "
+                f"just because you have nothing else. What you're doing right now is as good a "
+                f"thing to talk about."
+            )
+            messages.append({"role": "system", "content": (
+                f"# Open threads between you two\n{tl}\n{_thread_tail}"
             )})
 
     rq = _recent_questions.get(chat_id) or []
@@ -4070,6 +4106,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             + "\n".join("- " + b for b in bds)
         )})
 
+    # Placed after every recall block so it frames them, and before the card's own
+    # post-history instructions so the card still gets the last word on voice.
+    if PROMPT_BALANCE:
+        messages.append({"role": "system", "content": _initiative_note(NAME, uname)})
+
     if POST_HISTORY_RAW:
         messages.append({"role": "system", "content": fill(POST_HISTORY_RAW, NAME, uname)})
 
@@ -4104,9 +4145,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # Day context — what's been happening today; drives continuity across conversations.
     day_ctx = _read_day_context()
     if day_ctx:
-        messages.append({"role": "system", "content": (
-            f"# What's going on today\n{day_ctx}\n\n"
+        _day_tail = (
             f"Let this color what you say when it fits — don't narrate it like a list."
+            if not PROMPT_BALANCE else
+            f"Let this color what you say — and it's yours to bring up unprompted, the way "
+            f"anyone mentions what they're in the middle of. Still never narrate it like a "
+            f"list; one concrete detail beats a summary of your day."
+        )
+        messages.append({"role": "system", "content": (
+            f"# What's going on today\n{day_ctx}\n\n{_day_tail}"
         )})
 
     if image_data_url:

@@ -7,6 +7,58 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.1 — Topic initiative rebalanced away from recall (PROMPT_BALANCE)
+
+**Root cause this release addresses:** owner-reported symptom was "the bots are too focused
+on bringing up memories and notes and don't bring up things to do with other features". The
+cause is not card size and not context pressure — it's an **asymmetry in the directive text**
+of the injected blocks. Of the ~15 system blocks `assemble_messages` appends, exactly two
+carried an explicit instruction to raise their contents — `# Things you know {user} has going
+on` ("Ask about these naturally if one fits") and `# Open threads between you two` ("Let them
+surface naturally if one fits"). Both are recall. Meanwhile the live-context blocks were
+either bare statements (`environment_note()`'s time+weather one-liner, `# {NAME}'s schedule
+today`) or **actively suppressed**: `# What's going on today` ended with "don't narrate it
+like a list". So the only sanctioned way for the character to open a topic was to remember
+something, and the block describing her actual present day was the one told to stay in the
+background. The model was following the prompt correctly.
+
+Two things ruled out while diagnosing, recorded so they aren't re-investigated:
+- **Card size is not a factor.** `CONTEXT_TOKEN_BUDGET` defaults to `0`, so
+  `_trim_history_to_budget` returns immediately and nothing is trimmed at all. Even with a
+  budget set, `protected = system_indices | {final_user}` — every injected block is exempt
+  and only conversation history is dropped. A 53KB card (jules) costs recent turns, never a
+  feature block.
+- This is the follow-on release v2026-07-18.1 explicitly deferred ("Lore, `memory_block`
+  facts/summaries, `user_notes`, pinned, and `day.txt` … injected wholesale (not ranked), so
+  suppression there is a different mechanism — left for a future release"). That release
+  fixed *repetition of one ranked memory*; this one fixes *which category of thing she
+  reaches for at all*. Different mechanism, as predicted.
+
+**What shipped**, behind `PROMPT_BALANCE` (default **1 = on**; `0` restores the previous
+prompt text byte-for-byte):
+- New pure `_initiative_note(name, uname)` → a `# Bringing things up` block appended after
+  every recall block (so it frames them) and before `POST_HISTORY_RAW` (so the card keeps the
+  last word on voice). It says plainly that recalling is one option among several and not the
+  default, that what she's doing//what's around her/what she noticed today are equally valid
+  openings, and that recalled facts are context rather than a supply of topics to draw down.
+- `user_notes` tail rewritten: still "ask if it fits", now explicitly "not a checklist to work
+  through and not your default way of showing you care. Most messages shouldn't touch it."
+- `open_threads` tail rewritten: adds "don't reach for these just because you have nothing
+  else."
+- `day.txt` tail rewritten: the anti-list guard is kept (it's load-bearing against recitation)
+  but the block now grants initiative — "yours to bring up unprompted, the way anyone mentions
+  what they're in the middle of."
+
+**Deliberately unchanged:** no block was removed and none had its content narrowed.
+`user_notes` injection into every 1:1 prompt stays as-is — the 2026-07-10 audit already
+rejected "injected into every chat's prompt" as a defect (by design for single-owner bots).
+Ranked-memory suppression (`MEMORY_REPEAT_SUPPRESS_TURNS`) is untouched and orthogonal.
+
+**Pure helper + tests:** `_initiative_note`. New `TestInitiativeNote` (names interpolated,
+states the live-over-recall preference, no leftover "checklist" framing) and
+`TestPromptBalanceTails` (each rewritten tail differs from its legacy string, and the legacy
+string is what the kill switch restores).
+
 ## v2026-07-23.2
 
 Anti-hallucination: note confidence gating (article: "Stop AI Hallucinations Before

@@ -2716,3 +2716,78 @@ class TestNoteConfidenceConfig:
         import inspect
         src = inspect.getsource(bot._post_reply_analysis)
         assert "do not fill gaps with a" in src
+
+
+# ── Topic-initiative balance (PROMPT_BALANCE, v2026-07-25.1) ─────────────────
+# Recall blocks were the only ones instructed to raise their contents; the live
+# context blocks were passive or actively suppressed. See CHANGELOG v2026-07-25.1.
+
+class TestInitiativeNote:
+    def test_interpolates_both_names(self):
+        note = bot._initiative_note("Nora", "Brian")
+        assert "Nora" in note
+        assert "Brian" in note
+
+    def test_states_recall_is_not_the_default(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "only one option" in note
+        assert "default" in note
+
+    def test_prefers_live_opening_on_a_tie(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "take the live one" in note
+
+    def test_frames_recall_as_context_not_topic_supply(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "context she has" in note
+
+    def test_is_pure_and_deterministic(self):
+        assert bot._initiative_note("A", "b") == bot._initiative_note("A", "b")
+
+    def test_no_leading_or_trailing_whitespace(self):
+        note = bot._initiative_note("Nora", "Brian")
+        assert note == note.strip()
+
+    def test_carries_its_own_heading(self):
+        assert bot._initiative_note("Nora", "Brian").startswith("# Bringing things up")
+
+
+class TestPromptBalanceConfig:
+    def test_flag_exists_and_defaults_on(self):
+        assert hasattr(bot, "PROMPT_BALANCE")
+        assert bot.PROMPT_BALANCE is True
+
+    def test_flag_is_bool(self):
+        assert isinstance(bot.PROMPT_BALANCE, bool)
+
+
+class TestPromptBalanceTails:
+    """Each rewritten tail must keep the legacy string as the kill-switch branch,
+    so PROMPT_BALANCE=0 restores the pre-v2026-07-25.1 prompt exactly."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot.assemble_messages)
+
+    def test_legacy_notes_tail_still_present(self):
+        assert "Ask about these naturally if one fits the moment" in self._src()
+
+    def test_legacy_threads_tail_still_present(self):
+        assert "Let them surface naturally if one fits" in self._src()
+
+    def test_legacy_day_tail_still_present(self):
+        assert "don't narrate it like a list" in self._src()
+
+    def test_notes_tail_rejects_checklist_framing(self):
+        assert "not a checklist to work through" in self._src()
+
+    def test_threads_tail_rejects_filler_use(self):
+        assert "just because you have nothing else" in self._src()
+
+    def test_day_tail_grants_initiative(self):
+        assert "yours to bring up unprompted" in self._src()
+
+    def test_initiative_block_is_gated(self):
+        src = self._src()
+        assert "if PROMPT_BALANCE:" in src
+        assert "_initiative_note(NAME, uname)" in src
