@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.13"
+BOT_VERSION = "2026-07-25.14"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1585,7 +1585,22 @@ def norm_emoji(e: str) -> str:
 WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Seattle")
 WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
 WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
-TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
+# BOT_TIMEZONE is the name `.env.example` has always documented and the one instances
+# actually set — but until 2026-07-25 nothing read it except the `--check-config`
+# preflight, purely to label a warning. The clock came from TIMEZONE, so setting the
+# documented variable did nothing and every instance silently ran on the
+# America/Los_Angeles default: quiet hours, reminders, schedules, midnight day rotation
+# and note follow-ups all on Pacific regardless of what the .env said. Found by the
+# 2026-07-25 audit; the item-1 sweep missed it because BOT_TIMEZONE *is* read somewhere,
+# just not for its documented purpose — "is it read at all" is a weaker test than "does
+# it do what the docs claim".
+# BOT_TIMEZONE now wins; TIMEZONE still works so existing .envs using it are unaffected.
+TIMEZONE = os.getenv("BOT_TIMEZONE", "").strip() or os.getenv("TIMEZONE", "America/Los_Angeles")
+_tz_alt = os.getenv("TIMEZONE", "").strip()
+if os.getenv("BOT_TIMEZONE", "").strip() and _tz_alt and _tz_alt != TIMEZONE:
+    _CONFIG_WARNINGS.append(
+        f"both BOT_TIMEZONE and TIMEZONE are set and differ — using BOT_TIMEZONE={TIMEZONE!r}, "
+        f"ignoring TIMEZONE={_tz_alt!r}. Remove one.")
 
 try:
     from zoneinfo import ZoneInfo

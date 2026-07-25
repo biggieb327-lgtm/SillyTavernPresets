@@ -7,6 +7,61 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.14 — BOT_TIMEZONE never set the timezone (+ audit item 4)
+
+**⚠️ BEHAVIOUR CHANGE ON DEPLOY — read before shipping.** Any instance whose `.env` sets
+`BOT_TIMEZONE` has, until now, been ignoring it and running on `America/Los_Angeles`.
+After this release it uses the timezone you actually asked for. If that differs from
+Pacific, **quiet hours, reminders, note follow-ups, schedule windows and midnight day
+rotation all shift accordingly** — correct, but a visible change in when things happen.
+Check each instance's `/audit` and `.env` before deploying if that matters.
+
+**Root cause:** two timezone variables, and the documented one was inert.
+- `TIMEZONE` set the clock: `TZ = ZoneInfo(TIMEZONE)`, default `America/Los_Angeles`.
+- `BOT_TIMEZONE` was read in exactly one place — inside `--check-config` — purely to
+  *label* a warning string.
+- `.env.example` has always documented `BOT_TIMEZONE` as the timezone setting, and the
+  pytest fixture sets it too.
+
+So the variable the docs told you to set did nothing, silently. Worse, the preflight
+check read as a pass: with `BOT_TIMEZONE` set and `TIMEZONE` unset, `TZ` resolves fine
+(to Pacific), so `--check-config` cheerfully reported a working timezone that wasn't the
+one requested.
+
+`BOT_TIMEZONE` now wins, with `TIMEZONE` still honoured so existing `.env` files using it
+are unaffected; setting both to different values warns rather than picking silently.
+
+**How the earlier sweep missed it, worth recording:** v2026-07-25.12's check asked *"is
+this variable read anywhere?"*. `BOT_TIMEZONE` **is** read — just not for its documented
+purpose. "Is it read at all" is a strictly weaker test than "does it do what the docs
+claim", and only the second one would have caught this. It surfaced by accident while
+enumerating undocumented variables for item 4.
+
+**Audit item 4 — `.env.example` now accounts for every variable bot.py reads.** 194 read;
+177 documented as settable with defaults extracted *from the source*, not typed from
+memory; 17 deliberately listed as internal.
+
+Newly documented, grouped by feature: weather/location, web search, voice & delivery,
+follow-up bubbles, documents/PDFs/images, selfie tuning, TTS, memory & notes, mood &
+reactions, proactive timing, schedules, inner voice, and group-chat tuning. **Reddit link
+reading (`REDDIT_CLIENT_ID`/`SECRET`/`USER_AGENT`) was an entire undocumented feature** —
+Reddit puts scraping behind a JS wall, so shared Reddit links silently fail without a
+free OAuth app, and nothing told you that.
+
+The 17 internal ones (`BOT_HOME`, ring-buffer sizes, memory-compaction thresholds, API
+endpoints, the legacy `TIMEZONE` alias) are listed **by name with no example values**, so
+the file is a complete account of what bot.py reads without presenting implementation
+details as a menu to tune.
+
+**New eval `env-vars-documented`**, break-tested: green on the real file, red when a fake
+`os.getenv` is injected into a copy. It fails in both directions — documented-but-unread
+and read-but-undocumented — so this drift cannot silently return.
+
+**Tests:** `TestBotTimezoneTakesEffect` — the fixture's `BOT_TIMEZONE=America/New_York`
+now actually resolves (it would have been Los_Angeles before), the clock is read at
+module scope rather than only in the preflight, the legacy name still works, and the
+conflict warning exists.
+
 ## v2026-07-25.13 — Audit item 3: no command renders arbitrary content through Markdown
 
 **Root cause:** v2026-07-25.7 fixed `/audit` sending arbitrary diagnostic strings under

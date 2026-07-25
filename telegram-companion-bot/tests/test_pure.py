@@ -3962,3 +3962,33 @@ class TestNoUnescapedMarkdownInterpolation:
         for fn in (bot.card_cmd, bot.notes_cmd, bot.status_cmd, bot.schedule_cmd,
                    bot.setcard_cmd, bot.vibe_cmd, bot.energy_cmd):
             assert "parse_mode" not in inspect.getsource(fn), fn.__name__
+
+
+# ── BOT_TIMEZONE actually sets the clock (v2026-07-25.14) ───────────────────
+# It was documented as THE timezone setting but only read by --check-config, so every
+# instance silently ran on the America/Los_Angeles default of TIMEZONE.
+
+class TestBotTimezoneTakesEffect:
+    def test_fixture_bot_timezone_is_honoured(self):
+        # conftest sets BOT_TIMEZONE=America/New_York. Before the fix this asserted
+        # nothing useful because TZ came from TIMEZONE and defaulted to Los_Angeles.
+        assert bot.TIMEZONE == "America/New_York"
+        assert str(bot.TZ) == "America/New_York"
+
+    def test_bot_timezone_is_read_at_module_scope(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r'^TIMEZONE = .*$', src, re.M)
+        assert m and "BOT_TIMEZONE" in m.group(0), \
+            "the clock must come from BOT_TIMEZONE, not just the preflight check"
+
+    def test_legacy_timezone_still_supported(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r'^TIMEZONE = .*$', src, re.M)
+        assert '"TIMEZONE"' in m.group(0), "existing .envs using TIMEZONE must keep working"
+
+    def test_conflict_between_the_two_warns(self):
+        import inspect
+        src = inspect.getsource(bot)
+        assert "both BOT_TIMEZONE and TIMEZONE are set and differ" in src
