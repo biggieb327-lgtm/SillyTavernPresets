@@ -72,7 +72,7 @@ def _get_session() -> requests.Session:
 _REPLY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="reply")
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
-from telegram.error import NetworkError, TimedOut
+from telegram.error import NetworkError, TimedOut, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     ApplicationHandlerStop,
@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.7"
+BOT_VERSION = "2026-07-25.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11934,6 +11934,17 @@ async def fleet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
     err = context.error
+    # BadRequest MUST be tested before NetworkError: in PTB it *subclasses* NetworkError
+    # (verified on 21.11.1), so the isinstance check below silently absorbed every
+    # client-side Bot API error — malformed markup, message-too-long, bad parameters —
+    # logged it as "[net] transient" and filed it under the `network` counter, which reads
+    # as ambient phone flakiness and gets ignored. That is exactly how the v2026-07-25.5
+    # /audit markup bug hid: two "Can't parse entities" failures showed up in /audit as
+    # "network: 3". A 400 from Telegram is a defect in what we sent, not a bad connection.
+    if isinstance(err, BadRequest):
+        log.error("[api] bad request — client-side defect, not the network: %s", err)
+        _count_error("bad_request")
+        return
     if isinstance(err, (NetworkError, TimedOut)):
         log.warning("[net] transient: %s: %s", err.__class__.__name__, err)
         _count_error("network")
@@ -12090,9 +12101,13 @@ async def _on_shutdown(application):
     # plain signal handler here would never fire. post_shutdown runs as part of PTB's
     # own graceful-stop sequence regardless of what triggered it (signal, or an
     # explicit app.stop() from /update or /restart), which is the reliable hook.
-    # WARNING so it lands in errors.log: a startup audit with no preceding "graceful
-    # shutdown" line means the process was SIGKILLed, not signaled (Android phantom
-    # process killer / OOM killer — those can't be caught at all).
+    # WARNING so it lands in errors.log. NOTE (corrected 2026-07-25): the absence of this
+    # line does NOT imply a SIGKILL, and reading it that way cost two debugging rounds.
+    # /update and /restart exit through _schedule_exit() -> os._exit(0), which bypasses
+    # this hook entirely, so an ordinary deploy also logs no graceful stop. Triage a
+    # restart by the EXIT CODE in run-bot.sh's "[run-bot] … exited (code N)" line:
+    # 0 = clean/intentional, 137 = SIGKILL (phantom-process/OOM killer), 143 = a SIGTERM
+    # PTB never converted to a clean stop (OEM battery manager).
     log.warning("[shutdown] graceful stop — saving state.")
     _write_state()
     await _stop_admin_api(application)

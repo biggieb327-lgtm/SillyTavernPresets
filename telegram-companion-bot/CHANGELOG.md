@@ -7,6 +7,53 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.8 — Client-side API errors stop hiding in the network bucket
+
+**Root cause:** `BadRequest` **subclasses `NetworkError`** in python-telegram-bot
+(verified on 21.11.1: `BadRequest → NetworkError → TelegramError`). `on_error` tested
+`isinstance(err, (NetworkError, TimedOut))` first, so every 400 from the Bot API —
+malformed markup, message-too-long, invalid parameters, bad file — was logged as
+`[net] transient: BadRequest: …` at WARNING and counted under `network`. That bucket reads
+as ambient phone flakiness and is rightly ignored.
+
+**This is how v2026-07-25.5's `/audit` markup bug stayed invisible.** From Emily's
+`errors.log`:
+
+```
+07:38:01 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
+07:46:46 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
+```
+
+Two reproductions of a code defect, presented to the owner in `/audit` as `network: 3`.
+A 400 means *we sent something invalid*; it has nothing to do with the connection, and
+conflating the two removed the only signal that would have named the bug.
+
+**Fix:** `BadRequest` is now tested **before** `NetworkError` (mandatory given the
+inheritance), logged via `log.error` with `[api] bad request — client-side defect, not the
+network`, and counted in its own `bad_request` category so it appears as a distinct line
+in `/audit`. Real `NetworkError`/`TimedOut` behaviour is unchanged.
+
+Considered and accepted: a few Bot API 400s are semi-benign (`Message is not modified`,
+`Query is too old`). Those will now log at ERROR. Left unfiltered rather than
+pre-emptively suppressed — if one shows up in practice it is a one-line substring filter,
+whereas guessing at the list now risks re-hiding a real defect.
+
+**Also in this release** (deferred from .7 to avoid a redeploy for a comment): the
+`_on_shutdown` docstring stated that a startup audit with no preceding graceful-stop line
+means SIGKILL. That is false — `/update` and `/restart` exit via `_schedule_exit()` →
+`os._exit(0)`, bypassing `post_shutdown`, so an ordinary deploy logs no graceful stop
+either. Corrected in place to point at the exit code instead (`0` clean, `137` SIGKILL,
+`143` uncaught SIGTERM), matching the CLAUDE.md and `repo-debugging-playbook` fixes made
+alongside it. Reading that comment literally cost two debugging rounds on a bot that had
+had zero unexpected restarts.
+
+**Tests:** `TestBadRequestNotNetwork` — asserts the PTB subclass relationship itself (so a
+future PTB fix surfaces as a signal rather than silently making the guard redundant),
+that a `BadRequest` increments `bad_request` and **not** `network`, that genuine
+`NetworkError`/`TimedOut` still count as `network`, that the isinstance ordering is
+explicit in source, and that the branch logs at ERROR rather than WARNING. Driven through
+`on_error` itself, not a source grep.
+
 ## v2026-07-25.7 — /audit was broken by its own output (regression in .5/.6)
 
 **Root cause:** `audit_cmd` sends with `parse_mode="Markdown"`, and v2026-07-25.5/.6 added

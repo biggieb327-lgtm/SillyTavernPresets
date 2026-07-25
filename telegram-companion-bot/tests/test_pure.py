@@ -3620,3 +3620,60 @@ class TestAuditIsPlainText:
         # Guards the premise: if field names ever stopped containing '_', a future reader
         # might think the plain-text requirement was cosmetic.
         assert any("_" in k for k in bot._card_field_tokens)
+
+
+# ── BadRequest is a client-side defect, not network noise (v2026-07-25.8) ─────
+# In PTB, BadRequest SUBCLASSES NetworkError, so on_error's isinstance(err,
+# (NetworkError, TimedOut)) absorbed every 400 from the Bot API — malformed markup,
+# message-too-long, bad parameters — as "[net] transient" under the `network` counter.
+# That is how the v2026-07-25.5 /audit markup bug presented as "network: 3".
+
+class TestBadRequestNotNetwork:
+    class _Ctx:
+        def __init__(self, error):
+            self.error = error
+
+    @staticmethod
+    def _counts(cat):
+        return len(bot._error_counts.get(cat, []))
+
+    def test_ptb_really_does_subclass_networkerror(self):
+        # The premise. If PTB ever fixes this, the ordering guard becomes redundant
+        # rather than wrong — but we want to know.
+        from telegram.error import BadRequest, NetworkError
+        assert issubclass(BadRequest, NetworkError)
+
+    def test_bad_request_counted_separately(self):
+        from telegram.error import BadRequest
+        before_bad, before_net = self._counts("bad_request"), self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(
+            BadRequest("Can't parse entities: can't find end of the entity at byte 484"))))
+        assert self._counts("bad_request") == before_bad + 1
+        assert self._counts("network") == before_net, "must not also count as network"
+
+    def test_real_network_error_still_counted_as_network(self):
+        from telegram.error import NetworkError
+        before_bad, before_net = self._counts("bad_request"), self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(NetworkError("httpx.ReadError: "))))
+        assert self._counts("network") == before_net + 1
+        assert self._counts("bad_request") == before_bad
+
+    def test_timeout_still_counted_as_network(self):
+        from telegram.error import TimedOut
+        before = self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(TimedOut())))
+        assert self._counts("network") == before + 1
+
+    def test_ordering_is_explicit_in_source(self):
+        # A future reader reordering these checks silently reintroduces the bug.
+        import inspect
+        src = inspect.getsource(bot.on_error)
+        assert src.index("isinstance(err, BadRequest)") < \
+               src.index("isinstance(err, (NetworkError, TimedOut))")
+
+    def test_bad_request_surfaces_at_error_level(self):
+        import inspect
+        src = inspect.getsource(bot.on_error)
+        i = src.index("isinstance(err, BadRequest)")
+        j = src.index("isinstance(err, (NetworkError, TimedOut))")
+        assert "log.error" in src[i:j], "a client-side defect should not log as a warning"
