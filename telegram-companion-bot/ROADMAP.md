@@ -278,17 +278,28 @@ single-device blast radius.
   protected, so a new or reworded block can't silently become droppable.
 - `CONTEXT_TOKEN_BUDGET` still defaults to 0/off. Set it from the `/audit` numbers.
 
-### 3.13 Reduce the protected prompt floor — S, **open, needs owner input**
-- The remaining problem the trimmer deliberately does **not** solve: for a card-heavy
-  instance the system stack is almost entirely *protected*, so a budget below it still
-  costs conversation. Jules is the worst case at 14,417 tokens — `preset.txt` 8,503 +
-  card 5,224, of which a single `ATTRACTION RULE` block in her card is 4,715.
-- Candidate levers, none actioned (all are **content** decisions, not code): split
-  `preset.txt` into an always-on core plus situational sections injected on demand; prune
-  it; move Jules's `ATTRACTION RULE` into her lorebook so it becomes conditional.
-- **Do not action without the owner.** `preset.txt` is voice-critical and deliberately
-  tuned (see v2026-07-18.1's anti-echo work); cards ship to relationships someone
-  actually has. Use the `/audit` `Prompt:` top-blocks line as the evidence base.
+### 3.13 Reduce the protected prompt floor — **mechanism shipped, content split open**
+- **Mechanism ✅ (v2026-07-25.5, `PRESET_FILES`):** ordered preset layer files, each
+  injected as its own block; `sync-cards.sh` and `vps-sync.sh` are layer-aware. Inert by
+  default — verified byte-identical prompt for the unset, explicit-single-layer, and legacy
+  `PRESET_FILE` configs.
+- **Correction to the earlier note here:** `[ATTRACTION RULE]` is **84 tokens**, not 4,715.
+  That figure was the whole merged card block, mislabelled by `_prompt_top_blocks` (fixed
+  in v2026-07-25.5). Moving it to the lorebook saves ~84 tokens — parked as not worth a
+  release on size grounds; revisit only if there's a *behavioural* reason to make it
+  conditional.
+- **Open: the content split.** `preset.txt` is 8,503 tok on every message, by section
+  ~1,760 universal / ~6,020 roleplay-scene machinery / ~727 feature-coupled. Prototype
+  core/rp/feature split measured **cass 11,031 → 4,758 (−57%)**; jules unchanged (she uses
+  every layer). The gain is signal-to-noise as much as size — ~700 tok of live per-turn
+  context currently competes with 8.5k of largely inapplicable instruction.
+- Two easy first cuts, low voice risk: `[RELATIONSHIP STAGE]` (323 tok) instructs every bot
+  about `CLOSENESS_ENABLED`, which **defaults to 0**; `[STEPPED THINKING]` (403 tok) is
+  likewise tied to `STEP_INTENT`. Both belong in a feature layer, not the core.
+- **Do not action without the owner.** `preset.txt` is voice-critical and deliberately tuned
+  (see v2026-07-18.1's anti-echo work); `[CHARACTER AUTHENTICITY]` alone is 2,386 tok.
+  Split one layer at a time, using `/audit`'s `Preset layers:` and `Card:` lines as the
+  evidence base.
 
 ---
 
