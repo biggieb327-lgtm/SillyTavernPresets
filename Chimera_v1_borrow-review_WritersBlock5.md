@@ -1,8 +1,15 @@
 # Chimera v1 — borrow review against Writer's Block 5
 
-**Source reviewed:** `Writers_Block_5_Latest_2_edited.json` (231 KB, 125 prompts, 37 enabled)
+**Source reviewed:** `WritersBlock_5_Latest_2.json` (231 KB, 125 prompts, 37 enabled)
 **Target:** `Chimera_v1.json` (77 KB, 80 prompts, 36 enabled)
 **Date:** 2026-07-25
+
+> **Status — implemented in `Chimera_v2.json` (2026-07-25).** Everything in Tier 1
+> and Tier 2 shipped except the Prose Style library, plus De-Positivity, the
+> Adaptive Beat-Budget pacing option and the `send_if_empty` change from Tier 3.
+> Deliberately not imported: the Prose Style library (deferred, not rejected),
+> Active Persona / Living Story, and Episodic Mode. `Chimera_v1.json` is unchanged.
+> Per-item landing details are in the v2 preset's own README prompt.
 
 Both are SillyTavern chat-completion presets built on the same pattern: a menu of
 mutually-exclusive picker blocks plus always-on modules. They are close enough to
