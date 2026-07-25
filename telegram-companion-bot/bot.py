@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.8"
+BOT_VERSION = "2026-07-25.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -10558,48 +10558,81 @@ async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # rate-limited login endpoint. Zero LLM calls are added — the snapshot is injected as
 # prompt context, and the three monitors reuse the existing send_triggered path.
 
-def _garmin_bits(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
-    """Pure: already-fetched Garmin payloads → short plain-language phrases.
+def _garmin_fields(sleep_dto: dict, stats: dict, activity: dict) -> list[tuple]:
+    """Pure: payloads → ordered [(metric label, phrase or None)] for all six metrics.
 
-    Kept free of I/O so the field-name handling (the part that silently breaks when
-    Garmin renames a key) is testable. Each field is independent — a missing one drops
-    its phrase instead of losing the whole snapshot."""
-    bits: list[str] = []
+    THE single source of truth: `_garmin_bits` is a thin wrapper over this, so the
+    snapshot text and the "what's missing" report cannot disagree. An earlier version of
+    this release derived labels by prefix-matching the finished phrases and got it wrong
+    immediately ("slept …" does not start with "sleep"), which is precisely the drift
+    this direction of dependency prevents.
+
+    A None phrase is a routine state, not an error: battery saver disabling the optical
+    HR sensor takes out sleep, resting HR, body battery and stress together while steps
+    (accelerometer, phone-side) keep arriving — the 2026-07-25 case."""
+    sleep_phrase = None
     secs = (sleep_dto or {}).get("sleepTimeSeconds")
     if secs:
         try:
             h, m = divmod(int(secs) // 60, 60)
-            sleep = f"slept {h}h{m:02d}m last night"
+            sleep_phrase = f"slept {h}h{m:02d}m last night"
             sc = ((sleep_dto or {}).get("sleepScores") or {}).get("overall") or {}
             if sc.get("value"):
                 q = (sc.get("qualifierKey") or "").lower().replace("_", " ")
-                sleep += f" (sleep score {sc['value']}{', ' + q if q else ''})"
-            bits.append(sleep)
+                sleep_phrase += f" (sleep score {sc['value']}{', ' + q if q else ''})"
         except (TypeError, ValueError):
-            pass
+            sleep_phrase = None
+
     st = stats or {}
-    if st.get("restingHeartRate"):
-        bits.append(f"resting HR {st['restingHeartRate']}")
+    rhr_phrase = f"resting HR {st['restingHeartRate']}" if st.get("restingHeartRate") else None
+
+    steps_phrase = None
     if st.get("totalSteps") is not None:
         try:
-            bits.append(f"{int(st['totalSteps']):,} steps so far")
+            steps_phrase = f"{int(st['totalSteps']):,} steps so far"
         except (TypeError, ValueError):
-            pass
+            steps_phrase = None
+
     bb = st.get("bodyBatteryMostRecentValue")
-    if bb is not None:
-        bits.append(f"body battery {bb}")
+    bb_phrase = f"body battery {bb}" if bb is not None else None
+
     stress = st.get("averageStressLevel")
-    if isinstance(stress, (int, float)) and stress >= 0:
-        bits.append(f"avg stress {int(stress)}")
+    stress_phrase = (f"avg stress {int(stress)}"
+                     if isinstance(stress, (int, float)) and stress >= 0 else None)
+
     a = activity or {}
+    workout_phrase = None
     if a:
         name = ((a.get("activityType") or {}).get("typeKey")
                 or a.get("activityName") or "workout").replace("_", " ")
         dist = a.get("distance")
-        desc = name + (f" {dist / 1000:.1f}km" if isinstance(dist, (int, float)) and dist else "")
+        desc = name + (f" {dist / 1000:.1f}km"
+                       if isinstance(dist, (int, float)) and dist else "")
         when = (a.get("startTimeLocal") or "")[:10]
-        bits.append(f"last workout: {desc}" + (f" ({when})" if when else ""))
-    return bits
+        workout_phrase = f"last workout: {desc}" + (f" ({when})" if when else "")
+
+    return [
+        ("sleep", sleep_phrase),
+        ("resting HR", rhr_phrase),
+        ("steps", steps_phrase),
+        ("body battery", bb_phrase),
+        ("stress", stress_phrase),
+        ("last workout", workout_phrase),
+    ]
+
+
+def _garmin_missing(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
+    """Pure: the metric labels Garmin returned no usable data for."""
+    return [label for label, phrase in _garmin_fields(sleep_dto, stats, activity)
+            if not phrase]
+
+
+def _garmin_bits(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
+    """Pure: payloads → the phrases that have data, in display order.
+
+    Thin wrapper over `_garmin_fields` (see there). Each field is independent — a
+    missing one drops its phrase instead of losing the whole snapshot."""
+    return [phrase for _, phrase in _garmin_fields(sleep_dto, stats, activity) if phrase]
 
 
 def _stress_sustained(arr, cutoff_ms: float, threshold: int,
@@ -10683,33 +10716,48 @@ def _drop_garmin_session(tag: str, exc: Exception):
     _garmin_obj = None
 
 
-def _fetch_garmin() -> str:
-    """Off-loop: today's metrics as one short line. Each metric is isolated."""
+def _fetch_garmin() -> tuple:
+    """Off-loop: (snapshot text, list of metrics with no data). Each metric is isolated.
+
+    Per-endpoint failures go through log.warning, NOT print: print reaches bot.log only,
+    so `/errors` could not show them and diagnosing a partial pull needed a shell — the
+    exact dead end hit on 2026-07-25. Only the exception CLASS is logged; Garmin
+    exceptions can carry the request URL (the v2026-07-20.2 key-leak class)."""
     global _garmin_obj
     if _Garmin is None or not GARMIN_ENABLED:
-        return ""
+        return "", []
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
         client = _garmin_client()
     except Exception as e:
-        print(f"[garmin] login failed: {type(e).__name__}")
+        log.warning("[garmin] login failed: %s", type(e).__name__)
+        _count_error("garmin")
         _garmin_obj = None
-        return ""
+        return "", []
     sleep_dto, stats, activity = {}, {}, {}
     try:
         sleep_dto = (client.get_sleep_data(today) or {}).get("dailySleepDTO") or {}
     except Exception as e:
-        print(f"[garmin] sleep: {type(e).__name__}")
+        log.warning("[garmin] sleep endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
     try:
         stats = client.get_stats(today) or {}
     except Exception as e:
-        print(f"[garmin] stats: {type(e).__name__}")
+        log.warning("[garmin] stats endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
     try:
         acts = client.get_activities(0, 1) or []
         activity = acts[0] if acts else {}
     except Exception as e:
-        print(f"[garmin] activities: {type(e).__name__}")
-    return "; ".join(_garmin_bits(sleep_dto, stats, activity))
+        log.warning("[garmin] activities endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
+    text = "; ".join(_garmin_bits(sleep_dto, stats, activity))
+    missing = _garmin_missing(sleep_dto, stats, activity)
+    if missing:
+        # Routine (battery saver, watch not synced yet), so WARNING not ERROR — but it
+        # must be visible somewhere other than a shell.
+        log.warning("[garmin] no data for: %s", ", ".join(missing))
+    return text, missing
 
 
 def _garmin_snapshot() -> str:
@@ -10721,6 +10769,8 @@ def _garmin_snapshot() -> str:
             if GARMIN_FILE.exists():
                 d = json.loads(GARMIN_FILE.read_text(encoding="utf-8"))
                 _garmin["text"], _garmin["ts"] = d.get("text", ""), float(d.get("ts", 0))
+                # Absent in snapshots written before v2026-07-25.9.
+                _garmin["missing"] = d.get("missing") or []
         except Exception:
             pass
     if _garmin["text"] and (time.time() - _garmin["ts"]) < GARMIN_MAX_AGE_HOURS * 3600:
@@ -10732,17 +10782,19 @@ async def update_garmin():
     if not GARMIN_ENABLED or _Garmin is None:
         return
     try:
-        text = await asyncio.to_thread(_fetch_garmin)
+        text, missing = await asyncio.to_thread(_fetch_garmin)
         if text:
-            _garmin.update({"text": text, "ts": time.time(), "loaded": True})
+            _garmin.update({"text": text, "ts": time.time(), "loaded": True,
+                            "missing": missing})
             try:
-                GARMIN_FILE.write_text(json.dumps({"text": text, "ts": _garmin["ts"]}),
-                                       encoding="utf-8")
+                GARMIN_FILE.write_text(
+                    json.dumps({"text": text, "ts": _garmin["ts"], "missing": missing}),
+                    encoding="utf-8")
             except Exception as e:
-                print(f"[garmin] save failed: {type(e).__name__}")
+                log.warning("[garmin] snapshot save failed: %s", type(e).__name__)
             print(f"[garmin] {text}")
     except Exception as e:
-        print(f"[garmin] update failed: {type(e).__name__}")
+        log.warning("[garmin] update failed: %s", type(e).__name__)
         _count_error("garmin")
 
 
@@ -11093,6 +11145,21 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+def _garmin_gap_note(missing: list = None) -> str:
+    """The '…and here's what wasn't there' tail for /health and /healthnow.
+
+    A partial pull used to be indistinguishable from a broken feature: on 2026-07-25 a
+    watch in battery saver returned steps and nothing else, and the only way to find out
+    which metrics were absent — let alone why — was to shell in and read bot.log."""
+    missing = _garmin.get("missing", []) if missing is None else missing
+    if not missing:
+        return ""
+    return ("\n\nNo data for: " + ", ".join(missing) +
+            ".\nUsually the watch hasn't synced yet, or battery saver has the optical "
+            "heart-rate sensor off — that one takes out sleep, resting HR, body battery "
+            "and stress together while steps keep arriving.")
+
+
 def _garmin_off_reason() -> str:
     """Why the health commands are unavailable — distinguishing "no credentials" from
     "killed by the switch" from "library missing" so the owner isn't left guessing."""
@@ -11127,7 +11194,8 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     age = (time.time() - _garmin["ts"]) / 3600
     stamp = "just now" if age < 1 else f"{age:.0f}h ago"
-    await update.message.reply_text(f"⌚ Latest from your watch ({stamp}):\n{snap}")
+    await update.message.reply_text(
+        f"⌚ Latest from your watch ({stamp}):\n{snap}{_garmin_gap_note()}")
 
 
 async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11145,9 +11213,10 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("⌚ Checking your watch...")
     await update_garmin()
-    await update.message.reply_text(
-        f"⌚ {_garmin['text']}" if _garmin.get("text")
-        else "Couldn't pull anything that time — check /errors.")
+    if not _garmin.get("text"):
+        await update.message.reply_text("Couldn't pull anything that time — check /errors.")
+        return
+    await update.message.reply_text(f"⌚ {_garmin['text']}{_garmin_gap_note()}")
 
 
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

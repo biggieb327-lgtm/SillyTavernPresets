@@ -7,6 +7,50 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.9 — A partial Garmin pull explains itself
+
+**Root cause:** on 2026-07-25 `/healthnow` returned only today's step count. The feature
+was working correctly — the watch was in battery saver, which disables the optical HR
+sensor, so sleep, resting HR, body battery and stress had never been recorded, while
+steps (accelerometer, phone-side) kept arriving. But **nothing in the product could say
+that.** `/healthnow` printed the phrases it had and stayed silent about the rest, so a
+correct partial pull was indistinguishable from a broken integration.
+
+Worse, the diagnostics existed but were unreachable: `_fetch_garmin` logged per-endpoint
+failures with `print()`, which reaches `bot.log` but **not** `errors.log` — so `/errors`
+could not show them and the only route to an answer was a shell. That is the second time
+in one day that diagnosing a freshly shipped feature required device access it shouldn't
+have (see v2026-07-25.7).
+
+**What shipped:**
+- **`_garmin_fields`** is now the single source of truth: payloads → ordered
+  `[(metric label, phrase or None)]` for all six metrics. **`_garmin_bits` is a thin
+  wrapper over it**, so the snapshot text and the missing-metric report cannot drift.
+  (The first cut of this release inverted that dependency — deriving labels by
+  prefix-matching finished phrases — and broke immediately, because `"slept …"` does not
+  start with `"sleep"`. Caught by the tests; the direction of dependency is the fix.)
+- **`_garmin_missing`** names the metrics with no usable data; **`_garmin_gap_note`**
+  turns that into a plain-text tail on `/health` and `/healthnow` that also states the
+  two usual causes (watch not synced; battery saver holding the HR sensor off, which
+  takes out four metrics at once while steps survive).
+- **Per-endpoint failures now go through `log.warning`**, so they land in `errors.log`
+  and `/errors`, and count an error category. Still only the exception *class* is logged
+  — Garmin exceptions can carry the request URL (the v2026-07-20.2 key-leak class).
+- The `"no data for: …"` summary is logged once per pull at WARNING. Routine, but it must
+  be visible somewhere other than a shell.
+- `missing` is persisted into `.garmin_snapshot` so `/health` (the cached view) is honest
+  too. Snapshots written before this release have no such key and load as `[]`.
+
+**Tests:** `TestGarminFields` (all six labels always reported; empty payloads mean
+everything missing; **the exact battery-saver case** — steps present, the five HR-derived
+metrics absent; full payload reports nothing missing; and an agreement test pinning
+`_garmin_fields` against `_garmin_bits`), `TestGarminGapNote` (silent when nothing is
+missing, names the metrics, states the cause, stays plain text), and
+`TestGarminFailuresReachErrors` (no `print` survives in `_fetch_garmin`, the exception
+object itself is never logged, the return contract is `(text, missing)`, and the loader
+tolerates pre-`.9` snapshot files). All 14 original `_garmin_bits` tests pass unchanged,
+which is what demonstrates the wrapper preserved its contract.
+
 ## v2026-07-25.8 — Client-side API errors stop hiding in the network bucket
 
 **Root cause:** `BadRequest` **subclasses `NetworkError`** in python-telegram-bot

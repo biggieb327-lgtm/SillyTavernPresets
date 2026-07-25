@@ -3677,3 +3677,100 @@ class TestBadRequestNotNetwork:
         i = src.index("isinstance(err, BadRequest)")
         j = src.index("isinstance(err, (NetworkError, TimedOut))")
         assert "log.error" in src[i:j], "a client-side defect should not log as a warning"
+
+
+# ── Garmin partial-pull diagnosability (v2026-07-25.9) ───────────────────────
+# A watch in battery saver returned steps and nothing else; the only way to learn WHICH
+# metrics were absent was to shell in and read bot.log, because the per-field failures
+# used print() (bot.log only, invisible to /errors). See CHANGELOG v2026-07-25.9.
+
+class TestGarminFields:
+    ALL = ["sleep", "resting HR", "steps", "body battery", "stress", "last workout"]
+
+    def test_all_six_metrics_always_reported(self):
+        fields = bot._garmin_fields({}, {}, {})
+        assert [label for label, _ in fields] == self.ALL
+
+    def test_empty_payloads_mean_everything_missing(self):
+        assert bot._garmin_missing({}, {}, {}) == self.ALL
+
+    def test_the_battery_saver_case(self):
+        # Exactly what happened: accelerometer steps survive, every HR-derived metric
+        # is gone because the optical sensor was off.
+        missing = bot._garmin_missing({}, {"totalSteps": 4210}, {})
+        assert "steps" not in missing
+        assert set(missing) == {"sleep", "resting HR", "body battery",
+                                "stress", "last workout"}
+
+    def test_full_payload_means_nothing_missing(self):
+        missing = bot._garmin_missing(
+            {"sleepTimeSeconds": 6 * 3600},
+            {"restingHeartRate": 54, "totalSteps": 3000,
+             "bodyBatteryMostRecentValue": 60, "averageStressLevel": 30},
+            {"activityName": "ride"})
+        assert missing == []
+
+    def test_fields_and_bits_agree(self):
+        # The whole point of the shared source: present-phrases must equal _garmin_bits.
+        args = ({"sleepTimeSeconds": 3600}, {"totalSteps": 10}, {})
+        phrases = [p for _, p in bot._garmin_fields(*args) if p]
+        assert phrases == bot._garmin_bits(*args)
+
+    def test_zero_steps_counts_as_present(self):
+        assert "steps" not in bot._garmin_missing({}, {"totalSteps": 0}, {})
+
+    def test_unmeasurable_stress_counts_as_missing(self):
+        assert "stress" in bot._garmin_missing({}, {"averageStressLevel": -1}, {})
+
+
+class TestGarminGapNote:
+    def test_silent_when_nothing_missing(self):
+        assert bot._garmin_gap_note([]) == ""
+
+    def test_names_the_missing_metrics(self):
+        note = bot._garmin_gap_note(["sleep", "body battery"])
+        assert "sleep" in note and "body battery" in note
+
+    def test_explains_the_likely_cause(self):
+        note = bot._garmin_gap_note(["sleep"]).lower()
+        assert "battery saver" in note
+        assert "sync" in note
+
+    def test_is_plain_text(self):
+        # /health and /healthnow reply without parse_mode; keep it that way.
+        note = bot._garmin_gap_note(["resting HR"])
+        assert "*" not in note and "_" not in note
+
+
+class TestGarminFailuresReachErrors:
+    def test_fetch_logs_via_log_not_print(self):
+        import inspect
+        src = inspect.getsource(bot._fetch_garmin)
+        assert "print(" not in src, (
+            "print() reaches bot.log only — /errors cannot show it, which is the gap "
+            "this release closes")
+        assert src.count("log.warning") >= 4
+
+    def test_fetch_never_logs_the_exception_itself(self):
+        # Garmin exceptions can carry the request URL (v2026-07-20.2 key-leak class).
+        import inspect
+        src = inspect.getsource(bot._fetch_garmin)
+        assert '", e)' not in src and '%s", e' not in src
+        assert "type(e).__name__" in src
+
+    def test_fetch_returns_text_and_missing(self):
+        import inspect
+        assert inspect.getsource(bot._fetch_garmin).rstrip().endswith("return text, missing")
+
+    def test_snapshot_loader_tolerates_pre_09_files(self):
+        # Old .garmin_snapshot files have no "missing" key.
+        import json as _json
+        bot._garmin.update({"loaded": False, "text": "", "ts": 0.0, "missing": []})
+        bot.GARMIN_FILE.write_text(_json.dumps({"text": "steps", "ts": time.time()}),
+                                   encoding="utf-8")
+        try:
+            bot._garmin_snapshot()
+            assert bot._garmin["missing"] == []
+        finally:
+            bot.GARMIN_FILE.unlink(missing_ok=True)
+            bot._garmin.update({"loaded": False, "text": "", "ts": 0.0, "missing": []})
