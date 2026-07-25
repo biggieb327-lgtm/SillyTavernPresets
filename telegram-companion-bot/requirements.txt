@@ -9,5 +9,14 @@ Pillow>=10.0,<11.0
 # hard requirement: four of six instances have no watch, the phone venv is shared, and a
 # venv rebuild shouldn't pull a dep most bots never import. bot.py imports it in a
 # try/except and reports "inert" in /audit when credentials exist without the library.
-# Install per-instance where it's wanted:  pip install garminconnect
-# garminconnect>=0.2.19
+#
+# Install into the VENV, not system python — the bots run ~/telegram-bot/venv/bin/python,
+# so a bare `pip install` lands somewhere they never look and /audit keeps saying "inert":
+#     ~/telegram-bot/venv/bin/pip install garminconnect       # phone
+#     /opt/telegram-bots/venv/bin/pip install garminconnect   # VPS
+# Then /restart that bot — the import happens once at module load.
+#
+# Confirmed installable on Termux under Python 3.14.6 (2026-07-25), despite 0.3.x needing
+# curl_cffi -> cffi. If a future version won't build there, `garminconnect<0.3` uses
+# pure-Python garth instead (but pulls Rust-based pydantic).
+# garminconnect>=0.3

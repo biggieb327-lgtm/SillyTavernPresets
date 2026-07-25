@@ -210,6 +210,9 @@ aren't obvious from it:
 
 - `NANOGPT_MODEL=zai-org/glm-5:thinking` (chat), `SUMMARY_MODEL`/`REACTION_MODEL`
   cheap+fast (`glm-4.7-flash`).
+  **Emily deliberately runs `zai-org/glm-4.7:thinking`** (owner-confirmed 2026-07-25). Not
+  drift — do not "correct" it to glm-5. Per-instance model choice is expected; check the
+  `=== STARTUP AUDIT ===` line for what an instance is actually on before assuming.
 - `FALLBACK_MODEL` must be roleplay-capable: `anthracite-org/magnum-v4-72b`
   (recommended) or `Sao10K/L3.3-70B-Euryale-v2.3`. Used on 400/429/5xx/timeout;
   `call_nanogpt` = 2 attempts/model, 2s/4s backoff, 150s primary budget.
