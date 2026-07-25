@@ -62,6 +62,16 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    bash .claude/evals/run-evals.sh
    ```
 
+   **If this release FIXES something, also sweep for the rest of the class** before
+   step 7 — on 2026-07-25 every point fix that day turned out to be a class, and the
+   rework cost most of a session:
+   ```bash
+   python3 .claude/tools/sweep.py
+   ```
+   Advisory, not a CI gate: it emits *candidates*, and judgement is required (a real
+   hit may be correctly mitigated). Triage each one, then load `fix-the-class` if the
+   sweep — or the shape of the bug — suggests other instances exist.
+
 7. **Commit on the session's `claude/...` branch, then merge to `main` and push.**
    Standing policy (owner-approved 2026-07-11): merge autonomously **only when step 6
    is fully green**. Any red check = stop, report, do not merge.
