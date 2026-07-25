@@ -3131,8 +3131,11 @@ class TestRecordPromptSize:
         assert bot._prompt_stats["max_chat"] == 2
 
     def test_max_blocks_captured_at_the_peak(self):
+        # Index 0 is the merged card block and gets a fixed label, so put the block
+        # under test after it (see TestCardBlockLabelling).
         bot._record_prompt_size(
-            [{"role": "system", "content": "# peak\n" + "a" * 40000}], 1)
+            [{"role": "system", "content": "card"},
+             {"role": "system", "content": "# peak\n" + "a" * 40000}], 1)
         assert bot._prompt_stats["max_blocks"][0][1] == "# peak"
 
     def test_buckets_accumulate(self):
@@ -3403,3 +3406,86 @@ class TestOptionalBlocksAreMarked:
         for anchor in ("POST_HISTORY_RAW", "TEXTING_STYLE"):
             i = src.index(anchor)
             assert "_sys_opt(" not in src[max(0, i - 160):i], anchor
+
+
+# ── Layered presets + honest card labelling (v2026-07-25.5) ──────────────────
+# One shared 8.5k preset meant every bot carried instructions written for the others.
+# See CHANGELOG v2026-07-25.5.
+
+class TestPresetLayers:
+    def test_layers_are_loaded(self):
+        assert isinstance(bot.PRESET_LAYERS, list)
+        assert bot.PRESET_LAYERS, "there must always be at least a built-in fallback"
+
+    def test_each_layer_is_name_and_text(self):
+        for name, text in bot.PRESET_LAYERS:
+            assert isinstance(name, str) and name
+            assert isinstance(text, str) and text.strip()
+
+    def test_texting_style_is_the_joined_layers(self):
+        assert bot.TEXTING_STYLE == "\n\n".join(t for _, t in bot.PRESET_LAYERS)
+
+    def test_fixture_falls_back_to_builtin(self):
+        # The test fixture has no preset.txt, so the built-in default must be used —
+        # the documented no-preset case, and it must not warn about it.
+        assert bot.PRESET_LAYERS == [("<built-in>", bot._DEFAULT_TEXTING_STYLE)]
+
+    def test_missing_default_preset_does_not_warn(self):
+        joined = " ".join(bot._CONFIG_WARNINGS)
+        assert "preset layer" not in joined
+
+    def test_preset_file_env_still_honoured(self):
+        # Backward compatibility: PRESET_FILE must keep working as the single-layer name.
+        assert bot.PRESET_FILE == "preset.txt"
+
+    def test_every_layer_injected_as_its_own_block(self):
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "for _lname, _ltext in PRESET_LAYERS:" in src
+
+    def test_layers_reported_in_audit(self):
+        d = bot.gather_audit_data()
+        assert "preset_layers" in d
+        assert all(isinstance(t, int) for _, t in d["preset_layers"])
+
+
+class TestCardBlockLabelling:
+    """messages[0] is the MERGED card block. Labelling it by its first line credited an
+    84-token section with 4,715 tokens and misdirected a real investigation."""
+
+    def test_card_block_gets_a_fixed_label(self):
+        msgs = [{"role": "system", "content": "[ATTRACTION RULE]\n" + "x" * 40000}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "(card: system_prompt+description+…)"
+
+    def test_later_blocks_still_use_their_heading(self):
+        msgs = [{"role": "system", "content": "card"},
+                {"role": "system", "content": "# Relevant memories\n" + "x" * 4000}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "# Relevant memories"
+
+    def test_card_label_does_not_leak_card_content(self):
+        msgs = [{"role": "system", "content": "[KINK MECHANICS]\nsecret"}]
+        assert "KINK" not in bot._prompt_top_blocks(msgs)[0][1]
+
+
+class TestCardFieldTokens:
+    def test_breakdown_is_recorded(self):
+        assert isinstance(bot._card_field_tokens, dict)
+        assert bot._card_field_tokens, "load_character must populate the breakdown"
+
+    def test_fixture_fields_present(self):
+        # The fixture card sets system_prompt and description.
+        assert "system_prompt" in bot._card_field_tokens
+        assert "description" in bot._card_field_tokens
+
+    def test_empty_fields_are_omitted_not_zero(self):
+        assert 0 not in [v for k, v in bot._card_field_tokens.items()
+                         if k != "character_book"]
+
+    def test_lorebook_tracked_separately(self):
+        # Conditional cost must not be mixed into the always-on total.
+        assert "character_book" in bot._card_field_tokens
+
+    def test_reported_in_audit(self):
+        d = bot.gather_audit_data()
+        assert "card_fields" in d
+        assert d["card_fields"]["system_prompt"] > 0

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.4"
+BOT_VERSION = "2026-07-25.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -356,10 +356,41 @@ _DEFAULT_TEXTING_STYLE = (
 )
 # Per-bot preset: a small text file of extra system instructions (e.g. texting style),
 # editable without touching bot.py. Falls back to the default above if missing.
+# Layered presets (v2026-07-25.5). One shared 8.5k-token preset meant every bot carried
+# instructions written for every OTHER bot — a writing-collaborator instance was paying
+# ~6k tokens of scene/NPC/roleplay machinery it can never use, diluting the ~700 tokens of
+# live per-turn context it actually needs. PRESET_FILES is an ordered list of layer files:
+# a shared core, an optional genre layer several characters can share, then a per-character
+# layer where one is warranted. Each layer is injected as its own system block so /audit
+# shows what each one costs.
+#
+# Backward compatible in both directions: unset uses PRESET_FILE (still honoured) which
+# itself defaults to the single "preset.txt", so today's fleet behaviour is unchanged and
+# the assembled prompt stays byte-identical until an .env opts in.
 PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
-_preset_path = BASE_DIR / PRESET_FILE
-TEXTING_STYLE = _preset_path.read_text(encoding="utf-8").strip() if _preset_path.exists() \
-    else _DEFAULT_TEXTING_STYLE
+_preset_names = [p.strip() for p in
+                 os.getenv("PRESET_FILES", PRESET_FILE).split(",") if p.strip()]
+PRESET_LAYERS: list[tuple[str, str]] = []
+for _pn in _preset_names:
+    _pp = BASE_DIR / _pn
+    try:
+        _text = _pp.read_text(encoding="utf-8").strip() if _pp.exists() else ""
+    except Exception as _e:
+        _text = ""
+        _CONFIG_WARNINGS.append(f"preset layer {_pn!r} could not be read ({type(_e).__name__})")
+    if _text:
+        PRESET_LAYERS.append((_pn, _text))
+    elif not _pp.exists():
+        # A named-but-missing layer is a config error worth surfacing — silently dropping
+        # it would quietly strip voice rules and look like a model regression. The single
+        # default name is exempt: "no preset.txt" is the documented fallback case.
+        if _pn != "preset.txt" or os.getenv("PRESET_FILES"):
+            _CONFIG_WARNINGS.append(f"preset layer {_pn!r} not found in {BASE_DIR}")
+if not PRESET_LAYERS:
+    PRESET_LAYERS = [("<built-in>", _DEFAULT_TEXTING_STYLE)]
+# Kept for anything that wants the whole preset as one string (and so a single-layer
+# config is exactly what it was before).
+TEXTING_STYLE = "\n\n".join(t for _, t in PRESET_LAYERS)
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
@@ -802,15 +833,23 @@ def _prompt_bucket(tokens: int) -> str:
 
 def _prompt_top_blocks(messages: list, n: int = 3) -> list:
     """Pure: the n largest system blocks as (tokens, heading), biggest first. Recorded
-    alongside a new maximum so /audit says WHICH block drove it, not just that it grew."""
+    alongside a new maximum so /audit says WHICH block drove it, not just that it grew.
+
+    messages[0] is always the merged card block (`fill(SYSTEM_PROMPT_RAW, …)`), which
+    concatenates system_prompt + description + personality + scenario + mes_example. It
+    gets a fixed label rather than its first line: labelling it by whatever the card
+    happens to open with once credited an 84-token section with 4,715 tokens and sent a
+    real investigation down the wrong path. Use the card-field breakdown in /audit for
+    the inside of this block."""
     blocks = []
-    for m in messages:
+    for i, m in enumerate(messages):
         if m.get("role") != "system":
             continue
         c = m.get("content", "")
         if not isinstance(c, str):
             continue
-        blocks.append((_est_tokens(c), c.split("\n", 1)[0][:48]))
+        head = "(card: system_prompt+description+…)" if i == 0 else c.split("\n", 1)[0][:48]
+        blocks.append((_est_tokens(c), head))
     blocks.sort(key=lambda b: b[0], reverse=True)
     return blocks[:n]
 
@@ -1967,6 +2006,10 @@ MILESTONES_MAX = _env_int("MILESTONES_MAX", "30")  # cap on relationship milesto
 
 
 # --- Character card loading (SillyTavern v2) ---
+# Per-field token estimates, filled by load_character (see the note there).
+_card_field_tokens: dict[str, int] = {}
+
+
 def fill(text: str, char: str, user: str) -> str:
     if not text:
         return ""
@@ -2017,6 +2060,22 @@ def load_character(path: Path):
             "content": (entry.get("content") or "").strip(),
             "constant": bool(entry.get("constant", False)),
         })
+
+    # Per-field token estimates for /audit. load_character MERGES system_prompt,
+    # description, personality, scenario and mes_example into one block, so by
+    # prompt-assembly time the sub-structure is gone and any size report can only label
+    # the merged block by its first line. That produced a real misdiagnosis on 2026-07-25:
+    # jules's system_prompt opens with "[ATTRACTION RULE]", so an 84-token section got
+    # credited with the whole 4,715-token card block. Record the breakdown here, where the
+    # fields still exist.
+    _card_field_tokens.clear()
+    for _f in ("system_prompt", "description", "personality", "scenario",
+               "mes_example", "post_history_instructions"):
+        _t = _est_tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
+        if _t:
+            _card_field_tokens[_f] = _t
+    _card_field_tokens["character_book"] = sum(
+        _est_tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
 
     first_mes = data.get("first_mes", "")
     return name, system_prompt, post_history, lore, first_mes
@@ -4296,7 +4355,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         messages.append({"role": "system", "content": fill(POST_HISTORY_RAW, NAME, uname)})
 
     if TEXTING_REALISM:
-        messages.append({"role": "system", "content": TEXTING_STYLE})
+        # One block per layer: a single-layer config is byte-identical to the old single
+        # TEXTING_STYLE block, and a layered one is separately visible in /audit.
+        for _lname, _ltext in PRESET_LAYERS:
+            messages.append({"role": "system", "content": _ltext})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
@@ -11365,6 +11427,8 @@ def gather_audit_data() -> dict:
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
         "prompt_stats": _prompt_audit_state(),
+        "card_fields": dict(_card_field_tokens),
+        "preset_layers": [(n, _est_tokens(t)) for n, t in PRESET_LAYERS],
     }
 
 
@@ -11429,6 +11493,17 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  spread: {spread}")
         for tok, head in (ps.get("max_blocks") or [])[:3]:
             lines.append(f"  ~{tok}t  {head}")
+    pl = d.get("preset_layers") or []
+    if pl:
+        lines.append("Preset layers: " + ", ".join(f"{n} ~{t}t" for n, t in pl))
+    cf = d.get("card_fields") or {}
+    if cf:
+        # Unconditional card fields vs the lorebook, which only costs on a trigger.
+        uncond = sum(v for k, v in cf.items() if k != "character_book")
+        book = cf.get("character_book", 0)
+        lines.append(f"Card: ~{uncond}t always + ~{book}t lorebook (on trigger)")
+        top = sorted(((v, k) for k, v in cf.items() if k != "character_book"), reverse=True)
+        lines.append("  " + ", ".join(f"{k} ~{v}t" for v, k in top[:4]))
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
     llm = d.get("llm_stats", {})

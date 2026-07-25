@@ -7,6 +7,81 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.5 — Layered presets, and an honest card breakdown (PRESET_FILES)
+
+**Correction to v2026-07-25.3's findings — read this before trusting that entry's numbers.**
+That release reported jules carrying "a 4,715-token `ATTRACTION RULE` block". **Wrong.**
+`[ATTRACTION RULE]` is **84 tokens**. The 4,715 was the entire *merged* card block —
+`load_character` joins `system_prompt` + boilerplate + `description` (1,762) + `scenario`
+(81) + `mes_example` (1,444) into one system message, and `_prompt_top_blocks` labelled
+each block by its **first line**. Jules's `system_prompt` opens with `[ATTRACTION RULE]`,
+so an 84-token section was credited with a whole card. Jules's `system_prompt` is 1,375
+tokens across seven sections, the largest being `[PACE CONTROL]` at 348.
+
+That was a defect in the diagnostic shipped one release earlier, and it sent a real
+investigation down the wrong path ("move `ATTRACTION RULE` to the lorebook to cut her floor
+by a third" — it would have saved 84 tokens). Both halves are fixed here:
+- `_prompt_top_blocks` gives `messages[0]` the fixed label `(card:
+  system_prompt+description+…)` instead of inheriting whatever the card opens with.
+- `load_character` now records a real per-field breakdown (`_card_field_tokens`) *where the
+  fields still exist*, before the merge destroys the structure. `/audit` gains a `Card:`
+  line separating always-on fields from the lorebook (which only costs on a trigger), plus
+  the four biggest fields by name.
+
+**Root cause this release addresses (the actual feature):** one shared `preset.txt` is
+8,503 tokens injected on **every message for every bot**, and by section it is ~1,760
+universal / ~6,020 roleplay-scene machinery / ~727 coupled to features that have their own
+env flags (`[RELATIONSHIP STAGE]` is 323 tokens instructing every bot about
+`CLOSENESS_ENABLED`, which **defaults to 0** — dead weight on all six). Cass is a
+developmental editor with no scenes and no NPCs, carrying ~6k tokens of scene-management
+instruction she cannot use. The cost isn't really tokens — it's signal-to-noise: ~700
+tokens of live per-turn context (mood, day, schedule, watch metrics, capabilities) were
+competing against 8,500 tokens of largely inapplicable generic instruction, which is the
+same failure mode as the recall bias fixed in v2026-07-25.1.
+
+**What shipped:** `PRESET_FILES` — an ordered, comma-separated list of layer files, each
+read from the instance directory and injected as **its own system block** (so `/audit`
+shows what each layer costs, and a layer can be added or dropped without editing a
+monolith). Unset falls back to `PRESET_FILE`, which still defaults to `preset.txt`, so a
+single-layer config produces exactly one block as before and **the fleet's assembled prompt
+is unchanged until an `.env` opts in**. A named-but-missing layer appends a
+`_CONFIG_WARNINGS` entry rather than silently vanishing — quietly dropping voice rules
+reads as a model regression, not a deploy error. If no layer resolves at all, the built-in
+`_DEFAULT_TEXTING_STYLE` still applies, and the documented "no preset.txt" case does not
+warn.
+
+**Deploy paths made layer-aware in the same commit**, so the content split can't half-land:
+- `sync-cards.sh` copies every `preset-*.txt` in the repo to every instance (each bot's
+  `PRESET_FILES` decides what it loads). Globs safely when no layers exist yet.
+- `deploy/vps-sync.sh` can't list a remote directory over raw URLs, so it parses the
+  instance's own `PRESET_FILES` and pulls exactly those. Self-maintaining — no layer list
+  duplicated in the script. A named layer that 404s is **fatal on purpose**: starting a bot
+  with missing voice rules is worse than a failed deploy.
+
+**Measured with a prototype core/rp/feature split** (not shipped — see below):
+| instance | today | layered | layers used |
+|---|---|---|---|
+| cass | 11,031 | **4,758** (−57%) | core |
+| jules | 14,419 | 14,419 | core + rp + feature |
+
+Jules is unchanged *by design* — she uses every layer, so there is nothing to drop. The win
+is concentrated exactly where a character doesn't need the roleplay machinery, which is the
+honest shape of this change.
+
+**The content split is deliberately NOT in this release.** `preset.txt` is voice-critical
+and deliberately tuned (see v2026-07-18.1's anti-echo work), and `[CHARACTER AUTHENTICITY]`
+alone is 2,386 tokens. Carving it up is an owner-reviewed content decision, one layer at a
+time, using the new `/audit` numbers as the evidence base. This release ships only the
+mechanism, inert by default. ROADMAP 3.13 tracks the split.
+
+**Tests:** `TestPresetLayers` (layers load, name/text shape, joined `TEXTING_STYLE`
+equivalence, built-in fallback, no spurious warning for a missing default,
+`PRESET_FILE` back-compat, per-layer injection, audit reporting), `TestCardBlockLabelling`
+(the card block gets the fixed label, later blocks keep their headings, and the label leaks
+no card content), `TestCardFieldTokens` (breakdown recorded, empty fields omitted, lorebook
+tracked separately, surfaced in `/audit`). One v2026-07-25.3 test was updated because
+`messages[0]` is now labelled deliberately rather than by its first line.
+
 ## v2026-07-25.4 — Prompt trimming gives up the right things first
 
 **Root cause this release addresses:** `_trim_history_to_budget` computed
