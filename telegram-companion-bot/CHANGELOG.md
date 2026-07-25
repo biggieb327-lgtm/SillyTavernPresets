@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.13 — Audit item 3: no command renders arbitrary content through Markdown
+
+**Root cause:** v2026-07-25.7 fixed `/audit` sending arbitrary diagnostic strings under
+`parse_mode="Markdown"` — a stray `_` or unmatched `[` makes Telegram reject the **whole**
+message, so the command replies with silence, which is indistinguishable from a dead bot.
+That fix was point-scoped to `/audit`. The audit sweep asked the obvious follow-up
+question — *where else?* — and found **13 more sites across 11 commands** interpolating
+values into Markdown outside backticks.
+
+Converted to plain text (matching `/audit` and the pre-existing `memory_cmd`, which
+already documents this exact reasoning):
+
+| command | what it renders |
+|---|---|
+| `/card`, `/setcard` | character-card field contents and the user's new value |
+| `/notes` | the user's own note text |
+| `/status` | outfit, life-arc, day, about-you snippets **and the conversation tail** |
+| `/schedule`, `/people`, `/projects` | user-written file contents |
+| `/vibe`, `/energy`, `/setmodel`, `/settings` | user-supplied names and values |
+| `/model` | `NAME` from the card |
+
+**Latent, not firing.** All four character cards were tested against Markdown parsing
+first — balanced brackets, even underscore counts, nothing currently breaks. This is a
+fix for the failure that hadn't happened yet: `/notes` renders text you write and
+`/status` renders conversation content, so a single `_` was all it would take.
+
+**Backticks are not the safe wrapper they look like.** `setcard_cmd` wrapped raw user
+input in a code span (`` `{field}` ``) — a backtick *in* that input closes the span early
+and breaks the parse. The scanner had scored backtick-wrapped values as safe; that
+assumption held for model ids and fixed strings but not for arbitrary input. Those two
+sites are now plain text with `{field!r}`.
+
+**Two sites deliberately left on Markdown**, allowlisted in the test with the reason:
+`quietwin_cmd` (an int index, fixed `Mon`–`Sun` names, `HH:MM` strings) and `fleet_cmd`
+(an int, inside a ``` fence). Neither can carry a metacharacter.
+
+**Test:** `TestNoUnescapedMarkdownInterpolation` is a *generalised* guard, not another
+point fix — it re-derives the offender list from source on every run and fails on any new
+one, so the next command that formats arbitrary data is caught at commit time rather than
+by an owner wondering why a command went quiet. A second assertion fails if the two
+allowlisted commands ever stop interpolating provably-safe values, so the allowlist can't
+go stale silently.
+
 ## v2026-07-25.12 — Audit items 1 & 2: dead env vars, and the group pilot split across hosts
 
 From the three-class audit (shared state / silent replies / doc-vs-reality drift).

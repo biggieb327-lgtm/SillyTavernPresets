@@ -3913,3 +3913,52 @@ class TestGroupColocationWarning:
         # The default being shared is exactly why co-location matters.
         from pathlib import Path as _P
         assert bot.GROUP_LEDGER_DIR == _P(bot.__file__).resolve().parent
+
+
+# ── No command renders arbitrary content through Markdown (v2026-07-25.13) ───
+# Generalises the v2026-07-25.7 /audit outage: Telegram rejects the WHOLE message on a
+# stray '_' or unmatched '[', and the command then replies with silence.
+
+class TestNoUnescapedMarkdownInterpolation:
+    # Values that are provably metachar-free: ints, fixed day names, HH:MM strings.
+    ALLOWED = {"quietwin_cmd", "fleet_cmd"}
+
+    @staticmethod
+    def _offenders():
+        import re, inspect, pathlib
+        src = pathlib.Path(inspect.getfile(bot)).read_text().splitlines()
+        out = []
+        for i, line in enumerate(src, 1):
+            if 'parse_mode="Markdown"' not in line or line.strip().startswith("#"):
+                continue
+            stmt = " ".join(x.strip() for x in src[max(0, i - 7):i]
+                            if not x.strip().startswith("#"))
+            risky = [m.group(1) for m in re.finditer(r'\{([a-zA-Z_][\w\[\]\'\".]*)\}', stmt)
+                     if not (stmt[max(0, m.start() - 1):m.start()] == "`"
+                             and stmt[m.end():m.end() + 1] == "`")]
+            if not risky:
+                continue
+            fn = ""
+            for j in range(i - 1, 0, -1):
+                if src[j - 1].startswith(("async def ", "def ")):
+                    fn = src[j - 1].split("(")[0].split()[-1]
+                    break
+            out.append((fn, i, sorted(set(risky))))
+        return out
+
+    def test_no_new_unescaped_markdown_interpolation(self):
+        bad = [o for o in self._offenders() if o[0] not in self.ALLOWED]
+        assert not bad, (
+            "these send arbitrary values through Markdown; a '_' or '[' in the data "
+            f"makes Telegram reject the message and the command replies with silence: {bad}")
+
+    def test_the_allowlist_is_still_justified(self):
+        # If either stops interpolating only provably-safe values, the allowlist is stale.
+        names = {o[0] for o in self._offenders()}
+        assert names <= self.ALLOWED
+
+    def test_content_rendering_commands_are_plain_text(self):
+        import inspect
+        for fn in (bot.card_cmd, bot.notes_cmd, bot.status_cmd, bot.schedule_cmd,
+                   bot.setcard_cmd, bot.vibe_cmd, bot.energy_cmd):
+            assert "parse_mode" not in inspect.getsource(fn), fn.__name__

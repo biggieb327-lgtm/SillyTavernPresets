@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.12"
+BOT_VERSION = "2026-07-25.13"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5958,12 +5958,14 @@ async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if val:
             preview = val[:120].replace("\n", " ")
             suffix = f"… ({len(val)} chars)" if len(val) > 120 else ""
-            lines.append(f"*{label}:* {preview}{suffix}")
+            lines.append(f"{label}: {preview}{suffix}")
         else:
-            lines.append(f"*{label}:* (empty)")
-    lines += ["", "Use `/setcard <field> <value>` to update.",
+            lines.append(f"{label}: (empty)")
+    lines += ["", "Use /setcard <field> <value> to update.",
               "Fields: " + ", ".join(_CARD_FIELDS)]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Plain text: card field content is arbitrary, and a stray '_' or unmatched '['
+    # would make Telegram reject the whole message (see v2026-07-25.7).
+    await update.message.reply_text("\n".join(lines))
 
 
 async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5974,18 +5976,16 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text(
-            "Usage: `/setcard <field> <value>`\n"
+            "Usage: /setcard <field> <value>\n"
             "Fields: " + ", ".join(_CARD_FIELDS) + "\n"
-            "Send `/setcard <field> clear` to empty a field.",
-            parse_mode="Markdown",
-        )
+            "Send /setcard <field> clear to empty a field.")
         return
     field = args[0].lower()
     if field not in _CARD_FIELDS:
+        # `field` is raw user input — a backtick in it would break the code span, so
+        # backticks are not the safe wrapper they look like.
         await update.message.reply_text(
-            f"Unknown field `{field}`. Fields: " + ", ".join(_CARD_FIELDS),
-            parse_mode="Markdown",
-        )
+            f"Unknown field {field!r}. Fields: " + ", ".join(_CARD_FIELDS))
         return
     value = "" if args[1].lower() == "clear" and len(args) == 2 else " ".join(args[1:])
     json_key = _CARD_FIELDS[field]
@@ -5993,14 +5993,14 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _save_and_reload_card()
     if value:
         preview = value[:200] + ("…" if len(value) > 200 else "")
-        await update.message.reply_text(f"*{field}* updated:\n{preview}", parse_mode="Markdown")
+        await update.message.reply_text(f"{field} updated:\n{preview}")
     else:
-        await update.message.reply_text(f"*{field}* cleared.", parse_mode="Markdown")
+        await update.message.reply_text(f"{field} cleared.")
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🤖 Character: *{NAME}*\nModel: `{NANOGPT_MODEL}`", parse_mode="Markdown"
+        f"🤖 Character: {NAME}\nModel: {NANOGPT_MODEL}"
     )
 
 
@@ -6125,7 +6125,7 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     globals()[var] = model_id
     model_overrides[var] = model_id
     save_state()
-    await update.message.reply_text(f"✅ {role} model set to `{model_id}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ {role} model set to {model_id}")
 
 
 SETTINGS_INFO = {
@@ -6187,7 +6187,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     globals()[var] = value
     setting_overrides[var] = value
     save_state()
-    await update.message.reply_text(f"✅ {key} set to `{value}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ {key} set to {value}")
 
 
 CONFIGURABLE_MODELS = list(MODEL_ROLES.values())
@@ -6440,7 +6440,7 @@ async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if exp:
                 mins = max(0, round((exp - time.time()) / 60))
                 tail = f" (expires in {mins}m)" if mins < 60 else f" (expires in {mins // 60}h)"
-            await update.message.reply_text(f"Current vibe: **{vibe}**{tail}", parse_mode="Markdown")
+            await update.message.reply_text(f"Current vibe: {vibe}{tail}")
         return
     name = args[0].lower()
     if name == "off":
@@ -6461,7 +6461,7 @@ async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_vibe[chat_id] = {"name": name, "expires_at": expires_at}
     save_state()
     tail = f" for {args[1]}" if expires_at and len(args) > 1 else ""
-    await update.message.reply_text(f"Vibe set to **{name}**{tail}. Use /vibe off to clear.", parse_mode="Markdown")
+    await update.message.reply_text(f"Vibe set to {name}{tail}. Use /vibe off to clear.")
 
 
 # --- Vent mode ---
@@ -6504,7 +6504,7 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_energy[chat_id] = {"level": lvl, "ts": time.time()}
     save_state()
-    await update.message.reply_text(f"Energy set to **{lvl}**. Use /energy off to clear.", parse_mode="Markdown")
+    await update.message.reply_text(f"Energy set to {lvl}. Use /energy off to clear.")
 
 
 # --- Inside joke bank ---
@@ -7742,9 +7742,8 @@ def _context_file_cmd(file: "Path", cache: dict, label: str):
         if not args:
             current = file.read_text(encoding="utf-8").strip() if file.exists() else "(empty)"
             await update.message.reply_text(
-                f"*{label}:*\n{current}\n\n"
+                f"{label}:\n{current}\n\n"
                 f"/{label.lower()} <text> — replace\n/{label.lower()} add <text> — append",
-                parse_mode="Markdown",
             )
             return
         if args[0].lower() == "add":
@@ -7778,9 +7777,8 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
         await update.message.reply_text(
-            f"*Schedule:*\n{current}\n\n"
+            f"Schedule:\n{current}\n\n"
             f"/schedule <text> — replace\n/schedule add <text> — append",
-            parse_mode="Markdown",
         )
         return
     if args[0].lower() == "add":
@@ -7838,8 +7836,7 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         numbered = "\n".join(f"{i+1}. {l}" for i, l in enumerate(lines))
         await update.message.reply_text(
-            f"*Your notes:*\n{numbered}\n\n/notes del <n> to remove one",
-            parse_mode="Markdown",
+            f"Your notes:\n{numbered}\n\n/notes del <n> to remove one",
         )
         return
 
@@ -9769,46 +9766,46 @@ async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick dashboard: mood, outfit, today's context, and time since last message."""
     chat_id = update.effective_chat.id
-    lines = [f"*{NAME} — status*", ""]
+    lines = [f"{NAME} — status", ""]
 
     label = mood_label(chat_id)
     s = mood_now(chat_id)
     filled = max(0, round((s + 3) / 6 * 10))
     bar = "█" * filled + "░" * (10 - filled)
     mood_str = f"{label}  " if label else ""
-    lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
+    lines.append(f"Mood: {mood_str}[{bar}]  {s:+.1f}")
 
     cl = closeness.get(chat_id)
     if cl:
-        lines.append(f"*Closeness:* {cl['bucket']} ({cl['score']:.2f})")
+        lines.append(f"Closeness: {cl['bucket']} ({cl['score']:.2f})")
 
     outfit = wardrobe.get("current")
     if outfit:
-        lines.append(f"*Wearing:* {outfit}")
+        lines.append(f"Wearing: {outfit}")
 
     life_arc = _read_life_arc()
     if life_arc:
         snippet = life_arc[:150] + ("…" if len(life_arc) > 150 else "")
-        lines.append(f"*Life arc:* {snippet}")
+        lines.append(f"Life arc: {snippet}")
 
     day_ctx = _read_day_context()
     if day_ctx:
         snippet = day_ctx[:150] + ("…" if len(day_ctx) > 150 else "")
-        lines.append(f"*Today:* {snippet}")
+        lines.append(f"Today: {snippet}")
 
     unotes = _read_user_notes()
     if unotes:
         snippet = unotes[:150] + ("…" if len(unotes) > 150 else "")
-        lines.append(f"*About you:* {snippet}")
+        lines.append(f"About you: {snippet}")
 
     weather = (_weather_cache.get("text") or "").strip()
     if weather:
-        lines.append(f"*Weather:* {weather}")
+        lines.append(f"Weather: {weather}")
 
     qt = quiet_until.get(chat_id)
     if qt and time.time() < qt:
         remaining = int((qt - time.time()) / 60)
-        lines.append(f"*Quiet mode:* {remaining}m remaining")
+        lines.append(f"Quiet mode: {remaining}m remaining")
 
     wins = quiet_windows.get(chat_id, [])
     if wins:
@@ -9817,7 +9814,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
             eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
             win_strs.append(f"{_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
-        lines.append(f"*Quiet windows:* {', '.join(win_strs)}")
+        lines.append(f"Quiet windows: {', '.join(win_strs)}")
 
     aw = away.get(chat_id)
     if aw and _is_away(chat_id):
@@ -9830,7 +9827,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if exp:
             remaining_m = max(0, int((exp - time.time()) / 60))
             exp_str = f" (auto-expires in {remaining_m}m)"
-        lines.append(f"*Away:* {reason} ({ago}m, {origin}){exp_str}")
+        lines.append(f"Away: {reason} ({ago}m, {origin}){exp_str}")
 
     last = last_seen.get(chat_id, 0)
     if last:
@@ -9843,7 +9840,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             gap_str = f"{round(gap / 3600)}h ago"
         else:
             gap_str = f"{round(gap / 86400)}d ago"
-        lines.append(f"*Last chat:* {gap_str}")
+        lines.append(f"Last chat: {gap_str}")
 
     # Conversation tail — last 3 messages truncated to ~80 chars
     hist = conversation_history.get(chat_id, [])
@@ -9858,7 +9855,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = text[:77] + "…"
             lines.append(f"  {speaker}: {text}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Plain text: this renders outfit/life-arc/day/notes snippets and the conversation
+    # tail, all arbitrary. Same reason as /audit (v2026-07-25.7).
+    await update.message.reply_text("\n".join(lines))
 
 
 async def _generate_daily_events(owner: int, yesterday: str = ""):
