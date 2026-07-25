@@ -261,6 +261,35 @@ single-device blast radius.
   requested yet; audit it deliberately rather than assuming main is a superset, and treat
   every port as a rewrite against current main (a merge would drag in a parallel bot.py).
 
+### 3.11 ~~Prompt-size observability~~ ✅ (shipped v2026-07-25.3, `PROMPT_STATS`)
+- Per-call assembled size, running max with the three largest system blocks at the peak,
+  coarse histogram, all on a new `/audit` `Prompt:` line. Nothing measured a *single*
+  prompt before — `_llm_stats["tok_in"]` is a daily running sum.
+- Baseline measured at ship time (empty instance, 20 short turns): cass 11,435 → jules
+  14,822 tokens. `preset.txt` alone is **8,503 tokens on every message for every bot** —
+  larger than any card, and 77% of cass's system stack.
+
+### 3.12 ~~Tiered prompt trimming~~ ✅ (shipped v2026-07-25.4)
+- `_trim_history_to_budget` → `_trim_prompt_to_budget`. The old version protected every
+  system block and dropped only conversation (9/9 blocks kept, 13/20 turns dropped at a
+  15k budget), and could strip all history while still shipping over budget. Now: optional
+  blocks first (largest first), then history oldest-first, then a last-resort dip below
+  `KEEP_RECENT`, then a warning. Opt-in marking via `_sys_opt()` — unmarked stays
+  protected, so a new or reworded block can't silently become droppable.
+- `CONTEXT_TOKEN_BUDGET` still defaults to 0/off. Set it from the `/audit` numbers.
+
+### 3.13 Reduce the protected prompt floor — S, **open, needs owner input**
+- The remaining problem the trimmer deliberately does **not** solve: for a card-heavy
+  instance the system stack is almost entirely *protected*, so a budget below it still
+  costs conversation. Jules is the worst case at 14,417 tokens — `preset.txt` 8,503 +
+  card 5,224, of which a single `ATTRACTION RULE` block in her card is 4,715.
+- Candidate levers, none actioned (all are **content** decisions, not code): split
+  `preset.txt` into an always-on core plus situational sections injected on demand; prune
+  it; move Jules's `ATTRACTION RULE` into her lorebook so it becomes conditional.
+- **Do not action without the owner.** `preset.txt` is voice-critical and deliberately
+  tuned (see v2026-07-18.1's anti-echo work); cards ship to relationships someone
+  actually has. Use the `/audit` `Prompt:` top-blocks line as the evidence base.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
