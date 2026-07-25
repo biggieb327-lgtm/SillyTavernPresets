@@ -334,6 +334,32 @@ single-device blast radius.
   Split one layer at a time, using `/audit`'s `Preset layers:` and `Card:` lines as the
   evidence base.
 
+### 3.14 Port the banned-rhetoric block from Chimera v2 into `preset.txt` — S, owner-gated
+- **Evidence:** the 2026-07-25 review of Writer's Block 5 against the root Chimera preset
+  (`Chimera_v1_borrow-review_WritersBlock5.md`) found that naming the specific LLM
+  constructions beats describing them. Chimera's old rule — *"write the positive action:
+  'She looks away' rather than 'She doesn't look at him'"* — catches simple negation only.
+  It misses `not X but Y`, which is the loudest machine tell. Shipped to the SillyTavern
+  side in `Chimera_v2.json`; the fleet never got it.
+- **What to port:** the four named bans — contrastive negation (`not X but Y`),
+  false-correction/epanorthosis (`It was X. No — Y.`), negation-as-atmosphere
+  (`it wasn't the wind`), and litotes (`not unkind`) — each with its one-line example.
+  ~60 tokens. Do NOT port the rest of the Chimera diff: hooks, the relationship ladder,
+  the assistants and the CoT tasks are all scene-roleplay machinery, wrong shape for a
+  texting companion.
+- **Blast radius:** `preset.txt` is fleet-wide — one edit changes all six characters at
+  once. Deploy is `sync-cards.sh` (dry-run first) + `/restart` per phone bot, and
+  `vps-sync.sh` for cass and jules.
+- **Sequencing note:** 3.13 is actively trying to *shrink* `preset.txt`. If the core/rp/
+  feature split lands first, this belongs in the **core** layer — it is universal prose
+  hygiene, not scene machinery. Adding it before the split just grows the monolith.
+- **Risk:** low on content, non-trivial on voice — `preset.txt` is deliberately tuned
+  (v2026-07-18.1 anti-echo work). Verify against Priya and Jules first: Priya's lowercase
+  sardonic register and Jules's flat precision are the two most likely to shift.
+- **Done =** the block is in `preset.txt` (or the core layer), all six bots restarted and
+  `/audit`-verified, with a before/after sample from Priya and Jules showing the register
+  held.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
