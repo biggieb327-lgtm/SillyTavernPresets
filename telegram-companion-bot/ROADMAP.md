@@ -237,6 +237,30 @@ single-device blast radius.
   thinking call demonstrably improves replies over the free `STEP_INTENT` seed in an
   A/B, with latency and call-count logged; phone-hosted behavior provably unchanged.
 
+### 3.9 ~~Topic-initiative balance~~ ✅ (shipped v2026-07-25.1, `PROMPT_BALANCE`)
+- Owner reported the bots over-reach for memories/notes and rarely surface anything else.
+  Cause was directive asymmetry, not card size or context pressure: only the two recall
+  blocks told the character to raise their contents, while `day.txt` was explicitly told
+  not to be foregrounded. Adds a `# Bringing things up` block plus rewritten
+  notes/threads/day tails. This is the follow-on v2026-07-18.1 deferred.
+- Card size was ruled out and should not be re-investigated: `CONTEXT_TOKEN_BUDGET`
+  defaults to 0 (no trimming at all), and when set, every system block is protected —
+  only conversation history is dropped.
+
+### 3.10 ~~Garmin health feed~~ ✅ (shipped v2026-07-25.2, `GARMIN_FEED`)
+- Sleep / resting HR / steps / Body Battery / stress / last workout as prompt context,
+  plus three quiet-hours-and-budget-gated proactive check-ins, `/health` `/healthnow`
+  `/stress`, and an `/audit` line. `garminconnect` stays an optional per-instance pip
+  install, not a fleet requirement.
+- **Why it took until now:** the feature was built on `claude/push-to-repo-7i2f3c`, an
+  **orphan branch sharing no git history with `main`** (empty `git merge-base`; separate
+  root commit 2026-04-15). Deploys all pull from `main`, so it shipped to nobody for
+  ~3 weeks. Ported by hand.
+- **Open follow-up:** that branch holds other unported work — on-this-day reminiscing,
+  offline life events, adaptive texting-style mirroring, `acoustic_ears`, `/diag`. None is
+  requested yet; audit it deliberately rather than assuming main is a superset, and treat
+  every port as a rewrite against current main (a merge would drag in a parallel bot.py).
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)

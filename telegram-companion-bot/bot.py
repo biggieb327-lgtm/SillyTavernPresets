@@ -40,6 +40,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from garminconnect import Garmin as _Garmin  # optional; only for the Garmin health feed
+except Exception:
+    _Garmin = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -82,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.1"
+BOT_VERSION = "2026-07-25.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1420,6 +1425,58 @@ TRAFFIC_RADIUS_MILES = _env_float("TRAFFIC_RADIUS_MILES", "10")
 TRAFFIC_POLL_MINUTES = _env_int("TRAFFIC_POLL_MINUTES", "10")
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
+# --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
+# Fail-closed on credentials like WSDOT above (no creds => inert), but the kill switch is
+# separate so the feed can be turned off without deleting credentials (invariant #16).
+GARMIN_FEED = os.getenv("GARMIN_FEED", "1").lower() not in ("0", "false", "no", "off")
+GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "").strip()
+GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
+GARMIN_ENABLED = GARMIN_FEED and bool(GARMIN_EMAIL and GARMIN_PASSWORD)
+GARMIN_TIMES = os.getenv("GARMIN_TIMES", "07:30,16:00")
+GARMIN_TOKENSTORE = os.path.expanduser(os.getenv("GARMINTOKENS", "~/.garminconnect"))
+GARMIN_MAX_AGE_HOURS = _env_float("GARMIN_MAX_AGE_HOURS", "18")
+GARMIN_LOGIN_COOLDOWN = _env_int("GARMIN_LOGIN_COOLDOWN", "1800")  # back off after a failed login
+GARMIN_FILE = BASE_DIR / ".garmin_snapshot"
+GARMIN_COOLDOWN_FILE = BASE_DIR / ".garmin_cooldown"  # persisted: restarts must not hammer login
+_garmin: dict = {"text": "", "ts": 0.0, "loaded": False}
+_garmin_obj = None  # cached logged-in client
+if GARMIN_ENABLED and _Garmin is None:
+    # Credentials set but the library is absent: the feed would be silently dead. Surface it
+    # in /audit rather than letting the owner wonder why she never mentions their sleep.
+    _CONFIG_WARNINGS.append(
+        "GARMIN_EMAIL/PASSWORD set but the garminconnect library is missing — "
+        "health feed inert (pip install garminconnect)")
+
+# Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
+# "wound up" without false-alarming on workouts. Only active when the feed is configured.
+STRESS_ALERTS = GARMIN_ENABLED and os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+STRESS_THRESHOLD = _env_int("STRESS_THRESHOLD", "60")          # 0-100; sustained above this = high
+STRESS_SUSTAINED_MIN = _env_int("STRESS_SUSTAINED_MIN", "45")  # must stay high this long to trigger
+STRESS_POLL_MIN = _env_int("STRESS_POLL_MIN", "30")            # how often to check
+STRESS_ALERT_COOLDOWN_HOURS = _env_float("STRESS_ALERT_COOLDOWN_HOURS", "4")
+STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time; a restart can't re-fire
+
+# Body Battery: Garmin's 0-100 energy-reserve gauge. Bottoming out means genuinely depleted.
+# Polled on the stress cadence — the client is cached, so it's one extra GET, not a login.
+BB_ALERTS = GARMIN_ENABLED and os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_LOW_THRESHOLD = _env_int("BB_LOW_THRESHOLD", "20")
+BB_ALERT_COOLDOWN_HOURS = _env_float("BB_ALERT_COOLDOWN_HOURS", "8")
+BB_ALERT_FILE = BASE_DIR / ".bb_alert"
+
+# Resting-HR morning check: resting HR notably above the user's OWN rolling baseline is an
+# early "run down / coming down with something" signal.
+RHR_ALERTS = GARMIN_ENABLED and os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ELEVATED_DELTA = _env_int("RHR_ELEVATED_DELTA", "7")  # bpm above baseline to flag
+RHR_BASELINE_DAYS = _env_int("RHR_BASELINE_DAYS", "14")   # rolling window for the baseline median
+RHR_BASELINE_MIN_DAYS = _env_int("RHR_BASELINE_MIN_DAYS", "3")  # no alert below this much history
+RHR_CHECK_TIME = os.getenv("RHR_CHECK_TIME", "08:00")
+RHR_HISTORY_FILE = BASE_DIR / ".rhr_history.json"
+RHR_ALERT_FILE = BASE_DIR / ".rhr_alert"  # date of the last check-in, so it fires at most once/day
+try:
+    _RHR_H, _RHR_M = (int(x) for x in RHR_CHECK_TIME.split(":"))
+except Exception:
+    _RHR_H, _RHR_M = 8, 0
 
 # --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
@@ -4155,6 +4212,19 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         messages.append({"role": "system", "content": (
             f"# What's going on today\n{day_ctx}\n\n{_day_tail}"
         )})
+
+    # The user's watch metrics are private 1:1 state — never read into a group prompt
+    # (GROUP_CHAT_DESIGN.md §5), same rule as user_notes and inside jokes above.
+    if GARMIN_ENABLED and not group:
+        snap = _garmin_snapshot()
+        if snap:
+            messages.append({"role": "system", "content": (
+                f"# How {uname} is doing physically today (from their watch)\n{snap}\n"
+                f"You quietly keep an eye on how they're doing — this is yours to raise "
+                f"unprompted when it fits, gentler if they slept badly or stress is high, "
+                f"hyped if they crushed a workout. Never recite the numbers, never mention a "
+                f"watch or a dashboard, and don't open with it every time."
+            )})
 
     if image_data_url:
         messages.append({"role": "user", "content": [
@@ -10260,6 +10330,406 @@ async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{header}\n\n{_format_restaurants(results)}")
 
 
+# --- Garmin health feed -------------------------------------------------------------
+# Ported to main 2026-07-25 (v2026-07-25.2). The feature previously existed only on the
+# orphan branch claude/push-to-repo-7i2f3c, which shares no git history with main and so
+# was never deployable — the fleet installs from main. Hand-ported, not cherry-picked.
+#
+# Shape: all garminconnect calls are blocking `requests` underneath, so every one of them
+# runs via asyncio.to_thread (invariant #8). The logged-in client is cached module-level;
+# a failed login writes a persisted cooldown so restart loops can't hammer Garmin's
+# rate-limited login endpoint. Zero LLM calls are added — the snapshot is injected as
+# prompt context, and the three monitors reuse the existing send_triggered path.
+
+def _garmin_bits(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
+    """Pure: already-fetched Garmin payloads → short plain-language phrases.
+
+    Kept free of I/O so the field-name handling (the part that silently breaks when
+    Garmin renames a key) is testable. Each field is independent — a missing one drops
+    its phrase instead of losing the whole snapshot."""
+    bits: list[str] = []
+    secs = (sleep_dto or {}).get("sleepTimeSeconds")
+    if secs:
+        try:
+            h, m = divmod(int(secs) // 60, 60)
+            sleep = f"slept {h}h{m:02d}m last night"
+            sc = ((sleep_dto or {}).get("sleepScores") or {}).get("overall") or {}
+            if sc.get("value"):
+                q = (sc.get("qualifierKey") or "").lower().replace("_", " ")
+                sleep += f" (sleep score {sc['value']}{', ' + q if q else ''})"
+            bits.append(sleep)
+        except (TypeError, ValueError):
+            pass
+    st = stats or {}
+    if st.get("restingHeartRate"):
+        bits.append(f"resting HR {st['restingHeartRate']}")
+    if st.get("totalSteps") is not None:
+        try:
+            bits.append(f"{int(st['totalSteps']):,} steps so far")
+        except (TypeError, ValueError):
+            pass
+    bb = st.get("bodyBatteryMostRecentValue")
+    if bb is not None:
+        bits.append(f"body battery {bb}")
+    stress = st.get("averageStressLevel")
+    if isinstance(stress, (int, float)) and stress >= 0:
+        bits.append(f"avg stress {int(stress)}")
+    a = activity or {}
+    if a:
+        name = ((a.get("activityType") or {}).get("typeKey")
+                or a.get("activityName") or "workout").replace("_", " ")
+        dist = a.get("distance")
+        desc = name + (f" {dist / 1000:.1f}km" if isinstance(dist, (int, float)) and dist else "")
+        when = (a.get("startTimeLocal") or "")[:10]
+        bits.append(f"last workout: {desc}" + (f" ({when})" if when else ""))
+    return bits
+
+
+def _stress_sustained(arr, cutoff_ms: float, threshold: int,
+                      min_samples: int = 3, high_frac: float = 0.7):
+    """Pure: Garmin stressValuesArray → (sustained_high, rounded_avg).
+
+    Garmin marks unmeasurable readings -1/-2 (e.g. during an activity); those are
+    skipped rather than counted as calm. avg is None when there's too little usable
+    data, which is deliberately distinct from a genuinely calm average that rounds
+    to 0 — the caller must not treat "no data" as "fine"."""
+    recent = []
+    for pair in arr or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        ts, v = pair[0], pair[1]
+        if not isinstance(v, (int, float)) or not isinstance(ts, (int, float)):
+            continue
+        if v >= 0 and ts >= cutoff_ms:
+            recent.append(v)
+    if len(recent) < min_samples:
+        return (False, None)
+    avg = sum(recent) / len(recent)
+    frac = sum(1 for v in recent if v >= threshold) / len(recent)
+    return (avg >= threshold and frac >= high_frac, round(avg))
+
+
+def _rhr_baseline(history: list, today: str, min_days: int):
+    """Pure: prior daily resting-HR readings → median baseline, or None if too few.
+
+    Today's own reading is excluded so a single elevated day can't raise the very
+    baseline it's being compared against."""
+    prior = [x["rhr"] for x in (history or [])
+             if isinstance(x, dict) and x.get("date") != today
+             and isinstance(x.get("rhr"), (int, float)) and x.get("rhr") > 0]
+    if len(prior) < max(1, min_days):
+        return None
+    return sorted(prior)[len(prior) // 2]
+
+
+def _garmin_cooldown_left() -> float:
+    try:
+        if GARMIN_COOLDOWN_FILE.exists():
+            return max(0.0, float(GARMIN_COOLDOWN_FILE.read_text()) - time.time())
+    except Exception:
+        pass
+    return 0.0
+
+
+def _garmin_client():
+    """Off-loop only. Logged-in client, reusing the cached token store; once a token is
+    saved, login() resumes it without a fresh (rate-limited) login."""
+    global _garmin_obj
+    if _garmin_obj is not None:
+        return _garmin_obj
+    left = _garmin_cooldown_left()
+    if left > 0:
+        raise RuntimeError(f"garmin login on cooldown for {int(left)}s (rate-limited earlier)")
+    try:
+        c = _Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
+        c.login(GARMIN_TOKENSTORE)
+    except Exception:
+        try:
+            GARMIN_COOLDOWN_FILE.write_text(str(time.time() + GARMIN_LOGIN_COOLDOWN))
+        except Exception:
+            pass
+        raise
+    try:
+        GARMIN_COOLDOWN_FILE.unlink()  # success → clear any cooldown
+    except Exception:
+        pass
+    _garmin_obj = c
+    return c
+
+
+def _drop_garmin_session(tag: str, exc: Exception):
+    """A cached client can break mid-runtime, not just at login. Drop it so the next poll
+    re-logs in instead of retrying the same dead session forever. Never logs the raw
+    exception — Garmin errors can carry the request URL and credentials."""
+    global _garmin_obj
+    print(f"[{tag}] fetch failed: {type(exc).__name__}")
+    _garmin_obj = None
+
+
+def _fetch_garmin() -> str:
+    """Off-loop: today's metrics as one short line. Each metric is isolated."""
+    global _garmin_obj
+    if _Garmin is None or not GARMIN_ENABLED:
+        return ""
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        client = _garmin_client()
+    except Exception as e:
+        print(f"[garmin] login failed: {type(e).__name__}")
+        _garmin_obj = None
+        return ""
+    sleep_dto, stats, activity = {}, {}, {}
+    try:
+        sleep_dto = (client.get_sleep_data(today) or {}).get("dailySleepDTO") or {}
+    except Exception as e:
+        print(f"[garmin] sleep: {type(e).__name__}")
+    try:
+        stats = client.get_stats(today) or {}
+    except Exception as e:
+        print(f"[garmin] stats: {type(e).__name__}")
+    try:
+        acts = client.get_activities(0, 1) or []
+        activity = acts[0] if acts else {}
+    except Exception as e:
+        print(f"[garmin] activities: {type(e).__name__}")
+    return "; ".join(_garmin_bits(sleep_dto, stats, activity))
+
+
+def _garmin_snapshot() -> str:
+    """On-loop: the cached snapshot if it's fresh enough to inject, else ''.
+    Loads from disk once so a restart doesn't lose the morning pull."""
+    if not _garmin["loaded"]:
+        _garmin["loaded"] = True
+        try:
+            if GARMIN_FILE.exists():
+                d = json.loads(GARMIN_FILE.read_text(encoding="utf-8"))
+                _garmin["text"], _garmin["ts"] = d.get("text", ""), float(d.get("ts", 0))
+        except Exception:
+            pass
+    if _garmin["text"] and (time.time() - _garmin["ts"]) < GARMIN_MAX_AGE_HOURS * 3600:
+        return _garmin["text"]
+    return ""
+
+
+async def update_garmin():
+    if not GARMIN_ENABLED or _Garmin is None:
+        return
+    try:
+        text = await asyncio.to_thread(_fetch_garmin)
+        if text:
+            _garmin.update({"text": text, "ts": time.time(), "loaded": True})
+            try:
+                GARMIN_FILE.write_text(json.dumps({"text": text, "ts": _garmin["ts"]}),
+                                       encoding="utf-8")
+            except Exception as e:
+                print(f"[garmin] save failed: {type(e).__name__}")
+            print(f"[garmin] {text}")
+    except Exception as e:
+        print(f"[garmin] update failed: {type(e).__name__}")
+        _count_error("garmin")
+
+
+async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
+    await update_garmin()
+
+
+def _health_nudge_ok(owner: int) -> bool:
+    """The same proactive gate note_followup_job uses — quiet flag, away, quiet hours,
+    per-chat quiet windows, then the shared nudge budget. A health check-in is a nudge
+    and must not be exempt from any of it."""
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if (_is_quiet(owner) or _is_away(owner) or in_quiet_hours()
+            or _in_quiet_window(now_dt, quiet_windows.get(owner, []))):
+        return False
+    return _check_nudge_budget(owner)
+
+
+def _stress_alert_ts() -> float:
+    try:
+        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _recent_stress_high():
+    """Off-loop: has stress stayed high over the last STRESS_SUSTAINED_MIN minutes?"""
+    if not STRESS_ALERTS or _Garmin is None:
+        return (False, None)
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        data = _garmin_client().get_stress_data(today) or {}
+    except Exception as e:
+        _drop_garmin_session("stress", e)
+        return (False, None)
+    cutoff_ms = (time.time() - STRESS_SUSTAINED_MIN * 60) * 1000
+    return _stress_sustained(data.get("stressValuesArray") or [], cutoff_ms, STRESS_THRESHOLD)
+
+
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: sustained high stress → one gentle in-character check-in."""
+    if not STRESS_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
+        return  # already checked in recently
+    if not _health_nudge_ok(owner):
+        return
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if not high:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
+        f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
+        f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
+        f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            STRESS_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[stress] high-stress check-in sent (avg {avg}).")
+    except Exception as e:
+        log.warning("[stress] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
+def _bb_alert_ts() -> float:
+    try:
+        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _body_battery_now():
+    """Off-loop: latest Body Battery (0-100), or None."""
+    if not BB_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        bb = (_garmin_client().get_stats(today) or {}).get("bodyBatteryMostRecentValue")
+    except Exception as e:
+        _drop_garmin_session("bb", e)
+        return None
+    return int(bb) if isinstance(bb, (int, float)) and bb >= 0 else None
+
+
+async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
+    if not BB_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
+        return
+    if not _health_nudge_ok(owner):
+        return
+    bb = await asyncio.to_thread(_body_battery_now)
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
+        f"right now — physically depleted, the kind of drained where pushing harder won't help. "
+        f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
+        f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            BB_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[bb] low-energy check-in sent (body battery {bb}).")
+    except Exception as e:
+        log.warning("[bb] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
+def _resting_hr_today():
+    """Off-loop: today's resting heart rate, or None."""
+    if not RHR_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        rhr = (_garmin_client().get_stats(today) or {}).get("restingHeartRate")
+    except Exception as e:
+        _drop_garmin_session("rhr", e)
+        return None
+    return int(rhr) if isinstance(rhr, (int, float)) and rhr > 0 else None
+
+
+def _read_rhr_history() -> list:
+    try:
+        if RHR_HISTORY_FILE.exists():
+            h = json.loads(RHR_HISTORY_FILE.read_text(encoding="utf-8"))
+            return h if isinstance(h, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _record_rhr(date_str: str, rhr: int):
+    h = [x for x in _read_rhr_history() if isinstance(x, dict) and x.get("date") != date_str]
+    h.append({"date": date_str, "rhr": rhr})
+    h = h[-(RHR_BASELINE_DAYS + 2):]
+    try:
+        RHR_HISTORY_FILE.write_text(json.dumps(h), encoding="utf-8")
+    except Exception as e:
+        print(f"[rhr] history save failed: {type(e).__name__}")
+
+
+async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once daily: resting HR notably above the user's own baseline → early run-down check-in."""
+    if not RHR_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    rhr = await asyncio.to_thread(_resting_hr_today)
+    if not rhr:
+        return
+    baseline = _rhr_baseline(_read_rhr_history(), today, RHR_BASELINE_MIN_DAYS)
+    _record_rhr(today, rhr)  # always record, so the baseline keeps building
+    if baseline is None or rhr < baseline + RHR_ELEVATED_DELTA:
+        return
+    try:
+        if RHR_ALERT_FILE.exists() and RHR_ALERT_FILE.read_text(encoding="utf-8").strip() == today:
+            return  # already checked in today
+    except Exception:
+        pass
+    if not _health_nudge_ok(owner):
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s resting heart rate is notably higher than their usual baseline this "
+        f"morning — often an early sign of being run down, fighting something off, under-slept or "
+        f"stressed. Gently and fully in character, open by noticing they might be a little under "
+        f"the weather or worn out, and check how they're feeling. Warm, brief, NOT clinical; no "
+        f"numbers or watch talk.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            RHR_ALERT_FILE.write_text(today, encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[rhr] elevated resting-HR check-in (today {rhr} vs baseline {baseline}).")
+    except Exception as e:
+        log.warning("[rhr] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
 # --- WSDOT Traffic integration ---
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -10404,6 +10874,82 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "📍 Got it. Use /traffic or /incidents to check what's around there."
             )
+
+
+def _garmin_off_reason() -> str:
+    """Why the health commands are unavailable — distinguishing "no credentials" from
+    "killed by the switch" from "library missing" so the owner isn't left guessing."""
+    if not GARMIN_FEED:
+        return "The health feed is switched off (GARMIN_FEED=0)."
+    if not (GARMIN_EMAIL and GARMIN_PASSWORD):
+        return "The health feed isn't set up (GARMIN_EMAIL and GARMIN_PASSWORD missing)."
+    if _Garmin is None:
+        return "The garminconnect library isn't installed (pip install garminconnect)."
+    return ""
+
+
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    reason = _garmin_off_reason()
+    if reason:
+        await update.message.reply_text(reason)
+        return
+    snap = _garmin_snapshot()
+    if not snap:
+        stale = _garmin.get("text") or ""
+        if stale:
+            age = (time.time() - _garmin["ts"]) / 3600
+            await update.message.reply_text(
+                f"⌚ Last reading is stale ({age:.0f}h old, cutoff "
+                f"{GARMIN_MAX_AGE_HOURS:.0f}h) so she isn't using it:\n{stale}\n\n"
+                f"/healthnow pulls fresh data.")
+            return
+        await update.message.reply_text(
+            "No watch data yet — it pulls a couple of times a day, or use /healthnow.")
+        return
+    age = (time.time() - _garmin["ts"]) / 3600
+    stamp = "just now" if age < 1 else f"{age:.0f}h ago"
+    await update.message.reply_text(f"⌚ Latest from your watch ({stamp}):\n{snap}")
+
+
+async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    reason = _garmin_off_reason()
+    if reason:
+        await update.message.reply_text(reason)
+        return
+    left = _garmin_cooldown_left()
+    if left > 0:
+        await update.message.reply_text(
+            f"Garmin login is on cooldown for another {int(left // 60)}m (an earlier login was "
+            f"rate-limited). Try again after that.")
+        return
+    await update.message.reply_text("⌚ Checking your watch...")
+    await update_garmin()
+    await update.message.reply_text(
+        f"⌚ {_garmin['text']}" if _garmin.get("text")
+        else "Couldn't pull anything that time — check /errors.")
+
+
+async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not STRESS_ALERTS:
+        reason = _garmin_off_reason()
+        await update.message.reply_text(
+            reason or "Stress monitoring is off (STRESS_ALERTS=0).")
+        return
+    await update.message.reply_text("⌚ Checking recent stress...")
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if avg is None:
+        await update.message.reply_text(
+            "No usable stress readings in that window (the watch may need to sync).")
+        return
+    state = f"sustained high (≥{STRESS_THRESHOLD})" if high else "within normal range"
+    await update.message.reply_text(
+        f"🧘 Last {STRESS_SUSTAINED_MIN} min — avg stress {avg}/100: {state}.")
 
 
 async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10690,7 +11236,23 @@ def gather_audit_data() -> dict:
         "config_warnings": list(_CONFIG_WARNINGS),
         "llm_stats": dict(_llm_stats),
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
+        "garmin": _garmin_audit_state(),
     }
+
+
+def _garmin_audit_state() -> str:
+    """One-line health-feed state for /audit: off / inert / how stale the snapshot is."""
+    if not GARMIN_FEED:
+        return "off (GARMIN_FEED=0)"
+    if not (GARMIN_EMAIL and GARMIN_PASSWORD):
+        return "off (no credentials)"
+    if _Garmin is None:
+        return "inert (garminconnect not installed)"
+    if not _garmin.get("text"):
+        return "on, no data yet"
+    age_h = (time.time() - _garmin["ts"]) / 3600
+    fresh = "fresh" if age_h < GARMIN_MAX_AGE_HOURS else "STALE"
+    return f"on, {fresh} ({age_h:.0f}h old)"
 
 
 async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
@@ -10711,6 +11273,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
+        f"Health feed (Garmin): {d.get('garmin', 'off')}",
     ]
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
@@ -11222,8 +11785,16 @@ _TRAFFIC_COMMANDS = [
     BotCommand("incidents", "Active incidents (near you if location shared)"),
 ]
 
+# Health handlers register only when the Garmin feed is configured, so the menu mirrors that.
+_HEALTH_COMMANDS = [
+    BotCommand("health", "Latest metrics from your watch"),
+    BotCommand("healthnow", "Pull fresh watch data right now"),
+    BotCommand("stress", "Recent stress reading"),
+]
 
-def _build_command_menu(traffic_enabled: bool, payments_enabled: bool) -> list:
+
+def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
+                        garmin_enabled: bool = False) -> list:
     """The autocomplete menu, mirroring which command handlers are actually registered.
     Hand-kept alongside the handler registrations — keep the two in sync."""
     cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
@@ -11231,11 +11802,14 @@ def _build_command_menu(traffic_enabled: bool, payments_enabled: bool) -> list:
         cmds += _TRAFFIC_COMMANDS
     if payments_enabled:
         cmds += _PAYMENT_COMMANDS
+    if garmin_enabled:
+        cmds += _HEALTH_COMMANDS
     return cmds
 
 
 async def _register_commands(application):
-    await application.bot.set_my_commands(_build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED))
+    await application.bot.set_my_commands(
+        _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED))
 
 
 async def _post_init(application):
@@ -11448,6 +12022,13 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
+    # Registered whenever credentials exist (even if the kill switch is off or the library
+    # is missing) so the commands can explain WHY they're inert — an unregistered command
+    # gives no response at all, which is undiagnosable from the user side.
+    if GARMIN_EMAIL and GARMIN_PASSWORD:
+        app.add_handler(CommandHandler("health", health_cmd))
+        app.add_handler(CommandHandler("healthnow", healthnow_cmd))
+        app.add_handler(CommandHandler("stress", stress_cmd))
     # Registered unconditionally: when TOMTOM_API_KEY is unset the handlers reply
     # "Maps aren't set up" instead of going silent (an unregistered command gives
     # no response at all, which is undiagnosable from the user side).
@@ -11477,6 +12058,34 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
+        if GARMIN_ENABLED and _Garmin is not None:
+            for _gt in GARMIN_TIMES.split(","):
+                _gt = _gt.strip()
+                if not _gt:
+                    continue
+                try:
+                    _gh, _gm = (int(x) for x in _gt.split(":"))
+                except Exception:
+                    log.warning("[config] bad GARMIN_TIMES entry %r — skipped", _gt)
+                    continue
+                _gtime = dtime(_gh, _gm, tzinfo=TZ) if TZ else dtime(_gh, _gm)
+                app.job_queue.run_daily(garmin_job, time=_gtime)
+            app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
+            log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
+            if STRESS_ALERTS:
+                app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                            first=STRESS_POLL_MIN * 60)
+                log.info("Stress monitoring on (every %d min, threshold %d).",
+                         STRESS_POLL_MIN, STRESS_THRESHOLD)
+            if BB_ALERTS:
+                app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                            first=STRESS_POLL_MIN * 60)
+                log.info("Body Battery monitoring on (every %d min, low threshold %d).",
+                         STRESS_POLL_MIN, BB_LOW_THRESHOLD)
+            if RHR_ALERTS:
+                _rhtime = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
+                app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
+                log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")

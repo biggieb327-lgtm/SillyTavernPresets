@@ -2791,3 +2791,247 @@ class TestPromptBalanceTails:
         src = self._src()
         assert "if PROMPT_BALANCE:" in src
         assert "_initiative_note(NAME, uname)" in src
+
+
+# ── Garmin health feed (v2026-07-25.2) ───────────────────────────────────────
+# Ported from the orphan branch claude/push-to-repo-7i2f3c, which shares no git
+# history with main and so was never deployable. Pure logic split out of the I/O
+# so field-name handling and the alert thresholds are testable.
+
+class TestGarminBits:
+    def test_empty_payloads_produce_nothing(self):
+        assert bot._garmin_bits({}, {}, {}) == []
+
+    def test_none_payloads_are_safe(self):
+        assert bot._garmin_bits(None, None, None) == []
+
+    def test_sleep_formats_hours_and_minutes(self):
+        bits = bot._garmin_bits({"sleepTimeSeconds": 7 * 3600 + 5 * 60}, {}, {})
+        assert bits == ["slept 7h05m last night"]
+
+    def test_sleep_score_and_qualifier_appended(self):
+        bits = bot._garmin_bits(
+            {"sleepTimeSeconds": 3600,
+             "sleepScores": {"overall": {"value": 82, "qualifierKey": "GOOD"}}}, {}, {})
+        assert "sleep score 82" in bits[0]
+        assert "good" in bits[0]
+
+    def test_zero_sleep_is_dropped_not_rendered(self):
+        # A 0 reading means "no data", not "slept 0h" — must not be reported.
+        assert bot._garmin_bits({"sleepTimeSeconds": 0}, {}, {}) == []
+
+    def test_steps_thousands_separator(self):
+        assert "12,345 steps so far" in bot._garmin_bits({}, {"totalSteps": 12345}, {})
+
+    def test_zero_steps_still_reported(self):
+        # 0 steps is real information (unlike 0 sleep) — the key is present.
+        assert "0 steps so far" in bot._garmin_bits({}, {"totalSteps": 0}, {})
+
+    def test_negative_stress_skipped(self):
+        # Garmin uses -1/-2 for "couldn't measure".
+        assert bot._garmin_bits({}, {"averageStressLevel": -1}, {}) == []
+
+    def test_stress_zero_is_kept(self):
+        assert "avg stress 0" in bot._garmin_bits({}, {"averageStressLevel": 0}, {})
+
+    def test_body_battery_reported(self):
+        assert "body battery 43" in bot._garmin_bits({}, {"bodyBatteryMostRecentValue": 43}, {})
+
+    def test_activity_distance_in_km(self):
+        bits = bot._garmin_bits({}, {}, {
+            "activityType": {"typeKey": "trail_running"},
+            "distance": 5400, "startTimeLocal": "2026-07-24 08:00:00"})
+        assert "trail running" in bits[0]
+        assert "5.4km" in bits[0]
+        assert "2026-07-24" in bits[0]
+
+    def test_activity_without_distance(self):
+        bits = bot._garmin_bits({}, {}, {"activityName": "yoga"})
+        assert bits == ["last workout: yoga"]
+
+    def test_one_bad_field_does_not_lose_the_others(self):
+        bits = bot._garmin_bits({"sleepTimeSeconds": "nonsense"},
+                                {"totalSteps": 900}, {})
+        assert any("900 steps" in b for b in bits)
+
+    def test_all_fields_together(self):
+        bits = bot._garmin_bits(
+            {"sleepTimeSeconds": 6 * 3600},
+            {"restingHeartRate": 54, "totalSteps": 3000,
+             "bodyBatteryMostRecentValue": 60, "averageStressLevel": 30},
+            {"activityName": "ride"})
+        assert len(bits) == 6
+
+
+class TestStressSustained:
+    @staticmethod
+    def _pairs(values, base_ts=1_000_000.0):
+        return [[base_ts + i, v] for i, v in enumerate(values)]
+
+    def test_no_data_returns_none_avg(self):
+        # None avg must be distinguishable from a calm average that rounds to 0.
+        high, avg = bot._stress_sustained([], 0, 60)
+        assert high is False and avg is None
+
+    def test_too_few_samples_returns_none_avg(self):
+        high, avg = bot._stress_sustained(self._pairs([80, 80]), 0, 60)
+        assert high is False and avg is None
+
+    def test_sustained_high_detected(self):
+        high, avg = bot._stress_sustained(self._pairs([70, 75, 80, 72]), 0, 60)
+        assert high is True and avg == 74
+
+    def test_calm_readings_are_not_high(self):
+        high, avg = bot._stress_sustained(self._pairs([10, 12, 15]), 0, 60)
+        assert high is False and avg == 12
+
+    def test_genuinely_calm_avg_zero_is_not_none(self):
+        high, avg = bot._stress_sustained(self._pairs([0, 0, 0]), 0, 60)
+        assert high is False and avg == 0
+
+    def test_unmeasurable_readings_skipped(self):
+        # -1/-2 must be dropped, not averaged in as low stress.
+        high, avg = bot._stress_sustained(self._pairs([-1, -2, 80, 80, 80]), 0, 60)
+        assert high is True and avg == 80
+
+    def test_readings_before_cutoff_excluded(self):
+        pairs = [[100, 90], [200, 90], [5000, 10], [5001, 10], [5002, 10]]
+        high, avg = bot._stress_sustained(pairs, 5000, 60)
+        assert high is False and avg == 10
+
+    def test_brief_spike_is_not_sustained(self):
+        # One spike in five readings fails the 70%-of-window requirement.
+        high, avg = bot._stress_sustained(self._pairs([90, 10, 10, 10, 10]), 0, 60)
+        assert high is False
+
+    def test_malformed_entries_ignored(self):
+        pairs = [None, [1], "junk", [1, "x"], [1, 80], [2, 80], [3, 80]]
+        high, avg = bot._stress_sustained(pairs, 0, 60)
+        assert high is True and avg == 80
+
+
+class TestRhrBaseline:
+    def test_none_when_history_empty(self):
+        assert bot._rhr_baseline([], "2026-07-25", 3) is None
+
+    def test_none_when_below_min_days(self):
+        h = [{"date": "2026-07-23", "rhr": 50}, {"date": "2026-07-24", "rhr": 52}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) is None
+
+    def test_median_of_prior_days(self):
+        h = [{"date": "2026-07-21", "rhr": 50},
+             {"date": "2026-07-22", "rhr": 60},
+             {"date": "2026-07-23", "rhr": 55}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 55
+
+    def test_today_excluded_from_its_own_baseline(self):
+        # Today's elevated reading must not raise the baseline it's compared against.
+        h = [{"date": "2026-07-22", "rhr": 50},
+             {"date": "2026-07-23", "rhr": 50},
+             {"date": "2026-07-24", "rhr": 50},
+             {"date": "2026-07-25", "rhr": 90}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 50
+
+    def test_malformed_rows_ignored(self):
+        h = [{"date": "a", "rhr": 50}, "junk", {"date": "b"},
+             {"date": "c", "rhr": None}, {"date": "d", "rhr": 52},
+             {"date": "e", "rhr": 54}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 52
+
+    def test_nonpositive_readings_ignored(self):
+        h = [{"date": "a", "rhr": 0}, {"date": "b", "rhr": -5},
+             {"date": "c", "rhr": 50}, {"date": "d", "rhr": 52},
+             {"date": "e", "rhr": 54}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 52
+
+    def test_none_history_is_safe(self):
+        assert bot._rhr_baseline(None, "2026-07-25", 3) is None
+
+
+class TestGarminConfig:
+    def test_kill_switch_exists_and_defaults_on(self):
+        assert hasattr(bot, "GARMIN_FEED")
+        assert bot.GARMIN_FEED is True
+
+    def test_disabled_without_credentials(self):
+        # No creds in the test fixture .env, so the feed must be inert.
+        assert bot.GARMIN_ENABLED is False
+
+    def test_monitors_require_the_feed(self):
+        assert bot.STRESS_ALERTS is False
+        assert bot.BB_ALERTS is False
+        assert bot.RHR_ALERTS is False
+
+    def test_numeric_config_went_through_env_helpers(self):
+        assert isinstance(bot.STRESS_THRESHOLD, int)
+        assert isinstance(bot.GARMIN_MAX_AGE_HOURS, float)
+        assert isinstance(bot.BB_ALERT_COOLDOWN_HOURS, float)
+
+    def test_off_reason_explains_missing_credentials(self):
+        assert "GARMIN_EMAIL" in bot._garmin_off_reason()
+
+    def test_audit_state_reports_off(self):
+        assert "off" in bot._garmin_audit_state()
+
+    def test_health_commands_in_menu_only_when_enabled(self):
+        names = {c.command for c in bot._build_command_menu(False, False, False)}
+        assert "health" not in names
+        on = {c.command for c in bot._build_command_menu(False, False, True)}
+        assert {"health", "healthnow", "stress"} <= on
+
+
+class TestGarminInvariants:
+    """Rules from bot-code-invariants that this feature could plausibly break."""
+
+    def test_every_garmin_call_runs_off_the_event_loop(self):
+        # Invariant #8: garminconnect is blocking requests underneath.
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job,
+                   bot.rhr_monitor_job, bot.update_garmin):
+            src = inspect.getsource(fn)
+            assert "asyncio.to_thread" in src, fn.__name__
+
+    def test_snapshot_never_enters_group_prompts(self):
+        # GROUP_CHAT_DESIGN.md §5: watch metrics are private 1:1 state.
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "GARMIN_ENABLED and not group" in src
+
+    def test_health_commands_not_group_allowed(self):
+        assert bot.GROUP_ALLOWED_COMMANDS == {"chatid"}
+
+    def test_no_raw_exception_in_garmin_logs(self):
+        # Garmin errors can carry the request URL; log the type only (cf. the WSDOT
+        # key-leak fix in v2026-07-20.2).
+        import inspect
+        for fn in (bot._fetch_garmin, bot._drop_garmin_session):
+            src = inspect.getsource(fn)
+            assert '", e)' not in src, fn.__name__
+            assert '", exc)' not in src, fn.__name__
+            # Only the exception's class name may reach a log line.
+            assert ".__name__" in src, fn.__name__
+
+    def test_check_ins_consume_the_nudge_budget(self):
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
+            assert "_consume_nudge(owner)" in inspect.getsource(fn), fn.__name__
+
+    def test_check_ins_respect_the_proactive_gate(self):
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
+            assert "_health_nudge_ok(owner)" in inspect.getsource(fn), fn.__name__
+
+    def test_health_nudge_gate_checks_every_condition(self):
+        import inspect
+        src = inspect.getsource(bot._health_nudge_ok)
+        for gate in ("_is_quiet", "_is_away", "in_quiet_hours",
+                     "_in_quiet_window", "_check_nudge_budget"):
+            assert gate in src, gate
+
+    def test_no_new_llm_call_added(self):
+        # Invariant #3: the feed is prompt context + the existing proactive path.
+        import inspect
+        for fn in (bot.update_garmin, bot._fetch_garmin, bot.stress_monitor_job,
+                   bot.bb_monitor_job, bot.rhr_monitor_job):
+            src = inspect.getsource(fn)
+            assert "call_nanogpt" not in src, fn.__name__

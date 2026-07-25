@@ -7,6 +7,79 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.2 — Garmin health feed ported onto main (GARMIN_FEED)
+
+**Root cause this release addresses:** the owner asked why the bots never bring up Garmin
+data. They never had any. The Garmin health feed was built on
+`origin/claude/push-to-repo-7i2f3c`, and that branch **shares no git history with `main`** —
+`git merge-base main origin/claude/push-to-repo-7i2f3c` returns empty, and neither branch is
+an ancestor of the other. It's a separate lineage rooted at `76223f9 2026-04-15 "Add files
+via upload"` (9,101-line `bot.py`, last touched 2026-07-04) while main's is 11,487 lines.
+`main` had **zero** references to Garmin in `bot.py`, `.env.example`, or any doc. Since every
+deploy path (`/update`, `sync-cards.sh`, `vps-sync.sh`) pulls from `main`, no bot ever had
+the feature. Not a prompt-attention problem — a missing-code problem.
+
+Because the histories are unrelated, this is a **hand-port, not a cherry-pick** (a merge
+would have dragged in a whole parallel bot.py). Each piece was rewritten against current
+main and its API surface re-verified against the installed library: `Garmin(email,
+password)` positional, `login(tokenstore)`, and `get_sleep_data` / `get_stats` /
+`get_activities` / `get_stress_data` all confirmed present.
+
+**What shipped**, behind `GARMIN_FEED` (default **1 = on**; `0` disables without deleting
+credentials — the feed is additionally inert with no credentials, so unset stays a no-op):
+- **Snapshot feed.** `GARMIN_TIMES` (default 07:30,16:00) plus once at startup pulls sleep,
+  resting HR, steps, Body Battery, avg stress, and last workout into one short line, cached
+  to `.garmin_snapshot` and re-read after a restart. Injected as `# How {user} is doing
+  physically today` and told to work it in without ever reciting numbers. Stops being
+  injected past `GARMIN_MAX_AGE_HOURS` (18) so she never speaks to yesterday's body.
+- **Three proactive check-ins**, each with its own persisted cooldown so a restart can't
+  re-fire one: sustained high stress (`STRESS_*`), Body Battery bottomed out (`BB_*`), and
+  resting HR above the user's own rolling median baseline (`RHR_*`).
+- **`/health`, `/healthnow`, `/stress`** — registered whenever credentials exist, even when
+  the kill switch is off or the library is missing, so they can explain *why* they're inert
+  (an unregistered command answers nothing, which is undiagnosable from the user side).
+  `/audit` gained a `Health feed (Garmin)` line reporting off / inert / snapshot staleness.
+- **Login-cooldown hardening carried over from the branch:** a failed login persists a
+  `GARMIN_LOGIN_COOLDOWN` (1800s) backoff to `.garmin_cooldown`, because Garmin rate-limits
+  the login endpoint and a restart loop otherwise hammers it. A client that breaks
+  *mid-runtime* is dropped (`_drop_garmin_session`) so the next poll re-logs in instead of
+  retrying a dead session forever.
+
+**Invariants this diff had to satisfy** (each was a real risk here):
+- **#8, no bare blocking calls in async:** garminconnect is blocking `requests` underneath.
+  Every call site goes through `asyncio.to_thread`; pinned by a test that greps all four
+  async entry points.
+- **#3, no new LLM calls:** the snapshot is prompt context and the check-ins reuse the
+  existing `send_triggered` path. Zero completion calls added; pinned by a test.
+- **GROUP_CHAT_DESIGN.md §5:** watch metrics are private 1:1 state, so the block is gated
+  `GARMIN_ENABLED and not group`, same as `user_notes` and inside jokes. Pinned by a test —
+  without this, health data would be narrated to Priya and Jules's group thread.
+- **v2026-07-20.2 key-leak class:** Garmin exceptions can carry the request URL, so no log
+  line interpolates the exception — only `type(e).__name__`. Pinned by a test.
+- **#15:** every numeric knob goes through `_env_int`/`_env_float`; a typo warns and falls
+  back instead of bricking the instance.
+- Check-ins go through the same proactive gate as `note_followup_job` (quiet flag, away,
+  quiet hours, per-chat quiet windows) and **consume the shared nudge budget** — a health
+  check-in is a nudge and isn't exempt from it. Extracted as `_health_nudge_ok`.
+
+**`garminconnect` is deliberately NOT in `requirements.txt`.** Four of six instances have no
+watch and the phone venv is shared, so a venv rebuild shouldn't pull a dep most bots never
+import. It stays an optional try/except import, documented in `requirements.txt` and
+`.env.example` with the per-instance pip command. Credentials-set-but-library-missing is not
+silent: it appends a `_CONFIG_WARNINGS` entry and shows as `inert` in `/audit`.
+
+**Pure helpers + tests:** `_garmin_bits` (payload → phrases, so a Garmin field rename is
+caught by a test rather than by silence), `_stress_sustained` (skips Garmin's -1/-2
+unmeasurable markers; returns `avg=None` for "no data", deliberately distinct from a calm
+average that rounds to 0), `_rhr_baseline` (excludes today so one elevated reading can't
+raise the baseline it's compared against). 45 new tests across `TestGarminBits`,
+`TestStressSustained`, `TestRhrBaseline`, `TestGarminConfig`, `TestGarminInvariants`.
+
+**Not ported from the branch** (out of scope, recorded so it isn't mistaken for an
+oversight): that lineage's on-this-day reminiscing, offline life events, adaptive
+texting-style mirroring, acoustic_ears, and `/diag`. Several overlap features main already
+solved differently. Only the health feed was requested.
+
 ## v2026-07-25.1 — Topic initiative rebalanced away from recall (PROMPT_BALANCE)
 
 **Root cause this release addresses:** owner-reported symptom was "the bots are too focused
