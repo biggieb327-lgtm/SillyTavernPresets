@@ -3883,3 +3883,33 @@ class TestUpdateCmdNeverRepliesSilently:
         assert "update_in_progress" in src
         assert "else:" in src
         assert "Update did not run" in src
+
+
+# ── Group-chat co-location warning (v2026-07-25.12) ─────────────────────────
+# GROUP_CHAT_DESIGN.md §3 assumes every peer shares one filesystem. Jules moved to the
+# VPS 2026-07-19 while priya stayed on the phone, so the pilot pair no longer does.
+
+class TestGroupColocationWarning:
+    def test_warning_is_gated_on_group_mode_and_peers(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r"if GROUP_MODE and GROUP_PEERS:\n(.*?)\n\n", src, re.S)
+        assert m, "co-location warning block missing"
+        body = m.group(1)
+        assert "_CONFIG_WARNINGS.append" in body
+
+    def test_warning_names_the_resolved_ledger_dir(self):
+        # The owner has to COMPARE the path across hosts, so it must be printed.
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r"if GROUP_MODE and GROUP_PEERS:\n(.*?)\n\n", src, re.S)
+        assert "{GROUP_LEDGER_DIR}" in m.group(1)
+
+    def test_fixture_is_group_off_so_no_warning(self):
+        assert bot.GROUP_MODE is False
+        assert not any("GROUP_MODE on" in w for w in bot._CONFIG_WARNINGS)
+
+    def test_ledger_dir_defaults_to_the_shared_code_dir(self):
+        # The default being shared is exactly why co-location matters.
+        from pathlib import Path as _P
+        assert bot.GROUP_LEDGER_DIR == _P(bot.__file__).resolve().parent

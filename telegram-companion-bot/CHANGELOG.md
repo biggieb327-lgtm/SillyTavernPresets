@@ -7,6 +7,61 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.12 — Audit items 1 & 2: dead env vars, and the group pilot split across hosts
+
+From the three-class audit (shared state / silent replies / doc-vs-reality drift).
+
+**Item 1 — `.env.example` documented seven variables bot.py never reads.** A mechanical
+diff of `os.getenv`/`_env_int`/`_env_float` names against the template found 7 documented
+vars with zero readers. Setting any of them was a silent no-op, and the template is what
+`CLAUDE.md` calls the "full documented template":
+- `HEARTBEAT_MIN` / `HEARTBEAT_MAX` — **name mismatch**: those are bot.py's internal
+  seconds-valued Python variables; the env vars are `HEARTBEAT_MIN_HOURS` /
+  `HEARTBEAT_MAX_HOURS`.
+- `NUDGE_MAX` — **never existed**. The nudge budget is per-chat runtime state (default 3,
+  0 = unlimited) set from Telegram with `/nudges 3`. Documenting it as an env var meant
+  an owner could believe they had capped proactive messages when they had not.
+- `PROACTIVE_HOUR_START` / `PROACTIVE_HOUR_END` — never existed. The real control is
+  `QUIET_START` / `QUIET_END`, which are a *suppression* window (so the sense is inverted
+  from the old names) and were themselves undocumented.
+- `CONTEXT_LIMIT` / `SUMMARY_EVERY` — never existed. The verbatim window is bounded by
+  hardcoded `MAX_HISTORY=20` / `KEEP_RECENT=10` plus the settable `SHORT_TERM_HOURS`;
+  summarisation is overflow-triggered, so there is no "every N turns" knob at all.
+
+All seven corrected in place with the real names and an explicit note that the old ones
+did nothing. Re-running the check now reports **0** documented-but-unread vars (65 remain
+undocumented in the other direction — audit item 4, not addressed here).
+
+**Item 2 — the group-chat pilot is split across two hosts.** `GROUP_CHAT_DESIGN.md` §3
+states the assumption plainly: *"all instances live on one phone"*, *"one ext4 filesystem,
+where flock is reliable"*. Telegram never delivers one bot's messages to another, so the
+shared filesystem **is** the channel. Jules migrated to the VPS on 2026-07-19; Priya
+stayed on the phone. Each host now silently gets its own ledger and claim dir, which
+breaks precisely what the design exists to prevent:
+- `_try_claim` always succeeds on both sides — there are no shared claim files to contend
+  for, so both bots answer the same message;
+- `GROUP_BOT_CHAIN_MAX` and `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers,
+  so the chain cap and alternation penalty do not apply across the pair.
+
+`GROUP_DAILY_BOT_BUDGET` still bounds each bot individually, so a runaway is capped rather
+than infinite — but at roughly double the intended volume with no alternation control.
+Contrast `world.txt`, whose equivalent split MIGRATION.md explicitly accepts: that one
+degrades to independent weather, this one degrades to unbounded alternation.
+
+bot.py cannot know where a peer lives, so the fix is a loud startup `_CONFIG_WARNINGS`
+entry whenever `GROUP_MODE` is on with peers configured, printing the **resolved**
+`GROUP_LEDGER_DIR` so the owner can compare it across hosts. Documented in
+`GROUP_CHAT_DESIGN.md` (inline at the assumption itself) and in `deploy/MIGRATION.md`
+alongside the Nora/`world.txt` note, with a verification step for when priya migrates.
+
+**Recommendation while split: `GROUP_MODE=0` on both.** `GROUP_MODE` defaults to 0, so
+this is dormant unless explicitly enabled.
+
+**Tests:** `TestGroupColocationWarning` — the warning is gated on `GROUP_MODE and
+GROUP_PEERS`, it names the resolved directory (the owner has to *compare* it, so printing
+it is the point), the fixture stays warning-free, and `GROUP_LEDGER_DIR` still defaults to
+the shared code dir, which is why co-location matters at all.
+
 ## v2026-07-25.11 — Concurrent /update corrupted the shared code dir
 
 **Root cause:** owner-reported from a VPS bot's `/errors`:

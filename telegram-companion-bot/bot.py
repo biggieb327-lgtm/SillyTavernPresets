@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.11"
+BOT_VERSION = "2026-07-25.12"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -320,6 +320,22 @@ GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
 GROUP_ALLOWED_COMMANDS = {"chatid"}
+
+# Co-location warning (2026-07-25). The whole bot-to-bot mechanism rests on every peer
+# reading and writing ONE ledger + claim dir on ONE filesystem — GROUP_CHAT_DESIGN.md §3
+# states the assumption plainly ("all instances live on one phone", "one ext4 filesystem,
+# where flock is reliable"). That stopped being true when jules moved to the VPS while
+# priya stayed on the phone: each host silently gets its own copy, so `_try_claim` always
+# succeeds on both, and GROUP_BOT_CHAIN_MAX / GROUP_DAILY_BOT_BUDGET are computed from
+# separate ledgers — i.e. the loop cap that exists to stop runaway bot-to-bot chatter is
+# not enforced. bot.py cannot detect where a peer lives, so this states the requirement
+# and prints the resolved path; compare it across hosts to confirm they match.
+if GROUP_MODE and GROUP_PEERS:
+    _CONFIG_WARNINGS.append(
+        f"GROUP_MODE on with peers ({', '.join(GROUP_PEERS)}): bot-to-bot coordination "
+        f"requires every peer to share this exact directory on one filesystem — "
+        f"{GROUP_LEDGER_DIR}. A peer on another host (e.g. after a VPS migration) gets "
+        f"its own copy: claims always succeed and the chain cap is NOT enforced.")
 
 # --- R6 evolution experiments (each behind its own flag, default off) ---
 FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")

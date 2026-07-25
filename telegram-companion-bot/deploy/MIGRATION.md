@@ -280,6 +280,27 @@ Nora is the `WORLD_GENERATOR=1` instance. When migrating her:
 - She was the last session in `update-all.sh` on the phone. Once she's migrated,
   `update-all.sh` and `watchdog.sh` on the phone have nothing left to manage.
 
+### Group-chat pilot (Priya + Jules) — split by the migration
+
+Unlike `world.txt` above, this one does **not** degrade gracefully, and it is already in
+effect: jules migrated 2026-07-19, priya did not.
+
+- The bot-to-bot mechanism is a flock'd ledger plus atomic claim files in
+  `GROUP_LEDGER_DIR` (defaults to the shared code dir). `GROUP_CHAT_DESIGN.md` §3 assumes
+  every peer is on one filesystem — Telegram never delivers one bot's messages to another,
+  so the filesystem *is* the channel.
+- Split across hosts, each side gets its own copy: `_try_claim` always succeeds on both,
+  and `GROUP_BOT_CHAIN_MAX` / `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers.
+  The alternation and chain caps stop working; only each bot's own daily budget bounds it.
+- **Therefore:** keep `GROUP_MODE=0` on both until the pair is co-located again — either
+  migrate priya, or point both at genuinely shared storage via `GROUP_LEDGER_DIR`.
+- Since v2026-07-25.12 a startup config warning prints the resolved ledger path whenever
+  `GROUP_MODE` is on with peers configured. Compare it on both hosts; if the two paths
+  aren't the same physical directory, coordination is not happening.
+- **When migrating priya, verify co-location before re-enabling:** with both bots up, run
+  `/chatid` in the group from each, then confirm a single `group_<chat_id>.jsonl` on the
+  VPS grows for both — not one file per host.
+
 ---
 
 ## Phase 3: Retire the phone
