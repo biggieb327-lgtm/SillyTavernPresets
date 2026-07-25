@@ -7,6 +7,66 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.4 — Prompt trimming gives up the right things first
+
+**Root cause this release addresses:** `_trim_history_to_budget` computed
+`protected = system_indices | {final_user}` — i.e. **every** system block was exempt and
+only conversation history was droppable. Two consequences, both demonstrated by
+exercising the function rather than reading it:
+
+1. **The priority was inverted.** On the real assembled prompt at a 15,000-token budget it
+   kept 9/9 system blocks and dropped 13/20 conversation turns. It would delete a dozen
+   turns of live conversation to preserve a triggered lorebook entry or a randomly sampled
+   list of local restaurants — context the character demonstrably does not need to hold a
+   conversation.
+2. **The budget was unenforceable and silent about it.** Because the protected set could
+   exceed the budget on its own, the loop drained every droppable message and returned
+   over budget anyway. With a 14,000-token system stack and a budget of 8,000: 0 of 40
+   history messages kept, prompt still 14,003, logged as a success. (v2026-07-25.3 made
+   that case log a WARNING; this release makes it rare.)
+
+**What shipped** — `_trim_history_to_budget` → **`_trim_prompt_to_budget`**, now tiered:
+1. optional system blocks, **largest first** (fewest distinct blocks lost per token freed);
+2. history older than `KEEP_RECENT`, oldest first;
+3. last resort — dip below `KEEP_RECENT`, oldest first (a degraded prompt that fits beats
+   a hard context failure);
+4. still over → WARNING + `prompt_budget` error, as before.
+
+The final user message and every unmarked system block are never dropped.
+
+**Marking is opt-in and fails safe.** A block is droppable only if built with the new
+`_sys_opt()` helper, which tags it `_tier = _TIER_OPTIONAL`; `_strip_tiers()` removes the
+internal key before the list reaches the API (same reason history's `ts` is dropped when
+copied into the prompt). Seven blocks are marked: `# Relevant background` (lore),
+`# Relevant memories`, `# Inside jokes`, `# Local places`, `# Open threads`,
+`# What's going on today`, and the recent-questions list. Everything else — the card, the
+preset, capabilities, post-history instructions, mood, the initiative note — stays
+protected **by default**, so a newly added block, or one whose heading someone rewrites,
+cannot silently become droppable. The rejected alternative was classifying by heading
+string at trim time, which reclassifies a block the moment its wording changes.
+
+**Measured effect** (priya, populated with threads/jokes/recent-questions, 20 turns,
+13,005 tokens untrimmed): at a 12,800 budget the tiered trimmer drops 2 optional blocks
+and keeps **18/20** turns. **Honest limit:** the benefit is proportional to how much
+optional context is live. For a card-heavy instance like jules — 14,417 tokens of system
+stack that is almost entirely *protected* (preset 8,503 + card 5,224) — there is little
+optional context to give up, and a budget below ~14.5k still costs conversation. The only
+real lever there is reducing the protected content itself, which is a content decision
+(see the `Prompt:` top-blocks line added in v2026-07-25.3), not a trimming one. This
+release does not claim to fix that case.
+
+`CONTEXT_TOKEN_BUDGET` still defaults to **0/off** — nothing changes for the fleet until
+it is deliberately set, and `.env.example` now says to set it from the `/audit` numbers
+rather than by guessing.
+
+**Pure helpers + tests:** `_sys_opt`, `_strip_tiers`. 25 new tests across `TestSysOpt`,
+`TestStripTiers`, `TestTieredTrimOrder` (optional-before-history, largest-optional-first,
+oldest-history-first with the survivors proven contiguous and newest-ending, last-resort
+dip, final-user survival, protected-block survival, early stop, unfittable warning) and
+`TestOptionalBlocksAreMarked` (the seven blocks carry the marker; `POST_HISTORY_RAW` and
+`TEXTING_STYLE` deliberately do not). The pre-existing `TestTrimPromptToBudget` cases pass
+unchanged after the rename — unmarked blocks behave exactly as before.
+
 ## v2026-07-25.3 — Measure the assembled prompt (PROMPT_STATS)
 
 **Root cause this release addresses:** a question came up about whether large character

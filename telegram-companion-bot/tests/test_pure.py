@@ -823,7 +823,7 @@ class TestGatherAuditData:
 
 # ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
 
-class TestTrimHistoryToBudget:
+class TestTrimPromptToBudget:
     def test_noop_when_under_budget(self):
         msgs = [
             {"role": "system", "content": "sys"},
@@ -831,12 +831,12 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": "bye"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 10000)
+        result = bot._trim_prompt_to_budget(list(msgs), 10000)
         assert len(result) == 4
 
     def test_disabled_when_zero(self):
         msgs = [{"role": "user", "content": "x" * 100000}]
-        result = bot._trim_history_to_budget(list(msgs), 0)
+        result = bot._trim_prompt_to_budget(list(msgs), 0)
         assert len(result) == 1
 
     def test_drops_oldest_history_first(self):
@@ -846,7 +846,7 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "old reply"},
             {"role": "user", "content": "new message"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 20)
+        result = bot._trim_prompt_to_budget(list(msgs), 20)
         roles = [m["role"] for m in result]
         assert "system" in roles
         assert result[-1]["content"] == "new message"
@@ -856,7 +856,7 @@ class TestTrimHistoryToBudget:
             {"role": "system", "content": "x" * 400},
             {"role": "user", "content": "hi"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 50)
+        result = bot._trim_prompt_to_budget(list(msgs), 50)
         assert any(m["role"] == "system" for m in result)
 
     def test_never_drops_final_user(self):
@@ -866,7 +866,7 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "a" * 400},
             {"role": "user", "content": "final question"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 30)
+        result = bot._trim_prompt_to_budget(list(msgs), 30)
         assert result[-1]["content"] == "final question"
 
 
@@ -3170,21 +3170,21 @@ class TestTrimBudgetLogging:
 
     def test_disabled_budget_is_a_passthrough(self):
         m = self._prompt(1000, 5)
-        assert bot._trim_history_to_budget(list(m), 0) == m
+        assert bot._trim_prompt_to_budget(list(m), 0) == m
 
     def test_under_budget_is_untouched(self):
         m = self._prompt(100, 3)
-        assert len(bot._trim_history_to_budget(list(m), 100000)) == len(m)
+        assert len(bot._trim_prompt_to_budget(list(m), 100000)) == len(m)
 
     def test_drops_history_oldest_first(self):
         m = self._prompt(1000, 20)
-        out = bot._trim_history_to_budget(list(m), 1300)
+        out = bot._trim_prompt_to_budget(list(m), 1300)
         assert len(out) < len(m)
         assert out[-1]["content"] == "final"   # final user message always survives
 
     def test_system_blocks_are_never_dropped(self):
         m = self._prompt(1000, 20)
-        out = bot._trim_history_to_budget(list(m), 1100)
+        out = bot._trim_prompt_to_budget(list(m), 1100)
         assert sum(1 for x in out if x["role"] == "system") == 1
 
     def test_over_budget_warns_and_counts_an_error(self, caplog):
@@ -3192,7 +3192,7 @@ class TestTrimBudgetLogging:
         before = len(bot._error_counts.get("prompt_budget", []))
         m = self._prompt(14000, 40)
         with caplog.at_level(logging.WARNING):
-            out = bot._trim_history_to_budget(list(m), 8000)
+            out = bot._trim_prompt_to_budget(list(m), 8000)
         # All history stripped, still over — the case that used to pass silently.
         assert sum(1 for x in out if x["role"] != "system") == 1
         assert any("OVER BUDGET" in r.message for r in caplog.records)
@@ -3202,7 +3202,7 @@ class TestTrimBudgetLogging:
         import logging
         m = self._prompt(1000, 20)
         with caplog.at_level(logging.WARNING):
-            bot._trim_history_to_budget(list(m), 5000)
+            bot._trim_prompt_to_budget(list(m), 5000)
         assert not any("OVER BUDGET" in r.message for r in caplog.records)
 
 
@@ -3222,3 +3222,184 @@ class TestPromptStatsConfig:
         bot.assemble_messages(99, "hello")
         assert bot._prompt_stats["n"] == 1
         assert bot._prompt_stats["max"] > 0
+
+
+# ── Tiered prompt trimming (v2026-07-25.4) ───────────────────────────────────
+# The old trimmer protected EVERY system block and dropped only conversation, so it
+# would delete a dozen live turns to keep a triggered lorebook entry — and could strip
+# all history and still ship over budget. See CHANGELOG v2026-07-25.4.
+
+class TestSysOpt:
+    def test_marks_the_optional_tier(self):
+        m = bot._sys_opt("# Relevant memories\nx")
+        assert m["role"] == "system"
+        assert m["_tier"] == bot._TIER_OPTIONAL
+
+    def test_content_is_preserved(self):
+        assert bot._sys_opt("hello")["content"] == "hello"
+
+
+class TestStripTiers:
+    def test_removes_internal_keys(self):
+        out = bot._strip_tiers([bot._sys_opt("x")])
+        assert out == [{"role": "system", "content": "x"}]
+
+    def test_leaves_normal_messages_untouched(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        assert bot._strip_tiers(msgs) == msgs
+
+    def test_no_underscore_keys_survive(self):
+        out = bot._strip_tiers([{"role": "system", "content": "x", "_tier": 2, "_x": 1}])
+        assert not any(k.startswith("_") for m in out for k in m)
+
+    def test_assembled_prompt_carries_no_internal_keys(self):
+        # Whatever the API receives must be role/content only.
+        bot.conversation_history[77] = []
+        bot.user_names[77] = "Tester"
+        msgs = bot.assemble_messages(77, "hello")
+        assert all(set(m) <= {"role", "content"} for m in msgs)
+
+
+class TestTieredTrimOrder:
+    @staticmethod
+    def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):
+        msgs = [{"role": "system", "content": "P" * (4 * protected_tok)}]
+        for t in optional_toks:
+            msgs.append(bot._sys_opt("# opt\n" + "o" * (4 * t)))
+        for i in range(n_hist):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": "h" * (4 * hist_tok)})
+        msgs.append({"role": "user", "content": "final"})
+        return msgs
+
+    @staticmethod
+    def _n_optional(msgs):
+        return sum(1 for m in msgs if m.get("_tier") == bot._TIER_OPTIONAL)
+
+    @staticmethod
+    def _n_hist(msgs):
+        return sum(1 for m in msgs if m.get("role") != "system")
+
+    def test_optional_blocks_go_before_any_history(self):
+        # The whole point of the release: conversation outlives optional context.
+        m = self._prompt(1000, [500, 500], 10, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1300, keep_recent=2)
+        assert self._n_optional(out) == 0
+        assert self._n_hist(out) == 11          # 10 history + final, all intact
+
+    def test_largest_optional_dropped_first(self):
+        m = self._prompt(1000, [50, 900], 2, hist_tok=10)
+        out = bot._trim_prompt_to_budget(list(m), 1200, keep_recent=2)
+        kept = [x for x in out if x.get("_tier") == bot._TIER_OPTIONAL]
+        assert len(kept) == 1
+        assert bot._msg_tokens(kept[0]) < 200   # the small one survived
+
+    def test_history_trimmed_only_after_optional_exhausted(self):
+        m = self._prompt(1000, [200], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1200, keep_recent=4)
+        assert self._n_optional(out) == 0
+        assert self._n_hist(out) < 21
+
+    def test_oldest_history_goes_first_newest_survives(self):
+        # Distinguishable turns so we can prove WHICH ones survived, not just how many.
+        msgs = [{"role": "system", "content": "P" * 4000}]
+        for i in range(20):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": f"turn{i:02d} " + "h" * 92})
+        msgs.append({"role": "user", "content": "final"})
+        out = bot._trim_prompt_to_budget(msgs, 1200, keep_recent=5)
+        kept = [m["content"][:6] for m in out
+                if m["role"] != "system" and m["content"] != "final"]
+        assert kept, "some history should survive at this budget"
+        # Whatever survived is a contiguous run ending at the newest turn.
+        assert kept[-1] == "turn19"
+        assert kept == sorted(kept)
+
+    def test_keep_recent_is_held_back_until_older_is_exhausted(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        # Budget leaves room for ~3 turns, so the 15 "older" ones must all go first
+        # and the dip into the newest 5 stops the moment it fits.
+        out = bot._trim_prompt_to_budget(list(m), 1100, keep_recent=5)
+        assert self._n_hist(out) == 4          # 3 recent + the final user message
+
+    def test_last_resort_dips_below_keep_recent(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=5)
+        assert self._n_hist(out) == 1           # only the final user message left
+
+    def test_final_user_message_always_survives(self):
+        m = self._prompt(1000, [400], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=5)
+        assert out[-1]["content"] == "final"
+
+    def test_protected_block_never_dropped(self):
+        m = self._prompt(2000, [400], 10, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 100, keep_recent=2)
+        assert sum(1 for x in out if x.get("_tier") is None
+                   and x["role"] == "system") == 1
+
+    def test_stops_as_soon_as_it_fits(self):
+        m = self._prompt(1000, [100, 100, 100], 5, hist_tok=10)
+        out = bot._trim_prompt_to_budget(list(m), 1250, keep_recent=2)
+        assert self._n_optional(out) >= 1       # didn't drop more than needed
+        assert self._n_hist(out) == 6           # history untouched
+
+    def test_under_budget_is_a_noop(self):
+        m = self._prompt(100, [50], 4, hist_tok=10)
+        assert len(bot._trim_prompt_to_budget(list(m), 100000)) == len(m)
+
+    def test_zero_budget_disables_everything(self):
+        m = self._prompt(9999, [999], 40)
+        assert bot._trim_prompt_to_budget(list(m), 0) == m
+
+    def test_keep_recent_zero_allows_full_history_drop(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=0)
+        assert self._n_hist(out) == 1
+
+    def test_unfittable_still_warns(self, caplog):
+        import logging
+        m = self._prompt(5000, [200], 10, hist_tok=25)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_prompt_to_budget(list(m), 1000, keep_recent=2)
+        assert any("OVER BUDGET" in r.message for r in caplog.records)
+
+    def test_successful_trim_does_not_warn(self, caplog):
+        import logging
+        m = self._prompt(1000, [500], 5, hist_tok=25)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_prompt_to_budget(list(m), 1300, keep_recent=2)
+        assert not any("OVER BUDGET" in r.message for r in caplog.records)
+
+
+class TestOptionalBlocksAreMarked:
+    """The blocks that should be sacrificeable actually carry the marker. Without this,
+    a budget would silently fall back to eating conversation again."""
+
+    def _assembled(self):
+        import inspect
+        return inspect.getsource(bot.assemble_messages)
+
+    def test_seven_optional_blocks_marked(self):
+        assert self._assembled().count("_sys_opt(") == 7
+
+    def test_lore_is_optional(self):
+        src = self._assembled()
+        i = src.index("# Relevant background")
+        assert "_sys_opt(" in src[max(0, i - 200):i]
+
+    def test_memories_are_optional(self):
+        src = self._assembled()
+        assert "_sys_opt(block)" in src
+
+    def test_day_context_is_optional(self):
+        src = self._assembled()
+        i = src.index("# What's going on today")
+        assert "_sys_opt(" in src[max(0, i - 200):i]
+
+    def test_voice_critical_blocks_are_not_optional(self):
+        # The card's own instructions and the texting preset must never be droppable.
+        src = self._assembled()
+        for anchor in ("POST_HISTORY_RAW", "TEXTING_STYLE"):
+            i = src.index(anchor)
+            assert "_sys_opt(" not in src[max(0, i - 160):i], anchor

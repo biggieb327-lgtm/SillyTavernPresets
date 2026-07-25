@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.3"
+BOT_VERSION = "2026-07-25.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -757,6 +757,28 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# --- Prompt trim tiers ---------------------------------------------------------------
+# A system block is NEVER dropped unless it is explicitly marked optional. Fail-safe by
+# construction: a new block, or one whose heading someone rewrites, stays protected. The
+# alternative (classifying by heading string at trim time) silently reclassifies a block
+# the moment its wording changes, which is exactly the kind of drift this repo keeps
+# paying for elsewhere.
+_TIER_OPTIONAL = 2
+
+
+def _sys_opt(content: str) -> dict:
+    """A system block that may be dropped to fit a context budget: triggered, situational,
+    or decorative context that the character can hold a conversation without. Voice,
+    identity, capabilities, and the card itself are never marked this way."""
+    return {"role": "system", "content": content, "_tier": _TIER_OPTIONAL}
+
+
+def _strip_tiers(messages: list) -> list:
+    """Remove internal bookkeeping keys before the list goes to the API — same reason
+    history's `ts` is dropped when it's copied into the prompt."""
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+
+
 def _msg_tokens(m: dict) -> int:
     """Estimated tokens for one assembled message, string or multipart content."""
     c = m.get("content", "")
@@ -810,41 +832,76 @@ def _record_prompt_size(messages: list, chat_id: int) -> int:
     return total
 
 
-def _trim_history_to_budget(messages: list, budget: int) -> list:
+def _trim_prompt_to_budget(messages: list, budget: int, keep_recent: int = None) -> list:
+    """Fit the assembled prompt into `budget` estimated tokens, giving up the least
+    valuable context first.
+
+    The previous version protected EVERY system block and dropped only conversation
+    history, which inverted the real priority: it would delete a dozen turns of live
+    conversation to preserve a triggered lorebook entry, and — because the protected
+    blocks could exceed the budget on their own — strip the entire conversation and
+    still ship over budget. Order now:
+
+      1. optional system blocks (`_sys_opt`: lore, recalled memories, inside jokes,
+         local-places sample, open threads, day context, recent-questions list),
+         largest first so the fewest distinct blocks are lost;
+      2. history older than `keep_recent`, oldest first;
+      3. the last-resort dip below `keep_recent`, oldest first — a degraded prompt
+         that fits beats a hard context failure;
+      4. still over → WARNING + counted error. Never drops a protected system block
+         or the final user message.
+    """
     if budget <= 0:
         return messages
-    total = sum(_est_tokens(m.get("content", "") if isinstance(m.get("content"), str)
-                            else str(m.get("content", ""))) for m in messages)
+    keep_recent = KEEP_RECENT if keep_recent is None else keep_recent
+    total = _prompt_token_total(messages)
     if total <= budget:
         return messages
-    system_indices = {i for i, m in enumerate(messages) if m["role"] == "system"}
+
     final_user = None
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i]["role"] == "user":
+        if messages[i].get("role") == "user":
             final_user = i
             break
-    protected = system_indices | ({final_user} if final_user is not None else set())
-    droppable = [i for i in range(len(messages)) if i not in protected]
-    dropped = 0
-    while total > budget and droppable:
-        i = droppable.pop(0)
-        content = messages[i].get("content", "")
-        total -= _est_tokens(content if isinstance(content, str) else str(content))
-        messages[i] = None
-        dropped += 1
+
+    hist_idx = [i for i, m in enumerate(messages)
+                if m.get("role") != "system" and i != final_user]
+    opt_idx = [i for i, m in enumerate(messages)
+               if m.get("role") == "system" and m.get("_tier") == _TIER_OPTIONAL]
+    # Largest first: frees the budget while losing the fewest distinct blocks.
+    opt_idx.sort(key=lambda i: _msg_tokens(messages[i]), reverse=True)
+    # Oldest first, but the newest `keep_recent` turns are held back for stage 3.
+    if keep_recent > 0:
+        older, recent = hist_idx[:-keep_recent], hist_idx[-keep_recent:]
+    else:
+        older, recent = hist_idx, []
+
+    dropped_opt = dropped_hist = 0
+    for stage, idxs in (("opt", opt_idx), ("hist", older), ("recent", recent)):
+        for i in idxs:
+            if total <= budget:
+                break
+            total -= _msg_tokens(messages[i])
+            messages[i] = None
+            if stage == "opt":
+                dropped_opt += 1
+            else:
+                dropped_hist += 1
+        if total <= budget:
+            break
+
     messages = [m for m in messages if m is not None]
-    if dropped:
-        # The old wording said "~Nk tokens over budget" while printing the FINAL total,
-        # not the overage — it read as an overshoot report when the trim had succeeded.
-        log.info("[prompt] dropped %d history msg(s); final ~%dk tokens (budget ~%dk)",
-                 dropped, total // 1000, budget // 1000)
+    if dropped_opt or dropped_hist:
+        log.info("[prompt] trimmed to fit: dropped %d optional block(s) + %d history "
+                 "msg(s); final ~%dk tokens (budget ~%dk)",
+                 dropped_opt, dropped_hist, total // 1000, budget // 1000)
     if total > budget:
-        # Every system block is protected, so once they alone exceed the budget this
-        # function cannot enforce it — it strips the whole conversation and ships over
-        # anyway. That used to be silent. WARNING so it reaches errors.log and /errors.
-        log.warning("[prompt] OVER BUDGET after trimming: ~%d tokens vs budget %d — the "
-                    "system blocks alone exceed it (%d history msg(s) dropped, to no effect)",
-                    total, budget, dropped)
+        # Protected blocks (card, preset, capabilities, post-history) alone exceed the
+        # budget — nothing droppable is left. Shipping over is the honest outcome; the
+        # fix is a smaller preset/card or a larger budget, not deleting more context.
+        log.warning("[prompt] OVER BUDGET after trimming: ~%d tokens vs budget %d — "
+                    "protected blocks alone exceed it (dropped %d optional + %d history)",
+                    total, budget, dropped_opt, dropped_hist)
         _count_error("prompt_budget")
     return messages
 
@@ -3976,12 +4033,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
-        messages.append({
-            "role": "system",
-            "content": (f"# Local places\nReal spots {NAME} knows and might naturally reference "
-                        f"if it fits — don't force them, and don't invent fake businesses when "
-                        f"a real area works: " + ", ".join(picks) + "."),
-        })
+        messages.append(_sys_opt(
+            f"# Local places\nReal spots {NAME} knows and might naturally reference "
+            f"if it fits — don't force them, and don't invent fake businesses when "
+            f"a real area works: " + ", ".join(picks) + "."))
 
     cap_lines = [
         f"# Capabilities\nA couple of things you can do with tags, used naturally and "
@@ -4170,10 +4225,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         joke_lines = "\n".join(
             f'- "{j["phrase"]}" ({j["tone"]}): {j["meaning"]}' for j in avail_jokes
         )
-        messages.append({"role": "system", "content": (
+        messages.append(_sys_opt(
             f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
-        )})
+        ))
 
     # Feedback-miss: one-turn note after a 👎 reaction
     if FEEDBACK_REACTIONS and chat_id in _feedback_miss:
@@ -4194,24 +4249,22 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                 f"just because you have nothing else. What you're doing right now is as good a "
                 f"thing to talk about."
             )
-            messages.append({"role": "system", "content": (
+            messages.append(_sys_opt(
                 f"# Open threads between you two\n{tl}\n{_thread_tail}"
-            )})
+            ))
 
     rq = _recent_questions.get(chat_id) or []
     if rq:
-        messages.append({"role": "system", "content": (
+        messages.append(_sys_opt(
             f"# Questions you've recently asked {uname} — don't repeat these:\n"
             + "\n".join("- " + q for q in rq[-5:])
-        )})
+        ))
 
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-8:])
     lore = triggered_lore(scan_text, query_vec=query_vec)
     if lore:
-        messages.append({
-            "role": "system",
-            "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
-        })
+        messages.append(_sys_opt(
+            "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname)))
 
     mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
@@ -4225,7 +4278,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             block += (f"\nThese are context, not conversation topics — don't bring one"
                       f" up again if you've referenced it recently; let it go unless"
                       f" {uname} raises it.")
-        messages.append({"role": "system", "content": block})
+        messages.append(_sys_opt(block))
 
     bds = boundaries.get(chat_id) or []
     if bds:
@@ -4280,9 +4333,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"anyone mentions what they're in the middle of. Still never narrate it like a "
             f"list; one concrete detail beats a summary of your day."
         )
-        messages.append({"role": "system", "content": (
+        messages.append(_sys_opt(
             f"# What's going on today\n{day_ctx}\n\n{_day_tail}"
-        )})
+        ))
 
     # The user's watch metrics are private 1:1 state — never read into a group prompt
     # (GROUP_CHAT_DESIGN.md §5), same rule as user_notes and inside jokes above.
@@ -4310,7 +4363,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
 
-    final = _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
+    final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
     if PROMPT_STATS:
         _record_prompt_size(final, chat_id)
     return final
