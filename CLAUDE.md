@@ -100,7 +100,12 @@ the `nora-instance-dir` eval.)
 
 ## Stack
 
-- Python 3.13 on Termux/Android; `python-telegram-bot >=21.0,<22.0` (async, job-queue)
+- Python **3.14** on Termux/Android (observed 3.14.6 on emily 2026-07-25 — Termux upgraded
+  from 3.13 at some point; the shared venv was rebuilt and is consistent with it, and the
+  PTB v21 `asyncio.get_event_loop()` workaround in `main()` still holds). The
+  `=== STARTUP AUDIT ===` line reports the live version — trust it over this file.
+  Practical effect: cp314 wheels are scarce, so any new binary dependency is likely to
+  compile from source on-device. `python-telegram-bot >=21.0,<22.0` (async, job-queue)
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`
 - SillyTavern `chara_card_v2` JSON cards
 - Repo `biggieb327-lgtm/SillyTavernPresets`; raw URL base
