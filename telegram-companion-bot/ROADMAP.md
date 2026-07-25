@@ -81,6 +81,39 @@ single-device blast radius.
   works across phone+VPS hosts mid-migration) and replies with one up/down /
   version / uptime / errors table — `fleet-status.sh` without the shell.
 
+### 1.6 Lock the vps-sync.sh bot.py swap — S, **next**
+- **Why now:** `perform_self_update` had exactly this bug and it bit on 2026-07-25
+  (`FileNotFoundError: /opt/telegram-bots/bot.py.new`, operational log same date). Fixed
+  in bot.py by a host-wide `flock` in v2026-07-25.11 — but `deploy/vps-sync.sh` performs
+  the *same* swap on the *same* shared paths with no guard, so the class is only half
+  closed. Cass and jules share `/opt/telegram-bots`, and the documented deploy is two
+  back-to-back invocations, which is precisely the race.
+- **The race** (`vps-sync.sh` lines 33/49/50/51):
+  ```
+  curl -o "$BASE/bot.py.new"   →  py_compile  →  cp bot.py bot.py.bak  →  mv bot.py.new bot.py
+  ```
+  Two concurrent runs share all three paths. The loud failure is one run's `mv` removing
+  the other's `bot.py.new`. **The silent failure is worse and is the real reason to fix
+  it:** if instance B's `cp bot.py bot.py.bak` lands after instance A's `mv`, the rollback
+  point becomes a copy of the *new* code, and nothing reports it — you believe you can
+  roll back and you cannot.
+- **Fix:** `flock` around the bot.py swap. `flock` is util-linux and present by default on
+  Ubuntu 24.04 (unlike Termux, which is why bot.py's phone-side guard and `watchdog.sh`'s
+  PID-file guard were chosen differently — do not "unify" the three).
+  ```bash
+  exec 9>"$BASE/.vps-sync.lock"
+  flock -n 9 || { echo "[vps-sync] another sync is swapping bot.py on this host; retry"; exit 1; }
+  ```
+  Only the shared code swap needs covering — the card, preset layers, `.env` and systemd
+  unit are all per-instance. Locking the whole run is simpler and equally correct.
+- **Also worth folding in:** `vps-sync.sh` currently `cp`s the backup *before* the `mv`
+  with `|| true`, so a failed backup is silent. Make the backup failure fatal, since its
+  entire purpose is the rollback path.
+- **Done when:** two `vps-sync.sh` runs started simultaneously against the same host leave
+  a correct `bot.py` and a `bot.py.bak` holding the genuinely previous version; the second
+  run exits non-zero with a clear message rather than corrupting either. Verify by racing
+  them deliberately on the VPS, not by inspection.
+
 ---
 
 ## Track 2 — Engineering workflow
@@ -354,6 +387,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | **Now** | 1.2 VPS Phase 2 — pilot jules | **Jules migrated to the VPS 2026-07-19** (Contabo, Ubuntu 24.04, systemd `bot@jules`, PID live); in 7-day soak. Pending: re-point `HEALTHCHECK_URL` to the VPS, remove the phone-side `~/jules-bot` after soak. Runbook updated with the stop-supervisor + whole-dir-tar fixes the pilot surfaced (see operational-log 2026-07-19). Remaining five bots next, same procedure. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
+| **Next** | 1.6 lock the `vps-sync.sh` bot.py swap | Closes the other half of the concurrent-deploy bug fixed in bot.py by v2026-07-25.11. Cass and jules share `/opt/telegram-bots`, and the documented deploy runs `vps-sync.sh` twice back to back — the exact race. Silent failure mode (a `bot.py.bak` holding the *new* code) is the reason this ranks above cosmetic work. Small: a `flock` plus making the backup failure fatal. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
