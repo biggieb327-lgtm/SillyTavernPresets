@@ -3578,3 +3578,45 @@ class TestResolvePresetLayers:
             out, _ = self._resolve(names, {})
             assert len(out) >= 1
             assert all(t for _, t in out)
+
+
+# ── /audit must be sendable whatever it finds (v2026-07-25.7) ────────────────
+# v2026-07-25.5/.6 added card field names (system_prompt, mes_example) and prompt block
+# headings ([VOICEPRINT PRESET …]) to a parse_mode="Markdown" message. A stray '_' or an
+# unmatched '[' makes Telegram reject the whole message ("can't parse entities"), so the
+# command whose job is diagnosing the bot became the thing that silently failed.
+
+class TestAuditIsPlainText:
+    def _src(self):
+        """audit_cmd's source with comment lines removed — the comments deliberately
+        mention parse_mode="Markdown" to explain why it must not be used."""
+        import inspect
+        return "\n".join(ln for ln in inspect.getsource(bot.audit_cmd).splitlines()
+                         if not ln.lstrip().startswith("#"))
+
+    def test_audit_does_not_use_parse_mode(self):
+        assert "parse_mode" not in self._src(), (
+            "/audit interpolates arbitrary diagnostic text (card fields, prompt headings, "
+            "config warnings naming env vars) — any parse_mode makes it un-sendable "
+            "depending on what it found")
+
+    def test_header_has_no_markdown_emphasis(self):
+        assert "*Self-Audit*" not in self._src()
+
+    def test_audit_output_survives_markdown_hostile_content(self):
+        # The real payload that broke it: underscores and unmatched brackets.
+        bot._prompt_stats.update({"n": 1, "sum": 9000, "max": 9000, "max_ts": time.time(),
+                                  "max_chat": 1, "buckets": {"8-12k": 1},
+                                  "max_blocks": [(8503, "[VOICEPRINT PRESET — SINGLE SLOT]"),
+                                                 (2231, "(card: system_prompt+description+…)")]})
+        d = bot.gather_audit_data()
+        ps = d["prompt_stats"]
+        rendered = "\n".join(f"  ~{t}t  {h}" for t, h in ps["max_blocks"])
+        # Exactly the conditions Telegram rejects — proof the content is hostile, which is
+        # why the command must not ask Telegram to parse it.
+        assert rendered.count("[") != rendered.count("]") or "_" in rendered
+
+    def test_card_field_names_contain_underscores(self):
+        # Guards the premise: if field names ever stopped containing '_', a future reader
+        # might think the plain-text requirement was cosmetic.
+        assert any("_" in k for k in bot._card_field_tokens)

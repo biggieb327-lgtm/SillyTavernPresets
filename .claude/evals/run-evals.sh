@@ -269,6 +269,27 @@ else
   ok "no-exception-leak: user-facing errors are generic; details stay in the log"
 fi
 
+# v2026-07-25.7: /audit interpolates arbitrary diagnostic strings — card field names
+# (system_prompt, mes_example), prompt block headings ([VOICEPRINT PRESET …]), config
+# warnings naming env vars. Under parse_mode="Markdown" a stray '_' or unmatched '['
+# makes Telegram reject the whole message, so the command that exists to diagnose the
+# bot silently failed fleet-wide. Pinned because the regression is invisible in code
+# review and only shows up as "audit isn't working".
+# NB: a plain awk range (/^async def audit_cmd/,/^async def /) collapses to ONE line,
+# because the opening line matches the end pattern too — that version of this check could
+# never fail. Flag-based scan instead, and it was break-tested red before being trusted.
+audit_send=$(awk '
+  /^async def audit_cmd/ { inblk = 1; next }
+  inblk && /^async def / { inblk = 0 }
+  inblk && $0 !~ /^[[:space:]]*#/ && /parse_mode/ { c++ }
+  END { print c + 0 }
+' "$BOT")
+if [ "${audit_send:-0}" -eq 0 ]; then
+  ok "audit-plain-text: /audit sends plain text (cannot be broken by what it reports)"
+else
+  bad "audit-plain-text" "/audit uses parse_mode again — a card field name or prompt heading with '_' or '[' will make Telegram reject the message and /audit will silently stop working (see CHANGELOG v2026-07-25.7)"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

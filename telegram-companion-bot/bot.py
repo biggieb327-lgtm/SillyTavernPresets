@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.6"
+BOT_VERSION = "2026-07-25.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11495,7 +11495,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         return
     d = gather_audit_data()
     lines = [
-        f"🔧 *Self-Audit* (v{d['version']})",
+        f"🔧 Self-Audit (v{d['version']})",
         f"Uptime: {d['uptime_hours']}h",
         f"Errors (last hour): {d['errors_last_hour_total']}",
     ]
@@ -11556,7 +11556,15 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
                 f"Group {gid}: ledger {lsize} KB, bot-sends today "
                 f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}"
             )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Sent as PLAIN TEXT deliberately. /audit interpolates arbitrary diagnostic strings —
+    # card field names (system_prompt, mes_example), prompt block headings
+    # ([VOICEPRINT PRESET …]), config warnings naming env vars (STRESS_THRESHOLD), file
+    # paths, model ids. Under parse_mode="Markdown" a stray '_' or an unmatched '[' makes
+    # Telegram reject the whole message with "can't parse entities", so the command whose
+    # entire job is diagnosing the bot became the thing that silently failed
+    # (v2026-07-25.5/.6). A diagnostic must never be un-sendable because of what it found.
+    # The only Markdown here was a bold header — not worth that failure mode.
+    await update.message.reply_text("\n".join(lines))
 
 
 def tail_error_lines(n: int = 20) -> list[str]:

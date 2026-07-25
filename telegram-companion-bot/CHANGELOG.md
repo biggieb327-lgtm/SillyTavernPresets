@@ -7,6 +7,51 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.7 — /audit was broken by its own output (regression in .5/.6)
+
+**Root cause:** `audit_cmd` sends with `parse_mode="Markdown"`, and v2026-07-25.5/.6 added
+lines that interpolate **arbitrary diagnostic strings** into it:
+- card field names from the new `Card:` line — `system_prompt`, `mes_example`,
+  `post_history_instructions` all contain `_`, which opens italics in Telegram's legacy
+  Markdown;
+- prompt block headings from the `Prompt:` top-blocks line — e.g.
+  `[VOICEPRINT PRESET — TELEGRAM SINGLE SLOT]`, an unmatched `[` that legacy Markdown
+  parses as the start of a link;
+- and, pre-existing but far rarer, config warnings naming env vars (`STRESS_THRESHOLD`).
+
+Telegram rejects the whole message with `400: can't parse entities`, so nothing sends.
+From the owner's side `/audit` simply does nothing — **the command whose entire purpose is
+diagnosing the bot became the thing that silently failed**, on every instance running .5
+or .6, not just the one where it was noticed. Verified by rendering Emily's real audit
+payload and counting the metacharacters: three of the added lines are individually
+unbalanced.
+
+**Fix:** `/audit` now sends **plain text**. The only Markdown it ever used was a bold
+`*Self-Audit*` header, which is not worth a failure mode where the diagnostic is
+un-sendable because of what it found. Escaping was the alternative and was rejected: the
+set of interpolated values is open-ended (field names, headings, file paths, model ids,
+exception class names, future additions), so escaping would need to be remembered forever
+at every new call site, while plain text cannot regress.
+
+**Not affected, and why:** `/errors` never set a `parse_mode`. `/fleet` wraps its table in
+a ``` fence, where `_` and `[` are literal, and only carries version/uptime/error counts.
+Both were checked rather than assumed.
+
+**Eval + tests.** New `audit-plain-text` eval, **break-tested red-green** — and the first
+version of it was itself broken: a plain awk range
+`/^async def audit_cmd/,/^async def /` collapses to a single line, because the opening
+line also matches the end pattern, so the check could never fail. Replaced with a
+flag-based scan that skips comment lines (the fix's own comment necessarily mentions
+`parse_mode="Markdown"` to explain the ban). Confirmed 0 on the fixed file and 1 on a copy
+with `parse_mode` re-injected. `TestAuditIsPlainText` pins the same contract in pytest,
+including that the card-field names really do contain underscores — so a future reader
+can't mistake the plain-text requirement for cosmetic preference.
+
+**Why an eval for a first occurrence** (the usual bar is twice): the failure is invisible
+in code review and in every local test, produces no user-visible error, and disables the
+fleet's primary diagnostic. The same shape would recur the moment anyone adds a formatted
+line to `/audit`.
+
 ## v2026-07-25.6 — The preset split, Cass first (+ fallback ladder)
 
 **Content, plus one small bot.py hardening.** v2026-07-25.5 shipped the layering
