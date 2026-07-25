@@ -7,6 +7,37 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.10 — Sanity-check sweep: the wrong triage rule had four more survivors
+
+**Root cause:** v2026-07-25.8 corrected "`STARTUP AUDIT` with no preceding
+`[shutdown] graceful stop` = SIGKILL" in `CLAUDE.md`, the Monitoring section, the
+`repo-debugging-playbook` table, and `_on_shutdown`'s docstring. An explicit sweep found
+it still standing in **four more places** — a correction pass that greps only where you
+remember writing something is not a correction pass.
+
+The worst survivor was in `_self_audit`'s **restart-storm DM**: the message the owner
+receives *at the moment they are debugging a restart storm* told them
+`no line = SIGKILL`. Worst possible placement for the one instruction guaranteed to be
+read under pressure. Now points at the exit code (137 / 143 / 0) and explicitly warns
+that the graceful-stop line is not the discriminator.
+
+Also fixed:
+- `CHEATSHEET.md` — the phantom-killer check still keyed off the graceful-stop line.
+  Replaced with the exit-code grep, plus the note that `settings` cannot run in Termux
+  (it needs adb) and the process-census one-liner that found the stacked watchdogs.
+- `vault/entities/termux-phone-host.md` — a live knowledge entry that past sessions have
+  corrected during incidents. Carried **three** stale facts: the old triage rule, "Python
+  3.13" (it's 3.14.6), and "all six bots" on the phone (it's four; cass and jules are on
+  the VPS).
+- The v2026-07-25.3 entry below still asserted the 4,715-token `ATTRACTION RULE` figure as
+  fact, with only a forward correction in `.5`. Annotated inline so it can't be read in
+  isolation and believed. Deliberately annotated rather than rewritten — the mistake, and
+  how a mislabelled diagnostic produced it, are worth keeping legible.
+
+**Test:** `TestRestartStormAdviceIsCorrect` pins the DM to the exit-code rule and asserts
+the old claim is absent, because this specific text has now been wrong through two
+correction passes.
+
 ## 2026-07-25 — Ops: watchdog.sh single-instance guard (no bot.py change, no version bump)
 
 **Root cause:** `watchdog.sh` supports two install modes — `--once` (cron) and a bare
@@ -401,6 +432,13 @@ but her prompt is only 1.3× larger, because most of that 52KB is lorebook (cond
 and JSON structure. The largest single line item for every bot is the *shared* preset —
 77% of cass's system stack, 59% of jules's. Jules's one real outlier is a 4,715-token
 `ATTRACTION RULE` block inside her card, which ships unconditionally every message.
+
+> ⚠️ **The previous sentence is WRONG — corrected in v2026-07-25.5.** `[ATTRACTION RULE]`
+> is **84 tokens**. The 4,715 figure is the entire *merged* card block (system_prompt +
+> description + scenario + mes_example); `_prompt_top_blocks` labelled every block by its
+> first line, and jules's card happens to open with that heading. Do not act on the 4,715
+> number. Left in place rather than rewritten so the mistake, and how a mislabelled
+> diagnostic produced it, stay legible.
 
 **What shipped**, behind `PROMPT_STATS` (default **1 = on**; `0` disables the bookkeeping):
 - `_record_prompt_size` at the end of `assemble_messages` — count, running sum, max (with

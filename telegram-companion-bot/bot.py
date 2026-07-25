@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.9"
+BOT_VERSION = "2026-07-25.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11420,10 +11420,11 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
         _restart_alert_ts = time.time()
         issues.append(
             f"restarted {restarts}x in the last hour — something is killing the process. "
-            f"Check /errors: a '[shutdown] graceful stop' line before a startup audit "
-            f"means it was signaled (a real Termux/Android battery-management restriction, "
-            f"not the phantom killer, which can't be caught at all — no line = SIGKILL, "
-            f"check: adb shell settings get global settings_enable_monitor_phantom_procs)"
+            f"Triage by EXIT CODE in bot.log's '[run-bot] ... exited (code N)' line: "
+            f"137 = SIGKILL (Android phantom-process killer or OOM), 143 = SIGTERM "
+            f"(OEM battery manager), 0 = clean exit. Do NOT use the '[shutdown] graceful "
+            f"stop' line for this — /update and /restart exit via os._exit(0) and never "
+            f"log one either, so its absence does not mean SIGKILL."
         )
 
     fallback_1h = recent.get("fallback", 0)

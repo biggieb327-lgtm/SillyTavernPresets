@@ -83,8 +83,19 @@ tail -20 ~/telegram-bot/watchdog.log
 # Phone: dead session recovery
 tmux kill-session -t <name>; bash ~/telegram-bot/run-bot.sh ~/<name>-bot <name>
 
-# Phantom-killer check (silent restarts with NO graceful-stop line in /errors):
+# Restart triage — read the EXIT CODE, not the graceful-stop line (corrected 2026-07-25:
+# /update and /restart exit via os._exit(0) and log no graceful stop either, so its
+# absence proves nothing). 137 = SIGKILL/phantom killer, 143 = SIGTERM/battery manager,
+# 0 = clean or owner-initiated:
+grep -h "exited (code" ~/*-bot/bot.log | grep -v "code 0" | tail -20
+
+# Only if that shows 137s. NB: `settings` must run under adb — in Termux it fails with
+# "Failure calling service settings". Android 11+ can adb to itself over wireless debugging.
 adb shell settings get global settings_enable_monitor_phantom_procs   # want: false
+
+# Process census (phantom limit is >32 system-wide; stacked shell loops show as
+# paired bash/sleep counts):
+ps -o pid,ppid,args -u $(id -u) | awk '{print $3}' | sort | uniq -c | sort -rn | head
 ```
 
 `telegram.error.Conflict` = two processes polling one token. Find the second

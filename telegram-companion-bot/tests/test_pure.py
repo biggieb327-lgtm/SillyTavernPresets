@@ -3774,3 +3774,27 @@ class TestGarminFailuresReachErrors:
         finally:
             bot.GARMIN_FILE.unlink(missing_ok=True)
             bot._garmin.update({"loaded": False, "text": "", "ts": 0.0, "missing": []})
+
+
+# ── Restart-storm DM states the correct triage rule (v2026-07-25.10) ─────────
+# The wrong rule ("no graceful-stop line = SIGKILL") survived in FOUR places after the
+# first correction pass, including this DM — the message the owner reads at the exact
+# moment they are debugging a restart storm. See CHANGELOG v2026-07-25.10.
+
+class TestRestartStormAdviceIsCorrect:
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot._self_audit)
+
+    def test_dm_points_at_the_exit_code(self):
+        src = self._src()
+        assert "exited (code" in src
+        assert "137" in src and "143" in src
+
+    def test_dm_does_not_claim_missing_line_means_sigkill(self):
+        src = self._src()
+        assert "no line = SIGKILL" not in src
+
+    def test_dm_warns_the_graceful_line_is_not_the_discriminator(self):
+        src = self._src()
+        assert "does not mean SIGKILL" in src or "Do NOT use" in src
