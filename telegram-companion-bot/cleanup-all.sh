@@ -43,10 +43,10 @@ BOT_SRC="$HOME/telegram-bot"
 FORCE=false
 [ "${1:-}" = "--force" ] && FORCE=true
 
-# Instance dirs mirror update-all.sh / backup-all.sh (the authoritative list). Nora's
-# instance dir is ~/nora-bot; ~/telegram-bot is the shared CODE dir (pycache lives
-# there too, so it's swept as well).
-INSTANCE_DIRS="$BOT_SRC $HOME/nora-bot $HOME/bonnie-bot $HOME/cass-bot $HOME/emily-bot $HOME/priya-bot $HOME/jules-bot"
+# Instance dirs mirror update-all.sh (the authoritative phone list). VPS bots
+# (cass, jules) are not cleaned here. ~/telegram-bot ($BOT_SRC) is the shared
+# CODE dir (not an instance dir, but pycache lives there too, so it's swept).
+INSTANCE_DIRS="$BOT_SRC $HOME/nora-bot $HOME/bonnie-bot $HOME/emily-bot $HOME/priya-bot"
 
 # State/config files that must never be swept, even if a pattern would otherwise match.
 PROTECTED="\.env$|state\.json$|memories\.txt$|user_notes\.txt$|setting\.txt$|reminders\.json$|payments\.json$|bot\.py$|bot\.py\.bak$|\.alive$|bot\.pid$"

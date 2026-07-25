@@ -32,6 +32,20 @@ curl -fsSL "$RAW/preset.txt" -o "$BASE/$INST/preset.txt"
 curl -fsSL "$RAW/$CARD"      -o "$BASE/$INST/$CARD"
 curl -fsSL "$RAW/bot.py"     -o "$BASE/bot.py.new"
 
+# Preset LAYERS (v2026-07-25.5): a remote listing isn't possible over raw URLs, so pull
+# exactly the layers THIS instance names in its own PRESET_FILES. Self-maintaining — no
+# layer list to keep in sync here. A named layer that 404s is fatal on purpose: continuing
+# would start the bot missing voice rules, which reads as a model regression rather than a
+# failed deploy.
+LAYERS=$(sed -n 's/^[[:space:]]*PRESET_FILES[[:space:]]*=[[:space:]]*//p' \
+         "$BASE/$INST/.env" 2>/dev/null | tail -1 | tr -d '"'"'"'' | tr ',' ' ')
+for pl in $LAYERS; do
+  [ "$pl" = "preset.txt" ] && continue          # already pulled above
+  echo "[vps-sync] pulling preset layer $pl..."
+  curl -fsSL "$RAW/$pl" -o "$BASE/$INST/$pl" \
+    || { echo "[vps-sync] FATAL: preset layer '$pl' named in .env is not in the repo" >&2; exit 1; }
+done
+
 "$BASE/venv/bin/python" -m py_compile "$BASE/bot.py.new"
 cp "$BASE/bot.py" "$BASE/bot.py.bak" 2>/dev/null || true
 mv "$BASE/bot.py.new" "$BASE/bot.py"

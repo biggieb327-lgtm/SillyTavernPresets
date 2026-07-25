@@ -81,6 +81,39 @@ single-device blast radius.
   works across phone+VPS hosts mid-migration) and replies with one up/down /
   version / uptime / errors table — `fleet-status.sh` without the shell.
 
+### 1.6 Lock the vps-sync.sh bot.py swap — S, **next**
+- **Why now:** `perform_self_update` had exactly this bug and it bit on 2026-07-25
+  (`FileNotFoundError: /opt/telegram-bots/bot.py.new`, operational log same date). Fixed
+  in bot.py by a host-wide `flock` in v2026-07-25.11 — but `deploy/vps-sync.sh` performs
+  the *same* swap on the *same* shared paths with no guard, so the class is only half
+  closed. Cass and jules share `/opt/telegram-bots`, and the documented deploy is two
+  back-to-back invocations, which is precisely the race.
+- **The race** (`vps-sync.sh` lines 33/49/50/51):
+  ```
+  curl -o "$BASE/bot.py.new"   →  py_compile  →  cp bot.py bot.py.bak  →  mv bot.py.new bot.py
+  ```
+  Two concurrent runs share all three paths. The loud failure is one run's `mv` removing
+  the other's `bot.py.new`. **The silent failure is worse and is the real reason to fix
+  it:** if instance B's `cp bot.py bot.py.bak` lands after instance A's `mv`, the rollback
+  point becomes a copy of the *new* code, and nothing reports it — you believe you can
+  roll back and you cannot.
+- **Fix:** `flock` around the bot.py swap. `flock` is util-linux and present by default on
+  Ubuntu 24.04 (unlike Termux, which is why bot.py's phone-side guard and `watchdog.sh`'s
+  PID-file guard were chosen differently — do not "unify" the three).
+  ```bash
+  exec 9>"$BASE/.vps-sync.lock"
+  flock -n 9 || { echo "[vps-sync] another sync is swapping bot.py on this host; retry"; exit 1; }
+  ```
+  Only the shared code swap needs covering — the card, preset layers, `.env` and systemd
+  unit are all per-instance. Locking the whole run is simpler and equally correct.
+- **Also worth folding in:** `vps-sync.sh` currently `cp`s the backup *before* the `mv`
+  with `|| true`, so a failed backup is silent. Make the backup failure fatal, since its
+  entire purpose is the rollback path.
+- **Done when:** two `vps-sync.sh` runs started simultaneously against the same host leave
+  a correct `bot.py` and a `bot.py.bak` holding the genuinely previous version; the second
+  run exits non-zero with a clear message rather than corrupting either. Verify by racing
+  them deliberately on the VPS, not by inspection.
+
 ---
 
 ## Track 2 — Engineering workflow
@@ -237,6 +270,70 @@ single-device blast radius.
   thinking call demonstrably improves replies over the free `STEP_INTENT` seed in an
   A/B, with latency and call-count logged; phone-hosted behavior provably unchanged.
 
+### 3.9 ~~Topic-initiative balance~~ ✅ (shipped v2026-07-25.1, `PROMPT_BALANCE`)
+- Owner reported the bots over-reach for memories/notes and rarely surface anything else.
+  Cause was directive asymmetry, not card size or context pressure: only the two recall
+  blocks told the character to raise their contents, while `day.txt` was explicitly told
+  not to be foregrounded. Adds a `# Bringing things up` block plus rewritten
+  notes/threads/day tails. This is the follow-on v2026-07-18.1 deferred.
+- Card size was ruled out and should not be re-investigated: `CONTEXT_TOKEN_BUDGET`
+  defaults to 0 (no trimming at all), and when set, every system block is protected —
+  only conversation history is dropped.
+
+### 3.10 ~~Garmin health feed~~ ✅ (shipped v2026-07-25.2, `GARMIN_FEED`)
+- Sleep / resting HR / steps / Body Battery / stress / last workout as prompt context,
+  plus three quiet-hours-and-budget-gated proactive check-ins, `/health` `/healthnow`
+  `/stress`, and an `/audit` line. `garminconnect` stays an optional per-instance pip
+  install, not a fleet requirement.
+- **Why it took until now:** the feature was built on `claude/push-to-repo-7i2f3c`, an
+  **orphan branch sharing no git history with `main`** (empty `git merge-base`; separate
+  root commit 2026-04-15). Deploys all pull from `main`, so it shipped to nobody for
+  ~3 weeks. Ported by hand.
+- **Open follow-up:** that branch holds other unported work — on-this-day reminiscing,
+  offline life events, adaptive texting-style mirroring, `acoustic_ears`, `/diag`. None is
+  requested yet; audit it deliberately rather than assuming main is a superset, and treat
+  every port as a rewrite against current main (a merge would drag in a parallel bot.py).
+
+### 3.11 ~~Prompt-size observability~~ ✅ (shipped v2026-07-25.3, `PROMPT_STATS`)
+- Per-call assembled size, running max with the three largest system blocks at the peak,
+  coarse histogram, all on a new `/audit` `Prompt:` line. Nothing measured a *single*
+  prompt before — `_llm_stats["tok_in"]` is a daily running sum.
+- Baseline measured at ship time (empty instance, 20 short turns): cass 11,435 → jules
+  14,822 tokens. `preset.txt` alone is **8,503 tokens on every message for every bot** —
+  larger than any card, and 77% of cass's system stack.
+
+### 3.12 ~~Tiered prompt trimming~~ ✅ (shipped v2026-07-25.4)
+- `_trim_history_to_budget` → `_trim_prompt_to_budget`. The old version protected every
+  system block and dropped only conversation (9/9 blocks kept, 13/20 turns dropped at a
+  15k budget), and could strip all history while still shipping over budget. Now: optional
+  blocks first (largest first), then history oldest-first, then a last-resort dip below
+  `KEEP_RECENT`, then a warning. Opt-in marking via `_sys_opt()` — unmarked stays
+  protected, so a new or reworded block can't silently become droppable.
+- `CONTEXT_TOKEN_BUDGET` still defaults to 0/off. Set it from the `/audit` numbers.
+
+### 3.13 Reduce the protected prompt floor — **mechanism shipped, content split open**
+- **Mechanism ✅ (v2026-07-25.5, `PRESET_FILES`):** ordered preset layer files, each
+  injected as its own block; `sync-cards.sh` and `vps-sync.sh` are layer-aware. Inert by
+  default — verified byte-identical prompt for the unset, explicit-single-layer, and legacy
+  `PRESET_FILE` configs.
+- **Correction to the earlier note here:** `[ATTRACTION RULE]` is **84 tokens**, not 4,715.
+  That figure was the whole merged card block, mislabelled by `_prompt_top_blocks` (fixed
+  in v2026-07-25.5). Moving it to the lorebook saves ~84 tokens — parked as not worth a
+  release on size grounds; revisit only if there's a *behavioural* reason to make it
+  conditional.
+- **Open: the content split.** `preset.txt` is 8,503 tok on every message, by section
+  ~1,760 universal / ~6,020 roleplay-scene machinery / ~727 feature-coupled. Prototype
+  core/rp/feature split measured **cass 11,031 → 4,758 (−57%)**; jules unchanged (she uses
+  every layer). The gain is signal-to-noise as much as size — ~700 tok of live per-turn
+  context currently competes with 8.5k of largely inapplicable instruction.
+- Two easy first cuts, low voice risk: `[RELATIONSHIP STAGE]` (323 tok) instructs every bot
+  about `CLOSENESS_ENABLED`, which **defaults to 0**; `[STEPPED THINKING]` (403 tok) is
+  likewise tied to `STEP_INTENT`. Both belong in a feature layer, not the core.
+- **Do not action without the owner.** `preset.txt` is voice-critical and deliberately tuned
+  (see v2026-07-18.1's anti-echo work); `[CHARACTER AUTHENTICITY]` alone is 2,386 tok.
+  Split one layer at a time, using `/audit`'s `Preset layers:` and `Card:` lines as the
+  evidence base.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
@@ -290,6 +387,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | **Now** | 1.2 VPS Phase 2 — pilot jules | **Jules migrated to the VPS 2026-07-19** (Contabo, Ubuntu 24.04, systemd `bot@jules`, PID live); in 7-day soak. Pending: re-point `HEALTHCHECK_URL` to the VPS, remove the phone-side `~/jules-bot` after soak. Runbook updated with the stop-supervisor + whole-dir-tar fixes the pilot surfaced (see operational-log 2026-07-19). Remaining five bots next, same procedure. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
+| **Next** | 1.6 lock the `vps-sync.sh` bot.py swap | Closes the other half of the concurrent-deploy bug fixed in bot.py by v2026-07-25.11. Cass and jules share `/opt/telegram-bots`, and the documented deploy runs `vps-sync.sh` twice back to back — the exact race. Silent failure mode (a `bot.py.bak` holding the *new* code) is the reason this ranks above cosmetic work. Small: a `flock` plus making the backup failure fatal. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,

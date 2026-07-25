@@ -40,6 +40,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from garminconnect import Garmin as _Garmin  # optional; only for the Garmin health feed
+except Exception:
+    _Garmin = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -67,7 +72,7 @@ def _get_session() -> requests.Session:
 _REPLY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="reply")
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
-from telegram.error import NetworkError, TimedOut
+from telegram.error import NetworkError, TimedOut, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     ApplicationHandlerStop,
@@ -82,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-23.2"
+BOT_VERSION = "2026-07-25.14"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -235,6 +240,13 @@ USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
 MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reason AND answer
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
+# Assembled-prompt size tracking. Set 0 to disable the bookkeeping entirely.
+PROMPT_STATS = os.getenv("PROMPT_STATS", "1").lower() not in ("0", "false", "no", "off")
+# In-memory only (like _recent_questions): a restart resets it. Persisting would add a
+# state-serialization path for numbers whose whole purpose is answering "what is this
+# instance doing right now".
+_prompt_stats: dict = {"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                       "max_chat": None, "max_blocks": [], "buckets": {}}
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -279,6 +291,11 @@ LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+# Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
+# only blocks carrying an explicit "raise this" instruction, while her live context (her day,
+# her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
+# restore the pre-v2026-07-25.1 prompt text exactly.
+PROMPT_BALANCE = os.getenv("PROMPT_BALANCE", "1").lower() not in ("0", "false", "no", "off")
 TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
@@ -303,6 +320,22 @@ GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
 GROUP_ALLOWED_COMMANDS = {"chatid"}
+
+# Co-location warning (2026-07-25). The whole bot-to-bot mechanism rests on every peer
+# reading and writing ONE ledger + claim dir on ONE filesystem — GROUP_CHAT_DESIGN.md §3
+# states the assumption plainly ("all instances live on one phone", "one ext4 filesystem,
+# where flock is reliable"). That stopped being true when jules moved to the VPS while
+# priya stayed on the phone: each host silently gets its own copy, so `_try_claim` always
+# succeeds on both, and GROUP_BOT_CHAIN_MAX / GROUP_DAILY_BOT_BUDGET are computed from
+# separate ledgers — i.e. the loop cap that exists to stop runaway bot-to-bot chatter is
+# not enforced. bot.py cannot detect where a peer lives, so this states the requirement
+# and prints the resolved path; compare it across hosts to confirm they match.
+if GROUP_MODE and GROUP_PEERS:
+    _CONFIG_WARNINGS.append(
+        f"GROUP_MODE on with peers ({', '.join(GROUP_PEERS)}): bot-to-bot coordination "
+        f"requires every peer to share this exact directory on one filesystem — "
+        f"{GROUP_LEDGER_DIR}. A peer on another host (e.g. after a VPS migration) gets "
+        f"its own copy: claims always succeed and the chain cap is NOT enforced.")
 
 # --- R6 evolution experiments (each behind its own flag, default off) ---
 FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")
@@ -339,10 +372,69 @@ _DEFAULT_TEXTING_STYLE = (
 )
 # Per-bot preset: a small text file of extra system instructions (e.g. texting style),
 # editable without touching bot.py. Falls back to the default above if missing.
+# Layered presets (v2026-07-25.5). One shared 8.5k-token preset meant every bot carried
+# instructions written for every OTHER bot — a writing-collaborator instance was paying
+# ~6k tokens of scene/NPC/roleplay machinery it can never use, diluting the ~700 tokens of
+# live per-turn context it actually needs. PRESET_FILES is an ordered list of layer files:
+# a shared core, an optional genre layer several characters can share, then a per-character
+# layer where one is warranted. Each layer is injected as its own system block so /audit
+# shows what each one costs.
+#
+# Backward compatible in both directions: unset uses PRESET_FILE (still honoured) which
+# itself defaults to the single "preset.txt", so today's fleet behaviour is unchanged and
+# the assembled prompt stays byte-identical until an .env opts in.
 PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
-_preset_path = BASE_DIR / PRESET_FILE
-TEXTING_STYLE = _preset_path.read_text(encoding="utf-8").strip() if _preset_path.exists() \
-    else _DEFAULT_TEXTING_STYLE
+_preset_names = [p.strip() for p in
+                 os.getenv("PRESET_FILES", PRESET_FILE).split(",") if p.strip()]
+
+
+def _resolve_preset_layers(names: list, read, default_text: str, warn: list) -> list:
+    """Layer names -> [(label, text)], applying the fallback ladder. `read(name)` returns
+    the file's text, "" if absent/empty, or raises. Injected so the ladder is testable
+    without a filesystem.
+
+    Ladder: named layers -> the shared preset.txt -> the built-in default. A named-but-
+    missing layer is always reported: silently dropping one strips tuned voice rules and
+    presents as a model regression rather than a deploy error. "No preset.txt at all" is
+    the one documented silent case, so the bare default name doesn't warn."""
+    layers = []
+    for n in names:
+        try:
+            text = read(n)
+        except Exception as e:
+            warn.append(f"preset layer {n!r} could not be read ({type(e).__name__})")
+            continue
+        if text:
+            layers.append((n, text))
+        elif names != ["preset.txt"]:
+            warn.append(f"preset layer {n!r} not found")
+    if layers:
+        return layers
+    # Nothing resolved. If layers were explicitly named, this is almost certainly a
+    # deploy-order mistake (.env updated before the files reached the instance); the full
+    # shared preset is a far better landing place than a ~250-token stub.
+    if names != ["preset.txt"]:
+        try:
+            shared = read("preset.txt")
+        except Exception:
+            shared = ""
+        if shared:
+            warn.append("no PRESET_FILES layer resolved — falling back to the shared "
+                        "preset.txt (check the layer files reached this instance)")
+            return [("preset.txt (fallback)", shared)]
+    return [("<built-in>", default_text)]
+
+
+def _read_preset_file(name: str) -> str:
+    p = BASE_DIR / name
+    return p.read_text(encoding="utf-8").strip() if p.exists() else ""
+
+
+PRESET_LAYERS: list[tuple[str, str]] = _resolve_preset_layers(
+    _preset_names, _read_preset_file, _DEFAULT_TEXTING_STYLE, _CONFIG_WARNINGS)
+# Kept for anything that wants the whole preset as one string (and so a single-layer
+# config is exactly what it was before).
+TEXTING_STYLE = "\n\n".join(t for _, t in PRESET_LAYERS)
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
@@ -740,31 +832,160 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _trim_history_to_budget(messages: list, budget: int) -> list:
+# --- Prompt trim tiers ---------------------------------------------------------------
+# A system block is NEVER dropped unless it is explicitly marked optional. Fail-safe by
+# construction: a new block, or one whose heading someone rewrites, stays protected. The
+# alternative (classifying by heading string at trim time) silently reclassifies a block
+# the moment its wording changes, which is exactly the kind of drift this repo keeps
+# paying for elsewhere.
+_TIER_OPTIONAL = 2
+
+
+def _sys_opt(content: str) -> dict:
+    """A system block that may be dropped to fit a context budget: triggered, situational,
+    or decorative context that the character can hold a conversation without. Voice,
+    identity, capabilities, and the card itself are never marked this way."""
+    return {"role": "system", "content": content, "_tier": _TIER_OPTIONAL}
+
+
+def _strip_tiers(messages: list) -> list:
+    """Remove internal bookkeeping keys before the list goes to the API — same reason
+    history's `ts` is dropped when it's copied into the prompt."""
+    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+
+
+def _msg_tokens(m: dict) -> int:
+    """Estimated tokens for one assembled message, string or multipart content."""
+    c = m.get("content", "")
+    return _est_tokens(c if isinstance(c, str) else str(c))
+
+
+def _prompt_token_total(messages: list) -> int:
+    """Pure: estimated size of a whole assembled prompt."""
+    return sum(_msg_tokens(m) for m in messages)
+
+
+def _prompt_bucket(tokens: int) -> str:
+    """Pure: coarse histogram bucket. Deliberately wide — the question this answers is
+    'are we anywhere near a context ceiling', not 'what was the exact size'."""
+    for edge, label in ((8000, "<8k"), (12000, "8-12k"), (16000, "12-16k"),
+                        (24000, "16-24k"), (32000, "24-32k")):
+        if tokens < edge:
+            return label
+    return "32k+"
+
+
+def _prompt_top_blocks(messages: list, n: int = 3) -> list:
+    """Pure: the n largest system blocks as (tokens, heading), biggest first. Recorded
+    alongside a new maximum so /audit says WHICH block drove it, not just that it grew.
+
+    messages[0] is always the merged card block (`fill(SYSTEM_PROMPT_RAW, …)`), which
+    concatenates system_prompt + description + personality + scenario + mes_example. It
+    gets a fixed label rather than its first line: labelling it by whatever the card
+    happens to open with once credited an 84-token section with 4,715 tokens and sent a
+    real investigation down the wrong path. Use the card-field breakdown in /audit for
+    the inside of this block."""
+    blocks = []
+    for i, m in enumerate(messages):
+        if m.get("role") != "system":
+            continue
+        c = m.get("content", "")
+        if not isinstance(c, str):
+            continue
+        head = "(card: system_prompt+description+…)" if i == 0 else c.split("\n", 1)[0][:48]
+        blocks.append((_est_tokens(c), head))
+    blocks.sort(key=lambda b: b[0], reverse=True)
+    return blocks[:n]
+
+
+def _record_prompt_size(messages: list, chat_id: int) -> int:
+    """Bookkeeping for the assembled prompt. Nothing measured the size of a SINGLE
+    prompt before this — `_llm_stats["tok_in"]` is a running daily sum, so it could
+    not answer "how big does this get on a bad day", which is exactly the question
+    that matters for a context ceiling. On-loop and O(messages); the same walk
+    `_track_llm_usage` already does per call."""
+    total = _prompt_token_total(messages)
+    s = _prompt_stats
+    s["n"] += 1
+    s["sum"] += total
+    s["buckets"][_prompt_bucket(total)] = s["buckets"].get(_prompt_bucket(total), 0) + 1
+    if total > s["max"]:
+        s.update({"max": total, "max_ts": time.time(), "max_chat": chat_id,
+                  "max_blocks": _prompt_top_blocks(messages)})
+    return total
+
+
+def _trim_prompt_to_budget(messages: list, budget: int, keep_recent: int = None) -> list:
+    """Fit the assembled prompt into `budget` estimated tokens, giving up the least
+    valuable context first.
+
+    The previous version protected EVERY system block and dropped only conversation
+    history, which inverted the real priority: it would delete a dozen turns of live
+    conversation to preserve a triggered lorebook entry, and — because the protected
+    blocks could exceed the budget on their own — strip the entire conversation and
+    still ship over budget. Order now:
+
+      1. optional system blocks (`_sys_opt`: lore, recalled memories, inside jokes,
+         local-places sample, open threads, day context, recent-questions list),
+         largest first so the fewest distinct blocks are lost;
+      2. history older than `keep_recent`, oldest first;
+      3. the last-resort dip below `keep_recent`, oldest first — a degraded prompt
+         that fits beats a hard context failure;
+      4. still over → WARNING + counted error. Never drops a protected system block
+         or the final user message.
+    """
     if budget <= 0:
         return messages
-    total = sum(_est_tokens(m.get("content", "") if isinstance(m.get("content"), str)
-                            else str(m.get("content", ""))) for m in messages)
+    keep_recent = KEEP_RECENT if keep_recent is None else keep_recent
+    total = _prompt_token_total(messages)
     if total <= budget:
         return messages
-    system_indices = {i for i, m in enumerate(messages) if m["role"] == "system"}
+
     final_user = None
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i]["role"] == "user":
+        if messages[i].get("role") == "user":
             final_user = i
             break
-    protected = system_indices | ({final_user} if final_user is not None else set())
-    droppable = [i for i in range(len(messages)) if i not in protected]
-    dropped = 0
-    while total > budget and droppable:
-        i = droppable.pop(0)
-        content = messages[i].get("content", "")
-        total -= _est_tokens(content if isinstance(content, str) else str(content))
-        messages[i] = None
-        dropped += 1
+
+    hist_idx = [i for i, m in enumerate(messages)
+                if m.get("role") != "system" and i != final_user]
+    opt_idx = [i for i, m in enumerate(messages)
+               if m.get("role") == "system" and m.get("_tier") == _TIER_OPTIONAL]
+    # Largest first: frees the budget while losing the fewest distinct blocks.
+    opt_idx.sort(key=lambda i: _msg_tokens(messages[i]), reverse=True)
+    # Oldest first, but the newest `keep_recent` turns are held back for stage 3.
+    if keep_recent > 0:
+        older, recent = hist_idx[:-keep_recent], hist_idx[-keep_recent:]
+    else:
+        older, recent = hist_idx, []
+
+    dropped_opt = dropped_hist = 0
+    for stage, idxs in (("opt", opt_idx), ("hist", older), ("recent", recent)):
+        for i in idxs:
+            if total <= budget:
+                break
+            total -= _msg_tokens(messages[i])
+            messages[i] = None
+            if stage == "opt":
+                dropped_opt += 1
+            else:
+                dropped_hist += 1
+        if total <= budget:
+            break
+
     messages = [m for m in messages if m is not None]
-    if dropped:
-        log.info("[prompt] trimmed %d msgs, ~%dk tokens over budget", dropped, (total // 1000))
+    if dropped_opt or dropped_hist:
+        log.info("[prompt] trimmed to fit: dropped %d optional block(s) + %d history "
+                 "msg(s); final ~%dk tokens (budget ~%dk)",
+                 dropped_opt, dropped_hist, total // 1000, budget // 1000)
+    if total > budget:
+        # Protected blocks (card, preset, capabilities, post-history) alone exceed the
+        # budget — nothing droppable is left. Shipping over is the honest outcome; the
+        # fix is a smaller preset/card or a larger budget, not deleting more context.
+        log.warning("[prompt] OVER BUDGET after trimming: ~%d tokens vs budget %d — "
+                    "protected blocks alone exceed it (dropped %d optional + %d history)",
+                    total, budget, dropped_opt, dropped_hist)
+        _count_error("prompt_budget")
     return messages
 
 
@@ -1364,7 +1585,22 @@ def norm_emoji(e: str) -> str:
 WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Seattle")
 WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
 WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
-TIMEZONE = os.getenv("TIMEZONE", "America/Los_Angeles")
+# BOT_TIMEZONE is the name `.env.example` has always documented and the one instances
+# actually set — but until 2026-07-25 nothing read it except the `--check-config`
+# preflight, purely to label a warning. The clock came from TIMEZONE, so setting the
+# documented variable did nothing and every instance silently ran on the
+# America/Los_Angeles default: quiet hours, reminders, schedules, midnight day rotation
+# and note follow-ups all on Pacific regardless of what the .env said. Found by the
+# 2026-07-25 audit; the item-1 sweep missed it because BOT_TIMEZONE *is* read somewhere,
+# just not for its documented purpose — "is it read at all" is a weaker test than "does
+# it do what the docs claim".
+# BOT_TIMEZONE now wins; TIMEZONE still works so existing .envs using it are unaffected.
+TIMEZONE = os.getenv("BOT_TIMEZONE", "").strip() or os.getenv("TIMEZONE", "America/Los_Angeles")
+_tz_alt = os.getenv("TIMEZONE", "").strip()
+if os.getenv("BOT_TIMEZONE", "").strip() and _tz_alt and _tz_alt != TIMEZONE:
+    _CONFIG_WARNINGS.append(
+        f"both BOT_TIMEZONE and TIMEZONE are set and differ — using BOT_TIMEZONE={TIMEZONE!r}, "
+        f"ignoring TIMEZONE={_tz_alt!r}. Remove one.")
 
 try:
     from zoneinfo import ZoneInfo
@@ -1415,6 +1651,58 @@ TRAFFIC_RADIUS_MILES = _env_float("TRAFFIC_RADIUS_MILES", "10")
 TRAFFIC_POLL_MINUTES = _env_int("TRAFFIC_POLL_MINUTES", "10")
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
+# --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
+# Fail-closed on credentials like WSDOT above (no creds => inert), but the kill switch is
+# separate so the feed can be turned off without deleting credentials (invariant #16).
+GARMIN_FEED = os.getenv("GARMIN_FEED", "1").lower() not in ("0", "false", "no", "off")
+GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "").strip()
+GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
+GARMIN_ENABLED = GARMIN_FEED and bool(GARMIN_EMAIL and GARMIN_PASSWORD)
+GARMIN_TIMES = os.getenv("GARMIN_TIMES", "07:30,16:00")
+GARMIN_TOKENSTORE = os.path.expanduser(os.getenv("GARMINTOKENS", "~/.garminconnect"))
+GARMIN_MAX_AGE_HOURS = _env_float("GARMIN_MAX_AGE_HOURS", "18")
+GARMIN_LOGIN_COOLDOWN = _env_int("GARMIN_LOGIN_COOLDOWN", "1800")  # back off after a failed login
+GARMIN_FILE = BASE_DIR / ".garmin_snapshot"
+GARMIN_COOLDOWN_FILE = BASE_DIR / ".garmin_cooldown"  # persisted: restarts must not hammer login
+_garmin: dict = {"text": "", "ts": 0.0, "loaded": False}
+_garmin_obj = None  # cached logged-in client
+if GARMIN_ENABLED and _Garmin is None:
+    # Credentials set but the library is absent: the feed would be silently dead. Surface it
+    # in /audit rather than letting the owner wonder why she never mentions their sleep.
+    _CONFIG_WARNINGS.append(
+        "GARMIN_EMAIL/PASSWORD set but the garminconnect library is missing — "
+        "health feed inert (pip install garminconnect)")
+
+# Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
+# "wound up" without false-alarming on workouts. Only active when the feed is configured.
+STRESS_ALERTS = GARMIN_ENABLED and os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+STRESS_THRESHOLD = _env_int("STRESS_THRESHOLD", "60")          # 0-100; sustained above this = high
+STRESS_SUSTAINED_MIN = _env_int("STRESS_SUSTAINED_MIN", "45")  # must stay high this long to trigger
+STRESS_POLL_MIN = _env_int("STRESS_POLL_MIN", "30")            # how often to check
+STRESS_ALERT_COOLDOWN_HOURS = _env_float("STRESS_ALERT_COOLDOWN_HOURS", "4")
+STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time; a restart can't re-fire
+
+# Body Battery: Garmin's 0-100 energy-reserve gauge. Bottoming out means genuinely depleted.
+# Polled on the stress cadence — the client is cached, so it's one extra GET, not a login.
+BB_ALERTS = GARMIN_ENABLED and os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_LOW_THRESHOLD = _env_int("BB_LOW_THRESHOLD", "20")
+BB_ALERT_COOLDOWN_HOURS = _env_float("BB_ALERT_COOLDOWN_HOURS", "8")
+BB_ALERT_FILE = BASE_DIR / ".bb_alert"
+
+# Resting-HR morning check: resting HR notably above the user's OWN rolling baseline is an
+# early "run down / coming down with something" signal.
+RHR_ALERTS = GARMIN_ENABLED and os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ELEVATED_DELTA = _env_int("RHR_ELEVATED_DELTA", "7")  # bpm above baseline to flag
+RHR_BASELINE_DAYS = _env_int("RHR_BASELINE_DAYS", "14")   # rolling window for the baseline median
+RHR_BASELINE_MIN_DAYS = _env_int("RHR_BASELINE_MIN_DAYS", "3")  # no alert below this much history
+RHR_CHECK_TIME = os.getenv("RHR_CHECK_TIME", "08:00")
+RHR_HISTORY_FILE = BASE_DIR / ".rhr_history.json"
+RHR_ALERT_FILE = BASE_DIR / ".rhr_alert"  # date of the last check-in, so it fires at most once/day
+try:
+    _RHR_H, _RHR_M = (int(x) for x in RHR_CHECK_TIME.split(":"))
+except Exception:
+    _RHR_H, _RHR_M = 8, 0
 
 # --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
@@ -1777,6 +2065,10 @@ MILESTONES_MAX = _env_int("MILESTONES_MAX", "30")  # cap on relationship milesto
 
 
 # --- Character card loading (SillyTavern v2) ---
+# Per-field token estimates, filled by load_character (see the note there).
+_card_field_tokens: dict[str, int] = {}
+
+
 def fill(text: str, char: str, user: str) -> str:
     if not text:
         return ""
@@ -1827,6 +2119,22 @@ def load_character(path: Path):
             "content": (entry.get("content") or "").strip(),
             "constant": bool(entry.get("constant", False)),
         })
+
+    # Per-field token estimates for /audit. load_character MERGES system_prompt,
+    # description, personality, scenario and mes_example into one block, so by
+    # prompt-assembly time the sub-structure is gone and any size report can only label
+    # the merged block by its first line. That produced a real misdiagnosis on 2026-07-25:
+    # jules's system_prompt opens with "[ATTRACTION RULE]", so an 84-token section got
+    # credited with the whole 4,715-token card block. Record the breakdown here, where the
+    # fields still exist.
+    _card_field_tokens.clear()
+    for _f in ("system_prompt", "description", "personality", "scenario",
+               "mes_example", "post_history_instructions"):
+        _t = _est_tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
+        if _t:
+            _card_field_tokens[_f] = _t
+    _card_field_tokens["character_book"] = sum(
+        _est_tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
 
     first_mes = data.get("first_mes", "")
     return name, system_prompt, post_history, lore, first_mes
@@ -3033,6 +3341,25 @@ def environment_note() -> str:
     return "[" + line + "]"
 
 
+def _initiative_note(name: str, uname: str) -> str:
+    """The topic-initiative balance block (gated on PROMPT_BALANCE).
+
+    Recall blocks (notes, threads, memories, pinned) each told her to raise their
+    contents; the live-context blocks (her day, her schedule, weather, whatever a
+    feature put in front of her) said either nothing or "don't foreground this".
+    Net effect: remembering was the only sanctioned way to open a topic. This says
+    plainly that it isn't. Pure so the wording is testable."""
+    return (
+        f"# Bringing things up\n"
+        f"When {name} starts a topic rather than answering one, remembering something is "
+        f"only one option and shouldn't be the default. What she's doing right now, what's "
+        f"around her, what she's got coming up, something she noticed about {uname} today — "
+        f"all of these are as real to reach for as anything she recalls, and often better, "
+        f"because they're happening now. Recalled facts are context she has, not a supply "
+        f"of conversation topics to draw down. If two openings fit equally, take the live one."
+    )
+
+
 def mood_now(chat_id: int) -> float:
     """Current mood, decaying toward neutral over time (half-life ~24h)."""
     m = moods.get(chat_id)
@@ -3824,12 +4151,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
-        messages.append({
-            "role": "system",
-            "content": (f"# Local places\nReal spots {NAME} knows and might naturally reference "
-                        f"if it fits — don't force them, and don't invent fake businesses when "
-                        f"a real area works: " + ", ".join(picks) + "."),
-        })
+        messages.append(_sys_opt(
+            f"# Local places\nReal spots {NAME} knows and might naturally reference "
+            f"if it fits — don't force them, and don't invent fake businesses when "
+            f"a real area works: " + ", ".join(picks) + "."))
 
     cap_lines = [
         f"# Capabilities\nA couple of things you can do with tags, used naturally and "
@@ -3899,9 +4224,15 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # prompts (GROUP_CHAT_DESIGN.md §5).
     unotes = "" if group else _read_user_notes()
     if unotes:
-        messages.append({"role": "system", "content": (
-            f"# Things you know {uname} has going on\n{unotes}\n"
+        _unote_tail = (
             f"Ask about these naturally if one fits the moment — don't force it."
+            if not PROMPT_BALANCE else
+            f"Ask about one naturally if the moment genuinely calls for it — don't force it. "
+            f"This is a list you happen to know, not a checklist to work through and not your "
+            f"default way of showing you care. Most messages shouldn't touch it at all."
+        )
+        messages.append({"role": "system", "content": (
+            f"# Things you know {uname} has going on\n{unotes}\n{_unote_tail}"
         )})
 
     messages.append({"role": "system", "content": mood_note(chat_id)})
@@ -4012,10 +4343,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         joke_lines = "\n".join(
             f'- "{j["phrase"]}" ({j["tone"]}): {j["meaning"]}' for j in avail_jokes
         )
-        messages.append({"role": "system", "content": (
+        messages.append(_sys_opt(
             f"# Inside jokes\nShared bits between {NAME} and {uname} — use them sparingly "
             f"and only when they genuinely fit the moment. Not every message:\n{joke_lines}"
-        )})
+        ))
 
     # Feedback-miss: one-turn note after a 👎 reaction
     if FEEDBACK_REACTIONS and chat_id in _feedback_miss:
@@ -4029,25 +4360,29 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         threads = open_threads.get(chat_id, [])
         if threads:
             tl = "\n".join(f"- {t}" for t in threads[:3])
-            messages.append({"role": "system", "content": (
-                f"# Open threads between you two\n{tl}\n"
+            _thread_tail = (
                 f"Let them surface naturally if one fits — don't force."
-            )})
+                if not PROMPT_BALANCE else
+                f"Let one surface naturally if it fits — don't force, and don't reach for these "
+                f"just because you have nothing else. What you're doing right now is as good a "
+                f"thing to talk about."
+            )
+            messages.append(_sys_opt(
+                f"# Open threads between you two\n{tl}\n{_thread_tail}"
+            ))
 
     rq = _recent_questions.get(chat_id) or []
     if rq:
-        messages.append({"role": "system", "content": (
+        messages.append(_sys_opt(
             f"# Questions you've recently asked {uname} — don't repeat these:\n"
             + "\n".join("- " + q for q in rq[-5:])
-        )})
+        ))
 
     scan_text = latest_user_content + " " + " ".join(m["content"] for m in history[-8:])
     lore = triggered_lore(scan_text, query_vec=query_vec)
     if lore:
-        messages.append({
-            "role": "system",
-            "content": "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname),
-        })
+        messages.append(_sys_opt(
+            "# Relevant background\n\n" + fill("\n\n".join(lore), NAME, uname)))
 
     mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
@@ -4061,7 +4396,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             block += (f"\nThese are context, not conversation topics — don't bring one"
                       f" up again if you've referenced it recently; let it go unless"
                       f" {uname} raises it.")
-        messages.append({"role": "system", "content": block})
+        messages.append(_sys_opt(block))
 
     bds = boundaries.get(chat_id) or []
     if bds:
@@ -4070,11 +4405,19 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             + "\n".join("- " + b for b in bds)
         )})
 
+    # Placed after every recall block so it frames them, and before the card's own
+    # post-history instructions so the card still gets the last word on voice.
+    if PROMPT_BALANCE:
+        messages.append({"role": "system", "content": _initiative_note(NAME, uname)})
+
     if POST_HISTORY_RAW:
         messages.append({"role": "system", "content": fill(POST_HISTORY_RAW, NAME, uname)})
 
     if TEXTING_REALISM:
-        messages.append({"role": "system", "content": TEXTING_STYLE})
+        # One block per layer: a single-layer config is byte-identical to the old single
+        # TEXTING_STYLE block, and a layered one is separately visible in /audit.
+        for _lname, _ltext in PRESET_LAYERS:
+            messages.append({"role": "system", "content": _ltext})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
@@ -4104,10 +4447,29 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # Day context — what's been happening today; drives continuity across conversations.
     day_ctx = _read_day_context()
     if day_ctx:
-        messages.append({"role": "system", "content": (
-            f"# What's going on today\n{day_ctx}\n\n"
+        _day_tail = (
             f"Let this color what you say when it fits — don't narrate it like a list."
-        )})
+            if not PROMPT_BALANCE else
+            f"Let this color what you say — and it's yours to bring up unprompted, the way "
+            f"anyone mentions what they're in the middle of. Still never narrate it like a "
+            f"list; one concrete detail beats a summary of your day."
+        )
+        messages.append(_sys_opt(
+            f"# What's going on today\n{day_ctx}\n\n{_day_tail}"
+        ))
+
+    # The user's watch metrics are private 1:1 state — never read into a group prompt
+    # (GROUP_CHAT_DESIGN.md §5), same rule as user_notes and inside jokes above.
+    if GARMIN_ENABLED and not group:
+        snap = _garmin_snapshot()
+        if snap:
+            messages.append({"role": "system", "content": (
+                f"# How {uname} is doing physically today (from their watch)\n{snap}\n"
+                f"You quietly keep an eye on how they're doing — this is yours to raise "
+                f"unprompted when it fits, gentler if they slept badly or stress is high, "
+                f"hyped if they crushed a workout. Never recite the numbers, never mention a "
+                f"watch or a dashboard, and don't open with it every time."
+            )})
 
     if image_data_url:
         messages.append({"role": "user", "content": [
@@ -4122,7 +4484,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
 
-    return _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
+    final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
+    if PROMPT_STATS:
+        _record_prompt_size(final, chat_id)
+    return final
 
 
 # --- NanoGPT ---
@@ -5608,12 +5973,14 @@ async def card_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if val:
             preview = val[:120].replace("\n", " ")
             suffix = f"… ({len(val)} chars)" if len(val) > 120 else ""
-            lines.append(f"*{label}:* {preview}{suffix}")
+            lines.append(f"{label}: {preview}{suffix}")
         else:
-            lines.append(f"*{label}:* (empty)")
-    lines += ["", "Use `/setcard <field> <value>` to update.",
+            lines.append(f"{label}: (empty)")
+    lines += ["", "Use /setcard <field> <value> to update.",
               "Fields: " + ", ".join(_CARD_FIELDS)]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Plain text: card field content is arbitrary, and a stray '_' or unmatched '['
+    # would make Telegram reject the whole message (see v2026-07-25.7).
+    await update.message.reply_text("\n".join(lines))
 
 
 async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5624,18 +5991,16 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     if len(args) < 2:
         await update.message.reply_text(
-            "Usage: `/setcard <field> <value>`\n"
+            "Usage: /setcard <field> <value>\n"
             "Fields: " + ", ".join(_CARD_FIELDS) + "\n"
-            "Send `/setcard <field> clear` to empty a field.",
-            parse_mode="Markdown",
-        )
+            "Send /setcard <field> clear to empty a field.")
         return
     field = args[0].lower()
     if field not in _CARD_FIELDS:
+        # `field` is raw user input — a backtick in it would break the code span, so
+        # backticks are not the safe wrapper they look like.
         await update.message.reply_text(
-            f"Unknown field `{field}`. Fields: " + ", ".join(_CARD_FIELDS),
-            parse_mode="Markdown",
-        )
+            f"Unknown field {field!r}. Fields: " + ", ".join(_CARD_FIELDS))
         return
     value = "" if args[1].lower() == "clear" and len(args) == 2 else " ".join(args[1:])
     json_key = _CARD_FIELDS[field]
@@ -5643,14 +6008,14 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _save_and_reload_card()
     if value:
         preview = value[:200] + ("…" if len(value) > 200 else "")
-        await update.message.reply_text(f"*{field}* updated:\n{preview}", parse_mode="Markdown")
+        await update.message.reply_text(f"{field} updated:\n{preview}")
     else:
-        await update.message.reply_text(f"*{field}* cleared.", parse_mode="Markdown")
+        await update.message.reply_text(f"{field} cleared.")
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"🤖 Character: *{NAME}*\nModel: `{NANOGPT_MODEL}`", parse_mode="Markdown"
+        f"🤖 Character: {NAME}\nModel: {NANOGPT_MODEL}"
     )
 
 
@@ -5775,7 +6140,7 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     globals()[var] = model_id
     model_overrides[var] = model_id
     save_state()
-    await update.message.reply_text(f"✅ {role} model set to `{model_id}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ {role} model set to {model_id}")
 
 
 SETTINGS_INFO = {
@@ -5837,7 +6202,7 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     globals()[var] = value
     setting_overrides[var] = value
     save_state()
-    await update.message.reply_text(f"✅ {key} set to `{value}`", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ {key} set to {value}")
 
 
 CONFIGURABLE_MODELS = list(MODEL_ROLES.values())
@@ -6090,7 +6455,7 @@ async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if exp:
                 mins = max(0, round((exp - time.time()) / 60))
                 tail = f" (expires in {mins}m)" if mins < 60 else f" (expires in {mins // 60}h)"
-            await update.message.reply_text(f"Current vibe: **{vibe}**{tail}", parse_mode="Markdown")
+            await update.message.reply_text(f"Current vibe: {vibe}{tail}")
         return
     name = args[0].lower()
     if name == "off":
@@ -6111,7 +6476,7 @@ async def vibe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_vibe[chat_id] = {"name": name, "expires_at": expires_at}
     save_state()
     tail = f" for {args[1]}" if expires_at and len(args) > 1 else ""
-    await update.message.reply_text(f"Vibe set to **{name}**{tail}. Use /vibe off to clear.", parse_mode="Markdown")
+    await update.message.reply_text(f"Vibe set to {name}{tail}. Use /vibe off to clear.")
 
 
 # --- Vent mode ---
@@ -6154,7 +6519,7 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_energy[chat_id] = {"level": lvl, "ts": time.time()}
     save_state()
-    await update.message.reply_text(f"Energy set to **{lvl}**. Use /energy off to clear.", parse_mode="Markdown")
+    await update.message.reply_text(f"Energy set to {lvl}. Use /energy off to clear.")
 
 
 # --- Inside joke bank ---
@@ -7392,9 +7757,8 @@ def _context_file_cmd(file: "Path", cache: dict, label: str):
         if not args:
             current = file.read_text(encoding="utf-8").strip() if file.exists() else "(empty)"
             await update.message.reply_text(
-                f"*{label}:*\n{current}\n\n"
+                f"{label}:\n{current}\n\n"
                 f"/{label.lower()} <text> — replace\n/{label.lower()} add <text> — append",
-                parse_mode="Markdown",
             )
             return
         if args[0].lower() == "add":
@@ -7428,9 +7792,8 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
         await update.message.reply_text(
-            f"*Schedule:*\n{current}\n\n"
+            f"Schedule:\n{current}\n\n"
             f"/schedule <text> — replace\n/schedule add <text> — append",
-            parse_mode="Markdown",
         )
         return
     if args[0].lower() == "add":
@@ -7488,8 +7851,7 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         numbered = "\n".join(f"{i+1}. {l}" for i, l in enumerate(lines))
         await update.message.reply_text(
-            f"*Your notes:*\n{numbered}\n\n/notes del <n> to remove one",
-            parse_mode="Markdown",
+            f"Your notes:\n{numbered}\n\n/notes del <n> to remove one",
         )
         return
 
@@ -9419,46 +9781,46 @@ async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick dashboard: mood, outfit, today's context, and time since last message."""
     chat_id = update.effective_chat.id
-    lines = [f"*{NAME} — status*", ""]
+    lines = [f"{NAME} — status", ""]
 
     label = mood_label(chat_id)
     s = mood_now(chat_id)
     filled = max(0, round((s + 3) / 6 * 10))
     bar = "█" * filled + "░" * (10 - filled)
     mood_str = f"{label}  " if label else ""
-    lines.append(f"*Mood:* {mood_str}[{bar}]  {s:+.1f}")
+    lines.append(f"Mood: {mood_str}[{bar}]  {s:+.1f}")
 
     cl = closeness.get(chat_id)
     if cl:
-        lines.append(f"*Closeness:* {cl['bucket']} ({cl['score']:.2f})")
+        lines.append(f"Closeness: {cl['bucket']} ({cl['score']:.2f})")
 
     outfit = wardrobe.get("current")
     if outfit:
-        lines.append(f"*Wearing:* {outfit}")
+        lines.append(f"Wearing: {outfit}")
 
     life_arc = _read_life_arc()
     if life_arc:
         snippet = life_arc[:150] + ("…" if len(life_arc) > 150 else "")
-        lines.append(f"*Life arc:* {snippet}")
+        lines.append(f"Life arc: {snippet}")
 
     day_ctx = _read_day_context()
     if day_ctx:
         snippet = day_ctx[:150] + ("…" if len(day_ctx) > 150 else "")
-        lines.append(f"*Today:* {snippet}")
+        lines.append(f"Today: {snippet}")
 
     unotes = _read_user_notes()
     if unotes:
         snippet = unotes[:150] + ("…" if len(unotes) > 150 else "")
-        lines.append(f"*About you:* {snippet}")
+        lines.append(f"About you: {snippet}")
 
     weather = (_weather_cache.get("text") or "").strip()
     if weather:
-        lines.append(f"*Weather:* {weather}")
+        lines.append(f"Weather: {weather}")
 
     qt = quiet_until.get(chat_id)
     if qt and time.time() < qt:
         remaining = int((qt - time.time()) / 60)
-        lines.append(f"*Quiet mode:* {remaining}m remaining")
+        lines.append(f"Quiet mode: {remaining}m remaining")
 
     wins = quiet_windows.get(chat_id, [])
     if wins:
@@ -9467,7 +9829,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sh = f"{w['start'] // 60:02d}:{w['start'] % 60:02d}"
             eh = f"{w['end'] // 60:02d}:{w['end'] % 60:02d}"
             win_strs.append(f"{_DOW_DISPLAY[w['dow']]} {sh}–{eh}")
-        lines.append(f"*Quiet windows:* {', '.join(win_strs)}")
+        lines.append(f"Quiet windows: {', '.join(win_strs)}")
 
     aw = away.get(chat_id)
     if aw and _is_away(chat_id):
@@ -9480,7 +9842,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if exp:
             remaining_m = max(0, int((exp - time.time()) / 60))
             exp_str = f" (auto-expires in {remaining_m}m)"
-        lines.append(f"*Away:* {reason} ({ago}m, {origin}){exp_str}")
+        lines.append(f"Away: {reason} ({ago}m, {origin}){exp_str}")
 
     last = last_seen.get(chat_id, 0)
     if last:
@@ -9493,7 +9855,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             gap_str = f"{round(gap / 3600)}h ago"
         else:
             gap_str = f"{round(gap / 86400)}d ago"
-        lines.append(f"*Last chat:* {gap_str}")
+        lines.append(f"Last chat: {gap_str}")
 
     # Conversation tail — last 3 messages truncated to ~80 chars
     hist = conversation_history.get(chat_id, [])
@@ -9508,7 +9870,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = text[:77] + "…"
             lines.append(f"  {speaker}: {text}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Plain text: this renders outfit/life-arc/day/notes snippets and the conversation
+    # tail, all arbitrary. Same reason as /audit (v2026-07-25.7).
+    await update.message.reply_text("\n".join(lines))
 
 
 async def _generate_daily_events(owner: int, yesterday: str = ""):
@@ -10213,6 +10577,458 @@ async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"{header}\n\n{_format_restaurants(results)}")
 
 
+# --- Garmin health feed -------------------------------------------------------------
+# Ported to main 2026-07-25 (v2026-07-25.2). The feature previously existed only on the
+# orphan branch claude/push-to-repo-7i2f3c, which shares no git history with main and so
+# was never deployable — the fleet installs from main. Hand-ported, not cherry-picked.
+#
+# Shape: all garminconnect calls are blocking `requests` underneath, so every one of them
+# runs via asyncio.to_thread (invariant #8). The logged-in client is cached module-level;
+# a failed login writes a persisted cooldown so restart loops can't hammer Garmin's
+# rate-limited login endpoint. Zero LLM calls are added — the snapshot is injected as
+# prompt context, and the three monitors reuse the existing send_triggered path.
+
+def _garmin_fields(sleep_dto: dict, stats: dict, activity: dict) -> list[tuple]:
+    """Pure: payloads → ordered [(metric label, phrase or None)] for all six metrics.
+
+    THE single source of truth: `_garmin_bits` is a thin wrapper over this, so the
+    snapshot text and the "what's missing" report cannot disagree. An earlier version of
+    this release derived labels by prefix-matching the finished phrases and got it wrong
+    immediately ("slept …" does not start with "sleep"), which is precisely the drift
+    this direction of dependency prevents.
+
+    A None phrase is a routine state, not an error: battery saver disabling the optical
+    HR sensor takes out sleep, resting HR, body battery and stress together while steps
+    (accelerometer, phone-side) keep arriving — the 2026-07-25 case."""
+    sleep_phrase = None
+    secs = (sleep_dto or {}).get("sleepTimeSeconds")
+    if secs:
+        try:
+            h, m = divmod(int(secs) // 60, 60)
+            sleep_phrase = f"slept {h}h{m:02d}m last night"
+            sc = ((sleep_dto or {}).get("sleepScores") or {}).get("overall") or {}
+            if sc.get("value"):
+                q = (sc.get("qualifierKey") or "").lower().replace("_", " ")
+                sleep_phrase += f" (sleep score {sc['value']}{', ' + q if q else ''})"
+        except (TypeError, ValueError):
+            sleep_phrase = None
+
+    st = stats or {}
+    rhr_phrase = f"resting HR {st['restingHeartRate']}" if st.get("restingHeartRate") else None
+
+    steps_phrase = None
+    if st.get("totalSteps") is not None:
+        try:
+            steps_phrase = f"{int(st['totalSteps']):,} steps so far"
+        except (TypeError, ValueError):
+            steps_phrase = None
+
+    bb = st.get("bodyBatteryMostRecentValue")
+    bb_phrase = f"body battery {bb}" if bb is not None else None
+
+    stress = st.get("averageStressLevel")
+    stress_phrase = (f"avg stress {int(stress)}"
+                     if isinstance(stress, (int, float)) and stress >= 0 else None)
+
+    a = activity or {}
+    workout_phrase = None
+    if a:
+        name = ((a.get("activityType") or {}).get("typeKey")
+                or a.get("activityName") or "workout").replace("_", " ")
+        dist = a.get("distance")
+        desc = name + (f" {dist / 1000:.1f}km"
+                       if isinstance(dist, (int, float)) and dist else "")
+        when = (a.get("startTimeLocal") or "")[:10]
+        workout_phrase = f"last workout: {desc}" + (f" ({when})" if when else "")
+
+    return [
+        ("sleep", sleep_phrase),
+        ("resting HR", rhr_phrase),
+        ("steps", steps_phrase),
+        ("body battery", bb_phrase),
+        ("stress", stress_phrase),
+        ("last workout", workout_phrase),
+    ]
+
+
+def _garmin_missing(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
+    """Pure: the metric labels Garmin returned no usable data for."""
+    return [label for label, phrase in _garmin_fields(sleep_dto, stats, activity)
+            if not phrase]
+
+
+def _garmin_bits(sleep_dto: dict, stats: dict, activity: dict) -> list[str]:
+    """Pure: payloads → the phrases that have data, in display order.
+
+    Thin wrapper over `_garmin_fields` (see there). Each field is independent — a
+    missing one drops its phrase instead of losing the whole snapshot."""
+    return [phrase for _, phrase in _garmin_fields(sleep_dto, stats, activity) if phrase]
+
+
+def _stress_sustained(arr, cutoff_ms: float, threshold: int,
+                      min_samples: int = 3, high_frac: float = 0.7):
+    """Pure: Garmin stressValuesArray → (sustained_high, rounded_avg).
+
+    Garmin marks unmeasurable readings -1/-2 (e.g. during an activity); those are
+    skipped rather than counted as calm. avg is None when there's too little usable
+    data, which is deliberately distinct from a genuinely calm average that rounds
+    to 0 — the caller must not treat "no data" as "fine"."""
+    recent = []
+    for pair in arr or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        ts, v = pair[0], pair[1]
+        if not isinstance(v, (int, float)) or not isinstance(ts, (int, float)):
+            continue
+        if v >= 0 and ts >= cutoff_ms:
+            recent.append(v)
+    if len(recent) < min_samples:
+        return (False, None)
+    avg = sum(recent) / len(recent)
+    frac = sum(1 for v in recent if v >= threshold) / len(recent)
+    return (avg >= threshold and frac >= high_frac, round(avg))
+
+
+def _rhr_baseline(history: list, today: str, min_days: int):
+    """Pure: prior daily resting-HR readings → median baseline, or None if too few.
+
+    Today's own reading is excluded so a single elevated day can't raise the very
+    baseline it's being compared against."""
+    prior = [x["rhr"] for x in (history or [])
+             if isinstance(x, dict) and x.get("date") != today
+             and isinstance(x.get("rhr"), (int, float)) and x.get("rhr") > 0]
+    if len(prior) < max(1, min_days):
+        return None
+    return sorted(prior)[len(prior) // 2]
+
+
+def _garmin_cooldown_left() -> float:
+    try:
+        if GARMIN_COOLDOWN_FILE.exists():
+            return max(0.0, float(GARMIN_COOLDOWN_FILE.read_text()) - time.time())
+    except Exception:
+        pass
+    return 0.0
+
+
+def _garmin_client():
+    """Off-loop only. Logged-in client, reusing the cached token store; once a token is
+    saved, login() resumes it without a fresh (rate-limited) login."""
+    global _garmin_obj
+    if _garmin_obj is not None:
+        return _garmin_obj
+    left = _garmin_cooldown_left()
+    if left > 0:
+        raise RuntimeError(f"garmin login on cooldown for {int(left)}s (rate-limited earlier)")
+    try:
+        c = _Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
+        c.login(GARMIN_TOKENSTORE)
+    except Exception:
+        try:
+            GARMIN_COOLDOWN_FILE.write_text(str(time.time() + GARMIN_LOGIN_COOLDOWN))
+        except Exception:
+            pass
+        raise
+    try:
+        GARMIN_COOLDOWN_FILE.unlink()  # success → clear any cooldown
+    except Exception:
+        pass
+    _garmin_obj = c
+    return c
+
+
+def _drop_garmin_session(tag: str, exc: Exception):
+    """A cached client can break mid-runtime, not just at login. Drop it so the next poll
+    re-logs in instead of retrying the same dead session forever. Never logs the raw
+    exception — Garmin errors can carry the request URL and credentials."""
+    global _garmin_obj
+    print(f"[{tag}] fetch failed: {type(exc).__name__}")
+    _garmin_obj = None
+
+
+def _fetch_garmin() -> tuple:
+    """Off-loop: (snapshot text, list of metrics with no data). Each metric is isolated.
+
+    Per-endpoint failures go through log.warning, NOT print: print reaches bot.log only,
+    so `/errors` could not show them and diagnosing a partial pull needed a shell — the
+    exact dead end hit on 2026-07-25. Only the exception CLASS is logged; Garmin
+    exceptions can carry the request URL (the v2026-07-20.2 key-leak class)."""
+    global _garmin_obj
+    if _Garmin is None or not GARMIN_ENABLED:
+        return "", []
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        client = _garmin_client()
+    except Exception as e:
+        log.warning("[garmin] login failed: %s", type(e).__name__)
+        _count_error("garmin")
+        _garmin_obj = None
+        return "", []
+    sleep_dto, stats, activity = {}, {}, {}
+    try:
+        sleep_dto = (client.get_sleep_data(today) or {}).get("dailySleepDTO") or {}
+    except Exception as e:
+        log.warning("[garmin] sleep endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
+    try:
+        stats = client.get_stats(today) or {}
+    except Exception as e:
+        log.warning("[garmin] stats endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
+    try:
+        acts = client.get_activities(0, 1) or []
+        activity = acts[0] if acts else {}
+    except Exception as e:
+        log.warning("[garmin] activities endpoint failed: %s", type(e).__name__)
+        _count_error("garmin")
+    text = "; ".join(_garmin_bits(sleep_dto, stats, activity))
+    missing = _garmin_missing(sleep_dto, stats, activity)
+    if missing:
+        # Routine (battery saver, watch not synced yet), so WARNING not ERROR — but it
+        # must be visible somewhere other than a shell.
+        log.warning("[garmin] no data for: %s", ", ".join(missing))
+    return text, missing
+
+
+def _garmin_snapshot() -> str:
+    """On-loop: the cached snapshot if it's fresh enough to inject, else ''.
+    Loads from disk once so a restart doesn't lose the morning pull."""
+    if not _garmin["loaded"]:
+        _garmin["loaded"] = True
+        try:
+            if GARMIN_FILE.exists():
+                d = json.loads(GARMIN_FILE.read_text(encoding="utf-8"))
+                _garmin["text"], _garmin["ts"] = d.get("text", ""), float(d.get("ts", 0))
+                # Absent in snapshots written before v2026-07-25.9.
+                _garmin["missing"] = d.get("missing") or []
+        except Exception:
+            pass
+    if _garmin["text"] and (time.time() - _garmin["ts"]) < GARMIN_MAX_AGE_HOURS * 3600:
+        return _garmin["text"]
+    return ""
+
+
+async def update_garmin():
+    if not GARMIN_ENABLED or _Garmin is None:
+        return
+    try:
+        text, missing = await asyncio.to_thread(_fetch_garmin)
+        if text:
+            _garmin.update({"text": text, "ts": time.time(), "loaded": True,
+                            "missing": missing})
+            try:
+                GARMIN_FILE.write_text(
+                    json.dumps({"text": text, "ts": _garmin["ts"], "missing": missing}),
+                    encoding="utf-8")
+            except Exception as e:
+                log.warning("[garmin] snapshot save failed: %s", type(e).__name__)
+            print(f"[garmin] {text}")
+    except Exception as e:
+        log.warning("[garmin] update failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
+async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
+    await update_garmin()
+
+
+def _health_nudge_ok(owner: int) -> bool:
+    """The same proactive gate note_followup_job uses — quiet flag, away, quiet hours,
+    per-chat quiet windows, then the shared nudge budget. A health check-in is a nudge
+    and must not be exempt from any of it."""
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if (_is_quiet(owner) or _is_away(owner) or in_quiet_hours()
+            or _in_quiet_window(now_dt, quiet_windows.get(owner, []))):
+        return False
+    return _check_nudge_budget(owner)
+
+
+def _stress_alert_ts() -> float:
+    try:
+        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _recent_stress_high():
+    """Off-loop: has stress stayed high over the last STRESS_SUSTAINED_MIN minutes?"""
+    if not STRESS_ALERTS or _Garmin is None:
+        return (False, None)
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        data = _garmin_client().get_stress_data(today) or {}
+    except Exception as e:
+        _drop_garmin_session("stress", e)
+        return (False, None)
+    cutoff_ms = (time.time() - STRESS_SUSTAINED_MIN * 60) * 1000
+    return _stress_sustained(data.get("stressValuesArray") or [], cutoff_ms, STRESS_THRESHOLD)
+
+
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: sustained high stress → one gentle in-character check-in."""
+    if not STRESS_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
+        return  # already checked in recently
+    if not _health_nudge_ok(owner):
+        return
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if not high:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
+        f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
+        f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
+        f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            STRESS_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[stress] high-stress check-in sent (avg {avg}).")
+    except Exception as e:
+        log.warning("[stress] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
+def _bb_alert_ts() -> float:
+    try:
+        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+def _body_battery_now():
+    """Off-loop: latest Body Battery (0-100), or None."""
+    if not BB_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        bb = (_garmin_client().get_stats(today) or {}).get("bodyBatteryMostRecentValue")
+    except Exception as e:
+        _drop_garmin_session("bb", e)
+        return None
+    return int(bb) if isinstance(bb, (int, float)) and bb >= 0 else None
+
+
+async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
+    if not BB_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
+        return
+    if not _health_nudge_ok(owner):
+        return
+    bb = await asyncio.to_thread(_body_battery_now)
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
+        f"right now — physically depleted, the kind of drained where pushing harder won't help. "
+        f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
+        f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            BB_ALERT_FILE.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[bb] low-energy check-in sent (body battery {bb}).")
+    except Exception as e:
+        log.warning("[bb] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
+def _resting_hr_today():
+    """Off-loop: today's resting heart rate, or None."""
+    if not RHR_ALERTS or _Garmin is None:
+        return None
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    try:
+        rhr = (_garmin_client().get_stats(today) or {}).get("restingHeartRate")
+    except Exception as e:
+        _drop_garmin_session("rhr", e)
+        return None
+    return int(rhr) if isinstance(rhr, (int, float)) and rhr > 0 else None
+
+
+def _read_rhr_history() -> list:
+    try:
+        if RHR_HISTORY_FILE.exists():
+            h = json.loads(RHR_HISTORY_FILE.read_text(encoding="utf-8"))
+            return h if isinstance(h, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _record_rhr(date_str: str, rhr: int):
+    h = [x for x in _read_rhr_history() if isinstance(x, dict) and x.get("date") != date_str]
+    h.append({"date": date_str, "rhr": rhr})
+    h = h[-(RHR_BASELINE_DAYS + 2):]
+    try:
+        RHR_HISTORY_FILE.write_text(json.dumps(h), encoding="utf-8")
+    except Exception as e:
+        print(f"[rhr] history save failed: {type(e).__name__}")
+
+
+async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once daily: resting HR notably above the user's own baseline → early run-down check-in."""
+    if not RHR_ALERTS:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    rhr = await asyncio.to_thread(_resting_hr_today)
+    if not rhr:
+        return
+    baseline = _rhr_baseline(_read_rhr_history(), today, RHR_BASELINE_MIN_DAYS)
+    _record_rhr(today, rhr)  # always record, so the baseline keeps building
+    if baseline is None or rhr < baseline + RHR_ELEVATED_DELTA:
+        return
+    try:
+        if RHR_ALERT_FILE.exists() and RHR_ALERT_FILE.read_text(encoding="utf-8").strip() == today:
+            return  # already checked in today
+    except Exception:
+        pass
+    if not _health_nudge_ok(owner):
+        return
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {uname}'s resting heart rate is notably higher than their usual baseline this "
+        f"morning — often an early sign of being run down, fighting something off, under-slept or "
+        f"stressed. Gently and fully in character, open by noticing they might be a little under "
+        f"the weather or worn out, and check how they're feeling. Warm, brief, NOT clinical; no "
+        f"numbers or watch talk.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        try:
+            RHR_ALERT_FILE.write_text(today, encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[rhr] elevated resting-HR check-in (today {rhr} vs baseline {baseline}).")
+    except Exception as e:
+        log.warning("[rhr] alert failed: %s", type(e).__name__)
+        _count_error("garmin")
+
+
 # --- WSDOT Traffic integration ---
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -10357,6 +11173,99 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "📍 Got it. Use /traffic or /incidents to check what's around there."
             )
+
+
+def _garmin_gap_note(missing: list = None) -> str:
+    """The '…and here's what wasn't there' tail for /health and /healthnow.
+
+    A partial pull used to be indistinguishable from a broken feature: on 2026-07-25 a
+    watch in battery saver returned steps and nothing else, and the only way to find out
+    which metrics were absent — let alone why — was to shell in and read bot.log."""
+    missing = _garmin.get("missing", []) if missing is None else missing
+    if not missing:
+        return ""
+    return ("\n\nNo data for: " + ", ".join(missing) +
+            ".\nUsually the watch hasn't synced yet, or battery saver has the optical "
+            "heart-rate sensor off — that one takes out sleep, resting HR, body battery "
+            "and stress together while steps keep arriving.")
+
+
+def _garmin_off_reason() -> str:
+    """Why the health commands are unavailable — distinguishing "no credentials" from
+    "killed by the switch" from "library missing" so the owner isn't left guessing."""
+    if not GARMIN_FEED:
+        return "The health feed is switched off (GARMIN_FEED=0)."
+    if not (GARMIN_EMAIL and GARMIN_PASSWORD):
+        return "The health feed isn't set up (GARMIN_EMAIL and GARMIN_PASSWORD missing)."
+    if _Garmin is None:
+        return "The garminconnect library isn't installed (pip install garminconnect)."
+    return ""
+
+
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    reason = _garmin_off_reason()
+    if reason:
+        await update.message.reply_text(reason)
+        return
+    snap = _garmin_snapshot()
+    if not snap:
+        stale = _garmin.get("text") or ""
+        if stale:
+            age = (time.time() - _garmin["ts"]) / 3600
+            await update.message.reply_text(
+                f"⌚ Last reading is stale ({age:.0f}h old, cutoff "
+                f"{GARMIN_MAX_AGE_HOURS:.0f}h) so she isn't using it:\n{stale}\n\n"
+                f"/healthnow pulls fresh data.")
+            return
+        await update.message.reply_text(
+            "No watch data yet — it pulls a couple of times a day, or use /healthnow.")
+        return
+    age = (time.time() - _garmin["ts"]) / 3600
+    stamp = "just now" if age < 1 else f"{age:.0f}h ago"
+    await update.message.reply_text(
+        f"⌚ Latest from your watch ({stamp}):\n{snap}{_garmin_gap_note()}")
+
+
+async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    reason = _garmin_off_reason()
+    if reason:
+        await update.message.reply_text(reason)
+        return
+    left = _garmin_cooldown_left()
+    if left > 0:
+        await update.message.reply_text(
+            f"Garmin login is on cooldown for another {int(left // 60)}m (an earlier login was "
+            f"rate-limited). Try again after that.")
+        return
+    await update.message.reply_text("⌚ Checking your watch...")
+    await update_garmin()
+    if not _garmin.get("text"):
+        await update.message.reply_text("Couldn't pull anything that time — check /errors.")
+        return
+    await update.message.reply_text(f"⌚ {_garmin['text']}{_garmin_gap_note()}")
+
+
+async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not STRESS_ALERTS:
+        reason = _garmin_off_reason()
+        await update.message.reply_text(
+            reason or "Stress monitoring is off (STRESS_ALERTS=0).")
+        return
+    await update.message.reply_text("⌚ Checking recent stress...")
+    high, avg = await asyncio.to_thread(_recent_stress_high)
+    if avg is None:
+        await update.message.reply_text(
+            "No usable stress readings in that window (the watch may need to sync).")
+        return
+    state = f"sustained high (≥{STRESS_THRESHOLD})" if high else "within normal range"
+    await update.message.reply_text(
+        f"🧘 Last {STRESS_SUSTAINED_MIN} min — avg stress {avg}/100: {state}.")
 
 
 async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10541,10 +11450,11 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
         _restart_alert_ts = time.time()
         issues.append(
             f"restarted {restarts}x in the last hour — something is killing the process. "
-            f"Check /errors: a '[shutdown] graceful stop' line before a startup audit "
-            f"means it was signaled (a real Termux/Android battery-management restriction, "
-            f"not the phantom killer, which can't be caught at all — no line = SIGKILL, "
-            f"check: adb shell settings get global settings_enable_monitor_phantom_procs)"
+            f"Triage by EXIT CODE in bot.log's '[run-bot] ... exited (code N)' line: "
+            f"137 = SIGKILL (Android phantom-process killer or OOM), 143 = SIGTERM "
+            f"(OEM battery manager), 0 = clean exit. Do NOT use the '[shutdown] graceful "
+            f"stop' line for this — /update and /restart exit via os._exit(0) and never "
+            f"log one either, so its absence does not mean SIGKILL."
         )
 
     fallback_1h = recent.get("fallback", 0)
@@ -10643,7 +11553,41 @@ def gather_audit_data() -> dict:
         "config_warnings": list(_CONFIG_WARNINGS),
         "llm_stats": dict(_llm_stats),
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
+        "garmin": _garmin_audit_state(),
+        "prompt_stats": _prompt_audit_state(),
+        "card_fields": dict(_card_field_tokens),
+        "preset_layers": [(n, _est_tokens(t)) for n, t in PRESET_LAYERS],
     }
+
+
+def _prompt_audit_state() -> dict:
+    """Assembled-prompt size summary for /audit, or {} when nothing's been assembled."""
+    s = _prompt_stats
+    if not s["n"]:
+        return {}
+    return {
+        "n": s["n"],
+        "avg": s["sum"] // s["n"],
+        "max": s["max"],
+        "max_age_h": round((time.time() - s["max_ts"]) / 3600, 1) if s["max_ts"] else None,
+        "buckets": dict(s["buckets"]),
+        "max_blocks": list(s["max_blocks"]),
+    }
+
+
+def _garmin_audit_state() -> str:
+    """One-line health-feed state for /audit: off / inert / how stale the snapshot is."""
+    if not GARMIN_FEED:
+        return "off (GARMIN_FEED=0)"
+    if not (GARMIN_EMAIL and GARMIN_PASSWORD):
+        return "off (no credentials)"
+    if _Garmin is None:
+        return "inert (garminconnect not installed)"
+    if not _garmin.get("text"):
+        return "on, no data yet"
+    age_h = (time.time() - _garmin["ts"]) / 3600
+    fresh = "fresh" if age_h < GARMIN_MAX_AGE_HOURS else "STALE"
+    return f"on, {fresh} ({age_h:.0f}h old)"
 
 
 async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
@@ -10651,7 +11595,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         return
     d = gather_audit_data()
     lines = [
-        f"🔧 *Self-Audit* (v{d['version']})",
+        f"🔧 Self-Audit (v{d['version']})",
         f"Uptime: {d['uptime_hours']}h",
         f"Errors (last hour): {d['errors_last_hour_total']}",
     ]
@@ -10664,7 +11608,30 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
+        f"Health feed (Garmin): {d.get('garmin', 'off')}",
     ]
+    ps = d.get("prompt_stats") or {}
+    if ps:
+        age = f", {ps['max_age_h']}h ago" if ps.get("max_age_h") is not None else ""
+        lines.append(f"Prompt: avg ~{ps['avg'] // 1000}k, max ~{ps['max'] // 1000}k"
+                     f"{age} over {ps['n']} assembled")
+        if ps.get("buckets"):
+            order = ["<8k", "8-12k", "12-16k", "16-24k", "24-32k", "32k+"]
+            spread = " ".join(f"{b}:{ps['buckets'][b]}" for b in order if b in ps["buckets"])
+            lines.append(f"  spread: {spread}")
+        for tok, head in (ps.get("max_blocks") or [])[:3]:
+            lines.append(f"  ~{tok}t  {head}")
+    pl = d.get("preset_layers") or []
+    if pl:
+        lines.append("Preset layers: " + ", ".join(f"{n} ~{t}t" for n, t in pl))
+    cf = d.get("card_fields") or {}
+    if cf:
+        # Unconditional card fields vs the lorebook, which only costs on a trigger.
+        uncond = sum(v for k, v in cf.items() if k != "character_book")
+        book = cf.get("character_book", 0)
+        lines.append(f"Card: ~{uncond}t always + ~{book}t lorebook (on trigger)")
+        top = sorted(((v, k) for k, v in cf.items() if k != "character_book"), reverse=True)
+        lines.append("  " + ", ".join(f"{k} ~{v}t" for v, k in top[:4]))
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
     llm = d.get("llm_stats", {})
@@ -10689,7 +11656,15 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
                 f"Group {gid}: ledger {lsize} KB, bot-sends today "
                 f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}"
             )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    # Sent as PLAIN TEXT deliberately. /audit interpolates arbitrary diagnostic strings —
+    # card field names (system_prompt, mes_example), prompt block headings
+    # ([VOICEPRINT PRESET …]), config warnings naming env vars (STRESS_THRESHOLD), file
+    # paths, model ids. Under parse_mode="Markdown" a stray '_' or an unmatched '[' makes
+    # Telegram reject the whole message with "can't parse entities", so the command whose
+    # entire job is diagnosing the bot became the thing that silently failed
+    # (v2026-07-25.5/.6). A diagnostic must never be un-sendable because of what it found.
+    # The only Markdown here was a bold header — not worth that failure mode.
+    await update.message.reply_text("\n".join(lines))
 
 
 def tail_error_lines(n: int = 20) -> list[str]:
@@ -10759,6 +11734,43 @@ def perform_self_update(force: bool = False) -> dict:
     code_dir = Path(__file__).resolve().parent
     target = code_dir / "bot.py"
     tmp = code_dir / "bot.py.new"
+
+    # Every instance on a host SHARES this code dir — ~/telegram-bot for the four phone
+    # bots, /opt/telegram-bots for cass+jules. So `bot.py.new`, `bot.py.bak` and `bot.py`
+    # are shared, unsynchronised paths, and two concurrent /update calls corrupt each
+    # other. Observed 2026-07-25 on the VPS: one instance's `tmp.replace(target)` removed
+    # bot.py.new out from under the other, which then died on an opaque
+    # FileNotFoundError from py_compile.
+    #
+    # The silent variant is worse than the crash: the loser reaches
+    # `bot.py.bak <- target` AFTER the winner has already swapped in the new file, so the
+    # rollback point becomes a copy of the NEW code. You would believe you had a rollback
+    # and not have one.
+    #
+    # The documented procedure (update ONE bot, /restart the rest) avoids this by
+    # convention; this makes it structural. Held only inside this sync function — it runs
+    # via asyncio.to_thread and contains no awaits, so invariant #9 is not in play.
+    lock_path = code_dir / ".update.lock"
+    try:
+        lock_f = open(lock_path, "w")
+    except Exception as e:
+        return {"ok": False, "reason": "lock_failed", "detail": type(e).__name__}
+    try:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_f.close()
+        return {"ok": False, "reason": "update_in_progress",
+                "detail": "another bot sharing this host's bot.py is already updating; "
+                          "run /update on ONE instance, then /restart the others"}
+    try:
+        return _perform_self_update_locked(force, code_dir, target, tmp)
+    finally:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        lock_f.close()
+
+
+def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: Path) -> dict:
+    """The body of perform_self_update, run under the host-wide update lock."""
     try:
         # Cache-bust: GitHub's raw CDN caches main/bot.py for ~5 min, so an /update run
         # shortly after a push can fetch the stale prior version and wrongly report
@@ -10816,6 +11828,14 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif reason == "compile_failed":
             await update.message.reply_text(
                 f"❌ New bot.py does not compile — keeping v{result['version']}.\n{result['detail']}")
+        elif reason == "update_in_progress":
+            await update.message.reply_text(f"⏳ {result['detail']}")
+        else:
+            # Catch-all so a new reason can never reply with silence. Before this, an
+            # unhandled reason fell straight through to `return` and the owner saw
+            # nothing — indistinguishable from the bot being dead, which is the same
+            # class of failure as the /audit outage in v2026-07-25.7.
+            await update.message.reply_text(f"⚠️ Update did not run ({reason}).")
         return
     await update.message.reply_text(
         f"⬆️ Updated v{result['old_version']} → v{result['new_version']}. "
@@ -11059,6 +12079,17 @@ async def fleet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Keep transient network blips from spamming the log or stopping the bot."""
     err = context.error
+    # BadRequest MUST be tested before NetworkError: in PTB it *subclasses* NetworkError
+    # (verified on 21.11.1), so the isinstance check below silently absorbed every
+    # client-side Bot API error — malformed markup, message-too-long, bad parameters —
+    # logged it as "[net] transient" and filed it under the `network` counter, which reads
+    # as ambient phone flakiness and gets ignored. That is exactly how the v2026-07-25.5
+    # /audit markup bug hid: two "Can't parse entities" failures showed up in /audit as
+    # "network: 3". A 400 from Telegram is a defect in what we sent, not a bad connection.
+    if isinstance(err, BadRequest):
+        log.error("[api] bad request — client-side defect, not the network: %s", err)
+        _count_error("bad_request")
+        return
     if isinstance(err, (NetworkError, TimedOut)):
         log.warning("[net] transient: %s: %s", err.__class__.__name__, err)
         _count_error("network")
@@ -11175,8 +12206,16 @@ _TRAFFIC_COMMANDS = [
     BotCommand("incidents", "Active incidents (near you if location shared)"),
 ]
 
+# Health handlers register only when the Garmin feed is configured, so the menu mirrors that.
+_HEALTH_COMMANDS = [
+    BotCommand("health", "Latest metrics from your watch"),
+    BotCommand("healthnow", "Pull fresh watch data right now"),
+    BotCommand("stress", "Recent stress reading"),
+]
 
-def _build_command_menu(traffic_enabled: bool, payments_enabled: bool) -> list:
+
+def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
+                        garmin_enabled: bool = False) -> list:
     """The autocomplete menu, mirroring which command handlers are actually registered.
     Hand-kept alongside the handler registrations — keep the two in sync."""
     cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
@@ -11184,11 +12223,14 @@ def _build_command_menu(traffic_enabled: bool, payments_enabled: bool) -> list:
         cmds += _TRAFFIC_COMMANDS
     if payments_enabled:
         cmds += _PAYMENT_COMMANDS
+    if garmin_enabled:
+        cmds += _HEALTH_COMMANDS
     return cmds
 
 
 async def _register_commands(application):
-    await application.bot.set_my_commands(_build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED))
+    await application.bot.set_my_commands(
+        _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED))
 
 
 async def _post_init(application):
@@ -11204,9 +12246,13 @@ async def _on_shutdown(application):
     # plain signal handler here would never fire. post_shutdown runs as part of PTB's
     # own graceful-stop sequence regardless of what triggered it (signal, or an
     # explicit app.stop() from /update or /restart), which is the reliable hook.
-    # WARNING so it lands in errors.log: a startup audit with no preceding "graceful
-    # shutdown" line means the process was SIGKILLed, not signaled (Android phantom
-    # process killer / OOM killer — those can't be caught at all).
+    # WARNING so it lands in errors.log. NOTE (corrected 2026-07-25): the absence of this
+    # line does NOT imply a SIGKILL, and reading it that way cost two debugging rounds.
+    # /update and /restart exit through _schedule_exit() -> os._exit(0), which bypasses
+    # this hook entirely, so an ordinary deploy also logs no graceful stop. Triage a
+    # restart by the EXIT CODE in run-bot.sh's "[run-bot] … exited (code N)" line:
+    # 0 = clean/intentional, 137 = SIGKILL (phantom-process/OOM killer), 143 = a SIGTERM
+    # PTB never converted to a clean stop (OEM battery manager).
     log.warning("[shutdown] graceful stop — saving state.")
     _write_state()
     await _stop_admin_api(application)
@@ -11401,6 +12447,13 @@ def main():
     if TRAFFIC_ENABLED:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
+    # Registered whenever credentials exist (even if the kill switch is off or the library
+    # is missing) so the commands can explain WHY they're inert — an unregistered command
+    # gives no response at all, which is undiagnosable from the user side.
+    if GARMIN_EMAIL and GARMIN_PASSWORD:
+        app.add_handler(CommandHandler("health", health_cmd))
+        app.add_handler(CommandHandler("healthnow", healthnow_cmd))
+        app.add_handler(CommandHandler("stress", stress_cmd))
     # Registered unconditionally: when TOMTOM_API_KEY is unset the handlers reply
     # "Maps aren't set up" instead of going silent (an unregistered command gives
     # no response at all, which is undiagnosable from the user side).
@@ -11430,6 +12483,34 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
+        if GARMIN_ENABLED and _Garmin is not None:
+            for _gt in GARMIN_TIMES.split(","):
+                _gt = _gt.strip()
+                if not _gt:
+                    continue
+                try:
+                    _gh, _gm = (int(x) for x in _gt.split(":"))
+                except Exception:
+                    log.warning("[config] bad GARMIN_TIMES entry %r — skipped", _gt)
+                    continue
+                _gtime = dtime(_gh, _gm, tzinfo=TZ) if TZ else dtime(_gh, _gm)
+                app.job_queue.run_daily(garmin_job, time=_gtime)
+            app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
+            log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
+            if STRESS_ALERTS:
+                app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                            first=STRESS_POLL_MIN * 60)
+                log.info("Stress monitoring on (every %d min, threshold %d).",
+                         STRESS_POLL_MIN, STRESS_THRESHOLD)
+            if BB_ALERTS:
+                app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
+                                            first=STRESS_POLL_MIN * 60)
+                log.info("Body Battery monitoring on (every %d min, low threshold %d).",
+                         STRESS_POLL_MIN, BB_LOW_THRESHOLD)
+            if RHR_ALERTS:
+                _rhtime = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
+                app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
+                log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")

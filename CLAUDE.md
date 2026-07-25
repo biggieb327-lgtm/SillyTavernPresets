@@ -100,7 +100,12 @@ the `nora-instance-dir` eval.)
 
 ## Stack
 
-- Python 3.13 on Termux/Android; `python-telegram-bot >=21.0,<22.0` (async, job-queue)
+- Python **3.14** on Termux/Android (observed 3.14.6 on emily 2026-07-25 — Termux upgraded
+  from 3.13 at some point; the shared venv was rebuilt and is consistent with it, and the
+  PTB v21 `asyncio.get_event_loop()` workaround in `main()` still holds). The
+  `=== STARTUP AUDIT ===` line reports the live version — trust it over this file.
+  Practical effect: cp314 wheels are scarce, so any new binary dependency is likely to
+  compile from source on-device. `python-telegram-bot >=21.0,<22.0` (async, job-queue)
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`
 - SillyTavern `chara_card_v2` JSON cards
 - Repo `biggieb327-lgtm/SillyTavernPresets`; raw URL base
@@ -205,6 +210,9 @@ aren't obvious from it:
 
 - `NANOGPT_MODEL=zai-org/glm-5:thinking` (chat), `SUMMARY_MODEL`/`REACTION_MODEL`
   cheap+fast (`glm-4.7-flash`).
+  **Emily deliberately runs `zai-org/glm-4.7:thinking`** (owner-confirmed 2026-07-25). Not
+  drift — do not "correct" it to glm-5. Per-instance model choice is expected; check the
+  `=== STARTUP AUDIT ===` line for what an instance is actually on before assuming.
 - `FALLBACK_MODEL` must be roleplay-capable: `anthracite-org/magnum-v4-72b`
   (recommended) or `Sao10K/L3.3-70B-Euryale-v2.3`. Used on 400/429/5xx/timeout;
   `call_nanogpt` = 2 attempts/model, 2s/4s backoff, 150s primary budget.
@@ -277,16 +285,46 @@ pilot pair with Priya.
 ## Termux / Android quirks
 
 - **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
-  processes when >32 exist system-wide; 6 bots sit at that limit. Signature:
-  `STARTUP AUDIT` lines piling up in `/errors` with **no** `[shutdown] graceful stop`
-  line before them (SIGKILL can't be caught). One-time fix via adb:
+  processes when >32 exist system-wide; 6 bots sit at that limit.
+  **Triage by the EXIT CODE in the `[run-bot] … exited (code N)` line of `bot.log`** —
+  run-bot.sh logs the real `$?` (corrected 2026-07-25; the old "no graceful-stop line"
+  signature was wrong and cost two debugging rounds):
+
+  | exit code | meaning |
+  |---|---|
+  | `0` | Clean. `/update` and `/restart` exit here via `os._exit(0)` in `_schedule_exit()` (so the Telegram reply and admin-API response flush first). **No graceful-stop line is logged for these** — that's expected, not a kill. |
+  | `137` | SIGKILL (128+9) — phantom-process killer or OOM killer. Can't be caught, so no graceful-stop line either. |
+  | `143` | SIGTERM (128+15) that PTB didn't convert to a clean stop — most likely an OEM battery manager (see dontkillmyapp.com). |
+
+  So `[shutdown] graceful stop` being **absent does NOT imply SIGKILL** — an ordinary
+  deploy looks identical in that respect. Only the exit code separates them. The
+  restart-storm detector (`_tally_unexpected_restarts`) is unaffected: it keys off the
+  `[restart] requested` / `[update] …; restarting` markers in `errors.log`, not the
+  graceful-stop line.
+
+  One-time fix via adb:
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
   plus Termux battery → Unrestricted. **The setting reverts after an Android OS
-  update/factory reset** — if silent restarts return, check
-  `settings get global settings_enable_monitor_phantom_procs` before debugging
-  anything else. Conversely, repeated *clean* `exited (code 0)` restarts WITH a
-  graceful-stop line are NOT the phantom killer — that's a real SIGTERM, most likely
-  an OEM battery manager (see dontkillmyapp.com for the manufacturer).
+  update/factory reset.**
+
+  **Reading the setting needs adb too.** `settings get global …` run directly in Termux
+  fails with `Failure calling service settings: Failed transaction (2147483646)` — the
+  settings service only accepts calls from the `shell` uid (2000), and Termux is a normal
+  app uid. (Confirmed 2026-07-25; this file previously told you to run it in Termux.)
+  Prefer the **behavioural** check, which needs no permissions and answers the question
+  that actually matters — whether anything is being killed:
+  ```bash
+  grep -h "exited (code" ~/*-bot/bot.log | grep -v "code 0" | tail -20   # any 137 = SIGKILL
+  ```
+  Only reach for adb if that shows kills. No PC needed — Android 11+ can adb to itself:
+  Developer options → Wireless debugging → *Pair device with pairing code*, then
+  `pkg install android-tools`, `adb pair 127.0.0.1:<PAIRING_PORT>`, then
+  `adb connect 127.0.0.1:<CONNECT_PORT>`. **The pairing port and the connect port are
+  different** — the connect port is on the main Wireless debugging screen.
+
+  Process count matters independently: the limit is >32 system-wide. Census with
+  `pgrep -af "bot.py"` (more than one process per instance = duplicate pollers →
+  `telegram.error.Conflict`; see the 2026-07-19 log row) and `tmux ls`.
 - run-bot.sh launches `~/telegram-bot/venv/bin/python` **explicitly** — bare `python`
   crash-loops on `ModuleNotFoundError` when the venv isn't on tmux's PATH. Never
   regress this.
@@ -328,8 +366,12 @@ pilot pair with Priya.
 ## Monitoring
 
 - **Restart-storm self-report**: `_self_audit` (every 30 min) DMs the owner at ≥3
-  `STARTUP AUDIT` lines/hour (2h cooldown). Graceful-stop line present = catchable
-  SIGTERM (battery manager or watchdog); absent = SIGKILL (phantom killer).
+  *unexpected* `STARTUP AUDIT` lines/hour (2h cooldown). `_tally_unexpected_restarts`
+  excludes owner-initiated starts via the `[restart] requested` / `[update] …; restarting`
+  markers, so ordinary deploys don't trip it. To classify a restart, read the **exit code**
+  in `bot.log`'s `[run-bot] … exited (code N)` line — see §Termux/Android quirks. Do not
+  use the graceful-stop line for this: `/update` and `/restart` exit via `os._exit(0)` and
+  never log one either.
 - **Dead man's switch**: set `HEALTHCHECK_URL` per instance (healthchecks.io, 30 min
   period + 15 min grace) — silence alerts on bot-down AND phone-dead.
 - **`backup-all.sh`** (cron, on-device): nightly state archive to shared storage,

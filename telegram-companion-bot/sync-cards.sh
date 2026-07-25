@@ -93,6 +93,15 @@ for entry in "nora-bot:nora:nora.json" "bonnie-bot:bonnie:bonnie.json" "emily-bo
   # Shared voiceprint preset — same file for every instance (bot.py reads BASE_DIR/preset.txt).
   pull_file "$REPO/preset.txt" "$dir/preset.txt" "preset.txt"
 
+  # Preset LAYERS (v2026-07-25.5): every instance receives every layer file that exists in
+  # the repo; each bot's PRESET_FILES picks which ones it actually loads. Syncing them all
+  # is deliberate — a bot whose .env names a layer that never reached its directory logs a
+  # config warning and silently loses those voice rules, which reads as a model regression.
+  for pl in "$REPO"/preset-*.txt; do
+    [ -e "$pl" ] || continue          # no layers in the repo yet: nothing to do
+    pull_file "$pl" "$dir/$(basename "$pl")" "$(basename "$pl")"
+  done
+
   # Seed files live in a per-character subdirectory in the repo.
   for sf in $SEED_FILES; do
     pull_file "$REPO/$name/$sf" "$dir/$sf" "$name/$sf"

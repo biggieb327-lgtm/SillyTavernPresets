@@ -13,6 +13,7 @@ Load a skill only when its trigger fires. Preloaded always (do not re-load): `ar
 | A live bot is misbehaving, restarting, or silent | `repo-debugging-playbook` |
 | Work is merged; user needs to get it onto the fleet, or a deploy went wrong | `deploy-and-verify-fleet` |
 | Editing character cards, seed files, preset.txt, or root SillyTavern presets | `edit-cards-and-presets` |
+| A fix is about to ship, or a check/eval is being written | `fix-the-class` |
 | Same failure class happened twice, or user asks to pin a check | `add-regression-eval` |
 | External audit/review output (LLM or human) lists claimed bugs | `verify-external-audit` |
 | Touching any GROUP_* code, the ledger, or bot-to-bot behavior | `group-chat-changes` |

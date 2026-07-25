@@ -38,6 +38,25 @@ Bot API anti-loop policy and is independent of privacy mode. Two consequences:
    to the group, Jules's process hears nothing from Telegram. The side channel is the
    shared filesystem: all instances live on one phone and already share
    `~/telegram-bot/` (the `world.txt` precedent). We add a **group ledger** file there.
+
+   > ⚠️ **This assumption no longer holds fleet-wide (noted 2026-07-25).** Jules moved to
+   > the VPS on 2026-07-19 while Priya stayed on the phone, so the pilot pair no longer
+   > shares a filesystem. Each host silently gets its own ledger and claim dir, and the
+   > consequences are exactly the ones this design exists to prevent: `_try_claim` always
+   > succeeds on both sides (no shared claim files), and `GROUP_BOT_CHAIN_MAX` /
+   > `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers, so the loop cap is not
+   > enforced. `GROUP_DAILY_BOT_BUDGET` still bounds each bot individually, so a runaway
+   > is capped rather than infinite — but at roughly double the intended volume with no
+   > alternation control.
+   >
+   > bot.py cannot detect where a peer lives, so since v2026-07-25.12 it emits a startup
+   > config warning naming the resolved `GROUP_LEDGER_DIR`; compare it across hosts.
+   >
+   > **Until the pilot pair is co-located again** (both on the VPS after ROADMAP 1.2, or
+   > `GROUP_LEDGER_DIR` pointed at genuinely shared storage), run the group pilot only
+   > between instances on the same host, or leave `GROUP_MODE=0`. Unlike the `world.txt`
+   > split — which MIGRATION.md explicitly accepts as graceful degradation to independent
+   > weather — this one degrades into *unbounded alternation*, not a smaller feature.
 2. For bots to see ordinary (unaddressed) *human* group messages, **privacy mode must be
    disabled** per bot via BotFather (`/setprivacy` → Disable). With privacy on (the
    default), a group bot only receives commands, @mentions, and replies to itself.
