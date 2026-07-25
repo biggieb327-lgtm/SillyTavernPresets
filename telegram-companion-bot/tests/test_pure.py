@@ -3035,3 +3035,190 @@ class TestGarminInvariants:
                    bot.bb_monitor_job, bot.rhr_monitor_job):
             src = inspect.getsource(fn)
             assert "call_nanogpt" not in src, fn.__name__
+
+
+# ── Assembled-prompt instrumentation (PROMPT_STATS, v2026-07-25.3) ───────────
+# Nothing measured a single prompt before this; _llm_stats["tok_in"] is a daily
+# running sum across all LLM calls. See CHANGELOG v2026-07-25.3.
+
+class TestPromptTokenTotal:
+    def test_empty_prompt_is_zero(self):
+        assert bot._prompt_token_total([]) == 0
+
+    def test_sums_all_messages(self):
+        msgs = [{"role": "system", "content": "a" * 400},
+                {"role": "user", "content": "b" * 400}]
+        assert bot._prompt_token_total(msgs) == 200
+
+    def test_multipart_content_does_not_crash(self):
+        # Image messages carry a list, not a str.
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        assert bot._prompt_token_total(msgs) > 0
+
+    def test_missing_content_key_is_safe(self):
+        assert bot._prompt_token_total([{"role": "system"}]) >= 1
+
+
+class TestPromptBucket:
+    def test_small_prompt(self):
+        assert bot._prompt_bucket(0) == "<8k"
+        assert bot._prompt_bucket(7999) == "<8k"
+
+    def test_boundaries_are_exclusive_upper(self):
+        assert bot._prompt_bucket(8000) == "8-12k"
+        assert bot._prompt_bucket(12000) == "12-16k"
+        assert bot._prompt_bucket(16000) == "16-24k"
+        assert bot._prompt_bucket(24000) == "24-32k"
+
+    def test_overflow_bucket(self):
+        assert bot._prompt_bucket(32000) == "32k+"
+        assert bot._prompt_bucket(500000) == "32k+"
+
+    def test_measured_fleet_range_lands_in_expected_buckets(self):
+        # cass 11,435 and jules 14,822 as measured for this release.
+        assert bot._prompt_bucket(11435) == "8-12k"
+        assert bot._prompt_bucket(14822) == "12-16k"
+
+
+class TestPromptTopBlocks:
+    def test_returns_biggest_first(self):
+        msgs = [{"role": "system", "content": "# small\n" + "x" * 40},
+                {"role": "system", "content": "# big\n" + "x" * 4000},
+                {"role": "user", "content": "y" * 8000}]
+        top = bot._prompt_top_blocks(msgs)
+        assert top[0][1] == "# big"
+
+    def test_ignores_non_system_messages(self):
+        msgs = [{"role": "user", "content": "u" * 8000},
+                {"role": "system", "content": "# only\nx"}]
+        assert [h for _, h in bot._prompt_top_blocks(msgs)] == ["# only"]
+
+    def test_respects_the_limit(self):
+        msgs = [{"role": "system", "content": f"# h{i}\n" + "x" * (100 * i)}
+                for i in range(1, 8)]
+        assert len(bot._prompt_top_blocks(msgs, n=3)) == 3
+
+    def test_heading_is_truncated(self):
+        msgs = [{"role": "system", "content": "#" + "z" * 200}]
+        assert len(bot._prompt_top_blocks(msgs)[0][1]) <= 48
+
+    def test_multipart_content_skipped_not_fatal(self):
+        msgs = [{"role": "system", "content": [{"type": "text"}]},
+                {"role": "system", "content": "# ok\nx"}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "# ok"
+
+    def test_empty_input(self):
+        assert bot._prompt_top_blocks([]) == []
+
+
+class TestRecordPromptSize:
+    def setup_method(self):
+        bot._prompt_stats.update({"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                                  "max_chat": None, "max_blocks": [], "buckets": {}})
+
+    def test_records_count_and_total(self):
+        msgs = [{"role": "system", "content": "a" * 4000}]
+        total = bot._record_prompt_size(msgs, 7)
+        assert total == 1000
+        assert bot._prompt_stats["n"] == 1
+        assert bot._prompt_stats["sum"] == 1000
+
+    def test_tracks_the_maximum_and_its_chat(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 400}], 1)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 40000}], 2)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 800}], 3)
+        assert bot._prompt_stats["max"] == 10000
+        assert bot._prompt_stats["max_chat"] == 2
+
+    def test_max_blocks_captured_at_the_peak(self):
+        bot._record_prompt_size(
+            [{"role": "system", "content": "# peak\n" + "a" * 40000}], 1)
+        assert bot._prompt_stats["max_blocks"][0][1] == "# peak"
+
+    def test_buckets_accumulate(self):
+        for _ in range(3):
+            bot._record_prompt_size([{"role": "system", "content": "a" * 400}], 1)
+        assert bot._prompt_stats["buckets"]["<8k"] == 3
+
+    def test_average_is_derivable(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 4000}], 1)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 8000}], 1)
+        s = bot._prompt_stats
+        assert s["sum"] // s["n"] == 1500
+
+    def test_audit_state_empty_before_any_prompt(self):
+        assert bot._prompt_audit_state() == {}
+
+    def test_audit_state_populated_after(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 4000}], 1)
+        st = bot._prompt_audit_state()
+        assert st["n"] == 1 and st["avg"] == 1000 and st["max"] == 1000
+
+
+class TestTrimBudgetLogging:
+    """The budget cannot be enforced when the system blocks alone exceed it — that
+    used to be silent. See CHANGELOG v2026-07-25.3."""
+
+    @staticmethod
+    def _prompt(system_tokens, n_hist):
+        msgs = [{"role": "system", "content": "s" * (4 * system_tokens)}]
+        for i in range(n_hist):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": "x" * 400})
+        msgs.append({"role": "user", "content": "final"})
+        return msgs
+
+    def test_disabled_budget_is_a_passthrough(self):
+        m = self._prompt(1000, 5)
+        assert bot._trim_history_to_budget(list(m), 0) == m
+
+    def test_under_budget_is_untouched(self):
+        m = self._prompt(100, 3)
+        assert len(bot._trim_history_to_budget(list(m), 100000)) == len(m)
+
+    def test_drops_history_oldest_first(self):
+        m = self._prompt(1000, 20)
+        out = bot._trim_history_to_budget(list(m), 1300)
+        assert len(out) < len(m)
+        assert out[-1]["content"] == "final"   # final user message always survives
+
+    def test_system_blocks_are_never_dropped(self):
+        m = self._prompt(1000, 20)
+        out = bot._trim_history_to_budget(list(m), 1100)
+        assert sum(1 for x in out if x["role"] == "system") == 1
+
+    def test_over_budget_warns_and_counts_an_error(self, caplog):
+        import logging
+        before = len(bot._error_counts.get("prompt_budget", []))
+        m = self._prompt(14000, 40)
+        with caplog.at_level(logging.WARNING):
+            out = bot._trim_history_to_budget(list(m), 8000)
+        # All history stripped, still over — the case that used to pass silently.
+        assert sum(1 for x in out if x["role"] != "system") == 1
+        assert any("OVER BUDGET" in r.message for r in caplog.records)
+        assert len(bot._error_counts.get("prompt_budget", [])) == before + 1
+
+    def test_successful_trim_does_not_warn(self, caplog):
+        import logging
+        m = self._prompt(1000, 20)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_history_to_budget(list(m), 5000)
+        assert not any("OVER BUDGET" in r.message for r in caplog.records)
+
+
+class TestPromptStatsConfig:
+    def test_flag_exists_and_defaults_on(self):
+        assert bot.PROMPT_STATS is True
+
+    def test_budget_still_defaults_off(self):
+        # Must stay 0 until the trimmer's priority order is fixed (v2026-07-25.4).
+        assert bot.CONTEXT_TOKEN_BUDGET == 0
+
+    def test_assemble_records_when_enabled(self):
+        bot._prompt_stats.update({"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                                  "max_chat": None, "max_blocks": [], "buckets": {}})
+        bot.conversation_history[99] = []
+        bot.user_names[99] = "Tester"
+        bot.assemble_messages(99, "hello")
+        assert bot._prompt_stats["n"] == 1
+        assert bot._prompt_stats["max"] > 0

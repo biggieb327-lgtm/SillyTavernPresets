@@ -7,6 +7,67 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.3 — Measure the assembled prompt (PROMPT_STATS)
+
+**Root cause this release addresses:** a question came up about whether large character
+cards were starving other features of prompt attention, and **nothing in the codebase
+could answer it**. `_llm_stats["tok_in"]` accumulates a daily running sum across every LLM
+call (chat, summary, analysis, reaction), so it cannot report the size of a single
+assembled prompt, its maximum, or which block drove it. There is no context-overflow
+detection either. Instrumenting first is this repo's own protocol ("opaque error →
+instrument first") and it decides whether the follow-up trimmer work is urgent or
+theoretical. No trimming behaviour changes here.
+
+Measured while diagnosing (recorded so the next session doesn't re-derive it — estimates
+via `_est_tokens`, 4 chars/token, on an empty instance with 20 short history messages):
+
+| source | tokens | conditional? |
+|---|---|---|
+| `preset.txt` (shared voiceprint) | **8,503** | no — every message, every bot |
+| card's unconditional fields | 1,834 (cass) → 5,224 (jules) | no |
+| lorebook | 0 → 3,991 (jules) | yes, only on trigger |
+| capabilities / mood / initiative / env / etc. | ~700 | mostly |
+| history (20 short msgs) | 405 | bounded by COUNT, not tokens |
+
+Full assembled prompt: **cass 11,435 → jules 14,822**. The headline finding is that
+**card file size is a poor proxy for prompt cost**: jules's card is 5.8× cass's on disk
+but her prompt is only 1.3× larger, because most of that 52KB is lorebook (conditional)
+and JSON structure. The largest single line item for every bot is the *shared* preset —
+77% of cass's system stack, 59% of jules's. Jules's one real outlier is a 4,715-token
+`ATTRACTION RULE` block inside her card, which ships unconditionally every message.
+
+**What shipped**, behind `PROMPT_STATS` (default **1 = on**; `0` disables the bookkeeping):
+- `_record_prompt_size` at the end of `assemble_messages` — count, running sum, max (with
+  timestamp and chat), and a coarse histogram. On-loop and O(messages), the same walk
+  `_track_llm_usage` already does per call. In-memory only, like `_recent_questions`; a
+  restart resets it rather than adding a state-serialization path.
+- On a new maximum it also records the three largest system blocks by heading, so `/audit`
+  says *which* block drove the peak instead of only that a peak happened.
+- `/audit` gains a `Prompt:` line (avg, max, age of max, sample count), a bucket spread,
+  and those top blocks.
+
+**Two logging defects fixed in `_trim_history_to_budget`** (both found by exercising the
+function directly rather than by reading it):
+- The completion line read `"~%dk tokens over budget"` while printing the **final total**,
+  not the overage — a successful trim reported itself as an overshoot. Now
+  `"dropped N history msg(s); final ~Xk tokens (budget ~Yk)"`.
+- **The budget was silently unenforceable and said nothing.** Because `protected =
+  system_indices | {final_user}` exempts every system block, once the system blocks alone
+  exceed the budget the function strips the entire conversation and returns over budget
+  anyway. Demonstrated at a 14,000-token system stack: budget 8,000 → 0 of 40 history
+  messages kept, prompt still 14,003, logged as success. It now emits a WARNING (so it
+  reaches `errors.log` and `/errors`) and counts a `prompt_budget` error.
+
+`CONTEXT_TOKEN_BUDGET` remains **0/off** and `.env.example` now warns against setting it
+until the trimmer's priority order is fixed — with all system blocks protected, a budget
+below the system total destroys the conversation to preserve optional blocks like a
+triggered lorebook entry. That inversion is the next release, deliberately kept separate
+so this one is pure observation.
+
+**Pure helpers + tests:** `_msg_tokens`, `_prompt_token_total`, `_prompt_bucket`,
+`_prompt_top_blocks`. New `TestPromptTokenTotal`, `TestPromptBucket`,
+`TestPromptTopBlocks`, `TestRecordPromptSize`, `TestTrimBudgetLogging`.
+
 ## v2026-07-25.2 — Garmin health feed ported onto main (GARMIN_FEED)
 
 **Root cause this release addresses:** the owner asked why the bots never bring up Garmin

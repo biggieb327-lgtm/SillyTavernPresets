@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.2"
+BOT_VERSION = "2026-07-25.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -240,6 +240,13 @@ USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
 MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reason AND answer
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
+# Assembled-prompt size tracking. Set 0 to disable the bookkeeping entirely.
+PROMPT_STATS = os.getenv("PROMPT_STATS", "1").lower() not in ("0", "false", "no", "off")
+# In-memory only (like _recent_questions): a restart resets it. Persisting would add a
+# state-serialization path for numbers whose whole purpose is answering "what is this
+# instance doing right now".
+_prompt_stats: dict = {"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                       "max_chat": None, "max_blocks": [], "buckets": {}}
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
 REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
@@ -750,6 +757,59 @@ def _est_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _msg_tokens(m: dict) -> int:
+    """Estimated tokens for one assembled message, string or multipart content."""
+    c = m.get("content", "")
+    return _est_tokens(c if isinstance(c, str) else str(c))
+
+
+def _prompt_token_total(messages: list) -> int:
+    """Pure: estimated size of a whole assembled prompt."""
+    return sum(_msg_tokens(m) for m in messages)
+
+
+def _prompt_bucket(tokens: int) -> str:
+    """Pure: coarse histogram bucket. Deliberately wide — the question this answers is
+    'are we anywhere near a context ceiling', not 'what was the exact size'."""
+    for edge, label in ((8000, "<8k"), (12000, "8-12k"), (16000, "12-16k"),
+                        (24000, "16-24k"), (32000, "24-32k")):
+        if tokens < edge:
+            return label
+    return "32k+"
+
+
+def _prompt_top_blocks(messages: list, n: int = 3) -> list:
+    """Pure: the n largest system blocks as (tokens, heading), biggest first. Recorded
+    alongside a new maximum so /audit says WHICH block drove it, not just that it grew."""
+    blocks = []
+    for m in messages:
+        if m.get("role") != "system":
+            continue
+        c = m.get("content", "")
+        if not isinstance(c, str):
+            continue
+        blocks.append((_est_tokens(c), c.split("\n", 1)[0][:48]))
+    blocks.sort(key=lambda b: b[0], reverse=True)
+    return blocks[:n]
+
+
+def _record_prompt_size(messages: list, chat_id: int) -> int:
+    """Bookkeeping for the assembled prompt. Nothing measured the size of a SINGLE
+    prompt before this — `_llm_stats["tok_in"]` is a running daily sum, so it could
+    not answer "how big does this get on a bad day", which is exactly the question
+    that matters for a context ceiling. On-loop and O(messages); the same walk
+    `_track_llm_usage` already does per call."""
+    total = _prompt_token_total(messages)
+    s = _prompt_stats
+    s["n"] += 1
+    s["sum"] += total
+    s["buckets"][_prompt_bucket(total)] = s["buckets"].get(_prompt_bucket(total), 0) + 1
+    if total > s["max"]:
+        s.update({"max": total, "max_ts": time.time(), "max_chat": chat_id,
+                  "max_blocks": _prompt_top_blocks(messages)})
+    return total
+
+
 def _trim_history_to_budget(messages: list, budget: int) -> list:
     if budget <= 0:
         return messages
@@ -774,7 +834,18 @@ def _trim_history_to_budget(messages: list, budget: int) -> list:
         dropped += 1
     messages = [m for m in messages if m is not None]
     if dropped:
-        log.info("[prompt] trimmed %d msgs, ~%dk tokens over budget", dropped, (total // 1000))
+        # The old wording said "~Nk tokens over budget" while printing the FINAL total,
+        # not the overage — it read as an overshoot report when the trim had succeeded.
+        log.info("[prompt] dropped %d history msg(s); final ~%dk tokens (budget ~%dk)",
+                 dropped, total // 1000, budget // 1000)
+    if total > budget:
+        # Every system block is protected, so once they alone exceed the budget this
+        # function cannot enforce it — it strips the whole conversation and ships over
+        # anyway. That used to be silent. WARNING so it reaches errors.log and /errors.
+        log.warning("[prompt] OVER BUDGET after trimming: ~%d tokens vs budget %d — the "
+                    "system blocks alone exceed it (%d history msg(s) dropped, to no effect)",
+                    total, budget, dropped)
+        _count_error("prompt_budget")
     return messages
 
 
@@ -4239,7 +4310,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
 
-    return _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
+    final = _trim_history_to_budget(messages, CONTEXT_TOKEN_BUDGET)
+    if PROMPT_STATS:
+        _record_prompt_size(final, chat_id)
+    return final
 
 
 # --- NanoGPT ---
@@ -11237,6 +11311,22 @@ def gather_audit_data() -> dict:
         "llm_stats": dict(_llm_stats),
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
+        "prompt_stats": _prompt_audit_state(),
+    }
+
+
+def _prompt_audit_state() -> dict:
+    """Assembled-prompt size summary for /audit, or {} when nothing's been assembled."""
+    s = _prompt_stats
+    if not s["n"]:
+        return {}
+    return {
+        "n": s["n"],
+        "avg": s["sum"] // s["n"],
+        "max": s["max"],
+        "max_age_h": round((time.time() - s["max_ts"]) / 3600, 1) if s["max_ts"] else None,
+        "buckets": dict(s["buckets"]),
+        "max_blocks": list(s["max_blocks"]),
     }
 
 
@@ -11275,6 +11365,17 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
     ]
+    ps = d.get("prompt_stats") or {}
+    if ps:
+        age = f", {ps['max_age_h']}h ago" if ps.get("max_age_h") is not None else ""
+        lines.append(f"Prompt: avg ~{ps['avg'] // 1000}k, max ~{ps['max'] // 1000}k"
+                     f"{age} over {ps['n']} assembled")
+        if ps.get("buckets"):
+            order = ["<8k", "8-12k", "12-16k", "16-24k", "24-32k", "32k+"]
+            spread = " ".join(f"{b}:{ps['buckets'][b]}" for b in order if b in ps["buckets"])
+            lines.append(f"  spread: {spread}")
+        for tok, head in (ps.get("max_blocks") or [])[:3]:
+            lines.append(f"  ~{tok}t  {head}")
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
     llm = d.get("llm_stats", {})
