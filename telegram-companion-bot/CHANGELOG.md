@@ -7,6 +7,60 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.11 — Concurrent /update corrupted the shared code dir
+
+**Root cause:** owner-reported from a VPS bot's `/errors`:
+
+```
+File "/opt/telegram-bots/bot.py", line 11660, in perform_self_update
+File "/usr/lib/python3.12/py_compile.py", line 161, in compile
+FileNotFoundError: [Errno 2] No such file or directory: '/opt/telegram-bots/bot.py.new'
+```
+
+`perform_self_update` writes `bot.py.new`, `bot.py.bak` and `bot.py` into
+`Path(__file__).parent` — the **shared** code directory. Every instance on a host shares
+it: `~/telegram-bot` for the four phone bots, `/opt/telegram-bots` for cass and jules. So
+two concurrent `/update` calls operate on the same three paths with no synchronisation:
+
+1. cass writes `bot.py.new`
+2. jules writes `bot.py.new`
+3. cass compiles, then `tmp.replace(target)` — which **removes** `bot.py.new`
+4. jules compiles → `FileNotFoundError`
+
+**The crash is the good outcome.** The silent variant is worse: the loser reaches
+`bot.py.bak <- target` *after* the winner has already swapped in the new file, so the
+rollback point becomes a copy of the **new** code. You would believe you had a rollback
+and not have one — and nothing would tell you.
+
+The documented procedure ("`/update` to ONE bot, then `/restart` the others") avoids this
+by convention. Nothing enforced it, and the phone has the identical exposure.
+
+**Fix:** a host-wide `flock` on `.update.lock` in the code dir, taken **before** the
+download so a refused update does no work at all — no request, no temp file, nothing
+touched. A second caller gets `{"reason": "update_in_progress"}` naming the correct
+procedure. The body moved to `_perform_self_update_locked` so the lock and the work are
+separable and testable. Held only inside a sync function invoked via `asyncio.to_thread`
+with no awaits, so invariant #9 does not apply.
+
+**Second defect found while fixing the first:** `update_cmd` matched reasons with an
+if/elif chain and no `else`, so `update_in_progress` — and any future reason — fell
+through to a bare `return` and **replied nothing at all**. Same class as the `/audit`
+outage in v2026-07-25.7: a command that silently does nothing is indistinguishable from a
+dead bot. There is now a catch-all reply.
+
+**Also:** `.update.lock`, `bot.py.new` and `bot.py.bak` are gitignored. The lock file
+first appeared as an untracked artifact of the very tests written for it.
+
+**Tests:** `TestSelfUpdateLock` holds the lock the way a competing instance would and
+asserts the refusal happens before any network or filesystem work (including that
+`bot.py.new` is untouched — the exact file the bug destroyed), that the lock is released
+for the next caller, and that the lock lives outside the extracted body.
+`TestUpdateCmdNeverRepliesSilently` pins the catch-all.
+
+**Operationally:** `/update` on a VPS instance works but is not the documented path —
+`deploy/vps-sync.sh` also pulls the card and preset layers and handles the systemd unit.
+Use it for cass and jules.
+
 ## v2026-07-25.10 — Sanity-check sweep: the wrong triage rule had four more survivors
 
 **Root cause:** v2026-07-25.8 corrected "`STARTUP AUDIT` with no preceding

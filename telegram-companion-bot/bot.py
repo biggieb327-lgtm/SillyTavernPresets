@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.10"
+BOT_VERSION = "2026-07-25.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11704,6 +11704,43 @@ def perform_self_update(force: bool = False) -> dict:
     code_dir = Path(__file__).resolve().parent
     target = code_dir / "bot.py"
     tmp = code_dir / "bot.py.new"
+
+    # Every instance on a host SHARES this code dir — ~/telegram-bot for the four phone
+    # bots, /opt/telegram-bots for cass+jules. So `bot.py.new`, `bot.py.bak` and `bot.py`
+    # are shared, unsynchronised paths, and two concurrent /update calls corrupt each
+    # other. Observed 2026-07-25 on the VPS: one instance's `tmp.replace(target)` removed
+    # bot.py.new out from under the other, which then died on an opaque
+    # FileNotFoundError from py_compile.
+    #
+    # The silent variant is worse than the crash: the loser reaches
+    # `bot.py.bak <- target` AFTER the winner has already swapped in the new file, so the
+    # rollback point becomes a copy of the NEW code. You would believe you had a rollback
+    # and not have one.
+    #
+    # The documented procedure (update ONE bot, /restart the rest) avoids this by
+    # convention; this makes it structural. Held only inside this sync function — it runs
+    # via asyncio.to_thread and contains no awaits, so invariant #9 is not in play.
+    lock_path = code_dir / ".update.lock"
+    try:
+        lock_f = open(lock_path, "w")
+    except Exception as e:
+        return {"ok": False, "reason": "lock_failed", "detail": type(e).__name__}
+    try:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_f.close()
+        return {"ok": False, "reason": "update_in_progress",
+                "detail": "another bot sharing this host's bot.py is already updating; "
+                          "run /update on ONE instance, then /restart the others"}
+    try:
+        return _perform_self_update_locked(force, code_dir, target, tmp)
+    finally:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        lock_f.close()
+
+
+def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: Path) -> dict:
+    """The body of perform_self_update, run under the host-wide update lock."""
     try:
         # Cache-bust: GitHub's raw CDN caches main/bot.py for ~5 min, so an /update run
         # shortly after a push can fetch the stale prior version and wrongly report
@@ -11761,6 +11798,14 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif reason == "compile_failed":
             await update.message.reply_text(
                 f"❌ New bot.py does not compile — keeping v{result['version']}.\n{result['detail']}")
+        elif reason == "update_in_progress":
+            await update.message.reply_text(f"⏳ {result['detail']}")
+        else:
+            # Catch-all so a new reason can never reply with silence. Before this, an
+            # unhandled reason fell straight through to `return` and the owner saw
+            # nothing — indistinguishable from the bot being dead, which is the same
+            # class of failure as the /audit outage in v2026-07-25.7.
+            await update.message.reply_text(f"⚠️ Update did not run ({reason}).")
         return
     await update.message.reply_text(
         f"⬆️ Updated v{result['old_version']} → v{result['new_version']}. "

@@ -3798,3 +3798,88 @@ class TestRestartStormAdviceIsCorrect:
     def test_dm_warns_the_graceful_line_is_not_the_discriminator(self):
         src = self._src()
         assert "does not mean SIGKILL" in src or "Do NOT use" in src
+
+
+# ── Concurrent /update corrupts the shared code dir (v2026-07-25.11) ─────────
+# Every instance on a host shares the code dir: ~/telegram-bot for the four phone bots,
+# /opt/telegram-bots for cass+jules. bot.py.new / bot.py.bak / bot.py are therefore
+# shared, unsynchronised paths. Observed on the VPS 2026-07-25.
+
+class TestSelfUpdateLock:
+    def _lock_path(self):
+        from pathlib import Path as _P
+        return _P(bot.__file__).resolve().parent / ".update.lock"
+
+    def test_lock_blocks_a_concurrent_update(self):
+        # Hold the lock the way a second instance would, then confirm perform_self_update
+        # refuses BEFORE doing any network work — no download, no temp file written.
+        import fcntl
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            result = bot.perform_self_update()
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert result["ok"] is False
+        assert result["reason"] == "update_in_progress"
+
+    def test_refusal_names_the_correct_procedure(self):
+        import fcntl
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            detail = bot.perform_self_update()["detail"]
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert "ONE instance" in detail and "/restart" in detail
+
+    def test_lock_is_released_for_the_next_caller(self):
+        # Two sequential refusals must both work; a leaked fd would make the second hang
+        # or wrongly succeed.
+        import fcntl
+        lp = self._lock_path()
+        for _ in range(2):
+            holder = open(lp, "w")
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                assert bot.perform_self_update()["reason"] == "update_in_progress"
+            finally:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+    def test_no_temp_file_written_when_refused(self):
+        # The bug was one instance deleting another's bot.py.new; a refused update must
+        # not touch it at all.
+        import fcntl
+        from pathlib import Path as _P
+        tmp = _P(bot.__file__).resolve().parent / "bot.py.new"
+        existed = tmp.exists()
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            bot.perform_self_update()
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert tmp.exists() == existed
+
+    def test_body_is_separated_from_the_lock(self):
+        import inspect
+        assert "flock" in inspect.getsource(bot.perform_self_update)
+        assert "flock" not in inspect.getsource(bot._perform_self_update_locked)
+
+
+class TestUpdateCmdNeverRepliesSilently:
+    def test_every_failure_reason_gets_a_reply(self):
+        # An unhandled reason used to fall through to a bare `return`, which looks
+        # identical to the bot being dead.
+        import inspect
+        src = inspect.getsource(bot.update_cmd)
+        assert "update_in_progress" in src
+        assert "else:" in src
+        assert "Update did not run" in src
