@@ -305,9 +305,26 @@ pilot pair with Priya.
   One-time fix via adb:
   `adb shell settings put global settings_enable_monitor_phantom_procs false`
   plus Termux battery → Unrestricted. **The setting reverts after an Android OS
-  update/factory reset** — if `code 137` restarts return, check
-  `settings get global settings_enable_monitor_phantom_procs` before debugging
-  anything else.
+  update/factory reset.**
+
+  **Reading the setting needs adb too.** `settings get global …` run directly in Termux
+  fails with `Failure calling service settings: Failed transaction (2147483646)` — the
+  settings service only accepts calls from the `shell` uid (2000), and Termux is a normal
+  app uid. (Confirmed 2026-07-25; this file previously told you to run it in Termux.)
+  Prefer the **behavioural** check, which needs no permissions and answers the question
+  that actually matters — whether anything is being killed:
+  ```bash
+  grep -h "exited (code" ~/*-bot/bot.log | grep -v "code 0" | tail -20   # any 137 = SIGKILL
+  ```
+  Only reach for adb if that shows kills. No PC needed — Android 11+ can adb to itself:
+  Developer options → Wireless debugging → *Pair device with pairing code*, then
+  `pkg install android-tools`, `adb pair 127.0.0.1:<PAIRING_PORT>`, then
+  `adb connect 127.0.0.1:<CONNECT_PORT>`. **The pairing port and the connect port are
+  different** — the connect port is on the main Wireless debugging screen.
+
+  Process count matters independently: the limit is >32 system-wide. Census with
+  `pgrep -af "bot.py"` (more than one process per instance = duplicate pollers →
+  `telegram.error.Conflict`; see the 2026-07-19 log row) and `tmux ls`.
 - run-bot.sh launches `~/telegram-bot/venv/bin/python` **explicitly** — bare `python`
   crash-loops on `ModuleNotFoundError` when the venv isn't on tmux's PATH. Never
   regress this.
