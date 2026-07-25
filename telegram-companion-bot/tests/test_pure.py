@@ -3489,3 +3489,92 @@ class TestCardFieldTokens:
         d = bot.gather_audit_data()
         assert "card_fields" in d
         assert d["card_fields"]["system_prompt"] > 0
+
+
+# ── Preset layer resolution + fallback ladder (v2026-07-25.6) ────────────────
+# Ladder: named layers -> shared preset.txt -> built-in. The middle rung exists because
+# updating .env before the layer files reach an instance would otherwise drop the bot to
+# a ~250-token stub, which presents as a model regression. See CHANGELOG v2026-07-25.6.
+
+class TestResolvePresetLayers:
+    DEFAULT = "BUILT-IN DEFAULT"
+
+    @staticmethod
+    def _reader(files):
+        def read(name):
+            if name in files:
+                return files[name]
+            return ""
+        return read
+
+    def _resolve(self, names, files):
+        warn = []
+        out = bot._resolve_preset_layers(names, self._reader(files), self.DEFAULT, warn)
+        return out, warn
+
+    def test_single_layer_resolves(self):
+        out, warn = self._resolve(["preset.txt"], {"preset.txt": "SHARED"})
+        assert out == [("preset.txt", "SHARED")]
+        assert warn == []
+
+    def test_layers_keep_declared_order(self):
+        files = {"a.txt": "A", "b.txt": "B", "c.txt": "C"}
+        out, _ = self._resolve(["a.txt", "b.txt", "c.txt"], files)
+        assert [n for n, _ in out] == ["a.txt", "b.txt", "c.txt"]
+
+    def test_partial_resolution_keeps_what_exists_and_warns(self):
+        out, warn = self._resolve(["a.txt", "gone.txt"], {"a.txt": "A"})
+        assert out == [("a.txt", "A")]
+        assert any("gone.txt" in w for w in warn)
+
+    def test_missing_default_preset_does_not_warn(self):
+        # The documented "no preset.txt at all" case must stay quiet.
+        out, warn = self._resolve(["preset.txt"], {})
+        assert out == [("<built-in>", self.DEFAULT)]
+        assert warn == []
+
+    def test_all_named_layers_missing_falls_back_to_shared(self):
+        out, warn = self._resolve(["core.txt", "rp.txt"], {"preset.txt": "SHARED"})
+        assert out == [("preset.txt (fallback)", "SHARED")]
+        assert any("falling back to the shared" in w for w in warn)
+        # And each missing layer is still named, so the cause is diagnosable.
+        assert any("core.txt" in w for w in warn)
+
+    def test_falls_through_to_builtin_when_nothing_exists(self):
+        out, warn = self._resolve(["core.txt"], {})
+        assert out == [("<built-in>", self.DEFAULT)]
+        assert any("core.txt" in w for w in warn)
+
+    def test_unreadable_layer_is_reported_not_fatal(self):
+        def read(name):
+            if name == "bad.txt":
+                raise OSError("permission denied")
+            return "OK" if name == "good.txt" else ""
+        warn = []
+        out = bot._resolve_preset_layers(["bad.txt", "good.txt"], read, self.DEFAULT, warn)
+        assert out == [("good.txt", "OK")]
+        assert any("could not be read" in w for w in warn)
+
+    def test_reader_exception_does_not_leak_the_message(self):
+        def read(name):
+            raise OSError("/secret/path/leaked")
+        warn = []
+        bot._resolve_preset_layers(["x.txt"], read, self.DEFAULT, warn)
+        assert not any("leaked" in w for w in warn)
+
+    def test_empty_layer_file_treated_as_missing(self):
+        out, warn = self._resolve(["core.txt"], {"core.txt": "", "preset.txt": "SHARED"})
+        assert out == [("preset.txt (fallback)", "SHARED")]
+
+    def test_fallback_never_duplicates_an_already_loaded_layer(self):
+        # preset.txt listed AND resolvable: it's a normal layer, not the fallback rung.
+        out, _ = self._resolve(["preset.txt", "extra.txt"],
+                               {"preset.txt": "SHARED", "extra.txt": "X"})
+        assert [n for n, _ in out] == ["preset.txt", "extra.txt"]
+        assert not any("fallback" in n for n, _ in out)
+
+    def test_always_returns_at_least_one_layer(self):
+        for names in ([], ["nope.txt"], ["preset.txt"]):
+            out, _ = self._resolve(names, {})
+            assert len(out) >= 1
+            assert all(t for _, t in out)

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.5"
+BOT_VERSION = "2026-07-25.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -370,24 +370,52 @@ _DEFAULT_TEXTING_STYLE = (
 PRESET_FILE = os.getenv("PRESET_FILE", "preset.txt")
 _preset_names = [p.strip() for p in
                  os.getenv("PRESET_FILES", PRESET_FILE).split(",") if p.strip()]
-PRESET_LAYERS: list[tuple[str, str]] = []
-for _pn in _preset_names:
-    _pp = BASE_DIR / _pn
-    try:
-        _text = _pp.read_text(encoding="utf-8").strip() if _pp.exists() else ""
-    except Exception as _e:
-        _text = ""
-        _CONFIG_WARNINGS.append(f"preset layer {_pn!r} could not be read ({type(_e).__name__})")
-    if _text:
-        PRESET_LAYERS.append((_pn, _text))
-    elif not _pp.exists():
-        # A named-but-missing layer is a config error worth surfacing — silently dropping
-        # it would quietly strip voice rules and look like a model regression. The single
-        # default name is exempt: "no preset.txt" is the documented fallback case.
-        if _pn != "preset.txt" or os.getenv("PRESET_FILES"):
-            _CONFIG_WARNINGS.append(f"preset layer {_pn!r} not found in {BASE_DIR}")
-if not PRESET_LAYERS:
-    PRESET_LAYERS = [("<built-in>", _DEFAULT_TEXTING_STYLE)]
+
+
+def _resolve_preset_layers(names: list, read, default_text: str, warn: list) -> list:
+    """Layer names -> [(label, text)], applying the fallback ladder. `read(name)` returns
+    the file's text, "" if absent/empty, or raises. Injected so the ladder is testable
+    without a filesystem.
+
+    Ladder: named layers -> the shared preset.txt -> the built-in default. A named-but-
+    missing layer is always reported: silently dropping one strips tuned voice rules and
+    presents as a model regression rather than a deploy error. "No preset.txt at all" is
+    the one documented silent case, so the bare default name doesn't warn."""
+    layers = []
+    for n in names:
+        try:
+            text = read(n)
+        except Exception as e:
+            warn.append(f"preset layer {n!r} could not be read ({type(e).__name__})")
+            continue
+        if text:
+            layers.append((n, text))
+        elif names != ["preset.txt"]:
+            warn.append(f"preset layer {n!r} not found")
+    if layers:
+        return layers
+    # Nothing resolved. If layers were explicitly named, this is almost certainly a
+    # deploy-order mistake (.env updated before the files reached the instance); the full
+    # shared preset is a far better landing place than a ~250-token stub.
+    if names != ["preset.txt"]:
+        try:
+            shared = read("preset.txt")
+        except Exception:
+            shared = ""
+        if shared:
+            warn.append("no PRESET_FILES layer resolved — falling back to the shared "
+                        "preset.txt (check the layer files reached this instance)")
+            return [("preset.txt (fallback)", shared)]
+    return [("<built-in>", default_text)]
+
+
+def _read_preset_file(name: str) -> str:
+    p = BASE_DIR / name
+    return p.read_text(encoding="utf-8").strip() if p.exists() else ""
+
+
+PRESET_LAYERS: list[tuple[str, str]] = _resolve_preset_layers(
+    _preset_names, _read_preset_file, _DEFAULT_TEXTING_STYLE, _CONFIG_WARNINGS)
 # Kept for anything that wants the whole preset as one string (and so a single-layer
 # config is exactly what it was before).
 TEXTING_STYLE = "\n\n".join(t for _, t in PRESET_LAYERS)

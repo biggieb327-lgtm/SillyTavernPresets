@@ -7,6 +7,71 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.6 — The preset split, Cass first (+ fallback ladder)
+
+**Content, plus one small bot.py hardening.** v2026-07-25.5 shipped the layering
+mechanism; this carves the actual layers and moves **Cass alone** onto them. `preset.txt`
+is **unchanged**, so the other five bots are byte-identically unaffected until their
+`.env` opts in.
+
+**What the split revealed.** `[CHARACTER AUTHENTICITY]` (2,386 tok — the largest section
+in the file) is two unrelated bodies of text concatenated under one heading:
+- ~490 tok of genuinely universal guidance: autistic characters, scientists and
+  professionals rendered as full people; technical vocabulary belongs to the work, not the
+  interior.
+- ~1,900 tok of a Dead Dove content guide + explicit content module — anatomical
+  sex-writing mechanics, action-reaction chains, worked examples, a scene-quality checklist.
+
+So **Cass — a developmental editor — was carrying ~1,900 tokens of explicit scene-writing
+mechanics on every message.** The misleading heading is exactly why it stayed invisible:
+the same failure mode as the `ATTRACTION RULE` mislabel corrected in v2026-07-25.5. The
+section is split at the `### Dead Dove Content Guide` boundary; the universal part keeps
+the heading and goes to core.
+
+**Layers created** (partitioned programmatically, so text is preserved byte-for-byte):
+
+| layer | tok | contents |
+|---|---|---|
+| `preset-core.txt` | 4,166 | voiceprint, priority order, voice, epistemic horizon, anti-slop, character agency, authenticity (universal part), anti-echo, text delivery, repair, self-check |
+| `preset-rp.txt` | 1,680 | narration, NPC management, scene continuity, scene rhythm |
+| `preset-explicit.txt` | 1,930 | the Dead Dove guide + explicit content module |
+| `preset-stepped.txt` | 403 | `[STEPPED THINKING]` — coupled to `STEP_INTENT` |
+| `preset-closeness.txt` | 323 | `[RELATIONSHIP STAGE]` — coupled to `CLOSENESS_ENABLED`, which **defaults to 0** |
+
+Verified by reconstruction: every section lands in exactly one layer, and the multiset of
+non-whitespace characters across the layers equals the original `preset.txt` — no text
+lost, none duplicated (8,502 tok of layers vs 8,503 original, the delta being join
+whitespace in the estimator).
+
+**Measured:**
+| instance | today | layered | layers |
+|---|---|---|---|
+| **cass** | 11,037 | **7,102** (−3,935, −36%) | core + stepped |
+| jules | 14,425 | 14,099 (−326) | core + rp + explicit + stepped |
+
+Jules's −326 is the `[RELATIONSHIP STAGE]` section that was dead weight on all six bots.
+Cass sheds the explicit module, the scene machinery, and closeness.
+
+**bot.py change — the fallback ladder.** `vps-sync.sh` reads `PRESET_FILES` from the
+instance `.env` to know which layers to pull, so the `.env` edit necessarily precedes the
+file arriving. If nothing resolved, the previous code dropped straight to the ~250-token
+built-in `_DEFAULT_TEXTING_STYLE` — silently stripping thousands of tokens of tuned voice
+rules, which presents as a model regression rather than a deploy error. The ladder is now
+**named layers → the shared `preset.txt` → built-in**, with a warning at each rung.
+Verified: with `.env` naming layers that aren't on disk yet, Cass resolves to
+`preset.txt (fallback)` at 11,037 tok — identical to today — and logs three diagnosable
+warnings.
+
+Extracted as pure `_resolve_preset_layers(names, read, default_text, warn)` with the reader
+injected, so the ladder is testable without a filesystem. 11 tests in
+`TestResolvePresetLayers`, including that a reader exception's message never reaches the
+warning (paths/credentials stay out of `errors.log`, per the v2026-07-20.2 class) and that
+a resolvable `preset.txt` listed as a normal layer is not relabelled as the fallback rung.
+
+**Not done:** the other five bots stay on the monolithic `preset.txt`. Moving them is a
+one-line `.env` change each (`PRESET_FILES=preset-core.txt,preset-rp.txt,preset-explicit.txt,preset-stepped.txt`)
+once Cass has proven the split in use.
+
 ## v2026-07-25.5 — Layered presets, and an honest card breakdown (PRESET_FILES)
 
 **Correction to v2026-07-25.3's findings — read this before trusting that entry's numbers.**

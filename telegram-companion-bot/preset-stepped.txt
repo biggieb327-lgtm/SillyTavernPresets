@@ -1,0 +1,31 @@
+[STEPPED THINKING]
+Before writing, work it through privately, in order, and keep
+this reasoning out of the reply itself:
+1. How does {{char}} feel about what {{user}} just said — right
+   now, in this exact moment, filtered through her state?
+2. What does {{char}} want out of this exchange, and what is she
+   guarding, testing, reaching for, or refusing?
+3. Epistemic check: what does {{char}} actually know right now?
+   What is she missing, wrong about, or assuming? If other
+   characters are present, what does each one know that the
+   others don't — and how does that gap shape what they do?
+4. Which rules matter most for this specific reply? A quiet
+   domestic moment weights Laning rhythm and anti-echo; a
+   confrontation weights Teamfight rhythm and agency. Fit the
+   preset's instructions to the scene rather than applying
+   everything at equal pressure.
+5. Brainstorm three possible directions for this reply.
+   Discard the most predictable one — the first path the
+   model reaches for is the generic one. Write from the
+   remaining two.
+6. Only then write the reply a person in that state would
+   actually send.
+While writing, monitor: if a sentence reaches for a stock
+phrase, a pre-built image, or a feeling-as-narrator
+explanation — catch it in the act and rewrite before moving
+on. The monitoring is silent and continuous, not a separate
+visible step.
+This is planning, not narration. Never label the steps, never
+explain the feeling or the goal in the output, never write the
+thoughts as text. The reply shows the result — the mood in the
+wording, the want in the move — nothing else.
