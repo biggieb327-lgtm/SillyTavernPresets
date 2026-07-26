@@ -823,7 +823,7 @@ class TestGatherAuditData:
 
 # ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
 
-class TestTrimHistoryToBudget:
+class TestTrimPromptToBudget:
     def test_noop_when_under_budget(self):
         msgs = [
             {"role": "system", "content": "sys"},
@@ -831,12 +831,12 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": "bye"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 10000)
+        result = bot._trim_prompt_to_budget(list(msgs), 10000)
         assert len(result) == 4
 
     def test_disabled_when_zero(self):
         msgs = [{"role": "user", "content": "x" * 100000}]
-        result = bot._trim_history_to_budget(list(msgs), 0)
+        result = bot._trim_prompt_to_budget(list(msgs), 0)
         assert len(result) == 1
 
     def test_drops_oldest_history_first(self):
@@ -846,7 +846,7 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "old reply"},
             {"role": "user", "content": "new message"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 20)
+        result = bot._trim_prompt_to_budget(list(msgs), 20)
         roles = [m["role"] for m in result]
         assert "system" in roles
         assert result[-1]["content"] == "new message"
@@ -856,7 +856,7 @@ class TestTrimHistoryToBudget:
             {"role": "system", "content": "x" * 400},
             {"role": "user", "content": "hi"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 50)
+        result = bot._trim_prompt_to_budget(list(msgs), 50)
         assert any(m["role"] == "system" for m in result)
 
     def test_never_drops_final_user(self):
@@ -866,7 +866,7 @@ class TestTrimHistoryToBudget:
             {"role": "assistant", "content": "a" * 400},
             {"role": "user", "content": "final question"},
         ]
-        result = bot._trim_history_to_budget(list(msgs), 30)
+        result = bot._trim_prompt_to_budget(list(msgs), 30)
         assert result[-1]["content"] == "final question"
 
 
@@ -2716,3 +2716,1279 @@ class TestNoteConfidenceConfig:
         import inspect
         src = inspect.getsource(bot._post_reply_analysis)
         assert "do not fill gaps with a" in src
+
+
+# ── Topic-initiative balance (PROMPT_BALANCE, v2026-07-25.1) ─────────────────
+# Recall blocks were the only ones instructed to raise their contents; the live
+# context blocks were passive or actively suppressed. See CHANGELOG v2026-07-25.1.
+
+class TestInitiativeNote:
+    def test_interpolates_both_names(self):
+        note = bot._initiative_note("Nora", "Brian")
+        assert "Nora" in note
+        assert "Brian" in note
+
+    def test_states_recall_is_not_the_default(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "only one option" in note
+        assert "default" in note
+
+    def test_prefers_live_opening_on_a_tie(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "take the live one" in note
+
+    def test_frames_recall_as_context_not_topic_supply(self):
+        note = bot._initiative_note("Nora", "Brian").lower()
+        assert "context she has" in note
+
+    def test_is_pure_and_deterministic(self):
+        assert bot._initiative_note("A", "b") == bot._initiative_note("A", "b")
+
+    def test_no_leading_or_trailing_whitespace(self):
+        note = bot._initiative_note("Nora", "Brian")
+        assert note == note.strip()
+
+    def test_carries_its_own_heading(self):
+        assert bot._initiative_note("Nora", "Brian").startswith("# Bringing things up")
+
+
+class TestPromptBalanceConfig:
+    def test_flag_exists_and_defaults_on(self):
+        assert hasattr(bot, "PROMPT_BALANCE")
+        assert bot.PROMPT_BALANCE is True
+
+    def test_flag_is_bool(self):
+        assert isinstance(bot.PROMPT_BALANCE, bool)
+
+
+class TestPromptBalanceTails:
+    """Each rewritten tail must keep the legacy string as the kill-switch branch,
+    so PROMPT_BALANCE=0 restores the pre-v2026-07-25.1 prompt exactly."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot.assemble_messages)
+
+    def test_legacy_notes_tail_still_present(self):
+        assert "Ask about these naturally if one fits the moment" in self._src()
+
+    def test_legacy_threads_tail_still_present(self):
+        assert "Let them surface naturally if one fits" in self._src()
+
+    def test_legacy_day_tail_still_present(self):
+        assert "don't narrate it like a list" in self._src()
+
+    def test_notes_tail_rejects_checklist_framing(self):
+        assert "not a checklist to work through" in self._src()
+
+    def test_threads_tail_rejects_filler_use(self):
+        assert "just because you have nothing else" in self._src()
+
+    def test_day_tail_grants_initiative(self):
+        assert "yours to bring up unprompted" in self._src()
+
+    def test_initiative_block_is_gated(self):
+        src = self._src()
+        assert "if PROMPT_BALANCE:" in src
+        assert "_initiative_note(NAME, uname)" in src
+
+
+# ── Garmin health feed (v2026-07-25.2) ───────────────────────────────────────
+# Ported from the orphan branch claude/push-to-repo-7i2f3c, which shares no git
+# history with main and so was never deployable. Pure logic split out of the I/O
+# so field-name handling and the alert thresholds are testable.
+
+class TestGarminBits:
+    def test_empty_payloads_produce_nothing(self):
+        assert bot._garmin_bits({}, {}, {}) == []
+
+    def test_none_payloads_are_safe(self):
+        assert bot._garmin_bits(None, None, None) == []
+
+    def test_sleep_formats_hours_and_minutes(self):
+        bits = bot._garmin_bits({"sleepTimeSeconds": 7 * 3600 + 5 * 60}, {}, {})
+        assert bits == ["slept 7h05m last night"]
+
+    def test_sleep_score_and_qualifier_appended(self):
+        bits = bot._garmin_bits(
+            {"sleepTimeSeconds": 3600,
+             "sleepScores": {"overall": {"value": 82, "qualifierKey": "GOOD"}}}, {}, {})
+        assert "sleep score 82" in bits[0]
+        assert "good" in bits[0]
+
+    def test_zero_sleep_is_dropped_not_rendered(self):
+        # A 0 reading means "no data", not "slept 0h" — must not be reported.
+        assert bot._garmin_bits({"sleepTimeSeconds": 0}, {}, {}) == []
+
+    def test_steps_thousands_separator(self):
+        assert "12,345 steps so far" in bot._garmin_bits({}, {"totalSteps": 12345}, {})
+
+    def test_zero_steps_still_reported(self):
+        # 0 steps is real information (unlike 0 sleep) — the key is present.
+        assert "0 steps so far" in bot._garmin_bits({}, {"totalSteps": 0}, {})
+
+    def test_negative_stress_skipped(self):
+        # Garmin uses -1/-2 for "couldn't measure".
+        assert bot._garmin_bits({}, {"averageStressLevel": -1}, {}) == []
+
+    def test_stress_zero_is_kept(self):
+        assert "avg stress 0" in bot._garmin_bits({}, {"averageStressLevel": 0}, {})
+
+    def test_body_battery_reported(self):
+        assert "body battery 43" in bot._garmin_bits({}, {"bodyBatteryMostRecentValue": 43}, {})
+
+    def test_activity_distance_in_km(self):
+        bits = bot._garmin_bits({}, {}, {
+            "activityType": {"typeKey": "trail_running"},
+            "distance": 5400, "startTimeLocal": "2026-07-24 08:00:00"})
+        assert "trail running" in bits[0]
+        assert "5.4km" in bits[0]
+        assert "2026-07-24" in bits[0]
+
+    def test_activity_without_distance(self):
+        bits = bot._garmin_bits({}, {}, {"activityName": "yoga"})
+        assert bits == ["last workout: yoga"]
+
+    def test_one_bad_field_does_not_lose_the_others(self):
+        bits = bot._garmin_bits({"sleepTimeSeconds": "nonsense"},
+                                {"totalSteps": 900}, {})
+        assert any("900 steps" in b for b in bits)
+
+    def test_all_fields_together(self):
+        bits = bot._garmin_bits(
+            {"sleepTimeSeconds": 6 * 3600},
+            {"restingHeartRate": 54, "totalSteps": 3000,
+             "bodyBatteryMostRecentValue": 60, "averageStressLevel": 30},
+            {"activityName": "ride"})
+        assert len(bits) == 6
+
+
+class TestStressSustained:
+    @staticmethod
+    def _pairs(values, base_ts=1_000_000.0):
+        return [[base_ts + i, v] for i, v in enumerate(values)]
+
+    def test_no_data_returns_none_avg(self):
+        # None avg must be distinguishable from a calm average that rounds to 0.
+        high, avg = bot._stress_sustained([], 0, 60)
+        assert high is False and avg is None
+
+    def test_too_few_samples_returns_none_avg(self):
+        high, avg = bot._stress_sustained(self._pairs([80, 80]), 0, 60)
+        assert high is False and avg is None
+
+    def test_sustained_high_detected(self):
+        high, avg = bot._stress_sustained(self._pairs([70, 75, 80, 72]), 0, 60)
+        assert high is True and avg == 74
+
+    def test_calm_readings_are_not_high(self):
+        high, avg = bot._stress_sustained(self._pairs([10, 12, 15]), 0, 60)
+        assert high is False and avg == 12
+
+    def test_genuinely_calm_avg_zero_is_not_none(self):
+        high, avg = bot._stress_sustained(self._pairs([0, 0, 0]), 0, 60)
+        assert high is False and avg == 0
+
+    def test_unmeasurable_readings_skipped(self):
+        # -1/-2 must be dropped, not averaged in as low stress.
+        high, avg = bot._stress_sustained(self._pairs([-1, -2, 80, 80, 80]), 0, 60)
+        assert high is True and avg == 80
+
+    def test_readings_before_cutoff_excluded(self):
+        pairs = [[100, 90], [200, 90], [5000, 10], [5001, 10], [5002, 10]]
+        high, avg = bot._stress_sustained(pairs, 5000, 60)
+        assert high is False and avg == 10
+
+    def test_brief_spike_is_not_sustained(self):
+        # One spike in five readings fails the 70%-of-window requirement.
+        high, avg = bot._stress_sustained(self._pairs([90, 10, 10, 10, 10]), 0, 60)
+        assert high is False
+
+    def test_malformed_entries_ignored(self):
+        pairs = [None, [1], "junk", [1, "x"], [1, 80], [2, 80], [3, 80]]
+        high, avg = bot._stress_sustained(pairs, 0, 60)
+        assert high is True and avg == 80
+
+
+class TestRhrBaseline:
+    def test_none_when_history_empty(self):
+        assert bot._rhr_baseline([], "2026-07-25", 3) is None
+
+    def test_none_when_below_min_days(self):
+        h = [{"date": "2026-07-23", "rhr": 50}, {"date": "2026-07-24", "rhr": 52}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) is None
+
+    def test_median_of_prior_days(self):
+        h = [{"date": "2026-07-21", "rhr": 50},
+             {"date": "2026-07-22", "rhr": 60},
+             {"date": "2026-07-23", "rhr": 55}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 55
+
+    def test_today_excluded_from_its_own_baseline(self):
+        # Today's elevated reading must not raise the baseline it's compared against.
+        h = [{"date": "2026-07-22", "rhr": 50},
+             {"date": "2026-07-23", "rhr": 50},
+             {"date": "2026-07-24", "rhr": 50},
+             {"date": "2026-07-25", "rhr": 90}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 50
+
+    def test_malformed_rows_ignored(self):
+        h = [{"date": "a", "rhr": 50}, "junk", {"date": "b"},
+             {"date": "c", "rhr": None}, {"date": "d", "rhr": 52},
+             {"date": "e", "rhr": 54}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 52
+
+    def test_nonpositive_readings_ignored(self):
+        h = [{"date": "a", "rhr": 0}, {"date": "b", "rhr": -5},
+             {"date": "c", "rhr": 50}, {"date": "d", "rhr": 52},
+             {"date": "e", "rhr": 54}]
+        assert bot._rhr_baseline(h, "2026-07-25", 3) == 52
+
+    def test_none_history_is_safe(self):
+        assert bot._rhr_baseline(None, "2026-07-25", 3) is None
+
+
+class TestGarminConfig:
+    def test_kill_switch_exists_and_defaults_on(self):
+        assert hasattr(bot, "GARMIN_FEED")
+        assert bot.GARMIN_FEED is True
+
+    def test_disabled_without_credentials(self):
+        # No creds in the test fixture .env, so the feed must be inert.
+        assert bot.GARMIN_ENABLED is False
+
+    def test_monitors_require_the_feed(self):
+        assert bot.STRESS_ALERTS is False
+        assert bot.BB_ALERTS is False
+        assert bot.RHR_ALERTS is False
+
+    def test_numeric_config_went_through_env_helpers(self):
+        assert isinstance(bot.STRESS_THRESHOLD, int)
+        assert isinstance(bot.GARMIN_MAX_AGE_HOURS, float)
+        assert isinstance(bot.BB_ALERT_COOLDOWN_HOURS, float)
+
+    def test_off_reason_explains_missing_credentials(self):
+        assert "GARMIN_EMAIL" in bot._garmin_off_reason()
+
+    def test_audit_state_reports_off(self):
+        assert "off" in bot._garmin_audit_state()
+
+    def test_health_commands_in_menu_only_when_enabled(self):
+        names = {c.command for c in bot._build_command_menu(False, False, False)}
+        assert "health" not in names
+        on = {c.command for c in bot._build_command_menu(False, False, True)}
+        assert {"health", "healthnow", "stress"} <= on
+
+
+class TestGarminInvariants:
+    """Rules from bot-code-invariants that this feature could plausibly break."""
+
+    def test_every_garmin_call_runs_off_the_event_loop(self):
+        # Invariant #8: garminconnect is blocking requests underneath.
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job,
+                   bot.rhr_monitor_job, bot.update_garmin):
+            src = inspect.getsource(fn)
+            assert "asyncio.to_thread" in src, fn.__name__
+
+    def test_snapshot_never_enters_group_prompts(self):
+        # GROUP_CHAT_DESIGN.md §5: watch metrics are private 1:1 state.
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "GARMIN_ENABLED and not group" in src
+
+    def test_health_commands_not_group_allowed(self):
+        assert bot.GROUP_ALLOWED_COMMANDS == {"chatid"}
+
+    def test_no_raw_exception_in_garmin_logs(self):
+        # Garmin errors can carry the request URL; log the type only (cf. the WSDOT
+        # key-leak fix in v2026-07-20.2).
+        import inspect
+        for fn in (bot._fetch_garmin, bot._drop_garmin_session):
+            src = inspect.getsource(fn)
+            assert '", e)' not in src, fn.__name__
+            assert '", exc)' not in src, fn.__name__
+            # Only the exception's class name may reach a log line.
+            assert ".__name__" in src, fn.__name__
+
+    def test_check_ins_consume_the_nudge_budget(self):
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
+            assert "_consume_nudge(owner)" in inspect.getsource(fn), fn.__name__
+
+    def test_check_ins_respect_the_proactive_gate(self):
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
+            assert "_health_nudge_ok(owner)" in inspect.getsource(fn), fn.__name__
+
+    def test_health_nudge_gate_checks_every_condition(self):
+        import inspect
+        src = inspect.getsource(bot._health_nudge_ok)
+        for gate in ("_is_quiet", "_is_away", "in_quiet_hours",
+                     "_in_quiet_window", "_check_nudge_budget"):
+            assert gate in src, gate
+
+    def test_no_new_llm_call_added(self):
+        # Invariant #3: the feed is prompt context + the existing proactive path.
+        import inspect
+        for fn in (bot.update_garmin, bot._fetch_garmin, bot.stress_monitor_job,
+                   bot.bb_monitor_job, bot.rhr_monitor_job):
+            src = inspect.getsource(fn)
+            assert "call_nanogpt" not in src, fn.__name__
+
+
+# ── Assembled-prompt instrumentation (PROMPT_STATS, v2026-07-25.3) ───────────
+# Nothing measured a single prompt before this; _llm_stats["tok_in"] is a daily
+# running sum across all LLM calls. See CHANGELOG v2026-07-25.3.
+
+class TestPromptTokenTotal:
+    def test_empty_prompt_is_zero(self):
+        assert bot._prompt_token_total([]) == 0
+
+    def test_sums_all_messages(self):
+        msgs = [{"role": "system", "content": "a" * 400},
+                {"role": "user", "content": "b" * 400}]
+        assert bot._prompt_token_total(msgs) == 200
+
+    def test_multipart_content_does_not_crash(self):
+        # Image messages carry a list, not a str.
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        assert bot._prompt_token_total(msgs) > 0
+
+    def test_missing_content_key_is_safe(self):
+        assert bot._prompt_token_total([{"role": "system"}]) >= 1
+
+
+class TestPromptBucket:
+    def test_small_prompt(self):
+        assert bot._prompt_bucket(0) == "<8k"
+        assert bot._prompt_bucket(7999) == "<8k"
+
+    def test_boundaries_are_exclusive_upper(self):
+        assert bot._prompt_bucket(8000) == "8-12k"
+        assert bot._prompt_bucket(12000) == "12-16k"
+        assert bot._prompt_bucket(16000) == "16-24k"
+        assert bot._prompt_bucket(24000) == "24-32k"
+
+    def test_overflow_bucket(self):
+        assert bot._prompt_bucket(32000) == "32k+"
+        assert bot._prompt_bucket(500000) == "32k+"
+
+    def test_measured_fleet_range_lands_in_expected_buckets(self):
+        # cass 11,435 and jules 14,822 as measured for this release.
+        assert bot._prompt_bucket(11435) == "8-12k"
+        assert bot._prompt_bucket(14822) == "12-16k"
+
+
+class TestPromptTopBlocks:
+    def test_returns_biggest_first(self):
+        msgs = [{"role": "system", "content": "# small\n" + "x" * 40},
+                {"role": "system", "content": "# big\n" + "x" * 4000},
+                {"role": "user", "content": "y" * 8000}]
+        top = bot._prompt_top_blocks(msgs)
+        assert top[0][1] == "# big"
+
+    def test_ignores_non_system_messages(self):
+        msgs = [{"role": "user", "content": "u" * 8000},
+                {"role": "system", "content": "# only\nx"}]
+        assert [h for _, h in bot._prompt_top_blocks(msgs)] == ["# only"]
+
+    def test_respects_the_limit(self):
+        msgs = [{"role": "system", "content": f"# h{i}\n" + "x" * (100 * i)}
+                for i in range(1, 8)]
+        assert len(bot._prompt_top_blocks(msgs, n=3)) == 3
+
+    def test_heading_is_truncated(self):
+        msgs = [{"role": "system", "content": "#" + "z" * 200}]
+        assert len(bot._prompt_top_blocks(msgs)[0][1]) <= 48
+
+    def test_multipart_content_skipped_not_fatal(self):
+        msgs = [{"role": "system", "content": [{"type": "text"}]},
+                {"role": "system", "content": "# ok\nx"}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "# ok"
+
+    def test_empty_input(self):
+        assert bot._prompt_top_blocks([]) == []
+
+
+class TestRecordPromptSize:
+    def setup_method(self):
+        bot._prompt_stats.update({"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                                  "max_chat": None, "max_blocks": [], "buckets": {}})
+
+    def test_records_count_and_total(self):
+        msgs = [{"role": "system", "content": "a" * 4000}]
+        total = bot._record_prompt_size(msgs, 7)
+        assert total == 1000
+        assert bot._prompt_stats["n"] == 1
+        assert bot._prompt_stats["sum"] == 1000
+
+    def test_tracks_the_maximum_and_its_chat(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 400}], 1)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 40000}], 2)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 800}], 3)
+        assert bot._prompt_stats["max"] == 10000
+        assert bot._prompt_stats["max_chat"] == 2
+
+    def test_max_blocks_captured_at_the_peak(self):
+        # Index 0 is the merged card block and gets a fixed label, so put the block
+        # under test after it (see TestCardBlockLabelling).
+        bot._record_prompt_size(
+            [{"role": "system", "content": "card"},
+             {"role": "system", "content": "# peak\n" + "a" * 40000}], 1)
+        assert bot._prompt_stats["max_blocks"][0][1] == "# peak"
+
+    def test_buckets_accumulate(self):
+        for _ in range(3):
+            bot._record_prompt_size([{"role": "system", "content": "a" * 400}], 1)
+        assert bot._prompt_stats["buckets"]["<8k"] == 3
+
+    def test_average_is_derivable(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 4000}], 1)
+        bot._record_prompt_size([{"role": "system", "content": "a" * 8000}], 1)
+        s = bot._prompt_stats
+        assert s["sum"] // s["n"] == 1500
+
+    def test_audit_state_empty_before_any_prompt(self):
+        assert bot._prompt_audit_state() == {}
+
+    def test_audit_state_populated_after(self):
+        bot._record_prompt_size([{"role": "system", "content": "a" * 4000}], 1)
+        st = bot._prompt_audit_state()
+        assert st["n"] == 1 and st["avg"] == 1000 and st["max"] == 1000
+
+
+class TestTrimBudgetLogging:
+    """The budget cannot be enforced when the system blocks alone exceed it — that
+    used to be silent. See CHANGELOG v2026-07-25.3."""
+
+    @staticmethod
+    def _prompt(system_tokens, n_hist):
+        msgs = [{"role": "system", "content": "s" * (4 * system_tokens)}]
+        for i in range(n_hist):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": "x" * 400})
+        msgs.append({"role": "user", "content": "final"})
+        return msgs
+
+    def test_disabled_budget_is_a_passthrough(self):
+        m = self._prompt(1000, 5)
+        assert bot._trim_prompt_to_budget(list(m), 0) == m
+
+    def test_under_budget_is_untouched(self):
+        m = self._prompt(100, 3)
+        assert len(bot._trim_prompt_to_budget(list(m), 100000)) == len(m)
+
+    def test_drops_history_oldest_first(self):
+        m = self._prompt(1000, 20)
+        out = bot._trim_prompt_to_budget(list(m), 1300)
+        assert len(out) < len(m)
+        assert out[-1]["content"] == "final"   # final user message always survives
+
+    def test_system_blocks_are_never_dropped(self):
+        m = self._prompt(1000, 20)
+        out = bot._trim_prompt_to_budget(list(m), 1100)
+        assert sum(1 for x in out if x["role"] == "system") == 1
+
+    def test_over_budget_warns_and_counts_an_error(self, caplog):
+        import logging
+        before = len(bot._error_counts.get("prompt_budget", []))
+        m = self._prompt(14000, 40)
+        with caplog.at_level(logging.WARNING):
+            out = bot._trim_prompt_to_budget(list(m), 8000)
+        # All history stripped, still over — the case that used to pass silently.
+        assert sum(1 for x in out if x["role"] != "system") == 1
+        assert any("OVER BUDGET" in r.message for r in caplog.records)
+        assert len(bot._error_counts.get("prompt_budget", [])) == before + 1
+
+    def test_successful_trim_does_not_warn(self, caplog):
+        import logging
+        m = self._prompt(1000, 20)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_prompt_to_budget(list(m), 5000)
+        assert not any("OVER BUDGET" in r.message for r in caplog.records)
+
+
+class TestPromptStatsConfig:
+    def test_flag_exists_and_defaults_on(self):
+        assert bot.PROMPT_STATS is True
+
+    def test_budget_still_defaults_off(self):
+        # Must stay 0 until the trimmer's priority order is fixed (v2026-07-25.4).
+        assert bot.CONTEXT_TOKEN_BUDGET == 0
+
+    def test_assemble_records_when_enabled(self):
+        bot._prompt_stats.update({"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
+                                  "max_chat": None, "max_blocks": [], "buckets": {}})
+        bot.conversation_history[99] = []
+        bot.user_names[99] = "Tester"
+        bot.assemble_messages(99, "hello")
+        assert bot._prompt_stats["n"] == 1
+        assert bot._prompt_stats["max"] > 0
+
+
+# ── Tiered prompt trimming (v2026-07-25.4) ───────────────────────────────────
+# The old trimmer protected EVERY system block and dropped only conversation, so it
+# would delete a dozen live turns to keep a triggered lorebook entry — and could strip
+# all history and still ship over budget. See CHANGELOG v2026-07-25.4.
+
+class TestSysOpt:
+    def test_marks_the_optional_tier(self):
+        m = bot._sys_opt("# Relevant memories\nx")
+        assert m["role"] == "system"
+        assert m["_tier"] == bot._TIER_OPTIONAL
+
+    def test_content_is_preserved(self):
+        assert bot._sys_opt("hello")["content"] == "hello"
+
+
+class TestStripTiers:
+    def test_removes_internal_keys(self):
+        out = bot._strip_tiers([bot._sys_opt("x")])
+        assert out == [{"role": "system", "content": "x"}]
+
+    def test_leaves_normal_messages_untouched(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        assert bot._strip_tiers(msgs) == msgs
+
+    def test_no_underscore_keys_survive(self):
+        out = bot._strip_tiers([{"role": "system", "content": "x", "_tier": 2, "_x": 1}])
+        assert not any(k.startswith("_") for m in out for k in m)
+
+    def test_assembled_prompt_carries_no_internal_keys(self):
+        # Whatever the API receives must be role/content only.
+        bot.conversation_history[77] = []
+        bot.user_names[77] = "Tester"
+        msgs = bot.assemble_messages(77, "hello")
+        assert all(set(m) <= {"role", "content"} for m in msgs)
+
+
+class TestTieredTrimOrder:
+    @staticmethod
+    def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):
+        msgs = [{"role": "system", "content": "P" * (4 * protected_tok)}]
+        for t in optional_toks:
+            msgs.append(bot._sys_opt("# opt\n" + "o" * (4 * t)))
+        for i in range(n_hist):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": "h" * (4 * hist_tok)})
+        msgs.append({"role": "user", "content": "final"})
+        return msgs
+
+    @staticmethod
+    def _n_optional(msgs):
+        return sum(1 for m in msgs if m.get("_tier") == bot._TIER_OPTIONAL)
+
+    @staticmethod
+    def _n_hist(msgs):
+        return sum(1 for m in msgs if m.get("role") != "system")
+
+    def test_optional_blocks_go_before_any_history(self):
+        # The whole point of the release: conversation outlives optional context.
+        m = self._prompt(1000, [500, 500], 10, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1300, keep_recent=2)
+        assert self._n_optional(out) == 0
+        assert self._n_hist(out) == 11          # 10 history + final, all intact
+
+    def test_largest_optional_dropped_first(self):
+        m = self._prompt(1000, [50, 900], 2, hist_tok=10)
+        out = bot._trim_prompt_to_budget(list(m), 1200, keep_recent=2)
+        kept = [x for x in out if x.get("_tier") == bot._TIER_OPTIONAL]
+        assert len(kept) == 1
+        assert bot._msg_tokens(kept[0]) < 200   # the small one survived
+
+    def test_history_trimmed_only_after_optional_exhausted(self):
+        m = self._prompt(1000, [200], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1200, keep_recent=4)
+        assert self._n_optional(out) == 0
+        assert self._n_hist(out) < 21
+
+    def test_oldest_history_goes_first_newest_survives(self):
+        # Distinguishable turns so we can prove WHICH ones survived, not just how many.
+        msgs = [{"role": "system", "content": "P" * 4000}]
+        for i in range(20):
+            msgs.append({"role": "user" if i % 2 == 0 else "assistant",
+                         "content": f"turn{i:02d} " + "h" * 92})
+        msgs.append({"role": "user", "content": "final"})
+        out = bot._trim_prompt_to_budget(msgs, 1200, keep_recent=5)
+        kept = [m["content"][:6] for m in out
+                if m["role"] != "system" and m["content"] != "final"]
+        assert kept, "some history should survive at this budget"
+        # Whatever survived is a contiguous run ending at the newest turn.
+        assert kept[-1] == "turn19"
+        assert kept == sorted(kept)
+
+    def test_keep_recent_is_held_back_until_older_is_exhausted(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        # Budget leaves room for ~3 turns, so the 15 "older" ones must all go first
+        # and the dip into the newest 5 stops the moment it fits.
+        out = bot._trim_prompt_to_budget(list(m), 1100, keep_recent=5)
+        assert self._n_hist(out) == 4          # 3 recent + the final user message
+
+    def test_last_resort_dips_below_keep_recent(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=5)
+        assert self._n_hist(out) == 1           # only the final user message left
+
+    def test_final_user_message_always_survives(self):
+        m = self._prompt(1000, [400], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=5)
+        assert out[-1]["content"] == "final"
+
+    def test_protected_block_never_dropped(self):
+        m = self._prompt(2000, [400], 10, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 100, keep_recent=2)
+        assert sum(1 for x in out if x.get("_tier") is None
+                   and x["role"] == "system") == 1
+
+    def test_stops_as_soon_as_it_fits(self):
+        m = self._prompt(1000, [100, 100, 100], 5, hist_tok=10)
+        out = bot._trim_prompt_to_budget(list(m), 1250, keep_recent=2)
+        assert self._n_optional(out) >= 1       # didn't drop more than needed
+        assert self._n_hist(out) == 6           # history untouched
+
+    def test_under_budget_is_a_noop(self):
+        m = self._prompt(100, [50], 4, hist_tok=10)
+        assert len(bot._trim_prompt_to_budget(list(m), 100000)) == len(m)
+
+    def test_zero_budget_disables_everything(self):
+        m = self._prompt(9999, [999], 40)
+        assert bot._trim_prompt_to_budget(list(m), 0) == m
+
+    def test_keep_recent_zero_allows_full_history_drop(self):
+        m = self._prompt(1000, [], 20, hist_tok=25)
+        out = bot._trim_prompt_to_budget(list(m), 1000, keep_recent=0)
+        assert self._n_hist(out) == 1
+
+    def test_unfittable_still_warns(self, caplog):
+        import logging
+        m = self._prompt(5000, [200], 10, hist_tok=25)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_prompt_to_budget(list(m), 1000, keep_recent=2)
+        assert any("OVER BUDGET" in r.message for r in caplog.records)
+
+    def test_successful_trim_does_not_warn(self, caplog):
+        import logging
+        m = self._prompt(1000, [500], 5, hist_tok=25)
+        with caplog.at_level(logging.WARNING):
+            bot._trim_prompt_to_budget(list(m), 1300, keep_recent=2)
+        assert not any("OVER BUDGET" in r.message for r in caplog.records)
+
+
+class TestOptionalBlocksAreMarked:
+    """The blocks that should be sacrificeable actually carry the marker. Without this,
+    a budget would silently fall back to eating conversation again."""
+
+    def _assembled(self):
+        import inspect
+        return inspect.getsource(bot.assemble_messages)
+
+    def test_seven_optional_blocks_marked(self):
+        assert self._assembled().count("_sys_opt(") == 7
+
+    def test_lore_is_optional(self):
+        src = self._assembled()
+        i = src.index("# Relevant background")
+        assert "_sys_opt(" in src[max(0, i - 200):i]
+
+    def test_memories_are_optional(self):
+        src = self._assembled()
+        assert "_sys_opt(block)" in src
+
+    def test_day_context_is_optional(self):
+        src = self._assembled()
+        i = src.index("# What's going on today")
+        assert "_sys_opt(" in src[max(0, i - 200):i]
+
+    def test_voice_critical_blocks_are_not_optional(self):
+        # The card's own instructions and the texting preset must never be droppable.
+        src = self._assembled()
+        for anchor in ("POST_HISTORY_RAW", "TEXTING_STYLE"):
+            i = src.index(anchor)
+            assert "_sys_opt(" not in src[max(0, i - 160):i], anchor
+
+
+# ── Layered presets + honest card labelling (v2026-07-25.5) ──────────────────
+# One shared 8.5k preset meant every bot carried instructions written for the others.
+# See CHANGELOG v2026-07-25.5.
+
+class TestPresetLayers:
+    def test_layers_are_loaded(self):
+        assert isinstance(bot.PRESET_LAYERS, list)
+        assert bot.PRESET_LAYERS, "there must always be at least a built-in fallback"
+
+    def test_each_layer_is_name_and_text(self):
+        for name, text in bot.PRESET_LAYERS:
+            assert isinstance(name, str) and name
+            assert isinstance(text, str) and text.strip()
+
+    def test_texting_style_is_the_joined_layers(self):
+        assert bot.TEXTING_STYLE == "\n\n".join(t for _, t in bot.PRESET_LAYERS)
+
+    def test_fixture_falls_back_to_builtin(self):
+        # The test fixture has no preset.txt, so the built-in default must be used —
+        # the documented no-preset case, and it must not warn about it.
+        assert bot.PRESET_LAYERS == [("<built-in>", bot._DEFAULT_TEXTING_STYLE)]
+
+    def test_missing_default_preset_does_not_warn(self):
+        joined = " ".join(bot._CONFIG_WARNINGS)
+        assert "preset layer" not in joined
+
+    def test_preset_file_env_still_honoured(self):
+        # Backward compatibility: PRESET_FILE must keep working as the single-layer name.
+        assert bot.PRESET_FILE == "preset.txt"
+
+    def test_every_layer_injected_as_its_own_block(self):
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "for _lname, _ltext in PRESET_LAYERS:" in src
+
+    def test_layers_reported_in_audit(self):
+        d = bot.gather_audit_data()
+        assert "preset_layers" in d
+        assert all(isinstance(t, int) for _, t in d["preset_layers"])
+
+
+class TestCardBlockLabelling:
+    """messages[0] is the MERGED card block. Labelling it by its first line credited an
+    84-token section with 4,715 tokens and misdirected a real investigation."""
+
+    def test_card_block_gets_a_fixed_label(self):
+        msgs = [{"role": "system", "content": "[ATTRACTION RULE]\n" + "x" * 40000}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "(card: system_prompt+description+…)"
+
+    def test_later_blocks_still_use_their_heading(self):
+        msgs = [{"role": "system", "content": "card"},
+                {"role": "system", "content": "# Relevant memories\n" + "x" * 4000}]
+        assert bot._prompt_top_blocks(msgs)[0][1] == "# Relevant memories"
+
+    def test_card_label_does_not_leak_card_content(self):
+        msgs = [{"role": "system", "content": "[KINK MECHANICS]\nsecret"}]
+        assert "KINK" not in bot._prompt_top_blocks(msgs)[0][1]
+
+
+class TestCardFieldTokens:
+    def test_breakdown_is_recorded(self):
+        assert isinstance(bot._card_field_tokens, dict)
+        assert bot._card_field_tokens, "load_character must populate the breakdown"
+
+    def test_fixture_fields_present(self):
+        # The fixture card sets system_prompt and description.
+        assert "system_prompt" in bot._card_field_tokens
+        assert "description" in bot._card_field_tokens
+
+    def test_empty_fields_are_omitted_not_zero(self):
+        assert 0 not in [v for k, v in bot._card_field_tokens.items()
+                         if k != "character_book"]
+
+    def test_lorebook_tracked_separately(self):
+        # Conditional cost must not be mixed into the always-on total.
+        assert "character_book" in bot._card_field_tokens
+
+    def test_reported_in_audit(self):
+        d = bot.gather_audit_data()
+        assert "card_fields" in d
+        assert d["card_fields"]["system_prompt"] > 0
+
+
+# ── Preset layer resolution + fallback ladder (v2026-07-25.6) ────────────────
+# Ladder: named layers -> shared preset.txt -> built-in. The middle rung exists because
+# updating .env before the layer files reach an instance would otherwise drop the bot to
+# a ~250-token stub, which presents as a model regression. See CHANGELOG v2026-07-25.6.
+
+class TestResolvePresetLayers:
+    DEFAULT = "BUILT-IN DEFAULT"
+
+    @staticmethod
+    def _reader(files):
+        def read(name):
+            if name in files:
+                return files[name]
+            return ""
+        return read
+
+    def _resolve(self, names, files):
+        warn = []
+        out = bot._resolve_preset_layers(names, self._reader(files), self.DEFAULT, warn)
+        return out, warn
+
+    def test_single_layer_resolves(self):
+        out, warn = self._resolve(["preset.txt"], {"preset.txt": "SHARED"})
+        assert out == [("preset.txt", "SHARED")]
+        assert warn == []
+
+    def test_layers_keep_declared_order(self):
+        files = {"a.txt": "A", "b.txt": "B", "c.txt": "C"}
+        out, _ = self._resolve(["a.txt", "b.txt", "c.txt"], files)
+        assert [n for n, _ in out] == ["a.txt", "b.txt", "c.txt"]
+
+    def test_partial_resolution_keeps_what_exists_and_warns(self):
+        out, warn = self._resolve(["a.txt", "gone.txt"], {"a.txt": "A"})
+        assert out == [("a.txt", "A")]
+        assert any("gone.txt" in w for w in warn)
+
+    def test_missing_default_preset_does_not_warn(self):
+        # The documented "no preset.txt at all" case must stay quiet.
+        out, warn = self._resolve(["preset.txt"], {})
+        assert out == [("<built-in>", self.DEFAULT)]
+        assert warn == []
+
+    def test_all_named_layers_missing_falls_back_to_shared(self):
+        out, warn = self._resolve(["core.txt", "rp.txt"], {"preset.txt": "SHARED"})
+        assert out == [("preset.txt (fallback)", "SHARED")]
+        assert any("falling back to the shared" in w for w in warn)
+        # And each missing layer is still named, so the cause is diagnosable.
+        assert any("core.txt" in w for w in warn)
+
+    def test_falls_through_to_builtin_when_nothing_exists(self):
+        out, warn = self._resolve(["core.txt"], {})
+        assert out == [("<built-in>", self.DEFAULT)]
+        assert any("core.txt" in w for w in warn)
+
+    def test_unreadable_layer_is_reported_not_fatal(self):
+        def read(name):
+            if name == "bad.txt":
+                raise OSError("permission denied")
+            return "OK" if name == "good.txt" else ""
+        warn = []
+        out = bot._resolve_preset_layers(["bad.txt", "good.txt"], read, self.DEFAULT, warn)
+        assert out == [("good.txt", "OK")]
+        assert any("could not be read" in w for w in warn)
+
+    def test_reader_exception_does_not_leak_the_message(self):
+        def read(name):
+            raise OSError("/secret/path/leaked")
+        warn = []
+        bot._resolve_preset_layers(["x.txt"], read, self.DEFAULT, warn)
+        assert not any("leaked" in w for w in warn)
+
+    def test_empty_layer_file_treated_as_missing(self):
+        out, warn = self._resolve(["core.txt"], {"core.txt": "", "preset.txt": "SHARED"})
+        assert out == [("preset.txt (fallback)", "SHARED")]
+
+    def test_fallback_never_duplicates_an_already_loaded_layer(self):
+        # preset.txt listed AND resolvable: it's a normal layer, not the fallback rung.
+        out, _ = self._resolve(["preset.txt", "extra.txt"],
+                               {"preset.txt": "SHARED", "extra.txt": "X"})
+        assert [n for n, _ in out] == ["preset.txt", "extra.txt"]
+        assert not any("fallback" in n for n, _ in out)
+
+    def test_always_returns_at_least_one_layer(self):
+        for names in ([], ["nope.txt"], ["preset.txt"]):
+            out, _ = self._resolve(names, {})
+            assert len(out) >= 1
+            assert all(t for _, t in out)
+
+
+# ── /audit must be sendable whatever it finds (v2026-07-25.7) ────────────────
+# v2026-07-25.5/.6 added card field names (system_prompt, mes_example) and prompt block
+# headings ([VOICEPRINT PRESET …]) to a parse_mode="Markdown" message. A stray '_' or an
+# unmatched '[' makes Telegram reject the whole message ("can't parse entities"), so the
+# command whose job is diagnosing the bot became the thing that silently failed.
+
+class TestAuditIsPlainText:
+    def _src(self):
+        """audit_cmd's source with comment lines removed — the comments deliberately
+        mention parse_mode="Markdown" to explain why it must not be used."""
+        import inspect
+        return "\n".join(ln for ln in inspect.getsource(bot.audit_cmd).splitlines()
+                         if not ln.lstrip().startswith("#"))
+
+    def test_audit_does_not_use_parse_mode(self):
+        assert "parse_mode" not in self._src(), (
+            "/audit interpolates arbitrary diagnostic text (card fields, prompt headings, "
+            "config warnings naming env vars) — any parse_mode makes it un-sendable "
+            "depending on what it found")
+
+    def test_header_has_no_markdown_emphasis(self):
+        assert "*Self-Audit*" not in self._src()
+
+    def test_audit_output_survives_markdown_hostile_content(self):
+        # The real payload that broke it: underscores and unmatched brackets.
+        bot._prompt_stats.update({"n": 1, "sum": 9000, "max": 9000, "max_ts": time.time(),
+                                  "max_chat": 1, "buckets": {"8-12k": 1},
+                                  "max_blocks": [(8503, "[VOICEPRINT PRESET — SINGLE SLOT]"),
+                                                 (2231, "(card: system_prompt+description+…)")]})
+        d = bot.gather_audit_data()
+        ps = d["prompt_stats"]
+        rendered = "\n".join(f"  ~{t}t  {h}" for t, h in ps["max_blocks"])
+        # Exactly the conditions Telegram rejects — proof the content is hostile, which is
+        # why the command must not ask Telegram to parse it.
+        assert rendered.count("[") != rendered.count("]") or "_" in rendered
+
+    def test_card_field_names_contain_underscores(self):
+        # Guards the premise: if field names ever stopped containing '_', a future reader
+        # might think the plain-text requirement was cosmetic.
+        assert any("_" in k for k in bot._card_field_tokens)
+
+
+# ── BadRequest is a client-side defect, not network noise (v2026-07-25.8) ─────
+# In PTB, BadRequest SUBCLASSES NetworkError, so on_error's isinstance(err,
+# (NetworkError, TimedOut)) absorbed every 400 from the Bot API — malformed markup,
+# message-too-long, bad parameters — as "[net] transient" under the `network` counter.
+# That is how the v2026-07-25.5 /audit markup bug presented as "network: 3".
+
+class TestBadRequestNotNetwork:
+    class _Ctx:
+        def __init__(self, error):
+            self.error = error
+
+    @staticmethod
+    def _counts(cat):
+        return len(bot._error_counts.get(cat, []))
+
+    def test_ptb_really_does_subclass_networkerror(self):
+        # The premise. If PTB ever fixes this, the ordering guard becomes redundant
+        # rather than wrong — but we want to know.
+        from telegram.error import BadRequest, NetworkError
+        assert issubclass(BadRequest, NetworkError)
+
+    def test_bad_request_counted_separately(self):
+        from telegram.error import BadRequest
+        before_bad, before_net = self._counts("bad_request"), self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(
+            BadRequest("Can't parse entities: can't find end of the entity at byte 484"))))
+        assert self._counts("bad_request") == before_bad + 1
+        assert self._counts("network") == before_net, "must not also count as network"
+
+    def test_real_network_error_still_counted_as_network(self):
+        from telegram.error import NetworkError
+        before_bad, before_net = self._counts("bad_request"), self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(NetworkError("httpx.ReadError: "))))
+        assert self._counts("network") == before_net + 1
+        assert self._counts("bad_request") == before_bad
+
+    def test_timeout_still_counted_as_network(self):
+        from telegram.error import TimedOut
+        before = self._counts("network")
+        asyncio.run(bot.on_error(None, self._Ctx(TimedOut())))
+        assert self._counts("network") == before + 1
+
+    def test_ordering_is_explicit_in_source(self):
+        # A future reader reordering these checks silently reintroduces the bug.
+        import inspect
+        src = inspect.getsource(bot.on_error)
+        assert src.index("isinstance(err, BadRequest)") < \
+               src.index("isinstance(err, (NetworkError, TimedOut))")
+
+    def test_bad_request_surfaces_at_error_level(self):
+        import inspect
+        src = inspect.getsource(bot.on_error)
+        i = src.index("isinstance(err, BadRequest)")
+        j = src.index("isinstance(err, (NetworkError, TimedOut))")
+        assert "log.error" in src[i:j], "a client-side defect should not log as a warning"
+
+
+# ── Garmin partial-pull diagnosability (v2026-07-25.9) ───────────────────────
+# A watch in battery saver returned steps and nothing else; the only way to learn WHICH
+# metrics were absent was to shell in and read bot.log, because the per-field failures
+# used print() (bot.log only, invisible to /errors). See CHANGELOG v2026-07-25.9.
+
+class TestGarminFields:
+    ALL = ["sleep", "resting HR", "steps", "body battery", "stress", "last workout"]
+
+    def test_all_six_metrics_always_reported(self):
+        fields = bot._garmin_fields({}, {}, {})
+        assert [label for label, _ in fields] == self.ALL
+
+    def test_empty_payloads_mean_everything_missing(self):
+        assert bot._garmin_missing({}, {}, {}) == self.ALL
+
+    def test_the_battery_saver_case(self):
+        # Exactly what happened: accelerometer steps survive, every HR-derived metric
+        # is gone because the optical sensor was off.
+        missing = bot._garmin_missing({}, {"totalSteps": 4210}, {})
+        assert "steps" not in missing
+        assert set(missing) == {"sleep", "resting HR", "body battery",
+                                "stress", "last workout"}
+
+    def test_full_payload_means_nothing_missing(self):
+        missing = bot._garmin_missing(
+            {"sleepTimeSeconds": 6 * 3600},
+            {"restingHeartRate": 54, "totalSteps": 3000,
+             "bodyBatteryMostRecentValue": 60, "averageStressLevel": 30},
+            {"activityName": "ride"})
+        assert missing == []
+
+    def test_fields_and_bits_agree(self):
+        # The whole point of the shared source: present-phrases must equal _garmin_bits.
+        args = ({"sleepTimeSeconds": 3600}, {"totalSteps": 10}, {})
+        phrases = [p for _, p in bot._garmin_fields(*args) if p]
+        assert phrases == bot._garmin_bits(*args)
+
+    def test_zero_steps_counts_as_present(self):
+        assert "steps" not in bot._garmin_missing({}, {"totalSteps": 0}, {})
+
+    def test_unmeasurable_stress_counts_as_missing(self):
+        assert "stress" in bot._garmin_missing({}, {"averageStressLevel": -1}, {})
+
+
+class TestGarminGapNote:
+    def test_silent_when_nothing_missing(self):
+        assert bot._garmin_gap_note([]) == ""
+
+    def test_names_the_missing_metrics(self):
+        note = bot._garmin_gap_note(["sleep", "body battery"])
+        assert "sleep" in note and "body battery" in note
+
+    def test_explains_the_likely_cause(self):
+        note = bot._garmin_gap_note(["sleep"]).lower()
+        assert "battery saver" in note
+        assert "sync" in note
+
+    def test_is_plain_text(self):
+        # /health and /healthnow reply without parse_mode; keep it that way.
+        note = bot._garmin_gap_note(["resting HR"])
+        assert "*" not in note and "_" not in note
+
+
+class TestGarminFailuresReachErrors:
+    def test_fetch_logs_via_log_not_print(self):
+        import inspect
+        src = inspect.getsource(bot._fetch_garmin)
+        assert "print(" not in src, (
+            "print() reaches bot.log only — /errors cannot show it, which is the gap "
+            "this release closes")
+        assert src.count("log.warning") >= 4
+
+    def test_fetch_never_logs_the_exception_itself(self):
+        # Garmin exceptions can carry the request URL (v2026-07-20.2 key-leak class).
+        import inspect
+        src = inspect.getsource(bot._fetch_garmin)
+        assert '", e)' not in src and '%s", e' not in src
+        assert "type(e).__name__" in src
+
+    def test_fetch_returns_text_and_missing(self):
+        import inspect
+        assert inspect.getsource(bot._fetch_garmin).rstrip().endswith("return text, missing")
+
+    def test_snapshot_loader_tolerates_pre_09_files(self):
+        # Old .garmin_snapshot files have no "missing" key.
+        import json as _json
+        bot._garmin.update({"loaded": False, "text": "", "ts": 0.0, "missing": []})
+        bot.GARMIN_FILE.write_text(_json.dumps({"text": "steps", "ts": time.time()}),
+                                   encoding="utf-8")
+        try:
+            bot._garmin_snapshot()
+            assert bot._garmin["missing"] == []
+        finally:
+            bot.GARMIN_FILE.unlink(missing_ok=True)
+            bot._garmin.update({"loaded": False, "text": "", "ts": 0.0, "missing": []})
+
+
+# ── Restart-storm DM states the correct triage rule (v2026-07-25.10) ─────────
+# The wrong rule ("no graceful-stop line = SIGKILL") survived in FOUR places after the
+# first correction pass, including this DM — the message the owner reads at the exact
+# moment they are debugging a restart storm. See CHANGELOG v2026-07-25.10.
+
+class TestRestartStormAdviceIsCorrect:
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot._self_audit)
+
+    def test_dm_points_at_the_exit_code(self):
+        src = self._src()
+        assert "exited (code" in src
+        assert "137" in src and "143" in src
+
+    def test_dm_does_not_claim_missing_line_means_sigkill(self):
+        src = self._src()
+        assert "no line = SIGKILL" not in src
+
+    def test_dm_warns_the_graceful_line_is_not_the_discriminator(self):
+        src = self._src()
+        assert "does not mean SIGKILL" in src or "Do NOT use" in src
+
+
+# ── Concurrent /update corrupts the shared code dir (v2026-07-25.11) ─────────
+# Every instance on a host shares the code dir: ~/telegram-bot for the four phone bots,
+# /opt/telegram-bots for cass+jules. bot.py.new / bot.py.bak / bot.py are therefore
+# shared, unsynchronised paths. Observed on the VPS 2026-07-25.
+
+class TestSelfUpdateLock:
+    def _lock_path(self):
+        from pathlib import Path as _P
+        return _P(bot.__file__).resolve().parent / ".update.lock"
+
+    def test_lock_blocks_a_concurrent_update(self):
+        # Hold the lock the way a second instance would, then confirm perform_self_update
+        # refuses BEFORE doing any network work — no download, no temp file written.
+        import fcntl
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            result = bot.perform_self_update()
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert result["ok"] is False
+        assert result["reason"] == "update_in_progress"
+
+    def test_refusal_names_the_correct_procedure(self):
+        import fcntl
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            detail = bot.perform_self_update()["detail"]
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert "ONE instance" in detail and "/restart" in detail
+
+    def test_lock_is_released_for_the_next_caller(self):
+        # Two sequential refusals must both work; a leaked fd would make the second hang
+        # or wrongly succeed.
+        import fcntl
+        lp = self._lock_path()
+        for _ in range(2):
+            holder = open(lp, "w")
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                assert bot.perform_self_update()["reason"] == "update_in_progress"
+            finally:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+                holder.close()
+
+    def test_no_temp_file_written_when_refused(self):
+        # The bug was one instance deleting another's bot.py.new; a refused update must
+        # not touch it at all.
+        import fcntl
+        from pathlib import Path as _P
+        tmp = _P(bot.__file__).resolve().parent / "bot.py.new"
+        existed = tmp.exists()
+        lp = self._lock_path()
+        holder = open(lp, "w")
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            bot.perform_self_update()
+        finally:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
+        assert tmp.exists() == existed
+
+    def test_body_is_separated_from_the_lock(self):
+        import inspect
+        assert "flock" in inspect.getsource(bot.perform_self_update)
+        assert "flock" not in inspect.getsource(bot._perform_self_update_locked)
+
+
+class TestUpdateCmdNeverRepliesSilently:
+    def test_every_failure_reason_gets_a_reply(self):
+        # An unhandled reason used to fall through to a bare `return`, which looks
+        # identical to the bot being dead.
+        import inspect
+        src = inspect.getsource(bot.update_cmd)
+        assert "update_in_progress" in src
+        assert "else:" in src
+        assert "Update did not run" in src
+
+
+# ── Group-chat co-location warning (v2026-07-25.12) ─────────────────────────
+# GROUP_CHAT_DESIGN.md §3 assumes every peer shares one filesystem. Jules moved to the
+# VPS 2026-07-19 while priya stayed on the phone, so the pilot pair no longer does.
+
+class TestGroupColocationWarning:
+    def test_warning_is_gated_on_group_mode_and_peers(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r"if GROUP_MODE and GROUP_PEERS:\n(.*?)\n\n", src, re.S)
+        assert m, "co-location warning block missing"
+        body = m.group(1)
+        assert "_CONFIG_WARNINGS.append" in body
+
+    def test_warning_names_the_resolved_ledger_dir(self):
+        # The owner has to COMPARE the path across hosts, so it must be printed.
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r"if GROUP_MODE and GROUP_PEERS:\n(.*?)\n\n", src, re.S)
+        assert "{GROUP_LEDGER_DIR}" in m.group(1)
+
+    def test_fixture_is_group_off_so_no_warning(self):
+        assert bot.GROUP_MODE is False
+        assert not any("GROUP_MODE on" in w for w in bot._CONFIG_WARNINGS)
+
+    def test_ledger_dir_defaults_to_the_shared_code_dir(self):
+        # The default being shared is exactly why co-location matters.
+        from pathlib import Path as _P
+        assert bot.GROUP_LEDGER_DIR == _P(bot.__file__).resolve().parent
+
+
+# ── No command renders arbitrary content through Markdown (v2026-07-25.13) ───
+# Generalises the v2026-07-25.7 /audit outage: Telegram rejects the WHOLE message on a
+# stray '_' or unmatched '[', and the command then replies with silence.
+
+class TestNoUnescapedMarkdownInterpolation:
+    # Values that are provably metachar-free: ints, fixed day names, HH:MM strings.
+    ALLOWED = {"quietwin_cmd", "fleet_cmd"}
+
+    @staticmethod
+    def _offenders():
+        import re, inspect, pathlib
+        src = pathlib.Path(inspect.getfile(bot)).read_text().splitlines()
+        out = []
+        for i, line in enumerate(src, 1):
+            if 'parse_mode="Markdown"' not in line or line.strip().startswith("#"):
+                continue
+            stmt = " ".join(x.strip() for x in src[max(0, i - 7):i]
+                            if not x.strip().startswith("#"))
+            risky = [m.group(1) for m in re.finditer(r'\{([a-zA-Z_][\w\[\]\'\".]*)\}', stmt)
+                     if not (stmt[max(0, m.start() - 1):m.start()] == "`"
+                             and stmt[m.end():m.end() + 1] == "`")]
+            if not risky:
+                continue
+            fn = ""
+            for j in range(i - 1, 0, -1):
+                if src[j - 1].startswith(("async def ", "def ")):
+                    fn = src[j - 1].split("(")[0].split()[-1]
+                    break
+            out.append((fn, i, sorted(set(risky))))
+        return out
+
+    def test_no_new_unescaped_markdown_interpolation(self):
+        bad = [o for o in self._offenders() if o[0] not in self.ALLOWED]
+        assert not bad, (
+            "these send arbitrary values through Markdown; a '_' or '[' in the data "
+            f"makes Telegram reject the message and the command replies with silence: {bad}")
+
+    def test_the_allowlist_is_still_justified(self):
+        # If either stops interpolating only provably-safe values, the allowlist is stale.
+        names = {o[0] for o in self._offenders()}
+        assert names <= self.ALLOWED
+
+    def test_content_rendering_commands_are_plain_text(self):
+        import inspect
+        for fn in (bot.card_cmd, bot.notes_cmd, bot.status_cmd, bot.schedule_cmd,
+                   bot.setcard_cmd, bot.vibe_cmd, bot.energy_cmd):
+            assert "parse_mode" not in inspect.getsource(fn), fn.__name__
+
+
+# ── BOT_TIMEZONE actually sets the clock (v2026-07-25.14) ───────────────────
+# It was documented as THE timezone setting but only read by --check-config, so every
+# instance silently ran on the America/Los_Angeles default of TIMEZONE.
+
+class TestBotTimezoneTakesEffect:
+    def test_fixture_bot_timezone_is_honoured(self):
+        # conftest sets BOT_TIMEZONE=America/New_York. Before the fix this asserted
+        # nothing useful because TZ came from TIMEZONE and defaulted to Los_Angeles.
+        assert bot.TIMEZONE == "America/New_York"
+        assert str(bot.TZ) == "America/New_York"
+
+    def test_bot_timezone_is_read_at_module_scope(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r'^TIMEZONE = .*$', src, re.M)
+        assert m and "BOT_TIMEZONE" in m.group(0), \
+            "the clock must come from BOT_TIMEZONE, not just the preflight check"
+
+    def test_legacy_timezone_still_supported(self):
+        import inspect, re
+        src = inspect.getsource(bot)
+        m = re.search(r'^TIMEZONE = .*$', src, re.M)
+        assert '"TIMEZONE"' in m.group(0), "existing .envs using TIMEZONE must keep working"
+
+    def test_conflict_between_the_two_warns(self):
+        import inspect
+        src = inspect.getsource(bot)
+        assert "both BOT_TIMEZONE and TIMEZONE are set and differ" in src

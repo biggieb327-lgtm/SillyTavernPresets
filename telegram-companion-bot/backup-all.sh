@@ -49,10 +49,12 @@ trap 'rm -rf "$STAGE"' EXIT
 # Same state-file list as the /backup command; .env deliberately excluded.
 FILES="state.json memories.txt user_notes.txt setting.txt reminders.json payments.json"
 
-# Instance list mirrors update-all.sh (the authoritative list): nora is the home
-# instance at ~/telegram-bot, the rest are ~/<name>-bot.
+# Instance list mirrors update-all.sh (the authoritative phone list). VPS bots
+# (cass, jules) are not backed up here — they have their own backup on the VPS.
+# Nora's instance dir is ~/nora-bot (confirmed on-device 2026-07-11), NOT the
+# shared code dir ~/telegram-bot.
 copied=0
-for entry in "telegram-bot:nora" "bonnie-bot:bonnie" "cass-bot:cass" "emily-bot:emily" "priya-bot:priya" "jules-bot:jules"; do
+for entry in "nora-bot:nora" "bonnie-bot:bonnie" "emily-bot:emily" "priya-bot:priya"; do
   dir="$HOME/${entry%%:*}"
   name="${entry##*:}"
   [ -d "$dir" ] || { echo "  $name: skipped (no $dir)"; continue; }

@@ -7,6 +7,803 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-25.14 — BOT_TIMEZONE never set the timezone (+ audit item 4)
+
+**⚠️ BEHAVIOUR CHANGE ON DEPLOY — read before shipping.** Any instance whose `.env` sets
+`BOT_TIMEZONE` has, until now, been ignoring it and running on `America/Los_Angeles`.
+After this release it uses the timezone you actually asked for. If that differs from
+Pacific, **quiet hours, reminders, note follow-ups, schedule windows and midnight day
+rotation all shift accordingly** — correct, but a visible change in when things happen.
+Check each instance's `/audit` and `.env` before deploying if that matters.
+
+**Root cause:** two timezone variables, and the documented one was inert.
+- `TIMEZONE` set the clock: `TZ = ZoneInfo(TIMEZONE)`, default `America/Los_Angeles`.
+- `BOT_TIMEZONE` was read in exactly one place — inside `--check-config` — purely to
+  *label* a warning string.
+- `.env.example` has always documented `BOT_TIMEZONE` as the timezone setting, and the
+  pytest fixture sets it too.
+
+So the variable the docs told you to set did nothing, silently. Worse, the preflight
+check read as a pass: with `BOT_TIMEZONE` set and `TIMEZONE` unset, `TZ` resolves fine
+(to Pacific), so `--check-config` cheerfully reported a working timezone that wasn't the
+one requested.
+
+`BOT_TIMEZONE` now wins, with `TIMEZONE` still honoured so existing `.env` files using it
+are unaffected; setting both to different values warns rather than picking silently.
+
+**How the earlier sweep missed it, worth recording:** v2026-07-25.12's check asked *"is
+this variable read anywhere?"*. `BOT_TIMEZONE` **is** read — just not for its documented
+purpose. "Is it read at all" is a strictly weaker test than "does it do what the docs
+claim", and only the second one would have caught this. It surfaced by accident while
+enumerating undocumented variables for item 4.
+
+**Audit item 4 — `.env.example` now accounts for every variable bot.py reads.** 194 read;
+177 documented as settable with defaults extracted *from the source*, not typed from
+memory; 17 deliberately listed as internal.
+
+Newly documented, grouped by feature: weather/location, web search, voice & delivery,
+follow-up bubbles, documents/PDFs/images, selfie tuning, TTS, memory & notes, mood &
+reactions, proactive timing, schedules, inner voice, and group-chat tuning. **Reddit link
+reading (`REDDIT_CLIENT_ID`/`SECRET`/`USER_AGENT`) was an entire undocumented feature** —
+Reddit puts scraping behind a JS wall, so shared Reddit links silently fail without a
+free OAuth app, and nothing told you that.
+
+The 17 internal ones (`BOT_HOME`, ring-buffer sizes, memory-compaction thresholds, API
+endpoints, the legacy `TIMEZONE` alias) are listed **by name with no example values**, so
+the file is a complete account of what bot.py reads without presenting implementation
+details as a menu to tune.
+
+**New eval `env-vars-documented`**, break-tested: green on the real file, red when a fake
+`os.getenv` is injected into a copy. It fails in both directions — documented-but-unread
+and read-but-undocumented — so this drift cannot silently return.
+
+**Tests:** `TestBotTimezoneTakesEffect` — the fixture's `BOT_TIMEZONE=America/New_York`
+now actually resolves (it would have been Los_Angeles before), the clock is read at
+module scope rather than only in the preflight, the legacy name still works, and the
+conflict warning exists.
+
+## v2026-07-25.13 — Audit item 3: no command renders arbitrary content through Markdown
+
+**Root cause:** v2026-07-25.7 fixed `/audit` sending arbitrary diagnostic strings under
+`parse_mode="Markdown"` — a stray `_` or unmatched `[` makes Telegram reject the **whole**
+message, so the command replies with silence, which is indistinguishable from a dead bot.
+That fix was point-scoped to `/audit`. The audit sweep asked the obvious follow-up
+question — *where else?* — and found **13 more sites across 11 commands** interpolating
+values into Markdown outside backticks.
+
+Converted to plain text (matching `/audit` and the pre-existing `memory_cmd`, which
+already documents this exact reasoning):
+
+| command | what it renders |
+|---|---|
+| `/card`, `/setcard` | character-card field contents and the user's new value |
+| `/notes` | the user's own note text |
+| `/status` | outfit, life-arc, day, about-you snippets **and the conversation tail** |
+| `/schedule`, `/people`, `/projects` | user-written file contents |
+| `/vibe`, `/energy`, `/setmodel`, `/settings` | user-supplied names and values |
+| `/model` | `NAME` from the card |
+
+**Latent, not firing.** All four character cards were tested against Markdown parsing
+first — balanced brackets, even underscore counts, nothing currently breaks. This is a
+fix for the failure that hadn't happened yet: `/notes` renders text you write and
+`/status` renders conversation content, so a single `_` was all it would take.
+
+**Backticks are not the safe wrapper they look like.** `setcard_cmd` wrapped raw user
+input in a code span (`` `{field}` ``) — a backtick *in* that input closes the span early
+and breaks the parse. The scanner had scored backtick-wrapped values as safe; that
+assumption held for model ids and fixed strings but not for arbitrary input. Those two
+sites are now plain text with `{field!r}`.
+
+**Two sites deliberately left on Markdown**, allowlisted in the test with the reason:
+`quietwin_cmd` (an int index, fixed `Mon`–`Sun` names, `HH:MM` strings) and `fleet_cmd`
+(an int, inside a ``` fence). Neither can carry a metacharacter.
+
+**Test:** `TestNoUnescapedMarkdownInterpolation` is a *generalised* guard, not another
+point fix — it re-derives the offender list from source on every run and fails on any new
+one, so the next command that formats arbitrary data is caught at commit time rather than
+by an owner wondering why a command went quiet. A second assertion fails if the two
+allowlisted commands ever stop interpolating provably-safe values, so the allowlist can't
+go stale silently.
+
+## v2026-07-25.12 — Audit items 1 & 2: dead env vars, and the group pilot split across hosts
+
+From the three-class audit (shared state / silent replies / doc-vs-reality drift).
+
+**Item 1 — `.env.example` documented seven variables bot.py never reads.** A mechanical
+diff of `os.getenv`/`_env_int`/`_env_float` names against the template found 7 documented
+vars with zero readers. Setting any of them was a silent no-op, and the template is what
+`CLAUDE.md` calls the "full documented template":
+- `HEARTBEAT_MIN` / `HEARTBEAT_MAX` — **name mismatch**: those are bot.py's internal
+  seconds-valued Python variables; the env vars are `HEARTBEAT_MIN_HOURS` /
+  `HEARTBEAT_MAX_HOURS`.
+- `NUDGE_MAX` — **never existed**. The nudge budget is per-chat runtime state (default 3,
+  0 = unlimited) set from Telegram with `/nudges 3`. Documenting it as an env var meant
+  an owner could believe they had capped proactive messages when they had not.
+- `PROACTIVE_HOUR_START` / `PROACTIVE_HOUR_END` — never existed. The real control is
+  `QUIET_START` / `QUIET_END`, which are a *suppression* window (so the sense is inverted
+  from the old names) and were themselves undocumented.
+- `CONTEXT_LIMIT` / `SUMMARY_EVERY` — never existed. The verbatim window is bounded by
+  hardcoded `MAX_HISTORY=20` / `KEEP_RECENT=10` plus the settable `SHORT_TERM_HOURS`;
+  summarisation is overflow-triggered, so there is no "every N turns" knob at all.
+
+All seven corrected in place with the real names and an explicit note that the old ones
+did nothing. Re-running the check now reports **0** documented-but-unread vars (65 remain
+undocumented in the other direction — audit item 4, not addressed here).
+
+**Item 2 — the group-chat pilot is split across two hosts.** `GROUP_CHAT_DESIGN.md` §3
+states the assumption plainly: *"all instances live on one phone"*, *"one ext4 filesystem,
+where flock is reliable"*. Telegram never delivers one bot's messages to another, so the
+shared filesystem **is** the channel. Jules migrated to the VPS on 2026-07-19; Priya
+stayed on the phone. Each host now silently gets its own ledger and claim dir, which
+breaks precisely what the design exists to prevent:
+- `_try_claim` always succeeds on both sides — there are no shared claim files to contend
+  for, so both bots answer the same message;
+- `GROUP_BOT_CHAIN_MAX` and `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers,
+  so the chain cap and alternation penalty do not apply across the pair.
+
+`GROUP_DAILY_BOT_BUDGET` still bounds each bot individually, so a runaway is capped rather
+than infinite — but at roughly double the intended volume with no alternation control.
+Contrast `world.txt`, whose equivalent split MIGRATION.md explicitly accepts: that one
+degrades to independent weather, this one degrades to unbounded alternation.
+
+bot.py cannot know where a peer lives, so the fix is a loud startup `_CONFIG_WARNINGS`
+entry whenever `GROUP_MODE` is on with peers configured, printing the **resolved**
+`GROUP_LEDGER_DIR` so the owner can compare it across hosts. Documented in
+`GROUP_CHAT_DESIGN.md` (inline at the assumption itself) and in `deploy/MIGRATION.md`
+alongside the Nora/`world.txt` note, with a verification step for when priya migrates.
+
+**Recommendation while split: `GROUP_MODE=0` on both.** `GROUP_MODE` defaults to 0, so
+this is dormant unless explicitly enabled.
+
+**Tests:** `TestGroupColocationWarning` — the warning is gated on `GROUP_MODE and
+GROUP_PEERS`, it names the resolved directory (the owner has to *compare* it, so printing
+it is the point), the fixture stays warning-free, and `GROUP_LEDGER_DIR` still defaults to
+the shared code dir, which is why co-location matters at all.
+
+## v2026-07-25.11 — Concurrent /update corrupted the shared code dir
+
+**Root cause:** owner-reported from a VPS bot's `/errors`:
+
+```
+File "/opt/telegram-bots/bot.py", line 11660, in perform_self_update
+File "/usr/lib/python3.12/py_compile.py", line 161, in compile
+FileNotFoundError: [Errno 2] No such file or directory: '/opt/telegram-bots/bot.py.new'
+```
+
+`perform_self_update` writes `bot.py.new`, `bot.py.bak` and `bot.py` into
+`Path(__file__).parent` — the **shared** code directory. Every instance on a host shares
+it: `~/telegram-bot` for the four phone bots, `/opt/telegram-bots` for cass and jules. So
+two concurrent `/update` calls operate on the same three paths with no synchronisation:
+
+1. cass writes `bot.py.new`
+2. jules writes `bot.py.new`
+3. cass compiles, then `tmp.replace(target)` — which **removes** `bot.py.new`
+4. jules compiles → `FileNotFoundError`
+
+**The crash is the good outcome.** The silent variant is worse: the loser reaches
+`bot.py.bak <- target` *after* the winner has already swapped in the new file, so the
+rollback point becomes a copy of the **new** code. You would believe you had a rollback
+and not have one — and nothing would tell you.
+
+The documented procedure ("`/update` to ONE bot, then `/restart` the others") avoids this
+by convention. Nothing enforced it, and the phone has the identical exposure.
+
+**Fix:** a host-wide `flock` on `.update.lock` in the code dir, taken **before** the
+download so a refused update does no work at all — no request, no temp file, nothing
+touched. A second caller gets `{"reason": "update_in_progress"}` naming the correct
+procedure. The body moved to `_perform_self_update_locked` so the lock and the work are
+separable and testable. Held only inside a sync function invoked via `asyncio.to_thread`
+with no awaits, so invariant #9 does not apply.
+
+**Second defect found while fixing the first:** `update_cmd` matched reasons with an
+if/elif chain and no `else`, so `update_in_progress` — and any future reason — fell
+through to a bare `return` and **replied nothing at all**. Same class as the `/audit`
+outage in v2026-07-25.7: a command that silently does nothing is indistinguishable from a
+dead bot. There is now a catch-all reply.
+
+**Also:** `.update.lock`, `bot.py.new` and `bot.py.bak` are gitignored. The lock file
+first appeared as an untracked artifact of the very tests written for it.
+
+**Tests:** `TestSelfUpdateLock` holds the lock the way a competing instance would and
+asserts the refusal happens before any network or filesystem work (including that
+`bot.py.new` is untouched — the exact file the bug destroyed), that the lock is released
+for the next caller, and that the lock lives outside the extracted body.
+`TestUpdateCmdNeverRepliesSilently` pins the catch-all.
+
+**Operationally:** `/update` on a VPS instance works but is not the documented path —
+`deploy/vps-sync.sh` also pulls the card and preset layers and handles the systemd unit.
+Use it for cass and jules.
+
+## v2026-07-25.10 — Sanity-check sweep: the wrong triage rule had four more survivors
+
+**Root cause:** v2026-07-25.8 corrected "`STARTUP AUDIT` with no preceding
+`[shutdown] graceful stop` = SIGKILL" in `CLAUDE.md`, the Monitoring section, the
+`repo-debugging-playbook` table, and `_on_shutdown`'s docstring. An explicit sweep found
+it still standing in **four more places** — a correction pass that greps only where you
+remember writing something is not a correction pass.
+
+The worst survivor was in `_self_audit`'s **restart-storm DM**: the message the owner
+receives *at the moment they are debugging a restart storm* told them
+`no line = SIGKILL`. Worst possible placement for the one instruction guaranteed to be
+read under pressure. Now points at the exit code (137 / 143 / 0) and explicitly warns
+that the graceful-stop line is not the discriminator.
+
+Also fixed:
+- `CHEATSHEET.md` — the phantom-killer check still keyed off the graceful-stop line.
+  Replaced with the exit-code grep, plus the note that `settings` cannot run in Termux
+  (it needs adb) and the process-census one-liner that found the stacked watchdogs.
+- `vault/entities/termux-phone-host.md` — a live knowledge entry that past sessions have
+  corrected during incidents. Carried **three** stale facts: the old triage rule, "Python
+  3.13" (it's 3.14.6), and "all six bots" on the phone (it's four; cass and jules are on
+  the VPS).
+- The v2026-07-25.3 entry below still asserted the 4,715-token `ATTRACTION RULE` figure as
+  fact, with only a forward correction in `.5`. Annotated inline so it can't be read in
+  isolation and believed. Deliberately annotated rather than rewritten — the mistake, and
+  how a mislabelled diagnostic produced it, are worth keeping legible.
+
+**Test:** `TestRestartStormAdviceIsCorrect` pins the DM to the exit-code rule and asserts
+the old claim is absent, because this specific text has now been wrong through two
+correction passes.
+
+## 2026-07-25 — Ops: watchdog.sh single-instance guard (no bot.py change, no version bump)
+
+**Root cause:** `watchdog.sh` supports two install modes — `--once` (cron) and a bare
+invocation that enters `while true; do run_checks; sleep $WATCHDOG_INTERVAL; done` and
+never exits. Installed in cron **without** `--once`, every invocation starts another
+immortal loop. Nothing stopped it: the script had no duplicate-instance guard of any kind.
+
+Observed on-device 2026-07-25: **92 `bash` + 91 `sleep` processes**, ~183 of the phone's
+191 Termux-uid processes, against an Android phantom-process limit of 32. Diagnosed by
+grouping `ps -u $(id -u)` by command — the paired bash/sleep counts are the signature of
+N shell loops each parked in a sleep.
+
+**The process count was the lesser problem.** Every accumulated watchdog polls the same
+`.alive` heartbeat files, so a single stale heartbeat would produce ~91 simultaneous
+kill-and-relaunch decisions against one bot. That is the 2026-07-05 incident this script
+was written to prevent, multiplied by however many copies have piled up.
+
+**Fix:** a PID-file guard ahead of the mode dispatch. A live owner (`kill -0` succeeds)
+makes the new instance log why and exit; a stale file is cleared and taken over; `trap …
+EXIT INT TERM` removes it on the way out. PID file rather than `flock` to avoid a
+util-linux dependency on Termux — the theoretical race between two simultaneous starts is
+irrelevant against a 5-minute cron cadence.
+
+Break-tested through all four paths: clean start, refusal while a live instance holds the
+file, self-heal from a stale PID, and cleanup on exit.
+
+**`watchdog.sh` is curl-installed and NOT pulled by `update-all.sh`** — re-install it by
+hand to get this (command in the script header). Also check `crontab -l`: the cron line
+must include `--once`.
+
+## v2026-07-25.9 — A partial Garmin pull explains itself
+
+**Root cause:** on 2026-07-25 `/healthnow` returned only today's step count. The feature
+was working correctly — the watch was in battery saver, which disables the optical HR
+sensor, so sleep, resting HR, body battery and stress had never been recorded, while
+steps (accelerometer, phone-side) kept arriving. But **nothing in the product could say
+that.** `/healthnow` printed the phrases it had and stayed silent about the rest, so a
+correct partial pull was indistinguishable from a broken integration.
+
+Worse, the diagnostics existed but were unreachable: `_fetch_garmin` logged per-endpoint
+failures with `print()`, which reaches `bot.log` but **not** `errors.log` — so `/errors`
+could not show them and the only route to an answer was a shell. That is the second time
+in one day that diagnosing a freshly shipped feature required device access it shouldn't
+have (see v2026-07-25.7).
+
+**What shipped:**
+- **`_garmin_fields`** is now the single source of truth: payloads → ordered
+  `[(metric label, phrase or None)]` for all six metrics. **`_garmin_bits` is a thin
+  wrapper over it**, so the snapshot text and the missing-metric report cannot drift.
+  (The first cut of this release inverted that dependency — deriving labels by
+  prefix-matching finished phrases — and broke immediately, because `"slept …"` does not
+  start with `"sleep"`. Caught by the tests; the direction of dependency is the fix.)
+- **`_garmin_missing`** names the metrics with no usable data; **`_garmin_gap_note`**
+  turns that into a plain-text tail on `/health` and `/healthnow` that also states the
+  two usual causes (watch not synced; battery saver holding the HR sensor off, which
+  takes out four metrics at once while steps survive).
+- **Per-endpoint failures now go through `log.warning`**, so they land in `errors.log`
+  and `/errors`, and count an error category. Still only the exception *class* is logged
+  — Garmin exceptions can carry the request URL (the v2026-07-20.2 key-leak class).
+- The `"no data for: …"` summary is logged once per pull at WARNING. Routine, but it must
+  be visible somewhere other than a shell.
+- `missing` is persisted into `.garmin_snapshot` so `/health` (the cached view) is honest
+  too. Snapshots written before this release have no such key and load as `[]`.
+
+**Tests:** `TestGarminFields` (all six labels always reported; empty payloads mean
+everything missing; **the exact battery-saver case** — steps present, the five HR-derived
+metrics absent; full payload reports nothing missing; and an agreement test pinning
+`_garmin_fields` against `_garmin_bits`), `TestGarminGapNote` (silent when nothing is
+missing, names the metrics, states the cause, stays plain text), and
+`TestGarminFailuresReachErrors` (no `print` survives in `_fetch_garmin`, the exception
+object itself is never logged, the return contract is `(text, missing)`, and the loader
+tolerates pre-`.9` snapshot files). All 14 original `_garmin_bits` tests pass unchanged,
+which is what demonstrates the wrapper preserved its contract.
+
+## v2026-07-25.8 — Client-side API errors stop hiding in the network bucket
+
+**Root cause:** `BadRequest` **subclasses `NetworkError`** in python-telegram-bot
+(verified on 21.11.1: `BadRequest → NetworkError → TelegramError`). `on_error` tested
+`isinstance(err, (NetworkError, TimedOut))` first, so every 400 from the Bot API —
+malformed markup, message-too-long, invalid parameters, bad file — was logged as
+`[net] transient: BadRequest: …` at WARNING and counted under `network`. That bucket reads
+as ambient phone flakiness and is rightly ignored.
+
+**This is how v2026-07-25.5's `/audit` markup bug stayed invisible.** From Emily's
+`errors.log`:
+
+```
+07:38:01 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
+07:46:46 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
+```
+
+Two reproductions of a code defect, presented to the owner in `/audit` as `network: 3`.
+A 400 means *we sent something invalid*; it has nothing to do with the connection, and
+conflating the two removed the only signal that would have named the bug.
+
+**Fix:** `BadRequest` is now tested **before** `NetworkError` (mandatory given the
+inheritance), logged via `log.error` with `[api] bad request — client-side defect, not the
+network`, and counted in its own `bad_request` category so it appears as a distinct line
+in `/audit`. Real `NetworkError`/`TimedOut` behaviour is unchanged.
+
+Considered and accepted: a few Bot API 400s are semi-benign (`Message is not modified`,
+`Query is too old`). Those will now log at ERROR. Left unfiltered rather than
+pre-emptively suppressed — if one shows up in practice it is a one-line substring filter,
+whereas guessing at the list now risks re-hiding a real defect.
+
+**Also in this release** (deferred from .7 to avoid a redeploy for a comment): the
+`_on_shutdown` docstring stated that a startup audit with no preceding graceful-stop line
+means SIGKILL. That is false — `/update` and `/restart` exit via `_schedule_exit()` →
+`os._exit(0)`, bypassing `post_shutdown`, so an ordinary deploy logs no graceful stop
+either. Corrected in place to point at the exit code instead (`0` clean, `137` SIGKILL,
+`143` uncaught SIGTERM), matching the CLAUDE.md and `repo-debugging-playbook` fixes made
+alongside it. Reading that comment literally cost two debugging rounds on a bot that had
+had zero unexpected restarts.
+
+**Tests:** `TestBadRequestNotNetwork` — asserts the PTB subclass relationship itself (so a
+future PTB fix surfaces as a signal rather than silently making the guard redundant),
+that a `BadRequest` increments `bad_request` and **not** `network`, that genuine
+`NetworkError`/`TimedOut` still count as `network`, that the isinstance ordering is
+explicit in source, and that the branch logs at ERROR rather than WARNING. Driven through
+`on_error` itself, not a source grep.
+
+## v2026-07-25.7 — /audit was broken by its own output (regression in .5/.6)
+
+**Root cause:** `audit_cmd` sends with `parse_mode="Markdown"`, and v2026-07-25.5/.6 added
+lines that interpolate **arbitrary diagnostic strings** into it:
+- card field names from the new `Card:` line — `system_prompt`, `mes_example`,
+  `post_history_instructions` all contain `_`, which opens italics in Telegram's legacy
+  Markdown;
+- prompt block headings from the `Prompt:` top-blocks line — e.g.
+  `[VOICEPRINT PRESET — TELEGRAM SINGLE SLOT]`, an unmatched `[` that legacy Markdown
+  parses as the start of a link;
+- and, pre-existing but far rarer, config warnings naming env vars (`STRESS_THRESHOLD`).
+
+Telegram rejects the whole message with `400: can't parse entities`, so nothing sends.
+From the owner's side `/audit` simply does nothing — **the command whose entire purpose is
+diagnosing the bot became the thing that silently failed**, on every instance running .5
+or .6, not just the one where it was noticed. Verified by rendering Emily's real audit
+payload and counting the metacharacters: three of the added lines are individually
+unbalanced.
+
+**Fix:** `/audit` now sends **plain text**. The only Markdown it ever used was a bold
+`*Self-Audit*` header, which is not worth a failure mode where the diagnostic is
+un-sendable because of what it found. Escaping was the alternative and was rejected: the
+set of interpolated values is open-ended (field names, headings, file paths, model ids,
+exception class names, future additions), so escaping would need to be remembered forever
+at every new call site, while plain text cannot regress.
+
+**Not affected, and why:** `/errors` never set a `parse_mode`. `/fleet` wraps its table in
+a ``` fence, where `_` and `[` are literal, and only carries version/uptime/error counts.
+Both were checked rather than assumed.
+
+**Eval + tests.** New `audit-plain-text` eval, **break-tested red-green** — and the first
+version of it was itself broken: a plain awk range
+`/^async def audit_cmd/,/^async def /` collapses to a single line, because the opening
+line also matches the end pattern, so the check could never fail. Replaced with a
+flag-based scan that skips comment lines (the fix's own comment necessarily mentions
+`parse_mode="Markdown"` to explain the ban). Confirmed 0 on the fixed file and 1 on a copy
+with `parse_mode` re-injected. `TestAuditIsPlainText` pins the same contract in pytest,
+including that the card-field names really do contain underscores — so a future reader
+can't mistake the plain-text requirement for cosmetic preference.
+
+**Why an eval for a first occurrence** (the usual bar is twice): the failure is invisible
+in code review and in every local test, produces no user-visible error, and disables the
+fleet's primary diagnostic. The same shape would recur the moment anyone adds a formatted
+line to `/audit`.
+
+## v2026-07-25.6 — The preset split, Cass first (+ fallback ladder)
+
+**Content, plus one small bot.py hardening.** v2026-07-25.5 shipped the layering
+mechanism; this carves the actual layers and moves **Cass alone** onto them. `preset.txt`
+is **unchanged**, so the other five bots are byte-identically unaffected until their
+`.env` opts in.
+
+**What the split revealed.** `[CHARACTER AUTHENTICITY]` (2,386 tok — the largest section
+in the file) is two unrelated bodies of text concatenated under one heading:
+- ~490 tok of genuinely universal guidance: autistic characters, scientists and
+  professionals rendered as full people; technical vocabulary belongs to the work, not the
+  interior.
+- ~1,900 tok of a Dead Dove content guide + explicit content module — anatomical
+  sex-writing mechanics, action-reaction chains, worked examples, a scene-quality checklist.
+
+So **Cass — a developmental editor — was carrying ~1,900 tokens of explicit scene-writing
+mechanics on every message.** The misleading heading is exactly why it stayed invisible:
+the same failure mode as the `ATTRACTION RULE` mislabel corrected in v2026-07-25.5. The
+section is split at the `### Dead Dove Content Guide` boundary; the universal part keeps
+the heading and goes to core.
+
+**Layers created** (partitioned programmatically, so text is preserved byte-for-byte):
+
+| layer | tok | contents |
+|---|---|---|
+| `preset-core.txt` | 4,166 | voiceprint, priority order, voice, epistemic horizon, anti-slop, character agency, authenticity (universal part), anti-echo, text delivery, repair, self-check |
+| `preset-rp.txt` | 1,680 | narration, NPC management, scene continuity, scene rhythm |
+| `preset-explicit.txt` | 1,930 | the Dead Dove guide + explicit content module |
+| `preset-stepped.txt` | 403 | `[STEPPED THINKING]` — coupled to `STEP_INTENT` |
+| `preset-closeness.txt` | 323 | `[RELATIONSHIP STAGE]` — coupled to `CLOSENESS_ENABLED`, which **defaults to 0** |
+
+Verified by reconstruction: every section lands in exactly one layer, and the multiset of
+non-whitespace characters across the layers equals the original `preset.txt` — no text
+lost, none duplicated (8,502 tok of layers vs 8,503 original, the delta being join
+whitespace in the estimator).
+
+**Measured:**
+| instance | today | layered | layers |
+|---|---|---|---|
+| **cass** | 11,037 | **7,102** (−3,935, −36%) | core + stepped |
+| jules | 14,425 | 14,099 (−326) | core + rp + explicit + stepped |
+
+Jules's −326 is the `[RELATIONSHIP STAGE]` section that was dead weight on all six bots.
+Cass sheds the explicit module, the scene machinery, and closeness.
+
+**bot.py change — the fallback ladder.** `vps-sync.sh` reads `PRESET_FILES` from the
+instance `.env` to know which layers to pull, so the `.env` edit necessarily precedes the
+file arriving. If nothing resolved, the previous code dropped straight to the ~250-token
+built-in `_DEFAULT_TEXTING_STYLE` — silently stripping thousands of tokens of tuned voice
+rules, which presents as a model regression rather than a deploy error. The ladder is now
+**named layers → the shared `preset.txt` → built-in**, with a warning at each rung.
+Verified: with `.env` naming layers that aren't on disk yet, Cass resolves to
+`preset.txt (fallback)` at 11,037 tok — identical to today — and logs three diagnosable
+warnings.
+
+Extracted as pure `_resolve_preset_layers(names, read, default_text, warn)` with the reader
+injected, so the ladder is testable without a filesystem. 11 tests in
+`TestResolvePresetLayers`, including that a reader exception's message never reaches the
+warning (paths/credentials stay out of `errors.log`, per the v2026-07-20.2 class) and that
+a resolvable `preset.txt` listed as a normal layer is not relabelled as the fallback rung.
+
+**Not done:** the other five bots stay on the monolithic `preset.txt`. Moving them is a
+one-line `.env` change each (`PRESET_FILES=preset-core.txt,preset-rp.txt,preset-explicit.txt,preset-stepped.txt`)
+once Cass has proven the split in use.
+
+## v2026-07-25.5 — Layered presets, and an honest card breakdown (PRESET_FILES)
+
+**Correction to v2026-07-25.3's findings — read this before trusting that entry's numbers.**
+That release reported jules carrying "a 4,715-token `ATTRACTION RULE` block". **Wrong.**
+`[ATTRACTION RULE]` is **84 tokens**. The 4,715 was the entire *merged* card block —
+`load_character` joins `system_prompt` + boilerplate + `description` (1,762) + `scenario`
+(81) + `mes_example` (1,444) into one system message, and `_prompt_top_blocks` labelled
+each block by its **first line**. Jules's `system_prompt` opens with `[ATTRACTION RULE]`,
+so an 84-token section was credited with a whole card. Jules's `system_prompt` is 1,375
+tokens across seven sections, the largest being `[PACE CONTROL]` at 348.
+
+That was a defect in the diagnostic shipped one release earlier, and it sent a real
+investigation down the wrong path ("move `ATTRACTION RULE` to the lorebook to cut her floor
+by a third" — it would have saved 84 tokens). Both halves are fixed here:
+- `_prompt_top_blocks` gives `messages[0]` the fixed label `(card:
+  system_prompt+description+…)` instead of inheriting whatever the card opens with.
+- `load_character` now records a real per-field breakdown (`_card_field_tokens`) *where the
+  fields still exist*, before the merge destroys the structure. `/audit` gains a `Card:`
+  line separating always-on fields from the lorebook (which only costs on a trigger), plus
+  the four biggest fields by name.
+
+**Root cause this release addresses (the actual feature):** one shared `preset.txt` is
+8,503 tokens injected on **every message for every bot**, and by section it is ~1,760
+universal / ~6,020 roleplay-scene machinery / ~727 coupled to features that have their own
+env flags (`[RELATIONSHIP STAGE]` is 323 tokens instructing every bot about
+`CLOSENESS_ENABLED`, which **defaults to 0** — dead weight on all six). Cass is a
+developmental editor with no scenes and no NPCs, carrying ~6k tokens of scene-management
+instruction she cannot use. The cost isn't really tokens — it's signal-to-noise: ~700
+tokens of live per-turn context (mood, day, schedule, watch metrics, capabilities) were
+competing against 8,500 tokens of largely inapplicable generic instruction, which is the
+same failure mode as the recall bias fixed in v2026-07-25.1.
+
+**What shipped:** `PRESET_FILES` — an ordered, comma-separated list of layer files, each
+read from the instance directory and injected as **its own system block** (so `/audit`
+shows what each layer costs, and a layer can be added or dropped without editing a
+monolith). Unset falls back to `PRESET_FILE`, which still defaults to `preset.txt`, so a
+single-layer config produces exactly one block as before and **the fleet's assembled prompt
+is unchanged until an `.env` opts in**. A named-but-missing layer appends a
+`_CONFIG_WARNINGS` entry rather than silently vanishing — quietly dropping voice rules
+reads as a model regression, not a deploy error. If no layer resolves at all, the built-in
+`_DEFAULT_TEXTING_STYLE` still applies, and the documented "no preset.txt" case does not
+warn.
+
+**Deploy paths made layer-aware in the same commit**, so the content split can't half-land:
+- `sync-cards.sh` copies every `preset-*.txt` in the repo to every instance (each bot's
+  `PRESET_FILES` decides what it loads). Globs safely when no layers exist yet.
+- `deploy/vps-sync.sh` can't list a remote directory over raw URLs, so it parses the
+  instance's own `PRESET_FILES` and pulls exactly those. Self-maintaining — no layer list
+  duplicated in the script. A named layer that 404s is **fatal on purpose**: starting a bot
+  with missing voice rules is worse than a failed deploy.
+
+**Measured with a prototype core/rp/feature split** (not shipped — see below):
+| instance | today | layered | layers used |
+|---|---|---|---|
+| cass | 11,031 | **4,758** (−57%) | core |
+| jules | 14,419 | 14,419 | core + rp + feature |
+
+Jules is unchanged *by design* — she uses every layer, so there is nothing to drop. The win
+is concentrated exactly where a character doesn't need the roleplay machinery, which is the
+honest shape of this change.
+
+**The content split is deliberately NOT in this release.** `preset.txt` is voice-critical
+and deliberately tuned (see v2026-07-18.1's anti-echo work), and `[CHARACTER AUTHENTICITY]`
+alone is 2,386 tokens. Carving it up is an owner-reviewed content decision, one layer at a
+time, using the new `/audit` numbers as the evidence base. This release ships only the
+mechanism, inert by default. ROADMAP 3.13 tracks the split.
+
+**Tests:** `TestPresetLayers` (layers load, name/text shape, joined `TEXTING_STYLE`
+equivalence, built-in fallback, no spurious warning for a missing default,
+`PRESET_FILE` back-compat, per-layer injection, audit reporting), `TestCardBlockLabelling`
+(the card block gets the fixed label, later blocks keep their headings, and the label leaks
+no card content), `TestCardFieldTokens` (breakdown recorded, empty fields omitted, lorebook
+tracked separately, surfaced in `/audit`). One v2026-07-25.3 test was updated because
+`messages[0]` is now labelled deliberately rather than by its first line.
+
+## v2026-07-25.4 — Prompt trimming gives up the right things first
+
+**Root cause this release addresses:** `_trim_history_to_budget` computed
+`protected = system_indices | {final_user}` — i.e. **every** system block was exempt and
+only conversation history was droppable. Two consequences, both demonstrated by
+exercising the function rather than reading it:
+
+1. **The priority was inverted.** On the real assembled prompt at a 15,000-token budget it
+   kept 9/9 system blocks and dropped 13/20 conversation turns. It would delete a dozen
+   turns of live conversation to preserve a triggered lorebook entry or a randomly sampled
+   list of local restaurants — context the character demonstrably does not need to hold a
+   conversation.
+2. **The budget was unenforceable and silent about it.** Because the protected set could
+   exceed the budget on its own, the loop drained every droppable message and returned
+   over budget anyway. With a 14,000-token system stack and a budget of 8,000: 0 of 40
+   history messages kept, prompt still 14,003, logged as a success. (v2026-07-25.3 made
+   that case log a WARNING; this release makes it rare.)
+
+**What shipped** — `_trim_history_to_budget` → **`_trim_prompt_to_budget`**, now tiered:
+1. optional system blocks, **largest first** (fewest distinct blocks lost per token freed);
+2. history older than `KEEP_RECENT`, oldest first;
+3. last resort — dip below `KEEP_RECENT`, oldest first (a degraded prompt that fits beats
+   a hard context failure);
+4. still over → WARNING + `prompt_budget` error, as before.
+
+The final user message and every unmarked system block are never dropped.
+
+**Marking is opt-in and fails safe.** A block is droppable only if built with the new
+`_sys_opt()` helper, which tags it `_tier = _TIER_OPTIONAL`; `_strip_tiers()` removes the
+internal key before the list reaches the API (same reason history's `ts` is dropped when
+copied into the prompt). Seven blocks are marked: `# Relevant background` (lore),
+`# Relevant memories`, `# Inside jokes`, `# Local places`, `# Open threads`,
+`# What's going on today`, and the recent-questions list. Everything else — the card, the
+preset, capabilities, post-history instructions, mood, the initiative note — stays
+protected **by default**, so a newly added block, or one whose heading someone rewrites,
+cannot silently become droppable. The rejected alternative was classifying by heading
+string at trim time, which reclassifies a block the moment its wording changes.
+
+**Measured effect** (priya, populated with threads/jokes/recent-questions, 20 turns,
+13,005 tokens untrimmed): at a 12,800 budget the tiered trimmer drops 2 optional blocks
+and keeps **18/20** turns. **Honest limit:** the benefit is proportional to how much
+optional context is live. For a card-heavy instance like jules — 14,417 tokens of system
+stack that is almost entirely *protected* (preset 8,503 + card 5,224) — there is little
+optional context to give up, and a budget below ~14.5k still costs conversation. The only
+real lever there is reducing the protected content itself, which is a content decision
+(see the `Prompt:` top-blocks line added in v2026-07-25.3), not a trimming one. This
+release does not claim to fix that case.
+
+`CONTEXT_TOKEN_BUDGET` still defaults to **0/off** — nothing changes for the fleet until
+it is deliberately set, and `.env.example` now says to set it from the `/audit` numbers
+rather than by guessing.
+
+**Pure helpers + tests:** `_sys_opt`, `_strip_tiers`. 25 new tests across `TestSysOpt`,
+`TestStripTiers`, `TestTieredTrimOrder` (optional-before-history, largest-optional-first,
+oldest-history-first with the survivors proven contiguous and newest-ending, last-resort
+dip, final-user survival, protected-block survival, early stop, unfittable warning) and
+`TestOptionalBlocksAreMarked` (the seven blocks carry the marker; `POST_HISTORY_RAW` and
+`TEXTING_STYLE` deliberately do not). The pre-existing `TestTrimPromptToBudget` cases pass
+unchanged after the rename — unmarked blocks behave exactly as before.
+
+## v2026-07-25.3 — Measure the assembled prompt (PROMPT_STATS)
+
+**Root cause this release addresses:** a question came up about whether large character
+cards were starving other features of prompt attention, and **nothing in the codebase
+could answer it**. `_llm_stats["tok_in"]` accumulates a daily running sum across every LLM
+call (chat, summary, analysis, reaction), so it cannot report the size of a single
+assembled prompt, its maximum, or which block drove it. There is no context-overflow
+detection either. Instrumenting first is this repo's own protocol ("opaque error →
+instrument first") and it decides whether the follow-up trimmer work is urgent or
+theoretical. No trimming behaviour changes here.
+
+Measured while diagnosing (recorded so the next session doesn't re-derive it — estimates
+via `_est_tokens`, 4 chars/token, on an empty instance with 20 short history messages):
+
+| source | tokens | conditional? |
+|---|---|---|
+| `preset.txt` (shared voiceprint) | **8,503** | no — every message, every bot |
+| card's unconditional fields | 1,834 (cass) → 5,224 (jules) | no |
+| lorebook | 0 → 3,991 (jules) | yes, only on trigger |
+| capabilities / mood / initiative / env / etc. | ~700 | mostly |
+| history (20 short msgs) | 405 | bounded by COUNT, not tokens |
+
+Full assembled prompt: **cass 11,435 → jules 14,822**. The headline finding is that
+**card file size is a poor proxy for prompt cost**: jules's card is 5.8× cass's on disk
+but her prompt is only 1.3× larger, because most of that 52KB is lorebook (conditional)
+and JSON structure. The largest single line item for every bot is the *shared* preset —
+77% of cass's system stack, 59% of jules's. Jules's one real outlier is a 4,715-token
+`ATTRACTION RULE` block inside her card, which ships unconditionally every message.
+
+> ⚠️ **The previous sentence is WRONG — corrected in v2026-07-25.5.** `[ATTRACTION RULE]`
+> is **84 tokens**. The 4,715 figure is the entire *merged* card block (system_prompt +
+> description + scenario + mes_example); `_prompt_top_blocks` labelled every block by its
+> first line, and jules's card happens to open with that heading. Do not act on the 4,715
+> number. Left in place rather than rewritten so the mistake, and how a mislabelled
+> diagnostic produced it, stay legible.
+
+**What shipped**, behind `PROMPT_STATS` (default **1 = on**; `0` disables the bookkeeping):
+- `_record_prompt_size` at the end of `assemble_messages` — count, running sum, max (with
+  timestamp and chat), and a coarse histogram. On-loop and O(messages), the same walk
+  `_track_llm_usage` already does per call. In-memory only, like `_recent_questions`; a
+  restart resets it rather than adding a state-serialization path.
+- On a new maximum it also records the three largest system blocks by heading, so `/audit`
+  says *which* block drove the peak instead of only that a peak happened.
+- `/audit` gains a `Prompt:` line (avg, max, age of max, sample count), a bucket spread,
+  and those top blocks.
+
+**Two logging defects fixed in `_trim_history_to_budget`** (both found by exercising the
+function directly rather than by reading it):
+- The completion line read `"~%dk tokens over budget"` while printing the **final total**,
+  not the overage — a successful trim reported itself as an overshoot. Now
+  `"dropped N history msg(s); final ~Xk tokens (budget ~Yk)"`.
+- **The budget was silently unenforceable and said nothing.** Because `protected =
+  system_indices | {final_user}` exempts every system block, once the system blocks alone
+  exceed the budget the function strips the entire conversation and returns over budget
+  anyway. Demonstrated at a 14,000-token system stack: budget 8,000 → 0 of 40 history
+  messages kept, prompt still 14,003, logged as success. It now emits a WARNING (so it
+  reaches `errors.log` and `/errors`) and counts a `prompt_budget` error.
+
+`CONTEXT_TOKEN_BUDGET` remains **0/off** and `.env.example` now warns against setting it
+until the trimmer's priority order is fixed — with all system blocks protected, a budget
+below the system total destroys the conversation to preserve optional blocks like a
+triggered lorebook entry. That inversion is the next release, deliberately kept separate
+so this one is pure observation.
+
+**Pure helpers + tests:** `_msg_tokens`, `_prompt_token_total`, `_prompt_bucket`,
+`_prompt_top_blocks`. New `TestPromptTokenTotal`, `TestPromptBucket`,
+`TestPromptTopBlocks`, `TestRecordPromptSize`, `TestTrimBudgetLogging`.
+
+## v2026-07-25.2 — Garmin health feed ported onto main (GARMIN_FEED)
+
+**Root cause this release addresses:** the owner asked why the bots never bring up Garmin
+data. They never had any. The Garmin health feed was built on
+`origin/claude/push-to-repo-7i2f3c`, and that branch **shares no git history with `main`** —
+`git merge-base main origin/claude/push-to-repo-7i2f3c` returns empty, and neither branch is
+an ancestor of the other. It's a separate lineage rooted at `76223f9 2026-04-15 "Add files
+via upload"` (9,101-line `bot.py`, last touched 2026-07-04) while main's is 11,487 lines.
+`main` had **zero** references to Garmin in `bot.py`, `.env.example`, or any doc. Since every
+deploy path (`/update`, `sync-cards.sh`, `vps-sync.sh`) pulls from `main`, no bot ever had
+the feature. Not a prompt-attention problem — a missing-code problem.
+
+Because the histories are unrelated, this is a **hand-port, not a cherry-pick** (a merge
+would have dragged in a whole parallel bot.py). Each piece was rewritten against current
+main and its API surface re-verified against the installed library: `Garmin(email,
+password)` positional, `login(tokenstore)`, and `get_sleep_data` / `get_stats` /
+`get_activities` / `get_stress_data` all confirmed present.
+
+**What shipped**, behind `GARMIN_FEED` (default **1 = on**; `0` disables without deleting
+credentials — the feed is additionally inert with no credentials, so unset stays a no-op):
+- **Snapshot feed.** `GARMIN_TIMES` (default 07:30,16:00) plus once at startup pulls sleep,
+  resting HR, steps, Body Battery, avg stress, and last workout into one short line, cached
+  to `.garmin_snapshot` and re-read after a restart. Injected as `# How {user} is doing
+  physically today` and told to work it in without ever reciting numbers. Stops being
+  injected past `GARMIN_MAX_AGE_HOURS` (18) so she never speaks to yesterday's body.
+- **Three proactive check-ins**, each with its own persisted cooldown so a restart can't
+  re-fire one: sustained high stress (`STRESS_*`), Body Battery bottomed out (`BB_*`), and
+  resting HR above the user's own rolling median baseline (`RHR_*`).
+- **`/health`, `/healthnow`, `/stress`** — registered whenever credentials exist, even when
+  the kill switch is off or the library is missing, so they can explain *why* they're inert
+  (an unregistered command answers nothing, which is undiagnosable from the user side).
+  `/audit` gained a `Health feed (Garmin)` line reporting off / inert / snapshot staleness.
+- **Login-cooldown hardening carried over from the branch:** a failed login persists a
+  `GARMIN_LOGIN_COOLDOWN` (1800s) backoff to `.garmin_cooldown`, because Garmin rate-limits
+  the login endpoint and a restart loop otherwise hammers it. A client that breaks
+  *mid-runtime* is dropped (`_drop_garmin_session`) so the next poll re-logs in instead of
+  retrying a dead session forever.
+
+**Invariants this diff had to satisfy** (each was a real risk here):
+- **#8, no bare blocking calls in async:** garminconnect is blocking `requests` underneath.
+  Every call site goes through `asyncio.to_thread`; pinned by a test that greps all four
+  async entry points.
+- **#3, no new LLM calls:** the snapshot is prompt context and the check-ins reuse the
+  existing `send_triggered` path. Zero completion calls added; pinned by a test.
+- **GROUP_CHAT_DESIGN.md §5:** watch metrics are private 1:1 state, so the block is gated
+  `GARMIN_ENABLED and not group`, same as `user_notes` and inside jokes. Pinned by a test —
+  without this, health data would be narrated to Priya and Jules's group thread.
+- **v2026-07-20.2 key-leak class:** Garmin exceptions can carry the request URL, so no log
+  line interpolates the exception — only `type(e).__name__`. Pinned by a test.
+- **#15:** every numeric knob goes through `_env_int`/`_env_float`; a typo warns and falls
+  back instead of bricking the instance.
+- Check-ins go through the same proactive gate as `note_followup_job` (quiet flag, away,
+  quiet hours, per-chat quiet windows) and **consume the shared nudge budget** — a health
+  check-in is a nudge and isn't exempt from it. Extracted as `_health_nudge_ok`.
+
+**`garminconnect` is deliberately NOT in `requirements.txt`.** Four of six instances have no
+watch and the phone venv is shared, so a venv rebuild shouldn't pull a dep most bots never
+import. It stays an optional try/except import, documented in `requirements.txt` and
+`.env.example` with the per-instance pip command. Credentials-set-but-library-missing is not
+silent: it appends a `_CONFIG_WARNINGS` entry and shows as `inert` in `/audit`.
+
+**Pure helpers + tests:** `_garmin_bits` (payload → phrases, so a Garmin field rename is
+caught by a test rather than by silence), `_stress_sustained` (skips Garmin's -1/-2
+unmeasurable markers; returns `avg=None` for "no data", deliberately distinct from a calm
+average that rounds to 0), `_rhr_baseline` (excludes today so one elevated reading can't
+raise the baseline it's compared against). 45 new tests across `TestGarminBits`,
+`TestStressSustained`, `TestRhrBaseline`, `TestGarminConfig`, `TestGarminInvariants`.
+
+**Not ported from the branch** (out of scope, recorded so it isn't mistaken for an
+oversight): that lineage's on-this-day reminiscing, offline life events, adaptive
+texting-style mirroring, acoustic_ears, and `/diag`. Several overlap features main already
+solved differently. Only the health feed was requested.
+
+## v2026-07-25.1 — Topic initiative rebalanced away from recall (PROMPT_BALANCE)
+
+**Root cause this release addresses:** owner-reported symptom was "the bots are too focused
+on bringing up memories and notes and don't bring up things to do with other features". The
+cause is not card size and not context pressure — it's an **asymmetry in the directive text**
+of the injected blocks. Of the ~15 system blocks `assemble_messages` appends, exactly two
+carried an explicit instruction to raise their contents — `# Things you know {user} has going
+on` ("Ask about these naturally if one fits") and `# Open threads between you two` ("Let them
+surface naturally if one fits"). Both are recall. Meanwhile the live-context blocks were
+either bare statements (`environment_note()`'s time+weather one-liner, `# {NAME}'s schedule
+today`) or **actively suppressed**: `# What's going on today` ended with "don't narrate it
+like a list". So the only sanctioned way for the character to open a topic was to remember
+something, and the block describing her actual present day was the one told to stay in the
+background. The model was following the prompt correctly.
+
+Two things ruled out while diagnosing, recorded so they aren't re-investigated:
+- **Card size is not a factor.** `CONTEXT_TOKEN_BUDGET` defaults to `0`, so
+  `_trim_history_to_budget` returns immediately and nothing is trimmed at all. Even with a
+  budget set, `protected = system_indices | {final_user}` — every injected block is exempt
+  and only conversation history is dropped. A 53KB card (jules) costs recent turns, never a
+  feature block.
+- This is the follow-on release v2026-07-18.1 explicitly deferred ("Lore, `memory_block`
+  facts/summaries, `user_notes`, pinned, and `day.txt` … injected wholesale (not ranked), so
+  suppression there is a different mechanism — left for a future release"). That release
+  fixed *repetition of one ranked memory*; this one fixes *which category of thing she
+  reaches for at all*. Different mechanism, as predicted.
+
+**What shipped**, behind `PROMPT_BALANCE` (default **1 = on**; `0` restores the previous
+prompt text byte-for-byte):
+- New pure `_initiative_note(name, uname)` → a `# Bringing things up` block appended after
+  every recall block (so it frames them) and before `POST_HISTORY_RAW` (so the card keeps the
+  last word on voice). It says plainly that recalling is one option among several and not the
+  default, that what she's doing//what's around her/what she noticed today are equally valid
+  openings, and that recalled facts are context rather than a supply of topics to draw down.
+- `user_notes` tail rewritten: still "ask if it fits", now explicitly "not a checklist to work
+  through and not your default way of showing you care. Most messages shouldn't touch it."
+- `open_threads` tail rewritten: adds "don't reach for these just because you have nothing
+  else."
+- `day.txt` tail rewritten: the anti-list guard is kept (it's load-bearing against recitation)
+  but the block now grants initiative — "yours to bring up unprompted, the way anyone mentions
+  what they're in the middle of."
+
+**Deliberately unchanged:** no block was removed and none had its content narrowed.
+`user_notes` injection into every 1:1 prompt stays as-is — the 2026-07-10 audit already
+rejected "injected into every chat's prompt" as a defect (by design for single-owner bots).
+Ranked-memory suppression (`MEMORY_REPEAT_SUPPRESS_TURNS`) is untouched and orthogonal.
+
+**Pure helper + tests:** `_initiative_note`. New `TestInitiativeNote` (names interpolated,
+states the live-over-recall preference, no leftover "checklist" framing) and
+`TestPromptBalanceTails` (each rewritten tail differs from its legacy string, and the legacy
+string is what the kill switch restores).
+
 ## v2026-07-23.2
 
 Anti-hallucination: note confidence gating (article: "Stop AI Hallucinations Before

@@ -99,6 +99,31 @@ run_checks() {
   done
 }
 
+# --- Single-instance guard (added 2026-07-25) ---------------------------------------
+# Without this, `watchdog.sh` in cron WITHOUT --once starts a NEW immortal loop on every
+# invocation, each parked in `sleep $WATCHDOG_INTERVAL` forever. Observed on-device: 92
+# bash + 91 sleep processes, ~183 of the phone's 191 Termux-uid processes, well past the
+# Android phantom-process limit of 32.
+#
+# The bigger hazard is not the count: every accumulated watchdog polls the same .alive
+# heartbeats, so one stale heartbeat means N simultaneous kill-and-relaunch decisions
+# against a single bot — the 2026-07-05 failure multiplied by however many have piled up.
+#
+# PID file rather than flock: no util-linux dependency, and a stale file is self-healing
+# because kill -0 fails once the owner is gone. The theoretical race between two
+# simultaneous starts is irrelevant against a 5-minute cron cadence.
+WATCHDOG_PID_FILE="${WATCHDOG_PID_FILE:-$BOT_SRC/.watchdog.pid}"
+if [ -f "$WATCHDOG_PID_FILE" ]; then
+  _other=$(cat "$WATCHDOG_PID_FILE" 2>/dev/null || echo "")
+  if [ -n "$_other" ] && [ "$_other" != "$$" ] && kill -0 "$_other" 2>/dev/null; then
+    _log "another watchdog is already running (PID $_other) — exiting instead of stacking"
+    exit 0
+  fi
+  _log "clearing stale PID file (PID ${_other:-unknown} is gone)"
+fi
+echo "$$" > "$WATCHDOG_PID_FILE"
+trap 'rm -f "$WATCHDOG_PID_FILE"' EXIT INT TERM
+
 if [ "${1:-}" = "--once" ]; then
   run_checks
   exit 0

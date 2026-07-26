@@ -269,6 +269,55 @@ else
   ok "no-exception-leak: user-facing errors are generic; details stay in the log"
 fi
 
+# v2026-07-25.7: /audit interpolates arbitrary diagnostic strings — card field names
+# (system_prompt, mes_example), prompt block headings ([VOICEPRINT PRESET …]), config
+# warnings naming env vars. Under parse_mode="Markdown" a stray '_' or unmatched '['
+# makes Telegram reject the whole message, so the command that exists to diagnose the
+# bot silently failed fleet-wide. Pinned because the regression is invisible in code
+# review and only shows up as "audit isn't working".
+# NB: a plain awk range (/^async def audit_cmd/,/^async def /) collapses to ONE line,
+# because the opening line matches the end pattern too — that version of this check could
+# never fail. Flag-based scan instead, and it was break-tested red before being trusted.
+audit_send=$(awk '
+  /^async def audit_cmd/ { inblk = 1; next }
+  inblk && /^async def / { inblk = 0 }
+  inblk && $0 !~ /^[[:space:]]*#/ && /parse_mode/ { c++ }
+  END { print c + 0 }
+' "$BOT")
+if [ "${audit_send:-0}" -eq 0 ]; then
+  ok "audit-plain-text: /audit sends plain text (cannot be broken by what it reports)"
+else
+  bad "audit-plain-text" "/audit uses parse_mode again — a card field name or prompt heading with '_' or '[' will make Telegram reject the message and /audit will silently stop working (see CHANGELOG v2026-07-25.7)"
+fi
+
+# 2026-07-25 config audit: .env.example had drifted badly from bot.py in BOTH directions
+# — 7 variables documented that nothing read (setting NUDGE_MAX looked like it capped
+# proactive messages and did nothing), and 65 read that were undocumented, including
+# BOT_TIMEZONE, which was documented as THE timezone setting while the clock actually
+# came from TIMEZONE. Every var bot.py reads must now be either documented as settable
+# (`NAME=` line) or named in the "Internal knobs" section.
+env_drift=$(python3 - "$BOT" "$(dirname "$BOT")/.env.example" <<'PYEOF'
+import re, sys, pathlib
+bot = pathlib.Path(sys.argv[1]).read_text()
+env = pathlib.Path(sys.argv[2]).read_text()
+used = set(re.findall(r'os\.getenv\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot))
+used |= set(re.findall(r'_env_(?:int|float)\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot))
+documented = set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]{2,})=', env, re.M))
+mentioned = set(re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', env))
+dead = sorted(documented - used)
+missing = sorted(used - mentioned)
+out = []
+if dead:    out.append("documented but never read: " + ", ".join(dead))
+if missing: out.append("read but undocumented: " + ", ".join(missing))
+print(" | ".join(out))
+PYEOF
+)
+if [ -z "$env_drift" ]; then
+  ok "env-vars-documented: .env.example accounts for every var bot.py reads"
+else
+  bad "env-vars-documented" "$env_drift"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

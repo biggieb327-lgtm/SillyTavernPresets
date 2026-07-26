@@ -15,16 +15,26 @@ failure mode.
 - Work isn't merged to main yet → finish `repo-change-control` first (deploying a
   branch is impossible; the curl URLs are pinned to main).
 - The bot is broken for non-deploy reasons → `repo-debugging-playbook`.
-- VPS hosts → `vps-migration` (systemd, not tmux; different commands).
+- *Migrating* an instance from phone to VPS → `vps-migration`. Routine deploys to
+  the VPS instances that already exist (cass, jules) are path E below.
+
+## The fleet is split
+
+Phone: **nora, bonnie, emily, priya** (tmux + `run-bot.sh`).
+VPS: **cass, jules** (systemd `bot@<instance>` units).
+Both pull from `main`, but the commands differ — a phone path applied to a VPS
+instance silently does nothing, because the phone scripts skip instances with no
+local directory.
 
 ## Decision tree — what changed?
 
 | Changed | Path |
 |---|---|
-| bot.py only (and/or docs) | **A: `/update` from Telegram** |
+| bot.py only (and/or docs) — **phone bots** | **A: `/update` from Telegram** |
 | run-bot.sh (supervisor) — with or without bot.py | **B: `update-all.sh` via shell** (`/update` never regenerates the supervisor) |
-| Character cards / seed txt files only | **C: `sync-cards.sh`** (or curl one card + rerun run-bot.sh) |
-| An instance's `.env` | **D: edit on-device, `/restart` that bot** |
+| Character cards / seed txt files only — **phone bots** | **C: `sync-cards.sh`** (or curl one card + rerun run-bot.sh) |
+| An instance's `.env` | **D: edit on-device or on the VPS, `/restart` that bot** |
+| Anything at all on a **VPS bot** (code, card, or preset) | **E: `vps-sync.sh`** |
 
 ## Procedure
 
@@ -34,8 +44,10 @@ failure mode.
    restarts itself.
 2. User sends `/audit` to that bot — MUST show the new BOT_VERSION. If it still
    shows the old one, stop: the update didn't take (see failure modes below).
-3. Only then: `/restart` to the other five bots (they share the swapped file).
-4. `/audit` to each — all six show the new version.
+3. Only then: `/restart` to the other **phone** bots (they share the swapped file
+   at `~/telegram-bot/bot.py`).
+4. Run path E for cass and jules — they do not share the phone's file.
+5. `/audit` to each — all six show the new version.
 
 **Path B — supervisor changed:**
 ```bash
@@ -49,9 +61,22 @@ if those changed, the user reinstalls them manually (one-time curl, see OPS_MANU
 pulled), then without the flag, then `/restart` each affected bot. Card changes
 don't bump BOT_VERSION — verify by asking the character something the edit changed.
 
-**Path D — .env:** user edits on-device, `/restart` that bot, then check `/errors`
-for `[config]` warnings — bad numeric values fall back to defaults with a warning
-rather than crashing, so a typo shows up as a warning, not a crash.
+**Path D — .env:** user edits on-device (phone) or on the VPS, `/restart` that bot,
+then check `/errors` for `[config]` warnings — bad numeric values fall back to
+defaults with a warning rather than crashing, so a typo shows up as a warning, not
+a crash.
+
+**Path E — VPS bots (cass, jules).** One command per instance, and it covers code,
+card, and preset together:
+```bash
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- cass
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
+```
+`vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
+`CHARACTER_CARD`, restarts and enables the systemd unit, then prints verification
+output. Confirm with `/audit` to that bot as usual. Phone paths A/B/C never reach
+these instances — `update-all.sh`, `sync-cards.sh`, and `watchdog.sh` skip them
+automatically because there's no local directory.
 
 **Rollback (any path):** `~/telegram-bot/bot.py.bak` is the previous bot.py. Shell:
 copy it back over bot.py and restart sessions. There is deliberately no `/rollback`
@@ -75,15 +100,19 @@ at each step, and the rollback move — before they started.
 ## Verification checklist
 
 - [ ] Correct path chosen for what actually changed (check the merged diff, not memory)
-- [ ] All six bots verified — `/audit` shows expected BOT_VERSION (paths A/B) or
+- [ ] Phone path AND path E both run when the change affects all six
+- [ ] All six bots verified — `/audit` shows expected BOT_VERSION (paths A/B/E) or
       behavior/config confirmed (paths C/D)
 - [ ] Any `[config]` warnings in `/errors` after an .env change reviewed
 - [ ] CI green on main before telling the user to deploy
 
 ## Common mistakes
 
-- Sending `/update` to all six bots — one `/update` + five `/restart` is the
-  design; six parallel downloads on phone bandwidth is not.
+- Sending `/update` to all six bots — one `/update` + three `/restart` covers the
+  phone bots; six parallel downloads on phone bandwidth is not the design.
+- Forgetting cass and jules entirely. A "fleet deploy" that only ran the phone
+  paths has left two production bots on the old version, and nothing warns you —
+  the phone scripts skip them silently.
 - Using path A when run-bot.sh changed — the stale supervisor keeps running and
   the "deployed" behavior never appears.
 - Telling the user to deploy before the work is merged and CI is green on main.

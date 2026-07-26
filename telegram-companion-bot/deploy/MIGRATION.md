@@ -193,14 +193,63 @@ Monitor daily:
 - Timezone bugs (reminders firing at wrong times)
 - Network issues (NanoGPT timeouts — different from phone's mobile connection)
 
-### 10. Declare pilot successful
+### 10. Phone-side cleanup (required — do not skip)
 
-After 7 days with no issues, jules is permanently on the VPS. Remove its
-directory from the phone (or just leave it idle — it won't start without the
-tmux session):
+> **Learned 2026-07-25 (cass):** leaving the phone instance dir intact and the
+> phone scripts un-updated allowed the `setsid`'d watchdog loop (which survives
+> closing all Termux sessions) to resurrect a VPS bot on the phone — two pollers
+> on one token, silent state divergence. This step is not optional.
+
+**a. Rename the phone-side instance dir** so no phone script can pick it up:
 ```bash
-rm ~/jules-bot/bot.pid 2>/dev/null   # clean up stale lock
-# Optional: rm -rf ~/jules-bot/      # only after confirming VPS is stable
+mv ~/<name>-bot ~/<name>-bot.migrated
+```
+Do NOT `rm -rf` yet — keep `.migrated` as a rollback until VPS soak completes.
+The rename alone stops every phone script (they all guard with `[ -d "$dir" ]`).
+
+**b. Re-curl phone scripts that list instances.**
+These are curl-installed once and NOT pulled by `update-all.sh` — a stale copy
+is how Cass came back:
+```bash
+REPO=https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot
+curl -fsSL "$REPO/watchdog.sh"    -o ~/telegram-bot/watchdog.sh
+curl -fsSL "$REPO/backup-all.sh"  -o ~/telegram-bot/backup-all.sh
+curl -fsSL "$REPO/cleanup-all.sh" -o ~/telegram-bot/cleanup-all.sh
+```
+
+**c. Kill and restart the `setsid`'d watchdog loop** (it survives closed Termux
+sessions — that's by design, but it must run the updated script):
+```bash
+pkill -f "watchdog.sh --loop"
+setsid bash ~/telegram-bot/watchdog.sh --loop >> ~/telegram-bot/watchdog.log 2>&1 &
+disown
+```
+
+**d. Check for stale boot scripts** in `~/.termux/boot/`:
+```bash
+ls ~/.termux/boot/
+```
+If `start-bots.sh` is still there (replaced by `termux-boot-start.sh`), disable it:
+```bash
+mv ~/.termux/boot/start-bots.sh ~/.termux/boot/start-bots.sh.disabled
+```
+Termux:Boot runs every executable script in that directory — a stale duplicate
+fires the watchdog twice.
+
+**e. Verify the phone Cass/Jules is really dead:**
+```bash
+tmux ls | grep -E "cass|jules"                          # should show nothing
+pgrep -af "bot\.py.*(cass|jules)" && echo "STILL RUNNING" || echo "clean"
+```
+Then `/audit` on the VPS instance — PID and uptime should be stable across two
+checks a few minutes apart (unstable = a second poller is fighting for the token).
+
+### 11. Declare migration successful
+
+After 7 days with no issues and step 10 complete, the bot is permanently on the
+VPS. The `.migrated` dir on the phone can be deleted:
+```bash
+rm -rf ~/<name>-bot.migrated
 ```
 
 ---
@@ -209,14 +258,15 @@ rm ~/jules-bot/bot.pid 2>/dev/null   # clean up stale lock
 
 After the jules pilot succeeds, migrate one bot at a time. Order suggestion:
 1. **jules** ✓ (pilot)
-2. **cass** — low conversational state, analysis-mode bot
+2. **cass** ✓ — migrated; phone cleanup learned the hard way (2026-07-25)
 3. **bonnie** — moderate state
 4. **emily** — has WSDOT integration (verify `WSDOT_API_KEY` in VPS .env)
 5. **priya** — moderate state
 6. **nora** — last (she's the home instance, shared venv root, world generator)
 
-For each bot, repeat steps 3–9 above. The soak period can be shorter (2–3 days)
-once you've validated the pattern with jules.
+For each bot, repeat steps 3–11 above (step 10 is the one that bit us — don't
+skip it). The soak period can be shorter (2–3 days) once you've validated the
+pattern with jules.
 
 ### Nora-specific notes
 
@@ -230,20 +280,42 @@ Nora is the `WORLD_GENERATOR=1` instance. When migrating her:
 - She was the last session in `update-all.sh` on the phone. Once she's migrated,
   `update-all.sh` and `watchdog.sh` on the phone have nothing left to manage.
 
+### Group-chat pilot (Priya + Jules) — split by the migration
+
+Unlike `world.txt` above, this one does **not** degrade gracefully, and it is already in
+effect: jules migrated 2026-07-19, priya did not.
+
+- The bot-to-bot mechanism is a flock'd ledger plus atomic claim files in
+  `GROUP_LEDGER_DIR` (defaults to the shared code dir). `GROUP_CHAT_DESIGN.md` §3 assumes
+  every peer is on one filesystem — Telegram never delivers one bot's messages to another,
+  so the filesystem *is* the channel.
+- Split across hosts, each side gets its own copy: `_try_claim` always succeeds on both,
+  and `GROUP_BOT_CHAIN_MAX` / `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers.
+  The alternation and chain caps stop working; only each bot's own daily budget bounds it.
+- **Therefore:** keep `GROUP_MODE=0` on both until the pair is co-located again — either
+  migrate priya, or point both at genuinely shared storage via `GROUP_LEDGER_DIR`.
+- Since v2026-07-25.12 a startup config warning prints the resolved ledger path whenever
+  `GROUP_MODE` is on with peers configured. Compare it on both hosts; if the two paths
+  aren't the same physical directory, coordination is not happening.
+- **When migrating priya, verify co-location before re-enabling:** with both bots up, run
+  `/chatid` in the group from each, then confirm a single `group_<chat_id>.jsonl` on the
+  VPS grows for both — not one file per host.
+
 ---
 
 ## Phase 3: Retire the phone
 
 Once all six instances are on the VPS and stable (14-day total soak):
 
-1. Stop watchdog on the phone:
+1. Stop the watchdog loop on the phone:
    ```bash
+   pkill -f "watchdog.sh --loop"
    tmux kill-session -t watchdog 2>/dev/null
-   crontab -r   # or edit out the watchdog line
    ```
-2. Remove the cron/backup if running:
+2. Remove boot scripts:
    ```bash
-   tmux kill-session -t backup 2>/dev/null
+   rm ~/.termux/boot/termux-boot-start.sh
+   rm ~/.termux/boot/start-bots.sh.disabled 2>/dev/null
    ```
 3. Update OPS_MANUAL.md: mark Termux-specific sections as historical.
 4. Update CLAUDE.md: move Termux quirks to a "Historical (phone era)" section.
@@ -260,9 +332,11 @@ If anything goes wrong during migration:
    ```bash
    sudo systemctl stop bot@jules
    ```
-2. **Restart on the phone:**
+2. **Restart on the phone** (if the instance dir was renamed per step 10, undo
+   that first):
    ```bash
-   bash ~/telegram-bot/run-bot.sh ~/jules-bot jules
+   mv ~/<name>-bot.migrated ~/<name>-bot 2>/dev/null
+   bash ~/telegram-bot/run-bot.sh ~/<name>-bot <name>
    ```
 3. The phone's state files are untouched (we copied, not moved). The bot picks
    up right where it left off.
@@ -279,6 +353,10 @@ and state divergence.
 - [ ] healthchecks.io green for all 6 (14 days)
 - [ ] Tailscale connected, `fleet-status.sh` works over tailnet
 - [ ] `ADMIN_API_BIND` set to tailnet IP (not 127.0.0.1)
+- [ ] Every phone instance dir renamed `.migrated` then deleted (step 10a/11)
+- [ ] Phone scripts re-curled after each migration (step 10b)
+- [ ] Watchdog loop restarted with clean scripts (step 10c)
+- [ ] Stale boot scripts removed (step 10d)
 - [ ] Phone stopped / kept as cold spare
 - [ ] OPS_MANUAL.md updated with VPS-specific daily ops
 - [ ] CLAUDE.md Termux section marked historical

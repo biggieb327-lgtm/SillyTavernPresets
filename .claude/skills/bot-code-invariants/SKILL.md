@@ -23,6 +23,11 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
 3. NO new per-message LLM side calls. The single combined `post_reply_analysis`
    call is the extension point: add JSON keys to it. A sibling call competes with
    the user-facing reply for phone bandwidth.
+   **Documented carve-out — do not "fix" it:** `MEMORY_SEMANTIC_LIVE` adds one
+   small **embedding** round-trip per reply for live semantic recall
+   (owner-approved v2026-07-12.2). It is off-loop, cached, timeout-bounded, and
+   has a default-on kill switch. An embedding call is not a completion call; this
+   rule does not prohibit it, and removing it as a violation is a regression.
 4. New model-response paths MUST route through the `_do_request` choke point so
    output passes `_strip_thinking` + `_strip_native_tool_calls` + `_fix_mojibake`.
    A path that bypasses it will eventually send raw `<tool_call>` XML or mojibake
@@ -62,6 +67,15 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
     mandatory — a feature with no way to turn it off is the violation now, not a
     default-on one. (Higher-cost or higher-risk behavior may still default off with
     a one-line rationale; when in doubt, ask the owner.)
+
+**Extraction honesty (paired with rule 10)**
+17. **Null over plausible guess.** Notes and memories are defended in three
+    layers, and all three must stay: confidence gating (`NOTE_AUTOCONF`,
+    `MEMORY_AUTOCONF`), quote grounding against the source message, and an
+    explicit "do not fill gaps with a plausible extraction" instruction in the
+    prompt. Never collapse these into one. Prompt-only defense drifts as models
+    change; deterministic-only defense cannot steer the ambiguous cases. A change
+    that weakens any layer needs the other two strengthened, and a stated reason.
 
 ## Quality bar
 
