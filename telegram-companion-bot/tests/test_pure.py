@@ -1362,14 +1362,32 @@ class TestTallyUnexpectedRestarts:
         lines = [self._audit("16:30:00"), self._audit("17:30:00")]  # first is before cutoff
         assert bot._tally_unexpected_restarts(lines, self.CUT) == 1
 
-    def test_graceful_stop_alone_still_counts(self):
-        # A graceful-stop WITHOUT a /restart or /update marker (e.g. a battery-manager
-        # SIGTERM) is a real restart and must still be counted.
+    def test_graceful_stop_excluded(self):
+        # CHANGED v2026-07-26.7. This used to assert the opposite, on the phone-era
+        # rationale that a bare graceful stop meant an OEM battery-manager SIGTERM.
+        # The fleet has been 100% systemd since 2026-07-26: a graceful SIGTERM now
+        # means `systemctl restart` or a vps-sync deploy, neither of which logs a
+        # '[restart] requested' marker, so every deploy was tripping the storm alert.
         lines = [
             "2026-07-11 17:10:00 [WARNING] companion: [shutdown] graceful stop — saving state.",
             self._audit("17:10:07"),
         ]
-        assert bot._tally_unexpected_restarts(lines, self.CUT) == 1
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 0
+
+    def test_sigkill_still_counts(self):
+        # The guard that matters: a kill leaves NO graceful-stop line, so an OOM kill
+        # or phantom-killer SIGKILL is still reported. This is what the alert is for.
+        lines = [self._audit("17:10:00"), self._audit("17:25:00"), self._audit("17:45:00")]
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 3
+
+    def test_deploy_loop_does_not_alarm(self):
+        # Regression for the false alarm itself: six back-to-back vps-sync deploys.
+        lines = []
+        for i, t in enumerate(("17:05", "17:12", "17:19", "17:26", "17:33", "17:40")):
+            lines.append(f"2026-07-11 {t}:00 [WARNING] companion: "
+                         "[shutdown] graceful stop — saving state.")
+            lines.append(self._audit(f"{t}:07"))
+        assert bot._tally_unexpected_restarts(lines, self.CUT) == 0
 
 
 class TestTomTomRouteParams:
@@ -4288,18 +4306,39 @@ class TestRestartStormAdviceIsCorrect:
         import inspect
         return inspect.getsource(bot._self_audit)
 
-    def test_dm_points_at_the_exit_code(self):
+    # REWRITTEN v2026-07-26.7. These previously pinned phone-era triage (bot.log's
+    # "[run-bot] ... exited (code N)" line, 137/143, the Android phantom killer). The
+    # fleet has been 100% systemd since 2026-07-26: bot.log is 0 bytes, there is no
+    # battery manager, and that advice sent the operator to a file that no longer
+    # exists. The class's purpose is unchanged — the DM must give triage that actually
+    # works on the platform the bots run on.
+
+    def test_dm_points_at_systemd_triage(self):
         src = self._src()
-        assert "exited (code" in src
-        assert "137" in src and "143" in src
+        assert "systemctl status" in src
+        assert "journalctl" in src
+
+    def test_dm_identifies_sigkill_and_oom(self):
+        src = self._src()
+        assert "status=9" in src
+        assert "oom" in src.lower()
+
+    def test_dm_does_not_send_operator_to_phone_era_artifacts(self):
+        src = self._src()
+        for stale in ("run-bot", "phantom", "battery manager", "bot.log"):
+            assert stale not in src, f"restart-storm advice still references {stale!r}"
 
     def test_dm_does_not_claim_missing_line_means_sigkill(self):
         src = self._src()
         assert "no line = SIGKILL" not in src
 
-    def test_dm_warns_the_graceful_line_is_not_the_discriminator(self):
-        src = self._src()
-        assert "does not mean SIGKILL" in src or "Do NOT use" in src
+    def test_graceful_line_asymmetry_documented_where_the_logic_lives(self):
+        # The caveat moved out of the operator-facing DM (the count now excludes
+        # deliberate restarts, so the operator doesn't need it) into the docstring of
+        # the function that actually reasons about the line.
+        import inspect
+        doc = inspect.getsource(bot._tally_unexpected_restarts)
+        assert "absence" in doc.lower()
 
 
 # ── Concurrent /update corrupts the shared code dir (v2026-07-25.11) ─────────
