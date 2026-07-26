@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.6"
+BOT_VERSION = "2026-07-26.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11828,12 +11828,23 @@ def _tally_unexpected_restarts(lines, cutoff) -> int:
     deliberately restarting the bot, which used to trip a false 'something is killing
     the process' warning during ordinary maintenance.
 
+    A graceful-stop line also marks the start that follows as deliberate. On systemd,
+    `systemctl restart` and `vps-sync.sh` deploys stop the bot with SIGTERM, which
+    `post_shutdown` handles and logs — they never emit a '[restart] requested' marker,
+    so before v2026-07-26.7 every deploy tripped the storm alert. NOTE the direction of
+    this inference: the *presence* of a graceful stop proves the process was asked to
+    stop, which is what we key on. The *absence* proves nothing (/update and /restart
+    exit via os._exit(0) without logging one) — that asymmetry is why the alert text
+    says not to reason from a missing line. Anything that kills the process outright
+    (SIGKILL, OOM, an unhandled crash) leaves no graceful-stop line and is still counted.
+
     Compares naive wall-clock datetimes directly (never via Unix epoch) so it stays
     correct even if the OS local-time calibration is off after a tzdata disruption."""
     n = 0
     pending_intentional = False
     for line in lines:
-        if "[restart] requested" in line or "; restarting" in line:
+        if ("[restart] requested" in line or "; restarting" in line
+                or "[shutdown] graceful stop" in line):
             pending_intentional = True
             continue
         if "=== STARTUP AUDIT ===" not in line:
@@ -11905,13 +11916,16 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
     restarts = _count_recent_restarts()
     if restarts >= 3 and time.time() - _restart_alert_ts > 7200:
         _restart_alert_ts = time.time()
+        inst = BASE_DIR.name
         issues.append(
-            f"restarted {restarts}x in the last hour — something is killing the process. "
-            f"Triage by EXIT CODE in bot.log's '[run-bot] ... exited (code N)' line: "
-            f"137 = SIGKILL (Android phantom-process killer or OOM), 143 = SIGTERM "
-            f"(OEM battery manager), 0 = clean exit. Do NOT use the '[shutdown] graceful "
-            f"stop' line for this — /update and /restart exit via os._exit(0) and never "
-            f"log one either, so its absence does not mean SIGKILL."
+            f"restarted {restarts}x in the last hour with no deliberate stop — something "
+            f"is killing the process. Triage: `systemctl status bot@{inst}` for the last "
+            f"exit, then `journalctl -u bot@{inst} | grep -E 'Main process exited|Killed|"
+            f"out of memory'`. code=killed/status=9 is SIGKILL — usually the OOM killer, "
+            f"confirm with `journalctl -k | grep -i oom`. code=exited with a nonzero "
+            f"status is a crash; its traceback is just above in the journal. Deliberate "
+            f"restarts (/restart, /update, systemctl, vps-sync) are already excluded from "
+            f"this count, so these are unexplained."
         )
 
     fallback_1h = recent.get("fallback", 0)

@@ -67,6 +67,45 @@ whole would have cost ~650 tokens a message in duplication and imported a
 `run-evals.sh` (26/26) and the full pytest suite (670) — content-only, so no `BOT_VERSION`
 bump and no delivery-gate entry.
 
+## v2026-07-26.7 — The restart-storm alarm fired on every deploy
+
+**Root cause (owner-reported, 2026-07-26):** `/audit` warned "restarted 4x in the last
+hour — something is killing the process" after a night of ordinary maintenance. The
+storm detector excludes starts preceded by a `[restart] requested` or `; restarting`
+marker, which covers `/restart` and `/update` — but **not** `systemctl restart` or a
+`vps-sync.sh` deploy. Those stop the bot with SIGTERM, which `post_shutdown` handles
+and logs as a graceful stop, and emit no marker. Since the fleet went 100% systemd on
+2026-07-26 and a fleet deploy is six back-to-back restarts, every deploy tripped the
+alarm.
+
+A test actively encoded the old behaviour — `test_graceful_stop_alone_still_counts`,
+justified by "e.g. a battery-manager SIGTERM". That rationale was phone-era: on the
+VPS there is no OEM battery manager, and a graceful SIGTERM means someone (or a
+deploy) asked the bot to stop.
+
+**Fix:**
+- A `[shutdown] graceful stop` line now marks the following start as deliberate.
+  **The direction of the inference matters:** the *presence* of that line proves the
+  process was asked to stop; its *absence* still proves nothing (`/update` and
+  `/restart` exit via `os._exit(0)` without logging one). Anything that kills the
+  process outright — SIGKILL, OOM, an unhandled crash — leaves no graceful-stop line
+  and is still counted, which is the case the alarm exists for.
+- The alert text was also phone-era and useless on the VPS: it sent the operator to
+  `bot.log`'s `[run-bot] ... exited (code N)` line (that file is 0 bytes under
+  systemd) and blamed the Android phantom-process killer and OEM battery managers.
+  Rewritten for systemd — `systemctl status bot@<instance>`, a `journalctl` grep for
+  `Main process exited|Killed|out of memory`, how to read `code=killed/status=9` vs a
+  nonzero exit, and an OOM confirmation via `journalctl -k`. The instance name is
+  interpolated so the commands are copy-pasteable.
+- Tests: the old assertion is inverted with the reason recorded inline, plus
+  `test_sigkill_still_counts` (the guard that matters) and
+  `test_deploy_loop_does_not_alarm` (six back-to-back deploys → 0).
+
+**Trade-off, stated deliberately:** a repeated *external* SIGTERM on the VPS would no
+longer alarm. That was a real phone failure mode (battery managers) and is not a
+plausible VPS one; systemd's own logs cover it. Revisit if an instance ever runs
+somewhere with an aggressive process manager again.
+
 ## v2026-07-26.6 — The library-missing warning named a command that cannot work
 
 **Root cause (hit live, 2026-07-26):** both "garminconnect is missing" messages —
