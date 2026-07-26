@@ -200,13 +200,29 @@ brief — do not claim anything is new or recurring. Fix nothing.
   path, then preset review, then the `TheAtelierV5`→`TheAtelier_2.0` rename
   (trigger id `trig_01VXMxTLk8ZKwQ61tC3JxkCA`; previous ids
   `trig_01Df8nyGoMAoau5fidB9dhSn`, `trig_01T9Jjcn2ehwGGAJWovRFdNg`,
-  `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted).
+  `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted). **Prompt updated 2026-07-26** (same
+  trigger id, via `update_trigger` — no recreate): repointed at the
+  `character-reviewer` agent contract instead of inlining the review rules, and two
+  stale references fixed — the prompt told the fired session to read a "Character
+  notes section of CLAUDE.md" that does not exist (the binding register rules are in
+  `edit-cards-and-presets`, section "Respect per-character canon"), and the live
+  prompt was missing this file's "don't be fooled by a leftover high V-number"
+  clause, so the two disagreed and a literal reading of the drift rule would have
+  halted the pass.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
 - **Notifications:** push on completion (email off).
-- **What it does:** proposal-only content pass — reviews cards dropped in
-  `character-review/` (the inbox; see its README), spot-checks the six live fleet
+- **What it does:** proposal-only content pass, run by delegating to the
+  `character-reviewer` agent contract (`.claude/agents/character-reviewer.md`) the
+  same way the other Routines delegate to `improvement-analyst` and
+  `context-librarian` — the contract owns the review method, the proposal-only
+  posture, the per-character canon (via `edit-cards-and-presets`) and the evidence
+  bar; this prompt owns only the run scope, the Reddit step, and the output/branch
+  discipline. **Changing the review method means editing the agent file, not this
+  prompt.** The contract's ≤25-line output limit binds the session's final report,
+  not the PROPOSALS file. Concretely: reviews cards dropped in
+  `character-review/` (the root-level inbox; see its README), spot-checks the six live fleet
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
@@ -232,10 +248,20 @@ recorded in .claude/operating/routines.md — read that file first; if this prom
 and that file disagree, stop and report the drift to the owner instead of
 proceeding.
 
-PROPOSAL-ONLY: never edit any character card, seed file, or preset. Before
-judging any content, read .claude/skills/edit-cards-and-presets/SKILL.md and the
-Character notes section of CLAUDE.md — the per-character register rules are
-binding; these cards ship to relationships someone actually has.
+Act as the character-reviewer agent: read .claude/agents/character-reviewer.md and
+follow its mission, proposal-only posture, method, and evidence requirements
+exactly. This run is Mode B (proactive review) — there is no reported voice defect
+to triage, so the Mode A boundary check does not apply unless a finding turns out
+to be a prompt-assembly bug rather than a content one, in which case report it as
+a CODE verdict with its bot.py evidence and propose nothing for the card. The
+contract's <=25-line output limit applies to your final report to the owner, NOT to
+the PROPOSALS file, which is this Routine's deliverable and may run as long as the
+findings require. Steps 4-6 below are owner-approved additions to that contract.
+
+The contract loads .claude/skills/edit-cards-and-presets/SKILL.md, whose "Respect
+per-character canon" section holds the binding register rules — these cards ship to
+relationships someone actually has. PROPOSAL-ONLY: never edit any character card,
+seed file, or preset, and never push to main.
 
 1. Review inbox: list character-review/ (ignore README.md and PROPOSALS-*
    files). Review each card found there against the edit-cards-and-presets
@@ -258,10 +284,10 @@ binding; these cards ship to relationships someone actually has.
       structural clarity. Tag proposals [root preset].
    b. telegram-companion-bot/preset.txt — the shared texting voiceprint feeding
       ALL SIX live bots. Review for internal consistency, contradictions, and
-      drift from the characters' registers. This is the highest-blast-radius
-      file in the repo: any change hits the whole fleet at once, so every
-      preset.txt proposal MUST include a before/after quote and an explicit note
-      of the fleet-wide effect. Tag proposals [fleet preset].
+      drift from the characters' registers. The contract's fleet-wide
+      blast-radius rule applies here: every preset.txt proposal MUST include a
+      before/after quote and an explicit note of the fleet-wide effect. Tag
+      proposals [fleet preset].
 4. Reddit ideas: bounded pass for card-writing techniques applicable to the
    characters/presets reviewed above. Reddit access: WebFetch cannot reach
    reddit — use Bash curl against the public JSON API, e.g.
