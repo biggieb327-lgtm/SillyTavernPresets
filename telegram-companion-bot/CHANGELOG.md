@@ -67,6 +67,48 @@ whole would have cost ~650 tokens a message in duplication and imported a
 `run-evals.sh` (26/26) and the full pytest suite (670) — content-only, so no `BOT_VERSION`
 bump and no delivery-gate entry.
 
+## v2026-07-26.5 — The dead man's switch reported OK while being rejected
+
+**Root cause (found live, 2026-07-26):** `requests` does not raise on 4xx/5xx — it
+raises only on connection errors and timeouts. The healthcheck ping was
+
+```python
+await asyncio.to_thread(lambda: _get_session().get(HEALTHCHECK_URL, timeout=10))
+```
+
+with no status check, so a **rejected** ping completed the `try` block normally and
+logged nothing. Every `_self_audit` line read `[audit] OK`.
+
+Discovered while verifying monitoring coverage after the VPS migration: five of six
+instances had a **doubled** URL —
+`HEALTHCHECK_URL=https://hc-ping.com/https://hc-ping.com/<uuid>` — which hc-ping
+answers with HTTP 400. Byte-identical `.env` files came off the phone in the migration
+tar, so those five had been broken *on the phone too*: the fleet ran for weeks with one
+working dead man's switch out of six, and nothing in any log said so. Only nora's URL
+was well-formed.
+
+This is the same class the streaming path already pins as invariant #5 (force-read the
+body, then `raise_for_status()`), applied to a path nobody had revisited since it was
+written.
+
+**Fix:**
+- `_self_audit` now inspects `resp.status_code`; anything ≥400 logs a loud warning
+  naming the code and stating that the switch is NOT working, and counts a
+  `healthcheck_rejected` error so it surfaces in `/audit`'s error breakdown and in the
+  admin API — a silent monitor now shows up in the place operators actually look.
+- Connection failures keep their existing warning; the two failure modes are now
+  distinguishable in the log.
+- No kill switch: this adds observability to an existing call. "Off" would mean
+  restoring the silence that hid the bug.
+- `deploy/MIGRATION.md` step 8 no longer shows a literal `<your-jules-uuid>`
+  placeholder inside a copy-pasteable block, and gains a verification step
+  (`curl -fsS` the URL from the instance's own `.env`, plus a distinct-UUID count) —
+  a placeholder in a paste-block is a plausible origin for the doubling.
+
+**Verification:** `py_compile`, pytest, `run-evals.sh` (new `healthcheck-status-checked`
+eval, break-tested red-green). Live: all six instances now return HTTP 200 from the URL
+in their own `.env`, six distinct UUIDs.
+
 ## v2026-07-26.4 — The fleet's voiceprint was addressing `{{char}}`, not the character
 
 **⚠️ CHANGES THE ASSEMBLED PROMPT FOR ALL SIX BOTS.** Not a behaviour flag — the preset

@@ -261,6 +261,17 @@ else
   bad "null-over-guess" "null-over-guess instruction missing from analysis prompt — the model will fabricate plausible notes/memories when unsure"
 fi
 
+# v2026-07-26.5: requests does NOT raise on 4xx/5xx, so the healthcheck ping treated a
+# REJECTED ping as success and logged nothing. Five of six instances ran for weeks on a
+# doubled URL (hc-ping returned 400 every time) while every audit line read OK — a dead
+# man's switch that reports success while unreachable is worse than none.
+hc_body=$(awk '/Dead man.s switch/{f=1} f{print} f && /healthcheck ping failed/{exit}' "$BOT")
+if echo "$hc_body" | grep -qE 'if[^=]*status_code[[:space:]]*>=[[:space:]]*400'; then
+  ok "healthcheck-status-checked: a rejected healthcheck ping is detected, not silently passed"
+else
+  bad "healthcheck-status-checked" "the healthcheck ping no longer inspects resp.status_code — a 4xx/5xx ping will silently report OK and the dead man's switch dies quietly"
+fi
+
 # v2026-07-13.2: raw exception text was interpolated into chat messages — leaks
 # internals, and on_error would post them into the pilot GROUP chat.
 if grep -qE '\{type\(err\)|❌[^"]*\{e' "$BOT"; then
