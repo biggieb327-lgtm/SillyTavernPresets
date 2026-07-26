@@ -7,6 +7,66 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-26.3 — One /audit, two sizes for the same file (regression in .2)
+
+**Found by cass's first post-deploy `/audit`**, which reported `preset-core.txt` as
+**~4165t** on the `Prompt:` top-blocks line and **~3839t** on the `Preset layers:` line —
+the same file, one screen, an 8% disagreement and nothing saying why.
+
+**Root cause: v2026-07-26.2 calibrated a value that gets STORED.** `_record_prompt_size`
+accumulates across the process lifetime, and .2 pointed it at the calibrated `_tokens()`.
+So each sample froze whichever ratio was live the moment it was taken:
+- the first prompts after a restart are recorded before any API call has been measured,
+  i.e. at ratio 1.0 — raw;
+- later samples are recorded at the real ratio — calibrated;
+- `sum`/`avg` adds those together, mixing units in a single average;
+- `max_blocks` keeps the ratio from whenever the peak happened to be hit, and a peak set
+  in the first seconds after a restart is *always* the uncalibrated one.
+
+Meanwhile the `Preset layers:` line computes fresh at `/audit` time and is always
+current. Hence two numbers for one file. cass's audit is the textbook case: uptime 0.1h,
+peak recorded during startup at ratio 1.0, then 9 measured calls moved the ratio to 0.92.
+
+**The rule this violated:** a calibrated number is only meaningful against the ratio that
+produced it, so it must never be persisted or accumulated. Raw is the stable unit.
+
+**Fix:** stats are stored raw (`_prompt_token_total_raw`, `_msg_tokens_raw`, and
+`_prompt_top_blocks` back to `_est_tokens`) and the ratio is applied in
+`_prompt_audit_state()` at render. Every historical sample — including ones taken before
+the first measurement — is now re-expressed in today's unit, and a later ratio change
+retroactively corrects the whole history instead of stranding it.
+
+**Deliberately still calibrated: `_trim_prompt_to_budget`.** It makes a live decision
+against a real ceiling and stores nothing, which is exactly the case calibration is for.
+The split is now explicit: `_prompt_token_total` (calibrated, live decisions) vs
+`_prompt_token_total_raw` (raw, anything accumulated).
+
+**Buckets stay raw and are labelled.** They are counts already binned; history cannot be
+re-binned without the original samples. The edges are deliberately coarse — the question
+is "anywhere near a ceiling", not "how big exactly" — so the audit now reads
+`spread (raw est):` rather than implying a precision it doesn't have.
+
+**Swept for the class, and it was a class — two more instances**, both invisible in the
+reported symptom:
+- **`_card_field_tokens`** is filled once at card load, which is *always* before any API
+  call has been measured, then rendered much later. Every `Card:` line on every instance
+  was therefore frozen at ratio 1.0 while the `Preset layers:` line directly above it was
+  calibrated. Now stored raw, calibrated in `gather_audit_data`.
+- **`_llm_stats["tok_in"]`** had the *opposite* error. It holds the provider's real
+  counts, but .2 left the no-usage fallback adding **raw** estimates into the same sum —
+  two units in one total. That sum is rendered as-is and never re-scaled, so the fallback
+  should contribute the best estimate of the real count: it now adds calibrated tokens.
+
+The rule, now stated in the code at both sites: **store raw if the number will be
+re-rendered later; store calibrated if it is consumed immediately and never re-scaled.**
+The two mistakes are mirror images, which is why one sweep found both.
+
+**Tests:** `TestPromptStatsUnits` — samples stored raw under a live ratio, render applies
+the current ratio, a pre-calibration sample is re-expressed, the trim budget stays
+calibrated, card fields stored raw and rendered calibrated, the daily sum adds real units
+in both branches, and the regression itself pinned: the same text must not report two
+different sizes in one audit.
+
 ## v2026-07-26.2 — Token counts are measured, not guessed
 
 **Root cause: every token number this repo has ever reported was `len(text) // 4`.**

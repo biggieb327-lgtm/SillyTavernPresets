@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.2"
+BOT_VERSION = "2026-07-26.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -198,8 +198,12 @@ def _track_llm_usage(messages: list, reply: str):
         _llm_stats["measured"] += 1
         _record_token_calibration(messages, real_in)
     else:
-        _llm_stats["tok_in"] += sum(_est_tokens(m.get("content", "") or "") for m in messages)
-        _llm_stats["tok_out"] += _est_tokens(reply)
+        # Calibrated, not raw: this sum sits alongside real measured tokens and is
+        # rendered as-is, never re-scaled, so each addition should be the best available
+        # estimate of the REAL count at the time it is made. (The opposite rule applies
+        # to _prompt_stats, which IS re-rendered later — see _record_prompt_size.)
+        _llm_stats["tok_in"] += sum(_tokens(m.get("content", "") or "") for m in messages)
+        _llm_stats["tok_out"] += _tokens(reply)
         _llm_stats["estimated"] += 1
 
 # --- Env parsing that can't brick the fleet ---
@@ -1016,8 +1020,21 @@ def _msg_tokens(m: dict) -> int:
 
 
 def _prompt_token_total(messages: list) -> int:
-    """Pure: estimated size of a whole assembled prompt."""
+    """Pure: calibrated size of a whole assembled prompt. For live decisions (the trim
+    budget), where the question is how close this prompt is to a real ceiling."""
     return sum(_msg_tokens(m) for m in messages)
+
+
+def _msg_tokens_raw(m: dict) -> int:
+    """Uncalibrated tokens for one message — the unit the running stats are kept in."""
+    c = m.get("content", "")
+    return _est_tokens(c if isinstance(c, str) else str(c))
+
+
+def _prompt_token_total_raw(messages: list) -> int:
+    """Pure: raw size of a whole assembled prompt, for anything ACCUMULATED over time.
+    A stored calibrated number is only meaningful against the ratio that produced it."""
+    return sum(_msg_tokens_raw(m) for m in messages)
 
 
 def _prompt_bucket(tokens: int) -> str:
@@ -1048,7 +1065,9 @@ def _prompt_top_blocks(messages: list, n: int = 3) -> list:
         if not isinstance(c, str):
             continue
         head = "(card: system_prompt+description+…)" if i == 0 else c.split("\n", 1)[0][:48]
-        blocks.append((_tokens(c), head))
+        # Raw: this is recorded into _prompt_stats and read back later, so it must be in
+        # the same stable unit as the rest of the snapshot (see _record_prompt_size).
+        blocks.append((_est_tokens(c), head))
     blocks.sort(key=lambda b: b[0], reverse=True)
     return blocks[:n]
 
@@ -1058,8 +1077,15 @@ def _record_prompt_size(messages: list, chat_id: int) -> int:
     prompt before this — `_llm_stats["tok_in"]` is a running daily sum, so it could
     not answer "how big does this get on a bad day", which is exactly the question
     that matters for a context ceiling. On-loop and O(messages); the same walk
-    `_track_llm_usage` already does per call."""
-    total = _prompt_token_total(messages)
+    `_track_llm_usage` already does per call.
+
+    Stored in RAW units and calibrated at render (v2026-07-26.3). Storing calibrated
+    numbers froze whichever ratio happened to be live when each sample was taken, so a
+    running average silently mixed units and `max_blocks` kept the ratio from the moment
+    the peak was hit — while the /audit `Preset layers:` line recomputed live. One audit
+    then reported the same file at two different sizes. Raw is the stable unit: it lets
+    every historical sample re-express itself whenever the ratio moves."""
+    total = _prompt_token_total_raw(messages)
     s = _prompt_stats
     s["n"] += 1
     s["sum"] += total
@@ -2282,14 +2308,17 @@ def load_character(path: Path):
     # jules's system_prompt opens with "[ATTRACTION RULE]", so an 84-token section got
     # credited with the whole 4,715-token card block. Record the breakdown here, where the
     # fields still exist.
+    # RAW units: this dict is filled once at card load — before any API call has been
+    # measured — and rendered much later, so a calibrated value here would be frozen at
+    # ratio 1.0 forever (the v2026-07-26.3 class). gather_audit_data applies the ratio.
     _card_field_tokens.clear()
     for _f in ("system_prompt", "description", "personality", "scenario",
                "mes_example", "post_history_instructions"):
-        _t = _tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
+        _t = _est_tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
         if _t:
             _card_field_tokens[_f] = _t
     _card_field_tokens["character_book"] = sum(
-        _tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
+        _est_tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
 
     first_mes = data.get("first_mes", "")
     return name, system_prompt, post_history, lore, first_mes
@@ -11972,7 +12001,10 @@ def gather_audit_data() -> dict:
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
         "prompt_stats": _prompt_audit_state(),
-        "card_fields": dict(_card_field_tokens),
+        # Stored raw at card load; calibrated here so the Card: line shares a unit with
+        # the Preset layers: line computed just above it.
+        "card_fields": {k: int(round(v * _token_ratio()))
+                        for k, v in _card_field_tokens.items()},
         "preset_layers": [(n, _tokens(t)) for n, t in PRESET_LAYERS],
         "preset_override": list(preset_override),
         "token_calibration": _token_confidence(),
@@ -11984,13 +12016,20 @@ def _prompt_audit_state() -> dict:
     s = _prompt_stats
     if not s["n"]:
         return {}
+    # Stats accumulate in raw units; the ratio is applied HERE so every sample — including
+    # ones taken before the first API call was measured — is reported in today's unit and
+    # agrees with the live `Preset layers:` line.
+    r = _token_ratio()
     return {
         "n": s["n"],
-        "avg": s["sum"] // s["n"],
-        "max": s["max"],
+        "avg": int(round((s["sum"] // s["n"]) * r)),
+        "max": int(round(s["max"] * r)),
         "max_age_h": round((time.time() - s["max_ts"]) / 3600, 1) if s["max_ts"] else None,
+        # Buckets are counts already binned on raw values; history cannot be re-binned,
+        # and the edges are deliberately coarse ("near a ceiling?", not "how big
+        # exactly"), so they stay raw and the audit labels them as such.
         "buckets": dict(s["buckets"]),
-        "max_blocks": list(s["max_blocks"]),
+        "max_blocks": [(int(round(t * r)), head) for t, head in s["max_blocks"]],
     }
 
 
@@ -12037,7 +12076,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if ps.get("buckets"):
             order = ["<8k", "8-12k", "12-16k", "16-24k", "24-32k", "32k+"]
             spread = " ".join(f"{b}:{ps['buckets'][b]}" for b in order if b in ps["buckets"])
-            lines.append(f"  spread: {spread}")
+            lines.append(f"  spread (raw est): {spread}")
         for tok, head in (ps.get("max_blocks") or [])[:3]:
             lines.append(f"  ~{tok}t  {head}")
     pl = d.get("preset_layers") or []

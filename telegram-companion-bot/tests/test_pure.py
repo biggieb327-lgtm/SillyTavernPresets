@@ -3684,6 +3684,90 @@ class TestUsageCaptureWiring:
             "a hand-edited state.json must not set a nonsense multiplier"
 
 
+class TestPromptStatsUnits(object):
+    """v2026-07-26.3: stats accumulate over time, so they must be stored in the unit that
+    stays meaningful — raw — and calibrated at render. Storing calibrated numbers froze
+    the ratio live at each sample, so one /audit reported the same file at two sizes."""
+
+    def _fresh(self):
+        bot._prompt_stats.update(n=0, sum=0, max=0, max_ts=0, max_chat=None,
+                                 max_blocks=[], buckets={})
+
+    def test_samples_are_stored_raw(self):
+        self._fresh()
+        with _CalFixture(ratio=1.5, n=10):
+            msgs = [{"role": "system", "content": "x" * 40000}]   # raw 10000
+            bot._record_prompt_size(msgs, 1)
+            assert bot._prompt_stats["sum"] == 10000, "a live ratio must not be baked in"
+        self._fresh()
+
+    def test_render_applies_the_current_ratio(self):
+        self._fresh()
+        with _CalFixture(ratio=1.0, n=0):
+            bot._record_prompt_size([{"role": "system", "content": "x" * 40000}], 1)
+        with _CalFixture(ratio=0.92, n=9):
+            st = bot._prompt_audit_state()
+            assert st["avg"] == pytest.approx(9200, rel=0.01)
+            assert st["max"] == pytest.approx(9200, rel=0.01)
+        self._fresh()
+
+    def test_a_sample_taken_before_calibration_is_re_expressed(self):
+        # The exact reported bug: the peak was recorded uncalibrated, so /audit kept
+        # showing the pre-calibration number next to a live calibrated one.
+        self._fresh()
+        with _CalFixture(ratio=1.0, n=0):
+            bot._record_prompt_size([{"role": "system", "content": "y" * 40000}], 1)
+            raw_blocks = bot._prompt_audit_state()["max_blocks"]
+        with _CalFixture(ratio=0.92, n=9):
+            cal_blocks = bot._prompt_audit_state()["max_blocks"]
+        assert cal_blocks[0][0] < raw_blocks[0][0]
+        assert cal_blocks[0][0] == pytest.approx(raw_blocks[0][0] * 0.92, rel=0.01)
+        self._fresh()
+
+    def test_audit_block_and_preset_line_agree_for_the_same_text(self):
+        # The user-visible symptom: preset-core.txt shown as 4165t in one line and
+        # 3839t in another, in a single audit.
+        self._fresh()
+        layer = "VOICE RULES [BRACKETED]\n" * 500
+        with _CalFixture(ratio=1.0, n=0):
+            bot._record_prompt_size([{"role": "system", "content": layer}], 1)
+        with _CalFixture(ratio=0.92, n=9):
+            block_tokens = bot._prompt_audit_state()["max_blocks"][0][0]
+            preset_tokens = bot._tokens(layer)
+            assert abs(block_tokens - preset_tokens) <= 1, \
+                "the same text must not report two different sizes in one audit"
+        self._fresh()
+
+    def test_trim_budget_still_uses_calibrated_tokens(self):
+        # A budget is a real ceiling, so it should track real tokens, unlike the stats.
+        import inspect
+        assert "_msg_tokens(" in inspect.getsource(bot._trim_prompt_to_budget)
+
+    def test_card_fields_stored_raw_and_rendered_calibrated(self):
+        # Same class: filled once at card load (before anything is measured) and
+        # rendered much later, so a calibrated value there freezes at ratio 1.0.
+        import inspect
+        src = inspect.getsource(bot.load_character)
+        assert "_est_tokens(data.get(_f)" in src, "card fields must be stored raw"
+        assert "_est_tokens(json.dumps(e))" in src, "lorebook must be stored raw"
+        with _CalFixture(ratio=1.0, n=0):
+            raw = bot.gather_audit_data()["card_fields"]
+        with _CalFixture(ratio=0.92, n=9):
+            cal = bot.gather_audit_data()["card_fields"]
+        # Exact, not approximate: the fixture card's fields are only a few tokens, where
+        # integer rounding dominates any relative tolerance.
+        for k, v in raw.items():
+            assert cal[k] == int(round(v * 0.92)), k
+
+    def test_daily_token_sum_adds_real_units_in_both_branches(self):
+        # tok_in holds provider counts; the estimated branch must contribute the best
+        # estimate of the SAME unit, since this sum is rendered as-is and never re-scaled.
+        import inspect
+        src = inspect.getsource(bot._track_llm_usage)
+        est_branch = src.split("else:")[-1]
+        assert "_tokens(" in est_branch and "_est_tokens(" not in est_branch
+
+
 class TestPresetNameNormalization:
     AVAIL = ["preset-core.txt", "preset-rp.txt", "preset.txt"]
 
