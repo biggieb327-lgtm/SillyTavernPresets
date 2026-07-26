@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-26.4 — The fleet's voiceprint was addressing `{{char}}`, not the character
+
+**⚠️ CHANGES THE ASSEMBLED PROMPT FOR ALL SIX BOTS.** Not a behaviour flag — the preset
+text every instance sends is different after this deploy. Read before shipping.
+
+**Root cause:** `fill()` substitutes `{{char}}`/`{{user}}` into every prose block the bot
+assembles — the merged card (`bot.py:4330`), the setting (`:4335`), the lorebook
+(`:4589`), post-history instructions (`:4618`), the greeting (`:6093`, `:7381`) — with
+exactly one exception: the preset layers, appended raw at `:4623`. Found while looking at
+the layer files for the per-character preset work, not by any test or error.
+
+So the placeholders reached the model **verbatim**, in the block that defines the voice:
+
+| layer | `{{…}}` occurrences | who loads it |
+|---|---|---|
+| `preset-core.txt` | **66** | cass |
+| `preset.txt` | **88** | the other five |
+| `preset-rp.txt` | 14 | — |
+| `preset-closeness.txt`, `preset-stepped.txt` | 3 each | — |
+
+Line 3 of `preset-core.txt` arrived as *"You are {{char}} speaking to {{user}} in an
+ongoing exchange."* — as did "Preserve {{char}}'s voice", "Respond from {{char}}'s
+motives", "{{char}} knows only what {{char}} has witnessed or been told". The single
+highest-leverage block in the prompt was issuing instructions about a placeholder, and
+the model had to infer the referent from the card block above it.
+
+**Why it never surfaced:** it produces no error and no malformed output. The card names
+the character a few hundred tokens earlier, so a capable model resolves it and replies in
+character — the cost is silent, in how binding each rule is. This is the same shape as
+the v2026-07-25.7 Markdown failure: invisible in code review, invisible in every local
+test, visible only in quality.
+
+**Fix:** one line — the layer loop now appends `fill(_ltext, NAME, uname)`. Verified it is
+the only injection site; `TEXTING_STYLE` (the joined form) is not used to build prompts
+anywhere, so there is no second path to miss.
+
+**Effect on tokens:** slightly *fewer* — `{{char}}` (8 chars) becomes a name (typically
+4–6). Immaterial next to the effect on instruction clarity.
+
+**Tests:** `TestPresetPlaceholdersAreFilled` — the injection applies `fill()`, the shipped
+layers really do contain placeholders (so the guard can't silently protect nothing), and
+substitution works on realistic layer text.
+
 ## v2026-07-26.3 — One /audit, two sizes for the same file (regression in .2)
 
 **Found by cass's first post-deploy `/audit`**, which reported `preset-core.txt` as

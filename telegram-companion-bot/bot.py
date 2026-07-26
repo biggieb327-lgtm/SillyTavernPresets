@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.3"
+BOT_VERSION = "2026-07-26.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4620,8 +4620,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if TEXTING_REALISM:
         # One block per layer: a single-layer config is byte-identical to the old single
         # TEXTING_STYLE block, and a layered one is separately visible in /audit.
+        #
+        # fill() applies here too (v2026-07-26.4). Every other prose block — card,
+        # setting, lorebook, post-history, greeting — has always been substituted, and
+        # the preset was the one that wasn't, so 66 `{{char}}`/`{{user}}` placeholders in
+        # preset-core.txt (88 in the shared preset.txt) reached the model verbatim. The
+        # fleet's voiceprint was addressing a placeholder instead of the character.
         for _lname, _ltext in PRESET_LAYERS:
-            messages.append({"role": "system", "content": _ltext})
+            messages.append({"role": "system", "content": fill(_ltext, NAME, uname)})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})

@@ -3768,7 +3768,35 @@ class TestPromptStatsUnits(object):
         assert "_tokens(" in est_branch and "_est_tokens(" not in est_branch
 
 
-class TestPresetNameNormalization:
+class TestPresetPlaceholdersAreFilled:
+    """v2026-07-26.4: preset layers were the ONE prose block fill() never touched, so
+    every voice rule in the fleet's voiceprint addressed a literal {{char}}."""
+
+    def test_injection_applies_fill(self):
+        import inspect, re
+        src = inspect.getsource(bot.assemble_messages)
+        m = re.search(r"for _lname, _ltext in PRESET_LAYERS:\s*\n\s*messages\.append\(([^\n]*)",
+                      src)
+        assert m and "fill(" in m.group(1), \
+            "preset layers must be substituted like every other prose block"
+
+    def test_shipped_layers_actually_contain_placeholders(self):
+        # Pins WHY the fix matters: if the layers ever stop using placeholders this test
+        # should be revisited rather than silently protecting nothing.
+        import pathlib
+        repo = pathlib.Path(bot.__file__).parent
+        found = {p.name: p.read_text(encoding="utf-8").count("{{")
+                 for p in sorted(repo.glob("preset*.txt"))}
+        assert found, "no preset files in the repo to check"
+        assert any(v > 0 for v in found.values()), found
+
+    def test_fill_substitutes_both_placeholders_in_layer_text(self):
+        layer = ("You are {{char}} speaking to {{user}} in an ongoing exchange.\n"
+                 "Preserve {{char}}'s voice.")
+        out = bot.fill(layer, "Nora", "Brian")
+        assert "{{char}}" not in out and "{{user}}" not in out
+        assert "You are Nora speaking to Brian" in out
+        assert "Preserve Nora's voice." in out
     AVAIL = ["preset-core.txt", "preset-rp.txt", "preset.txt"]
 
     def test_bare_stem_resolves(self):
