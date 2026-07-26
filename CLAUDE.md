@@ -3,9 +3,9 @@
 ## What this repo is
 
 A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running six AI
-character instances on Android via Termux. One `bot.py` handles all characters;
-instances differ only by directory, `.env`, and SillyTavern v2 character card. The repo
-root also archives standalone SillyTavern presets/cards and an unrelated
+character instances — four on Android via Termux, two on a VPS. One `bot.py` handles all
+characters; instances differ only by directory, `.env`, and SillyTavern v2 character card.
+The repo root also archives standalone SillyTavern presets/cards and an unrelated
 `voicekit-starter/` project.
 
 ## Docs map — read the right doc, not all of them
@@ -22,33 +22,8 @@ All under `telegram-companion-bot/` unless noted:
   adversarial review rounds.
 - `OPS_MANUAL.md` — day-to-day operation + the **full bot command reference**.
 - `SETUP_GUIDE.md` — standing up a new instance (or use `new-bot.sh`).
+- `.env.example` — every variable bot.py reads, documented with defaults.
 - `.claude/memory/operational-log.md` — one row per failure that changed the system.
-
-## Agent operating system (`.claude/`)
-
-Rules here are backed by files that run, not prose:
-
-- **Agents** (`.claude/agents/`): `chief-operator` (opus) orchestrates;
-  `builder`/`system-fixer`/`qa-engineer` (sonnet) implement and verify;
-  `adversarial-critic`/`eval-designer`/`improvement-analyst` (opus) audit;
-  `context-librarian`/`research-scout` (haiku) handle hygiene and lookups.
-- **Hooks** (`.claude/hooks/`, wired in `.claude/settings.json`): session-start audit,
-  Bash risk guard, evidence logger, budget governor, **delivery gate** (blocks ending a
-  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
-  evidence), pre-compact handoff writer.
-- **Evals** (`.claude/evals/run-evals.sh`): past incidents pinned as runnable checks —
-  **run before claiming any change done**. A failure recurring twice earns a new eval.
-  Includes a secret scan (repo is public via raw URLs — a committed token is instantly
-  leaked) and BOT_VERSION↔changelog sync.
-- **CI** (`.github/workflows/evals.yml`): same evals + pytest on every push to
-  `main`/`claude/**`. Deploys curl from `main` — a red run on main is a deploy blocker.
-- **Improvement loop**: monthly Routine runs `improvement-analyst` over the logs;
-  pushes at most one evidence-based proposal (plus up to 3 URL-cited, unvetted
-  Reddit ideas, owner-approved addition 2026-07-20) to `claude/improvement-loop`,
-  never to `main`. Live since 2026-07-12 — schedule + verbatim prompt recorded in
-  `.claude/operating/routines.md` (keep file and Routine in sync; the daily ops
-  brief, weekly hygiene check, and monthly character pass live there too).
-- Runtime state in `.claude/.runtime/` is gitignored — never commit it.
 
 ## Operating rule
 
@@ -59,19 +34,51 @@ For complex work (multi-step, behavior-changing, or fleet-touching), read
 `.claude/operating/fable-to-opus.md` before acting — it carries owner-settled
 decisions and session-earned traps. For simple work, do not load it.
 
-Before starting work, inspect relevant project skills in `.claude/skills/`
-(`skill-router/SKILL.md` is the index; the 2026-07-11 staged batch was owner-reviewed
-and promoted in full on 2026-07-17 — `_staging/` now holds only the promotion
-procedure for future skills).
+Detailed procedure lives in skills, not here. `.claude/skills/skill-router/SKILL.md`
+is the index — consult it and load on demand (table below for the common cases).
 
-Use:
-- `repo-debugging-playbook` for bugs and regressions
-- `repo-change-control` + `bot-code-invariants` for edits that change behavior
-- `repo-validation-gate` before declaring done
+The machinery that enforces this is real, not advisory:
+
+- **`.claude/evals/run-evals.sh`** — past incidents pinned as runnable checks.
+  **Run it before claiming any change done.** A failure recurring twice earns a new
+  eval. Includes a secret scan (this repo is public via raw URLs) and
+  BOT_VERSION↔changelog sync.
+- **Hooks** (`.claude/hooks/`) — including a **delivery gate** that blocks ending a
+  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
+  evidence.
+- **CI** (`.github/workflows/evals.yml`) — same evals + pytest on `main`/`claude/**`.
+  Deploys curl from `main`, so **a red run on main is a deploy blocker.**
+- Routines are recorded in `.claude/operating/routines.md` — keep it and the live
+  Routine in sync.
 
 Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.
 Every completion must include the verification command actually run.
+
+## Where things live
+
+| Topic | Load |
+|---|---|
+| Shipping any bot.py change | `repo-change-control` + `bot-code-invariants` |
+| A live bot is silent, restarting, or misbehaving | `repo-debugging-playbook` |
+| Cause looks device-level: SIGKILL/137, venv, tzdata, watchdog, `pkg upgrade` | `termux-device-ops` |
+| Getting merged work onto the fleet (paths A–E) | `deploy-and-verify-fleet` |
+| Model slots, timeouts, `.env` constraints, voice/vision/traffic, continuity features | `bot-config-reference` |
+| Character cards, seeds, `preset.txt`, per-character canon | `edit-cards-and-presets` |
+| Any `GROUP_*` code, the ledger, bot-to-bot behavior | `group-chat-changes` |
+| Before declaring anything done | `repo-validation-gate` |
+
+Full index, including the less common skills: `skill-router`.
+
+## Known-deliberate — do not "fix" these
+
+- **Emily runs `zai-org/glm-4.7:thinking`**, not glm-5 (owner-confirmed 2026-07-25).
+  Per-instance model choice is expected, not drift.
+- **bot.py stays a single file.** The whole deploy model depends on it. Recorded
+  non-goal — don't propose splitting it.
+- **`AUDIT-2026-07-10.md` records rejected claims.** Check it before "fixing" a
+  finding someone already ruled invalid.
+- **`.claude/.runtime/` is gitignored.** Never commit it, never add it back.
 
 ## Bot instances
 
@@ -86,67 +93,39 @@ Every completion must include the verification command actually run.
 
 Phone instances share the venv at `~/telegram-bot/venv/`; VPS instances share
 `/opt/telegram-bots/venv/`. `bot.py` lives at `~/telegram-bot/bot.py` (phone) and
-`/opt/telegram-bots/bot.py` (VPS). The instance directory (where each bot's `.env`,
-card, and state live) is the basename shown on the `=== STARTUP AUDIT === …
-Instance:` line — that runtime value is authoritative if it ever disagrees with
-this table.
+`/opt/telegram-bots/bot.py` (VPS).
 
-Authoritative instance list = the loop in `update-all.sh` (phone) and the
+The instance directory is the basename on the `=== STARTUP AUDIT === … Instance:`
+line — **that runtime value is authoritative** if it ever disagrees with this table.
+The authoritative instance list is the loop in `update-all.sh` (phone) and the
 `bot@<instance>` systemd units (VPS). Phone scripts (`update-all.sh`,
 `sync-cards.sh`, `watchdog.sh`) skip VPS instances automatically (no local dir).
-(Nora's instance dir was corrected to `~/nora-bot/` on 2026-07-11 after the table
-drifted. On 2026-07-20 the launch/sync scripts were reconciled to match. Pinned by
-the `nora-instance-dir` eval.)
+Nora's directory is pinned by the `nora-instance-dir` eval.
 
 ## Stack
 
-- Python **3.14** on Termux/Android (observed 3.14.6 on emily 2026-07-25 — Termux upgraded
-  from 3.13 at some point; the shared venv was rebuilt and is consistent with it, and the
-  PTB v21 `asyncio.get_event_loop()` workaround in `main()` still holds). The
-  `=== STARTUP AUDIT ===` line reports the live version — trust it over this file.
-  Practical effect: cp314 wheels are scarce, so any new binary dependency is likely to
-  compile from source on-device. `python-telegram-bot >=21.0,<22.0` (async, job-queue)
-- NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`
-- SillyTavern `chara_card_v2` JSON cards
+- Python **3.14** on Termux/Android — the `=== STARTUP AUDIT ===` line reports the
+  live version; trust it over this file. Practical effect: cp314 wheels are scarce,
+  so any new binary dependency is likely to compile from source on-device.
+- `python-telegram-bot >=21.0,<22.0` (async, job-queue). PTB v21's deprecated
+  `asyncio.get_event_loop()` call is worked around in `main()` — don't remove it.
+- NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`.
+- SillyTavern `chara_card_v2` JSON cards.
 - Repo `biggieb327-lgtm/SillyTavernPresets`; raw URL base
   `https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/`
 
 ## Deployment
 
-The fleet is split across phone (nora, bonnie, emily, priya) and VPS (jules, cass).
-Deploy commands differ by platform; both pull from `main`.
+Five deploy paths, split across phone (nora, bonnie, emily, priya — tmux) and VPS
+(cass, jules — systemd). Both pull from `main`; the phone scripts silently skip VPS
+instances, so a "fleet deploy" that only ran the phone paths leaves two bots behind.
+Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
 
-**Phone bots — code update (no shell):** push to `main`, send `/update` to **one**
-phone bot (verifies compile, keeps `bot.py.bak`, swaps the shared file, restarts),
-then `/restart` to the other phone bots. Verify each with `/audit`.
+**Bump `BOT_VERSION` on every release** — it's how `/update` detects new versions and
+`/audit` proves a deploy landed. The delivery gate enforces this.
 
-**Phone bots — card/seed/preset-only update:**
-```bash
-cd ~/telegram-bot && bash sync-cards.sh        # dry-run first with --dry-run
-```
-Then `/restart` each phone bot. (VPS bots are skipped automatically — no local dir.)
-
-**VPS bots — any update (code, card, or preset):**
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- cass
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
-```
-`vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
-`CHARACTER_CARD`, restarts + enables the systemd unit, and prints verification.
-
-**When run-bot.sh changed (phone, shell required)** — `/update` never regenerates
-the supervisor:
-```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
-```
-
-**.env edit:** edit on-device (phone) or on the VPS, then `/restart` that bot.
-
-**Bump `BOT_VERSION` on every release** — it's how `/update` detects new versions
-and `/audit` proves deploys.
-
-Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/restart`
-`/audit` `/errors [N]` `/backup`.
+Ops essentials: `/update` `/restart` `/audit` `/errors [N]` `/backup`.
+Full command reference: `OPS_MANUAL.md`.
 
 ## Working principles
 
@@ -171,247 +150,17 @@ Full command reference: `OPS_MANUAL.md`. The ops essentials are `/update` `/rest
   mandatory env kill switch (unset = active, `0` = off). The kill switch is required;
   default-on is the norm. Details in `bot-code-invariants` #16.
 
-## Code invariants (each one paid for in debugging time)
-
-- **bot.py stays a single file.** The whole deploy model depends on it. Recorded
-  non-goal; don't propose splitting it.
-- **One combined post-reply analysis call** (`post_reply_analysis`: mood + note +
-  memory + any future extraction as extra JSON keys). Never add a per-message side
-  *LLM completion* call — they compete with user-facing replies for phone bandwidth.
-  (Documented carve-out: `MEMORY_SEMANTIC_LIVE` adds one small **embedding** round-trip
-  per reply for live semantic recall — owner-approved v2026-07-12.2, off-loop + cached
-  + timeout-bounded + default-on kill switch. Not a completion call; don't "fix" it.)
-- **Memory provenance:** generated content (day events, reflections) must never enter
-  user-fact stores unlabeled — the `[own-day …]` tag + per-consumer handling is the
-  template. Violating this caused the 2026-07-10 hallucinated-memories bug.
-- **Null over plausible guess:** both notes and memories have confidence gating
-  (`NOTE_AUTOCONF`, `MEMORY_AUTOCONF`) + quote grounding + an explicit "do not fill
-  gaps with a plausible extraction" prompt instruction. All three layers must stay —
-  prompt-only defense drifts; deterministic-only defense can't steer ambiguous cases.
-- **Concurrency:** state serialization happens on the event loop only (worker threads
-  hand `save_state` back via `call_soon_threadsafe`); never iterate live state dicts
-  from a worker thread; never run bare `requests` calls in an async handler (use
-  `asyncio.to_thread`); never hold the group-ledger flock across an `await`.
-- **Streaming error bodies must be force-read (`_ = resp.content`) before
-  `raise_for_status()`** or 400s arrive empty and undiagnosable (`_do_request` does
-  this; keep the pattern).
-- Model output passes through `_strip_thinking` + `_strip_native_tool_calls` +
-  `_fix_mojibake` at the `_do_request` choke point — new response paths must too.
-- PTB's `run_polling()` silently overrides `signal.signal()` handlers — shutdown work
-  goes in `post_shutdown` (see CHANGELOG v2026-07-05.8).
-- Group chats: commands are default-deny (`GROUP_ALLOWED_COMMANDS = {"chatid"}`) and
-  `_group_deliver` is allowlist-built — both pinned by CI evals; widen only with the
-  eval in the same commit.
-
-## Models & config constraints
-
-Full documented template: `telegram-companion-bot/.env.example`. The constraints that
-aren't obvious from it:
-
-- `NANOGPT_MODEL=zai-org/glm-5:thinking` (chat), `SUMMARY_MODEL`/`REACTION_MODEL`
-  cheap+fast (`glm-4.7-flash`).
-  **Emily deliberately runs `zai-org/glm-4.7:thinking`** (owner-confirmed 2026-07-25). Not
-  drift — do not "correct" it to glm-5. Per-instance model choice is expected; check the
-  `=== STARTUP AUDIT ===` line for what an instance is actually on before assuming.
-- `FALLBACK_MODEL` must be roleplay-capable: `anthracite-org/magnum-v4-72b`
-  (recommended) or `Sao10K/L3.3-70B-Euryale-v2.3`. Used on 400/429/5xx/timeout;
-  `call_nanogpt` = 2 attempts/model, 2s/4s backoff, 150s primary budget.
-- `DOCUMENT_MODEL` must be an **instruction** model (`deepseek/deepseek-v4-flash`) —
-  a roleplay model will perform the character card it's analyzing.
-- `VISION_MODEL` must be multimodal (`zai-org/glm-4.6v`) — the chat default rejects
-  images with 400.
-- `STREAM_TIMEOUT` (90s) is max silence between SSE chunks (stall detection);
-  `REQUEST_TIMEOUT` (120s) for non-streaming. 30s proved too tight on a phone.
-  Models that reject streaming are auto-retried non-streaming and cached in
-  `_no_stream_models`.
-- **Inworld voice (Emily):** TTS voice and model must come from the same engine — an
-  Inworld voice ID sent to an OpenAI-style model 400s. `INWORLD_API_KEY` switches the
-  engine; `TTS_VOICE` is then an Inworld voice ID.
-- **WSDOT traffic (Emily):** `WSDOT_API_KEY` + `TRAFFIC_RADIUS_MILES` +
-  `TRAFFIC_POLL_MINUTES`.
-- **Group-chat pilot (Priya + Jules, experimental):** read `GROUP_CHAT_DESIGN.md`
-  first — Telegram never delivers one bot's messages to another bot, so the feature
-  runs on a shared flock'd ledger + atomic claim files. Fleet-wide even when unset:
-  bots ignore all group chats (only `/chatid` answers) and `set_owner` refuses group
-  chat_ids. Enable with `GROUP_MODE=1` + `GROUP_ALLOWED_CHATS` (fail closed) +
-  `GROUP_PEERS`; loop caps `GROUP_BOT_CHAIN_MAX=2`, `GROUP_DAILY_BOT_BUDGET=30`.
-  BotFather privacy must be DISABLED for pilot bots (re-add to group after changing).
-  One-time on-device check: `python bot.py ~/priya-bot --claim-test` (two PASS lines).
-- Bad numeric `.env` values no longer crash the bot (v2026-07-10.2): `_env_int`/
-  `_env_float` fall back to defaults with a `[config]` warning — check logs after
-  editing an `.env`.
-
-## Continuity features (all characters)
-
-- **Date-aware note follow-ups**: datable user mentions stored with `(due YYYY-MM-DD)`
-  in `user_notes.txt`; a daily job (`NOTE_FOLLOWUP_TIME`, default 18:00) asks how it
-  went after the date, then marks `(asked …)`. Respects quiet hours + nudge budget.
-- **Multi-day life threads**: midnight rotation feeds yesterday's `day.txt` into
-  today's event generation. Archived days are provenance-tagged (`[own-day …]`) so her
-  own fiction is never presented as shared memory.
-- **Shared world**: the `WORLD_GENERATOR=1` instance (nora) writes `world.txt` at
-  midnight; all instances read it — same weather/backdrop fleet-wide.
-
-## Character notes
-
-**Nora** (`nora.json` / root `caa16137-nora.json`) — 25, bike messenger, Chicago South
-Side → Seattle. Casual register; curious by talking, not interrogating. Mormor died a
-year ago; mother left at 8. Three months into something with user she won't name.
-Lorebook: Ingrid/jacket, Mother, Messenger work, The toothbrush, Money/The City,
-Religion/Politics.
-
-**Bonnie** (`bonnie.json`) — libertarian gremlin housewife; chaotic surface over
-abandonment terror. Personality order: Surface → Core → Energy States → OCEAN →
-Friction (the card's actual file order; docs had it reversed until 2026-07-20).
-Four-state calm opening in first_mes.
-
-**Cass** (`cass.json`) — writing collaborator / developmental editor; send a `.json`
-card for substantive critique (uses `DOCUMENT_MODEL`). Forward-momentum rule: leads
-with fixes.
-
-**Emily** (`emily_harper.json`) — vision model + WSDOT traffic integration
-(`/traffic`, `/incidents`, live-location alerts) + Inworld voice.
-
-**Priya** (`priya.json`) — 26, fintech software engineer, Bellevue WA (moved from
-Austin 2026-07). Tamil-American, NJ-raised, Rutgers CS. Sardonic, lowercase, never
-performative; quietly lonely. Her atlas references real Eastside/Seattle places —
-keep edits geographically consistent with Bellevue.
-
-**Jules** (`jules_nakagawa.json`) — treats attention like a contact sport; files
-everything you say and deploys it later, flat and precise. Derby-culture "chirping"
-register — when she actually likes you she gets *meaner*, not warmer. Group-chat
-pilot pair with Priya.
-
-## Termux / Android quirks
-
-- **Phantom process killer (the big one).** Android 12+ silently SIGKILLs background
-  processes when >32 exist system-wide; 6 bots sit at that limit.
-  **Triage by the EXIT CODE in the `[run-bot] … exited (code N)` line of `bot.log`** —
-  run-bot.sh logs the real `$?` (corrected 2026-07-25; the old "no graceful-stop line"
-  signature was wrong and cost two debugging rounds):
-
-  | exit code | meaning |
-  |---|---|
-  | `0` | Clean. `/update` and `/restart` exit here via `os._exit(0)` in `_schedule_exit()` (so the Telegram reply and admin-API response flush first). **No graceful-stop line is logged for these** — that's expected, not a kill. |
-  | `137` | SIGKILL (128+9) — phantom-process killer or OOM killer. Can't be caught, so no graceful-stop line either. |
-  | `143` | SIGTERM (128+15) that PTB didn't convert to a clean stop — most likely an OEM battery manager (see dontkillmyapp.com). |
-
-  So `[shutdown] graceful stop` being **absent does NOT imply SIGKILL** — an ordinary
-  deploy looks identical in that respect. Only the exit code separates them. The
-  restart-storm detector (`_tally_unexpected_restarts`) is unaffected: it keys off the
-  `[restart] requested` / `[update] …; restarting` markers in `errors.log`, not the
-  graceful-stop line.
-
-  One-time fix via adb:
-  `adb shell settings put global settings_enable_monitor_phantom_procs false`
-  plus Termux battery → Unrestricted. **The setting reverts after an Android OS
-  update/factory reset.**
-
-  **Reading the setting needs adb too.** `settings get global …` run directly in Termux
-  fails with `Failure calling service settings: Failed transaction (2147483646)` — the
-  settings service only accepts calls from the `shell` uid (2000), and Termux is a normal
-  app uid. (Confirmed 2026-07-25; this file previously told you to run it in Termux.)
-  Prefer the **behavioural** check, which needs no permissions and answers the question
-  that actually matters — whether anything is being killed:
-  ```bash
-  grep -h "exited (code" ~/*-bot/bot.log | grep -v "code 0" | tail -20   # any 137 = SIGKILL
-  ```
-  Only reach for adb if that shows kills. No PC needed — Android 11+ can adb to itself:
-  Developer options → Wireless debugging → *Pair device with pairing code*, then
-  `pkg install android-tools`, `adb pair 127.0.0.1:<PAIRING_PORT>`, then
-  `adb connect 127.0.0.1:<CONNECT_PORT>`. **The pairing port and the connect port are
-  different** — the connect port is on the main Wireless debugging screen.
-
-  Process count matters independently: the limit is >32 system-wide. Census with
-  `pgrep -af "bot.py"` (more than one process per instance = duplicate pollers →
-  `telegram.error.Conflict`; see the 2026-07-19 log row) and `tmux ls`.
-- run-bot.sh launches `~/telegram-bot/venv/bin/python` **explicitly** — bare `python`
-  crash-loops on `ModuleNotFoundError` when the venv isn't on tmux's PATH. Never
-  regress this.
-- **`pkg upgrade` hazards:** android-tools can break (libprotobuf symbol —
-  `pkg reinstall android-tools`); a Python **minor**-version bump breaks the shared
-  venv — rebuild with `python -m venv --clear ~/telegram-bot/venv &&
-  ~/telegram-bot/venv/bin/pip install -r ~/telegram-bot/requirements.txt`
-  (`requirements.txt` is the single source of truth — hand-typing the list caused the
-  tzdata bug). Pillow may need `pkg install libjpeg-turbo zlib freetype` first, or
-  `pkg install python-pillow` + `--system-site-packages` venv. A big Python jump
-  (3.13→3.14) can outrun PTB v21's deprecated `asyncio.get_event_loop()` call —
-  bot.py works around it in `main()` (v2026-07-05.6); if worse appears, hold Termux's
-  `python` package back.
-- **Don't drop `tzdata`** — Termux has no system tz database; without it `ZoneInfo`
-  silently degrades to naive local time, and a stored tz-aware reminder vs naive
-  `now()` once crashed startup fleet-wide (`schedule_reminder` now normalizes
-  defensively, v2026-07-05.5 — but reinstall tzdata rather than rely on that).
-- `/tmp` is not writable — use `~/` for temp files.
-- Stale `bot.pid` after a crash: delete it before restarting (run-bot.sh also clears).
-- `tmux kill-session -t <name>` before reusing a session name; `httpx.ConnectError`
-  at startup = transient network blip, restart the session.
-- Wake lock is acquired automatically (`termux-wake-lock`). The supervisor writes
-  `bot.log` via `>>` (no tee — fewer processes for the phantom limit), trims at 5 MB;
-  `errors.log` rotates at 2 MB.
-
-## Debugging protocol (lessons learned)
-
-1. **Evidence before fixes.** Get `/errors` (or `tail -50 ~/<dir>/bot.log`) and the
-   exact error text first. Three rounds of speculative fixes once lost to one pasted
-   log line.
-2. **Differential diagnosis.** Which bots work, which don't — the broken one's delta
-   (.env, model, features) is usually the answer.
-3. **Opaque error → instrument first.** Make the failure self-describing, deploy,
-   reproduce, then fix.
-4. **A bot that can't answer `/errors` is a startup crash** — go to `bot.log`; the
-   supervisor lines show exit codes and cadence.
-5. **Verify every deploy** with `/audit`.
-
-## Monitoring
-
-- **Restart-storm self-report**: `_self_audit` (every 30 min) DMs the owner at ≥3
-  *unexpected* `STARTUP AUDIT` lines/hour (2h cooldown). `_tally_unexpected_restarts`
-  excludes owner-initiated starts via the `[restart] requested` / `[update] …; restarting`
-  markers, so ordinary deploys don't trip it. To classify a restart, read the **exit code**
-  in `bot.log`'s `[run-bot] … exited (code N)` line — see §Termux/Android quirks. Do not
-  use the graceful-stop line for this: `/update` and `/restart` exit via `os._exit(0)` and
-  never log one either.
-- **Dead man's switch**: set `HEALTHCHECK_URL` per instance (healthchecks.io, 30 min
-  period + 15 min grace) — silence alerts on bot-down AND phone-dead.
-- **`backup-all.sh`** (cron, on-device): nightly state archive to shared storage,
-  `.env` excluded, 14-day retention, optional rclone. Curl-installed once; not managed
-  by update-all.sh.
-- **`cleanup-all.sh`** (cron, on-device): disk janitor — sweeps pip cache,
-  `__pycache__`, SIGKILL-orphaned `.backup-stage.*` dirs, and stale `*.tmp` sidecars so
-  the phone doesn't silently fill up. **Dry-run by default** (measures only); `--force`
-  deletes. Never touches state, `.env`, `bot.py`/`.bak`, or live logs; character-card
-  orphans are reported, never auto-deleted. Curl-installed once; not managed by
-  update-all.sh.
-- **`watchdog.sh`** (on-device at `~/telegram-bot/watchdog.sh`; source now in repo,
-  still installed manually): relaunches vanished tmux sessions AND bots whose `.alive`
-  heartbeat is stale (>300s). **bot.py must touch `.alive` every 60s** (`_touch_alive`
-  job) — if that job is ever removed, watchdog restarts the whole fleet forever (cost
-  a full debugging session, 2026-07-05). `watchdog.log` states its reason before every
-  relaunch — check it first.
-
 ## Repo layout
 
-```
-/
-├── CLAUDE.md                        # this file
-├── telegram-companion-bot/
-│   ├── bot.py                       # single codebase, all instances
-│   ├── run-bot.sh / update-all.sh   # start one / redeploy all
-│   ├── watchdog.sh / backup-all.sh  # on-device helpers (curl-installed once)
-│   ├── cleanup-all.sh               # on-device disk janitor (curl-installed once)
-│   ├── fleet-status.sh / sync-cards.sh / new-bot.sh   # ops tooling
-│   ├── requirements.txt             # single source of truth for pip installs
-│   ├── .env.example                 # documented config template
-│   ├── preset.txt                   # shared voiceprint/texting-style preset
-│   ├── *.json                       # character cards (bot copies)
-│   ├── {bonnie,cass,emily,nora,priya}/   # per-character seed files
-│   ├── meme_templates/ + fonts/     # shared meme assets
-│   ├── tests/                       # pytest (pure-logic regression suite)
-│   ├── deploy/                      # VPS: bot@.service, install-vps.sh, MIGRATION.md
-│   └── *.md                         # docs — see Docs map above
-├── character-review/                # card inbox for the monthly character pass (see its README)
-├── caa16137-nora.json               # SillyTavern archive copy
-├── voicekit-starter/                # separate project (not the bot)
-└── [other SillyTavern presets/cards]
-```
+`telegram-companion-bot/` holds everything that deploys: `bot.py`, the ops scripts,
+character cards + seed dirs, `preset.txt`, `tests/`, `deploy/` (VPS), and the docs
+above. `ls` it for the rest. The non-obvious bits:
+
+- `requirements.txt` is the single source of truth for pip installs.
+- `preset.txt` is the shared voiceprint — editing it changes **all six** bots.
+- `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are curl-installed once and are
+  **not** managed by `update-all.sh`; changing them in-repo deploys nothing.
+- `character-review/` is the card inbox for the monthly character pass (see its README).
+- `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
+  the bot's `nora.json` — not a mirror, never sync them.
+- `voicekit-starter/` is a separate project; none of the bot's rules apply to it.

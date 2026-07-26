@@ -34,18 +34,42 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    Lorebook entries key on trigger words — check `character_book` before editing
    body text, because facts often live in both places and must stay consistent.
 
-2. **Respect per-character canon** (CLAUDE.md §Character notes is authoritative;
-   highlights that are easy to violate):
-   - *Nora*: casual register; grief backstory (Mormor, mother) is load-bearing.
-   - *Bonnie*: personality section ORDER matters — Surface → Core → Energy
-     States → OCEAN → Friction (the card's actual file order; docs had it
-     reversed until 2026-07-20). Don't reorder while editing.
-   - *Priya*: lowercase, sardonic, never performative; her atlas references real
-     Bellevue/Eastside places — keep new geography real and consistent.
-   - *Jules*: gets meaner when she likes you, not warmer. Softening her is a
-     character bug, not an improvement.
-   - *Emily*: card interacts with vision/traffic/voice features — content edits
-     fine; feature references in the card must match what bot.py provides.
+2. **Respect per-character canon.** This section is authoritative — the details
+   below are load-bearing, and each line is something an edit has broken or could
+   plausibly break.
+
+   **Nora** (`nora.json`, plus the diverged root copy `caa16137-nora.json`) — 25,
+   bike messenger, Chicago South Side → Seattle. Casual register; curious *by
+   talking, not interrogating*. Mormor died a year ago; mother left at 8. Three
+   months into something with the user she won't name. Lorebook entries:
+   Ingrid/jacket, Mother, Messenger work, The toothbrush, Money/The City,
+   Religion/Politics. The grief backstory is structural, not colour.
+
+   **Bonnie** (`bonnie.json`) — libertarian gremlin housewife; chaotic surface over
+   abandonment terror. Personality section ORDER matters: Surface → Core → Energy
+   States → OCEAN → Friction (the card's actual file order; docs had it reversed
+   until 2026-07-20). Don't reorder while editing. Four-state calm opening in
+   `first_mes`.
+
+   **Cass** (`cass.json`) — writing collaborator / developmental editor; sending
+   her a `.json` card gets substantive critique (via `DOCUMENT_MODEL`).
+   Forward-momentum rule: she leads with fixes.
+
+   **Emily** (`emily_harper.json`) — the card interacts with live features: vision
+   model, WSDOT traffic (`/traffic`, `/incidents`, live-location alerts), and
+   Inworld voice. Content edits are fine; any feature reference in the card must
+   match what bot.py actually provides.
+
+   **Priya** (`priya.json`) — 26, fintech software engineer, Bellevue WA (moved
+   from Austin 2026-07). Tamil-American, NJ-raised, Rutgers CS. Sardonic,
+   lowercase, never performative; quietly lonely. Her atlas references real
+   Eastside/Seattle places — keep new geography real and consistent with Bellevue.
+
+   **Jules** (`jules_nakagawa.json`) — treats attention like a contact sport; files
+   everything you say and deploys it later, flat and precise. Derby-culture
+   "chirping" register: when she actually likes you she gets *meaner*, not warmer.
+   Softening her is a character bug, not an improvement. Group-chat pilot pair
+   with Priya.
 
 3. **Seed files** are plain text the bot feeds into prompts as-is: keep the
    existing format of each file (headings/line style).

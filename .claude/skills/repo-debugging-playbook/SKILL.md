@@ -35,7 +35,7 @@ Three rounds of speculative fixes once lost to one pasted log line.
 
    | Signature | Cause | Check |
    |---|---|---|
-   | `[run-bot] … exited (code 137)` | SIGKILL — Android phantom-process killer or OOM | `settings get global settings_enable_monitor_phantom_procs` — reverts after OS updates |
+   | `[run-bot] … exited (code 137)` | SIGKILL — Android phantom-process killer or OOM | `grep -h "exited (code" ~/*-bot/bot.log \| grep -v "code 0" \| tail -20` — the behavioural check. Reading the Android setting itself needs adb; `settings get global …` **cannot** work from Termux (uid restriction, confirmed 2026-07-25). See `termux-device-ops` |
    | `[run-bot] … exited (code 143)` | SIGTERM PTB didn't convert to a clean stop — OEM battery manager | dontkillmyapp.com for the manufacturer |
    | `[run-bot] … exited (code 0)`, no graceful-stop line | **Normal.** `/update` and `/restart` exit via `os._exit(0)` in `_schedule_exit()` and never log a graceful stop. NOT a kill | correlate the timestamps with deploys before investigating further |
    | Whole fleet restarting every ~5 min | watchdog.sh judging bots frozen | `tail ~/telegram-bot/watchdog.log` — it states its reason before every relaunch. Check this FIRST for any restart storm |
@@ -51,8 +51,8 @@ Three rounds of speculative fixes once lost to one pasted log line.
 
 5. **Fix** via `repo-change-control` if it's code; via the user's hands if it's
    device state (Android settings, venv rebuild, stale `bot.pid`, tmux sessions).
-   Exact device commands live in CLAUDE.md §"Termux / Android quirks" and
-   `OPS_MANUAL.md` — quote them precisely, the user copy-pastes.
+   Exact device commands live in `termux-device-ops` and `OPS_MANUAL.md` — load
+   the skill and quote them precisely, the user copy-pastes.
 
 6. **Close the loop:** after the fix, `/audit` on affected bots, and add an
    operational-log row (`.claude/memory/operational-log.md`, fixed format: date,
