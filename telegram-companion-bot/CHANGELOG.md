@@ -7,6 +7,66 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-26 — Content: per-character preset layers (no bot.py change, no version bump)
+
+**Inert until an `.env` names them.** Six new files, no instance loads any of them yet.
+Deploy is a `PRESET_FILES` edit per bot — or `/preset add <name>` to try one live and
+`/preset reset` to undo, which is what v2026-07-26.1 was built for.
+
+**The finding that shaped these.** The obvious reading of "presets that fit each
+character" is that each bot needs more of its own content. It doesn't — the cards already
+carry personality, and carry it well. What the cards *also* carry is a **format contract**,
+and those contracts contradict the one shared `[TEXT DELIVERY]` rule in `preset-core.txt`:
+
+| card says | `preset-core.txt` says |
+|---|---|
+| Bonnie: "3-6 paragraphs, matched to scene energy" | "one to three short paragraphs… prefer shorter responses" |
+| Priya: "sometimes a reply is two words", "no asterisk actions, no stage direction" | (same paragraph default) |
+| Emily: "third person with italicized action beats" | written throughout for a first-person text thread |
+| Cass: "she texts, doesn't narrate" | `preset-rp.txt`: "describe physical action in simple direct sentences" |
+
+Bonnie's is a flat numeric contradiction — 3-6 versus 1-3 with a "prefer shorter" — fighting
+on every message she sends. So the per-character layer's job is **arbitration, not
+personality**: say which instruction wins where the shared preset and the card disagree,
+plus the one or two things about that character that are easy to smooth away.
+
+**Six layers, ~250-290 raw tokens each**, deliberately small: `preset-{nora,bonnie,cass,
+emily,priya,jules}.txt`. Each is a format contract plus a "what not to smooth" section —
+Bonnie's tender beat must not snap back to goblin mode inside the same message; Jules's
+warmth must never arrive as a soft line; Priya's warmth is closer attention, never an
+affirmation; Nora's grief shows as behaviour, never as narration; Cass names the fix in the
+same message as the problem; Emily's interior runs on biology.
+
+**Recommended stacks** (raw / at the 0.92 calibration measured on cass):
+
+| bot | `PRESET_FILES` | raw | cal | vs today |
+|---|---|---|---|---|
+| cass | core, stepped, cass | 4827 | 4441 | **−3676** |
+| priya | core, stepped, priya | 4830 | 4444 | **−3673** |
+| nora | core, rp, explicit, stepped, nora | 8505 | 7825 | +2 |
+| bonnie | core, rp, explicit, stepped, bonnie | 8521 | 7839 | +18 |
+| emily | core, rp, explicit, stepped, emily | 8501 | 7821 | −2 |
+| jules | core, rp, explicit, stepped, jules | 8538 | 7855 | +35 |
+
+cass and priya shed ~43%; the four scene characters pay within ±35 tokens for a stack that
+actually fits them. This is a fit exercise, not a token-cutting one — the saving lands
+exactly where a character cannot use the scene machinery, which is the same shape as the
+v2026-07-25.6 result.
+
+**`preset-explicit.txt` gains a standing-consent block** (~55 tok) — the one genuinely new
+rule in the `EveningTruthGLM5.2` preset the owner supplied. The rest of that file was
+checked line by line against the layers and is already covered, in places near-verbatim:
+"{{user}} is imperfect… factually wrong" is `preset-core.txt:245-246`, OOC handling is
+`:254-255`, non-omniscience is `[EPISTEMIC HORIZON]`, "no melodramatic or cliché phrases"
+is `[ANTI-SLOP]`, "goals independent of {{user}}" is `[CHARACTER AGENCY]`. Adopting it
+whole would have cost ~650 tokens a message in duplication and imported a
+"never-ending roleplay" frame into what `preset-core.txt` calls a
+`[VOICEPRINT PRESET — TELEGRAM SINGLE SLOT]`.
+
+**Not done, deliberately:** no `.env` was changed, so nothing is live. Verified with
+`run-evals.sh` (26/26) and the full pytest suite (670) — content-only, so no `BOT_VERSION`
+bump and no delivery-gate entry.
+
 ## v2026-07-26.4 — The fleet's voiceprint was addressing `{{char}}`, not the character
 
 **⚠️ CHANGES THE ASSEMBLED PROMPT FOR ALL SIX BOTS.** Not a behaviour flag — the preset
