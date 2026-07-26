@@ -1,111 +1,112 @@
 # Cheat sheet — most-used commands
 
-Quick crib for day-to-day ops. Full reference: `OPS_MANUAL.md`.
+Quick crib for day-to-day ops. Full reference: `OPS_MANUAL.md` §VPS operations.
+
+All six bots run on the **VPS** under systemd (`bot@<instance>`) as of 2026-07-26.
+The phone is empty — its tooling (`/update`, `update-all.sh`, `sync-cards.sh`,
+`watchdog.sh`, tmux) manages nothing now. Everything below runs as root on the VPS
+unless it says otherwise.
+
 Raw base URL used below:
 `BASE=https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot`
-
-## Which machine am I on? (check BEFORE running anything)
-
-```bash
-uname -o     # "Android" = phone (Termux) · "GNU/Linux" = VPS
-```
-Prompt `root@vmi…` = VPS. Phone commands on the VPS (and vice versa) have burned
-us three times — check first.
 
 ## Telegram (any bot, no shell needed)
 
 | Command | What it does |
 |---|---|
-| `/audit` | Version, uptime, error counts, PID — the only proof a deploy landed |
-| `/errors [N]` | Last N error lines from that bot's log |
-| `/update` | Downloads bot.py from main, compile-checks, swaps, restarts (**send to ONE phone bot only**, then `/restart` the rest) |
-| `/restart` | Restart that bot (picks up swapped bot.py, edited .env, new preset/card) |
+| `/audit` | Version, uptime, error counts, PID — the proof a deploy landed |
+| `/errors [N]` | Last N lines of that bot's errors.log (**historical** — not "right now") |
+| `/restart` | Restart that bot (reloads bot.py, .env, preset, card) |
 | `/backup` | On-demand state backup |
 | `/nudges [N]` | Show/set daily proactive-message budget |
+| `/fleet` | Every peer's up/down, version, uptime, errors in one table |
 
-## Deploy — pick the path by what changed
+## Deploy
 
-| Changed | Phone | VPS |
-|---|---|---|
-| bot.py | `/update` to one bot → `/audit` → `/restart` others → `/audit` each | vps-sync (below) |
-| preset.txt / cards / seeds | curl loop below (or `bash sync-cards.sh`) → `/restart` affected | vps-sync (below) |
-| run-bot.sh | update-all one-liner (below) | n/a (systemd, no supervisor) |
-| an `.env` | edit on-device → `/restart` that bot → check `/errors` for `[config]` warnings | edit → `systemctl restart bot@<name>` |
+One command per instance — pulls preset + layers + card + bot.py from `main`,
+compile-checks bot.py before swapping (keeps `bot.py.bak`), normalizes
+`CHARACTER_CARD`, restarts + enables the unit, prints verification:
 
-**Phone: preset to all phone bots** (then `/restart` each from Telegram):
 ```bash
-for d in nora bonnie cass emily priya; do
-  curl -fsSL $BASE/preset.txt -o ~/$d-bot/preset.txt
+curl -fsSL $BASE/deploy/vps-sync.sh | bash -s -- nora
+```
+
+Whole fleet:
+```bash
+for b in nora bonnie cass emily priya jules; do
+  curl -fsSL $BASE/deploy/vps-sync.sh | bash -s -- $b
 done
 ```
 
-**Phone: full redeploy** (bot.py + supervisor, restarts every session):
-```bash
-curl -fsSL $BASE/update-all.sh | bash
-```
-
-**VPS: everything for one instance** (preset + card + bot.py, compile-checked,
-CHARACTER_CARD normalized, restart + enable, prints verification):
-```bash
-curl -fsSL $BASE/deploy/vps-sync.sh | bash -s jules
-```
+`.env` change only: edit the file → `systemctl restart bot@<name>` → check `/errors`
+for `[config]` warnings.
 
 ## Verify a deploy actually landed
 
 ```bash
-# Telegram: /audit → BOT_VERSION matches the release you shipped
-# Content changes don't bump BOT_VERSION — hash-check the file instead:
-curl -fsSL $BASE/preset.txt | sha256sum        # remote
-sha256sum <instance-dir>/preset.txt            # local — must match
+# bot.py release: /audit shows the new BOT_VERSION
+# content change (no version bump): hash-check instead
+curl -fsSL $BASE/preset.txt | sha256sum
+sha256sum /opt/telegram-bots/<instance>/preset.txt      # must match
+journalctl -u bot@<instance> | grep "STARTUP AUDIT" | tail -1
 ```
-A matching file with an old process is still the old content — preset and card
-load once at startup; a restart is always required.
+A matching file with an old process is still the old content — presets and cards load
+once at startup, so a restart is always required.
 
-## VPS service basics
+## Service basics
 
 ```bash
-systemctl status bot@jules --no-pager          # running? PID? since when?
-systemctl restart bot@jules
-journalctl -u bot@jules -n 50 --no-pager       # recent log / STARTUP AUDIT line
-journalctl -u bot@jules --since "-10 min" | grep -c Conflict   # >0 = two pollers
-systemctl list-units 'bot@*' --no-pager        # what's running that shouldn't be?
+systemctl status bot@nora --no-pager       # running? PID? since when?
+systemctl restart bot@nora
+systemctl enable bot@nora                  # survive reboot — start alone does NOT
+systemctl list-units 'bot@*' --no-pager    # what's running
+pgrep -af bot.py                           # expect exactly 6 lines
+```
+
+## Logs
+
+```bash
+journalctl -u bot@nora -f                  # live tail
+journalctl -u bot@nora -n 50 --no-pager
+journalctl -u bot@nora --since "-1 h" | grep -iE 'error|traceback'
 ```
 
 ## Trouble one-liners
 
 ```bash
-# Phone: who's running? (empty pgrep for a migrated bot = correct)
-tmux ls && pgrep -af bot.py
+# Two pollers on one token (telegram.error.Conflict) — find the second one FIRST
+pgrep -af bot.py                                   # >1 line for an instance = there it is
+systemctl list-units 'bot@*' --no-pager            # a unit running that shouldn't be
+journalctl -u bot@<name> --since "-2 min" | grep -c Conflict    # 0 = resolved
 
-# Phone: why did the watchdog restart something? It says so before every relaunch:
-tail -20 ~/telegram-bot/watchdog.log
+# Bot can't read its own files (perms look like "missing", not "forbidden")
+ls -la /opt/telegram-bots/<name>/state.json        # want: bot bot
+chown -R bot:bot /opt/telegram-bots/<name>
 
-# Phone: dead session recovery
-tmux kill-session -t <name>; bash ~/telegram-bot/run-bot.sh ~/<name>-bot <name>
+# Rollback a bad bot.py
+cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
+for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
 
-# Restart triage — read the EXIT CODE, not the graceful-stop line (corrected 2026-07-25:
-# /update and /restart exit via os._exit(0) and log no graceful stop either, so its
-# absence proves nothing). 137 = SIGKILL/phantom killer, 143 = SIGTERM/battery manager,
-# 0 = clean or owner-initiated:
-grep -h "exited (code" ~/*-bot/bot.log | grep -v "code 0" | tail -20
-
-# Only if that shows 137s. NB: `settings` must run under adb — in Termux it fails with
-# "Failure calling service settings". Android 11+ can adb to itself over wireless debugging.
-adb shell settings get global settings_enable_monitor_phantom_procs   # want: false
-
-# Process census (phantom limit is >32 system-wide; stacked shell loops show as
-# paired bash/sleep counts):
-ps -o pid,ppid,args -u $(id -u) | awk '{print $3}' | sort | uniq -c | sort -rn | head
+# Disk (state + journals)
+df -h /opt
 ```
 
-`telegram.error.Conflict` = two processes polling one token. Find the second
-poller (both machines!) before touching anything else — see MIGRATION.md 7b.
+`telegram.error.Conflict` = two processes polling one token. Two consecutive
+`/audit`s that disagree on PID, or uptime going backwards, is the same signature.
 
 ## Rules of thumb
 
 - Deploys pull from **main** — unmerged work ships nothing.
 - `/audit` (or a hash match + fresh STARTUP AUDIT) is the only "done."
-- One `/update`, five `/restart` — never six `/update`s.
-- Rollback: phone `~/telegram-bot/bot.py.bak`, VPS `/opt/telegram-bots/bot.py.bak`
-  — copy back over bot.py and restart.
-- Termux frozen ≠ bots dead: `/audit` from Telegram first, force-close last.
+- `systemctl start` ≠ `enable`. Unenabled units vanish on reboot.
+- `/errors` and `errors.log` are history; a bounded `journalctl` window is *now*.
+- Verify migrated/copied state by **content** (dict entry counts), not size or hash.
+- Rollback: `/opt/telegram-bots/bot.py.bak` → copy back, restart.
+
+## Phone (historical)
+
+The Termux phone holds only `~/<name>-bot.migrated` rollback dirs and
+`~/<name>-migrate.tar.gz` archives, kept until the 14-day soak passes (~2026-08-09).
+Nothing runs there. If a `~/<name>-bot` dir ever reappears **and** `watchdog.sh` is
+still installed, the watchdog will relaunch that bot and it will fight the VPS for
+the token — keep the dirs under their `.migrated` names.

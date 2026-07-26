@@ -4,46 +4,102 @@ Day-to-day operation reference for a running bot.
 
 ---
 
-## Starting & Stopping
+## VPS operations
 
-### Preferred: from Telegram, no shell needed
-Send `/update` to **one** bot — it downloads the latest `bot.py`, refuses to install
-anything that doesn't compile, and restarts itself. Then send `/restart` to the other
-bots (they share the same `bot.py`, so they just need to reload it). Verify each with
-`/audit` — it shows `BOT_VERSION` and uptime.
+**All six instances run on the VPS under systemd** (migrated 2026-07-26; the Termux
+phone is empty). Layout:
 
-### Start everything (first run, or after a run-bot.sh/supervisor change)
+| Path | What |
+|---|---|
+| `/opt/telegram-bots/bot.py` | the single shared bot.py (all six run it) |
+| `/opt/telegram-bots/bot.py.bak` | previous version — the rollback |
+| `/opt/telegram-bots/venv/` | shared virtualenv |
+| `/opt/telegram-bots/<instance>/` | per-instance dir: `.env`, card, state, memory |
+| `/opt/telegram-bots/world.txt` | shared world context (nora writes it) |
+| `/etc/systemd/system/bot@.service` | unit template, `WorkingDirectory=/opt/telegram-bots/%i` |
+
+Each bot is `bot@<instance>` — `bot@nora`, `bot@bonnie`, `bot@cass`, `bot@emily`,
+`bot@priya`, `bot@jules`. All commands below run as root on the VPS.
+
+### Start, stop, restart
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
+systemctl start bot@nora
+systemctl restart bot@nora
+systemctl stop bot@nora
+systemctl status bot@nora --no-pager      # running? PID? since when?
 ```
-Pulls the latest `bot.py` and `run-bot.sh`, then restarts every instance (`nora`,
-`bonnie`, `cass`, `emily`, `priya`, `jules`) under its own supervisor, which
-auto-restarts that bot if it ever crashes.
+`Restart=always` in the unit replaces the phone's `.supervise.sh` supervisor — a
+crashed bot comes back on its own. **`systemctl stop` stays stopped** (that's the
+difference from a crash); `systemctl start` brings it back.
 
-### Start or restart a single bot
+**Always `enable` a unit you intend to survive a reboot** — `start` alone does not:
 ```bash
-bash ~/telegram-bot/run-bot.sh ~/nora-bot nora
+systemctl enable bot@nora
+systemctl list-units 'bot@*' --no-pager   # what's running right now
+systemctl list-unit-files 'bot@*'         # enabled vs disabled
 ```
-(No folder argument starts the home/default instance instead of a named one.)
 
-### Attach to a running session
+### Whole fleet
 ```bash
-tmux attach -t nora
-tmux attach -t emily
-# etc.
+for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
+systemctl list-units 'bot@*' --no-pager
+pgrep -af bot.py                          # expect exactly 6 lines, one per instance
 ```
-Detach without stopping it: `Ctrl+B`, then `D`.
 
-### Stop one bot
+### Logs — journalctl replaces tmux attach and bot.log
 ```bash
-tmux kill-session -t nora
+journalctl -u bot@nora -f                 # live tail
+journalctl -u bot@nora -n 50 --no-pager   # last 50 lines
+journalctl -u bot@nora --since "-1 h" | grep -iE 'error|traceback'
+journalctl -u bot@nora | grep "STARTUP AUDIT" | tail -1   # what version is live
 ```
-The supervisor will *not* restart it after a manual kill like this — it only restarts
-on a crash. To bring it back: `bash ~/telegram-bot/run-bot.sh ~/nora-bot nora` again.
+`/errors [N]` from Telegram still works and reads the instance's own `errors.log`.
+Note that `errors.log` is *historical* — a tail of it proves what was written, not
+what is happening now. For "is it happening right now", use a bounded journalctl
+window with a count.
 
-### Stop everything
+### Deploying
+One command per instance; it pulls `preset.txt`, that instance's preset layers and
+card, and `bot.py` from `main`, compile-checks `bot.py` before swapping (keeping
+`bot.py.bak`), normalizes `CHARACTER_CARD`, restarts + enables the unit, and prints
+hash + STARTUP AUDIT verification:
 ```bash
-for s in nora bonnie cass emily priya jules; do tmux kill-session -t $s 2>/dev/null; done
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- nora
+```
+`/update`, `update-all.sh` and `sync-cards.sh` are phone-era and manage nothing now.
+
+**Rollback:**
+```bash
+cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
+for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
+```
+
+### File ownership
+Bots run as the `bot` user. Anything you create or unpack in an instance dir must be
+handed over, or the bot silently can't read it (`Path.exists()` returns False on a
+permissions error, so it looks *missing*, not *forbidden*):
+```bash
+chown -R bot:bot /opt/telegram-bots/<instance>
+```
+
+### The one hard rule: a single poller per token
+`telegram.error.Conflict: terminated by other getUpdates request` means two processes
+are polling one bot's token. Find the second one before doing anything else:
+```bash
+pgrep -af bot.py                          # more than one line for an instance = there it is
+systemctl list-units 'bot@*' --no-pager   # a unit running that shouldn't be
+journalctl -u bot@<instance> --since "-2 min" | grep -c Conflict   # 0 = resolved
+```
+Two consecutive `/audit`s that disagree on PID or show uptime going backwards are the
+signature of a hidden second poller answering in turn. Causes seen in practice: a
+phone instance that was never fully stopped, and an instance dir cloned from a live
+one whose `.env` still held a working token.
+
+### Health
+```bash
+systemctl status bot@nora --no-pager | head -12
+df -h /opt                                # state + logs live here
+grep -c HEALTHCHECK_URL /opt/telegram-bots/*/.env   # dead-man's-switch coverage
 ```
 
 ---
