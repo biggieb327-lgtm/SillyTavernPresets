@@ -228,15 +228,36 @@ hash + STARTUP AUDIT verification.
 
 ### 8. Set up dead man's switch
 
-In the VPS `.env`:
-```
-HEALTHCHECK_URL=https://hc-ping.com/<your-jules-uuid>
-```
-Create the check on healthchecks.io: 30-min period, 15-min grace, alert via Telegram.
-Restart the unit:
+Create the check on healthchecks.io first (45-60 min period, 15-min grace, alert via
+Telegram — the bot pings every 30 min, so a 30-min period leaves zero headroom and
+flaps), then copy **its full ping URL** into the instance's `.env` as
+`HEALTHCHECK_URL`. The value is the complete URL from the dashboard and nothing else:
+`https://hc-ping.com/` followed by the check's UUID, 56 characters total.
+
+Do not hand-assemble it, and do not paste a full URL after an existing
+`https://hc-ping.com/` — that produces
+`https://hc-ping.com/https://hc-ping.com/<uuid>`, which hc-ping answers with HTTP 400.
+
 ```bash
 sudo systemctl restart bot@jules
 ```
+
+**Verify it — the ping is not self-announcing.** Before v2026-07-26.5 a rejected ping
+logged nothing at all (`requests` doesn't raise on 4xx), and five of six instances ran
+for weeks on the doubled URL above with every audit line reading `[audit] OK`. Test the
+URL the bot actually uses, from its own `.env`:
+```bash
+for b in nora bonnie cass emily priya jules; do
+  url=$(grep '^HEALTHCHECK_URL=' /opt/telegram-bots/$b/.env | cut -d= -f2- | tr -d '"')
+  printf '%s: len=%s ' "$b" "${#url}"
+  curl -fsS -o /dev/null "$url" && echo OK || echo FAILED
+done
+grep -h '^HEALTHCHECK_URL=' /opt/telegram-bots/*/.env | sort -u | wc -l   # want one per instance
+```
+Every line must read `len=56 OK`. The distinct-URL count matters as much as the pings:
+if two instances share a UUID, one bot's pings keep the check green while the other
+dies unseen. On v2026-07-26.5+, a rejected ping also logs a loud warning and counts a
+`healthcheck_rejected` error visible in `/audit`.
 
 ### 9. Soak period (7 days)
 

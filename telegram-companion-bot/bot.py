@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.4"
+BOT_VERSION = "2026-07-26.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11957,10 +11957,21 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
 
     # Dead man's switch: prove liveness to the external monitor. If these pings stop,
     # the service alerts the owner — covering everything a dead bot can't report.
+    # The status check is load-bearing: requests does NOT raise on 4xx/5xx, so a
+    # rejected ping used to complete the try block silently and log nothing. Five of
+    # six instances ran for weeks on a malformed URL (doubled host — hc-ping returned
+    # 400 every time) while every audit line read OK. A monitor that reports success
+    # while unreachable is worse than no monitor: it buys false confidence.
     if HEALTHCHECK_URL:
         try:
-            await asyncio.to_thread(
+            resp = await asyncio.to_thread(
                 lambda: _get_session().get(HEALTHCHECK_URL, timeout=10))
+            if resp.status_code >= 400:
+                _count_error("healthcheck_rejected")
+                log.warning(
+                    "[audit] healthcheck ping REJECTED: HTTP %s from the monitor — "
+                    "the dead man's switch is NOT working. Check HEALTHCHECK_URL.",
+                    resp.status_code)
         except Exception as e:
             log.warning("[audit] healthcheck ping failed: %s", e)
 
