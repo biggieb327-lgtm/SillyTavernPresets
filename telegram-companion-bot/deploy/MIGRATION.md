@@ -345,6 +345,46 @@ Nora is the `WORLD_GENERATOR=1` instance. When migrating her:
 - She was the last session in `update-all.sh` on the phone. Once she's migrated,
   `update-all.sh` and `watchdog.sh` on the phone have nothing left to manage.
 
+**Her tmux session may be named `nora` OR `telegram-bot`.** Check `tmux ls` and kill
+whichever exists — `watchdog.sh` checks both names against the same dir for exactly
+this reason.
+
+**Do NOT rename `~/telegram-bot/`.** That is the shared CODE dir (venv, `bot.py`, all
+the ops scripts) — her *instance* dir is `~/nora-bot`. Renaming the code dir breaks
+every remaining phone script.
+
+**The step-3 rename does not silence the watchdog for nora — she is the one
+exception.** The other five instances are checked by `check_instance`, which opens
+with `[ -d "$dir" ] || return`, so a renamed dir makes them invisible. Nora's branch
+in `run_checks` bypasses that function entirely:
+```bash
+if [ "$nora_up" = false ]; then
+  _log "RELAUNCH nora: session down (...)"
+  bash "$BOT_SRC/run-bot.sh" "$nora_dir" nora     # no [ -d ] guard
+fi
+```
+With `~/nora-bot` renamed, `nora_up` is false forever, so the watchdog retries every
+cycle. **Nothing actually starts** — `run-bot.sh` has its own guard (`cd` fails →
+"Instance folder not found" → `exit 1`) — so there is no second poller, only an
+endless `RELAUNCH nora` in `watchdog.log`.
+
+The real hazard is conditional: **if `~/nora-bot` ever reappears** (restoring a backup
+to inspect it, an rsync, a stray `mkdir`), the watchdog starts her within one cycle
+and she immediately fights the VPS instance for the token. Her directory must stay
+gone under its `.migrated` name.
+
+**So nora's cutover gets one step the others don't — actually retire the watchdog**,
+which by then has nothing left to supervise:
+```bash
+tmux ls | grep -q watchdog && tmux kill-session -t watchdog
+crontab -l | grep -i watchdog     # it may run from cron instead of (or as well as) tmux
+crontab -e                        # remove the watchdog line if present
+```
+Verify it stays gone across one full interval (default 300s) before declaring done:
+```bash
+sleep 310; tail -5 ~/telegram-bot/watchdog.log     # no new RELAUNCH entries
+```
+
 ### Group-chat pilot (Priya + Jules) — split by the migration
 
 Unlike `world.txt` above, this one does **not** degrade gracefully, and it is already in

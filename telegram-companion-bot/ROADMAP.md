@@ -28,8 +28,12 @@ single-device blast radius.
 - **Status:** Pilot soak PASSED 2026-07-26 — jules's week on the VPS closed with +7
   errors total, 0 in the last hour, current release running, no fabricated-timestamp
   recurrence, and no note-ownership regressions (the v2026-07-19.2 backstop fired
-  once, correctly, on a pre-fix polluted note). Phase 2 authorized and underway
-  (cass on the VPS per 1.6); remaining: bonnie, emily, priya, then nora last.
+  once, correctly, on a pre-fix polluted note). **Phase 2 is 5/6 done as of
+  2026-07-26** — cass, jules, priya, bonnie, emily all on systemd. Only **nora**
+  remains; see MIGRATION.md "Nora-specific notes" first (her watchdog branch skips
+  the `[ -d ]` guard, and she's the one whose cutover should also retire
+  `watchdog.sh`). Priya's and bonnie's cutovers each hit an incident — both in the
+  operational log, both now fixed in the runbook.
 - **Plan:**
   1. Pilot with one low-state bot (jules). Cutover is per-bot and brief: stop the
      instance on the phone → restore its directory from the latest backup-all.sh
