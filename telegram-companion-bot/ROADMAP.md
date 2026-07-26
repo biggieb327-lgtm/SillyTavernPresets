@@ -25,10 +25,11 @@ single-device blast radius.
 - **Evidence:** Changelog v2026-07-05.12 is explicitly "Phase 1 of VPS migration":
   `deploy/bot@.service` (Restart=always) and `deploy/install-vps.sh` already exist and
   are confirmed compatible with the PID-lock/exit patterns. Phase 2 was never specced.
-- **Status:** Pilot LIVE — jules cut over to the VPS 2026-07-19 (two incidents during
-  cutover, both recorded in the operational log; runbook gained steps 7b/7c and
-  `deploy/vps-sync.sh` is now the VPS deploy path). 7-day soak underway; Phase-2
-  migrations start after soak passes (~2026-07-26).
+- **Status:** Pilot soak PASSED 2026-07-26 — jules's week on the VPS closed with +7
+  errors total, 0 in the last hour, current release running, no fabricated-timestamp
+  recurrence, and no note-ownership regressions (the v2026-07-19.2 backstop fired
+  once, correctly, on a pre-fix polluted note). Phase 2 authorized and underway
+  (cass on the VPS per 1.6); remaining: bonnie, emily, priya, then nora last.
 - **Plan:**
   1. Pilot with one low-state bot (jules). Cutover is per-bot and brief: stop the
      instance on the phone → restore its directory from the latest backup-all.sh

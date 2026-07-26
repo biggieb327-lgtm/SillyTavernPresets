@@ -90,7 +90,10 @@ chown -R bot:bot jules
 ```
 The dir MUST be named `<instance>` (e.g. `jules`) to match `bot@jules` →
 `WorkingDirectory=/opt/telegram-bots/jules`. The card is whatever `CHARACTER_CARD` in
-`.env` points to — jules uses **`jules.json`**, not `jules_nakagawa.json`.
+`.env` points to — normalize it to the **repo filename** (jules: `jules_nakagawa.json`,
+emily: `emily_harper.json`): a renamed on-device copy silently exempts the instance
+from every future card deploy (bit jules on 2026-07-19; step 7c's `vps-sync.sh` fixes
+it automatically on first run).
 
 ### 5. Verify VPS .env
 
