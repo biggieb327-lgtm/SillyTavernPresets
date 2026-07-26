@@ -21,8 +21,14 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
 
 **LLM call budget (phone bandwidth)**
 3. NO new per-message LLM side calls. The single combined `post_reply_analysis`
-   call is the extension point: add JSON keys to it. A sibling call competes with
-   the user-facing reply for phone bandwidth.
+   call is the extension point: add JSON keys to it.
+   **The rule survived the VPS migration; its reason changed.** It was originally
+   phone-bandwidth (six bots, one Android radio). Since 2026-07-26 all six run on
+   the VPS and that constraint is gone — but two others are not: **latency** (a
+   sibling call delays every user-facing reply by a full round-trip) and **cost**
+   (each call re-pays the whole prompt; instances run ~17k input tokens per call,
+   so an extra per-message call is ~17k × messages × 6 bots). Do not read "the
+   phone is gone" as "this invariant is void."
    **Documented carve-out — do not "fix" it:** `MEMORY_SEMANTIC_LIVE` adds one
    small **embedding** round-trip per reply for live semantic recall
    (owner-approved v2026-07-12.2). It is off-loop, cached, timeout-bounded, and
