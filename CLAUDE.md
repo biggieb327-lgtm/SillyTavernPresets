@@ -3,7 +3,8 @@
 ## What this repo is
 
 A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running six AI
-character instances — four on Android via Termux, two on a VPS. One `bot.py` handles all
+character instances, all on a VPS under systemd (migrated off the Termux phone
+2026-07-26). One `bot.py` handles all
 characters; instances differ only by directory, `.env`, and SillyTavern v2 character card.
 The repo root also archives standalone SillyTavern presets/cards and an unrelated
 `voicekit-starter/` project.
@@ -82,31 +83,38 @@ Full index, including the less common skills: `skill-router`.
 
 ## Bot instances
 
-| Session | Platform | Directory | Character card |
-|---------|----------|-----------|----------------|
-| `nora` | phone | `~/nora-bot/` | `nora.json` |
-| `bonnie` | phone | `~/bonnie-bot/` | `bonnie.json` |
-| `cass` | **VPS** | `/opt/telegram-bots/cass/` | `cass.json` |
-| `emily` | phone | `~/emily-bot/` | `emily_harper.json` |
-| `priya` | phone | `~/priya-bot/` | `priya.json` |
-| `jules` | **VPS** | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
+**All six run on the VPS under systemd as of 2026-07-26** — the Termux phone is empty
+(ROADMAP 1.2 Phase 2 complete).
 
-Phone instances share the venv at `~/telegram-bot/venv/`; VPS instances share
-`/opt/telegram-bots/venv/`. `bot.py` lives at `~/telegram-bot/bot.py` (phone) and
-`/opt/telegram-bots/bot.py` (VPS).
+| Session | Directory | Character card |
+|---------|-----------|----------------|
+| `nora` | `/opt/telegram-bots/nora/` | `nora.json` |
+| `bonnie` | `/opt/telegram-bots/bonnie/` | `bonnie.json` |
+| `cass` | `/opt/telegram-bots/cass/` | `cass.json` |
+| `emily` | `/opt/telegram-bots/emily/` | `emily_harper.json` |
+| `priya` | `/opt/telegram-bots/priya/` | `priya.json` |
+| `jules` | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
+
+All instances share the venv at `/opt/telegram-bots/venv/`; `bot.py` lives at
+`/opt/telegram-bots/bot.py`. Each runs as `bot@<instance>` (unit file
+`deploy/bot@.service`, `WorkingDirectory=/opt/telegram-bots/%i`).
 
 The instance directory is the basename on the `=== STARTUP AUDIT === … Instance:`
 line — **that runtime value is authoritative** if it ever disagrees with this table.
-The authoritative instance list is the loop in `update-all.sh` (phone) and the
-`bot@<instance>` systemd units (VPS). Phone scripts (`update-all.sh`,
-`sync-cards.sh`, `watchdog.sh`) skip VPS instances automatically (no local dir).
-Nora's directory is pinned by the `nora-instance-dir` eval.
+The authoritative instance list is the set of `bot@<instance>` systemd units.
+
+**Phone-era tooling is historical.** `update-all.sh`, `sync-cards.sh`,
+`watchdog.sh`, `run-bot.sh` and the `.supervise.sh` supervisor were Termux-only and
+now manage nothing; VPS deploys go through `deploy/vps-sync.sh` (see Deployment
+below). The phone retains `~/<name>-bot.migrated` rollback dirs until the 14-day
+soak passes.
 
 ## Stack
 
-- Python **3.14** on Termux/Android — the `=== STARTUP AUDIT ===` line reports the
-  live version; trust it over this file. Practical effect: cp314 wheels are scarce,
-  so any new binary dependency is likely to compile from source on-device.
+- Python **3.12** on the VPS (Ubuntu 24.04) — the `=== STARTUP AUDIT ===` line reports
+  the live version; trust it over this file. The phone's cp314 wheel scarcity is
+  historical: wheels are now readily available, so a new binary dependency is no
+  longer likely to compile from source.
 - `python-telegram-bot >=21.0,<22.0` (async, job-queue). PTB v21's deprecated
   `asyncio.get_event_loop()` call is worked around in `main()` — don't remove it.
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`.
@@ -116,13 +124,20 @@ Nora's directory is pinned by the `nora-instance-dir` eval.
 
 ## Deployment
 
-Five deploy paths, split across phone (nora, bonnie, emily, priya — tmux) and VPS
-(cass, jules — systemd). Both pull from `main`; the phone scripts silently skip VPS
-instances, so a "fleet deploy" that only ran the phone paths leaves two bots behind.
-Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
+All six instances deploy from `main` via **`deploy/vps-sync.sh`**, one invocation per
+instance — it pulls `preset.txt`, the instance's preset layers and card, and `bot.py`
+(compile-checked, `bot.py.bak` kept), normalizes `CHARACTER_CARD`, restarts and
+enables the unit, then prints hash + STARTUP AUDIT verification:
 
-**Bump `BOT_VERSION` on every release** — it's how `/update` detects new versions and
-`/audit` proves a deploy landed. The delivery gate enforces this.
+```bash
+curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- <instance>
+```
+
+Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
+The phone-era paths (`/update`, `update-all.sh`, `sync-cards.sh`) are historical.
+
+**Bump `BOT_VERSION` on every release** — it's how `/audit` proves a deploy landed.
+The delivery gate enforces this.
 
 Ops essentials: `/update` `/restart` `/audit` `/errors [N]` `/backup`.
 Full command reference: `OPS_MANUAL.md`.
