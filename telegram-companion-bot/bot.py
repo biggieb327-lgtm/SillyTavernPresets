@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.5"
+BOT_VERSION = "2026-07-26.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1851,9 +1851,13 @@ _garmin_obj = None  # cached logged-in client
 if GARMIN_ENABLED and _Garmin is None:
     # Credentials set but the library is absent: the feed would be silently dead. Surface it
     # in /audit rather than letting the owner wonder why she never mentions their sleep.
+    # Name the VENV's interpreter, not bare `pip`: Ubuntu 24.04 refuses system-wide
+    # pip installs (PEP 668, "externally-managed-environment"), and a system install
+    # wouldn't reach the bots' venv anyway. sys.executable is the venv python by
+    # construction, so this stays correct on any host without hardcoding a path.
     _CONFIG_WARNINGS.append(
         "GARMIN_EMAIL/PASSWORD set but the garminconnect library is missing — "
-        "health feed inert (pip install garminconnect)")
+        f"health feed inert ({sys.executable} -m pip install garminconnect)")
 
 # Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
 # "wound up" without false-alarming on workouts. Only active when the feed is configured.
@@ -11650,7 +11654,8 @@ def _garmin_off_reason() -> str:
     if not (GARMIN_EMAIL and GARMIN_PASSWORD):
         return "The health feed isn't set up (GARMIN_EMAIL and GARMIN_PASSWORD missing)."
     if _Garmin is None:
-        return "The garminconnect library isn't installed (pip install garminconnect)."
+        return ("The garminconnect library isn't installed "
+                f"({sys.executable} -m pip install garminconnect).")
     return ""
 
 

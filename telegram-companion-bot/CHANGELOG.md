@@ -67,6 +67,27 @@ whole would have cost ~650 tokens a message in duplication and imported a
 `run-evals.sh` (26/26) and the full pytest suite (670) — content-only, so no `BOT_VERSION`
 bump and no delivery-gate entry.
 
+## v2026-07-26.6 — The library-missing warning named a command that cannot work
+
+**Root cause (hit live, 2026-07-26):** both "garminconnect is missing" messages —
+the `/audit` config warning and the health-feed status string — told the operator to
+run `pip install garminconnect`. On Ubuntu 24.04 that fails outright with
+`error: externally-managed-environment` (PEP 668), and even where it succeeds it
+installs system-wide, which is not where the bots look: every instance runs from the
+shared venv at `/opt/telegram-bots/venv/`. Since the 2026-07-26 migration the fleet is
+100% VPS, so the suggested command was wrong for **every** instance. `requirements.txt`
+has carried the correct venv-pip invocation in its comments all along; the runtime
+messages simply disagreed with it.
+
+**Fix:** both messages now interpolate `sys.executable`, which *is* the venv's
+interpreter by construction — so they render as
+`/opt/telegram-bots/venv/bin/python -m pip install garminconnect` and stay correct on
+any host without hardcoding a path (invariant #2: no hardcoded instance/host paths in
+shared logic).
+
+**Scope:** message text only. No behavior change, no new env var, no kill switch —
+"off" would mean restoring a command that cannot succeed.
+
 ## v2026-07-26.5 — The dead man's switch reported OK while being rejected
 
 **Root cause (found live, 2026-07-26):** `requests` does not raise on 4xx/5xx — it
