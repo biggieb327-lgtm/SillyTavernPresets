@@ -182,11 +182,43 @@ def env_drift() -> list[str]:
     return out
 
 
+# ── 5. Install advice that hardcodes a package manager ──────────────────────
+def install_hint() -> list[str]:
+    """An install hint naming the wrong package manager sends the operator to a
+    command that cannot run. `pkg` is Termux-only and does not exist on the Ubuntu
+    VPS the fleet has run on since 2026-07-26; bare `pip install` is refused there
+    outright (PEP 668, externally-managed-environment) and would miss the venv anyway.
+
+    This class was fixed once per instance and came back: v2026-07-26.6 corrected the
+    garminconnect pip hint, and two `pkg install` hints survived untouched — one of
+    them in a message sent to Telegram. Route every hint through `_pkg_hint()` /
+    `_pip_hint()` in bot.py, which derive the right command from the running host.
+
+    Benign hits to expect: the helper definitions themselves, and comments explaining
+    the history. Both are excluded below, so anything reported is a live string."""
+    src = BOT.read_text(encoding="utf-8").splitlines()
+    out = []
+    for i, line in enumerate(src, 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue                                   # commentary, not advice
+        if "_pkg_hint" in line or "_pip_hint" in line:
+            continue                                   # correct callers
+        if "sweep-ok" in line:
+            continue                                   # reviewed; reason on/above the line
+        if re.search(r'["\'][^"\']*\b(?:pkg|apt|apt-get)\s+install\b', line):
+            out.append(f"{BOT.name}:{i} hardcoded system-package hint — use _pkg_hint()")
+        if re.search(r'["\'][^"\']*(?<!-m )\bpip\s+install\b', line):
+            out.append(f"{BOT.name}:{i} hardcoded pip hint — use _pip_hint()")
+    return sorted(set(out))
+
+
 SCANNERS = {
     "markdown-interp": markdown_interp,
     "shared-writes": shared_writes,
     "silent-return": silent_return,
     "env-drift": env_drift,
+    "install-hint": install_hint,
 }
 
 

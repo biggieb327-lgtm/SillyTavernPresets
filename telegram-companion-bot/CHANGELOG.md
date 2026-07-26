@@ -67,6 +67,41 @@ whole would have cost ~650 tokens a message in duplication and imported a
 `run-evals.sh` (26/26) and the full pytest suite (670) — content-only, so no `BOT_VERSION`
 bump and no delivery-gate entry.
 
+## v2026-07-26.8 — Install hints told the operator to run commands that cannot run
+
+**The class, in one sentence:** *an install hint that hardcodes a package manager sends
+the operator to a command that does not exist on the host the bot is actually running
+on.*
+
+**Root cause:** v2026-07-26.6 fixed the garminconnect `pip install` hint by
+interpolating `sys.executable` — but that fixed the **instance, not the class**. Three
+more hardcoded hints survived, one of them in a message sent to Telegram:
+
+| site | said | why it fails on the fleet |
+|---|---|---|
+| `bot.py` PDF fallback (user-facing) | `pkg install mupdf-tools` | `pkg` is Termux-only; it does not exist on Ubuntu |
+| `--check-config` timezone preflight | `pkg install tzdata` | same |
+| JobQueue-missing warning | `pip install "python-telegram-bot[job-queue]"` | PEP 668 refuses system-wide pip on Ubuntu 24.04 |
+
+The third was found by the new scanner, not by hand — a targeted grep for
+Termux/Android terms missed it because the string names neither.
+
+**Fix — one derived helper per package manager, not four point edits:**
+- `_pkg_hint(pkg)` → `pkg install …` under Termux, `sudo apt install …` otherwise.
+- `_pip_hint(pkg)` → `{sys.executable} -m pip install …`, which is the venv interpreter
+  by construction, so it needs no hardcoded venv path and sidesteps PEP 668.
+- All four sites now route through them, including the garminconnect hints from .6.
+
+**New sweep scanner `install-hint`** (`.claude/tools/sweep.py`) so the class cannot
+return silently: it flags any string literal containing a hardcoded `pkg`/`apt`/`pip
+install`, skipping comments, correct callers, and lines marked `# sweep-ok`. Reviewed
+exceptions carry their reason on the line, per `fix-the-class`. Break-tested: clean
+tree reports 0, re-injecting the exact `pkg install tzdata` defect reports 1.
+
+**Benign hit recorded, not "fixed":** `_acquire_termux_wake_lock()` still calls
+`termux-wake-lock`, guarded by `shutil.which(...)`. On the VPS the binary is absent, so
+the function is silently inert — correct as written, and the guard is why.
+
 ## v2026-07-26.7 — The restart-storm alarm fired on every deploy
 
 **Root cause (owner-reported, 2026-07-26):** `/audit` warned "restarted 4x in the last

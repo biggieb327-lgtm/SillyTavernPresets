@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.7"
+BOT_VERSION = "2026-07-26.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -500,6 +500,28 @@ PRESET_COMMAND = os.getenv("PRESET_COMMAND", "1").lower() not in ("0", "false", 
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 _HTML_ESCAPE_RE = re.compile(r"[&<>]")
+
+# "You need to install X" hints, derived rather than hardcoded. Termux used `pkg`;
+# the fleet has been Ubuntu since 2026-07-26, where `pkg` does not exist at all — so
+# a hardcoded hint sends the operator to a command that cannot run. v2026-07-26.6
+# fixed this for the garminconnect *pip* hint by interpolating sys.executable, but
+# that was the instance, not the class: two `pkg install` hints survived. One helper
+# per package manager keeps every future hint correct on whatever host it runs on.
+_IS_TERMUX = "com.termux" in sys.prefix or os.path.isdir("/data/data/com.termux/files")
+
+
+def _pkg_hint(pkg: str) -> str:
+    """System-package install hint for the host this instance is actually on."""
+    # sweep-ok (both branches): this IS the helper the scanner points callers to.
+    return (f"pkg install {pkg}" if _IS_TERMUX  # sweep-ok
+            else f"sudo apt install {pkg}")  # sweep-ok
+
+
+def _pip_hint(pkg: str) -> str:
+    """Python-package install hint. sys.executable IS the venv interpreter, so this
+    stays right without hardcoding a venv path, and it sidesteps PEP 668 (Ubuntu
+    refuses system-wide `pip install` with externally-managed-environment)."""
+    return f"{sys.executable} -m pip install {pkg}"
 _HTTP_UA = "Mozilla/5.0 (Linux; Android) CompanionBot/1.0"
 # DuckDuckGo's HTML endpoint is picky about non-browser UAs.
 _SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1857,7 +1879,7 @@ if GARMIN_ENABLED and _Garmin is None:
     # construction, so this stays correct on any host without hardcoding a path.
     _CONFIG_WARNINGS.append(
         "GARMIN_EMAIL/PASSWORD set but the garminconnect library is missing — "
-        f"health feed inert ({sys.executable} -m pip install garminconnect)")
+        f"health feed inert ({_pip_hint('garminconnect')})")
 
 # Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
 # "wound up" without false-alarming on workouts. Only active when the feed is configured.
@@ -8809,7 +8831,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except FileNotFoundError:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text="[image-only PDF — install mupdf-tools to enable vision fallback: pkg install mupdf-tools]",
+                        text=("[image-only PDF — install mupdf-tools to enable vision "
+                              f"fallback: {_pkg_hint('mupdf-tools')}]"),
                     )
                 except Exception as e:
                     log.error("PDF OCR fallback failed: %s", e)
@@ -11655,7 +11678,7 @@ def _garmin_off_reason() -> str:
         return "The health feed isn't set up (GARMIN_EMAIL and GARMIN_PASSWORD missing)."
     if _Garmin is None:
         return ("The garminconnect library isn't installed "
-                f"({sys.executable} -m pip install garminconnect).")
+                f"({_pip_hint('garminconnect')}).")
     return ""
 
 
@@ -12796,7 +12819,7 @@ def _run_config_check() -> bool:
     if tz_env and TZ is None:
         check(False, "timezone",
               f"BOT_TIMEZONE={tz_env!r} did not resolve — bad name or missing tzdata "
-              f"(pkg install tzdata); reminders and quiet hours would drift to naive local time")
+              f"({_pkg_hint('tzdata')}); reminders and quiet hours would drift to naive local time")
     else:
         check(True, "timezone", str(TZ) if TZ else "unset — naive local time")
     check(bool(NAME), "character card", f"{CARD_NAME} → {NAME or 'NO NAME'}")
@@ -13070,7 +13093,7 @@ def main():
                         "stays fully disabled (fail closed).")
     else:
         log.warning('JobQueue unavailable — scheduled features disabled. '
-                    'Install with: pip install "python-telegram-bot[job-queue]"')
+                    f'Install with: {_pip_hint(chr(34) + "python-telegram-bot[job-queue]" + chr(34))}')
 
     log.info("%s is running (home: %s)", NAME, BASE_DIR)
     if ALLOWED_USERS:
