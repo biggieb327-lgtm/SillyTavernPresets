@@ -18,7 +18,7 @@ Big goal → understand intent → split into microtasks → dispatch → tools 
 | Work | Route to |
 |---|---|
 | System audits, root-cause analysis, architecture, adversarial review, improvement loops | `opus` (adversarial-critic, improvement-analyst, eval-designer) |
-| Implementation, repairs, QA | `sonnet` (builder, system-fixer, qa-engineer) |
+| Implementation, repairs, QA | `sonnet` (builder, coder, system-fixer, qa-engineer) |
 | Lookups, summarization, hygiene | `haiku` (context-librarian, research-scout) |
 
 ## Memory rules
