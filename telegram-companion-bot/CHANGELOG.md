@@ -7,6 +7,81 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-26.1 — Switch preset layers from Telegram (`/preset`)
+
+**Not a bug fix — a gap.** `PRESET_FILES` (v2026-07-25.5) made the voiceprint layered and
+swappable, but the only way to swap it is to SSH or open Termux, edit an instance `.env`,
+and restart the bot. That cost is why ROADMAP 3.13 — the content split that layering was
+built to enable — has been open since it shipped: evaluating whether cass reads better
+without `preset-rp.txt` means an edit-and-restart cycle per experiment, per bot, on a
+phone keyboard. The mechanism was there; the feedback loop wasn't.
+
+**Why it's cheap:** `assemble_messages` already re-reads `PRESET_LAYERS` from the module
+global on **every message** (v2026-07-25.5 injects one system block per layer). Rebinding
+that global therefore takes effect on the next reply with no restart, and rebinding is
+atomic — a reply already assembling its prompt keeps the list object it started with, so
+no lock is needed. The feature is a command plus persistence, not new prompt machinery.
+
+**What shipped** — `/preset`, admin-gated, per-instance:
+
+| form | effect |
+|---|---|
+| `/preset` | active layers, per-layer and total token cost, source (`.env` or override), what's on disk |
+| `/preset core,rp` | replace the stack |
+| `/preset add explicit` / `/preset drop explicit` | adjust one layer |
+| `/preset reset` | back to the `.env` stack, override cleared |
+
+Names resolve loosely (`core` → `preset-core.txt`) but **never approximately**: an
+unmatched name is rejected with the available list rather than resolved to a plausible
+neighbour. Every change reports the token delta (`~7102t -> ~11037t (+3935t per
+message)`), because the layers are large enough that a casual swap can quietly triple
+the per-message bill.
+
+**Three refusals, each guarding the failure mode the fallback ladder was built for**
+(v2026-07-25.6 — silently dropping voice rules presents as a *model* regression, which is
+the most expensive kind of bug to diagnose here):
+1. A stack is **dry-run resolved before the live one is touched**. If nothing resolves,
+   the current stack stays and the warnings are shown.
+2. An empty stack is refused outright.
+3. On startup, a saved override whose files have vanished (renamed, or an `.env` deployed
+   ahead of its files) reverts to the `.env` baseline and appends a config warning —
+   never to the ~250-token built-in stub.
+
+**Persistence and the kill switch.** The choice is saved as `preset_override` in
+`state.json` and re-applied by `apply_overrides()` alongside `/setmodel` and `/settings`.
+`PRESET_COMMAND=0` unregisters the command **and makes startup ignore a saved override** —
+that pairing is deliberate and is the recovery path: a stack that ruins a character's
+voice is undone with one `.env` line plus a restart, with no state.json surgery on a
+phone. Default on, per the 2026-07-18 policy.
+
+**Plain text, by construction.** The command interpolates layer filenames and resolver
+warning strings, which is exactly the shape that broke `/audit` in v2026-07-25.7 and the
+11 commands swept in .13 — a stray `_` or `[` makes Telegram reject the whole message, so
+the command replies with silence. Pinned by a test rather than left to review; the
+generalised `TestNoUnescapedMarkdownInterpolation` guard also covers it automatically.
+
+**`/audit` now marks an active override** (`Preset layers (via /preset): …`). Without it,
+an audit showing layers the `.env` doesn't name sends the next reader to the wrong file —
+the same class as the mislabelled prompt block corrected in v2026-07-25.5.
+
+**Known limit, not a defect.** `/preset` can only choose layers **on disk in that
+instance directory**. Phone instances have all of them (`sync-cards.sh` copies every
+`preset-*.txt`), so any combination works. On the VPS, `vps-sync.sh` pulls only the layers
+`PRESET_FILES` names — deliberate, since v2026-07-25.5 rejected duplicating a layer list
+into the script — so **cass and jules can only switch among the layers their `.env`
+already names**. `/preset` with no arguments lists what that instance actually has, so the
+constraint is visible at the point of use rather than surprising. Documented in
+`.env.example`.
+
+**Tests:** 27 across `TestPresetNameNormalization` (loose but never approximate matching),
+`TestPresetArgParsing` (comma/space equivalence, dedup — a layer listed twice would
+silently double its cost), `TestPresetSwap` (both globals rebound, dry-run does not
+mutate), `TestPresetOverridePersistence` (re-applied on startup, stranded by the kill
+switch, vanished layers revert to `.env`, serialized into state, flagged in `/audit`), and
+`TestPresetCommandInvariants` (admin gate, plain text, empty-stack refusal, menu mirrors
+the kill switch, no new LLM call). The fixture restores the module-scope stack by
+re-editing, since `test_fixture_falls_back_to_builtin` asserts it.
+
 ## v2026-07-25.14 — BOT_TIMEZONE never set the timezone (+ audit item 4)
 
 **⚠️ BEHAVIOUR CHANGE ON DEPLOY — read before shipping.** Any instance whose `.env` sets

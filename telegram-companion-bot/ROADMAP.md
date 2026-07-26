@@ -333,6 +333,12 @@ single-device blast radius.
   (see v2026-07-18.1's anti-echo work); `[CHARACTER AUTHENTICITY]` alone is 2,386 tok.
   Split one layer at a time, using `/audit`'s `Preset layers:` and `Card:` lines as the
   evidence base.
+- **Experiment loop now cheap (v2026-07-26.1, `/preset`).** The reason this item stalled
+  was the cost of evaluating a split: an `.env` edit plus a restart per experiment, per
+  bot, on a phone keyboard. `/preset core,rp` swaps the stack live from Telegram and
+  `/preset reset` undoes it, so "does cass read better without the scene machinery?" is
+  now answered by talking to her for an evening rather than by a deploy. The remaining
+  gate is unchanged: the *content* decisions are the owner's.
 
 ### 3.14 Port the banned-rhetoric block from Chimera v2 into `preset.txt` — S, owner-gated
 - **Evidence:** the 2026-07-25 review of Writer's Block 5 against the root Chimera preset

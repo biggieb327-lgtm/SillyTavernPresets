@@ -3449,6 +3449,198 @@ class TestPresetLayers:
         assert all(isinstance(t, int) for _, t in d["preset_layers"])
 
 
+# ── /preset: switching layers from Telegram (v2026-07-26.1) ────────────────────
+# The stack is a module global re-read on every message, so swapping it is live. The
+# risk this suite guards is the one the fallback ladder was built for: a typo or a
+# missing file quietly stripping tuned voice rules and reading as a model regression.
+
+class _PresetFixture:
+    """Write real layer files into the fixture instance dir and restore the live stack.
+
+    The module-scope stack is asserted elsewhere (test_fixture_falls_back_to_builtin),
+    so every test here MUST put it back — restoring by re-editing, never by leaving it
+    to import order.
+    """
+
+    def __enter__(self):
+        self._layers = bot.PRESET_LAYERS
+        self._style = bot.TEXTING_STYLE
+        self._override = list(bot.preset_override)
+        self._env = list(bot._PRESET_ENV_NAMES)
+        self._written = []
+        for name, body in (("preset-core.txt", "CORE " * 100),
+                           ("preset-rp.txt", "RP " * 50),
+                           ("preset-explicit.txt", "EXPLICIT " * 40)):
+            p = bot.BASE_DIR / name
+            p.write_text(body, encoding="utf-8")
+            self._written.append(p)
+        return self
+
+    def __exit__(self, *exc):
+        bot.PRESET_LAYERS = self._layers
+        bot.TEXTING_STYLE = self._style
+        bot.preset_override[:] = self._override
+        bot._PRESET_ENV_NAMES[:] = self._env
+        for p in self._written:
+            p.unlink(missing_ok=True)
+        return False
+
+
+class TestPresetNameNormalization:
+    AVAIL = ["preset-core.txt", "preset-rp.txt", "preset.txt"]
+
+    def test_bare_stem_resolves(self):
+        assert bot._normalize_preset_name("core", self.AVAIL) == "preset-core.txt"
+
+    def test_full_filename_resolves(self):
+        assert bot._normalize_preset_name("preset-rp.txt", self.AVAIL) == "preset-rp.txt"
+
+    def test_shared_preset_resolves_by_stem(self):
+        assert bot._normalize_preset_name("preset", self.AVAIL) == "preset.txt"
+
+    def test_unknown_name_is_none_not_a_guess(self):
+        # The whole point: a typo must NOT silently land on a plausible neighbour.
+        assert bot._normalize_preset_name("cor", self.AVAIL) is None
+        assert bot._normalize_preset_name("explicit", self.AVAIL) is None
+
+    def test_blank_is_none(self):
+        assert bot._normalize_preset_name("   ", self.AVAIL) is None
+
+
+class TestPresetArgParsing:
+    def test_comma_and_space_forms_agree(self):
+        assert bot._parse_preset_names(["core,rp"]) == ["core", "rp"]
+        assert bot._parse_preset_names(["core", "rp"]) == ["core", "rp"]
+        assert bot._parse_preset_names(["core,", "rp"]) == ["core", "rp"]
+
+    def test_order_preserved(self):
+        assert bot._parse_preset_names(["rp,core"]) == ["rp", "core"]
+
+    def test_deduplicated(self):
+        # A layer listed twice would be injected twice and silently double its cost.
+        assert bot._parse_preset_names(["core,core", "core"]) == ["core"]
+
+
+class TestPresetSwap:
+    def test_setting_layers_rebinds_both_globals(self):
+        with _PresetFixture():
+            layers, warn = bot._set_preset_layers(["preset-core.txt", "preset-rp.txt"])
+            assert [n for n, _ in layers] == ["preset-core.txt", "preset-rp.txt"]
+            assert bot.PRESET_LAYERS == layers
+            assert bot.TEXTING_STYLE == "\n\n".join(t for _, t in layers)
+            assert warn == []
+
+    def test_available_files_are_discovered(self):
+        with _PresetFixture():
+            avail = bot._list_preset_files()
+            assert {"preset-core.txt", "preset-rp.txt", "preset-explicit.txt"} <= set(avail)
+
+    def test_resolvable_stack_passes_the_dry_run(self):
+        with _PresetFixture():
+            ok, _ = bot._preset_resolves(["preset-core.txt"])
+            assert ok
+
+    def test_unresolvable_stack_fails_the_dry_run(self):
+        # The command uses this to refuse BEFORE mutating, so a bad stack never goes live.
+        with _PresetFixture():
+            ok, warn = bot._preset_resolves(["preset-nope.txt"])
+            assert not ok
+            assert any("preset-nope.txt" in w for w in warn)
+
+    def test_dry_run_does_not_mutate_the_live_stack(self):
+        with _PresetFixture():
+            bot._set_preset_layers(["preset-core.txt"])
+            before = bot.PRESET_LAYERS
+            bot._preset_resolves(["preset-nope.txt"])
+            assert bot.PRESET_LAYERS is before
+
+    def test_token_estimate_sums_the_stack(self):
+        with _PresetFixture():
+            layers, _ = bot._set_preset_layers(["preset-core.txt", "preset-rp.txt"])
+            assert bot._preset_stack_tokens(layers) == sum(
+                bot._est_tokens(t) for _, t in layers)
+
+
+class TestPresetOverridePersistence:
+    def test_override_is_reapplied_on_startup(self):
+        with _PresetFixture():
+            bot.preset_override[:] = ["preset-core.txt", "preset-rp.txt"]
+            bot.apply_overrides()
+            assert [n for n, _ in bot.PRESET_LAYERS] == ["preset-core.txt", "preset-rp.txt"]
+
+    def test_kill_switch_strands_the_override(self):
+        # PRESET_COMMAND=0 must let a mangled voice be recovered from .env alone.
+        with _PresetFixture():
+            baseline = bot.PRESET_LAYERS
+            bot.preset_override[:] = ["preset-core.txt"]
+            orig = bot.PRESET_COMMAND
+            bot.PRESET_COMMAND = False
+            try:
+                bot.apply_overrides()
+                assert bot.PRESET_LAYERS is baseline
+            finally:
+                bot.PRESET_COMMAND = orig
+
+    def test_vanished_override_reverts_to_env_not_the_stub(self):
+        # Layers deleted since the override was saved: falling through to the ~250-token
+        # built-in strips tuned voice rules and reads as a model regression.
+        with _PresetFixture():
+            bot._PRESET_ENV_NAMES[:] = ["preset-core.txt"]
+            bot.preset_override[:] = ["preset-gone.txt"]
+            warnings_before = len(bot._CONFIG_WARNINGS)
+            try:
+                bot.apply_overrides()
+                assert [n for n, _ in bot.PRESET_LAYERS] == ["preset-core.txt"]
+                assert bot.preset_override == []
+                assert any("reverted to the .env preset stack"
+                           in w for w in bot._CONFIG_WARNINGS[warnings_before:])
+            finally:
+                del bot._CONFIG_WARNINGS[warnings_before:]
+
+    def test_override_is_serialized_into_state(self):
+        import json
+        with _PresetFixture():
+            bot.preset_override[:] = ["preset-core.txt"]
+            assert json.loads(bot._serialize_state())["preset_override"] == \
+                ["preset-core.txt"]
+
+    def test_audit_flags_an_active_override(self):
+        with _PresetFixture():
+            bot.preset_override[:] = ["preset-core.txt"]
+            assert bot.gather_audit_data()["preset_override"] == ["preset-core.txt"]
+
+
+class TestPresetCommandInvariants:
+    """Rules from bot-code-invariants and past incidents this command could break."""
+
+    def test_command_is_admin_gated(self):
+        import inspect
+        src = inspect.getsource(bot.preset_cmd)
+        assert "_is_admin(update.effective_user.id)" in src, \
+            "swapping the voiceprint for every chat is an operational command"
+
+    def test_command_is_plain_text(self):
+        # v2026-07-25.7/.13: layer filenames and resolver warnings through Markdown
+        # would make Telegram reject the message and the command reply with silence.
+        import inspect
+        assert "parse_mode" not in inspect.getsource(bot.preset_cmd)
+
+    def test_command_refuses_an_empty_stack(self):
+        import inspect
+        assert "would leave no preset layers" in inspect.getsource(bot.preset_cmd)
+
+    def test_menu_entry_mirrors_the_kill_switch(self):
+        off = {c.command for c in bot._build_command_menu(False, False, False, False)}
+        assert "preset" not in off
+        on = {c.command for c in bot._build_command_menu(False, False, False, True)}
+        assert "preset" in on
+
+    def test_no_new_llm_call(self):
+        import inspect
+        src = inspect.getsource(bot.preset_cmd)
+        assert "_do_request" not in src and "chat/completions" not in src
+
+
 class TestCardBlockLabelling:
     """messages[0] is the MERGED card block. Labelling it by its first line credited an
     84-token section with 4,715 tokens and misdirected a real investigation."""

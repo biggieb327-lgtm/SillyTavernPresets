@@ -176,7 +176,9 @@ These files shape what the character knows and references. All are editable from
 ### Operations (admin only — allowlist member or owner)
 | Command | What it does |
 |---|---|
-| `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health |
+| `/preset` | Show this instance's preset (voice) layers, per-layer and total token cost, and which layer files are on disk |
+| `/preset <names>` | Swap the layer stack live — `/preset core,rp`. Also `add <name>`, `drop <name>`, `reset` (back to `.env`). Effective on the next message, no restart; persists across restarts. Reports the token delta. Kill switch `PRESET_COMMAND=0` (also makes startup ignore a saved override — the recovery path for a stack that ruins a character's voice) |
+| `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health. Marks the preset line `(via /preset)` when an override is active |
 | `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
 | `/update` | Self-deploy: pull latest `bot.py` from `main`, verify it compiles, restart (`force` to reinstall the same version) |
@@ -332,6 +334,12 @@ The bot uses different models for different tasks — cheap/fast for background 
 | `FALLBACK_MODEL` | Retry on error | optional |
 
 Change a model at runtime (no restart): `/setmodel chat gpt-4o`
+
+Change the **voice** at runtime (no restart): `/preset core,rp` — see `PRESET_FILES` in
+`.env.example` for what each layer contains. `/preset` can only pick layers present in
+that instance's directory: phone instances have all of them (`sync-cards.sh` copies every
+`preset-*.txt`), while on the VPS `vps-sync.sh` pulls only what `PRESET_FILES` names, so
+cass and jules choose among those until their `.env` names more.
 
 ---
 

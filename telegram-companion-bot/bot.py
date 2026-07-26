@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-25.14"
+BOT_VERSION = "2026-07-26.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -435,6 +435,13 @@ PRESET_LAYERS: list[tuple[str, str]] = _resolve_preset_layers(
 # Kept for anything that wants the whole preset as one string (and so a single-layer
 # config is exactly what it was before).
 TEXTING_STYLE = "\n\n".join(t for _, t in PRESET_LAYERS)
+# The .env baseline, kept verbatim so /preset reset can restore it after a live swap.
+_PRESET_ENV_NAMES: list[str] = list(_preset_names)
+# Kill switch for live preset switching (owner policy 2026-07-18: default on, env can
+# disable). PRESET_COMMAND=0 both unregisters /preset AND makes startup ignore a saved
+# override — so a stack that ruins a character's voice is undone with one .env line and
+# a restart, with no state.json surgery on a phone keyboard.
+PRESET_COMMAND = os.getenv("PRESET_COMMAND", "1").lower() not in ("0", "false", "no", "off")
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
 DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
@@ -2222,6 +2229,7 @@ summarizing = set()  # chat_ids with a summary update in flight (avoid overlap)
 _SUMMARIZE_SEM = asyncio.Semaphore(1)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
+preset_override: list = []  # preset layer filenames set via /preset; empty = use the .env stack
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 group_cursor: dict = {}    # group chat_id -> byte offset into the shared group ledger
@@ -2312,6 +2320,7 @@ def load_state():
         away[int(cid)] = aw
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
+    preset_override[:] = [str(n) for n in (data.get("preset_override") or [])]
     for cid, lv in data.get("user_location", {}).items():
         user_location[int(cid)] = lv
     for cid, ids in data.get("seen_incidents", {}).items():
@@ -2391,6 +2400,7 @@ def _serialize_state() -> str:
         "voice_reply": {str(k): v for k, v in voice_reply.items()},
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
+        "preset_override": list(preset_override),
         "user_location": {str(k): v for k, v in user_location.items()},
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
@@ -5943,6 +5953,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setcard <field> clear — empty a field",
         "",
         "*Settings*",
+        "/preset — show her active preset (voice) layers and what they cost",
+        "/preset <names> — swap the stack live, e.g. /preset core,rp (also: add/drop/reset)",
         "/model — show current model",
         "/setmodel <field> <value> — change a model setting",
         "/settings — show current settings",
@@ -6205,12 +6217,200 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {key} set to {value}")
 
 
+# --- Live preset switching (/preset) -------------------------------------------------
+# assemble_messages reads PRESET_LAYERS from the global on every message, so rebinding it
+# swaps the character's voice rules from the next reply onward with no restart. Rebinding
+# a module global is atomic: a reply already assembling its prompt keeps the list object
+# it started with rather than seeing a half-applied stack, so no lock is needed.
+#
+# This is per-INSTANCE, not per-chat, matching /setmodel and /setcard — one bot process
+# serves one character, and PRESET_LAYERS is that character's voice.
+
+
+def _list_preset_files() -> list[str]:
+    """Preset layer files present in this instance directory, sorted."""
+    try:
+        return sorted(p.name for p in BASE_DIR.glob("preset*.txt"))
+    except OSError as e:
+        # Name the class only — a path or errno string here would land in errors.log
+        # (the v2026-07-20.2 class).
+        log.warning("[preset] could not list preset files: %s", type(e).__name__)
+        return []
+
+
+def _normalize_preset_name(name: str, available: list) -> str | None:
+    """Accept 'core', 'preset-core' or 'preset-core.txt' for a layer that exists.
+    Returns the real filename, or None when nothing matches. A typo must resolve to
+    None rather than to a plausible file: silently loading the wrong voice rules is
+    the failure mode the v2026-07-25.6 fallback ladder exists to prevent."""
+    n = str(name).strip()
+    if not n:
+        return None
+    for cand in (n, f"{n}.txt", f"preset-{n}.txt", f"preset-{n}"):
+        if cand in available:
+            return cand
+    return None
+
+
+def _parse_preset_names(args: list) -> list[str]:
+    """'/preset core,rp' and '/preset core rp' mean the same thing. Order-preserving,
+    deduplicated — a layer injected twice would double its token cost silently."""
+    out: list[str] = []
+    for chunk in args:
+        for part in str(chunk).split(","):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def _preset_stack_tokens(layers: list) -> int:
+    return sum(_est_tokens(t) for _, t in layers)
+
+
+def _set_preset_layers(names: list) -> tuple[list, list]:
+    """Resolve `names` through the standard ladder and make them the live stack.
+    Returns (layers, warnings). Pure mutation — callers validate first."""
+    global PRESET_LAYERS, TEXTING_STYLE
+    warn: list[str] = []
+    layers = _resolve_preset_layers(list(names), _read_preset_file,
+                                    _DEFAULT_TEXTING_STYLE, warn)
+    PRESET_LAYERS = layers
+    TEXTING_STYLE = "\n\n".join(t for _, t in layers)
+    return layers, warn
+
+
+def _preset_resolves(names: list) -> tuple[bool, list]:
+    """Dry-run a stack without touching the live one. False = nothing resolved, which
+    would drop the bot to the ~250-token built-in and read as a model regression."""
+    warn: list[str] = []
+    layers = _resolve_preset_layers(list(names), _read_preset_file,
+                                    _DEFAULT_TEXTING_STYLE, warn)
+    return [n for n, _ in layers] != ["<built-in>"], warn
+
+
+async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show or swap this instance's preset layers, live.
+
+    /preset                     — active layers, token cost, what's available
+    /preset core,rp,stepped     — replace the stack
+    /preset add explicit        — append a layer
+    /preset drop explicit       — remove a layer
+    /preset reset               — back to the .env stack
+
+    Admin-gated (like /restart, unlike /setmodel): this rewrites the voiceprint for
+    every chat the instance serves, and the layers are large enough to move the
+    per-message token bill by thousands.
+
+    Plain text on purpose — layer filenames and resolver warnings are arbitrary enough
+    to break Telegram's legacy Markdown parser, which rejects the whole message and
+    makes the command reply with silence (v2026-07-25.7 and .13).
+    """
+    if not _is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    available = _list_preset_files()
+    sub = args[0].lower() if args else ""
+
+    if not args or sub in ("show", "list"):
+        lines = [f"Preset layers (~{_preset_stack_tokens(PRESET_LAYERS)}t per message):"]
+        for n, t in PRESET_LAYERS:
+            lines.append(f"  {n} ~{_est_tokens(t)}t")
+        lines.append("Source: " + (
+            "/preset override — " + ", ".join(preset_override) if preset_override
+            else ".env — " + ", ".join(_PRESET_ENV_NAMES)))
+        lines += ["", "Available: " + (", ".join(available) if available
+                                       else "(no preset*.txt in this instance dir)"), ""]
+        lines += ["Usage:",
+                  "  /preset core,rp        replace the stack",
+                  "  /preset add explicit   append a layer",
+                  "  /preset drop explicit  remove a layer",
+                  "  /preset reset          back to the .env stack"]
+        await _reply_chunked(update, "\n".join(lines))
+        return
+
+    # The logical current stack — the override or the .env baseline, NOT the resolved
+    # layer labels, which can read "preset.txt (fallback)" or "<built-in>".
+    current = list(preset_override or _PRESET_ENV_NAMES)
+    resetting = False
+
+    if sub == "reset":
+        wanted, resetting = list(_PRESET_ENV_NAMES), True
+    elif sub in ("add", "drop"):
+        if len(args) < 2:
+            await update.message.reply_text(f"Usage: /preset {sub} <name>")
+            return
+        wanted = list(current)
+        for pick in _parse_preset_names(args[1:]):
+            # For drop, also match against the current stack: a layer named in .env but
+            # no longer on disk must still be removable.
+            real = (_normalize_preset_name(pick, available)
+                    or (_normalize_preset_name(pick, wanted) if sub == "drop" else None))
+            if real is None:
+                await update.message.reply_text(
+                    f"No preset layer matching {pick!r}.\n"
+                    "Available: " + (", ".join(available) or "(none)"))
+                return
+            if sub == "add":
+                if real not in wanted:
+                    wanted.append(real)
+            else:
+                wanted = [w for w in wanted if w != real]
+    else:
+        wanted = []
+        for pick in _parse_preset_names(args):
+            real = _normalize_preset_name(pick, available)
+            if real is None:
+                await update.message.reply_text(
+                    f"No preset layer matching {pick!r}.\n"
+                    "Available: " + (", ".join(available) or "(none)"))
+                return
+            wanted.append(real)
+
+    if not wanted:
+        await update.message.reply_text(
+            "That would leave no preset layers at all — refusing.\n"
+            "Use /preset reset to go back to the .env stack.")
+        return
+
+    ok, probe_warn = _preset_resolves(wanted)
+    if not ok:
+        await update.message.reply_text(
+            "None of those layers resolved — keeping the current stack.\n"
+            + "\n".join(probe_warn))
+        return
+
+    before = _preset_stack_tokens(PRESET_LAYERS)
+    layers, warn = _set_preset_layers(wanted)
+    after = _preset_stack_tokens(layers)
+    if resetting:
+        preset_override.clear()
+    else:
+        preset_override[:] = wanted
+    save_state()
+
+    lines = [f"Preset layers now (~{after}t per message):"]
+    for n, t in layers:
+        lines.append(f"  {n} ~{_est_tokens(t)}t")
+    lines.append(f"Change: ~{before}t -> ~{after}t ({after - before:+d}t per message)")
+    lines.append("Live from the next message — no restart needed.")
+    if resetting:
+        lines.append("Back on the .env stack; the override is cleared.")
+    if warn:
+        lines += ["", "Warnings:"] + [f"  {w}" for w in warn]
+    await _reply_chunked(update, "\n".join(lines))
+    # WARNING so it lands in errors.log: a voice change is exactly the thing a future
+    # "why does she sound different?" investigation needs dated evidence for.
+    log.warning("[preset] layers set to %s (~%dt)",
+                ", ".join(n for n, _ in layers), after)
+
+
 CONFIGURABLE_MODELS = list(MODEL_ROLES.values())
 CONFIGURABLE_SETTINGS = [var for var, _ in SETTINGS_INFO.values()]
 
 
 def apply_overrides():
-    """Re-apply any /setmodel and /settings overrides saved from a previous run."""
+    """Re-apply any /setmodel, /settings and /preset overrides saved from a previous run."""
     g = globals()
     for name, value in model_overrides.items():
         if name in CONFIGURABLE_MODELS:
@@ -6218,6 +6418,21 @@ def apply_overrides():
     for name, value in setting_overrides.items():
         if name in CONFIGURABLE_SETTINGS:
             g[name] = value
+    # PRESET_COMMAND=0 must strand a saved override rather than apply it — that is the
+    # kill switch's whole job (recover a mangled voice from .env alone).
+    if preset_override and PRESET_COMMAND:
+        layers, warn = _set_preset_layers(list(preset_override))
+        if [n for n, _ in layers] == ["<built-in>"]:
+            # The saved layers are gone from disk (renamed, or an .env deployed ahead of
+            # its files). Falling through to the ~250-token built-in strips tuned voice
+            # rules and presents as a model regression, so revert to the .env baseline.
+            _set_preset_layers(list(_PRESET_ENV_NAMES))
+            preset_override.clear()
+            _CONFIG_WARNINGS.append(
+                "saved /preset override did not resolve — reverted to the .env preset stack")
+        else:
+            for w in warn:
+                _CONFIG_WARNINGS.append(f"/preset override: {w}")
 
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11557,6 +11772,7 @@ def gather_audit_data() -> dict:
         "prompt_stats": _prompt_audit_state(),
         "card_fields": dict(_card_field_tokens),
         "preset_layers": [(n, _est_tokens(t)) for n, t in PRESET_LAYERS],
+        "preset_override": list(preset_override),
     }
 
 
@@ -11623,7 +11839,10 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  ~{tok}t  {head}")
     pl = d.get("preset_layers") or []
     if pl:
-        lines.append("Preset layers: " + ", ".join(f"{n} ~{t}t" for n, t in pl))
+        # Flag the override: an audit that shows layers the .env doesn't name, with no
+        # hint they came from /preset, sends the next reader to the wrong file.
+        src = " (via /preset)" if d.get("preset_override") else ""
+        lines.append("Preset layers" + src + ": " + ", ".join(f"{n} ~{t}t" for n, t in pl))
     cf = d.get("card_fields") or {}
     if cf:
         # Unconditional card fields vs the lorebook, which only costs on a trigger.
@@ -12206,6 +12425,11 @@ _TRAFFIC_COMMANDS = [
     BotCommand("incidents", "Active incidents (near you if location shared)"),
 ]
 
+# /preset registers only when PRESET_COMMAND is on, so the menu mirrors that.
+_PRESET_COMMANDS = [
+    BotCommand("preset", "Show or switch preset (voice) layers"),
+]
+
 # Health handlers register only when the Garmin feed is configured, so the menu mirrors that.
 _HEALTH_COMMANDS = [
     BotCommand("health", "Latest metrics from your watch"),
@@ -12215,7 +12439,8 @@ _HEALTH_COMMANDS = [
 
 
 def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
-                        garmin_enabled: bool = False) -> list:
+                        garmin_enabled: bool = False,
+                        preset_enabled: bool = True) -> list:
     """The autocomplete menu, mirroring which command handlers are actually registered.
     Hand-kept alongside the handler registrations — keep the two in sync."""
     cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
@@ -12225,12 +12450,15 @@ def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
         cmds += _PAYMENT_COMMANDS
     if garmin_enabled:
         cmds += _HEALTH_COMMANDS
+    if preset_enabled:
+        cmds += _PRESET_COMMANDS
     return cmds
 
 
 async def _register_commands(application):
     await application.bot.set_my_commands(
-        _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED))
+        _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED,
+                            PRESET_COMMAND))
 
 
 async def _post_init(application):
@@ -12363,6 +12591,8 @@ def main():
     app.add_handler(CommandHandler("model", model_info))
     app.add_handler(CommandHandler("setmodel", setmodel_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    if PRESET_COMMAND:
+        app.add_handler(CommandHandler("preset", preset_cmd))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(CommandHandler("usage", check_usage))
     app.add_handler(CommandHandler("chatid", chatid))
