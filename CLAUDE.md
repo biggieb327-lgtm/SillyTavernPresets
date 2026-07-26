@@ -160,7 +160,9 @@ above. `ls` it for the rest. The non-obvious bits:
 - `preset.txt` is the shared voiceprint — editing it changes **all six** bots.
 - `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are curl-installed once and are
   **not** managed by `update-all.sh`; changing them in-repo deploys nothing.
-- `character-review/` is the card inbox for the monthly character pass (see its README).
+- `character-review/` (root) is the card inbox for the monthly character pass — the
+  `character-pass-monthly` Routine reads it and writes proposals, never edits (see its
+  README). On-demand reviews and voice-defect triage: the `character-reviewer` agent.
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
