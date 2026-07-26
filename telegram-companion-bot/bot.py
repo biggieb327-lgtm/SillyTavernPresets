@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.1"
+BOT_VERSION = "2026-07-26.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -132,13 +132,47 @@ log.addHandler(_error_handler)
 # --- Error tracking for self-audit ---
 _BOOT_TIME = time.time()
 _error_counts: dict[str, list[float]] = {}
-_llm_stats: dict = {"date": "", "calls": 0, "tok_in": 0, "tok_out": 0}
+_llm_stats: dict = {"date": "", "calls": 0, "tok_in": 0, "tok_out": 0,
+                    # How many of today's calls contributed MEASURED tokens rather than
+                    # estimated ones — without this, /usage can't say which it is showing.
+                    "measured": 0, "estimated": 0}
+
+# Real usage from the last API response on THIS thread. LLM calls run inside
+# asyncio.to_thread, so a plain module global would let two concurrent calls attribute
+# each other's token counts; thread-local keeps each call's usage with its own call.
+_call_usage = threading.local()
+
+
+def _stash_call_usage(usage):
+    """Record the provider's own token counts for the call this thread just made."""
+    _call_usage.last = usage if isinstance(usage, dict) else None
+
+
+def _take_call_usage():
+    """Consume the stashed usage — one call's numbers can never be counted twice."""
+    u = getattr(_call_usage, "last", None)
+    _call_usage.last = None
+    return u
+
 
 def _count_error(category: str):
     ts = _error_counts.setdefault(category, [])
     ts.append(time.time())
     if len(ts) > 200:
         del ts[:-200]
+
+
+def _usage_tokens(usage, key: str) -> int:
+    """A non-negative int from a provider usage block, or 0. Providers have shipped
+    nulls and strings in these fields, and a crash here would take down a reply that
+    otherwise succeeded — accounting must never be load-bearing."""
+    if not isinstance(usage, dict):
+        return 0
+    try:
+        v = int(usage.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return v if v > 0 else 0
 
 
 def _track_llm_usage(messages: list, reply: str):
@@ -148,9 +182,25 @@ def _track_llm_usage(messages: list, reply: str):
         _llm_stats["calls"] = 0
         _llm_stats["tok_in"] = 0
         _llm_stats["tok_out"] = 0
+        _llm_stats["measured"] = 0
+        _llm_stats["estimated"] = 0
     _llm_stats["calls"] += 1
-    _llm_stats["tok_in"] += sum(_est_tokens(m.get("content", "") or "") for m in messages)
-    _llm_stats["tok_out"] += _est_tokens(reply)
+    # Prefer the provider's own count. It is produced by the real tokenizer for the real
+    # model and includes the chat-template overhead we cannot see, so it is the actual
+    # billed number rather than an approximation of it. The character heuristic stays as
+    # the fallback for calls that return no usage block (some streaming paths).
+    usage = _take_call_usage()
+    real_in = _usage_tokens(usage, "prompt_tokens")
+    real_out = _usage_tokens(usage, "completion_tokens")
+    if real_in:
+        _llm_stats["tok_in"] += real_in
+        _llm_stats["tok_out"] += real_out or _est_tokens(reply)
+        _llm_stats["measured"] += 1
+        _record_token_calibration(messages, real_in)
+    else:
+        _llm_stats["tok_in"] += sum(_est_tokens(m.get("content", "") or "") for m in messages)
+        _llm_stats["tok_out"] += _est_tokens(reply)
+        _llm_stats["estimated"] += 1
 
 # --- Env parsing that can't brick the fleet ---
 # A non-numeric value in an instance .env used to raise at import and crash-loop
@@ -836,7 +886,105 @@ def _apply_audit_item(item: dict) -> tuple[bool, str]:
 
 
 def _est_tokens(text: str) -> int:
+    """RAW character heuristic — 4 chars per token. Deliberately kept as-is: it is the
+    baseline the live calibration measures against, so changing the divisor would move
+    the ratio, not improve accuracy. Callers reporting a number to a human want
+    `_tokens()` below; callers that need a stable, tokenizer-independent unit (the
+    memory budget) want this one."""
     return max(1, len(text) // 4)
+
+
+# --- Token calibration ----------------------------------------------------------------
+# Every reported token figure used to be `len(text) // 4`, presented as "~Nt". That is a
+# guess about English prose, and these files are not English prose: the presets are
+# bracketed headings, bullets and markdown, which tokenize denser than the 4.0 rule
+# assumes. Worse, the divisor cannot be right for the fleet in principle — nora, cass and
+# emily run different models with different tokenizers, so a single constant is wrong for
+# at least two of them.
+#
+# The fix is not a bundled tokenizer (wrong vocabulary for GLM, and a new binary wheel on
+# Termux/Python 3.14 is exactly the dependency this repo avoids). It is the number the
+# provider already returns: `usage.prompt_tokens`, counted by the real tokenizer for the
+# real model, on every call. `_track_llm_usage` now spends it directly, and each measured
+# call also yields a (estimated, actual) pair for the SAME text — which calibrates the
+# heuristic for everything we cannot measure directly, like "what would this preset layer
+# cost if I added it".
+#
+# Honest about what the ratio contains: `prompt_tokens` includes the chat-template
+# overhead (role markers, separators) that our content-only estimate cannot see. That
+# overhead is a few tokens per message — order 2% of a 10k prompt — and it is part of the
+# real bill, so folding it in makes the reported number closer to the truth, not further.
+_TOKEN_CAL_ALPHA = 0.2          # EMA weight; ~15 calls to substantially re-converge
+_TOKEN_CAL_MIN_RATIO = 0.5      # outside this band the pairing is not believable —
+_TOKEN_CAL_MAX_RATIO = 3.0      # cached/multipart/vision calls, not a tokenizer signal
+_TOKEN_CAL_MIN_EST = 200        # tiny prompts are dominated by per-message overhead
+token_calibration: dict = {"ratio": 1.0, "n": 0}
+# Kill switch (owner policy 2026-07-18): unset = calibrate. TOKEN_CALIBRATION=0 reports
+# the raw heuristic, which is what every number in the repo's history was measured with.
+TOKEN_CALIBRATION = os.getenv("TOKEN_CALIBRATION", "1").lower() not in (
+    "0", "false", "no", "off")
+
+
+def _calibration_sample(estimated: int, actual: int) -> float | None:
+    """Pure: the ratio one measured call contributes, or None if it isn't believable.
+    Rejecting outliers matters more than accepting samples — a vision call carries image
+    tokens with no character count behind them, and would drag the ratio toward nonsense
+    for every text-only reading afterwards."""
+    if estimated < _TOKEN_CAL_MIN_EST or actual <= 0:
+        return None
+    r = actual / estimated
+    return r if _TOKEN_CAL_MIN_RATIO <= r <= _TOKEN_CAL_MAX_RATIO else None
+
+
+def _blend_calibration(current: float, n: int, sample: float,
+                       alpha: float = _TOKEN_CAL_ALPHA) -> float:
+    """Pure: EMA, except the first sample replaces the 1.0 seed outright — otherwise the
+    displayed ratio would crawl away from a value nobody measured."""
+    return sample if n <= 0 else current * (1 - alpha) + sample * alpha
+
+
+def _record_token_calibration(messages: list, actual_prompt_tokens: int):
+    """Fold one measured call into the running ratio. Never raises: this is bookkeeping
+    hanging off a successful reply, and must not be able to turn one into an error."""
+    if not TOKEN_CALIBRATION:
+        return
+    try:
+        estimated = sum(_est_tokens(m.get("content", "") or "")
+                        if isinstance(m.get("content"), str)
+                        else _est_tokens(str(m.get("content") or ""))
+                        for m in messages)
+        sample = _calibration_sample(estimated, actual_prompt_tokens)
+        if sample is None:
+            return
+        token_calibration["ratio"] = _blend_calibration(
+            token_calibration["ratio"], token_calibration["n"], sample)
+        token_calibration["n"] += 1
+    except Exception as e:
+        log.warning("[tokens] calibration skipped: %s", type(e).__name__)
+
+
+def _token_ratio() -> float:
+    """The correction factor to apply to a character estimate right now."""
+    if not TOKEN_CALIBRATION or token_calibration["n"] <= 0:
+        return 1.0
+    return token_calibration["ratio"]
+
+
+def _tokens(text: str) -> int:
+    """Calibrated token count for REPORTING — what /preset, /audit and the prompt stats
+    show. Falls back to the raw heuristic until the first real call has been measured."""
+    return max(1, int(round(_est_tokens(text) * _token_ratio())))
+
+
+def _token_confidence() -> str:
+    """One phrase describing how much to trust the numbers, for the commands that show
+    them. Presenting a guess and a measurement identically is the actual defect here."""
+    if not TOKEN_CALIBRATION:
+        return "raw estimate (TOKEN_CALIBRATION=0)"
+    n = token_calibration["n"]
+    if n <= 0:
+        return "estimate — no measured API call yet"
+    return f"calibrated x{token_calibration['ratio']:.2f} from {n} measured call(s)"
 
 
 # --- Prompt trim tiers ---------------------------------------------------------------
@@ -864,7 +1012,7 @@ def _strip_tiers(messages: list) -> list:
 def _msg_tokens(m: dict) -> int:
     """Estimated tokens for one assembled message, string or multipart content."""
     c = m.get("content", "")
-    return _est_tokens(c if isinstance(c, str) else str(c))
+    return _tokens(c if isinstance(c, str) else str(c))
 
 
 def _prompt_token_total(messages: list) -> int:
@@ -900,7 +1048,7 @@ def _prompt_top_blocks(messages: list, n: int = 3) -> list:
         if not isinstance(c, str):
             continue
         head = "(card: system_prompt+description+…)" if i == 0 else c.split("\n", 1)[0][:48]
-        blocks.append((_est_tokens(c), head))
+        blocks.append((_tokens(c), head))
     blocks.sort(key=lambda b: b[0], reverse=True)
     return blocks[:n]
 
@@ -2137,11 +2285,11 @@ def load_character(path: Path):
     _card_field_tokens.clear()
     for _f in ("system_prompt", "description", "personality", "scenario",
                "mes_example", "post_history_instructions"):
-        _t = _est_tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
+        _t = _tokens(data.get(_f) or "") if (data.get(_f) or "") else 0
         if _t:
             _card_field_tokens[_f] = _t
     _card_field_tokens["character_book"] = sum(
-        _est_tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
+        _tokens(json.dumps(e)) for e in (book.get("entries") or [])) or 0
 
     first_mes = data.get("first_mes", "")
     return name, system_prompt, post_history, lore, first_mes
@@ -2321,6 +2469,16 @@ def load_state():
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     preset_override[:] = [str(n) for n in (data.get("preset_override") or [])]
+    _tc = data.get("token_calibration")
+    if isinstance(_tc, dict):
+        # Validate rather than trust: a hand-edited or truncated state.json must not be
+        # able to put a nonsense multiplier on every token figure the bot reports.
+        try:
+            _r, _n = float(_tc.get("ratio", 1.0)), int(_tc.get("n", 0))
+            if _TOKEN_CAL_MIN_RATIO <= _r <= _TOKEN_CAL_MAX_RATIO and _n >= 0:
+                token_calibration["ratio"], token_calibration["n"] = _r, _n
+        except (TypeError, ValueError):
+            log.warning("[tokens] ignoring malformed saved calibration")
     for cid, lv in data.get("user_location", {}).items():
         user_location[int(cid)] = lv
     for cid, ids in data.get("seen_incidents", {}).items():
@@ -2401,6 +2559,7 @@ def _serialize_state() -> str:
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
         "preset_override": list(preset_override),
+        "token_calibration": dict(token_calibration),
         "user_location": {str(k): v for k, v in user_location.items()},
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
         "group_cursor": {str(k): v for k, v in group_cursor.items()},
@@ -3253,6 +3412,12 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     out = []
     budget = MEMORY_TOKEN_BUDGET
     for _, line in merged:
+        # Deliberately the RAW estimate, not the calibrated `_tokens()`. MEMORY_TOKEN_BUDGET
+        # is a tuned recall knob, not a real-cost ceiling: every value in every .env was
+        # chosen against this 4-chars-per-token unit. Swapping in a calibrated count would
+        # silently change how many memories six live characters recall — a personality
+        # change delivered as an accounting fix. Retuning the budget in calibrated units is
+        # an owner decision (ROADMAP 4.4), not a side effect of this release.
         cost = _est_tokens(line)
         if cost > budget:
             continue
@@ -4616,9 +4781,15 @@ def _extract_content(choice: dict) -> str:
     return _strip_native_tool_calls(_strip_thinking(text))
 
 _no_stream_models: set[str] = set()
+# Models that 400 on `stream_options`. Learned at runtime, same shape as the set above:
+# these keep streaming, they just fall back to estimated token counts.
+_no_usage_stream_models: set[str] = set()
 
 def _do_request(payload: dict, model: str, stream: bool) -> str:
     headers = {"Authorization": f"Bearer {NANOGPT_API_KEY}", "Content-Type": "application/json"}
+    # Clear first: a retry that returns no usage block must fall back to the estimate,
+    # not silently inherit the previous attempt's numbers.
+    _stash_call_usage(None)
     if stream:
         resp = _get_session().post(
             f"{NANOGPT_BASE_URL}/chat/completions", headers=headers,
@@ -4638,14 +4809,24 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
                 if data == "[DONE]":
                     break
                 try:
-                    delta = json.loads(data)["choices"][0].get("delta", {})
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                # The usage chunk (requested via stream_options) carries an EMPTY
+                # choices list, so it must be read before the choices[0] access below —
+                # which would otherwise IndexError and skip it, discarding the only
+                # real token count the streaming path ever sees.
+                if isinstance(chunk.get("usage"), dict):
+                    _stash_call_usage(chunk["usage"])
+                try:
+                    delta = chunk["choices"][0].get("delta", {})
                     c = delta.get("content") or ""
                     r = delta.get("reasoning_content") or ""
                     if c:
                         content_parts.append(c)
                     if r:
                         reasoning_parts.append(r)
-                except (json.JSONDecodeError, KeyError, IndexError):
+                except (KeyError, IndexError):
                     continue
         finally:
             resp.close()
@@ -4663,15 +4844,23 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
             json=payload, timeout=(10, REQUEST_TIMEOUT),
         )
         resp.raise_for_status()
-        return _fix_mojibake(_extract_content(resp.json()["choices"][0]))
+        body = resp.json()
+        _stash_call_usage(body.get("usage"))
+        return _fix_mojibake(_extract_content(body["choices"][0]))
 
 
 def _one_call(messages: list, model: str) -> str:
     use_stream = model not in _no_stream_models
     payload: dict = {"model": model, "messages": messages}
+    # A streaming response carries no usage block unless it is asked for, which is why
+    # every streamed call used to be accounted by character estimate. Asked for per
+    # model, and dropped for any model that rejects the field — see the 400 handling.
+    want_usage = use_stream and model not in _no_usage_stream_models
     if use_stream:
         payload["stream"] = True
         payload["max_tokens"] = MAX_TOKENS
+        if want_usage:
+            payload["stream_options"] = {"include_usage": True}
     else:
         payload["stream"] = False
     if TEMPERATURE is not None:
@@ -4680,10 +4869,21 @@ def _one_call(messages: list, model: str) -> str:
         return _do_request(payload, model, stream=use_stream)
     except requests.exceptions.HTTPError as e:
         if use_stream and getattr(e.response, "status_code", 0) == 400:
+            # Ordered narrowest-first: an unknown `stream_options` must cost this model
+            # its token accounting, NOT its streaming. Disabling streaming on a provider
+            # that only objected to the usage flag would be a self-inflicted latency
+            # regression on every reply that model ever serves.
+            if want_usage:
+                log.warning("[model] %s rejected stream_options, retrying without "
+                            "(token counts fall back to estimates for this model)", model)
+                _no_usage_stream_models.add(model)
+                payload.pop("stream_options", None)
+                return _do_request(payload, model, stream=True)
             log.warning("[model] %s rejected streaming, retrying without", model)
             _no_stream_models.add(model)
             payload["stream"] = False
             payload.pop("max_tokens", None)
+            payload.pop("stream_options", None)
             return _do_request(payload, model, stream=False)
         raise
 
@@ -6265,7 +6465,7 @@ def _parse_preset_names(args: list) -> list[str]:
 
 
 def _preset_stack_tokens(layers: list) -> int:
-    return sum(_est_tokens(t) for _, t in layers)
+    return sum(_tokens(t) for _, t in layers)
 
 
 def _set_preset_layers(names: list) -> tuple[list, list]:
@@ -6315,10 +6515,11 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args or sub in ("show", "list"):
         lines = [f"Preset layers (~{_preset_stack_tokens(PRESET_LAYERS)}t per message):"]
         for n, t in PRESET_LAYERS:
-            lines.append(f"  {n} ~{_est_tokens(t)}t")
+            lines.append(f"  {n} ~{_tokens(t)}t")
         lines.append("Source: " + (
             "/preset override — " + ", ".join(preset_override) if preset_override
             else ".env — " + ", ".join(_PRESET_ENV_NAMES)))
+        lines.append("Counts: " + _token_confidence())
         lines += ["", "Available: " + (", ".join(available) if available
                                        else "(no preset*.txt in this instance dir)"), ""]
         lines += ["Usage:",
@@ -6391,8 +6592,9 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [f"Preset layers now (~{after}t per message):"]
     for n, t in layers:
-        lines.append(f"  {n} ~{_est_tokens(t)}t")
+        lines.append(f"  {n} ~{_tokens(t)}t")
     lines.append(f"Change: ~{before}t -> ~{after}t ({after - before:+d}t per message)")
+    lines.append("Counts: " + _token_confidence())
     lines.append("Live from the next message — no restart needed.")
     if resetting:
         lines.append("Back on the .env stack; the override is cleared.")
@@ -11771,8 +11973,9 @@ def gather_audit_data() -> dict:
         "garmin": _garmin_audit_state(),
         "prompt_stats": _prompt_audit_state(),
         "card_fields": dict(_card_field_tokens),
-        "preset_layers": [(n, _est_tokens(t)) for n, t in PRESET_LAYERS],
+        "preset_layers": [(n, _tokens(t)) for n, t in PRESET_LAYERS],
         "preset_override": list(preset_override),
+        "token_calibration": _token_confidence(),
     }
 
 
@@ -11855,9 +12058,20 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
     llm = d.get("llm_stats", {})
     if llm.get("calls"):
+        # "(est)" used to be unconditional and was the honest label when every figure was
+        # len//4. Now most calls carry the provider's real count, so the line says which.
+        measured, estimated = llm.get("measured", 0), llm.get("estimated", 0)
+        if measured and not estimated:
+            src = "measured"
+        elif measured:
+            src = f"{measured} measured / {estimated} est"
+        else:
+            src = "est"
         lines.append(
             f"LLM today: {llm['calls']} calls, "
-            f"~{llm['tok_in'] // 1000}k in / ~{llm['tok_out'] // 1000}k out (est)")
+            f"~{llm['tok_in'] // 1000}k in / ~{llm['tok_out'] // 1000}k out ({src})")
+    if d.get("token_calibration"):
+        lines.append("Token counts: " + d["token_calibration"])
     cw = d.get("config_warnings", [])
     if cw:
         lines.append(f"Config warnings: {len(cw)}")

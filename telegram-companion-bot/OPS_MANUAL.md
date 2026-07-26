@@ -169,7 +169,7 @@ These files shape what the character knows and references. All are editable from
 | `/model` | Show active models |
 | `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `vision`, `reaction`, `mood`, `fallback`) |
 | `/settings` | Show current settings |
-| `/usage` | Token usage stats |
+| `/usage` | Token usage stats (subscription limits from NanoGPT) |
 | `/chatid` | Show your Telegram user ID |
 | `/backup` | Send state.json, memories.txt, user_notes.txt, setting.txt, reminders.json, payments.json to chat (`.env` excluded) |
 
@@ -334,6 +334,16 @@ The bot uses different models for different tasks — cheap/fast for background 
 | `FALLBACK_MODEL` | Retry on error | optional |
 
 Change a model at runtime (no restart): `/setmodel chat gpt-4o`
+
+**Reading the token numbers.** Since v2026-07-26.2 the daily `/audit` and `/usage` totals
+are the provider's own counts (labelled `measured`), not estimates. Figures that can only
+be estimated — `/preset` layer costs, `/audit`'s `Preset layers:` and `Card:` lines — are
+scaled by a calibration ratio each bot measures from its own traffic, and both commands
+print which they are showing (`Counts: calibrated x1.28 from 41 measured call(s)`). A
+fresh instance shows `estimate — no measured API call yet` until it has held one real
+conversation. The ratio is model-specific: expect it to move after `/setmodel`. Kill
+switch `TOKEN_CALIBRATION=0` reverts to the raw `len//4` unit that every pre-.2 number in
+the docs was measured in.
 
 Change the **voice** at runtime (no restart): `/preset core,rp` — see `PRESET_FILES` in
 `.env.example` for what each layer contains. `/preset` can only pick layers present in

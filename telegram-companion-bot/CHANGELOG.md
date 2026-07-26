@@ -7,6 +7,86 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-26.2 — Token counts are measured, not guessed
+
+**Root cause: every token number this repo has ever reported was `len(text) // 4`.**
+`_est_tokens` is a rule of thumb about English prose, and it was being applied to
+bracketed, bulleted markdown presets — which tokenize denser than prose — with **one
+constant divisor for six bots running different models with different tokenizers**. It
+could not have been right for more than one of them at a time. Every figure in the
+v2026-07-25.3/.5/.6 analyses, the `/audit` `Preset layers:` and `Card:` lines, `/usage`,
+and the `/preset` deltas shipped hours ago in .1 all inherited it, and all of them
+rendered it as `~Nt`, which reads like rounding rather than like a guess.
+
+**The provider was returning the right answer the whole time, and bot.py threw it away.**
+The response to every chat completion carries a `usage` block — `prompt_tokens` counted
+by the real tokenizer for the real model, including the chat-template overhead we cannot
+see. `_do_request` read `resp.json()["choices"][0]` and discarded the rest, so
+`_track_llm_usage` re-derived from characters a number it had just been handed.
+
+**Why not a tokenizer library.** Considered and rejected. `tiktoken` would be the *wrong*
+vocabulary — the fleet runs GLM through NanoGPT, not an OpenAI model — so it would swap
+one wrong number for a differently wrong one, while adding a binary wheel to a Termux /
+Python 3.14 fleet where cp314 wheels are scarce and anything new compiles from source.
+The provider's count is both more accurate and free.
+
+**What shipped:**
+1. **Real usage is captured and spent.** Non-streaming reads `usage` off the body.
+   Streaming asks for it with `stream_options: {"include_usage": true}` and parses the
+   final chunk. `/usage` and `/audit` now report actual tokens, labelled `measured`,
+   `est`, or `N measured / M est` when a day mixes both.
+2. **The heuristic is calibrated from those measurements.** Each measured call yields an
+   (estimated, actual) pair for the *same text*; the ratio is folded into a persisted
+   per-instance EMA and applied to everything that can only ever be estimated — the
+   `/preset` layer costs, `/audit`'s preset and card lines, the prompt-size stats.
+3. **The numbers say which they are.** `/preset` and `/audit` carry
+   `Counts: calibrated x1.28 from 41 measured call(s)` or
+   `Counts: estimate — no measured API call yet`. Presenting a guess and a measurement
+   identically was the actual defect.
+
+**Three ways this could have gone wrong, and what stops each:**
+- **The usage chunk has an empty `choices` list.** Read after the existing
+  `chunk["choices"][0]` access it would `IndexError` into the `continue` and be dropped —
+  silently discarding the only real count the streaming path ever produces. Parsed
+  before, and pinned by a test asserting the source order.
+- **A provider that rejects `stream_options`.** The existing 400 handler would have
+  concluded "this model can't stream" and disabled streaming for it permanently — a
+  latency regression on every future reply, caused by an accounting flag. The 400 path is
+  now narrowest-first: drop `stream_options` (keep streaming), and only then fall back to
+  non-streaming. Separate `_no_usage_stream_models` set, learned at runtime.
+- **A ratio poisoned by calls where it is meaningless.** Vision calls carry image tokens
+  with no characters behind them; tiny prompts are dominated by per-message overhead.
+  Samples are rejected outside 0.5–3.0 or under 200 estimated tokens, and a saved ratio
+  is re-validated on load so a hand-edited `state.json` cannot put a nonsense multiplier
+  on every number the bot reports.
+
+**Deliberately NOT recalibrated: `MEMORY_TOKEN_BUDGET`.** It is a tuned recall knob, not
+a cost ceiling — every value in every `.env` was chosen against the raw 4-chars unit.
+Swapping in calibrated counts would change how many memories six live characters recall:
+a personality change delivered as an accounting fix. It stays on `_est_tokens` with a
+comment saying why, and retuning it in calibrated units is filed as ROADMAP 4.4.
+`CONTEXT_TOKEN_BUDGET` *is* calibrated (it genuinely is a cost ceiling) and defaults to
+0/off, so no instance changes behaviour on this deploy.
+
+**Honest about what is not verified here.** The mechanism is proven end-to-end against a
+simulated NanoGPT response (streaming usage chunk, non-streaming body, stale-usage
+clearing, calibration, reporting). The **actual ratio for the fleet's models is not
+known** — this container cannot reach nano-gpt.com, and no BPE vocabulary is obtainable
+offline to estimate it. Each bot measures its own on the first real conversation after
+deploy; `/audit` will show it. Expect it above 1.0 for the markdown-heavy presets, but
+that is a prediction, not a measurement. It also means **historical figures in the docs
+stay in raw units** — `preset.txt` is "8,503 raw-estimate tokens", and the calibrated
+number after deploy will differ. That is the numbers getting more correct, not drifting.
+
+**Tests:** 25 new. `TestUsageTokenParsing` (nulls, strings, negatives → 0, never raises —
+accounting hangs off an already-successful reply), `TestCalibrationSample` /
+`TestCalibrationBlend` (outlier rejection, first sample replaces the seed, convergence),
+`TestCalibratedTokens` (scaling, kill switch, confidence wording, and that the memory
+budget still uses the raw unit), `TestUsageAccounting` (real usage preferred, fallback
+without it, consumed exactly once so one call's count can't be billed to the next,
+calibration updated), `TestUsageCaptureWiring` (usage requested, parsed before the
+`choices` access, both transports, 400 ordering, stale clearing, saved-ratio validation).
+
 ## v2026-07-26.1 — Switch preset layers from Telegram (`/preset`)
 
 **Not a bug fix — a gap.** `PRESET_FILES` (v2026-07-25.5) made the voiceprint layered and

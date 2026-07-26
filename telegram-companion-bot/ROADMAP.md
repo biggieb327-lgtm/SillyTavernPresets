@@ -394,6 +394,22 @@ whichever agent implements it):
 *(R4 prompt hygiene, R5 UX, and R6 evolution experiments from the same plan shipped as
 v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
+### 4.4 Retune `MEMORY_TOKEN_BUDGET` in calibrated units — S, owner-gated
+- **Context:** v2026-07-26.2 made reported token counts real (provider `usage`, plus a
+  calibration ratio for what can only be estimated). `MEMORY_TOKEN_BUDGET` was
+  deliberately left on the raw `len//4` unit.
+- **Why it was left:** it is a tuned *recall* knob, not a cost ceiling. Every value in
+  every `.env` was picked against the raw unit, so switching to calibrated counts would
+  fit fewer memory lines into the same nominal budget and change how much six live
+  characters remember — a personality change shipped as an accounting fix.
+- **The work:** read each instance's calibration ratio from `/audit`, multiply its
+  `MEMORY_TOKEN_BUDGET` by it so the *effective* recall is unchanged, then switch the
+  budget to `_tokens()` in the same release. Net behaviour-neutral by construction; after
+  that the knob means real tokens and can be tuned against a real ceiling.
+- **Do not action without the owner** — the whole point is that recall volume is a
+  product decision, and the migration is only safe if the multiply and the switch ship
+  together.
+
 ### Rejected or already covered (recorded so they don't come back)
 - `/rollback` command — `bot.py.bak` + shell already covers it; a bad bot.py can't be
   trusted to run its own rollback anyway.

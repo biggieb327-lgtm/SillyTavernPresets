@@ -3486,6 +3486,204 @@ class _PresetFixture:
         return False
 
 
+# ── Token counts are measured, not guessed (v2026-07-26.2) ────────────────────
+# Every reported figure was len(text)//4 presented as "~Nt". The provider returns the
+# real count on every call; these pin that it is used, and that the calibration derived
+# from it cannot be poisoned by the calls where the ratio means nothing.
+
+class _CalFixture:
+    """Isolate the module-level calibration state."""
+
+    def __init__(self, ratio=1.0, n=0, enabled=True):
+        self._want = (ratio, n, enabled)
+
+    def __enter__(self):
+        self._saved = (bot.token_calibration["ratio"], bot.token_calibration["n"],
+                       bot.TOKEN_CALIBRATION)
+        r, n, e = self._want
+        bot.token_calibration["ratio"], bot.token_calibration["n"] = r, n
+        bot.TOKEN_CALIBRATION = e
+        return self
+
+    def __exit__(self, *exc):
+        (bot.token_calibration["ratio"], bot.token_calibration["n"],
+         bot.TOKEN_CALIBRATION) = self._saved
+        return False
+
+
+class TestUsageTokenParsing:
+    def test_reads_a_normal_usage_block(self):
+        assert bot._usage_tokens({"prompt_tokens": 1234}, "prompt_tokens") == 1234
+
+    def test_missing_and_null_are_zero(self):
+        assert bot._usage_tokens({}, "prompt_tokens") == 0
+        assert bot._usage_tokens({"prompt_tokens": None}, "prompt_tokens") == 0
+
+    def test_garbage_is_zero_not_an_exception(self):
+        # Accounting hangs off a reply that already succeeded; it must never raise.
+        assert bot._usage_tokens({"prompt_tokens": "lots"}, "prompt_tokens") == 0
+        assert bot._usage_tokens(None, "prompt_tokens") == 0
+        assert bot._usage_tokens({"prompt_tokens": -5}, "prompt_tokens") == 0
+
+
+class TestCalibrationSample:
+    def test_plausible_ratio_accepted(self):
+        assert bot._calibration_sample(1000, 1150) == pytest.approx(1.15)
+
+    def test_tiny_prompts_rejected(self):
+        # Per-message template overhead dominates, so the ratio would be meaningless.
+        assert bot._calibration_sample(50, 200) is None
+
+    def test_absurd_ratios_rejected(self):
+        # A vision call carries image tokens with no characters behind them; folding
+        # that in would corrupt every text-only reading afterwards.
+        assert bot._calibration_sample(1000, 90_000) is None
+        assert bot._calibration_sample(1000, 100) is None
+
+    def test_zero_actual_rejected(self):
+        assert bot._calibration_sample(1000, 0) is None
+
+
+class TestCalibrationBlend:
+    def test_first_sample_replaces_the_seed(self):
+        # Otherwise the displayed ratio starts at a value nobody measured and crawls.
+        assert bot._blend_calibration(1.0, 0, 1.30) == 1.30
+
+    def test_later_samples_are_smoothed(self):
+        out = bot._blend_calibration(1.30, 5, 1.10, alpha=0.2)
+        assert 1.10 < out < 1.30
+
+    def test_converges_toward_a_stable_signal(self):
+        r, n = 1.0, 0
+        for _ in range(40):
+            r = bot._blend_calibration(r, n, 1.25)
+            n += 1
+        assert r == pytest.approx(1.25, abs=0.01)
+
+
+class TestCalibratedTokens:
+    def test_uncalibrated_matches_the_raw_heuristic(self):
+        with _CalFixture(ratio=1.0, n=0):
+            assert bot._tokens("x" * 4000) == bot._est_tokens("x" * 4000)
+
+    def test_calibration_scales_the_estimate(self):
+        with _CalFixture(ratio=1.25, n=10):
+            assert bot._tokens("x" * 4000) == pytest.approx(
+                bot._est_tokens("x" * 4000) * 1.25, rel=0.01)
+
+    def test_kill_switch_returns_the_raw_estimate(self):
+        with _CalFixture(ratio=1.25, n=10, enabled=False):
+            assert bot._tokens("x" * 4000) == bot._est_tokens("x" * 4000)
+
+    def test_confidence_string_distinguishes_guess_from_measurement(self):
+        with _CalFixture(ratio=1.0, n=0):
+            assert "no measured API call" in bot._token_confidence()
+        with _CalFixture(ratio=1.25, n=7):
+            s = bot._token_confidence()
+            assert "1.25" in s and "7" in s
+        with _CalFixture(ratio=1.25, n=7, enabled=False):
+            assert "TOKEN_CALIBRATION=0" in bot._token_confidence()
+
+    def test_memory_budget_stays_on_the_raw_unit(self):
+        # Calibrating it would change how much six live characters recall — a
+        # personality change shipped as an accounting fix.
+        import inspect
+        src = inspect.getsource(bot.select_memories) if hasattr(bot, "select_memories") else ""
+        if not src:
+            import re
+            whole = inspect.getsource(bot)
+            m = re.search(r"budget = MEMORY_TOKEN_BUDGET.*?cost = (\w+)\(line\)",
+                          whole, re.S)
+            assert m and m.group(1) == "_est_tokens", "memory budget must use the raw unit"
+
+
+class TestUsageAccounting:
+    def _reset(self):
+        bot._llm_stats.update(date="", calls=0, tok_in=0, tok_out=0,
+                              measured=0, estimated=0)
+        bot._stash_call_usage(None)
+
+    def test_real_usage_is_spent_not_the_estimate(self):
+        self._reset()
+        with _CalFixture():
+            msgs = [{"role": "user", "content": "x" * 4000}]   # est 1000
+            bot._stash_call_usage({"prompt_tokens": 1234, "completion_tokens": 56})
+            bot._track_llm_usage(msgs, "y" * 400)
+            assert bot._llm_stats["tok_in"] == 1234
+            assert bot._llm_stats["tok_out"] == 56
+            assert bot._llm_stats["measured"] == 1 and bot._llm_stats["estimated"] == 0
+        self._reset()
+
+    def test_falls_back_to_the_estimate_without_usage(self):
+        self._reset()
+        with _CalFixture():
+            msgs = [{"role": "user", "content": "x" * 4000}]
+            bot._track_llm_usage(msgs, "y" * 400)
+            assert bot._llm_stats["tok_in"] == 1000
+            assert bot._llm_stats["estimated"] == 1 and bot._llm_stats["measured"] == 0
+        self._reset()
+
+    def test_usage_is_consumed_once(self):
+        # A stale stash would let one call's real count be billed to the next.
+        self._reset()
+        with _CalFixture():
+            bot._stash_call_usage({"prompt_tokens": 1234})
+            msgs = [{"role": "user", "content": "x" * 4000}]
+            bot._track_llm_usage(msgs, "r")
+            bot._track_llm_usage(msgs, "r")
+            assert bot._llm_stats["measured"] == 1 and bot._llm_stats["estimated"] == 1
+        self._reset()
+
+    def test_measured_call_updates_the_calibration(self):
+        self._reset()
+        with _CalFixture(ratio=1.0, n=0):
+            msgs = [{"role": "user", "content": "x" * 4000}]     # est 1000
+            bot._stash_call_usage({"prompt_tokens": 1200, "completion_tokens": 10})
+            bot._track_llm_usage(msgs, "r")
+            assert bot.token_calibration["n"] == 1
+            assert bot.token_calibration["ratio"] == pytest.approx(1.2, rel=0.01)
+        self._reset()
+
+
+class TestUsageCaptureWiring:
+    """The plumbing that makes a real count reachable at all."""
+
+    def test_streaming_asks_for_usage(self):
+        import inspect
+        assert '"include_usage": True' in inspect.getsource(bot._one_call), \
+            "a streamed response carries no usage block unless it is requested"
+
+    def test_usage_chunk_parsed_before_the_choices_access(self):
+        # The usage chunk has an EMPTY choices list: read after choices[0] it would
+        # IndexError and be skipped, discarding the only real count streaming provides.
+        import inspect
+        src = inspect.getsource(bot._do_request)
+        assert src.index('chunk.get("usage")') < src.index('chunk["choices"][0]')
+
+    def test_non_streaming_path_captures_usage(self):
+        import inspect
+        assert '_stash_call_usage(body.get("usage"))' in inspect.getsource(bot._do_request)
+
+    def test_stream_options_rejection_keeps_streaming(self):
+        # Dropping to non-streaming over a rejected accounting flag would be a latency
+        # regression on every reply that model serves.
+        import inspect
+        src = inspect.getsource(bot._one_call)
+        assert "_no_usage_stream_models.add(model)" in src
+        assert src.index("_no_usage_stream_models.add(model)") < \
+            src.index("_no_stream_models.add(model)")
+
+    def test_stale_usage_cleared_before_each_request(self):
+        import inspect
+        assert "_stash_call_usage(None)" in inspect.getsource(bot._do_request)
+
+    def test_saved_calibration_is_validated(self):
+        import inspect
+        src = inspect.getsource(bot.load_state)
+        assert "_TOKEN_CAL_MIN_RATIO" in src, \
+            "a hand-edited state.json must not set a nonsense multiplier"
+
+
 class TestPresetNameNormalization:
     AVAIL = ["preset-core.txt", "preset-rp.txt", "preset.txt"]
 
