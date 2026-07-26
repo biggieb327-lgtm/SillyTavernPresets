@@ -44,21 +44,46 @@ This archives all state files. The jules backup will be restored onto the VPS.
 
 ### 3. Stop jules on the phone
 
+**RENAME THE DIRECTORY FIRST.** This is the whole trick — do not reorder these:
 ```bash
-# 1. If the phone watchdog runs, stop it FIRST (or drop this instance from its list):
-#    it relaunches vanished bots and will resurrect jules mid-cutover.
-tmux ls | grep -q watchdog && tmux kill-session -t watchdog
-# 2. Kill the tmux SESSION — it owns the in-tmux supervisor .supervise.sh, which
-#    respawns bot.py within seconds. Killing bot.py alone is NOT enough.
+# 1. Remove the resurrection vector. watchdog.sh's check_instance starts with
+#    `[ -d "$dir" ] || return`, so a renamed dir is invisible to it — permanently,
+#    in every mode (its own tmux session OR cron). Do this BEFORE any kill.
+mv ~/jules-bot ~/jules-bot.migrated
+# 2. Now kill the stack: session, then the supervisor, then any straggler bot.py.
 tmux kill-session -t jules
-pkill -9 -f "jules-bot/.supervise.sh"   # backstop if the supervisor detached
+pkill -9 -f "jules-bot/.supervise.sh"
+pkill -9 -f "jules-bot"
 ```
-Confirm it's REALLY dead — wait out a respawn cycle, then check both:
+Confirm it's REALLY dead — wait out BOTH resurrection layers before believing it:
 ```bash
-sleep 3
+sleep 10
 tmux ls | grep jules                                   # should show nothing
 pgrep -af jules && echo "STILL RUNNING — kill again" || echo "clean"
 ```
+If anything comes back, read the watchdog's own reasoning — it logs before every
+relaunch and names the instance:
+```bash
+tail -20 ~/telegram-bot/watchdog.log
+```
+
+> **Learned 2026-07-19 (jules pilot):** `tmux kill-session` alone left `.supervise.sh`
+> respawning `bot.py`; the new process kept polling jules's token and fought the VPS
+> instance with `telegram.error.Conflict` for ~15 min. A `pgrep` caught between respawns
+> falsely reads "clean" — always kill the session **and** the supervisor, and confirm
+> `pgrep` stays empty after a `sleep`, before starting on the VPS. Also: run these on the
+> PHONE (prompt ends `$`), not the VPS — a mis-hosted `kill-session` silently no-ops.
+
+> **Learned 2026-07-26 (bonnie, third recurrence — this is why the rename moved to
+> step 1):** there are TWO independent resurrection layers, and the old kill order
+> defeated one while *arming* the other. `.supervise.sh` reacts to `bot.py` dying
+> (seconds). `watchdog.sh` reacts to the **tmux session** being missing — which is
+> exactly what a correct kill produces — and relaunches the entire stack via
+> `run-bot.sh` on its next cycle (up to 5 min later). So the kill genuinely works,
+> `pgrep` genuinely reads clean, and then everything returns minutes later with a
+> fresh session timestamp. Two `tmux ls` outputs whose "created" times differ by one
+> watchdog interval are the signature. Killing the watchdog's tmux session does not
+> help if it runs from cron; renaming the instance dir defeats it in both modes.
 > **Learned 2026-07-19 (jules pilot):** `tmux kill-session` alone left `.supervise.sh`
 > respawning `bot.py`; the new process kept polling jules's token and fought the VPS
 > instance with `telegram.error.Conflict` for ~15 min. A `pgrep` caught between respawns
@@ -236,6 +261,13 @@ Monitor daily:
 **a. Rename the phone-side instance dir** so no phone script can pick it up:
 ```bash
 mv ~/<name>-bot ~/<name>-bot.migrated
+```
+**If you followed step 3 correctly this is already done** — the rename moved to the
+top of the stop sequence on 2026-07-26, because doing it here (after cutover) left
+the watchdog free to resurrect the instance *during* the cutover window. Verify
+rather than re-run:
+```bash
+ls -d ~/<name>-bot ~/<name>-bot.migrated 2>/dev/null
 ```
 Do NOT `rm -rf` yet — keep `.migrated` as a rollback until VPS soak completes.
 The rename alone stops every phone script (they all guard with `[ -d "$dir" ]`).
