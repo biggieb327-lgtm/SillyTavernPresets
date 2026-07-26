@@ -95,6 +95,36 @@ emily: `emily_harper.json`): a renamed on-device copy silently exempts the insta
 from every future card deploy (bit jules on 2026-07-19; step 7c's `vps-sync.sh` fixes
 it automatically on first run).
 
+### 4b. Verify the transferred state, by content — not presence, size, or hash alone
+
+`/audit`'s "State file" reading only proves `state.json` exists and parses; it says
+nothing about whether it's the *real* history or an empty shell the VPS process
+built from scratch after starting with none. Compare structurally on both sides:
+```bash
+python3 -c "
+import json
+d = json.load(open('<path-to-state.json>'))
+for k in ('conversation_history','facts','moods','summaries','milestones','pinned'):
+    print(k, ':', len(d.get(k, {})), 'entries')
+"
+```
+Run against the phone's last backup archive and the VPS's live file; matching counts
+across every key confirm nothing was dropped. A byte-identical hash is NOT required —
+real activity on the VPS after transfer legitimately changes the file — but the dict
+*keys and counts* must line up.
+
+> **Learned 2026-07-26 (priya):** a re-attempted migration is a different risk profile
+> than a first attempt. Priya's phone directory had somehow lost its live `state.json`
+> sometime between an earlier (evidently incomplete) migration attempt that morning and
+> this evening's — the phone's `.supervise.sh` kept the bot running fine on empty state
+> in the meantime, with no error to flag the gap. `/audit`'s "State file: MISSING" only
+> surfaced because the phone process happened to answer that particular command instead
+> of the VPS one — a symptom easy to miss if you don't know which host answered. That
+> morning's backup tar (`<instance>-migrate.tar.gz`), not the live phone directory,
+> turned out to be the trustworthy source once compared this way. If a bot has ever had
+> a prior incomplete cutover attempt, verify against that instance's most recent backup
+> archive, not just whatever the live phone directory currently holds.
+
 ### 5. Verify VPS .env
 
 On the VPS:

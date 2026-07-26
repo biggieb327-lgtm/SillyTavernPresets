@@ -135,6 +135,11 @@ Full command reference: `OPS_MANUAL.md`.
 3. **Don't touch unrelated code** — but surface smells for separate follow-up.
 4. **Flag uncertainty explicitly**; small low-risk experiments over confident guessing.
 5. **Suggest better approaches** — durable wins over tactical patches are welcome.
+6. **Document every diagnosed failure.** Once a live-ops or code failure is root-caused
+   and resolved, add an operational-log row (`.claude/memory/operational-log.md`) before
+   calling the task done — even when the fix is a doc/guardrail update rather than a
+   bot.py change, and even when nothing shipped to CI. The log is the system's memory;
+   an undocumented incident is one a future session re-diagnoses from scratch.
 
 ## Git workflow
 
