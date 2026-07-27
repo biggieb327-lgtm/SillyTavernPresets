@@ -21,6 +21,12 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/risk-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Risk guard"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/anchor-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Anchor guard (C7)"
           }
         ]
       }
