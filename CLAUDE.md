@@ -155,6 +155,16 @@ Full command reference: `OPS_MANUAL.md`.
    calling the task done — even when the fix is a doc/guardrail update rather than a
    bot.py change, and even when nothing shipped to CI. The log is the system's memory;
    an undocumented incident is one a future session re-diagnoses from scratch.
+7. **Log your own mistakes to `.claude/memory/constraints.md`, immediately.** That file
+   records mistakes made *doing the work* — a command run on the wrong host, a fix
+   declared done that was one instance of a class, a theory asserted as fact — as
+   opposed to the operational log, which records the *system* failing. The test: did a
+   bot misbehave, or did we? Add the entry when the mistake is recognised, not at the
+   end of the session, and increment `seen` if it is a repeat. **At `seen: 2` the
+   constraint graduates**: prose has already failed twice, so write a hook, an eval, or
+   a `sweep.py` scanner and link it. Read this file before starting fleet-touching or
+   multi-step work — its whole value is being read before the same mistake is made
+   again.
 
 ## Git workflow
 
