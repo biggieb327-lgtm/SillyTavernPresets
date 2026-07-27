@@ -95,19 +95,32 @@ only documentation. An assertion is a claim about the world too.
 ### C7 — Anchor edits on content, not position
 **seen: 2** (2026-07-26, 2026-07-27) — *promoted from the Minor log by
 `sweep.py constraints-drift`, its first real find.*
-Two edits went wrong the same way. A paragraph was added to a function "after the
-docstring" and landed outside it, breaking the module until `py_compile` caught it. A
-Routine prompt was spliced into `routines.md` using line indexes read off `sed` output,
-off by one. Both located the edit point by *where it was* rather than *what it says*.
-**Constraint:** find edit points by searching for a unique anchor string in the
-surrounding content. Never a line number (stale the moment anything above it changes),
-never a structural guess like "the line after the docstring". The Edit tool is
-string-anchored by construction — prefer it over `sed -i`/line splicing for any file
-under version control.
-**Graduation: PENDING, deliberately.** Candidate mechanism is a PreToolUse warning on
-line-addressed `sed -i` against tracked files. Left unbuilt tonight so that
-`constraints-drift` rule 1 has a live case to flag in Monday's hygiene check — if the
-nag does not appear, the escalation machinery is broken and that is worth knowing.
+Two edits went wrong the same way: **the surrounding structure was not confirmed before
+writing.** A paragraph was added to a function anchored on `n = 0` — a content anchor,
+correctly matched — but the docstring had already closed above it, so the prose landed
+in the function body and broke the module until `py_compile` caught it. A Routine
+prompt was spliced into `routines.md` using line indexes read off `sed` output, off by
+one, in a file already edited twice that session.
+**Corrected framing (2026-07-27):** the first draft of this entry said both failures
+"located the edit point by *where it was* rather than *what it says*". That is only
+true of the second. The first used a content anchor and still failed, because the
+anchor was right and the assumption about what sat *above* it was wrong. The shared
+cause is not "used line numbers" — it is "did not verify the surrounding structure".
+Getting this wrong would have aimed the guard at the wrong thing.
+**Constraint:** before an in-place edit, confirm what actually surrounds the anchor —
+read it, do not infer it. Never address an edit by line number; prefer the Edit tool,
+which matches on a unique surrounding string and cannot drift.
+**Graduated 2026-07-27 (partially, and the gap is the point):**
+`.claude/hooks/anchor-guard.sh`, a PreToolUse hook, blocks `sed -i` carrying a numeric
+line address against anything outside `/tmp`/scratchpad. Nine-case matrix; the four
+must-not-fire cases (content-anchored substitution, read-only `sed -n`, throwaway
+paths, `# anchor-ok`) all pass.
+**What it does NOT cover:** the docstring failure. That was an Edit-tool call whose
+anchor matched correctly — no hook can see that the *assumption above the anchor* was
+wrong. Detecting line-index splicing inside a Python heredoc was also rejected:
+`readlines()` + slice + write cannot be matched without false positives, and a guard
+that misfires gets disabled. Both halves stay prose here. The existing backstop for the
+first is the compile check, which caught it on the next call.
 
 ---
 
