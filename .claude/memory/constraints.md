@@ -96,10 +96,18 @@ only documentation. An assertion is a claim about the world too.
 
 ## Minor — running log
 
-Small stuff: a wrong path, a command that needed one correction, a bad assumption
-caught in the same breath. **These do not earn constraints on their own** — kept
-separate so the numbered list above stays high-signal and the `seen: 2` graduation
-rule keeps meaning something.
+**Mistakes made and fixed mid-task** — the ones that never reach the owner because
+they were caught a minute later: a wrong path, a grep for the wrong variable name, a
+broken test harness, a script that didn't parse, an assumption corrected the moment
+evidence arrived. **These do not earn constraints on their own** — kept separate so
+the numbered list above stays high-signal and the `seen: 2` graduation rule keeps
+meaning something.
+
+**Log it *because* you fixed it, not despite that.** "I caught it immediately, no harm
+done" is the reflex that keeps this section empty and useless. Self-corrected errors
+are the highest-frequency signal available — they are invisible to everyone but the
+person who made them, they cost real minutes, and they are where the repeating shapes
+show up first. A section with nothing in it means under-reporting, not a clean run.
 
 **The promotion rule:** when two minor entries share a cause, delete both and write a
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
@@ -107,6 +115,14 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-27 — Recommended jules as the 3.8 A/B subject on a model reading taken hours
+  earlier; she had been moved to `glm-5.1:thinking` since, which disqualified her under
+  that item's own precondition → re-read live config at the moment of a recommendation,
+  not from earlier in the same session. State-in-context goes stale.
+- 2026-07-26 — Added a paragraph to `_tally_unexpected_restarts` after the closing
+  `"""`, putting bare prose in the function body; caught by `py_compile` on the next
+  run → when extending a docstring, anchor the edit on the closing delimiter, not on
+  the first line of code after it.
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows
