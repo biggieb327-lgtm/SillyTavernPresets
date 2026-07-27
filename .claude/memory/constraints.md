@@ -18,9 +18,14 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 3. **Increment `seen` when the same mistake recurs.** The count is the whole point —
    it is what tells a future session which constraints are load-bearing.
 4. **At `seen: 2`, it graduates.** A constraint that failed twice is not a documentation
-   problem, it is a missing guard: write a hook, an eval, or a `sweep.py` scanner and
-   link it. This mirrors the standing repo rule that a failure recurring twice earns an
-   eval.
+   problem, it is a missing guard: write a hook (the agent did X), a `sweep.py` scanner
+   (this shape exists elsewhere in the repo), an eval (this can regress in bot.py), or —
+   when no mechanism can see the mistake — **a section in the relevant skill**, and link
+   it. This mirrors the standing repo rule that a failure recurring twice earns an eval.
+   *Skills were added to this list on 2026-07-27: the original three-way rule would have
+   rejected the only correct answer for C8, whose failure mode no hook or scanner can
+   detect. Prefer a mechanism; accept prose only when you can say why nothing mechanical
+   would see it.*
 5. **Own it plainly.** "I asserted X without evidence" — not "it was unclear". A
    sanitised entry teaches nothing.
 
@@ -122,6 +127,32 @@ wrong. Detecting line-index splicing inside a Python heredoc was also rejected:
 that misfires gets disabled. Both halves stay prose here. The existing backstop for the
 first is the compile check, which caught it on the next call.
 
+### C8 — Ask what a reading actually measures before concluding from it
+**seen: 3** (2026-07-26 ×2, 2026-07-27) — *promoted by check 6 of the weekly hygiene
+Routine, from three Minor entries sharing one cause.*
+Three conclusions were drawn from readings that did not mean what they appeared to:
+- an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
+  changed since, and a test recommendation was built on it — **stale**
+- `grep '^MODEL='` returned nothing across six instances, read as "no model set"; the
+  variable is `NANOGPT_MODEL` — **wrong scope**; the grep was answering a question
+  nobody asked
+- `/errors` output full of `Conflict` tracebacks was read as a live fight; `errors.log`
+  is historical, persists across restarts, and travels inside migration tars — **wrong
+  currency**
+Two of these sent a live diagnosis down the wrong path for several rounds.
+**Constraint:** before concluding from any output, state what it actually covers — how
+current is it, what scope does it span, and what would absence of a result mean? A grep
+that finds nothing is only evidence if the pattern was right. A log tail proves what was
+written, never what is happening now. A reading from earlier in the session is a
+historical claim, not a live one.
+**Graduated 2026-07-27 — prose, deliberately.** No hook, scanner, or eval can see
+"trusted a reading that did not mean what it appeared to": there is no code shape and no
+tool call to intercept. Extended
+`.claude/skills/fix-the-class/SKILL.md` §"The two questions that catch what greps miss",
+which already carries the same family of lesson (`BOT_TIMEZONE` was *referenced*
+everywhere and still did nothing). This is the case that forced rule 4 above to admit
+skills as a graduation target.
+
 ---
 
 ## Minor — running log
@@ -145,10 +176,6 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
-- 2026-07-27 — Recommended jules as the 3.8 A/B subject on a model reading taken hours
-  earlier; she had been moved to `glm-5.1:thinking` since, which disqualified her under
-  that item's own precondition → re-read live config at the moment of a recommendation,
-  not from earlier in the same session. State-in-context goes stale.
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows
@@ -161,9 +188,3 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
 - 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
-- 2026-07-26 — Grepped for the primary model as `^MODEL=` when the variable is
-  `NANOGPT_MODEL`, and reported "no model set" on six instances → check the variable's
-  real name in source before drawing conclusions from a grep that found nothing.
-- 2026-07-26 — Read `/audit` output as live state when `errors.log` is historical and
-  survives migration in the tar; concluded a fight was ongoing that had ended → for
-  "is it happening now", use a bounded `journalctl` window, never a log tail.
