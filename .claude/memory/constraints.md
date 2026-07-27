@@ -92,6 +92,23 @@ phantom killer. Three stale assumptions in one function.
 **Constraint:** after any platform change, sweep tests and user-facing strings, not
 only documentation. An assertion is a claim about the world too.
 
+### C7 — Anchor edits on content, not position
+**seen: 2** (2026-07-26, 2026-07-27) — *promoted from the Minor log by
+`sweep.py constraints-drift`, its first real find.*
+Two edits went wrong the same way. A paragraph was added to a function "after the
+docstring" and landed outside it, breaking the module until `py_compile` caught it. A
+Routine prompt was spliced into `routines.md` using line indexes read off `sed` output,
+off by one. Both located the edit point by *where it was* rather than *what it says*.
+**Constraint:** find edit points by searching for a unique anchor string in the
+surrounding content. Never a line number (stale the moment anything above it changes),
+never a structural guess like "the line after the docstring". The Edit tool is
+string-anchored by construction — prefer it over `sed -i`/line splicing for any file
+under version control.
+**Graduation: PENDING, deliberately.** Candidate mechanism is a PreToolUse warning on
+line-addressed `sed -i` against tracked files. Left unbuilt tonight so that
+`constraints-drift` rule 1 has a live case to flag in Monday's hygiene check — if the
+nag does not appear, the escalation machinery is broken and that is worth knowing.
+
 ---
 
 ## Minor — running log
@@ -119,10 +136,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   earlier; she had been moved to `glm-5.1:thinking` since, which disqualified her under
   that item's own precondition → re-read live config at the moment of a recommendation,
   not from earlier in the same session. State-in-context goes stale.
-- 2026-07-26 — Added a paragraph to `_tally_unexpected_restarts` after the closing
-  `"""`, putting bare prose in the function body; caught by `py_compile` on the next
-  run → when extending a docstring, anchor the edit on the closing delimiter, not on
-  the first line of code after it.
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows

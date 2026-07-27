@@ -37,6 +37,7 @@ REPO = Path(__file__).resolve().parents[2]
 import os as _os
 BOT = Path(_os.getenv("SWEEP_BOT") or REPO / "telegram-companion-bot" / "bot.py")
 ENV = Path(_os.getenv("SWEEP_ENV") or REPO / "telegram-companion-bot" / ".env.example")
+CONSTRAINTS = Path(_os.getenv("SWEEP_CONSTRAINTS") or REPO / ".claude" / "memory" / "constraints.md")
 
 # Sites reviewed and justified. Keep the reason — an allowlist without one rots into
 # "this was noisy once".
@@ -213,12 +214,79 @@ def install_hint() -> list[str]:
     return sorted(set(out))
 
 
+# ── 6. constraints.md is only useful if it escalates ────────────────────────
+_STOP = frozenset("""a an and are as at be because been before but by caught check
+checked did does for from had has have how in into is it its not of on one only or
+que ran run than that the their them then there these they this to two use used using
+was were what when which while who with would you your it's don't wasn't""".split())
+
+
+def _minor_entries(text: str) -> list[tuple[str, str]]:
+    """(date, body) for each `- YYYY-MM-DD — …` bullet under the Minor heading."""
+    tail = text.split("## Minor", 1)
+    if len(tail) < 2:
+        return []
+    out = []
+    for m in re.finditer(r'^- (\d{4}-\d{2}-\d{2}) — (.+?)(?=^- \d{4}-\d{2}-\d{2} —|\Z)',
+                         tail[1], re.M | re.S):
+        out.append((m.group(1), " ".join(m.group(2).split())))
+    return out
+
+
+def constraints_drift() -> list[str]:
+    """A mistakes log that never escalates is a diary. This enforces the file's own
+    rules mechanically, so the escalation does not depend on anyone remembering:
+
+      1. A constraint at `seen: 2+` with no `**Graduated` line — by the file's own rule
+         prose has failed twice and it owes a hook, eval, or scanner.
+      2. A Minor backlog past 8 entries — time for a promotion pass, or the section
+         stops being read.
+      3. Minor entries sharing distinctive vocabulary — CANDIDATES for a shared cause,
+         which is the promotion trigger. This is a word-overlap heuristic and nothing
+         more: it cannot tell that two differently-worded entries share a root cause,
+         and it will pair unrelated ones that happen to discuss the same file. The
+         weekly reviewer decides; this only guarantees the pairs get looked at."""
+    if not CONSTRAINTS.exists():
+        return [f"{CONSTRAINTS} is missing — the mistakes log is the input to this check"]
+    text = CONSTRAINTS.read_text(encoding="utf-8")
+    out = []
+
+    for block in re.split(r'^### ', text, flags=re.M)[1:]:
+        head = block.splitlines()[0].strip()
+        seen_m = re.search(r'\*\*seen:\s*(\d+)', block)
+        if not seen_m:
+            continue
+        if int(seen_m.group(1)) >= 2 and "**Graduated" not in block:
+            out.append(f"constraint '{head}' is at seen: {seen_m.group(1)} with no "
+                       f"'**Graduated' line — it owes a hook/eval/scanner, not more prose")
+
+    minors = _minor_entries(text)
+    if len(minors) > 8:
+        out.append(f"Minor log holds {len(minors)} entries (>8) — run a promotion pass; "
+                   f"pairs sharing a cause become a numbered constraint")
+
+    toks = []
+    for date, body in minors:
+        words = {w for w in re.findall(r'[a-z_][a-z0-9_.\-]{3,}', body.lower())
+                 if w not in _STOP}
+        toks.append((date, body, words))
+    for i in range(len(toks)):
+        for j in range(i + 1, len(toks)):
+            shared = toks[i][2] & toks[j][2]
+            if len(shared) >= 3:
+                out.append(f"Minor {toks[i][0]} + {toks[j][0]} share "
+                           f"{sorted(shared)[:4]} — candidate shared cause, promote if real: "
+                           f"'{toks[i][1][:45]}…' / '{toks[j][1][:45]}…'")
+    return out
+
+
 SCANNERS = {
     "markdown-interp": markdown_interp,
     "shared-writes": shared_writes,
     "silent-return": silent_return,
     "env-drift": env_drift,
     "install-hint": install_hint,
+    "constraints-drift": constraints_drift,
 }
 
 

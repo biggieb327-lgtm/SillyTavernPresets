@@ -93,8 +93,18 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
 - **Notifications:** push on completion (email off).
 - **What it does:** report-only context-librarian pass — version/changelog sync,
   ROADMAP/IMPROVEMENTS_PLAN status drift, CI state on `main`, Routine↔this-file
-  sync, operational-log format. It fixes nothing and pushes nothing; findings go
-  to the owner, and recurring ones feed the monthly improvement loop.
+  sync, operational-log format, and (added 2026-07-27) **mistake-trend
+  escalation**: runs `sweep.py constraints-drift`, then judges whether Minor
+  entries in `.claude/memory/constraints.md` share a root cause and proposes the
+  constraint plus the mechanism that would prevent it (hook / scanner / eval /
+  skill). It fixes nothing and pushes nothing; findings go to the owner, and
+  recurring ones feed the monthly improvement loop.
+- **Why here and not a new Routine (2026-07-27):** a weekly trend scanner was
+  wanted for constraints.md. This Routine was already weekly, already
+  report-only, and already fed the improvement loop — a fourth Routine would
+  have duplicated it and drifted. The deterministic half lives in
+  `sweep.py constraints-drift` so it is testable and runnable on demand; only
+  the semantic clustering needs the LLM.
 - **Known limitation:** fired sessions carry no MCP connectors, so the CI check
   falls back to the public GitHub API via WebFetch and the Routine-sync check may
   be SKIPPED — the prompt requires skipped checks to be reported as skipped, never
@@ -127,6 +137,23 @@ Check, quoting the exact lines/values you compared as evidence:
    documented, every documented Routine live, prompts matching).
 5. Operational log: rows in .claude/memory/operational-log.md still match the
    fixed format (| Date | failure | root cause | system patch | eval | next |).
+
+6. MISTAKE TRENDS — escalate what is recurring. Run:
+       python3 .claude/tools/sweep.py constraints-drift
+   It mechanically reports three things: a constraint at seen: 2+ carrying no
+   "**Graduated" line (by the file's own rule it owes a hook, eval, or sweep.py
+   scanner, not more prose); a Minor backlog over 8 entries; and pairs of Minor
+   entries sharing distinctive vocabulary.
+   Then do the judgement the scanner cannot. Read .claude/memory/constraints.md and
+   decide whether any Minor entries share a ROOT CAUSE — the scanner only matches
+   words, so it both misses differently-worded pairs and invents pairs that merely
+   mention the same file. For each real cluster, propose in your report: the shared
+   cause in one sentence, the numbered constraint it should become, and which
+   mechanism would actually prevent it (a hook for "the agent did X", a sweep.py
+   scanner for "this shape exists elsewhere in the code", an eval for "this
+   regression can recur in bot.py", a skill for "the procedure was wrong").
+   PROPOSE ONLY — do not edit constraints.md, do not write the hook. Escalation is
+   the owner's call, and the graduation itself belongs in a reviewed session.
 
 If a check's tooling is unavailable in this session, report that check as
 "SKIPPED (tooling unavailable)" — never guess and never report a skipped check as
