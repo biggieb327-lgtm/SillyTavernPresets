@@ -164,8 +164,11 @@ Full command reference: `OPS_MANUAL.md`.
    constraint graduates**: prose has already failed twice, so write a hook, an eval, or
    a `sweep.py` scanner and link it. Read this file before starting fleet-touching or
    multi-step work — its whole value is being read before the same mistake is made
-   again. Small mistakes (a wrong path, a one-correction command) go in that file's
-   **Minor** running log, not the numbered list — and when two minor entries share a
+   again. Mistakes made and fixed **mid-task** — a wrong path, a broken test harness, a
+   grep for the wrong variable, an assumption corrected on the next tool call — go in
+   that file's **Minor** running log, not the numbered list. Log them *because* they
+   were self-corrected, not despite it: they cost real minutes, nobody else ever sees
+   them, and repeating shapes surface there first. When two minor entries share a
    cause, promote them into a numbered constraint.
 
 ## Git workflow
