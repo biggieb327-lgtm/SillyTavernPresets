@@ -63,7 +63,7 @@ Each was found by a scanner written in the moment. Those scanners are now
    For an eval, the equivalent is `add-regression-eval`'s red-green procedure — and
    never `git checkout` a file holding uncommitted work to undo a test injection.
 
-## The two questions that catch what greps miss
+## The three questions that catch what greps miss
 
 **"Is X referenced?" is strictly weaker than "does X do what the docs claim?"**
 `BOT_TIMEZONE` passed a referenced-anywhere check for months: it *was* read — inside
@@ -77,6 +77,24 @@ in its own docstring because it cannot check it.
 reported as 4,715 tokens, and a real investigation was aimed at the wrong file for two
 rounds. Before trusting a number a tool produced, check the tool against a case whose
 answer you already know.
+
+**"What does this reading actually measure — how current, what scope, and what would
+*nothing* mean?"** (constraint C8, promoted 2026-07-27 after three instances in two
+days.) Output gets believed at face value, and three times it was not what it looked
+like:
+
+| reading | read as | actually |
+|---|---|---|
+| an `/audit` line from earlier in the session | current config | **stale** — the model had been changed since, and a test plan was built on it |
+| `grep '^MODEL='` returning nothing on six instances | "no model is set" | **wrong scope** — the variable is `NANOGPT_MODEL`; the grep answered a question nobody asked |
+| `/errors` full of `Conflict` tracebacks | a fight happening now | **wrong currency** — `errors.log` is historical, survives restarts, and travels inside migration tars |
+
+Two of those aimed a live diagnosis at the wrong thing for several rounds. The habits:
+a grep that finds nothing is evidence only if the pattern was right — verify the name in
+source before concluding from an empty result; a log tail proves what was *written*, never
+what is *happening*, so for "now" use a bounded time window with a count; and any reading
+taken earlier in a session is a historical claim, not a live one — re-read before acting
+on it. No scanner can catch this one, which is why it lives here.
 
 ## Quality bar
 
