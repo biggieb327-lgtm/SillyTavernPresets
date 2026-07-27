@@ -47,6 +47,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/host-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Host guard (C1)"
+          },
+          {
+            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"

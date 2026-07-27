@@ -35,8 +35,16 @@ VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looke
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
 **Constraint:** before emitting a host-specific command, state which host it is for.
 Before running one, `uname -o` — `Android` = phone, `GNU/Linux` = VPS.
-**Graduated:** documented in `CHEATSHEET.md` (top section) and MIGRATION.md step 3.
-Still recurring — needs a stronger guard than prose.
+**Graduated 2026-07-27:** `.claude/hooks/host-guard.sh` + `host_guard.py`, a Stop hook.
+It blocks the turn when a fenced command block mixes VPS-only and phone-only commands,
+when a host-specific block appears in a message that never names its host, or when a
+`# host:` pragma contradicts the commands inside the block. Nine-case matrix, including
+fail-open on a malformed payload.
+**What it does NOT cover, deliberately:** the fleet is on a machine this container
+cannot reach and the owner runs these commands by hand, so nothing here can stop a
+paste into the wrong shell. The hook enforces only the agent's half — that every block
+handed over is attributable to exactly one host. The operator's half stays prose
+(`CHEATSHEET.md`: `uname -o` before anything host-specific).
 
 ### C2 — Name the class before calling a fix done
 **seen: 2** (2026-07-26 ×2)
@@ -83,3 +91,37 @@ SIGTERM"), and an operator-facing alert still pointed at `bot.log` and the Andro
 phantom killer. Three stale assumptions in one function.
 **Constraint:** after any platform change, sweep tests and user-facing strings, not
 only documentation. An assertion is a claim about the world too.
+
+---
+
+## Minor — running log
+
+Small stuff: a wrong path, a command that needed one correction, a bad assumption
+caught in the same breath. **These do not earn constraints on their own** — kept
+separate so the numbered list above stays high-signal and the `seen: 2` graduation
+rule keeps meaning something.
+
+**The promotion rule:** when two minor entries share a cause, delete both and write a
+numbered constraint. That is the whole reason to log them; a minor entry nobody ever
+promotes was still worth ten seconds to write.
+
+Format: `date — what happened → what to do instead`. One line. Newest first.
+
+- 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
+  the code fences never reached the transcript, so all three cases "passed" and the
+  guard looked dead. The *test* was broken, not the code → when a break-test shows
+  nothing firing, suspect the harness before the check. Build fixtures in Python, not
+  shell quoting.
+- 2026-07-27 — Wrote a `sweep-ok` pragma check for `install-hint` that matched
+  `"sweep-ok:"` with a colon, while the inline markers had none, so the helper kept
+  self-reporting → match pragmas loosely; make the scanner fit the annotation, not the
+  other way round.
+- 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
+  *cycling list* of delimiter characters, not a delimiter string → join with one
+  character, then substitute.
+- 2026-07-26 — Grepped for the primary model as `^MODEL=` when the variable is
+  `NANOGPT_MODEL`, and reported "no model set" on six instances → check the variable's
+  real name in source before drawing conclusions from a grep that found nothing.
+- 2026-07-26 — Read `/audit` output as live state when `errors.log` is historical and
+  survives migration in the tar; concluded a fight was ongoing that had ended → for
+  "is it happening now", use a bounded `journalctl` window, never a log tail.
