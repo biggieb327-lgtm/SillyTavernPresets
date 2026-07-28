@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-28.2 — A group instance configured to do nothing looked exactly like a broken one
+
+**Root cause: correct fail-closed silence is indistinguishable from failure.** Priya was
+in the pilot group, running, receiving traffic, with `GROUP_ALLOWED_CHATS` and
+`GROUP_PEERS` both set correctly — and `GROUP_MODE` never added. `group_guard`
+(bot.py:9277) requires `GROUP_MODE and chat.id in GROUP_ALLOWED_CHATS` for plain text;
+without it the message is dropped at handler group -1 with **no reply, no log line, no
+error**. That silence is right — a non-participating instance must not answer in a group
+it was merely added to (§6) — but it means "not configured for this group" and "broken"
+produce byte-identical observable behavior.
+
+Diagnosing it took six rounds of live debugging on 2026-07-28. What made it slow is
+worth recording, because every signal pointed *away* from config: `/chatid` answered
+normally (allowlisted commands return at bot.py:9268, **before** the `GROUP_MODE`
+check), so the bot was demonstrably present and receiving; `@priya_bot` was ignored too,
+which looks like a delivery problem but isn't — the @-mention changes Telegram delivery,
+not the guard; and `/errors` was clean, because nothing errored. Jules, correctly
+configured, worked throughout.
+
+**Fix — `_group_config_warnings(mode, chats, peers)`**, appended to `_CONFIG_WARNINGS`
+at import, so `/audit` states the incoherence:
+
+| state | warning |
+|---|---|
+| allowlist and/or peers set, `GROUP_MODE` off | *"… set but GROUP_MODE is off — this instance ignores ALL group traffic (it answers only `/chatid` there). Set GROUP_MODE=1 and restart to participate."* |
+| `GROUP_MODE` on, allowlist empty | *"… the allowlist fails closed, so every group message is still ignored. Add the group's chat id (`/chatid` in the group) and restart."* |
+
+**Both halves of the class, not just the one that bit** (C2): the inverse — `GROUP_MODE=1`
+with an empty allowlist — is the same defect with the same silent symptom (§6 fail
+closed), and would have been the next incident.
+
+**Deliberately quiet on the three coherent states:** participating (mode on + allowlist
+set), fully unconfigured (the fleet's four non-group bots), and participating without
+peers (one bot + human is a valid group, not an error). A warning firing on every
+`/audit` fleet-wide would be noise, and noise is how the next real warning gets ignored.
+
+**No behavior change.** Nothing about participation, the guard, the ledger, claims, or
+the caps is touched — this release only makes an existing state legible.
+`group-deliver-clean` and `group-cmd-allowlist` both green and untouched.
+
+**7 tests** over all four states of a pure helper, including a `test_priyas_actual_broken_config`
+pinning the exact configuration from the incident.
+
 ## v2026-07-28.1 — Diagnostics couldn't run while the bot was up, and said so dangerously
 
 **Root cause: `_acquire_pid_lock()` is a module-level call, so it beats its own

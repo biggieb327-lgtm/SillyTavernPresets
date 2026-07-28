@@ -4611,3 +4611,52 @@ class TestDuplicateInstanceAdviceIsSafe:
         src = self._src()
         assert "Conflict" in src
         assert "--claim-test" in src
+
+
+class TestIncoherentGroupConfigWarns:
+    """v2026-07-28.2. A group instance that cannot participate is SILENT by design —
+    group_guard drops the traffic at handler group -1 with no reply and nothing in
+    errors.log, because silence is correct fail-closed behavior for a non-participant.
+    That makes 'not configured' indistinguishable from 'broken' by observation:
+    diagnosing priya's missing GROUP_MODE took six rounds on 2026-07-28 with her
+    allowlist and peers already set. These warnings put the incoherence in /audit."""
+
+    W = staticmethod(lambda *a: bot._group_config_warnings(*a))
+
+    # --- the two incoherent states warn ---
+
+    def test_allowlist_set_but_mode_off(self):
+        out = self.W(False, {-5116757843}, [])
+        assert len(out) == 1
+        assert "GROUP_ALLOWED_CHATS set but GROUP_MODE is off" in out[0]
+
+    def test_peers_set_but_mode_off(self):
+        out = self.W(False, set(), ["Jules"])
+        assert len(out) == 1
+        assert "GROUP_PEERS set but GROUP_MODE is off" in out[0]
+
+    def test_priyas_actual_broken_config(self):
+        """The exact state that caused the incident: both set, GROUP_MODE absent."""
+        out = self.W(False, {-5116757843}, ["Jules"])
+        assert len(out) == 1
+        assert "GROUP_ALLOWED_CHATS, GROUP_PEERS set but GROUP_MODE is off" in out[0]
+        assert "Set GROUP_MODE=1 and restart" in out[0]
+
+    def test_mode_on_but_allowlist_empty(self):
+        """Same class inverted: the allowlist fails closed (GROUP_CHAT_DESIGN.md §6)."""
+        out = self.W(True, set(), ["Jules"])
+        assert len(out) == 1
+        assert "GROUP_ALLOWED_CHATS is empty" in out[0]
+
+    # --- the coherent states stay quiet ---
+
+    def test_participating_config_is_silent(self):
+        assert self.W(True, {-5116757843}, ["Jules"]) == []
+
+    def test_unconfigured_instance_is_silent(self):
+        """The fleet's four non-group bots must not warn on every /audit."""
+        assert self.W(False, set(), []) == []
+
+    def test_participating_without_peers_is_silent(self):
+        """One bot + human in a group is a valid configuration, not an error."""
+        assert self.W(True, {-5116757843}, []) == []

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-28.1"
+BOT_VERSION = "2026-07-28.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -400,6 +400,33 @@ if GROUP_MODE and GROUP_PEERS:
         f"requires every peer to share this exact directory on one filesystem — "
         f"{GROUP_LEDGER_DIR}. A peer on another host (e.g. after a VPS migration) gets "
         f"its own copy: claims always succeed and the chain cap is NOT enforced.")
+
+# Incoherent-group-config warnings (2026-07-28). Both states below are configured-but-
+# inert, and — this is the whole point — INVISIBLE: group_guard drops the traffic at
+# handler group -1 with no reply and nothing in errors.log, because silence is the
+# correct fail-closed behavior for a non-participating instance. There is no way to tell
+# "not configured for this group" from "broken" by observing the bot. Diagnosing the
+# first of these on priya took six rounds of live debugging on 2026-07-28 (the group
+# allowlist and peers were set; GROUP_MODE was never added), so the incoherence is
+# reported once at startup where /audit shows it.
+def _group_config_warnings(mode: bool, chats, peers) -> list[str]:
+    """Incoherent group config → operator-facing warnings. Pure so it can be tested
+    across the four states; the caller feeds it the module constants."""
+    if not mode and (chats or peers):
+        which = ", ".join(n for n, v in (("GROUP_ALLOWED_CHATS", chats),
+                                         ("GROUP_PEERS", peers)) if v)
+        return [f"{which} set but GROUP_MODE is off — this instance ignores ALL group "
+                f"traffic (it answers only /chatid there). Set GROUP_MODE=1 and restart "
+                f"to participate."]
+    if mode and not chats:
+        return ["GROUP_MODE is on but GROUP_ALLOWED_CHATS is empty — the allowlist fails "
+                "closed, so every group message is still ignored. Add the group's chat id "
+                "(/chatid in the group) and restart."]
+    return []
+
+
+_CONFIG_WARNINGS.extend(
+    _group_config_warnings(GROUP_MODE, GROUP_ALLOWED_CHATS, GROUP_PEERS))
 
 # --- R6 evolution experiments (each behind its own flag, default off) ---
 FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")
