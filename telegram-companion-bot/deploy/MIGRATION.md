@@ -532,6 +532,24 @@ Four traps, all hit for real on 2026-07-28:
 - **`ssh-keygen` offering to overwrite** an existing key: answer **n**. Overwriting
   invalidates whatever that key already authenticates.
 
+### First run only: move the working tree by hand
+
+`git fetch` updates `origin/main` but **not** the working tree, and the script that
+hard-resets the tree lives inside the tree. On a checkout older than 2026-07-19,
+`deploy/vps-sync.sh` does not exist yet at the checked-out commit, so the first run has
+to be bootstrapped:
+
+```bash
+# host: vps
+git -c safe.directory=/opt/telegram-bots/.repo -C /opt/telegram-bots/.repo status --porcelain | head
+git -c safe.directory=/opt/telegram-bots/.repo -C /opt/telegram-bots/.repo reset --hard origin/main
+git -c safe.directory=/opt/telegram-bots/.repo -C /opt/telegram-bots/.repo log --oneline -1
+```
+
+Check `status --porcelain` is empty first — `reset --hard` discards local changes, and
+this checkout may not have been touched in weeks. Every run after this one is
+self-maintaining: the script fetches *and* resets before it copies anything.
+
 ### Deploying from then on
 
 The script is no longer curl-piped into bash — run it from the checkout:
