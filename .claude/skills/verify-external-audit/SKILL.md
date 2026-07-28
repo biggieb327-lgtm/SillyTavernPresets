@@ -24,22 +24,45 @@ Every claim gets a verdict with line evidence before any fix.
    - `telegram-companion-bot/ROADMAP.md` § "Rejected or already covered"
    Any incoming claim matching an entry is closed with a citation, zero code read.
 
-2. **Triage each remaining claim to a verdict**, reading the actual code at the
-   claimed location (Grep/Read; claims often cite wrong line numbers — search for
-   the pattern, not the line):
-   - **CONFIRMED** — reproduced in code with file:line evidence; state the
-     failure scenario in one sentence.
-   - **FALSE** — code shows otherwise; quote the disproving lines.
-   - **ALREADY FIXED** — check `CHANGELOG.md`; cite the version.
-   - **REAL BUT REJECTED** — true observation, but fixing it violates a recorded
-     decision (single-file bot.py, no side calls, DRY_RUN rejection…); cite it.
-   - **UNVERIFIABLE HERE** — needs on-device behavior; say what evidence would
-     settle it and how to get it (`/errors`, log line, `--claim-test`).
+2. **Triage each remaining claim to a verdict AND a disposition** — two independent
+   fields, not one label. Read the actual code at the claimed location (Grep/Read;
+   claims often cite wrong line numbers — search for the pattern, not the line).
+
+   **Verdict — is the claim true?**
+   - **CONFIRMED** — reproduced in code with file:line evidence; state the failure
+     scenario in one sentence.
+   - **FALSE_POSITIVE** — code shows otherwise; quote the disproving lines.
+   - **STALE** — was true when written, fixed since; check `CHANGELOG.md`, cite the
+     version.
+   - **NOT_REPRODUCED** — can't settle it with the evidence available here (needs
+     on-device behavior); say what evidence would settle it and how to get it
+     (`/errors`, log line, `--claim-test`).
+   - **NOT_APPLICABLE** — describes a system we don't run (a framework we don't use,
+     a deploy path that isn't ours).
+
+   **Disposition — what did we do?**
+   - **FIXED** — shipped, cite the version.
+   - **NO_ACTION** — closed deliberately.
+   - **OPEN** — true and unfixed; belongs in ROADMAP or an operational-log Next.
+
+   **Why the split (adopted 2026-07-27, from the Shared Session Memory Protocol
+   review).** The old vocabulary had a single label `REAL BUT REJECTED`, which welded
+   a truth-claim to a policy decision. Once written it was impossible to ask the two
+   questions separately — so when a recorded decision was later revisited (as the
+   default-off convention was on 2026-07-18), nothing could answer "which past
+   findings were *true* but closed under the old rule?" That is exactly how the
+   memory-hygiene loops stayed off for two weeks (v2026-07-27.1). `REAL BUT REJECTED`
+   is now **CONFIRMED + NO_ACTION**, and it stays queryable.
+
+   The combination that most needs writing down is **CONFIRMED + NO_ACTION** — record
+   *which* recorded decision closed it (single-file bot.py, no side calls, DRY_RUN
+   rejection…), because that decision may not outlive the finding.
 
 3. **Record verdicts before fixing.** For a sizable audit, append a dated verdict
    section to `AUDIT-2026-07-10.md`'s pattern (or a new `AUDIT-<date>.md`), so the
    next audit's duplicates die in step 1. Small batches: verdicts in the session
-   report are enough.
+   report are enough. Record both fields — a table of claim → verdict → disposition →
+   evidence. A verdict with no disposition is half a record.
 
 4. **Fix only CONFIRMED claims**, via `repo-change-control` (one release; audit fixes
    are a coherent theme). Order by user impact, not by the auditor's severity
@@ -58,8 +81,10 @@ Every claim gets a verdict with line evidence before any fix.
 ## Verification checklist
 
 - [ ] Both rejected-claims registries consulted
-- [ ] Every claim has exactly one verdict with evidence
-- [ ] No code changed for FALSE / ALREADY FIXED / REJECTED / UNVERIFIABLE claims
+- [ ] Every claim has exactly one verdict AND one disposition, with evidence
+- [ ] Every CONFIRMED + NO_ACTION cites the decision that closed it
+- [ ] No code changed for FALSE_POSITIVE / STALE / NOT_REPRODUCED / NOT_APPLICABLE
+      claims, or for CONFIRMED ones dispositioned NO_ACTION
 - [ ] CONFIRMED fixes went through the full repo-change-control gate
 - [ ] Verdicts recorded somewhere durable if the batch was sizable
 
@@ -76,5 +101,5 @@ Every claim gets a verdict with line evidence before any fix.
 
 ## What to report back
 
-A verdict table (claim → verdict → evidence), what was fixed and shipped, what was
-rejected and why, and any new eval created.
+A verdict table (claim → verdict → disposition → evidence), what was fixed and
+shipped, what was closed and under which decision, and any new eval created.

@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-27.1 — The memory-hygiene loops were built, shipped, and never turned on
+
+**Root cause: a policy change that never swept backwards.** v2026-07-12.3 shipped three
+defenses against memory drifting away from ground truth — a weekly audit, recency decay,
+and confidence hedging — all default-OFF, because that was the convention at the time.
+Six days later (v2026-07-18.1) the owner reversed that convention: new features default ON
+with a mandatory kill switch. Nothing went back over the features that had shipped under
+the old rule. So for two weeks all six instances ran with the write path defended
+(confidence gating, quote grounding, provenance) and the **maintenance loop inert**:
+memories.txt accumulated contradictions with nothing reviewing them, a 6-month-old one-off
+outranked yesterday's correction whenever it shared a keyword, and a conf-3 memory the
+owner had waved through was asserted at recall with the same certainty as a conf-10
+quote-grounded fact. The code to prevent all three was present, tested, and disabled.
+
+Found while reviewing an external session-memory protocol
+(`REVIEW-SESSIONMEMORY-2026-07-27.md`) whose central claim is that memory must be audited
+against ground truth or agents invent progress. The claim is right and we had already
+implemented it — the finding was that we had not enabled it.
+
+**The flip.** Three one-line default changes; no logic touched:
+
+| var | was | now | kill switch |
+|---|---|---|---|
+| `MEMORY_DECAY_HALFLIFE_DAYS` | `0` (off) | `90` — the value the v2026-07-12.3 entry itself recommended | `=0` |
+| `MEMORY_HEDGE` | `0` | `1` | `=0` |
+| `MEMORY_AUDIT` | `0` | `1` | `=0` |
+
+**Why `MEMORY_AUDIT` defaults on despite invariant #16's higher-cost carve-out.** It adds
+one `SUMMARY_MODEL` call per instance per *week* (not per message — the per-message budget
+is untouched) and can put up to `MEMORY_AUDIT_MAX_PROPOSALS`×6 = 18 items a week into the
+owner's `/reviewmem` queue. That triage cost is the real price, and it is the reason the
+carve-out exists. Enabled at the owner's explicit instruction (2026-07-27). If the queue
+becomes noise, `MEMORY_AUDIT_MAX_PROPOSALS=1` throttles it before the kill switch does.
+The audit still never mutates anything on its own — every delete/merge needs `/reviewmem
+ok` and routes through the `_memory_replace` choke point.
+
+**What does not change.** No new per-message LLM call (invariant #3). Recency decay is
+floored at 0.1 so old memories fade in the ranking and never leave it, and entries with no
+recorded `ts` (pre-2026-07 legacy lines) stay at a neutral 1.0 — an instance whose
+`memory_meta.json` is sparse sees almost no ranking change. Hedging is display-time only;
+the stored line is untouched.
+
+**Testing note (why no new tests).** The three pure helpers already carry 34 tests from
+v2026-07-12.3, and all of them pass the parameter explicitly rather than reading the
+module global — `_recency_weight(ts, now, halflife)`, `_hedge_memory_lines(lines, meta,
+autoconf, enabled)`. The `triggered_memories` ranking tests set no `ts` in `_memory_meta`,
+so the new 90-day default resolves to the neutral 1.0 path and leaves them byte-identical.
+That decoupling is why a default flip needs no test changes — and is worth preserving.
+
+**Also in this release (`.claude/` only, no bot impact):** the operational log gains an
+`evidence_kind` tag and `verify-external-audit` gains a verdict/disposition split, both
+lifted from the reviewed protocol. See `REVIEW-SESSIONMEMORY-2026-07-27.md`.
+
 ## 2026-07-26 — Content: per-character preset layers (no bot.py change, no version bump)
 
 **Inert until an `.env` names them.** Six new files, no instance loads any of them yet.

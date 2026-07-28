@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-26.8"
+BOT_VERSION = "2026-07-27.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -649,10 +649,12 @@ MEMORY_LOG_FILE = BASE_DIR / "memory_log.txt"
 MEMORY_REVIEW_MAX = 20
 _memory_meta: dict[str, dict] = {}
 
-# Memory loops (all default OFF — unset keeps today's behavior)
-MEMORY_DECAY_HALFLIFE_DAYS = _env_float("MEMORY_DECAY_HALFLIFE_DAYS", "0")
-MEMORY_HEDGE = os.getenv("MEMORY_HEDGE", "0").strip() not in ("0", "false", "no")
-MEMORY_AUDIT = os.getenv("MEMORY_AUDIT", "0").strip() not in ("0", "false", "no")
+# Memory loops. Shipped default-OFF in v2026-07-12.3 under the pre-2026-07-18 convention;
+# flipped ON in v2026-07-27.1 to match the standing default-on policy (invariant #16).
+# Each keeps its kill switch: 0 restores the old behavior without a redeploy.
+MEMORY_DECAY_HALFLIFE_DAYS = _env_float("MEMORY_DECAY_HALFLIFE_DAYS", "90")
+MEMORY_HEDGE = os.getenv("MEMORY_HEDGE", "1").strip() not in ("0", "false", "no")
+MEMORY_AUDIT = os.getenv("MEMORY_AUDIT", "1").strip() not in ("0", "false", "no")
 MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
@@ -3437,7 +3439,8 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                 sem_scored[line] = (sim / max_sim) * 3.0
 
     # Merge: union of both, sum their scores, then age-decay the ranking
-    # (MEMORY_DECAY_HALFLIFE_DAYS; 0/unset = off, no-ts legacy entries neutral).
+    # (MEMORY_DECAY_HALFLIFE_DAYS; default 90 since v2026-07-27.1, 0 = off,
+    # no-ts legacy entries neutral).
     now = time.time()
 
     # Repeat-injection suppression: down-weight lines injected on recent turns so one

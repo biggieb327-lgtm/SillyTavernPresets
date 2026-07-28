@@ -176,6 +176,12 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-27 — `find . -name .env.example` returned `./.env.example` and I read that as
+  repo-root; the sandbox had reset cwd to `telegram-companion-bot/`, so both Edit calls
+  failed on a path that did not exist → a relative path is only as good as the cwd you
+  assumed. This shell resets cwd between calls: use absolute paths, or print `pwd` in
+  the same command that prints the relative result. (C8 family — the reading was true,
+  its base was not what I assumed.)
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows

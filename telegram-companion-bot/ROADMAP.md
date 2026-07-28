@@ -445,6 +445,20 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   product decision, and the migration is only safe if the multiply and the switch ship
   together.
 
+### 4.5 Re-decide the remaining pre-2026-07-18 default-off flags — S
+- **Context:** v2026-07-27.1 flipped `MEMORY_AUDIT`, `MEMORY_DECAY_HALFLIFE_DAYS` and
+  `MEMORY_HEDGE` to default-on. They had shipped default-off under the convention in
+  force before 2026-07-18, and the policy reversal that day never swept backwards.
+- **The remainder of that class** (swept 2026-07-27): `FEEDBACK_REACTIONS`,
+  `CLOSENESS_ENABLED`, `THREADS_ENABLED`, `JOKE_CANDIDATES`, `DEVICE_RENDER`. Each needs
+  a decision: default-on with kill switch, or stays-off with a one-line rationale under
+  invariant #16's higher-cost carve-out.
+- **Explicitly NOT in this class** — do not "fix" these: `FOOD_SUGGESTIONS` and
+  `MAP_INTENT` are additionally gated on `TOMTOM_ENABLED`, so flipping them is a no-op
+  without a key; `GROUP_MODE` is the deliberate per-instance priya/jules pilot.
+- **Why its own release:** one release = one theme, and these are user-visible
+  personality/behaviour changes across six live characters — not a bulk flip.
+
 ### Rejected or already covered (recorded so they don't come back)
 - `/rollback` command — `bot.py.bak` + shell already covers it; a bad bot.py can't be
   trusted to run its own rollback anyway.
