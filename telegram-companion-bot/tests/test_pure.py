@@ -4551,7 +4551,16 @@ class TestDiagnosticModesSkipPidLock:
         assert 'DIAGNOSTIC_MODE = any(f in sys.argv for f in ("--check-config", "--claim-test"))' in src
 
     def test_diagnostic_mode_declared_before_the_lock_and_load_state(self):
-        """Ordering is the whole fix: the constant is consulted by module-level code."""
+        """Ordering is the whole fix: the constant is consulted by module-level code.
+
+        NOT independently break-testable, and that is fine — moving the declaration
+        below `_acquire_pid_lock()` makes bot.py raise `NameError` at import, so the
+        real enforcement is the import itself (covered by the `bot-imports` eval), and
+        this assertion is a cheap, legible restatement of it. Verified 2026-07-28: the
+        injection errors at collection with `NameError: name 'DIAGNOSTIC_MODE' is not
+        defined` rather than failing this test. Recorded per C3 — a check nobody has
+        seen fail should say why.
+        """
         import inspect
         src = inspect.getsource(bot)
         decl = src.index("DIAGNOSTIC_MODE = any(")
@@ -4570,8 +4579,9 @@ class TestDiagnosticModesSkipPidLock:
         bot — it must not move that bot's state file out from under it."""
         import inspect
         src = inspect.getsource(bot.load_state)
-        guard = src.index("DIAGNOSTIC_MODE")
-        assert guard < src.index("STATE_FILE.rename(backup)")
+        assert "DIAGNOSTIC_MODE" in src, "load_state has no diagnostic-mode guard at all"
+        assert src.index("DIAGNOSTIC_MODE") < src.index("STATE_FILE.rename(backup)"), \
+            "the diagnostic guard must precede the destructive rename"
 
 
 class TestDuplicateInstanceAdviceIsSafe:
