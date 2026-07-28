@@ -7,6 +7,47 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-28 — A seed file can be in the repo and absent from the fleet, forever, silently
+
+**Found by a failing rename, not by a check.** Renaming Jules's dealership manager on the
+VPS returned `sed: can't read /opt/telegram-bots/jules/atlas.txt: No such file or
+directory`. The repo has had `jules/atlas.txt` since the seed folders were added; her live
+instance never got it.
+
+**Root cause: nothing syncs seed files, by design, and nothing reports on them either.**
+`install-vps.sh` seeds a character's `people/projects/schedule/atlas.txt` **once**, at
+first instance creation, and `vps-sync.sh` deliberately does not touch them — they are
+living, hand-edited content. Both halves are correct. The gap is what falls between: a
+seed file added to the repo *after* an instance exists has no path to that instance, and
+jules's dir came off the phone in the 2026-07-26 migration rather than through
+`install-vps.sh` seeding at all.
+
+**Why it stayed invisible.** `bot.py:649` reads the atlas once at import and falls back to
+`[]` when the file is absent — no warning, no error, and the fallback is correct behaviour
+for a character who has no atlas. `/audit` does not mention seed files. So the only symptom
+is Jules quietly never referencing Bellingham, which reads as a model quirk rather than a
+missing file. Same shape as the GROUP_MODE incident earlier today: **a correct silent
+fallback and a broken deploy are observationally identical** (C8).
+
+**`vps-sync.sh` now reports the gap** in its verification block: seed files present in the
+repo for that instance but missing on it, each with the `cp` that would fix it.
+
+**It reports, it does not copy.** An operator may have deleted a seed file deliberately,
+and an absent file is indistinguishable from an intended absence (C10) — auto-seeding
+would silently resurrect it on every deploy. This follows v2026-07-28.2's precedent:
+surface the incoherence, name the fix, leave the decision with the operator.
+
+Three-branch break test (`scratchpad/seedreport-test.sh`, extracting the block verbatim
+from the script rather than a re-typed copy): missing file warns and names it; all-present
+prints an explicit all-clear; no seed folder in the repo says so instead of claiming
+completeness. **All three print something** — per C3, "nothing printed" must never be the
+only signal a check can produce. The harness truncated at the first top-level `fi` on the
+first run and reported three false failures; the check was fine.
+
+**Not fixed here:** `/audit` still says nothing about seed files, so this is only visible
+at deploy time. Adding it is a bot.py change (version bump + changelog + delivery gate) and
+is left as a proposal rather than smuggled into a deploy-script fix.
+
 ## 2026-07-28 — Three Marcuses, one of them keyed into Emily's lorebook (content only)
 
 **Found while drafting Marcus's seed files, and it blocks the planned Emily+Marcus

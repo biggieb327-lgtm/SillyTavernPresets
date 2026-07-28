@@ -121,3 +121,33 @@ echo "$CARD  repo:  $(sha256sum "$SRC/$CARD" | cut -d' ' -f1)"
 echo "$CARD  local: $(sha256sum "$BASE/$INST/$CARD" | cut -d' ' -f1)"
 journalctl -u "bot@$INST" -n 60 --no-pager | grep "STARTUP AUDIT" | tail -1 \
   || echo "no STARTUP AUDIT line yet — check: journalctl -u bot@$INST -n 30"
+
+# Seed files (people/projects/schedule/atlas) are deliberately NOT synced above — they
+# are living, hand-edited content. But nothing else reports on them either, so a seed
+# file added to the repo after an instance already existed never arrives and never
+# announces itself. Found 2026-07-28: jules had no atlas.txt on the VPS. bot.py reads
+# it once at import and falls back to [] when absent (bot.py:649), and /audit does not
+# mention seed files at all, so the only symptom is a character quietly missing her
+# geography forever.
+#
+# Report, never copy. An operator may have removed a seed file deliberately, and an
+# absent file cannot be distinguished from an intended one (C10) — so this prints the
+# gap and the command, and leaves the decision where it belongs.
+seed_missing=""
+if [ -d "$SRC/$INST" ]; then
+  for sf in "$SRC/$INST"/*.txt; do
+    [ -e "$sf" ] || continue
+    sb=$(basename "$sf")
+    [ -f "$BASE/$INST/$sb" ] || seed_missing="$seed_missing $sb"
+  done
+fi
+if [ -n "$seed_missing" ]; then
+  echo "seed files: in repo, MISSING on this instance —$seed_missing"
+  for sb in $seed_missing; do
+    echo "            cp $SRC/$INST/$sb $BASE/$INST/$sb && chown bot:bot $BASE/$INST/$sb"
+  done
+elif [ -d "$SRC/$INST" ]; then
+  echo "seed files: all repo seed files present on this instance"
+else
+  echo "seed files: no seed folder in the repo for $INST (nothing to compare)"
+fi
