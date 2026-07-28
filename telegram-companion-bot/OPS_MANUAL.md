@@ -454,16 +454,23 @@ Setup, once per pilot bot:
    §0). Bot-to-bot flow is a shared *filesystem* side channel, not Telegram; split hosts
    silently give each bot its own ledger and the loop caps stop being enforced. Since the
    2026-07-26 migration all six run on the VPS under `/opt/telegram-bots/`, so
-   `GROUP_LEDGER_DIR` defaults to the shared code dir for both. Verify rather than assume
-   — the resolved path is named in each bot's startup config warning:
+   `GROUP_LEDGER_DIR` defaults to the shared code dir for both. Verify rather than assume:
    ```bash
    # host: VPS
-   ls -ld /opt/telegram-bots                        # must be writable by the bot user
    sudo -u bot test -w /opt/telegram-bots && echo "ledger dir writable" || echo "NOT WRITABLE"
-   journalctl -u bot@priya -u bot@jules | grep -i GROUP_LEDGER_DIR | tail -4
+   systemctl show bot@priya bot@jules -p ExecStart | grep -o '/opt/[^ ]*bot\.py'
+   grep -H "^[[:space:]]*GROUP_LEDGER_DIR=" /opt/telegram-bots/{priya,jules}/.env
    ```
-   The two instances must print the *same* directory. If the ledger dir is not writable
-   by `bot`, set `GROUP_LEDGER_DIR` in both `.env`s to a directory that is.
+   `GROUP_LEDGER_DIR` defaults to the directory of the running `bot.py` (bot.py:373), so
+   **identical `ExecStart` paths + no override in either `.env` = co-located, by
+   construction.** The last grep printing nothing is the passing result. If the dir is
+   not writable by `bot`, set `GROUP_LEDGER_DIR` in both `.env`s to one that is.
+
+   > **Do not try to verify this from the logs before enabling.** The startup config
+   > warning that names the resolved path is gated `if GROUP_MODE and GROUP_PEERS`
+   > (bot.py:387), so on a not-yet-enabled instance it never prints and an empty
+   > `journalctl | grep` means nothing at all. It is a *post*-enable confirmation —
+   > see step 6.
 4. In `/opt/telegram-bots/priya/.env` and `/opt/telegram-bots/jules/.env` only:
    ```
    GROUP_MODE=1
@@ -477,8 +484,14 @@ Setup, once per pilot bot:
      /opt/telegram-bots/priya --claim-test
    ```
    (must print two PASS lines — run it as `bot` so it exercises the real permissions).
-6. `systemctl restart bot@priya bot@jules`. Run the acceptance script in
-   `GROUP_CHAT_DESIGN.md` §10 before calling it working.
+6. `systemctl restart bot@priya bot@jules`. **Now** the ledger-dir warning fires (it
+   needs `GROUP_MODE` + `GROUP_PEERS`), so confirm both bots resolved the same path:
+   ```bash
+   # host: VPS
+   journalctl -u bot@priya -u bot@jules --since "5 min ago" | grep -o "share this exact directory[^.]*"
+   ```
+   Then run the acceptance script in `GROUP_CHAT_DESIGN.md` §10 before calling it
+   working.
 
 Behavior notes:
 

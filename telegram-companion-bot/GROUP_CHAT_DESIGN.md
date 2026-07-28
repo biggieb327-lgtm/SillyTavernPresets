@@ -62,10 +62,14 @@ Bot API anti-loop policy and is independent of privacy mode. Two consequences:
    > instances now run on the VPS under `/opt/telegram-bots/`, so `GROUP_LEDGER_DIR`
    > defaults to one shared code dir for both pilots and the blocker above is lifted.
    > This condition is what the warning names, so the pilot is unblocked — but **confirm
-   > it on the host before enabling**, don't infer it from this line: compare the
-   > resolved `GROUP_LEDGER_DIR` in both bots' startup config warnings, and check the
-   > directory is writable by the `bot` user the systemd unit runs as. Procedure:
-   > `OPS_MANUAL.md` § "Group chat (experimental)", step 3.
+   > it on the host before enabling**, don't infer it from this line. Note the startup
+   > config warning above is gated `if GROUP_MODE and GROUP_PEERS` (bot.py:387): it
+   > cannot print on a not-yet-enabled instance, so it is useless as a *pre*-enable
+   > check and an empty grep for it proves nothing. Before enabling, compare the units'
+   > `ExecStart` and confirm neither `.env` overrides `GROUP_LEDGER_DIR` — the default is
+   > the directory of the running `bot.py`, so identical ExecStart + no override means
+   > co-located by construction. Procedure: `OPS_MANUAL.md` § "Group chat
+   > (experimental)", step 3 (pre-enable) and step 6 (post-enable confirmation).
 2. For bots to see ordinary (unaddressed) *human* group messages, **privacy mode must be
    disabled** per bot via BotFather (`/setprivacy` → Disable). With privacy on (the
    default), a group bot only receives commands, @mentions, and replies to itself.

@@ -62,14 +62,27 @@ turned out to be three phone-era assumptions in one function, not one.
 `sweep.py` (v2026-07-26.8).
 
 ### C3 — Prove a check RED before trusting it GREEN
-**seen: 2** (2026-07-25 ×1, 2026-07-26 ×1)
+**seen: 3** (2026-07-25 ×1, 2026-07-26 ×1, 2026-07-28 ×1)
 The `healthcheck-status-checked` eval passed its own break test — it grepped for
 `status_code`, which still appeared in a log line after the guard was removed. The
 earlier `audit-plain-text` eval had an awk range that collapsed to one line and could
 never fail.
-**Constraint:** every new eval, test, or scanner must be run against a deliberately
-re-injected defect and observed to fail, before it is trusted.
-**Graduated:** `add-regression-eval` and `fix-the-class` both require it.
+**2026-07-28 — a new form: a check handed to the operator.** The group-chat pre-enable
+step told the owner to `journalctl | grep GROUP_LEDGER_DIR` to confirm both pilots
+shared a ledger directory. That warning is gated `if GROUP_MODE and GROUP_PEERS`
+(bot.py:387), so on a not-yet-enabled instance it can never print: the check was
+circular — it verified a precondition using a signal that only exists after the thing
+the precondition gates. Empty output was the only possible result, and I would have read
+it as a finding. Caught only because the owner reported the empty output rather than the
+expected line.
+**Constraint:** every new eval, test, scanner **or operator-facing verification step**
+must be shown capable of producing a signal before it is trusted — run it against a
+deliberately re-injected defect, or for a manual check, state the conditions under which
+the expected output appears and confirm those hold. **"Nothing printed" is a result only
+if something could have printed.**
+**Graduated:** `add-regression-eval` and `fix-the-class` both require it for automated
+checks. The operator-facing form is new here and is why this entry now names it
+explicitly — a handed-over check is one nobody will break-test unless the author did.
 
 ### C4 — Search for the bug's shape, not its remembered vocabulary
 **seen: 1** (2026-07-26)
