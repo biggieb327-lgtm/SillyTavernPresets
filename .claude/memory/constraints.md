@@ -282,6 +282,34 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
+  conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
+  Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length
+  at all. I had reasoned about the arbitration from `preset-core.txt` alone and had not
+  read the other three layers in his stack; the real conflict (`preset-explicit.txt`'s
+  standing-consent block deleting his defining behaviour) only appeared when I did →
+  a per-character layer arbitrates against the WHOLE stack. Read every layer the instance
+  will load before writing the one that resolves them. An inherited prediction is a
+  hypothesis, not a finding (C9 family — this one was caught before shipping).
+- 2026-07-28 — Filled the `.env.example` stack row for marcus by doing arithmetic off the
+  table's own published numbers (8501 − emily's layer + marcus's) instead of measuring.
+  The table is stale: `preset-core.txt` and `preset-explicit.txt` have grown since those
+  rows were written, so every row reads ~60 raw low and my derived figure inherited the
+  error → measure, don't derive from a published figure whose measurement date you did not
+  check (C8 family). Fixed by measuring and annotating the staleness in the table.
+- 2026-07-28 — `sed -n '1,30p' fleet-status.sh` failed on a path that exists, because an
+  earlier call in the same session had `cd`'d to the repo root → this shell persists cwd
+  across calls, so a bare relative path depends on whichever call last moved it. Use
+  absolute paths, or `cd` explicitly in the same command. (Same shape as the 2026-07-27
+  entry below; if it recurs a third time, promote it.)
+- 2026-07-28 — `anchor-guard.sh` blocked a *content-anchored* `sed -i 's/^Layer is …/'`.
+  Not my mistake and not a guard bug in the dangerous direction, but worth recording: line
+  28 scans the entire command string for a line-address shape, and the `grep -n "434 raw
+  tokens…"` half of the same compound command supplied `"` + digits + space + `r`, which
+  is in its `[acdipsr]` command-letter class → the guard cannot tell which segment of a
+  compound command the address-shaped text belongs to. Fail-safe direction, but "a guard
+  that misfires gets disabled" is this file's own rule (C7), so it needs either
+  per-segment matching or a note in the skill.
 - 2026-07-27 — `find . -name .env.example` returned `./.env.example` and I read that as
   repo-root; the sandbox had reset cwd to `telegram-companion-bot/`, so both Edit calls
   failed on a path that did not exist → a relative path is only as good as the cwd you
