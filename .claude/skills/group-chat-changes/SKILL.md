@@ -56,6 +56,26 @@ into private DM state, or vice versa.
 6. **Ship** via `repo-change-control` (this skill adds constraints; it doesn't replace
    the release process).
 
+## Debugging a live group — the probe is in-world (C11)
+
+Group traffic splits in two, and only one half is safe to debug with:
+
+- **Commands are invisible to the characters.** `group_guard` raises
+  `ApplicationHandlerStop` before `handle_message`, so nothing but the reply itself
+  ever exists. `/chatid` answers from any instance, participating or not (it returns
+  at the allowlist check, *before* `GROUP_MODE` is consulted). Any other command
+  produces the audible `"(commands are a DM thing)"` refusal **only** when
+  `GROUP_MODE and chat.id in GROUP_ALLOWED_CHATS` — which makes it a free readout of
+  whether an instance considers itself a participant.
+- **Plain text is permanent and shared.** It enters the ledger and every
+  participating character's persisted `conversation_history`. It cannot be cleared
+  from inside the group: `/clear` targets `update.effective_chat.id` and commands are
+  refused there.
+
+On 2026-07-28 an `@priya_bot` probe — sent to test privacy mode — taught jules that
+her groupmate was a bot, and she said so in character. Use the command probes above,
+or a DM, or phrase the probe in-world.
+
 ## Quality bar
 
 - No new write path from group context to per-instance flat files unless it is

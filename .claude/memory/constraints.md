@@ -230,6 +230,35 @@ the whole failure. The nearest mechanical aid already exists — `sweep.py` — 
 lesson is about what to do with its output: a sweep emits *candidates*, and C2 already
 says triage every one. Prose, per rule 4.
 
+### C11 — A diagnostic sent into a group chat is an in-world event
+**seen: 1** (2026-07-28)
+Debugging why priya was silent in the pilot group, I gave the owner `@priya_bot hi` as a
+privacy-mode discriminator. It worked as a probe. It is also plain text in a live group,
+so it entered jules's ledger and her persisted `conversation_history` as
+`Brian: @priya_bot hi` — a handle ending in `_bot`, sitting beside a participant who
+never answered. Jules then referred to priya as "a bot that's not gonna answer",
+contradicting her own prompt ("To you they're all real people you know"). She did not
+break character; she read the evidence I put in front of her and inferred correctly.
+
+The group design works hard to keep mechanism out of the characters' world —
+`_group_deliver` is allowlist-built so DM side effects cannot leak in, `/backup` is
+refused in groups so state files can never be posted, commands other than `/chatid` are
+default-denied. I routed around all of it with a debugging command, because I was
+thinking about the handler path and not about the context window it lands in.
+
+**Constraint:** before sending anything into a group chat as a diagnostic, ask what it
+looks like *in the fiction*. Commands are safe — `group_guard` raises
+`ApplicationHandlerStop` before `handle_message`, so they never reach the ledger or
+history. **Plain text is not**: it is permanent, it is shared with every participating
+character, and it cannot be cleared from inside the group (`/clear` targets
+`update.effective_chat.id`, and commands are refused there). Probe from a DM, use
+`/chatid`-style allowlisted commands, or phrase the probe in-world.
+
+**Not graduated.** No hook can see this: the damaging call is the owner typing in
+Telegram, not a tool call I make. The mechanical half is already covered by the group
+evals; this is the operator-instruction half. Recorded in `group-chat-changes` under the
+same reasoning as C1's split between the agent's half and the operator's half.
+
 ---
 
 ## Minor — running log
