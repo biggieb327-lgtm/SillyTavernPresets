@@ -486,3 +486,70 @@ and state divergence.
 - [ ] Phone stopped / kept as cold spare
 - [ ] OPS_MANUAL.md updated with VPS-specific daily ops
 - [ ] CLAUDE.md Termux section marked historical
+
+---
+
+## Private-repo deploys (2026-07-28)
+
+The repo went private so character cards aren't published via raw URLs. **Anonymous
+`raw.githubusercontent.com` fetches 404 on a private repo**, which breaks every
+curl-based deploy path at once — `vps-sync.sh`, `install-vps.sh`, and bot.py's own
+`/update`. `deploy/vps-sync.sh` therefore syncs from a **git checkout** on the VPS
+instead. A checkout authenticates once and behaves identically whether the repo is
+public or private, so this migration can be done *before* the visibility flip with no
+window where the fleet is unreachable.
+
+### One-time setup (VPS, as root)
+
+```bash
+# host: vps
+ssh-keygen -t ed25519 -f /root/.ssh/stpresets_deploy -N ''
+cat /root/.ssh/stpresets_deploy.pub
+# → add that key under the repo's Settings → Deploy keys, READ-ONLY (do not tick write)
+
+GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_deploy -o IdentitiesOnly=yes" \
+  git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git /opt/telegram-bots/.repo
+
+# verify the key works and the checkout is on main
+GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_deploy -o IdentitiesOnly=yes" \
+  git -C /opt/telegram-bots/.repo fetch origin main && echo "deploy key OK"
+```
+
+`vps-sync.sh` sets `GIT_SSH_COMMAND` itself when `/root/.ssh/stpresets_deploy` exists.
+Override the paths with `STPRESETS_REPO` / `STPRESETS_DEPLOY_KEY` if you put them
+elsewhere.
+
+### Deploying from then on
+
+The script is no longer curl-piped into bash — run it from the checkout:
+
+```bash
+# host: vps
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>
+```
+
+It fetches and hard-resets the checkout to `origin/main` first, prints the resolved
+HEAD, and compares repo-vs-instance hashes at the end, so a stale checkout can't
+silently deploy old content.
+
+### Order of operations for the flip
+
+Do **not** flip visibility first — once private, you cannot deploy the fix that teaches
+the fleet to authenticate, because that fix would have to arrive over the channel that
+just broke.
+
+1. Deploy-key setup + clone above (works while the repo is still public).
+2. Deploy the checkout-based `vps-sync.sh` to all six instances via the *current*
+   working path, and confirm each one's STARTUP AUDIT.
+3. Run `vps-sync.sh` once from the checkout and confirm the HEAD + hash lines.
+4. **Then** flip the repo to private (GitHub → Settings → General → Danger Zone).
+5. Re-run `vps-sync.sh` on one instance to prove the private path works end to end.
+
+### What stays broken, deliberately
+
+`/update` from Telegram cannot work against a private repo — raw URLs have no way to
+authenticate. As of v2026-07-28.3 it detects the 401/403/404 and replies with the
+`vps-sync.sh` command instead of a bare HTTP error. The phone-era scripts
+(`update-all.sh`, `sync-cards.sh`, `watchdog.sh`, `new-bot.sh`, `backup-all.sh`,
+`cleanup-all.sh`) still contain raw URLs and are now dead against a private repo; they
+already managed nothing post-migration, so they are left alone rather than half-fixed.

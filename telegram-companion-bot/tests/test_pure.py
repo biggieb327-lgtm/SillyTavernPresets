@@ -4660,3 +4660,37 @@ class TestIncoherentGroupConfigWarns:
     def test_participating_without_peers_is_silent(self):
         """One bot + human in a group is a valid configuration, not an error."""
         assert self.W(True, {-5116757843}, []) == []
+
+
+class TestUpdateReasonsAllHaveBranches:
+    """v2026-07-28.3. Twice now a new `reason` from the self-update path has shipped
+    without a matching branch in update_cmd: v2026-07-25.7 (/audit outage) and
+    v2026-07-25.11 (`update_in_progress`, which would have replied with silence). A
+    catch-all exists now, so the failure mode degraded from silence to an unhelpful
+    "Update did not run (x)" — still wrong for a reason with a real remedy. This pins
+    the CLASS: every reason the update path can return must be handled explicitly."""
+
+    def _reasons_returned(self):
+        import inspect, re
+        src = inspect.getsource(bot._perform_self_update_locked)
+        return set(re.findall(r'"reason":\s*"([a-z_]+)"', src))
+
+    def _reasons_handled(self):
+        import inspect, re
+        src = inspect.getsource(bot.update_cmd)
+        return set(re.findall(r'reason == "([a-z_]+)"', src))
+
+    def test_every_returned_reason_has_an_explicit_branch(self):
+        returned, handled = self._reasons_returned(), self._reasons_handled()
+        assert returned, "no reasons parsed — the regex or the function shape changed"
+        missing = returned - handled
+        assert not missing, (
+            f"update_cmd has no explicit branch for {sorted(missing)}; the catch-all "
+            f"would reply 'Update did not run', which names no remedy")
+
+    def test_repo_not_readable_is_one_of_them(self):
+        """The private-repo case specifically — raw URLs cannot authenticate, so this
+        reason is permanent, not transient, and its message must name vps-sync.sh."""
+        import inspect
+        assert "repo_not_readable" in self._reasons_returned()
+        assert "vps-sync.sh" in inspect.getsource(bot.update_cmd)

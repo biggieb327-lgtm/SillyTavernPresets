@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-28.2"
+BOT_VERSION = "2026-07-28.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -12377,6 +12377,16 @@ def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: 
         resp.raise_for_status()
         source = resp.text
     except Exception as e:
+        # A private repo 404s/401s anonymous raw fetches, so /update stops working the
+        # moment visibility changes — with a bare "404 Client Error" that names neither
+        # the cause nor the fix. Deploys moved to a git checkout on 2026-07-28
+        # (deploy/vps-sync.sh) precisely because raw URLs cannot authenticate; this
+        # branch makes the command say so instead of looking like a network fault.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (401, 403, 404):
+            return {"ok": False, "reason": "repo_not_readable",
+                    "detail": f"HTTP {status} fetching bot.py over an anonymous raw URL",
+                    "version": BOT_VERSION}
         return {"ok": False, "reason": "download_failed", "detail": str(e)}
     m = re.search(r'^BOT_VERSION\s*=\s*"([^"]+)"', source, re.M)
     new_version = m.group(1) if m else "unknown"
@@ -12422,6 +12432,14 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ New bot.py does not compile — keeping v{result['version']}.\n{result['detail']}")
         elif reason == "update_in_progress":
             await update.message.reply_text(f"⏳ {result['detail']}")
+        elif reason == "repo_not_readable":
+            await update.message.reply_text(
+                f"⚠️ /update can't reach the repo ({result['detail']}).\n\n"
+                f"This is expected if the repo is private — raw URLs can't "
+                f"authenticate. Deploy from the VPS instead:\n"
+                f"  /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh "
+                f"<instance>\n\n"
+                f"Still on v{result.get('version', BOT_VERSION)}; nothing changed.")
         else:
             # Catch-all so a new reason can never reply with silence. Before this, an
             # unhandled reason fell straight through to `return` and the owner saw

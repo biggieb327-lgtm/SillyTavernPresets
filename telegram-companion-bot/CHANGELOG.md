@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-28.3 — Deploys move to a git checkout so the repo can go private
+
+**Root cause: the entire deploy model assumed anonymous read.** Nine call sites fetch
+from `raw.githubusercontent.com`, including the two that matter — `deploy/vps-sync.sh`
+and bot.py's `perform_self_update`. Raw URLs 404 for a private repo and have no way to
+authenticate, so flipping visibility would have broken every deploy path on all six live
+instances simultaneously. Worse, the recovery is circular: the fix that teaches the fleet
+to authenticate would itself have to arrive over the channel that just broke, leaving
+hand-copying files to the VPS as the only way out.
+
+Owner decision (2026-07-28): make the repo private, because character cards were being
+published via raw URLs under a personal GitHub account as a side effect of how deploys
+work.
+
+**`deploy/vps-sync.sh` now syncs from a git checkout** at `/opt/telegram-bots/.repo`,
+cloned once with a **read-only deploy key**. This removes the circularity entirely — a
+checkout behaves identically whether the repo is public or private, so it ships and gets
+verified *before* the flip, and the flip then changes nothing. Secondary win: nine fetch
+call sites collapse to one working tree that is fetched and hard-reset to `origin/main`
+in a single step, so a partial deploy can no longer leave an instance with a new `bot.py`
+and a stale card. The script prints the resolved HEAD and compares repo-vs-instance
+hashes, so a stale checkout cannot silently deploy old content. A file named in `.env`
+but absent from the repo stays fatal, same as the old 404-is-fatal rule.
+
+**`/update` cannot be saved and now says so.** Raw URLs can't authenticate, full stop.
+Previously a private repo would have produced `⚠️ Download failed: 404 Client Error` —
+naming neither the cause nor the fix, and looking exactly like a network fault, which is
+the "opaque error" the debugging playbook says to instrument before it costs a session.
+`_perform_self_update_locked` now inspects `e.response.status_code` and returns a
+distinct `repo_not_readable` reason for 401/403/404; `update_cmd` gains a matching
+branch that replies with the `vps-sync.sh` command and confirms nothing changed. Note the
+catch-all added in v2026-07-25.11 already prevented silence here — this makes the message
+*useful*, not merely present.
+
+**New card: `marcus_calder.json`** (Marcus Calder, `chara_card_v2`). 2,988 always-on
+tokens — between Emily (2,308) and Jules (5,290), so no prompt-budget concern. Its
+`character_book` (6 keyword-triggered entries) and `extensions.depth_prompt` are both
+supported by `load_character` (bot.py:2352, 2357); every entry is `constant: false` /
+`selective: false`, so nothing is dropped by the parser's narrower feature set. Card
+added but **no instance exists yet** — `vps-sync.sh` gains a `marcus` case so one can be
+stood up, and it stays inert until an instance dir and unit are created.
+
+**Not touched, deliberately:** `update-all.sh`, `sync-cards.sh`, `watchdog.sh`,
+`new-bot.sh`, `backup-all.sh` and `cleanup-all.sh` still carry raw URLs and are now dead
+against a private repo. They are phone-era and already managed nothing after the
+2026-07-26 migration; half-fixing tooling that runs nowhere would add risk for no
+behavior change. Recorded here so their breakage is a known state, not a discovery.
+
+Setup, verification, and the mandatory order of operations: `deploy/MIGRATION.md`
+§ "Private-repo deploys".
+
 ## v2026-07-28.2 — A group instance configured to do nothing looked exactly like a broken one
 
 **Root cause: correct fail-closed silence is indistinguishable from failure.** Priya was
