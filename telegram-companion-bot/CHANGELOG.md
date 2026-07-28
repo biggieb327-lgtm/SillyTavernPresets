@@ -7,24 +7,35 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
-## v2026-07-27.1 — The memory-hygiene loops were built, shipped, and never turned on
+## v2026-07-27.1 — Memory-loop defaults aligned to the default-on policy (fleet no-op)
 
-**Root cause: a policy change that never swept backwards.** v2026-07-12.3 shipped three
-defenses against memory drifting away from ground truth — a weekly audit, recency decay,
-and confidence hedging — all default-OFF, because that was the convention at the time.
-Six days later (v2026-07-18.1) the owner reversed that convention: new features default ON
-with a mandatory kill switch. Nothing went back over the features that had shipped under
-the old rule. So for two weeks all six instances ran with the write path defended
-(confidence gating, quote grounding, provenance) and the **maintenance loop inert**:
-memories.txt accumulated contradictions with nothing reviewing them, a 6-month-old one-off
-outranked yesterday's correction whenever it shared a keyword, and a conf-3 memory the
-owner had waved through was asserted at recall with the same certainty as a conf-10
-quote-grounded fact. The code to prevent all three was present, tested, and disabled.
+> **This entry was rewritten on 2026-07-28. Its original root cause was false.** It
+> claimed all six instances had been running with the memory-hygiene loops inert for two
+> weeks. They had not: every instance's `.env` already set `MEMORY_AUDIT=1`,
+> `MEMORY_HEDGE=1`, `MEMORY_DECAY_HALFLIFE_DAYS=90` explicitly. The claim was an
+> inference from bot.py's defaults plus a commented-out `.env.example`, never a reading
+> of the live files — and it was shipped as fact. The original text is preserved only in
+> git history; what follows is what the release actually is. See
+> `.claude/memory/constraints.md` C9.
 
-Found while reviewing an external session-memory protocol
-(`REVIEW-SESSIONMEMORY-2026-07-27.md`) whose central claim is that memory must be audited
-against ground truth or agents invent progress. The claim is right and we had already
-implemented it — the finding was that we had not enabled it.
+**What this release actually does.** v2026-07-12.3 shipped three memory-hygiene features
+— weekly audit, recency decay, confidence hedging — default-OFF, correct under the
+convention then in force. v2026-07-18.1 reversed that convention (new features default ON
+with a mandatory kill switch) and nothing swept backwards over features already shipped
+under the old rule. This aligns those three defaults with the standing policy.
+
+**Live impact on the existing fleet: none.** All six `.env` files set all three
+explicitly, and an `.env` value always wins over a bot.py default, so every running
+character behaves exactly as it did before this release. Verified by the owner on the VPS
+2026-07-28, one line per instance per variable. `deploy/vps-sync.sh` cannot have written
+those lines — it touches exactly one `.env` key, `CHARACTER_CARD` (vps-sync.sh:55-58).
+
+**Where it does change something:** a *new* instance. `new-bot.sh` / `SETUP_GUIDE.md`
+produce an `.env` from `.env.example`, where all three ship commented out. Before this
+release a new bot silently came up with its memory-maintenance loop disabled and no
+signal that it had; now it inherits the fleet's actual configuration by default. That is
+the whole of the benefit, and it is worth having — but it is a provisioning fix, not the
+live-defect fix the original entry claimed.
 
 **The flip.** Three one-line default changes; no logic touched:
 
@@ -36,12 +47,14 @@ implemented it — the finding was that we had not enabled it.
 
 **Why `MEMORY_AUDIT` defaults on despite invariant #16's higher-cost carve-out.** It adds
 one `SUMMARY_MODEL` call per instance per *week* (not per message — the per-message budget
-is untouched) and can put up to `MEMORY_AUDIT_MAX_PROPOSALS`×6 = 18 items a week into the
-owner's `/reviewmem` queue. That triage cost is the real price, and it is the reason the
-carve-out exists. Enabled at the owner's explicit instruction (2026-07-27). If the queue
-becomes noise, `MEMORY_AUDIT_MAX_PROPOSALS=1` throttles it before the kill switch does.
-The audit still never mutates anything on its own — every delete/merge needs `/reviewmem
-ok` and routes through the `_memory_replace` choke point.
+is untouched) and can put up to `MEMORY_AUDIT_MAX_PROPOSALS` items a week per instance
+into the owner's `/reviewmem` queue. Enabled at the owner's explicit instruction
+(2026-07-27). Note this imposes **no new cost on the existing fleet** — all six already
+ran with it on, so that queue was already live; the corrected entry above supersedes the
+original's claim of "18 new items a week." The cost applies only to newly provisioned
+instances. If the queue becomes noise, `MEMORY_AUDIT_MAX_PROPOSALS=1` throttles it before
+the kill switch does. The audit never mutates anything on its own — every delete/merge
+needs `/reviewmem ok` and routes through the `_memory_replace` choke point.
 
 **What does not change.** No new per-message LLM call (invariant #3). Recency decay is
 floored at 0.1 so old memories fade in the ranking and never leave it, and entries with no

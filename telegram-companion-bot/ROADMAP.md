@@ -449,6 +449,22 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 - **Context:** v2026-07-27.1 flipped `MEMORY_AUDIT`, `MEMORY_DECAY_HALFLIFE_DAYS` and
   `MEMORY_HEDGE` to default-on. They had shipped default-off under the convention in
   force before 2026-07-18, and the policy reversal that day never swept backwards.
+- **PRECONDITION — do this first, it is not optional.** Check the six live `.env` files
+  before assuming any of these is actually off:
+  ```bash
+  # host: VPS
+  for i in nora bonnie cass emily priya jules; do
+    printf '=== %s\n' "$i"
+    for v in FEEDBACK_REACTIONS CLOSENESS_ENABLED THREADS_ENABLED JOKE_CANDIDATES DEVICE_RENDER; do
+      hit=$(grep -E "^[[:space:]]*${v}=" "/opt/telegram-bots/$i/.env" | tail -1)
+      printf '  %-20s %s\n' "$v" "${hit:-unset -> bot.py default applies}"
+    done
+  done
+  ```
+  v2026-07-27.1 shipped believing the memory flags were off fleet-wide, on exactly this
+  reasoning; all six had them set in `.env` and the release was a live no-op. If these
+  are set too, 4.5 is a **provisioning cleanup** (what a new instance inherits), not a
+  behaviour change, and must be scoped and announced as one. See constraints C9.
 - **The remainder of that class** (swept 2026-07-27): `FEEDBACK_REACTIONS`,
   `CLOSENESS_ENABLED`, `THREADS_ENABLED`, `JOKE_CANDIDATES`, `DEVICE_RENDER`. Each needs
   a decision: default-on with kill switch, or stays-off with a one-line rationale under

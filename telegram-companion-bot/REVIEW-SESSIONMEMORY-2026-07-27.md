@@ -112,18 +112,31 @@ conflating "you were wrong" with "I couldn't check" is how a real finding gets d
 `REAL BUT REJECTED` → `CONFIRMED` + `NO_ACTION` with a required citation of the closing
 decision; checklist and report-back format updated.
 
-### 3. The bug the review found — v2026-07-27.1
+### 3. What reading it prompted — v2026-07-27.1, and a correction
 
-Reading their case for auditing memory against ground truth sent me to check ours. All
-three memory-hygiene loops (`MEMORY_AUDIT`, `MEMORY_DECAY_HALFLIFE_DAYS`,
-`MEMORY_HEDGE`) shipped default-OFF in v2026-07-12.3 under the convention in force at
-the time; v2026-07-18.1 reversed that convention to default-ON-with-kill-switch and
-**nothing swept backwards**. The defenses existed, were tested, and were inert.
+Their case for auditing memory against ground truth sent me to check ours. All three
+memory-hygiene loops (`MEMORY_AUDIT`, `MEMORY_DECAY_HALFLIFE_DAYS`, `MEMORY_HEDGE`)
+shipped default-OFF in v2026-07-12.3 under the convention in force at the time;
+v2026-07-18.1 reversed that convention to default-ON-with-kill-switch and nothing swept
+backwards. v2026-07-27.1 aligns the defaults.
 
-Their contribution here is only the prompt to look — the finding and fix are ours.
-Details: `CHANGELOG.md` v2026-07-27.1, and the operational-log row naming the class
-(*a policy change that applies only forward silently grandfathers every prior decision
-it was meant to reverse*).
+**Correction (2026-07-28).** This section originally claimed the defenses were "inert"
+on the live fleet. That was false, and the manner of the error is worth recording *here*
+of all places. All six `.env` files set all three variables explicitly; the fleet was
+never unprotected, and the release is a live no-op whose real value is what a newly
+provisioned instance inherits.
+
+The claim was an inference from bot.py's defaults plus a commented-out `.env.example` —
+neither of which says anything about a live `.env` — and it was shipped to `main`,
+CI-green, having been correctly labelled `[hypothesis]` at every step. Which is the
+sharpest possible demonstration of the limit of idea #1 above: **a tag records how well
+a claim is supported; it does not stop the claim being load-bearing.** The protocol this
+document reviews has the same gap — `evidence_kind: HYPOTHESIS` is a field on a receipt,
+and nothing in the schema prevents a `PASS` in `acceptance[]` from resting on one.
+
+Recorded as constraints **C9** (verify a load-bearing hypothesis before shipping, not
+after), with the concrete precondition written into ROADMAP 4.5, whose premise rests on
+the identical reasoning.
 
 ## Rejected
 

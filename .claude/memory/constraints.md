@@ -153,6 +153,37 @@ which already carries the same family of lesson (`BOT_TIMEZONE` was *referenced*
 everywhere and still did nothing). This is the case that forced rule 4 above to admit
 skills as a graduation target.
 
+### C9 — Verify a load-bearing hypothesis before shipping, not after
+**seen: 1** (2026-07-27)
+v2026-07-27.1 shipped to `main`, CI-green, on the claim that all six instances had run
+for two weeks with their memory-hygiene loops disabled. The claim was **labelled
+`[hypothesis]`** in the operational log, in the changelog, and in the report to the
+owner — and the release's entire justification still rested on it. It was false: every
+`.env` set all three variables explicitly. The evidence that would settle it was one
+command, and the owner ran it in one message when finally asked — *after* the merge.
+
+The inference itself was empty, not merely unlucky: bot.py's default and a commented-out
+`.env.example` say nothing whatsoever about a live `.env`, and per-instance override is
+the normal way this fleet is configured. There was no weak evidence here to weigh, only
+the absence of any.
+
+**Constraint:** before a change ships, list what it *depends on being true*. Anything on
+that list marked `[hypothesis]` is a blocker, not a caveat — verify it, or scope the
+change so it doesn't depend on it. Honest labelling discharges the duty to *flag*
+uncertainty; it does not discharge the duty to *resolve* it. Specifically: **this
+container cannot reach the fleet, so every claim about live instance state is a question
+for the owner.** Ask before, not after — it cost one message here and one rewritten
+release entry.
+
+**Relation to C5/C8:** C5 says label a theory as a theory (complied with — and it was not
+enough). C8 says ask what a reading measures (this failure had *no* reading to measure).
+C9 is the missing third: what a conclusion is allowed to carry.
+
+**Not graduated to a mechanism.** A hook cannot know which of a diff's premises are
+load-bearing, and an eval cannot query a machine it has no route to. Prose, deliberately,
+per rule 4 — with the concrete precondition written into ROADMAP 4.5 so the next instance
+of this exact question hits a check instead of an inference.
+
 ---
 
 ## Minor — running log
