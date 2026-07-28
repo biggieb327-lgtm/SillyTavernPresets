@@ -445,37 +445,30 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   product decision, and the migration is only safe if the multiply and the switch ship
   together.
 
-### 4.5 Re-decide the remaining pre-2026-07-18 default-off flags — S
-- **Context:** v2026-07-27.1 flipped `MEMORY_AUDIT`, `MEMORY_DECAY_HALFLIFE_DAYS` and
-  `MEMORY_HEDGE` to default-on. They had shipped default-off under the convention in
-  force before 2026-07-18, and the policy reversal that day never swept backwards.
-- **PRECONDITION — do this first, it is not optional.** Check the six live `.env` files
-  before assuming any of these is actually off:
-  ```bash
-  # host: VPS
-  for i in nora bonnie cass emily priya jules; do
-    printf '=== %s\n' "$i"
-    for v in FEEDBACK_REACTIONS CLOSENESS_ENABLED THREADS_ENABLED JOKE_CANDIDATES DEVICE_RENDER; do
-      hit=$(grep -E "^[[:space:]]*${v}=" "/opt/telegram-bots/$i/.env" | tail -1)
-      printf '  %-20s %s\n' "$v" "${hit:-unset -> bot.py default applies}"
-    done
-  done
-  ```
-  v2026-07-27.1 shipped believing the memory flags were off fleet-wide, on exactly this
-  reasoning; all six had them set in `.env` and the release was a live no-op. If these
-  are set too, 4.5 is a **provisioning cleanup** (what a new instance inherits), not a
-  behaviour change, and must be scoped and announced as one. See constraints C9.
-- **The remainder of that class** (swept 2026-07-27): `FEEDBACK_REACTIONS`,
-  `CLOSENESS_ENABLED`, `THREADS_ENABLED`, `JOKE_CANDIDATES`, `DEVICE_RENDER`. Each needs
-  a decision: default-on with kill switch, or stays-off with a one-line rationale under
-  invariant #16's higher-cost carve-out.
-- **Explicitly NOT in this class** — do not "fix" these: `FOOD_SUGGESTIONS` and
-  `MAP_INTENT` are additionally gated on `TOMTOM_ENABLED`, so flipping them is a no-op
-  without a key; `GROUP_MODE` is the deliberate per-instance priya/jules pilot.
-- **Why its own release:** one release = one theme, and these are user-visible
-  personality/behaviour changes across six live characters — not a bulk flip.
-
 ### Rejected or already covered (recorded so they don't come back)
+- **"Sweep the remaining pre-2026-07-18 default-off flags to default-on" — withdrawn
+  2026-07-28, do not re-open.** Briefly filed as 4.5 after v2026-07-27.1, on the theory
+  that the 2026-07-18 default-on policy had never swept backwards. The five flags were
+  enumerated by *code shape* (`os.getenv("X", "0")`) without reading what any of them
+  was. All five are deliberately off, each with a rationale that already existed in
+  writing — which is precisely invariant #16's carve-out, not a violation of it:
+  - `FEEDBACK_REACTIONS`, `CLOSENESS_ENABLED`, `THREADS_ENABLED`, `JOKE_CANDIDATES` are
+    the R6 evolution experiments. The changelog titles that release *"R6 evolution
+    experiments (all gated, default off)"* (v2026-07-11.6); `.env.example` heads the
+    block *"default off, pilot one instance at a time"*; and the entry directly below
+    this one already rejects flipping them as a class — *"product direction, not audit
+    debt; revisit deliberately, not as a checklist."* A bulk default-flip is the
+    checklist. Enabling any of them is a per-instance product decision for the owner.
+  - `DEVICE_RENDER` is a cosmetic delivery preference (monospace bubbles, like a phone
+    log), documented under *Voice & delivery* with its default value shown. Default-off
+    is simply correct.
+  - `GROUP_MODE`, `FOOD_SUGGESTIONS`, `MAP_INTENT` were never in the class either: the
+    first is the group-chat pilot behind `GROUP_CHAT_DESIGN.md`, the latter two are
+    additionally gated on `TOMTOM_ENABLED` so flipping them is a no-op without a key.
+  Confirmed unset in all six live `.env` files (owner-run VPS check, 2026-07-28), so the
+  flags genuinely are off — they are off *on purpose*. See constraints C10: an
+  unexplained default is not the same as an unintended one.
+
 - `/rollback` command — `bot.py.bak` + shell already covers it; a bad bot.py can't be
   trusted to run its own rollback anyway.
 - Group ledger pruning / bot liveness heartbeats — rotation already exists; liveness

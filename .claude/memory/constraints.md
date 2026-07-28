@@ -184,6 +184,39 @@ load-bearing, and an eval cannot query a machine it has no route to. Prose, deli
 per rule 4 — with the concrete precondition written into ROADMAP 4.5 so the next instance
 of this exact question hits a check instead of an inference.
 
+### C10 — An unexplained default is not an unintended one: read the registries first
+**seen: 1** (2026-07-27)
+Having flipped three memory flags to default-on, I grepped for the rest of the "class"
+(`os.getenv("X", "0")`), found five, and shipped ROADMAP 4.5 to `main` calling them
+policy-grandfathered oversights needing re-decision. Four are the R6 evolution
+experiments and were deliberately off, with the rationale written down in **three**
+places I did not open: the changelog release title (*"R6 evolution experiments (all
+gated, default off)"*), the `.env.example` section header (*"default off, pilot one
+instance at a time"*), and — most damningly — ROADMAP's own rejected registry six lines
+below where I typed the new item (*"revisit deliberately, not as a checklist"*). The
+fifth, `DEVICE_RENDER`, is a cosmetic preference whose correct default is off.
+
+The enumeration was by **code shape**, and code shape cannot distinguish an oversight
+from a decision. Both look like `os.getenv("X", "0")`.
+
+**Constraint:** before classifying anything as drift, oversight, or debt, check whether
+it was a decision. This repo keeps four registries for exactly that — CLAUDE.md
+§"Known-deliberate — do not 'fix' these", ROADMAP §"Rejected or already covered",
+`AUDIT-2026-07-10.md` §rejected, and the originating changelog entry. Read the feature's
+own release entry and its `.env.example` block before writing a proposal about it.
+
+**The sharpest part:** `verify-external-audit` step 1 *is* this rule — "check the
+rejected-claims registries first… any incoming claim matching an entry is closed with a
+citation, zero code read" — and I had that skill loaded in the same session. I applied
+it to claims arriving from outside and not to a claim I generated myself. **Findings you
+produce are not exempt from your own verification protocol**; if anything they are the
+ones nobody else will check.
+
+**Not graduated.** A scanner could list default-off flags but not read intent, which is
+the whole failure. The nearest mechanical aid already exists — `sweep.py` — and the
+lesson is about what to do with its output: a sweep emits *candidates*, and C2 already
+says triage every one. Prose, per rule 4.
+
 ---
 
 ## Minor — running log
