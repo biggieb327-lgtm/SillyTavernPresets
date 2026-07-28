@@ -14,11 +14,13 @@
 # fetch call sites into one working tree, so a partial deploy can no longer leave an
 # instance with a new bot.py and a stale card.
 #
-# One-time setup on the VPS:
-#   ssh-keygen -t ed25519 -f /root/.ssh/stpresets_deploy -N ''
-#   # add /root/.ssh/stpresets_deploy.pub to the repo's Deploy keys (read-only)
-#   git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git \
-#     /opt/telegram-bots/.repo
+# The checkout ALREADY EXISTS — install-vps.sh has maintained one at
+# $INSTALL_DIR/.repo since 2026-07-06 (install-vps.sh:33) and chowns it to bot:bot
+# (line 69). Do not clone a new one. One-time setup is only the SSH key:
+#   ssh-keygen -t ed25519 -f /root/.ssh/stpresets_ro -N ''
+#   # add /root/.ssh/stpresets_ro.pub under the repo's Deploy keys, READ-ONLY
+#   git -C /opt/telegram-bots/.repo remote set-url origin \
+#     git@github.com:biggieb327-lgtm/SillyTavernPresets.git
 # See deploy/MIGRATION.md § "Private-repo deploys".
 #
 # Mirrors /update's safety: bot.py is compile-checked before the swap and the
@@ -29,7 +31,7 @@ INST="${1:?usage: vps-sync.sh <instance>}"
 BASE=/opt/telegram-bots
 REPO="${STPRESETS_REPO:-$BASE/.repo}"
 SRC="$REPO/telegram-companion-bot"
-GIT_SSH_KEY="${STPRESETS_DEPLOY_KEY:-/root/.ssh/stpresets_deploy}"
+GIT_SSH_KEY="${STPRESETS_DEPLOY_KEY:-/root/.ssh/stpresets_ro}"
 
 # Card mapping mirrors sync-cards.sh (the authoritative list).
 case "$INST" in
@@ -51,6 +53,7 @@ esac
 # prevent (bot.py.bak becoming a copy of the new code, 2026-07-25).
 [ -d "$REPO/.git" ] || {
   echo "[vps-sync] FATAL: no git checkout at $REPO" >&2
+  echo "  install-vps.sh creates it; to make one by hand:" >&2
   echo "  git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git $REPO" >&2
   echo "  (needs a read-only deploy key — see the header of this script)" >&2
   exit 1
@@ -58,10 +61,15 @@ esac
 
 [ -f "$GIT_SSH_KEY" ] && export GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o IdentitiesOnly=yes"
 
+# `git -c safe.directory=` on every call, not a global config change: install-vps.sh
+# does `chown -R bot:bot $INSTALL_DIR` (line 69), so the checkout is bot-owned while
+# this script runs as root — git refuses that as "dubious ownership". Inline keeps the
+# script working on a fresh host with no prior git setup.
+GIT="git -c safe.directory=$REPO -C $REPO"
 echo "[vps-sync] fetching main into $REPO..."
-git -C "$REPO" fetch --quiet origin main
-git -C "$REPO" reset --quiet --hard origin/main
-echo "[vps-sync] checkout now at $(git -C "$REPO" rev-parse --short HEAD)"
+$GIT fetch --quiet origin main
+$GIT reset --quiet --hard origin/main
+echo "[vps-sync] checkout now at $($GIT rev-parse --short HEAD)"
 
 # A file named in .env but absent from the repo is fatal on purpose: continuing would
 # start the bot missing voice rules or its card, which reads as a model regression
@@ -106,7 +114,7 @@ systemctl enable "bot@$INST" 2>/dev/null || true
 
 sleep 3
 echo "--- verification ---"
-echo "checkout HEAD:     $(git -C "$REPO" rev-parse --short HEAD)"
+echo "checkout HEAD:     $($GIT rev-parse --short HEAD)"
 echo "preset.txt  repo:  $(sha256sum "$SRC/preset.txt" | cut -d' ' -f1)"
 echo "preset.txt  local: $(sha256sum "$BASE/$INST/preset.txt" | cut -d' ' -f1)"
 echo "$CARD  repo:  $(sha256sum "$SRC/$CARD" | cut -d' ' -f1)"

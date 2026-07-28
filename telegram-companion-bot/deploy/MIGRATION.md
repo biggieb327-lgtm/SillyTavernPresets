@@ -501,23 +501,36 @@ window where the fleet is unreachable.
 
 ### One-time setup (VPS, as root)
 
+**The checkout already exists.** `install-vps.sh` has maintained one at
+`/opt/telegram-bots/.repo` since 2026-07-06 (install-vps.sh:33) and chowns it to
+`bot:bot` (line 69). Do **not** clone a new one — `git clone` into that path fails with
+"already exists and is not an empty directory", and a `chown` to root would be reverted
+by the next `install-vps.sh` run. Setup is only the key and the remote:
+
 ```bash
 # host: vps
-ssh-keygen -t ed25519 -f /root/.ssh/stpresets_deploy -N ''
-cat /root/.ssh/stpresets_deploy.pub
-# → add that key under the repo's Settings → Deploy keys, READ-ONLY (do not tick write)
-
-GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_deploy -o IdentitiesOnly=yes" \
-  git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git /opt/telegram-bots/.repo
-
-# verify the key works and the checkout is on main
-GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_deploy -o IdentitiesOnly=yes" \
-  git -C /opt/telegram-bots/.repo fetch origin main && echo "deploy key OK"
+ssh-keygen -t ed25519 -f /root/.ssh/stpresets_ro -N '' -C "vps-$(hostname)-stpresets-ro"
+cat /root/.ssh/stpresets_ro.pub
+# → add that line under the repo's Settings → Deploy keys, READ-ONLY (leave write unticked)
+git config --global --add safe.directory /opt/telegram-bots/.repo
+git -C /opt/telegram-bots/.repo remote set-url origin git@github.com:biggieb327-lgtm/SillyTavernPresets.git
+GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_ro -o IdentitiesOnly=yes" git -C /opt/telegram-bots/.repo fetch origin main && echo "deploy key OK"
 ```
 
-`vps-sync.sh` sets `GIT_SSH_COMMAND` itself when `/root/.ssh/stpresets_deploy` exists.
-Override the paths with `STPRESETS_REPO` / `STPRESETS_DEPLOY_KEY` if you put them
-elsewhere.
+Four traps, all hit for real on 2026-07-28:
+
+- **"Key already in use"** when adding the deploy key means that public key is already
+  registered elsewhere in the account — a key can be attached to only one place. Do not
+  delete the old one (something depends on it); generate a second key under a distinct
+  filename. Deploy keys are per-repo by design.
+- **"dubious ownership"** is expected, not a fault: the checkout is `bot`-owned and you
+  are root. The `safe.directory` line above fixes it for interactive use;
+  `vps-sync.sh` passes `-c safe.directory=` on every git call so it works without it.
+- **The host key prompt.** The first SSH connection asks you to accept
+  `github.com`'s fingerprint. `vps-sync.sh` runs non-interactively, so do this
+  interactive fetch once first or the first real deploy stalls on an unanswered prompt.
+- **`ssh-keygen` offering to overwrite** an existing key: answer **n**. Overwriting
+  invalidates whatever that key already authenticates.
 
 ### Deploying from then on
 
@@ -538,12 +551,16 @@ Do **not** flip visibility first — once private, you cannot deploy the fix tha
 the fleet to authenticate, because that fix would have to arrive over the channel that
 just broke.
 
-1. Deploy-key setup + clone above (works while the repo is still public).
-2. Deploy the checkout-based `vps-sync.sh` to all six instances via the *current*
-   working path, and confirm each one's STARTUP AUDIT.
-3. Run `vps-sync.sh` once from the checkout and confirm the HEAD + hash lines.
+1. Deploy-key setup above — key, deploy-key registration, SSH remote, one
+   interactive fetch to accept the host key. Works while the repo is still public.
+2. Run `vps-sync.sh` once from the checkout on ONE instance and confirm the
+   `checkout HEAD` line, the matching repo/local hashes, and its STARTUP AUDIT. This is
+   the step that proves the new path; everything after it is repetition.
+3. Run it for the remaining instances.
 4. **Then** flip the repo to private (GitHub → Settings → General → Danger Zone).
-5. Re-run `vps-sync.sh` on one instance to prove the private path works end to end.
+5. Re-run `vps-sync.sh` on one instance to prove the private path works end to end. The
+   fetch is the only part visibility can break, and it is the first thing the script
+   does, so a failure here is loud and harmless.
 
 ### What stays broken, deliberately
 

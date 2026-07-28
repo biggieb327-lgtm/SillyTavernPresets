@@ -9,7 +9,10 @@
 # config actually changed get restarted).
 set -euo pipefail
 
-REPO_URL="https://github.com/biggieb327-lgtm/SillyTavernPresets.git"
+# SSH, not HTTPS (2026-07-28): the repo is private, so anonymous HTTPS clone/pull
+# fails. Auth is a READ-ONLY deploy key on the VPS — see deploy/MIGRATION.md
+# § "Private-repo deploys". Override for a fork or a public mirror.
+REPO_URL="${REPO_URL:-git@github.com:biggieb327-lgtm/SillyTavernPresets.git}"
 INSTALL_DIR="/opt/telegram-bots"
 BOT_USER="bot"
 
