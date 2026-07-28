@@ -4533,3 +4533,71 @@ class TestBotTimezoneTakesEffect:
         import inspect
         src = inspect.getsource(bot)
         assert "both BOT_TIMEZONE and TIMEZONE are set and differ" in src
+
+
+class TestDiagnosticModesSkipPidLock:
+    """v2026-07-28.1. `--check-config` and `--claim-test` are dispatched in main(),
+    which runs after the module-level `_acquire_pid_lock()`, so they used to be
+    unrunnable while the instance's bot was up — precisely when an operator needs a
+    diagnostic. The lock guards against a duplicate *poller*; a non-polling mode
+    skipping it is not a weakening."""
+
+    def test_diagnostic_mode_covers_both_flags(self):
+        import inspect
+        src = inspect.getsource(bot)
+        # The constant must be derived from sys.argv and name both flags, so adding a
+        # third diagnostic flag without listing it here fails loudly rather than
+        # silently reintroducing the lock collision.
+        assert 'DIAGNOSTIC_MODE = any(f in sys.argv for f in ("--check-config", "--claim-test"))' in src
+
+    def test_diagnostic_mode_declared_before_the_lock_and_load_state(self):
+        """Ordering is the whole fix: the constant is consulted by module-level code."""
+        import inspect
+        src = inspect.getsource(bot)
+        decl = src.index("DIAGNOSTIC_MODE = any(")
+        assert decl < src.index("def _acquire_pid_lock")
+        assert decl < src.index("def load_state")
+
+    def test_pid_lock_returns_early_in_diagnostic_mode(self):
+        import inspect
+        src = inspect.getsource(bot._acquire_pid_lock)
+        head = src[:src.index("if _PID_FILE.exists()")]
+        assert "DIAGNOSTIC_MODE" in head and "return" in head
+
+    def test_load_state_never_renames_live_state_in_diagnostic_mode(self):
+        """The one destructive import-time path: a corrupt state file is renamed to
+        .corrupted. A diagnostic now skips the PID lock, so it can run beside the live
+        bot — it must not move that bot's state file out from under it."""
+        import inspect
+        src = inspect.getsource(bot.load_state)
+        guard = src.index("DIAGNOSTIC_MODE")
+        assert guard < src.index("STATE_FILE.rename(backup)")
+
+
+class TestDuplicateInstanceAdviceIsSafe:
+    """The old message said `kill <pid>` / `rm <lockfile>`. Under systemd both are
+    wrong: Restart=always undoes the kill, and removing the lock admits a second
+    poller — the telegram.error.Conflict class that cost hours in the 2026-07
+    migrations. Pinned so the dangerous wording cannot come back."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot._acquire_pid_lock)
+
+    def test_advises_systemctl_stop(self):
+        assert "systemctl stop bot@" in self._src()
+
+    def test_does_not_advise_killing_the_pid(self):
+        src = self._src()
+        assert "Kill it first" not in src
+        assert "kill {existing_pid}" not in src
+
+    def test_does_not_advise_removing_the_lock(self):
+        src = self._src()
+        assert "force-remove the lock" not in src
+        assert "rm {_PID_FILE}" not in src
+
+    def test_names_the_conflict_risk_and_the_diagnostic_escape_hatch(self):
+        src = self._src()
+        assert "Conflict" in src
+        assert "--claim-test" in src

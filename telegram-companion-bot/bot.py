@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-27.1"
+BOT_VERSION = "2026-07-28.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -95,6 +95,16 @@ BOT_VERSION = "2026-07-27.1"
 _home = sys.argv[1] if len(sys.argv) > 1 else os.getenv("BOT_HOME")
 IS_NAMED_INSTANCE = bool(_home)
 BASE_DIR = Path(_home).expanduser().resolve() if _home else Path(__file__).resolve().parent
+
+# --- Diagnostic (non-polling) modes ---------------------------------------------------
+# `--check-config` and `--claim-test` validate an instance and exit; neither opens a
+# Telegram connection. They are dispatched in main(), which runs *after* all module-level
+# setup, so before v2026-07-28.1 they hit the import-time PID lock and could not run at
+# all while the instance's bot was up — the exact situation an operator wants a
+# diagnostic for. Declared here (before the lock and before load_state) so both can
+# consult it. The PID lock exists to stop a second *poller* fighting for the token, not
+# to serialize filesystem access, so a non-polling mode skipping it is not a weakening.
+DIAGNOSTIC_MODE = any(f in sys.argv for f in ("--check-config", "--claim-test"))
 
 # --- Config / secrets ---
 env_path = BASE_DIR / ".env"
@@ -2464,6 +2474,13 @@ def load_state():
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception as e:
+        if DIAGNOSTIC_MODE:
+            # A diagnostic skips the PID lock, so it may be running alongside the live
+            # bot. Never move that bot's state file out from under it — the running
+            # process holds the real state in memory and would rewrite the file on its
+            # next save. Report and continue on empty state; no diagnostic reads it.
+            log.error("State file unreadable, LEFT IN PLACE (diagnostic mode): %s", e)
+            return
         backup = STATE_FILE.with_suffix(".corrupted")
         try:
             STATE_FILE.rename(backup)
@@ -2685,6 +2702,10 @@ def save_state():
 _PID_FILE = BASE_DIR / "bot.pid"
 
 def _acquire_pid_lock():
+    # Non-polling diagnostics never take the lock: they must be runnable against a live
+    # instance, and they cannot cause the duplicate-poller Conflict the lock guards.
+    if DIAGNOSTIC_MODE:
+        return
     if _PID_FILE.exists():
         try:
             existing_pid = int(_PID_FILE.read_text().strip())
@@ -2692,8 +2713,18 @@ def _acquire_pid_lock():
             os.kill(existing_pid, 0)
             raise SystemExit(
                 f"Another instance is already running (PID {existing_pid}).\n"
-                f"Kill it first: kill {existing_pid}\n"
-                f"Or force-remove the lock: rm {_PID_FILE}"
+                f"\n"
+                f"Do NOT kill that PID or delete the lock file if this instance is "
+                f"managed by systemd — the unit restarts on exit (Restart=always), so a "
+                f"kill is undone within seconds, and removing the lock lets a second "
+                f"process poll the same Telegram token (telegram.error.Conflict; cost "
+                f"hours during the 2026-07 migrations).\n"
+                f"\n"
+                f"To stop it properly:  systemctl stop bot@{BASE_DIR.name}\n"
+                f"Diagnostics need no stop: --check-config and --claim-test skip this "
+                f"lock and are safe to run while the bot is up.\n"
+                f"A stale lock is cleared automatically when the recorded PID is gone, "
+                f"so removing {_PID_FILE} by hand should never be necessary."
             )
         except ProcessLookupError:
             pass  # stale PID file — process is gone, safe to continue

@@ -7,6 +7,63 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-28.1 — Diagnostics couldn't run while the bot was up, and said so dangerously
+
+**Root cause: `_acquire_pid_lock()` is a module-level call, so it beats its own
+exemptions.** `--check-config` and `--claim-test` are dispatched inside `main()`
+(bot.py:12875), but the PID lock runs at *import* (bot.py:2710) — long before. Both
+diagnostics therefore aborted whenever the instance's bot was running, which is exactly
+when an operator reaches for them. Found trying to run the group-pilot atomicity smoke
+test (`GROUP_CHAT_DESIGN.md` §10.5) against a live priya: it refused, and neither
+diagnostic touches Telegram or needs the lock at all — `_run_claim_test` reads only
+`GROUP_LEDGER_DIR`, and the instance dir merely decides where `bot.pid` lands.
+
+**The second half is the part that could have cost data.** The refusal printed:
+
+```
+Kill it first: kill 178039
+Or force-remove the lock: rm /opt/telegram-bots/priya/bot.pid
+```
+
+Both are wrong on a systemd host, and the fleet has been 100% systemd since 2026-07-26.
+`Restart=always` undoes the kill within seconds, so it is disruptive *and* futile.
+Removing the lock is worse: it admits a second process polling the same token — the
+`telegram.error.Conflict` class that cost hours during the jules and priya cutovers
+(operational log 2026-07-19, 2026-07-25). Generic single-instance advice, written before
+systemd, aged into a recommendation to reproduce a known incident.
+
+**Fix.** A `DIAGNOSTIC_MODE` constant declared beside `BASE_DIR` — before both the lock
+and `load_state`, since module-level code consults it:
+
+- `_acquire_pid_lock()` returns early in diagnostic mode. The lock exists to stop a
+  duplicate *poller* fighting for the token, not to serialize filesystem access, so a
+  non-polling mode skipping it removes no protection.
+- The duplicate-instance message now says `systemctl stop bot@<instance>`, names the
+  Conflict risk, points out diagnostics need no stop at all, and notes that a stale lock
+  is already cleared automatically (the `ProcessLookupError` branch), so removing the
+  file by hand should never be necessary.
+- **`load_state` no longer renames a corrupt state file in diagnostic mode.** This is the
+  one destructive path reachable at import: a parse failure moves `state.json` to
+  `.corrupted`. Harmless when the lock guaranteed exclusivity — but a diagnostic now runs
+  *beside* the live bot, and must not move that bot's state file out from under it. It
+  logs and continues on empty state; no diagnostic reads state.
+
+**Fixed as a class, not an instance** (C2): the defect was described as being about
+`--claim-test`, but `--check-config` sat behind the identical import-time lock. Both are
+covered, and the flag list is pinned by a test so a third diagnostic flag added without
+listing it fails loudly instead of silently re-colliding.
+
+**Not changed, deliberately:** the three lock mechanisms stay distinct — bot.py's
+PID-file guard, `perform_self_update`'s host-wide `flock`, and `watchdog.sh`'s PID file
+were chosen differently per platform, and ROADMAP 1.6 explicitly says not to unify them.
+This release changes *when* the PID guard is taken, never *what* it is.
+
+**8 new tests**, two classes: `TestDiagnosticModesSkipPidLock` (flag coverage, the
+declaration-order requirement that is the actual fix, early return, and the `load_state`
+guard preceding the rename) and `TestDuplicateInstanceAdviceIsSafe`, which fails if
+`Kill it first` or `force-remove the lock` ever returns — the same shape as
+`TestRestartStormAdviceIsCorrect`, for the same reason.
+
 ## v2026-07-27.1 — Memory-loop defaults aligned to the default-on policy (fleet no-op)
 
 > **This entry was rewritten on 2026-07-28. Its original root cause was false.** It
