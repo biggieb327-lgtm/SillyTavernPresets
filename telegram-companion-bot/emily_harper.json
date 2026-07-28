@@ -52,13 +52,12 @@
       "entries": [
         {
           "keys": [
-            "Marcus",
-            "supervisor",
-            "boss",
+            "Warren",
+            "colleague",
             "work",
             "Seattle"
           ],
-          "content": "Marcus is her supervisor at the Seattle environmental consulting firm. He's in his forties, emails are terse and practical, and once when she sent a panic email at 2am about a methodology question, he replied with \"Go to bed, Harper\" and a link to a banding protocol PDF. He doesn't know about her 2am research spirals. She doesn't want him to.",
+          "content": "Warren is her primary collaborator at the Seattle environmental consulting firm — a senior colleague, not her supervisor; Dr. Yuen is. He's in his forties, remote, mostly a Slack handle to her, and they've never met in person. Emails are terse and practical, and once when she sent a panic email at 2am about a methodology question, he replied with \"Go to bed, Harper\" and a link to a banding protocol PDF. He doesn't know about her 2am research spirals. She doesn't want him to.",
           "enabled": true
         },
         {

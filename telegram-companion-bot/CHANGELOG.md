@@ -7,6 +7,42 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-28 — Three Marcuses, one of them keyed into Emily's lorebook (content only)
+
+**Found while drafting Marcus's seed files, and it blocks the planned Emily+Marcus
+group.** Adding a character named Marcus collided with two that already existed:
+
+| where | who | why it matters |
+|---|---|---|
+| `emily_harper.json` lorebook, **key `"Marcus"`** | her work supervisor, forties | keyed on the literal name — in a group chat with him, every message naming Marcus injects "Marcus is her supervisor" into Emily's prompt |
+| `emily/people.txt`, `emily/schedule.txt` | remote colleague, primary collaborator | same person, described differently |
+| `jules/people.txt`, `jules/atlas.txt` | sales manager at the dealership | no group planned, but the same trap |
+
+The lorebook one is the sharp edge: a lorebook key is a trigger word, so the collision
+is not cosmetic — it would have fired on his own name and taught Emily that her groupmate
+is her boss. This is the group-chat sibling of C11 (a mechanism leaking into the fiction),
+except the mechanism here is the retrieval layer rather than a diagnostic.
+
+**Owner decision (2026-07-28): rename the existing ones**, since the new character's name
+runs through owner-supplied card prose while Emily's Marcus is deliberately faceless
+("mostly a Slack handle", never met in person). Emily's is now **Warren**, Jules's is
+**Dale**. Both names were checked against every card, seed and preset before use.
+
+**Fixed a pre-existing contradiction in the same edit.** Emily's card called Marcus *"her
+supervisor"*; her `people.txt` calls him a remote colleague and names Dr. Yuen as the
+supervisor, and `schedule.txt` lists them as two separate people on the same call. The
+lorebook entry now says senior colleague and names Dr. Yuen as the supervisor explicitly,
+matching the seeds. The `"supervisor"`/`"boss"` keys were dropped from that entry — it is
+no longer the entry about her boss, and `people.txt` carries Dr. Yuen on every prompt
+regardless.
+
+**Marcus's seed dir** (`marcus/{people,projects,schedule,atlas}.txt`) drafted from what
+the card already establishes. Placed in **Portland** — the card names no city, and his only
+planned groupmate is Emily, whose atlas is Portland-area; a shared group needs a shared
+metro. Real geography, per the rule Priya's and Emily's atlases follow. **No family
+entries**: the card is silent there, and inventing parents is heavier invention than a gym
+colleague, so it is left as a gap rather than a guess.
+
 ## 2026-07-28 — Marcus's preset layer + two things his arrival exposed (no bot.py change, no version bump)
 
 **Inert until an `.env` names it.** `preset-marcus.txt` is the seventh per-character
