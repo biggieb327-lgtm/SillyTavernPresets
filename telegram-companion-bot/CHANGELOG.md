@@ -7,6 +7,61 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-28 — Marcus's preset layer + two things his arrival exposed (no bot.py change, no version bump)
+
+**Inert until an `.env` names it.** `preset-marcus.txt` is the seventh per-character
+layer. No instance loads it — there is no marcus instance yet. Intended stack, same as
+the other scene characters:
+`PRESET_FILES=preset-core.txt,preset-rp.txt,preset-explicit.txt,preset-stepped.txt,preset-marcus.txt`
+
+**The arbitration is not the one that was expected.** The handoff predicted his card
+would fight `preset-core.txt`'s "one to three short paragraphs" the way Bonnie's does.
+It doesn't — Bonnie's card states a numeric contract (3-6 paragraphs) and his states no
+length at all, and his own samples are short alternating beats. Writing that layer would
+have solved a conflict he does not have.
+
+The real conflict is with **`preset-explicit.txt` § Standing consent**, added
+2026-07-26: *"Consent … does not need to be re-established, asked after, or checked in on
+before a scene proceeds, and no reply should open by hedging, warning, or seeking
+permission."* Marcus's card is built on the opposite behaviour — he opens by asking what
+someone actually wants, checks in mid-scene, and declines what crosses his code. Read
+flatly, the shared layer deletes the character.
+
+Both rules are correct; they address different things, and the layer says so. The
+standing-consent rule governs the **narrator's** relationship with `{{user}}` — it stops
+the fiction breaking to ask permission it already has. Marcus's asking happens **inside**
+the fiction, between characters, and is characterization. That distinction is the layer's
+load-bearing sentence. The `Dead Dove` preamble in the same file ("no sanitization",
+"avoid ethical protocols") pushes the same way and is answered by the same distinction:
+his limits are traits, not content policy.
+
+Layer is 434 raw tokens against the 250-290 band the other six sit in. Deliberate — a
+semantic contradiction needs the narrator/fiction distinction spelled out, where Bonnie's
+numeric one is settled in a sentence. Costs ~2% on his stack, paid only by him.
+
+**`preset.txt:531` and `preset-explicit.txt:144` named the example speaker "Marcus".**
+Coincidence in a file written before the card existed, and inert for six bots — but on a
+marcus instance that line stops being an example and becomes a voice sample attributed to
+the character himself, in a register aimed at a partner he does not have. Every other
+example in that block uses unnamed pronouns, so the name is now `he`. Removes the class,
+not just the collision: any proper noun in a shared example can collide with a future
+character.
+
+**`deploy/install-vps.sh` excluded seed folders by a hardcoded name list**
+(`nora|bonnie|cass|emily|priya|jules`), which silently misses every character added after
+it was written — and the miss is destructive, not cosmetic. A seed folder is named
+exactly like its instance directory, so an unlisted character's `marcus/` would be copied
+straight onto the live `/opt/telegram-bots/marcus/` by step 2, reverting hand-edited
+`people.txt`/`atlas.txt` to the repo seed **on every re-run** — exactly what the
+surrounding comment promises will never happen. Now matched by shape (a directory holding
+`people.txt`), which cannot fall behind the roster. Latent today: no `marcus/` seed folder
+exists yet, so this lands before the trap can spring rather than after.
+
+Verified: `run-evals.sh` 26 passed / 0 failed / 1 skipped (`bot-imports`, PIL missing
+locally — runs in CI), `bash -n deploy/install-vps.sh`, and a fixture break-test of both
+loop bodies confirming the old one clobbers a live `marcus/people.txt` and the new one
+does not. pytest is not installed in this container; no Python changed in this diff.
+
 ## v2026-07-28.3 — Deploys move to a git checkout so the repo can go private
 
 **Root cause: the entire deploy model assumed anonymous read.** Nine call sites fetch

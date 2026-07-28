@@ -47,11 +47,18 @@ fi
 # hand-editable content (atlas.txt, people.txt, ...), not something to keep overwriting
 # from git on every re-run. Step 5 below seeds each one once, only when that instance
 # is first created.
+#
+# A seed folder is matched by SHAPE — a directory holding people.txt — not by a
+# hardcoded name list. The list version silently missed every character added after it
+# was written, and the miss is destructive rather than cosmetic: an unlisted character's
+# seed folder is named exactly like its instance directory, so the copy below lands
+# on top of the live instance and reverts hand-edited context files to the repo's seed
+# on every re-run. Shape-matching cannot fall behind the roster.
 shopt -s dotglob
 for item in "$REPO_CHECKOUT"/telegram-companion-bot/*; do
-  case "$(basename "$item")" in
-    nora|bonnie|cass|emily|priya|jules) continue ;;
-  esac
+  if [ -d "$item" ] && [ -f "$item/people.txt" ]; then
+    continue
+  fi
   cp -r "$item" "$INSTALL_DIR"/
 done
 shopt -u dotglob
