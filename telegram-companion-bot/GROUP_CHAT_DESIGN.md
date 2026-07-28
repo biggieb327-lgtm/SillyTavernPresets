@@ -57,6 +57,15 @@ Bot API anti-loop policy and is independent of privacy mode. Two consequences:
    > between instances on the same host, or leave `GROUP_MODE=0`. Unlike the `world.txt`
    > split — which MIGRATION.md explicitly accepts as graceful degradation to independent
    > weather — this one degrades into *unbounded alternation*, not a smaller feature.
+   >
+   > ✅ **Co-location restored 2026-07-26.** ROADMAP 1.2 Phase 2 completed and all six
+   > instances now run on the VPS under `/opt/telegram-bots/`, so `GROUP_LEDGER_DIR`
+   > defaults to one shared code dir for both pilots and the blocker above is lifted.
+   > This condition is what the warning names, so the pilot is unblocked — but **confirm
+   > it on the host before enabling**, don't infer it from this line: compare the
+   > resolved `GROUP_LEDGER_DIR` in both bots' startup config warnings, and check the
+   > directory is writable by the `bot` user the systemd unit runs as. Procedure:
+   > `OPS_MANUAL.md` § "Group chat (experimental)", step 3.
 2. For bots to see ordinary (unaddressed) *human* group messages, **privacy mode must be
    disabled** per bot via BotFather (`/setprivacy` → Disable). With privacy on (the
    default), a group bot only receives commands, @mentions, and replies to itself.

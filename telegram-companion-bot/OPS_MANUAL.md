@@ -450,17 +450,35 @@ Setup, once per pilot bot:
    changes only on re-add.
 2. Create the group, add both bots + yourself. Send `/chatid` in it to get the id
    (negative number).
-3. In `~/priya-bot/.env` and `~/jules-bot/.env` only:
+3. **Precondition — both pilots must share one ledger directory** (`GROUP_CHAT_DESIGN.md`
+   §0). Bot-to-bot flow is a shared *filesystem* side channel, not Telegram; split hosts
+   silently give each bot its own ledger and the loop caps stop being enforced. Since the
+   2026-07-26 migration all six run on the VPS under `/opt/telegram-bots/`, so
+   `GROUP_LEDGER_DIR` defaults to the shared code dir for both. Verify rather than assume
+   — the resolved path is named in each bot's startup config warning:
+   ```bash
+   # host: VPS
+   ls -ld /opt/telegram-bots                        # must be writable by the bot user
+   sudo -u bot test -w /opt/telegram-bots && echo "ledger dir writable" || echo "NOT WRITABLE"
+   journalctl -u bot@priya -u bot@jules | grep -i GROUP_LEDGER_DIR | tail -4
+   ```
+   The two instances must print the *same* directory. If the ledger dir is not writable
+   by `bot`, set `GROUP_LEDGER_DIR` in both `.env`s to a directory that is.
+4. In `/opt/telegram-bots/priya/.env` and `/opt/telegram-bots/jules/.env` only:
    ```
    GROUP_MODE=1
    GROUP_ALLOWED_CHATS=<the id>
    GROUP_PEERS=<the other character's first name>
    ```
-4. One-time smoke test of the atomicity primitives on the phone:
-   `~/telegram-bot/venv/bin/python ~/telegram-bot/bot.py ~/priya-bot --claim-test`
-   (must print two PASS lines).
-5. `/restart` both pilots. Run the acceptance script in `GROUP_CHAT_DESIGN.md` §10
-   before calling it working.
+5. One-time smoke test of the atomicity primitives, on the VPS:
+   ```bash
+   # host: VPS
+   sudo -u bot /opt/telegram-bots/venv/bin/python /opt/telegram-bots/bot.py \
+     /opt/telegram-bots/priya --claim-test
+   ```
+   (must print two PASS lines — run it as `bot` so it exercises the real permissions).
+6. `systemctl restart bot@priya bot@jules`. Run the acceptance script in
+   `GROUP_CHAT_DESIGN.md` §10 before calling it working.
 
 Behavior notes:
 
@@ -474,6 +492,9 @@ Behavior notes:
   group's chat_id in each instance's `state.json`.
 - `/audit` (in DM) shows a per-group line: ledger size, bot-send budget used, current
   bot chain length — that answers "why did she stop replying to Jules?" (budget or cap).
+- Only **one human** in the group, and only **two bots** — both are §9 v1 scope limits,
+  not tunables. A second person breaks the two-participant `{{user}}` assumption in the
+  prompt; a third bot is N-safe by construction but unvalidated.
 - Kill switch: remove `GROUP_MODE=1` from both `.env`s and `/restart` — pure DM
   behavior returns; the ledger file (`group_<id>.jsonl` next to bot.py) goes inert.
 
