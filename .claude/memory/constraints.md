@@ -320,6 +320,36 @@ rewritten to run from the checkout, and the phone-era remainder is annotated.
 
 ---
 
+### C14 — A scanner cannot tell "this file does the bad thing" from "this file explains it"
+**seen: 3** (2026-07-29 ×3) — *promoted immediately: two fresh occurrences in one session,
+and `sweep.py constraints-drift` then surfaced a third already in the Minor log.*
+Three times a checker confused executable text with the prose documenting it:
+1. An extraction assertion asserted `'list_triggers' not in prompt` — and tripped on the
+   new paragraph that *explains* `list_triggers` is unavailable.
+2. The `routine-prompts-runnable` eval matched `"(public repo)"` across the whole of
+   `routines.md` — and failed on the two prose lines recording that the "(public repo)"
+   annotation was the stale thing being removed.
+3. **(2026-07-29, found in the Minor log)** `no-live-raw-urls`'s first draft exempted a
+   whole file if a marker word appeared early; CHEATSHEET.md's header *explains* that raw
+   URLs 404, so the file the check most needed to guard went entirely unchecked.
+
+Note 1–2 fail loud (false flag) and 3 fails silent (false exempt) — the same cause points
+both ways, and the silent direction is the dangerous one. In every case the string was a
+defect *in one region* (a `### Verbatim prompt` block, a runnable `curl` line) and
+legitimate everywhere else. A file-wide match cannot tell those apart, so it makes
+documenting a fix impossible — the more carefully a removal is explained, the worse the
+check behaves.
+
+**Constraint: before matching a defect string, name the region where it is a defect and
+scope the match to it.** If the same string is legal elsewhere in the file, a file-wide
+`in`/`grep` is the wrong instrument. Ask "where would this be *correct*?" — if the answer
+isn't "nowhere", the pattern needs a boundary, not a longer blocklist.
+**Graduated:** the eval now parses `### Verbatim prompt` fenced blocks and only searches
+inside them (`.claude/evals/run-evals.sh`, `routine-prompts-runnable`), break-tested RED
+on all three branches with the surrounding prose left intact.
+
+---
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
@@ -360,7 +390,8 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   break-tested against a second file → **an opt-out matched loosely is an opt-out for
   everything.** Use a literal pragma for exemptions, and break-test in a file that is
   *not* the one you developed against. (C3 family, and the reason the 26→27 eval is
-  trustworthy.)
+  trustworthy.) — **promoted 2026-07-29 into C14** as its third and only silent-failing
+  instance; kept here because the pragma lesson is narrower than C14's region-scoping rule.
 - 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
   conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
   Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length

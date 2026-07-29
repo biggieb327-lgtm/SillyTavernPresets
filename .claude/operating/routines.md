@@ -92,8 +92,8 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
 - **Notifications:** push on completion (email off).
 - **What it does:** report-only context-librarian pass — version/changelog sync,
-  ROADMAP/IMPROVEMENTS_PLAN status drift, CI state on `main`, Routine↔this-file
-  sync, operational-log format, and (added 2026-07-27) **mistake-trend
+  ROADMAP/IMPROVEMENTS_PLAN status drift,
+  operational-log format, and (added 2026-07-27) **mistake-trend
   escalation**: runs `sweep.py constraints-drift`, then judges whether Minor
   entries in `.claude/memory/constraints.md` share a root cause and proposes the
   constraint plus the mechanism that would prevent it (hook / scanner / eval /
@@ -105,10 +105,22 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
   have duplicated it and drifted. The deterministic half lives in
   `sweep.py constraints-drift` so it is testable and runnable on demand; only
   the semantic clustering needs the LLM.
-- **Known limitation:** fired sessions carry no MCP connectors, so the CI check
-  falls back to the public GitHub API via WebFetch and the Routine-sync check may
-  be SKIPPED — the prompt requires skipped checks to be reported as skipped, never
-  as green.
+- **Two checks removed 2026-07-29 — they could never run.** Fired sessions carry no
+  MCP tools at all (the trigger's `session_context.allowed_tools` lists none), and
+  in this environment the GitHub REST API is reachable *only* through the `github`
+  MCP tools: direct `api.github.com` calls are refused by the agent proxy with 403
+  whether or not a token is sent, and the env's `GITHUB_TOKEN`/`GH_TOKEN` are
+  14-char `prox…` sentinels that work only for git over the local relay. So:
+  - **CI state on `main`** (was check 3) is gone. The old prompt's fallback —
+    unauthenticated WebFetch of `api.github.com/…/actions/runs`, annotated
+    "(public repo)" — broke when the repo went private on 2026-07-28 and was
+    proxy-blocked regardless. GitHub's own failed-run email on `main` is the
+    alerting path now.
+  - **Routine↔this-file sync** (was check 4) is gone. It needs
+    claude-code-remote `list_triggers`, also MCP-only. It is now an **on-demand
+    check the owner runs in a full session** — where `list_triggers` does work.
+  Both were failing safe (the prompt bans reporting a skipped check as green), so
+  the brief degraded honestly rather than lying — but the checks were dead weight.
 
 ### Verbatim prompt
 
@@ -121,24 +133,24 @@ Act as the context-librarian agent: read .claude/agents/context-librarian.md and
 follow its role. This run is REPORT-ONLY: make no commits, push nothing, create no
 branches, modify no Routines, and edit no files. Read-only actions only.
 
+Two checks that used to be here are gone because a fired session cannot run them
+(verified 2026-07-29): CI state on main needs the GitHub REST API, and
+Routine-to-routines.md sync needs claude-code-remote list_triggers. Both are
+MCP-only, and fired sessions carry no MCP tools. GitHub's own failed-run email on
+main covers CI; Routine sync is now an on-demand check the owner runs in a full
+session. Do not attempt either one, and do not report them as green, red, or
+skipped — they are out of scope, not unavailable.
+
 Check, quoting the exact lines/values you compared as evidence:
 1. Version sync: BOT_VERSION in telegram-companion-bot/bot.py vs the newest "## v"
    heading in telegram-companion-bot/CHANGELOG.md.
 2. Doc drift: do telegram-companion-bot/ROADMAP.md and IMPROVEMENTS_PLAN.md
    statuses agree with the CHANGELOG (anything shipped still marked pending, or
    marked shipped without a matching CHANGELOG entry)?
-3. CI on main: latest evals-workflow run on main. Use the github MCP tools if this
-   session has them; otherwise WebFetch
-   https://api.github.com/repos/biggieb327-lgtm/SillyTavernPresets/actions/runs?branch=main&per_page=1
-   (public repo). A red run on main is a deploy blocker — if found, lead the
-   report with it.
-4. Routine sync: if the claude-code-remote MCP list_triggers tool is available,
-   compare its output to .claude/operating/routines.md (every live Routine
-   documented, every documented Routine live, prompts matching).
-5. Operational log: rows in .claude/memory/operational-log.md still match the
+3. Operational log: rows in .claude/memory/operational-log.md still match the
    fixed format (| Date | failure | root cause | system patch | eval | next |).
 
-6. MISTAKE TRENDS — escalate what is recurring. Run:
+4. MISTAKE TRENDS — escalate what is recurring. Run:
        python3 .claude/tools/sweep.py constraints-drift
    It mechanically reports three things: a constraint at seen: 2+ carrying no
    "**Graduated" line (by the file's own rule it owes a hook, eval, or sweep.py
@@ -175,12 +187,17 @@ owner and the monthly improvement loop own that judgment. Fix nothing.
   lands as a morning brief (assumption: owner is on Pacific time; not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
 - **Notifications:** push on completion (email off).
-- **What it does:** fast repo-side morning triage — CI on main, commits shipped in
+- **What it does:** fast repo-side morning triage — commits shipped in
   the last day, BOT_VERSION↔changelog sync, and unmerged claude/* branches ahead of
   main. Report-only; fixes nothing; explicitly does NOT cover the fleet/phone (it
   can't see them) and does not duplicate the weekly hygiene check's deeper passes.
-- **Known limitation:** same as hygiene-check-weekly — fired sessions carry no MCP
-  connectors, so the CI check falls back to the public GitHub API via WebFetch.
+- **CI check removed 2026-07-29 — it could never run.** Same root cause as
+  hygiene-check-weekly above: the GitHub REST API is MCP-only in this environment
+  and fired sessions carry no MCP tools, so the prompt's "(public repo)" WebFetch
+  fallback was doubly dead — the repo went private 2026-07-28, and the agent proxy
+  403s `api.github.com` regardless. GitHub's own failed-run email on `main` is the
+  alerting path. All three surviving checks are pure git, which **does** work in a
+  fired session (`git fetch origin main` verified OK via the local relay).
 
 ### Verbatim prompt
 
@@ -191,21 +208,22 @@ disagree, stop and report the drift to the owner instead of proceeding.
 
 This is a fast morning triage read, REPORT-ONLY: make no commits, push nothing,
 create no branches, modify no Routines, and edit no files. Read-only actions only.
-The deeper weekly hygiene check owns doc drift, Routine sync, and log format — do
+The deeper weekly hygiene check owns doc drift and log format — do
 not duplicate it. This brief cannot see the phone or the bots; it covers the repo
 side only, and must not speculate about fleet health.
 
+This brief does NOT check CI. The GitHub REST API is reachable only through the
+github MCP tools, which fired sessions do not carry (verified 2026-07-29), so no CI
+check here could ever run — GitHub's own failed-run email on main is the alerting
+path. Do not attempt one, and do not report CI as green, red, or skipped.
+
 Check:
-1. CI on main: latest evals-workflow run. Use github MCP tools if this session has
-   them; otherwise WebFetch
-   https://api.github.com/repos/biggieb327-lgtm/SillyTavernPresets/actions/runs?branch=main&per_page=1
-   (public repo). A red run on main is a deploy blocker — if found, lead with it.
-2. What shipped: `git fetch origin main` then `git log --since="26 hours ago"
+1. What shipped: `git fetch origin main` then `git log --since="26 hours ago"
    --oneline origin/main` — list the commits (or "nothing new").
-3. Version sync: BOT_VERSION in telegram-companion-bot/bot.py (on origin/main) vs
+2. Version sync: BOT_VERSION in telegram-companion-bot/bot.py (on origin/main) vs
    the newest "## v" heading in telegram-companion-bot/CHANGELOG.md — one line,
    match or mismatch.
-4. Stalled work: `git branch -r` — any claude/* branch ahead of origin/main
+3. Stalled work: `git branch -r` — any claude/* branch ahead of origin/main
    (check with `git log origin/main..origin/<branch> --oneline`)? Per owner
    policy, an unmerged green branch ships nothing — list any, with commit count.
    Exception: claude/improvement-loop and claude/character-review ahead of main

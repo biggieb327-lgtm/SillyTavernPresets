@@ -374,6 +374,43 @@ else
   bad "env-vars-documented" "$env_drift"
 fi
 
+# Routine prompts must not instruct a fired session to use tooling it cannot have.
+# 2026-07-29: ops-brief-daily's CI check and hygiene-check-weekly's CI + Routine-sync
+# checks had been silently un-runnable. Fired sessions carry NO MCP tools, and in this
+# environment the GitHub REST API is MCP-only — the agent proxy 403s api.github.com with
+# or without a token. The prompts' documented fallback was an unauthenticated WebFetch of
+# api.github.com annotated "(public repo)", which also broke when the repo went private
+# on 2026-07-28. Both failed safe (skipped, never green) so nothing ever alerted.
+# Removing hygiene check #4 also removed the only automatic Routine-drift detector, so
+# this eval guards the file instead.
+routine_dead=$(python3 - <<'PYEOF'
+import re, pathlib
+p = pathlib.Path('.claude/operating/routines.md')
+if not p.exists():
+    print("routines.md missing"); raise SystemExit
+src = p.read_text()
+problems = []
+# Scope every check to the "### Verbatim prompt" fenced blocks. Prose OUTSIDE them
+# documents these dead paths on purpose (why they were removed) and must stay legal —
+# a file-wide match would flag the fix's own changelog.
+for sec in re.split(r'\n## ', src):
+    name = sec.split('\n', 1)[0].strip()
+    for block in re.findall(r'### Verbatim prompt\n\n```\n(.*?)\n```', sec, re.S):
+        if 'api.github.com' in block:
+            problems.append(f'{name}: prompt calls api.github.com (MCP-only; proxy 403s it)')
+        if '(public repo)' in block:
+            problems.append(f'{name}: prompt claims "(public repo)" (private since 2026-07-28)')
+        if re.search(r'if the claude-code-remote MCP list_triggers tool is available', block):
+            problems.append(f'{name}: prompt calls list_triggers (fired sessions carry no MCP)')
+print(" | ".join(problems))
+PYEOF
+)
+if [ -z "$routine_dead" ]; then
+  ok "routine-prompts-runnable: no Routine prompt depends on MCP-only or private-repo access"
+else
+  bad "routine-prompts-runnable" "$routine_dead"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"
