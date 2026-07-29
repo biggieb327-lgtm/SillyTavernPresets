@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-29 — install-vps.sh could not authenticate to the private repo (no bot.py change)
+
+**Root cause: the private-repo migration was applied to one script and not the other.**
+v2026-07-28.3 switched `install-vps.sh`'s `REPO_URL` to SSH but never wired the deploy
+key, so its `git clone`/`git pull` fell back to root's default identity. Standing up
+Marcus — the first `install-vps.sh` run since the repo went private — died at step 2/8
+with `git@github.com: Permission denied (publickey)`. `vps-sync.sh` was unaffected: it
+sets `GIT_SSH_COMMAND` from `/root/.ssh/stpresets_ro` (line 62), which is precisely the
+line `install-vps.sh` was missing.
+
+Changing a URL scheme is not the same as changing an auth model; the URL edit *looked*
+like the whole fix because the script it was copied from already had the other half.
+
+Also fixed in the same pass, before it could bite next: both `git` calls now pass
+`-c safe.directory="$REPO_CHECKOUT"`. Step 4/8 chowns the tree to `bot:bot`, so root
+running git there trips "detected dubious ownership" on every re-run — the auth failure
+was simply hiding it. `vps-sync.sh` passes the same flag for the same reason.
+
+**Recovery is not circular**, which is worth stating because it looks like it should be:
+the fixed `install-vps.sh` lives in the repo the broken `install-vps.sh` cannot read. But
+`vps-sync.sh` authenticates fine, and it fetches and hard-resets the checkout — so running
+it for any existing instance pulls the fix onto the box, and `install-vps.sh` is then run
+from the updated checkout.
+
+Verified: `bash -n` on both deploy scripts, evals 28/28.
+
 ## v2026-07-29.3 — The character's voice comes from the character's model, on every bot
 
 **Root cause: `SUMMARY_MODEL` was two jobs wearing one name.** Eleven call sites read it.

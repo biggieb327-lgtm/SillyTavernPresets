@@ -16,6 +16,13 @@ REPO_URL="${REPO_URL:-git@github.com:biggieb327-lgtm/SillyTavernPresets.git}"
 INSTALL_DIR="/opt/telegram-bots"
 BOT_USER="bot"
 
+# The deploy key, same default as vps-sync.sh. Switching REPO_URL to SSH on 2026-07-28
+# was only half the private-repo change: without this, git falls back to root's default
+# identity and fails with `git@github.com: Permission denied (publickey)` — which is
+# exactly what a fresh `install-vps.sh` run did on 2026-07-29.
+GIT_SSH_KEY="${STPRESETS_DEPLOY_KEY:-/root/.ssh/stpresets_ro}"
+[ -f "$GIT_SSH_KEY" ] && export GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o IdentitiesOnly=yes"
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this with sudo: sudo bash install-vps.sh" >&2
   exit 1
@@ -35,8 +42,11 @@ echo "== 2/8: cloning / updating repo =="
 # in the process, which meant every "re-run" silently did a full re-clone instead).
 REPO_CHECKOUT="$INSTALL_DIR/.repo"
 mkdir -p "$INSTALL_DIR"
+# `-c safe.directory=` on the call, not a global config change: step 4 chowns the whole
+# tree to bot:bot, so root running git in it trips "detected dubious ownership" on every
+# re-run. vps-sync.sh passes the same flag for the same reason.
 if [ -d "$REPO_CHECKOUT/.git" ]; then
-  git -C "$REPO_CHECKOUT" pull --ff-only
+  git -c safe.directory="$REPO_CHECKOUT" -C "$REPO_CHECKOUT" pull --ff-only
 else
   git clone "$REPO_URL" "$REPO_CHECKOUT"
 fi
