@@ -7,6 +7,58 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-29.2 — The guard was in the one place the selfie caption never goes
+
+**Root cause: v2026-07-29.1 put the guard in `extract_tags`, and a selfie caption never
+reaches it.** Found by the owner asking whether the vision model was responsible — a
+question that forced a proper reading of the image path instead of the assumed one.
+
+There are three model slots near a selfie, and separating them is the answer to the
+question: `VISION_MODEL` (`bot.py:295`) *reads* images the user sends, `SELFIE_MODEL` /
+`GEMINI_IMAGE_MODEL` (`605`, `607`) *generate the picture*, and the chat model writes the
+words. An image model emits pixels and cannot put text in a caption, so the leak was
+always text-side. But **which** text call was wrong in the v2026-07-29.1 entry:
+
+`_selfie_caption` (`bot.py:5629`) is its own LLM call on `SUMMARY_MODEL or NANOGPT_MODEL`,
+and its result goes **straight to `send_photo(caption=...)`** at `5717` without ever
+passing `extract_tags` — whose only three call sites are `9171`, `9430`, `9932`. The meme
+caption helper has the same shape. So if the leak came through the caption path, the
+guard shipped an hour earlier would not have caught it.
+
+**`generate_reply` is the real boundary**, and it is a clean one: all twelve
+`reply_with_typing` sites plus both caption helpers reach the model through it, while the
+~10 analysis and extraction paths (`3719`, `3840`, `4175`, `5262`, `5964`, `6005`, `6092`,
+`6179`, `10022`) call `call_nanogpt` directly. Moving the guard there covers every
+user-facing path and still keeps a line-eating regex away from the analysis JSON — which
+was the reason for avoiding `_do_request` in the first place. Removed from `extract_tags`
+so there is one home, not two.
+
+**A near-miss worth recording, because the break test is the only reason it isn't in the
+diff.** Moving the guard earlier raised a real-looking risk: an UPPERCASE `[SELFIE: ...]`
+would be stripped before `extract_tags` (which matches tag names case-insensitively) could
+parse it, and the selfie would silently never send. An exemption list for the four real
+tags was written to prevent that — then break-tested by neutering it, and **the tests
+still passed**, because the exemption never fired. A tag is `[selfie: value]` with the
+colon *inside* the brackets, and the directive pattern requires `]` immediately after the
+label, so it cannot match a tag in any case. The leaked directives are `[LABEL]: value`,
+colon *outside*. That structural difference is what the guard actually keys on. The
+exemption was deleted rather than left as reassuring dead code; the tests stay, pinning
+the guarantee.
+
+**Correction to v2026-07-29.1's root cause.** That entry attributed the bracket priming to
+the `[selfie: ...]` convention at `bot.py:4459`. That line is in the *main reply* prompt;
+`_selfie_caption` builds its own message list and does not include it. Its bracket priming
+comes from `SYSTEM_PROMPT_RAW` — her card's own `[ATTRACTION RULE]` / `[PACE CONTROL]` /
+`[THE FILE]` headers, which is consistent with the two real labels in the leak. Which of
+the two paths actually fired is **still unresolved**: the message read as a full reply
+with narration rather than the "1-2 sentences max, don't describe the photo" that
+`_selfie_caption` asks for, which points at the reply path — but that is inference, not
+evidence. The guard now covers both, so the fix does not depend on settling it.
+
+Verified: `py_compile`, **702 pytest** (699 − 1 replaced + 4), evals 28/28. Break-tested
+twice: neutering the guard fails `test_guard_lives_at_the_generate_reply_choke_point`, and
+neutering the exemption failed nothing, which is how the dead code was found.
+
 ## v2026-07-29.1 — Jules captioned a selfie with her own planning notes
 
 **Root cause: the reply prompt teaches the model a bracket-tag output format, and

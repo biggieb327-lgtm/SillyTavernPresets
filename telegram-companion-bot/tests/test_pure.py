@@ -4749,11 +4749,35 @@ class TestDirectiveLeakGuard:
         clean, dropped = bot._strip_directive_lines(self.LEAK)
         assert clean == self.LEAK and dropped == []
 
-    def test_extract_tags_applies_the_guard_after_known_tags(self):
-        """Order matters: a known tag must be removed by name first, so the sweep can
-        never re-match it, and the guard must still catch what follows."""
-        clean, _react, hint, _meme = bot.extract_tags(
-            "hey\n[selfie: her at the rink]\n[PACE CONTROL]: slow it down")
+    def test_guard_lives_at_the_generate_reply_choke_point(self):
+        """v2026-07-29.2. It was first placed in extract_tags, which the selfie/meme
+        caption paths never call — their text goes straight to send_photo(caption=...).
+        generate_reply is the real boundary: every user-facing path reaches the model
+        through it, while analysis/extraction call call_nanogpt directly."""
+        import inspect
+        assert "_strip_directive_lines" in inspect.getsource(bot.generate_reply)
+        assert "_strip_directive_lines" not in inspect.getsource(bot.extract_tags)
+
+    def test_analysis_paths_are_not_swept(self):
+        """call_nanogpt carries the post-reply analysis JSON. A line-eating regex must
+        never run there."""
+        import inspect
+        assert "_strip_directive_lines" not in inspect.getsource(bot.call_nanogpt)
+
+    def test_uppercase_known_tag_survives_for_extract_tags(self):
+        """The guard must not eat the feature it protects. This holds structurally, not
+        by an exemption list: a tag is `[selfie: value]` with the colon INSIDE the
+        brackets, and the directive pattern requires `]` right after the label. An
+        exemption list was written, break-tested, found inert, and deleted."""
+        text = "[SELFIE: her at the rink]"
+        clean, dropped = bot._strip_directive_lines(text)
+        assert dropped == [] and clean == text
+        _c, _r, hint, _m = bot.extract_tags(text)
         assert hint == "her at the rink"
-        assert "PACE CONTROL" not in clean
-        assert "hey" in clean
+
+    def test_tag_survives_but_directive_neighbour_still_stripped(self):
+        clean, dropped = bot._strip_directive_lines(
+            "[SELFIE: at the rink]\n[PACE CONTROL]: slow it down\nhey")
+        assert len(dropped) == 1
+        assert "[SELFIE: at the rink]" in clean
+        assert "PACE CONTROL" not in clean and "hey" in clean

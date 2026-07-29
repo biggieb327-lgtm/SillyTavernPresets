@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-29.1"
+BOT_VERSION = "2026-07-29.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5086,9 +5086,24 @@ async def generate_reply(messages: list, model: str = None, fallback: str = None
     loop = asyncio.get_running_loop()
     _replies_in_flight += 1
     try:
-        return await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
+        out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
     finally:
         _replies_in_flight -= 1
+    # Directive-leak guard sits HERE, not in extract_tags (where v2026-07-29.1 first put
+    # it), because this is the real boundary: every user-facing text path reaches the
+    # model through generate_reply — the twelve reply_with_typing sites plus
+    # _selfie_caption and the meme-caption helper, whose output goes straight to
+    # send_photo(caption=...) and never touches extract_tags. The analysis and
+    # extraction paths call call_nanogpt directly and are deliberately untouched, so a
+    # line-eating regex still cannot reach the JSON.
+    out, _leaked = _strip_directive_lines(out)
+    if _leaked:
+        # Loud on purpose: stripping makes the symptom invisible, and the underlying
+        # cause is a model emitting its planning as output. A silent guard would turn a
+        # visible model fault into an undiagnosable one.
+        log.warning("[directive-leak] stripped %d instruction-shaped line(s): %s",
+                    len(_leaked), " | ".join(ln.strip()[:120] for ln in _leaked[:3]))
+    return out
 
 
 async def _keep_typing(bot, chat_id: int):
@@ -5120,6 +5135,12 @@ async def reply_with_typing(context, chat_id: int, messages: list,
 # `[selfie: ...]` and friends are removed by name above, and an in-character aside like
 # "[laughs]" must survive.
 _DIRECTIVE_LINE_RE = re.compile(r"(?m)^[ \t]*\[[A-Z][A-Z0-9 _/&'\-]{1,38}\][ \t]*:?[^\n]*$")
+# Why the real tags survive this without needing an exemption list: a tag is
+# `[selfie: value]` with the colon INSIDE the brackets, so the pattern above — which
+# requires `]` immediately after the label — cannot match one, even in caps. The leaked
+# directives are `[LABEL]: value`, colon OUTSIDE. That structural difference is what the
+# guard keys on. An exemption list was written first, then break-tested and found inert;
+# removed rather than left as reassuring dead code. The tests pin the guarantee.
 
 
 def _strip_directive_lines(text: str) -> tuple:
@@ -5173,14 +5194,6 @@ def extract_tags(text: str):
         text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
     if reaction or sm or mm or sr:
         text = re.sub(r"[ \t]{2,}", " ", text)
-    # Last, so the known tags above are already gone and cannot be re-matched.
-    text, _leaked = _strip_directive_lines(text)
-    if _leaked:
-        # Loud on purpose: stripping makes the symptom invisible, and the underlying
-        # cause is a model emitting its planning as output. A silent guard would turn a
-        # visible model fault into an undiagnosable one.
-        log.warning("[directive-leak] stripped %d instruction-shaped line(s): %s",
-                    len(_leaked), " | ".join(ln.strip()[:120] for ln in _leaked[:3]))
     return text.strip(), reaction, selfie_hint, meme_caption
 
 
