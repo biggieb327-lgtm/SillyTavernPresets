@@ -310,6 +310,12 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-29 — Told the owner `grep -c Warren emily_harper.json` should "expect 1". It is
+  2 — the lorebook key *and* the content line, in a file I had written myself an hour
+  earlier. The deploy was correct; my predicted value was wrong, and a wrong expectation
+  handed to an operator reads as a failed deploy → when stating the expected output of a
+  verification command, **measure it against the repo copy first**, don't recall it. (C3's
+  neighbour: a check with a wrong expected value is as misleading as one that cannot fire.)
 - 2026-07-29 — The first draft of the `no-live-raw-urls` eval let a whole file opt out if
   any marker word (`404`, `historical`, `DEAD`) appeared in its first 25 lines. CHEATSHEET.md's
   header *explains* that raw URLs 404, so the entire file was exempt and a re-injected
