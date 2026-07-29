@@ -7,7 +7,7 @@ description: Safely editing SillyTavern character cards, per-instance seed files
 
 Two distinct families live in this repo:
 
-- **Bot cards** — `telegram-companion-bot/{nora,bonnie,cass,emily_harper,priya,jules_nakagawa}.json`
+- **Bot cards** — `telegram-companion-bot/{nora,bonnie,cass,emily_harper,priya,jules_nakagawa,marcus_calder}.json`
   (`chara_card_v2` spec) + seed dirs `{nora,bonnie,cass,emily,priya}/` each holding
   `people.txt, projects.txt, schedule.txt, atlas.txt`. These deploy to live bots.
 - **Root presets** — `TheAtelier*.json`, `UnifiedWritersRoom_*.json`,

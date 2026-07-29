@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running six AI
+A Python Telegram companion bot system (`telegram-companion-bot/bot.py`) running seven AI
 character instances, all on a VPS under systemd (migrated off the Termux phone
 2026-07-26). One `bot.py` handles all
 characters; instances differ only by directory, `.env`, and SillyTavern v2 character card.
@@ -42,7 +42,9 @@ The machinery that enforces this is real, not advisory:
 
 - **`.claude/evals/run-evals.sh`** — past incidents pinned as runnable checks.
   **Run it before claiming any change done.** A failure recurring twice earns a new
-  eval. Includes a secret scan (this repo is public via raw URLs) and
+  eval. Includes a secret scan (the repo is private since 2026-07-28, but cards and
+  presets were public via raw URLs for months — assume anything committed before then
+  is exposed) and
   BOT_VERSION↔changelog sync.
 - **Hooks** (`.claude/hooks/`) — including a **delivery gate** that blocks ending a
   turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
@@ -83,7 +85,7 @@ Full index, including the less common skills: `skill-router`.
 
 ## Bot instances
 
-**All six run on the VPS under systemd as of 2026-07-26** — the Termux phone is empty
+**All seven run on the VPS under systemd** (six migrated 2026-07-26; marcus created 2026-07-29) — the Termux phone is empty
 (ROADMAP 1.2 Phase 2 complete).
 
 | Session | Directory | Character card |
@@ -94,6 +96,7 @@ Full index, including the less common skills: `skill-router`.
 | `emily` | `/opt/telegram-bots/emily/` | `emily_harper.json` |
 | `priya` | `/opt/telegram-bots/priya/` | `priya.json` |
 | `jules` | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
+| `marcus` | `/opt/telegram-bots/marcus/` | `marcus_calder.json` |
 
 All instances share the venv at `/opt/telegram-bots/venv/`; `bot.py` lives at
 `/opt/telegram-bots/bot.py`. Each runs as `bot@<instance>` (unit file
@@ -125,7 +128,7 @@ soak passes.
 
 ## Deployment
 
-All six instances deploy from `main` via **`deploy/vps-sync.sh`**, one invocation per
+All seven instances deploy from `main` via **`deploy/vps-sync.sh`**, one invocation per
 instance — it pulls `preset.txt`, the instance's preset layers and card, and `bot.py`
 (compile-checked, `bot.py.bak` kept), normalizes `CHARACTER_CARD`, restarts and
 enables the unit, then prints hash + STARTUP AUDIT verification:
@@ -198,7 +201,7 @@ character cards + seed dirs, `preset.txt`, `tests/`, `deploy/` (VPS), and the do
 above. `ls` it for the rest. The non-obvious bits:
 
 - `requirements.txt` is the single source of truth for pip installs.
-- `preset.txt` is the shared voiceprint — editing it changes **all six** bots.
+- `preset.txt` is the shared voiceprint — editing it changes **all seven** bots.
 - `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are curl-installed once and are
   **not** managed by `update-all.sh`; changing them in-repo deploys nothing.
 - `character-review/` (root) is the card inbox for the monthly character pass — the

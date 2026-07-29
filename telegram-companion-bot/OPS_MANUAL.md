@@ -6,12 +6,12 @@ Day-to-day operation reference for a running bot.
 
 ## VPS operations
 
-**All six instances run on the VPS under systemd** (migrated 2026-07-26; the Termux
-phone is empty). Layout:
+**All seven instances run on the VPS under systemd** (six migrated 2026-07-26; marcus
+created 2026-07-29; the Termux phone is empty). Layout:
 
 | Path | What |
 |---|---|
-| `/opt/telegram-bots/bot.py` | the single shared bot.py (all six run it) |
+| `/opt/telegram-bots/bot.py` | the single shared bot.py (every instance runs it) |
 | `/opt/telegram-bots/bot.py.bak` | previous version — the rollback |
 | `/opt/telegram-bots/venv/` | shared virtualenv |
 | `/opt/telegram-bots/<instance>/` | per-instance dir: `.env`, card, state, memory |
@@ -19,7 +19,9 @@ phone is empty). Layout:
 | `/etc/systemd/system/bot@.service` | unit template, `WorkingDirectory=/opt/telegram-bots/%i` |
 
 Each bot is `bot@<instance>` — `bot@nora`, `bot@bonnie`, `bot@cass`, `bot@emily`,
-`bot@priya`, `bot@jules`. All commands below run as root on the VPS.
+`bot@priya`, `bot@jules`, `bot@marcus`. The authoritative list is whatever
+`systemctl list-units 'bot@*'` reports, not this sentence. All commands below run as
+root on the VPS.
 
 ### Start, stop, restart
 ```bash
@@ -41,9 +43,12 @@ systemctl list-unit-files 'bot@*'         # enabled vs disabled
 
 ### Whole fleet
 ```bash
-for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
+for b in $(systemctl list-units 'bot@*' --no-legend --plain \
+          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
+  systemctl restart "bot@$b"
+done
 systemctl list-units 'bot@*' --no-pager
-pgrep -af bot.py                          # expect exactly 6 lines, one per instance
+pgrep -af bot.py                          # one line per instance (7 today)
 ```
 
 ### Logs — journalctl replaces tmux attach and bot.log
@@ -74,7 +79,10 @@ hash + STARTUP AUDIT verification:
 **Rollback:**
 ```bash
 cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
-for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
+for b in $(systemctl list-units 'bot@*' --no-legend --plain \
+          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
+  systemctl restart "bot@$b"
+done
 ```
 
 ### File ownership

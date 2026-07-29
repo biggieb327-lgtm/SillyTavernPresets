@@ -2,7 +2,8 @@
 
 Quick crib for day-to-day ops. Full reference: `OPS_MANUAL.md` §VPS operations.
 
-All six bots run on the **VPS** under systemd (`bot@<instance>`) as of 2026-07-26.
+All **seven** bots run on the **VPS** under systemd (`bot@<instance>`) — six migrated
+2026-07-26, marcus created 2026-07-29.
 The phone is empty — its tooling (`/update`, `update-all.sh`, `sync-cards.sh`,
 `watchdog.sh`, tmux) manages nothing now. Everything below runs as root on the VPS
 unless it says otherwise.
@@ -35,7 +36,8 @@ $REPO/deploy/vps-sync.sh nora
 
 Whole fleet:
 ```bash
-for b in nora bonnie cass emily priya jules; do
+for b in $(systemctl list-units 'bot@*' --no-legend --plain \
+          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
   $REPO/deploy/vps-sync.sh "$b"
 done
 ```
@@ -62,7 +64,7 @@ systemctl status bot@nora --no-pager       # running? PID? since when?
 systemctl restart bot@nora
 systemctl enable bot@nora                  # survive reboot — start alone does NOT
 systemctl list-units 'bot@*' --no-pager    # what's running
-pgrep -af bot.py                           # expect exactly 6 lines
+pgrep -af bot.py                           # one line per instance (7 today)
 ```
 
 ## Logs
@@ -87,7 +89,10 @@ chown -R bot:bot /opt/telegram-bots/<name>
 
 # Rollback a bad bot.py
 cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
-for b in nora bonnie cass emily priya jules; do systemctl restart bot@$b; done
+for b in $(systemctl list-units 'bot@*' --no-legend --plain \
+          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
+  systemctl restart "bot@$b"
+done
 
 # Disk (state + journals)
 df -h /opt
