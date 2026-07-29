@@ -163,6 +163,51 @@ if [ -f .claude/settings.json ]; then
   fi
 fi
 
+# The repo went private 2026-07-28, so every raw.githubusercontent.com URL 404s. On
+# 2026-07-29 a runnable `curl -fsSL <raw-base>/deploy/vps-sync.sh` was handed to the
+# operator straight out of CLAUDE.md's Deployment block — it failed twice over, once on
+# the literal placeholder and once because the URL is dead. Docs are where deploy
+# commands get copied from, so a stale one is an outage waiting for someone to trust it.
+# Runnable = the line starts with curl/wget or assigns a BASE/REPO var. Annotated
+# history is fine: mark the block DEAD, Historical, or Superseded within 3 lines above.
+raw_stale=$(python3 - <<'PY'
+import pathlib, re
+bad = []
+skip = ("CHANGELOG.md", "constraints.md", "operational-log.md")
+for p in sorted(pathlib.Path(".").rglob("*.md")):
+    s = str(p)
+    if any(k in s for k in skip) or "/vault/" in s or "/node_modules/" in s:
+        continue
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    marker = r'DEAD|[Hh]istorical|[Ss]uperseded|404|do not run'
+    # A whole file can be retired with an EXPLICIT pragma in its first 25 lines
+    # (SETUP_GUIDE.md is entirely phone-era). The pragma is a literal token, not the
+    # loose marker set: the first draft accepted any marker word up top, which exempted
+    # all of CHEATSHEET.md because its header *explains* that raw URLs 404 — the check
+    # passed a re-injected defect in the one file it most needed to guard. An opt-out
+    # has to be unambiguous or it silently becomes an opt-out for everything.
+    if "evals: raw-urls-historical" in " ".join(lines[:25]):
+        continue
+    for i, ln in enumerate(lines):
+        if "raw.githubusercontent" not in ln:
+            continue
+        if not re.match(r'\s*(curl|wget|(export\s+)?(BASE|REPO|RAW\w*)=)', ln):
+            continue          # prose or a comment explaining the 404 — not runnable
+        # 6 lines, not 3: an annotation usually sits above the ```bash fence and any
+        # intervening prose, not immediately above the command.
+        window = " ".join(lines[max(0, i - 6):i + 1])
+        if re.search(marker, window):
+            continue          # annotated as dead on purpose
+        bad.append(f"{s}:{i+1}")
+print(" ".join(bad))
+PY
+)
+if [ -z "$raw_stale" ]; then
+  ok "no-live-raw-urls: no runnable raw.githubusercontent command left unannotated"
+else
+  bad "no-live-raw-urls" "raw URLs 404 (private repo) but these still read as runnable: $raw_stale"
+fi
+
 # Nora's instance dir drifted twice (table drift 2026-07-11; launch/sync scripts still
 # pointing at $BOT_SRC 2026-07-20). Her instance dir is ~/nora-bot; ~/telegram-bot is the
 # shared CODE dir. The scripts must not pass ~/telegram-bot (or bare $BOT_SRC) as Nora's

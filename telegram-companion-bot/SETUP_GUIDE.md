@@ -2,6 +2,16 @@
 
 This guide walks through setting up the companion bot from scratch on Android (Termux). Also covers Linux VPS and Mac.
 
+<!-- evals: raw-urls-historical -->
+
+> **Historical — every `curl` in this guide is dead.** The repo went private on
+> 2026-07-28, so `raw.githubusercontent.com` fetches 404, and the phone-era layout this
+> guide describes (`~/nora-bot`, `run-bot.sh`, `update-all.sh`) manages nothing since the
+> 2026-07-26 VPS migration. To stand up a new instance, use
+> `deploy/install-vps.sh` from the checkout at `/opt/telegram-bots/.repo` — see
+> `deploy/MIGRATION.md` § "Private-repo deploys" and `OPS_MANUAL.md`. Kept for the
+> per-variable explanations, not for the commands.
+
 ---
 
 ## What You'll Need

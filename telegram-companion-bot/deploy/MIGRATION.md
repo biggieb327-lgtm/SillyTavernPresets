@@ -218,7 +218,8 @@ processes are answering in turn.
 `/update` and `sync-cards.sh` are phone tooling and know nothing of the VPS.
 For content or bot.py deploys to a VPS instance use:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
+# host: vps (as root). Superseded 2026-07-28: the repo is private, raw URLs 404.
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh jules
 ```
 It pulls preset + card + bot.py from main, compile-checks bot.py before the swap
 (keeps `bot.py.bak`), normalizes `CHARACTER_CARD` to the repo card filename
@@ -293,7 +294,8 @@ ls -d ~/<name>-bot ~/<name>-bot.migrated 2>/dev/null
 Do NOT `rm -rf` yet — keep `.migrated` as a rollback until VPS soak completes.
 The rename alone stops every phone script (they all guard with `[ -d "$dir" ]`).
 
-**b. Re-curl phone scripts that list instances.**
+**b. Re-curl phone scripts that list instances.** *(Historical — this step belonged to
+the cutover. The phone is empty, and these URLs 404 now that the repo is private.)*
 These are curl-installed once and NOT pulled by `update-all.sh` — a stale copy
 is how Cass came back:
 ```bash

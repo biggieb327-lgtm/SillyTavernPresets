@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-07-29 — Every doc still told the operator to curl a URL that 404s
+
+**Found by handing the owner a command that could not run.** The deploy instruction in
+CLAUDE.md — `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily` — failed twice
+over: `<raw-base>` was a literal placeholder, and the URL is dead regardless, because
+**v2026-07-28.3 made the repo private the day before**. That release exists precisely
+because raw URLs 404 on a private repo, and the docs describing how to deploy were never
+updated to match it.
+
+**The class:** an operational command living in prose is a historical claim about how the
+system worked when someone wrote it down. The release changed the mechanism; seven
+documents kept describing the old one, and the one an agent reads first (CLAUDE.md) was
+among them.
+
+Rewritten to run from the checkout that is already on the box — `CLAUDE.md`,
+`OPS_MANUAL.md` (deploy + install), `CHEATSHEET.md`, `deploy/MIGRATION.md`, and the
+`deploy-and-verify-fleet` skill, which is what an agent loads when asked to deploy:
+
+```bash
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>
+```
+
+The script fetches and hard-resets the checkout to `origin/main` before copying, so
+running the on-disk copy is correct even when the checkout is stale — which it was: the
+diff that surfaced this showed `.repo` still holding pre-rename content while the live
+instance had the new.
+
+**Phone-era paths annotated, not rewritten** (`update-all.sh`, `backup-all.sh`, the
+MIGRATION cutover step, all of `SETUP_GUIDE.md`). They target `~/telegram-bot` on a phone
+that has been empty since 2026-07-26 and were already recorded as managing nothing; the
+fix there is a `DEAD` marker so nobody copies them, not a rewrite of dead tooling.
+
+**New eval `no-live-raw-urls`** (26 → 27) fails on any `curl`/`wget`/`BASE=` line carrying
+a `raw.githubusercontent` URL unless annotated dead within 6 lines, or its file opens with
+`<!-- evals: raw-urls-historical -->`.
+
+**The first draft of that eval was blind, and the break test is why we know.** It allowed
+a file-level opt-out on any marker word in the first 25 lines — and CHEATSHEET.md's header
+*explains* that raw URLs 404, so the whole file was exempt and a re-injected defect passed
+in the file the check most needed to guard. An opt-out matched loosely is an opt-out for
+everything. Now a literal pragma, break-tested red in a file other than the one it was
+developed against.
+
 ## 2026-07-28 — A seed file can be in the repo and absent from the fleet, forever, silently
 
 **Found by a failing rename, not by a check.** Renaming Jules's dealership manager on the

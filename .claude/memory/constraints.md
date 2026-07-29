@@ -259,6 +259,34 @@ Telegram, not a tool call I make. The mechanical half is already covered by the 
 evals; this is the operator-instruction half. Recorded in `group-chat-changes` under the
 same reasoning as C1's split between the agent's half and the operator's half.
 
+### C12 — A command copied out of documentation is a claim about the past
+**seen: 1** (2026-07-29)
+I handed the owner `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily`, lifted
+from CLAUDE.md's Deployment block. It failed twice over: `<raw-base>` was a literal
+placeholder I never substituted, and the URL is dead regardless — **the repo went private
+the day before, which was the entire point of the release I had just been reading about.**
+I had read v2026-07-28.3's changelog entry, which says in its first line that raw URLs 404
+on a private repo, and still shipped the raw-URL command, because I copied the deploy doc
+instead of the deploy script.
+
+The doc was not lying; it was *stale*. CLAUDE.md described a deploy path that was correct
+until 2026-07-28. A command in documentation is a historical claim about how the system
+worked when someone last wrote it down — exactly the C8 problem, applied to instructions
+rather than to readings.
+
+**Constraint:** before handing over any operational command, take it from the thing that
+executes it — the script's own usage header, the unit file, `--help` — not from prose
+describing it. If it must come from a doc, check the doc against the most recent change to
+the subsystem. Never emit a placeholder (`<raw-base>`, `<instance>`) inside a command you
+present as runnable without saying explicitly that it needs substituting.
+
+**Graduated immediately** — `no-live-raw-urls` in `run-evals.sh` fails on any
+`curl`/`wget`/`BASE=` line carrying a `raw.githubusercontent` URL unless it is annotated
+dead within 6 lines or its file opens with `<!-- evals: raw-urls-historical -->`. The
+whole class is now mechanical: seven live deploy instructions across CLAUDE.md,
+OPS_MANUAL.md, CHEATSHEET.md, MIGRATION.md and the `deploy-and-verify-fleet` skill were
+rewritten to run from the checkout, and the phone-era remainder is annotated.
+
 ---
 
 ## Minor — running log
@@ -282,6 +310,14 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-29 — The first draft of the `no-live-raw-urls` eval let a whole file opt out if
+  any marker word (`404`, `historical`, `DEAD`) appeared in its first 25 lines. CHEATSHEET.md's
+  header *explains* that raw URLs 404, so the entire file was exempt and a re-injected
+  defect passed — in the file the check most needed to guard. Caught only because I
+  break-tested against a second file → **an opt-out matched loosely is an opt-out for
+  everything.** Use a literal pragma for exemptions, and break-test in a file that is
+  *not* the one you developed against. (C3 family, and the reason the 26→27 eval is
+  trustworthy.)
 - 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
   conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
   Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length

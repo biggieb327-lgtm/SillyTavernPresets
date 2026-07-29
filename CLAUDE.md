@@ -119,8 +119,9 @@ soak passes.
   `asyncio.get_event_loop()` call is worked around in `main()` — don't remove it.
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`.
 - SillyTavern `chara_card_v2` JSON cards.
-- Repo `biggieb327-lgtm/SillyTavernPresets`; raw URL base
-  `https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/`
+- Repo `biggieb327-lgtm/SillyTavernPresets` — **private since 2026-07-28**. Anonymous
+  `raw.githubusercontent.com` URLs 404, so any doc or script still telling you to `curl`
+  one is stale. Deploys read from the checkout at `/opt/telegram-bots/.repo`.
 
 ## Deployment
 
@@ -130,8 +131,13 @@ instance — it pulls `preset.txt`, the instance's preset layers and card, and `
 enables the unit, then prints hash + STARTUP AUDIT verification:
 
 ```bash
-curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- <instance>
+# host: VPS (as root)
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>
 ```
+
+It fetches and hard-resets the checkout to `origin/main` before copying anything, so
+running the on-disk copy is correct even when the checkout is stale. **Not** curl-piped —
+the repo is private and raw URLs 404.
 
 Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
 The phone-era paths (`/update`, `update-all.sh`, `sync-cards.sh`) are historical.

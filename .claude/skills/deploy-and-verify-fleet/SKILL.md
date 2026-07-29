@@ -49,8 +49,11 @@ local directory.
 4. Run path E for cass and jules — they do not share the phone's file.
 5. `/audit` to each — all six show the new version.
 
-**Path B — supervisor changed:**
+**Path B — supervisor changed. DEAD, kept for history.** Phone-only (tmux, `~/telegram-bot`)
+and the phone has been empty since 2026-07-26; the URL also 404s now that the repo is
+private. Never hand this to the operator — use path E.
 ```bash
+# DEAD: phone-era, and raw URLs 404 on a private repo. Do not run.
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
 ```
 It prints the downloaded BOT_VERSION and restarts every tmux session. Then `/audit`
@@ -66,11 +69,14 @@ then check `/errors` for `[config]` warnings — bad numeric values fall back to
 defaults with a warning rather than crashing, so a typo shows up as a warning, not
 a crash.
 
-**Path E — VPS bots (cass, jules).** One command per instance, and it covers code,
-card, and preset together:
+**Path E — every instance (all six are on the VPS since 2026-07-26).** One command per
+instance, and it covers code, card, and preset together:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- cass
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- jules
+# host: VPS (as root). NOT curl-piped: the repo went private 2026-07-28 and
+# raw.githubusercontent.com 404s. vps-sync.sh fetches and hard-resets the checkout to
+# origin/main before copying, so running the on-disk copy is correct even when stale.
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh cass
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh jules
 ```
 `vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
 `CHARACTER_CARD`, restarts and enables the systemd unit, then prints verification

@@ -7,8 +7,10 @@ The phone is empty — its tooling (`/update`, `update-all.sh`, `sync-cards.sh`,
 `watchdog.sh`, tmux) manages nothing now. Everything below runs as root on the VPS
 unless it says otherwise.
 
-Raw base URL used below:
-`BASE=https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot`
+**The repo is private since 2026-07-28**, so `raw.githubusercontent.com` URLs 404 and
+`BASE=<raw url>` no longer works. Everything deploys from the authenticated checkout
+already on the box:
+`REPO=/opt/telegram-bots/.repo/telegram-companion-bot`
 
 ## Telegram (any bot, no shell needed)
 
@@ -28,13 +30,13 @@ compile-checks bot.py before swapping (keeps `bot.py.bak`), normalizes
 `CHARACTER_CARD`, restarts + enables the unit, prints verification:
 
 ```bash
-curl -fsSL $BASE/deploy/vps-sync.sh | bash -s -- nora
+$REPO/deploy/vps-sync.sh nora
 ```
 
 Whole fleet:
 ```bash
 for b in nora bonnie cass emily priya jules; do
-  curl -fsSL $BASE/deploy/vps-sync.sh | bash -s -- $b
+  $REPO/deploy/vps-sync.sh "$b"
 done
 ```
 
@@ -46,7 +48,7 @@ for `[config]` warnings.
 ```bash
 # bot.py release: /audit shows the new BOT_VERSION
 # content change (no version bump): hash-check instead
-curl -fsSL $BASE/preset.txt | sha256sum
+sha256sum $REPO/preset.txt                             # checkout (vps-sync fetches it)
 sha256sum /opt/telegram-bots/<instance>/preset.txt      # must match
 journalctl -u bot@<instance> | grep "STARTUP AUDIT" | tail -1
 ```

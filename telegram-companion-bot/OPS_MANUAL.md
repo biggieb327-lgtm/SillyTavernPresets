@@ -64,7 +64,10 @@ card, and `bot.py` from `main`, compile-checks `bot.py` before swapping (keeping
 `bot.py.bak`), normalizes `CHARACTER_CARD`, restarts + enables the unit, and prints
 hash + STARTUP AUDIT verification:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/vps-sync.sh | bash -s -- nora
+# host: VPS (as root). NOT curl-piped — the repo is private since 2026-07-28 and
+# raw.githubusercontent.com 404s. The script fetches + hard-resets the checkout to
+# origin/main before copying, so the on-disk copy is correct even if it looks stale.
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
 ```
 `/update`, `update-all.sh` and `sync-cards.sh` are phone-era and manage nothing now.
 
@@ -317,6 +320,8 @@ always excluded) to Android shared storage, prunes archives older than 14 days, 
 push off-phone via rclone. One-time setup and nightly cron instructions are in the
 script's header:
 ```bash
+# DEAD: phone-era (Android shared storage, ~/telegram-bot), and the raw URL 404s now
+# that the repo is private. Kept for the rclone/cron notes in the script header only.
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/backup-all.sh -o ~/telegram-bot/backup-all.sh
 bash ~/telegram-bot/backup-all.sh    # run once to verify, then schedule via crontab
 ```
@@ -524,8 +529,11 @@ existing mechanism unchanged for anyone still running that way.
 **Install** (Ubuntu 24.04 recommended, e.g. Contabo's ~€4.50/mo 4 vCPU/6GB RAM tier —
 best RAM headroom per dollar for running all 6 bots comfortably as of mid-2026 pricing):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/deploy/install-vps.sh -o install-vps.sh
-sudo bash install-vps.sh
+# First install on a fresh box: the repo is private, so fetch install-vps.sh over
+# authenticated git rather than raw HTTP — clone once with the read-only deploy key
+# (see deploy/MIGRATION.md § "Private-repo deploys"), then run it from the clone.
+sudo git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git /opt/telegram-bots/.repo
+sudo bash /opt/telegram-bots/.repo/telegram-companion-bot/deploy/install-vps.sh
 ```
 It's idempotent — re-run it to add another instance or after a `git pull` updates
 `requirements.txt`; it skips already-configured `.env` files and only touches units
