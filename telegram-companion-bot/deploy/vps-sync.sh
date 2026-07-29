@@ -143,7 +143,13 @@ if [ -d "$SRC/$INST" ]; then
 fi
 if [ -n "$seed_missing" ]; then
   echo "seed files: in repo, MISSING on this instance —$seed_missing"
+  echo "            CHECK FIRST: the repo copy can be an older generation than this"
+  echo "            instance's other seed files (jules, 2026-07-29 — her live"
+  echo "            people/projects/schedule were wholly different from the repo, so the"
+  echo "            repo atlas named a cast she does not have). Diff a sibling before"
+  echo "            copying; if they differ, the instance is authoritative, not the repo."
   for sb in $seed_missing; do
+    echo "            diff $SRC/$INST/people.txt $BASE/$INST/people.txt   # sanity-check the generation"
     echo "            cp $SRC/$INST/$sb $BASE/$INST/$sb && chown bot:bot $BASE/$INST/$sb"
   done
 elif [ -d "$SRC/$INST" ]; then
