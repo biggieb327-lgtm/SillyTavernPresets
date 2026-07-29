@@ -7,6 +7,62 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-29.1 — Jules captioned a selfie with her own planning notes
+
+**Root cause: the reply prompt teaches the model a bracket-tag output format, and
+`extract_tags` only removes the tags it knows by name.** When selfies are available
+bot.py appends `[selfie: a short visual description — your pose, expression,
+surroundings]` to the prompt (`bot.py:4459`). That is an instruction to emit
+`[TAG: value]` as *output*. `zai-org/glm-5.1:thinking`, holding `preset.txt`'s
+`[STEPPED THINKING]` block telling it to plan privately, rendered that planning in the
+very syntax it had just been handed:
+
+```
+[ATTRACTION RULE]: Present-tense. Maintain the patronizing "bud."
+[PACE CONTROL]: Mix it with a complaint. Business of the rink.
+[JULES TONE]: Concise, annoyed but using "Sam".
+```
+
+`extract_tags` strips `[react:]`, `[selfie:]`, `[meme:]` and `[search:]` **by name**;
+everything else bracketed went to Telegram verbatim, as the caption on a photo.
+
+**Why the evidence pointed here and not at prompt assembly.** A prompt-assembly leak
+would reproduce her system prompt *verbatim* — `[THE FILE]`, `[KINK MECHANICS]`,
+`[CANTONESE FORMS]`. Instead two labels were real headers from her card and four
+(`[JULES TONE]`, `[NO LANGUAGES]`, `[CANON NOTE]`, `[CONTEXT]`) exist nowhere in the
+repo. bot.py cannot invent `[NO LANGUAGES]`. The model borrowed the *style* and wrote
+its own content — which also rules out any fix keyed to known header names.
+
+**The guard:** `_strip_directive_lines` drops whole lines that are nothing but an
+ALL-CAPS bracketed label, optionally followed by `": rest of line"`. Runs inside
+`extract_tags`, **after** the named tags, so it can never re-match one. Lowercase is
+excluded deliberately: `[selfie: ...]` is handled above and an in-character `[laughs]`
+must survive. Default ON, kill switch `DIRECTIVE_LEAK_GUARD=0`.
+
+**It logs every strip at WARNING.** Stripping alone would convert a visible model fault
+into an invisible one — the guard hides the symptom, not the cause.
+
+**Deliberately NOT in `_do_request`** (invariant #4's choke point): that path also
+carries the post-reply analysis JSON, and a line-eating regex has no business near it.
+This runs on user-facing reply text only.
+
+**What this does not fix.** The same message contained `"Liga Handball refer a 4t 7 my"`
+and three confabulated people (`Sam`, `Chuck`, `Chronicle` — zero hits in her card or
+seeds). That is model degeneration, not a formatting bug, and the guard will not touch
+it. If it recurs, the question is `glm-5.1:thinking` and its sampling, not this code.
+The trailing unclosed quote is consistent with the leaked plan burning the 4096-token
+budget and truncating.
+
+**Also found:** her live stack is `preset.txt` (8018t monolith) + `preset-jules.txt`, set
+by a **runtime `/preset` override**, not by `.env` (`preset_override`, `bot.py:2474`) —
+which is why the owner had no memory of changing it. Moving her to the recommended
+`core,rp,explicit,stepped,jules` stack is handled separately, so the two changes are not
+confounded.
+
+Verified: `py_compile`, **699 pytest** (691 + 8 new), evals 27/27. The 8 new tests were
+break-tested red by neutering the guard — 3 stripping assertions failed, and the 5
+must-not-strip assertions correctly stayed green.
+
 ## 2026-07-29 — Every doc still told the operator to curl a URL that 404s
 
 **Found by handing the owner a command that could not run.** The deploy instruction in

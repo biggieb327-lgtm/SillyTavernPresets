@@ -4694,3 +4694,66 @@ class TestUpdateReasonsAllHaveBranches:
         import inspect
         assert "repo_not_readable" in self._reasons_returned()
         assert "vps-sync.sh" in inspect.getsource(bot.update_cmd)
+
+
+class TestDirectiveLeakGuard:
+    """v2026-07-29.1 — jules sent a selfie captioned with her own planning, rendered in
+    the `[selfie: ...]` bracket syntax the reply prompt had just taught her. extract_tags
+    strips react/selfie/meme/search BY NAME, so every other bracketed line reached the
+    user verbatim."""
+
+    LEAK = (
+        'Lasers have never looked so aggressively monochromatic.\n'
+        '[ATTRACTION RULE]: Present-tense. Maintain the patronizing "bud."\n'
+        '[PACE CONTROL]: Mix it with a complaint. Business of the rink.\n'
+        '[JULES TONE]: Concise, annoyed.\n'
+        'Caught mid-start.'
+    )
+
+    def test_strips_the_leaked_directive_lines(self):
+        clean, dropped = bot._strip_directive_lines(self.LEAK)
+        assert len(dropped) == 3
+        for tag in ("ATTRACTION RULE", "PACE CONTROL", "JULES TONE"):
+            assert tag not in clean
+
+    def test_keeps_the_actual_reply(self):
+        clean, _ = bot._strip_directive_lines(self.LEAK)
+        assert "Lasers have never looked so aggressively monochromatic." in clean
+        assert "Caught mid-start." in clean
+
+    def test_invented_labels_are_caught_not_just_known_ones(self):
+        """The leak included labels absent from her card — a fix keyed to real header
+        names would have missed [JULES TONE] and [NO LANGUAGES] entirely."""
+        clean, dropped = bot._strip_directive_lines("[NO LANGUAGES]: keep it English\nhi")
+        assert dropped and clean == "hi"
+
+    def test_lowercase_in_character_aside_survives(self):
+        """[laughs] is something a character might actually write."""
+        text = "*she shrugs* [laughs] whatever, bud"
+        clean, dropped = bot._strip_directive_lines(text)
+        assert clean == text and dropped == []
+
+    def test_bracket_mid_line_survives(self):
+        """Only whole lines that are nothing but a label are prompt syntax."""
+        text = "the sign said [OPEN] and she walked in"
+        clean, dropped = bot._strip_directive_lines(text)
+        assert clean == text and dropped == []
+
+    def test_ordinary_reply_is_untouched(self):
+        text = "*She leans against the doorway.*\n\"Took you long enough.\""
+        clean, dropped = bot._strip_directive_lines(text)
+        assert clean == text and dropped == []
+
+    def test_kill_switch_disables_it(self, monkeypatch):
+        monkeypatch.setattr(bot, "DIRECTIVE_LEAK_GUARD", False)
+        clean, dropped = bot._strip_directive_lines(self.LEAK)
+        assert clean == self.LEAK and dropped == []
+
+    def test_extract_tags_applies_the_guard_after_known_tags(self):
+        """Order matters: a known tag must be removed by name first, so the sweep can
+        never re-match it, and the guard must still catch what follows."""
+        clean, _react, hint, _meme = bot.extract_tags(
+            "hey\n[selfie: her at the rink]\n[PACE CONTROL]: slow it down")
+        assert hint == "her at the rink"
+        assert "PACE CONTROL" not in clean
+        assert "hey" in clean

@@ -283,9 +283,12 @@ entirely mine: **I told the user a suite had passed when I had not seen it pass.
 gate in a pipeline — `cmd | tail` discards its exit status; capture output and echo `$?`,
 or run the gate on its own line and read the result. And never report a check as green
 without having read its actual output in this turn.
-**Mechanism already exists for the enforcement half** (`eval-gate.sh`), which is why this
-does not need a new hook. The reporting half — claiming a green you did not observe — has
-no code shape to intercept and stays prose, per rule 4.
+**Graduated 2026-07-29 — the mechanism already existed, which is the finding.**
+`.claude/hooks/eval-gate.sh` is a Stop hook that runs the suite itself from
+`$CLAUDE_PROJECT_DIR` on every turn touching gated surfaces, so the enforcement half was
+never actually at risk: my broken invocation could not have shipped anything unverified.
+No new hook is owed. The reporting half — claiming a green you did not observe — has no
+code shape to intercept and stays prose, per rule 4.
 
 ### C12 — A command copied out of documentation is a claim about the past
 **seen: 1** (2026-07-29)

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-28.3"
+BOT_VERSION = "2026-07-29.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -322,6 +322,13 @@ MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 # existing single call — NO extra LLM round-trip (invariant #3). Default ON with a
 # kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
 STEP_INTENT = os.getenv("STEP_INTENT", "1").lower() not in ("0", "false", "no", "off")
+# Directive-leak guard (v2026-07-29.1). The reply prompt teaches the model a
+# `[selfie: ...]` output convention; a reasoning model holding private planning
+# instructions can render that planning in the SAME syntax and it reaches the user,
+# because extract_tags only removes tags it knows by name. Default ON with a kill
+# switch (owner policy 2026-07-18: unset = active, 0/off disables).
+DIRECTIVE_LEAK_GUARD = os.getenv(
+    "DIRECTIVE_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -5107,6 +5114,38 @@ async def reply_with_typing(context, chat_id: int, messages: list,
         typing.cancel()
 
 
+# A whole line that is nothing but an ALL-CAPS bracketed label, optionally followed by
+# ": rest of line". That is prompt syntax — section headers in the cards and presets —
+# and no character on this fleet writes in it. Lowercase tags are excluded on purpose:
+# `[selfie: ...]` and friends are removed by name above, and an in-character aside like
+# "[laughs]" must survive.
+_DIRECTIVE_LINE_RE = re.compile(r"(?m)^[ \t]*\[[A-Z][A-Z0-9 _/&'\-]{1,38}\][ \t]*:?[^\n]*$")
+
+
+def _strip_directive_lines(text: str) -> tuple:
+    """Drop leaked instruction-shaped lines from a reply. Returns (clean, dropped).
+
+    Root cause it exists for (jules, 2026-07-29): the reply prompt hands the model a
+    `[selfie: a short visual description]` convention, and glm-5.1:thinking rendered its
+    own private planning in that same bracket syntax — `[ATTRACTION RULE]: ...`,
+    `[PACE CONTROL]: ...`, plus labels it invented — which went out as a photo caption.
+    `extract_tags` strips react/selfie/meme/search BY NAME, so anything else bracketed
+    reached the user verbatim.
+
+    Deliberately not folded into `_do_request`: that choke point also carries the
+    post-reply analysis JSON, and a line-eating regex has no business near it. This runs
+    on user-facing reply text only, after the known tags are removed.
+    """
+    if not DIRECTIVE_LEAK_GUARD or "[" not in text:
+        return text, []
+    dropped = _DIRECTIVE_LINE_RE.findall(text)
+    if not dropped:
+        return text, []
+    cleaned = _DIRECTIVE_LINE_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip(), dropped
+
+
 def extract_tags(text: str):
     """Pull [react: ..], [selfie: ..], and [meme: ..] tags out, return
     (clean_text, reaction, selfie_hint, meme_caption). meme_caption is a (top, bottom)
@@ -5134,6 +5173,14 @@ def extract_tags(text: str):
         text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
     if reaction or sm or mm or sr:
         text = re.sub(r"[ \t]{2,}", " ", text)
+    # Last, so the known tags above are already gone and cannot be re-matched.
+    text, _leaked = _strip_directive_lines(text)
+    if _leaked:
+        # Loud on purpose: stripping makes the symptom invisible, and the underlying
+        # cause is a model emitting its planning as output. A silent guard would turn a
+        # visible model fault into an undiagnosable one.
+        log.warning("[directive-leak] stripped %d instruction-shaped line(s): %s",
+                    len(_leaked), " | ".join(ln.strip()[:120] for ln in _leaked[:3]))
     return text.strip(), reaction, selfie_hint, meme_caption
 
 
