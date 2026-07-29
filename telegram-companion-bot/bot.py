@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-29.2"
+BOT_VERSION = "2026-07-29.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -292,6 +292,12 @@ def _rate_ok(user_id: int) -> bool:
 NANOGPT_BASE_URL = os.getenv("NANOGPT_BASE", "https://nano-gpt.com/api/v1").rstrip("/")
 NANOGPT_MODEL = os.getenv("NANOGPT_MODEL", "zai-org/glm-5:thinking")
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a faster model
+# Selfie and meme captions are the character TALKING — user-facing prose in her voice —
+# so they default to the chat model, not the background slot. They used to ride
+# SUMMARY_MODEL, which meant an instance that pointed that at a small fast model for
+# cheap summaries was silently having that model write her dialogue (jules,
+# glm-4.7-flash, 2026-07-29). Overridable per instance without a redeploy.
+CAPTION_MODEL = os.getenv("CAPTION_MODEL", NANOGPT_MODEL)
 VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept image input
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
@@ -5667,7 +5673,7 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         )}]
     )
     try:
-        return (await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)).strip()
+        return (await generate_reply(messages, model=CAPTION_MODEL)).strip()
     except Exception:
         return ""
 
@@ -5857,7 +5863,7 @@ async def _generate_meme_captions(hint: str, chat_id: int) -> tuple:
         + [{"role": "user", "content": ask}]
     )
     try:
-        raw = await generate_reply(messages, model=SUMMARY_MODEL or NANOGPT_MODEL)
+        raw = await generate_reply(messages, model=CAPTION_MODEL)
         data = _extract_json(raw)
         return (data.get("top") or "").strip(), (data.get("bottom") or "").strip()
     except Exception:
@@ -6417,6 +6423,7 @@ async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 MODEL_ROLES = {
     "chat": "NANOGPT_MODEL",
     "summary": "SUMMARY_MODEL",
+    "caption": "CAPTION_MODEL",
     "reaction": "REACTION_MODEL",
     "mood": "MOOD_MODEL",
     "vision": "VISION_MODEL",

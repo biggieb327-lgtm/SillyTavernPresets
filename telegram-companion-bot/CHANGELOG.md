@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-07-29.3 — The character's voice comes from the character's model, on every bot
+
+**Root cause: `SUMMARY_MODEL` was two jobs wearing one name.** Eleven call sites read it.
+Nine are background work — rolling summaries, `reflect`, `_consolidate_facts`,
+`_promote_to_long_term`, `_memory_audit_scan`, day events, world text. **Two write
+user-facing prose in the character's voice**: `_selfie_caption` and
+`_generate_meme_captions`.
+
+Nothing announced that. An operator pointing `SUMMARY_MODEL` at a small fast model — which
+is exactly what the variable name invites, and what `.env.example` recommended — was
+silently handing that model the character's dialogue. Jules ran `glm-4.7-flash` and sent a
+selfie captioned with invented instruction blocks, three people who exist nowhere in her
+card or seeds, and outright word salad. Her `/audit` reported `glm-5.1:thinking` the whole
+time, because that is the *chat* slot, which is why the first two diagnoses this session
+blamed the wrong model.
+
+**New `CAPTION_MODEL` slot, defaulting to `NANOGPT_MODEL`.** Her voice now comes from her
+own model on every instance — the uniformity the owner asked for — and `SUMMARY_MODEL`
+finally means what its name says, so pointing it at something cheap is safe again. The
+default is the fix; the env var is the per-instance override, no redeploy required
+(invariant #16). Registered in `MODEL_ROLES` as `caption`, so `/setmodel` can reach it
+like every other slot.
+
+**No new LLM calls** (invariant #3) — the same two calls, on a different slot.
+
+Verified: `py_compile`, **706 pytest** (702 + 4), evals 28/28. Break-tested by pointing the
+captions back at `SUMMARY_MODEL`: `test_caption_helpers_no_longer_use_the_summary_slot`
+failed, the other three held. One test deliberately pins `_summarize` to `SUMMARY_MODEL`
+so a future "uniformity" pass cannot drag summarisation onto the chat model too.
+
+**Version note:** requested as "28.3", shipped as **2026-07-29.3** — `v2026-07-28.3` is
+yesterday's private-repo deploy release, and reusing it would break
+`version-changelog-sync` and make `/audit` ambiguous about what is live.
+
 ## v2026-07-29.2 — The guard was in the one place the selfie caption never goes
 
 **Root cause: v2026-07-29.1 put the guard in `extract_tags`, and a selfie caption never

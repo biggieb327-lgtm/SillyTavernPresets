@@ -4781,3 +4781,29 @@ class TestDirectiveLeakGuard:
         assert len(dropped) == 1
         assert "[SELFIE: at the rink]" in clean
         assert "PACE CONTROL" not in clean and "hey" in clean
+
+
+class TestCaptionModelSlot:
+    """v2026-07-29.3 — selfie and meme captions are the character talking, so they ride
+    the chat model, not the background summariser slot."""
+
+    def test_caption_model_defaults_to_the_chat_model(self):
+        assert bot.CAPTION_MODEL == bot.NANOGPT_MODEL
+
+    def test_caption_helpers_no_longer_use_the_summary_slot(self):
+        """The bug: an instance pointing SUMMARY_MODEL at a small fast model for cheap
+        summaries had that model writing the character's dialogue."""
+        import inspect
+        for fn in (bot._selfie_caption, bot._generate_meme_captions):
+            src = inspect.getsource(fn)
+            assert "SUMMARY_MODEL" not in src, fn.__name__
+            assert "CAPTION_MODEL" in src, fn.__name__
+
+    def test_caption_is_a_selectable_model_role(self):
+        """/setmodel must be able to reach it, like every other slot."""
+        assert bot.MODEL_ROLES.get("caption") == "CAPTION_MODEL"
+
+    def test_summary_slot_still_drives_background_work(self):
+        """Uniform captions must not accidentally move summarisation too."""
+        import inspect
+        assert "SUMMARY_MODEL" in inspect.getsource(bot._summarize)
