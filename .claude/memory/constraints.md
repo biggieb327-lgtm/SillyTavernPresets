@@ -259,6 +259,34 @@ Telegram, not a tool call I make. The mechanical half is already covered by the 
 evals; this is the operator-instruction half. Recorded in `group-chat-changes` under the
 same reasoning as C1's split between the agent's half and the operator's half.
 
+### C13 — A verification command that cannot fail is not verification
+**seen: 3** (2026-07-27, 2026-07-28, 2026-07-29) — *promoted from the Minor log on the
+third occurrence, as that entry said it should be.*
+Three times a check was run against the wrong working directory, because this shell
+persists cwd across calls and an earlier `cd` had moved it: `find .env.example` read as
+repo-root when cwd was `telegram-companion-bot/`; `sed -n fleet-status.sh` failed on a file
+that exists; and on 2026-07-29 `bash .claude/evals/run-evals.sh` printed *No such file or
+directory*.
+
+**The third one exposed the sharper half.** The command was
+`bash .claude/evals/run-evals.sh 2>&1 | tail -2 && git add -A && git commit …`. A pipeline's
+exit status is the *last* command's, so `tail` returned 0, `&&` did not short-circuit, and
+the commit proceeded on an eval run that never happened. The gate reported nothing and
+blocked nothing — it could not have.
+
+**What saved it, and what did not.** `.claude/hooks/eval-gate.sh` is a Stop hook that runs
+the suite itself, from `$CLAUDE_PROJECT_DIR`, on every turn touching gated surfaces. So the
+work was still verified and nothing shipped unchecked. The residual damage is narrower and
+entirely mine: **I told the user a suite had passed when I had not seen it pass.**
+
+**Constraint:** run repo tooling by absolute path, or `cd` in the same command. Never put a
+gate in a pipeline — `cmd | tail` discards its exit status; capture output and echo `$?`,
+or run the gate on its own line and read the result. And never report a check as green
+without having read its actual output in this turn.
+**Mechanism already exists for the enforcement half** (`eval-gate.sh`), which is why this
+does not need a new hook. The reporting half — claiming a green you did not observe — has
+no code shape to intercept and stays prose, per rule 4.
+
 ### C12 — A command copied out of documentation is a claim about the past
 **seen: 1** (2026-07-29)
 I handed the owner `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily`, lifted
@@ -339,11 +367,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   rows were written, so every row reads ~60 raw low and my derived figure inherited the
   error → measure, don't derive from a published figure whose measurement date you did not
   check (C8 family). Fixed by measuring and annotating the staleness in the table.
-- 2026-07-28 — `sed -n '1,30p' fleet-status.sh` failed on a path that exists, because an
-  earlier call in the same session had `cd`'d to the repo root → this shell persists cwd
-  across calls, so a bare relative path depends on whichever call last moved it. Use
-  absolute paths, or `cd` explicitly in the same command. (Same shape as the 2026-07-27
-  entry below; if it recurs a third time, promote it.)
 - 2026-07-28 — `anchor-guard.sh` blocked a *content-anchored* `sed -i 's/^Layer is …/'`.
   Not my mistake and not a guard bug in the dangerous direction, but worth recording: line
   28 scans the entire command string for a line-address shape, and the `grep -n "434 raw
@@ -352,12 +375,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   compound command the address-shaped text belongs to. Fail-safe direction, but "a guard
   that misfires gets disabled" is this file's own rule (C7), so it needs either
   per-segment matching or a note in the skill.
-- 2026-07-27 — `find . -name .env.example` returned `./.env.example` and I read that as
-  repo-root; the sandbox had reset cwd to `telegram-companion-bot/`, so both Edit calls
-  failed on a path that did not exist → a relative path is only as good as the cwd you
-  assumed. This shell resets cwd between calls: use absolute paths, or print `pwd` in
-  the same command that prints the relative result. (C8 family — the reading was true,
-  its base was not what I assumed.)
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows
