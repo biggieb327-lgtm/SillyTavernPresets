@@ -44,6 +44,18 @@ constraints; check their assumptions before acting on them.
      bot token, so stop-then-start, never parallel.
   2. Set `HEALTHCHECK_URL` per migrated instance (dead man's switch already built).
   3. `ADMIN_API_ENABLED=1`, bound to the Tailscale IP (Phase 1 auth model, never 0.0.0.0).
+     **NOT DONE — verified 2026-07-29.** `ADMIN_API_ENABLED` is unset on all six
+     instances and nothing is bound; the migration moved instance directories from the
+     phone, so no instance ever ran `install-vps.sh`, which is the only thing that writes
+     that line. Consequence: **`/fleet` and `fleet-status.sh` cannot work** — they poll
+     `/admin/health` on peers and no peer serves it. Silent, like every fail-closed
+     default (the `GROUP_MODE` class, operational log 2026-07-28).
+     **Do not enable it by adding one line to six `.env` files.** Every instance defaults
+     to `ADMIN_API_PORT=8765` (bot.py) and `_start_admin_api` calls
+     `ThreadingHTTPServer(...)` unguarded, so the second instance to start raises
+     `Address already in use` **and fails startup** — one optional feature taking down the
+     bot. Enabling means a distinct port per instance in the same edit, and the unguarded
+     bind is worth fixing first so a port clash degrades instead of crashing.
   4. Soak the pilot for a week (watch `/audit` error counts vs its phone baseline),
      then migrate the rest one at a time. Phone keeps nora last — she's the shared-venv
      home instance; retire the phone (or keep it as a spare) when she moves.
