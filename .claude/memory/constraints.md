@@ -341,6 +341,12 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-29 — Quoted a `for … ; do` loop as a two-line fragment to *illustrate* a change,
+  with no body and no `done`. The owner pasted it and bash sat at a `>` continuation
+  prompt — "didn't return to the command prompt" → **a fenced bash block is read as
+  runnable, whatever it was meant to illustrate.** Show partial shell as prose or with an
+  explicit `# fragment, not runnable` marker, or show the complete construct. (C12 family:
+  the first case was a command that could not authenticate, this one cannot even parse.)
 - 2026-07-29 — Told the owner `grep -c Warren emily_harper.json` should "expect 1". It is
   2 — the lorebook key *and* the content line, in a file I had written myself an hour
   earlier. The deploy was correct; my predicted value was wrong, and a wrong expectation
