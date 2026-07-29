@@ -260,13 +260,25 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 3** (2026-07-27, 2026-07-28, 2026-07-29) — *promoted from the Minor log on the
+**seen: 4** (2026-07-27, 2026-07-28, 2026-07-29 ×2) — *promoted from the Minor log on the
 third occurrence, as that entry said it should be.*
 Three times a check was run against the wrong working directory, because this shell
 persists cwd across calls and an earlier `cd` had moved it: `find .env.example` read as
 repo-root when cwd was `telegram-companion-bot/`; `sed -n fleet-status.sh` failed on a file
 that exists; and on 2026-07-29 `bash .claude/evals/run-evals.sh` printed *No such file or
 directory*.
+
+**Fourth occurrence (2026-07-29) — wrong *tree*, not wrong directory, and it printed a
+green.** Merging the Routine fix, `git checkout main` succeeded and the suite reported
+`23 passed, 0 failed` — a clean result that said nothing about my work, because **this
+container's local `main` is a stale branch with no merge-base against `origin/main`**
+(`ahead 76, behind 65`; `git merge-base` returns nothing, `git merge` refuses as
+"unrelated histories"). Only the *count* gave it away: 23, when the suite I had just
+extended has 28. A dropped eval count is a weak signal to depend on — a green from the
+wrong tree looks exactly like a green.
+**Durable repo fact:** merge to main by pushing the branch ref
+(`git push origin <branch>:main`, a fast-forward when the branch sits on `origin/main`'s
+tip). Do **not** `git checkout main` in a fresh cloud session and merge there.
 
 **The third one exposed the sharper half.** The command was
 `bash .claude/evals/run-evals.sh 2>&1 | tail -2 && git add -A && git commit …`. A pipeline's
