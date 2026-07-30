@@ -383,6 +383,17 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-29 — Asked why the ops brief can't reach GitHub, I investigated from this
+  container's working tree without fetching first, concluded "routines.md is out of sync
+  with the live Routines, that's why it halts", and rewrote the file. All of it was
+  already fixed on `origin/main` — six commits ahead of me, one of them the same routines
+  sync with a *better* root cause. Wasted ~10 calls and told the owner a wrong diagnosis.
+  Caught only because `git push origin main` was refused as non-fast-forward → **another
+  session may be pushing to this repo right now: `git fetch origin main` and compare
+  before diagnosing anything, not just before merging.** Distinct from C13's fourth
+  occurrence — my local `main` was a true ancestor, merely 6 commits behind, so nothing
+  looked wrong and the eval count was correct.
+
 - 2026-07-30 — Shipped a written recommendation to "move the standing-authorization text
   into CLAUDE.md and delete the per-turn hook" **without having read the hook.** Its
   docstring rejects exactly that, with a mechanism that holds: the text must land *later in
