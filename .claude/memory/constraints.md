@@ -383,6 +383,15 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-30 — Ghost-token audit: reported card↔preset-layer duplication as "emily 38
+  shared 8-grams", a number I was one sentence away from putting in a findings table. It
+  measures nothing an owner can act on — consecutive shingles overlap, so 38 of them were
+  **4** distinct passages (~87 tok). Re-measured with maximal common word-runs before
+  writing it up → **a similarity count is not a quantity of waste.** When a metric is a
+  proxy (shingles, matches, hits), convert it to the unit the decision is actually in
+  (tokens, files, dollars) before it reaches a report. (C8 family: ask what the reading
+  measures — here the proxy inflated the finding ~9x in the direction that made it look
+  more important.)
 - 2026-07-29 — Quoted a `for … ; do` loop as a two-line fragment to *illustrate* a change,
   with no body and no `done`. The owner pasted it and bash sat at a `>` continuation
   prompt — "didn't return to the command prompt" → **a fenced bash block is read as
