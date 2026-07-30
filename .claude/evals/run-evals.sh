@@ -411,6 +411,86 @@ else
   bad "routine-prompts-runnable" "$routine_dead"
 fi
 
+# --- skill-index-integrity -------------------------------------------------------------
+# Pins the 2026-07-30 scaffolding audit's recurring class: skill-router describing a
+# reality that isn't there. Three instances in one pass — (1) it claimed
+# artifact-first-delivery and repo-validation-gate were "preloaded always (do not
+# re-load)", suppressing the two most broadly applicable skills; (2) it advertised
+# `grill-me` as a live alias for a stub that sets disable-model-invocation and cannot be
+# invoked at all; (3) CLAUDE.md carried a divergent 8-row copy that omitted seven skills
+# including verify-external-audit. An index nobody can trust routes worse than no index.
+#
+# Checks BOTH directions, because they fail differently: a skill missing from the table is
+# invisible tomorrow, and a table row pointing at nothing sends a session somewhere empty.
+# Scoped to the LAST cell of table rows only — the file's own prose explains the grill-me
+# incident by name and must stay legal (C14: a scanner cannot tell "does the bad thing"
+# from "explains it").
+skill_index=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+router = Path(".claude/skills/skill-router/SKILL.md")
+skills_dir = Path(".claude/skills")
+problems = []
+
+if not router.exists():
+    print("skill-router/SKILL.md is missing — the routing table is the index")
+    raise SystemExit(0)
+
+# Names referenced in the Load (last) column of a table row. Skill dirs are
+# lowercase-hyphen, which excludes tool names like ListSkills/SearchSkills.
+named = set()
+for line in router.read_text(encoding="utf-8").splitlines():
+    s = line.strip()
+    if not s.startswith("|") or set(s) <= set("|- :"):
+        continue
+    cells = [c.strip() for c in s.strip("|").split("|")]
+    if len(cells) < 2 or cells[0].lower() == "trigger":
+        continue
+    for m in re.findall(r"`([a-z][a-z0-9-]*)`", cells[-1]):
+        named.add(m)
+
+on_disk = {}
+for d in sorted(skills_dir.iterdir()) if skills_dir.exists() else []:
+    if not d.is_dir() or d.name.startswith("_"):
+        continue
+    f = d / "SKILL.md"
+    if not f.is_file():
+        problems.append(f"{d.name}/ has no SKILL.md")
+        continue
+    head = f.read_text(encoding="utf-8")[:600]
+    on_disk[d.name] = bool(
+        re.search(r"^disable-model-invocation:\s*true", head, re.M))
+
+for name in sorted(set(on_disk) - named - {"skill-router"}):
+    problems.append(
+        f"{name} exists but is not in skill-router's table — register it there in the "
+        f"same change or it is invisible tomorrow")
+
+for name in sorted(named - set(on_disk)):
+    problems.append(
+        f"skill-router names {name} but .claude/skills/{name}/ does not exist — "
+        f"delete the row or create the skill (the grill-me class)")
+
+for name in sorted(n for n in named if on_disk.get(n)):
+    problems.append(
+        f"skill-router names {name}, which sets disable-model-invocation and therefore "
+        f"cannot be invoked — delete the row or drop that frontmatter")
+
+if re.search(r"[Pp]reloaded always", router.read_text(encoding="utf-8")):
+    problems.append(
+        "skill-router claims something is 'preloaded always' — nothing is; that claim "
+        "suppressed loading of artifact-first-delivery and repo-validation-gate")
+
+print(" | ".join(problems))
+PYEOF
+)
+if [ -z "$skill_index" ]; then
+  ok "skill-index-integrity: skill-router's table and .claude/skills/ agree, both directions"
+else
+  bad "skill-index-integrity" "$skill_index"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

@@ -60,18 +60,21 @@ Every completion must include the verification command actually run.
 
 ## Where things live
 
-| Topic | Load |
-|---|---|
-| Shipping any bot.py change | `repo-change-control` + `bot-code-invariants` |
-| A live bot is silent, restarting, or misbehaving | `repo-debugging-playbook` |
-| Cause looks device-level: SIGKILL/137, venv, tzdata, watchdog, `pkg upgrade` | `termux-device-ops` |
-| Getting merged work onto the fleet (paths A–E) | `deploy-and-verify-fleet` |
-| Model slots, timeouts, `.env` constraints, voice/vision/traffic, continuity features | `bot-config-reference` |
-| Character cards, seeds, `preset.txt`, per-character canon | `edit-cards-and-presets` |
-| Any `GROUP_*` code, the ledger, bot-to-bot behavior | `group-chat-changes` |
-| Before declaring anything done | `repo-validation-gate` |
+**`.claude/skills/skill-router/SKILL.md` is the routing table — read it, don't guess.**
 
-Full index, including the less common skills: `skill-router`.
+This file used to carry an 8-row copy of it. That copy drifted: it omitted seven skills,
+including `verify-external-audit`, and a session routing from it alone was steered past the
+skill its task actually matched (audited 2026-07-30, F2 in
+`.claude/SCAFFOLDING-AUDIT-2026-07-30.md`). Deleted rather than re-synced, because a
+one-line description of every skill already reaches you for free and cannot go stale, and a
+second hand-maintained index can only ever diverge from the first.
+
+Two composition facts the per-skill descriptions can't tell you:
+
+- `repo-change-control` and `bot-code-invariants` ship together for any bot.py change.
+- `repo-validation-gate` applies before declaring **anything** done, and
+  `artifact-first-delivery` before deciding where any output goes. Neither is preloaded —
+  load them.
 
 ## Known-deliberate — do not "fix" these
 
@@ -179,6 +182,15 @@ Full command reference: `OPS_MANUAL.md`.
    were self-corrected, not despite it: they cost real minutes, nobody else ever sees
    them, and repeating shapes surface there first. When two minor entries share a
    cause, promote them into a numbered constraint.
+8. **Subagents are pre-authorized (owner standing grant).** Delegation for work that
+   genuinely warrants it — broad multi-file search, an independent review pass, parallel
+   investigation, or any contract in `.claude/agents/` — does **not** need a fresh
+   per-turn request. In this repo, breadth or multiple parts *does* count as the user
+   having asked. Not mandatory: prefer inline work when the task is small, the context is
+   already loaded, or the budget-governor is live. This is the **durable** statement of
+   the grant, paid once per session; `.claude/hooks/agent-authorization.py` only
+   re-asserts it on turns where a server-side instruction would otherwise override it
+   (that file's TOKEN BUDGET note explains why both layers exist).
 
 ## Git workflow
 

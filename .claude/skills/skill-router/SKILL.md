@@ -3,11 +3,19 @@ name: skill-router
 description: Index of available skills and when to load each. Consult this instead of preloading everything — load skills on demand.
 ---
 
-Load a skill only when its trigger fires. Preloaded always (do not re-load): `artifact-first-delivery`, `repo-validation-gate`.
+Load a skill only when its trigger fires. **Nothing here arrives on its own.** Only the
+one-line description of each skill reaches you for free; every body must be loaded. Until
+2026-07-30 this file exempted `artifact-first-delivery` and `repo-validation-gate` from
+that rule, asserting they were already in context — they were not, so the exemption
+suppressed the two skills that apply most often. Both are ordinary rows below. See F1 in
+`.claude/SCAFFOLDING-AUDIT-2026-07-30.md`; the `skill-index-integrity` eval now rejects any
+such exemption.
 
 | Trigger | Load |
 |---|---|
-| Stress-testing a plan or design before building | `grilling` (alias: `grill-me`) |
+| Producing any deliverable — before deciding where output goes | `artifact-first-delivery` |
+| Before claiming ANY change is done | `repo-validation-gate` |
+| Stress-testing a plan or design before building | `grilling` |
 | Any bot.py change that will ship (feature, fix, refactor) | `repo-change-control` |
 | Reviewing or writing any bot.py diff (also loaded by repo-change-control) | `bot-code-invariants` |
 | A live bot is misbehaving, restarting, or silent | `repo-debugging-playbook` |
@@ -28,3 +36,8 @@ Rules:
 - One skill at a time; finish applying it before loading another.
 - If a needed skill doesn't exist and the need has come up twice, that's a finding for `improvement-analyst` — a candidate for a new skill, written by `system-fixer`.
 - New skills added under `.claude/skills/` must be registered in this table in the same change, or they're invisible tomorrow.
+- **And the reverse:** every skill named in this table must exist on disk AND be
+  model-invocable. A row for a skill that is missing, or that sets
+  `disable-model-invocation`, is an index entry pointing at nothing — the `grill-me` alias
+  was exactly that until 2026-07-30. Both directions are now pinned by the
+  `skill-index-integrity` eval.
