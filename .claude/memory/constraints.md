@@ -383,6 +383,26 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-30 — Shipped a written recommendation to "move the standing-authorization text
+  into CLAUDE.md and delete the per-turn hook" **without having read the hook.** Its
+  docstring rejects exactly that, with a mechanism that holds: the text must land *later in
+  the conversation* than a server-side system-prompt injection, "which a CLAUDE.md line
+  cannot do." The measurement behind the finding (O(turns) cost for invariant content) was
+  right; the prescription was wrong because it read a positional requirement as redundancy
+  → **before recommending that something be deleted, read it — especially when it looks
+  redundant.** Redundant-looking machinery in this repo is usually load-bearing and usually
+  says so in a comment. (C9 family: an inherited or inferred prediction is a hypothesis.
+  This one reached the owner in a delivered audit before I caught it, so it is a near-miss,
+  not a clean self-correction.)
+- 2026-07-30 — Wrote `skill-index-integrity` to catch indexes that describe a reality that
+  isn't there, then made the check a file-wide grep for "preloaded always" — and the same
+  commit added a sentence to `skill-router` *explaining* the removed claim. The new eval
+  went RED on a clean tree, flagging my own prose. Fixed by rewording the explanation so the
+  file contains no live-looking claim, rather than by adding an exemption → **C14 is not a
+  historical footnote; it is the default failure mode of writing a check and its
+  documentation in one pass.** Write the check, then re-read the same commit's prose as if
+  the scanner wrote it. (C14, `seen` unchanged — caught by the check itself, which is the
+  system working.)
 - 2026-07-30 — Ghost-token audit: reported card↔preset-layer duplication as "emily 38
   shared 8-grams", a number I was one sentence away from putting in a findings table. It
   measures nothing an owner can act on — consecutive shingles overlap, so 38 of them were

@@ -143,13 +143,47 @@ the bot audit's Finding 3, with the roles reversed — there the static block wa
 where a cache couldn't reach it; here it is *duplicated* rather than referenced.
 
 Its content is a standing *permission*, load-bearing only at a delegation decision — a
-small minority of turns. Nothing about it varies with the prompt, so a hook is the wrong
-mechanism for it.
+small minority of turns.
 
-**Fix:** move the paragraph into `CLAUDE.md` (paid once) and either delete the hook or
-reduce it to a one-line reminder. If it must stay per-turn, compress it to a single
-sentence: the second paragraph's "judgment still applies" caveat restates guidance already
-in `CLAUDE.md`'s working principles and the budget-governor's own behavior.
+**CORRECTION (2026-07-30, before implementing).** This finding originally recommended
+"move the paragraph into `CLAUDE.md` and delete the hook." **That was wrong, and I had not
+read the hook when I wrote it.** Its docstring rejects exactly that fix, for a reason that
+holds:
+
+> A UserPromptSubmit hook's additionalContext is promoted … into a real `{role:"system"}`
+> turn … That puts this text in the same channel as the injection and **later in the
+> conversation, which a CLAUDE.md line cannot do.**
+
+The hook counter-weights a *server-side* system-prompt injection. Position in the
+conversation is the mechanism, not an accident, so "state it once at the top" cannot
+replace it. The diagnosis (O(turns) cost for invariant content) was right; the prescription
+was wrong because it treated a positional requirement as redundancy.
+
+**Fix as shipped — two layers, cost O(1) in conversation length:**
+
+- **Strategic:** the grant is a standing fact about the repo, so it lives in `CLAUDE.md`
+  working principle 8, paid once per session. This makes the hook non-load-bearing for the
+  permission's *existence* — which is precisely what makes silence safe. Silence now costs
+  salience, never the grant.
+- **Tactical:** the hook keeps the positional mechanism but fires only where it changes an
+  outcome, at 74 tok instead of 224, capped at `MAX_EMITS=3` per session.
+
+The gate targets **the ambiguous middle**. The injected text self-exempts when the user
+"requested it", so a counter-weight is worth nothing on a turn that names an agent, and
+worth nothing on a small direct turn where inline work is correct anyway. Breadth or
+multiple parts with no agent named is the only case where the owner's grant flips the
+decision — so that is the only case it fires.
+
+| | before | after |
+|---|---|---|
+| 10-turn session | 2,240 tok | ≤ 262 tok |
+| 40-turn session | 8,960 tok | ≤ 262 tok |
+| growth | O(turns) | **O(1)** |
+
+(≈40 tok of `CLAUDE.md` principle 8, paid once, plus at most 3 × 74.) Verified: gate
+12/12 on hand-built cases, `MAX_EMITS` caps at 3, `AGENT_AUTHORIZATION=0` no-ops,
+`=always` restores the original ungated 224-tok body for A/B-ing whether the gate ever
+costs a real delegation, and malformed/empty stdin exits 0 silently.
 
 ## Finding 5 — `grill-me` is a dead skill advertised as live `[structural]`
 
@@ -175,18 +209,30 @@ run evals *in its own context* is reinforcement working as designed. Repetition 
 when it lands inside the always-loaded set — which is why Findings 1–4 are all in that set
 and this paragraph is not a finding.
 
-## Ranked recommendations
+## Status
 
-| # | Action | File | Cost | Risk |
-|---|---|---|---|---|
-| 1 | Delete the false "Preloaded always" sentence | `skill-router/SKILL.md:6` | 1 line | none |
-| 2 | Replace `CLAUDE.md`'s table with its own pointer (or regenerate + add equality eval) | `CLAUDE.md:202-212` | small | none |
-| 3 | Inject log headline + pointer, not the full row | `session-audit.sh:7` | small | none |
-| 4 | Move standing-authorization into `CLAUDE.md`; drop or shrink the per-turn hook | `agent-authorization.py` | small | low — changes delegation prompting |
-| 5 | Drop the `grill-me` alias or the file | `skill-router/SKILL.md:10` | 1 line | none |
+| # | Action | Status |
+|---|---|---|
+| 1 | Remove the false "already in context" exemption; add both skills as real rows | **fixed** `da4b797` |
+| 2 | Delete `CLAUDE.md`'s divergent table copy, keep pointer + composition facts | **fixed** `da4b797` |
+| 3 | Inject log headline + pointer, not the full 661-tok row | **open** — owner call |
+| 4 | Two-layer redesign; O(turns) → O(1) | **fixed** `da4b797` |
+| 5 | Delete `grill-me` and its router row | **fixed** `da4b797` |
 
-Items 1, 2 and 5 are one-line edits to files that are actively misleading future sessions,
-including mine. Nothing here has been applied — findings only.
+Finding 3 is the one left open: it changes what every future session is handed at startup,
+and unlike 1/2/5 it is a judgment call about how much history is worth 661 tokens rather
+than a false statement to delete.
+
+**Now eval-pinned.** `skill-index-integrity` in `.claude/evals/run-evals.sh` enforces
+Findings 1 and 5 permanently, in both directions — a skill missing from the router table is
+invisible tomorrow; a row pointing at nothing sends a session somewhere empty; and any
+future "already in context" exemption is rejected. Break-tested red on all four failure
+modes, green when clean. Suite: 29 passed, 0 failed.
+
+The check is scoped to the last cell of table rows, because the router file now *explains*
+the `grill-me` incident by name and that prose must stay legal — C14, which this change
+proved the hard way: the first version of the eval flagged my own explanatory sentence in
+`skill-router` and went red on a clean tree.
 
 Recurring shape across all five: **every one is an index or injection that describes the
 system inaccurately, not a file that is too big.** The scaffolding's size is fine. Its
