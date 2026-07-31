@@ -566,7 +566,13 @@ ROOTS = ["", "telegram-companion-bot", "telegram-companion-bot/deploy",
          ".claude/tools", ".claude/hooks", ".claude/evals", ".github/workflows"]
 EXTS = "md|sh|py|json|txt|yml|yaml|html|service|example"
 
-text = Path("CLAUDE.md").read_text(encoding="utf-8")
+# Strip fenced blocks BEFORE pairing inline backticks. A ``` fence is three backticks,
+# so a naive `([^`]+)` scan pairs one fence delimiter against the next and desynchronizes
+# for the whole rest of the file — which silently blinded this check to everything below
+# the Deployment section's code fence. Caught 2026-07-31 by break-test mode 5 failing to
+# go red, not by review. Fenced content is skipped deliberately: it holds shell commands
+# with placeholders (`<instance>`) and VPS absolute paths, neither of which is a repo path.
+text = re.sub(r"^```.*?^```", "", Path("CLAUDE.md").read_text(encoding="utf-8"), flags=re.S | re.M)
 missing = []
 for tok in sorted(set(re.findall(r"`([^`]+)`", text))):
     if tok.startswith(("/", "~", "http")) or tok in EXEMPT:

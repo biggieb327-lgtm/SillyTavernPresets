@@ -383,6 +383,13 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
+  over a file containing a ``` fence. Three-backtick delimiters pair against each other,
+  so the tokenizer desynchronized and the check was blind to everything below the fence —
+  it reported PASS on a clean tree and on an injected bad reference alike. Found only
+  because break-test mode 5 refused to go red. → **Strip fenced blocks before pairing
+  inline backticks, and treat a break-test that won't go red as a bug in the check, never
+  as proof the tree is clean.**
 - 2026-07-31 — Used `Edit` with `replace_all` on the fragment `principle 8` across the
   scaffolding audit, and it landed mid-sentence in two different grammatical positions
   ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
