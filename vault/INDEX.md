@@ -1,9 +1,10 @@
 # Vault index
 
-> **This repository is PUBLIC** (deploys pull raw URLs from main). Anything placed
-> in this vault is world-readable the moment it's pushed. No personal data, no
-> credentials, no private notes — the secret-scan eval catches token shapes, not
-> sensitive prose.
+> **This repository was PUBLIC until 2026-07-28** and this vault was built while it was.
+> Assume everything committed before that date is already exposed. It is private now
+> (deploys read the VPS checkout, not raw URLs), but keep the original rule: no personal
+> data, no credentials, no private notes — the secret-scan eval catches token shapes, not
+> sensitive prose, and a repo can be made public again in one click.
 
 Built 2026-07-11 from git-tracked repo files only, pinned at commit `d76dcdf`.
 Routing rule: new material lands in `raw/` first; promotion into `entities/` or

@@ -29,14 +29,15 @@ All under `telegram-companion-bot/` unless noted:
 ## Operating rule
 
 General method (scoping, evidence, verification, calibrated reporting):
-`.claude/OPERATING_MANUAL.md` — project rules in this file override it.
+`.claude/OPERATING_MANUAL.md` — **read it before non-trivial work**; it owns that layer,
+which is why this file no longer restates it. Project rules here override it.
 
 For complex work (multi-step, behavior-changing, or fleet-touching), read
 `.claude/operating/fable-to-opus.md` before acting — it carries owner-settled
 decisions and session-earned traps. For simple work, do not load it.
 
 Detailed procedure lives in skills, not here. `.claude/skills/skill-router/SKILL.md`
-is the index — consult it and load on demand (table below for the common cases).
+is the index — consult it and load on demand.
 
 The machinery that enforces this is real, not advisory:
 
@@ -50,7 +51,8 @@ The machinery that enforces this is real, not advisory:
   turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
   evidence.
 - **CI** (`.github/workflows/evals.yml`) — same evals + pytest on `main`/`claude/**`.
-  Deploys curl from `main`, so **a red run on main is a deploy blocker.**
+  `vps-sync.sh` hard-resets the VPS checkout to `origin/main` before copying, so
+  **a red run on main is a deploy blocker.**
 - Routines are recorded in `.claude/operating/routines.md` — keep it and the live
   Routine in sync.
 
@@ -62,12 +64,10 @@ Every completion must include the verification command actually run.
 
 **`.claude/skills/skill-router/SKILL.md` is the routing table — read it, don't guess.**
 
-This file used to carry an 8-row copy of it. That copy drifted: it omitted seven skills,
-including `verify-external-audit`, and a session routing from it alone was steered past the
-skill its task actually matched (audited 2026-07-30, F2 in
-`.claude/SCAFFOLDING-AUDIT-2026-07-30.md`). Deleted rather than re-synced, because a
-one-line description of every skill already reaches you for free and cannot go stale, and a
-second hand-maintained index can only ever diverge from the first.
+**Do not re-add a "quick reference" copy of that table here.** The last one drifted,
+omitted seven skills, and misrouted a session (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`);
+no check catches a new one. A one-line description of every skill already reaches you for
+free and cannot go stale.
 
 Two composition facts the per-skill descriptions can't tell you:
 
@@ -112,8 +112,8 @@ The authoritative instance list is the set of `bot@<instance>` systemd units.
 **Phone-era tooling is historical.** `update-all.sh`, `sync-cards.sh`,
 `watchdog.sh`, `run-bot.sh` and the `.supervise.sh` supervisor were Termux-only and
 now manage nothing; VPS deploys go through `deploy/vps-sync.sh` (see Deployment
-below). The phone retains `~/<name>-bot.migrated` rollback dirs until the 14-day
-soak passes.
+below). The phone retains `~/<name>-bot.migrated` rollback dirs until the 14-day soak
+ends **2026-08-09**; after that date this sentence is stale — confirm before relying on it.
 
 ## Stack
 
@@ -146,51 +146,53 @@ running the on-disk copy is correct even when the checkout is stale. **Not** cur
 the repo is private and raw URLs 404.
 
 Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
-The phone-era paths (`/update`, `update-all.sh`, `sync-cards.sh`) are historical.
+
+**`/update` is dead as a deploy path.** The handler still exists, but it downloads over
+raw URLs, so on the private repo it fails with `repo_not_readable` and replies telling the
+owner to run `vps-sync.sh` instead (see `update_cmd` in bot.py). `update-all.sh` and
+`sync-cards.sh` are historical for the same reason.
 
 **Bump `BOT_VERSION` on every release** — it's how `/audit` proves a deploy landed.
 The delivery gate enforces this.
 
-Ops essentials: `/update` `/restart` `/audit` `/errors [N]` `/backup`.
+Ops essentials: `/restart` `/audit` `/errors [N]` `/backup`.
 Full command reference: `OPS_MANUAL.md`.
 
 ## Working principles
 
-1. **Ask, don't assume.** When unclear, ask first. Running unattended: pick the most
-   reasonable interpretation, proceed, record the assumption.
-2. **Simplest solution first.** No flexibility that isn't needed yet.
-3. **Don't touch unrelated code** — but surface smells for separate follow-up.
-4. **Flag uncertainty explicitly**; small low-risk experiments over confident guessing.
-5. **Suggest better approaches** — durable wins over tactical patches are welcome.
-6. **Document every diagnosed failure.** Once a live-ops or code failure is root-caused
+Scoping, evidence, uncertainty, and stopping are `.claude/OPERATING_MANUAL.md`'s job — it states
+each with a threshold and a test, so they are not restated here. What is project-specific:
+
+1. **Unattended runs never block on a question.** Routines and loops fire with nobody
+   watching: pick the most reasonable reading, proceed, and record the assumption in the
+   output. Ask first only when someone is there to answer.
+2. **Out-of-scope smells get surfaced, not fixed** — name them as follow-ups in the
+   report, keep them out of the diff.
+3. **Suggest better approaches** — durable wins over tactical patches are welcome, even
+   when the better answer is bigger than what was asked.
+4. **Document every diagnosed failure.** Once a live-ops or code failure is root-caused
    and resolved, add an operational-log row (`.claude/memory/operational-log.md`) before
    calling the task done — even when the fix is a doc/guardrail update rather than a
    bot.py change, and even when nothing shipped to CI. The log is the system's memory;
    an undocumented incident is one a future session re-diagnoses from scratch.
-7. **Log your own mistakes to `.claude/memory/constraints.md`, immediately.** That file
-   records mistakes made *doing the work* — a command run on the wrong host, a fix
-   declared done that was one instance of a class, a theory asserted as fact — as
-   opposed to the operational log, which records the *system* failing. The test: did a
-   bot misbehave, or did we? Add the entry when the mistake is recognised, not at the
-   end of the session, and increment `seen` if it is a repeat. **At `seen: 2` the
-   constraint graduates**: prose has already failed twice, so write a hook, an eval, or
-   a `sweep.py` scanner and link it. Read this file before starting fleet-touching or
-   multi-step work — its whole value is being read before the same mistake is made
-   again. Mistakes made and fixed **mid-task** — a wrong path, a broken test harness, a
-   grep for the wrong variable, an assumption corrected on the next tool call — go in
-   that file's **Minor** running log, not the numbered list. Log them *because* they
-   were self-corrected, not despite it: they cost real minutes, nobody else ever sees
-   them, and repeating shapes surface there first. When two minor entries share a
-   cause, promote them into a numbered constraint.
-8. **Subagents are pre-authorized (owner standing grant).** Delegation for work that
+5. **Log your own mistakes to `.claude/memory/constraints.md` the moment you notice
+   them.** That file records mistakes made *doing the work* — wrong host, a "done" that
+   was one instance of a class, a theory asserted as fact — as opposed to the operational
+   log's record of the *system* failing. The test: did a bot misbehave, or did we?
+   **Read it before fleet-touching or multi-step work**; its whole value is being read
+   before the same mistake repeats. Slips you caught and fixed **mid-task** still get
+   logged, in that file's **Minor** running log — log them *because* they were
+   self-corrected: they cost real minutes and nobody else ever sees them. That file's
+   own header owns the rest (`seen` counts, the `seen: 2` graduation rule, promotion
+   out of Minor) — don't restate it here.
+6. **Subagents are pre-authorized (owner standing grant).** Delegation for work that
    genuinely warrants it — broad multi-file search, an independent review pass, parallel
    investigation, or any contract in `.claude/agents/` — does **not** need a fresh
    per-turn request. In this repo, breadth or multiple parts *does* count as the user
    having asked. Not mandatory: prefer inline work when the task is small, the context is
    already loaded, or the budget-governor is live. This is the **durable** statement of
-   the grant, paid once per session; `.claude/hooks/agent-authorization.py` only
-   re-asserts it on turns where a server-side instruction would otherwise override it
-   (that file's TOKEN BUDGET note explains why both layers exist).
+   the grant, paid once per session; `.claude/hooks/agent-authorization.py` re-asserts it
+   only on the turns where a server-side instruction would otherwise override it.
 
 ## Git workflow
 
@@ -220,11 +222,19 @@ above. `ls` it for the rest. The non-obvious bits:
 
 - `requirements.txt` is the single source of truth for pip installs.
 - `preset.txt` is the shared voiceprint — editing it changes **all seven** bots.
-- `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are curl-installed once and are
-  **not** managed by `update-all.sh`; changing them in-repo deploys nothing.
+- `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are phone-era leftovers: they were
+  curl-installed onto the phone once, and no VPS deploy path touches them. Editing them
+  in-repo ships nothing.
 - `character-review/` (root) is the card inbox for the monthly character pass — the
   `character-pass-monthly` Routine reads it and writes proposals, never edits (see its
   README). On-demand reviews and voice-defect triage: the `character-reviewer` agent.
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
+
+Nothing else at the repo root deploys anywhere: the standalone SillyTavern presets and
+cards (`TheAtelier*`, `UnifiedWritersRoom*`, `Chimera*`, `WritersBlock*`,
+`megumin-mobile/`), `vault/` (a knowledge snapshot built 2026-07-11 and pinned to commit
+`d76dcdf` — **an archive, not a source of truth**; it describes the phone-era system and
+is excluded from the secret scan), and `weekly-budget.html` + `index.html` (an unrelated
+personal budget page).

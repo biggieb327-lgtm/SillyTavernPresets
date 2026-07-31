@@ -162,7 +162,7 @@ was wrong because it treated a positional requirement as redundancy.
 **Fix as shipped — two layers, cost O(1) in conversation length:**
 
 - **Strategic:** the grant is a standing fact about the repo, so it lives in `CLAUDE.md`
-  working principle 8, paid once per session. This makes the hook non-load-bearing for the
+  as the subagent-authorization working principle, paid once per session. This makes the hook non-load-bearing for the
   permission's *existence* — which is precisely what makes silence safe. Silence now costs
   salience, never the grant.
 - **Tactical:** the hook keeps the positional mechanism but fires only where it changes an
@@ -180,7 +180,7 @@ decision — so that is the only case it fires.
 | 40-turn session | 8,960 tok | ≤ 262 tok |
 | growth | O(turns) | **O(1)** |
 
-(≈40 tok of `CLAUDE.md` principle 8, paid once, plus at most 3 × 74.) Verified: gate
+(≈40 tok of the `CLAUDE.md` subagent-authorization principle, paid once, plus at most 3 × 74.) Verified: gate
 12/12 on hand-built cases, `MAX_EMITS` caps at 3, `AGENT_AUTHORIZATION=0` no-ops,
 `=always` restores the original ungated 224-tok body for A/B-ing whether the gate ever
 costs a real delegation, and malformed/empty stdin exits 0 silently.

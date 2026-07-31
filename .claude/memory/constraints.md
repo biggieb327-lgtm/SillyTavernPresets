@@ -383,6 +383,19 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-07-31 — Used `Edit` with `replace_all` on the fragment `principle 8` across the
+  scaffolding audit, and it landed mid-sentence in two different grammatical positions
+  ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
+  had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
+  match sits inside a sentence, edit each site individually.**
+- 2026-07-31 — Grepped `routines.md` for Routine headings with `| head -20`, saw no
+  `character-pass-monthly`, and started writing it up as doc drift; the heading was at
+  line 242, past the cut. → **A `head`-truncated grep proves presence, never absence.
+  Re-run unbounded before reporting anything missing.**
+- 2026-07-31 — Ran a second Bash call assuming a fresh working directory after the first
+  had `cd`'d into `telegram-companion-bot/`; four path checks failed as "No such file".
+  → **The Bash working directory persists between calls: use absolute paths, or `cd` in
+  every call that depends on one.**
 - 2026-07-29 — Asked why the ops brief can't reach GitHub, I investigated from this
   container's working tree without fetching first, concluded "routines.md is out of sync
   with the live Routines, that's why it halts", and rewrote the file. All of it was
