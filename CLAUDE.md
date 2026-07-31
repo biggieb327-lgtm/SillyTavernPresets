@@ -118,9 +118,11 @@ ends **2026-08-09**; after that date this sentence is stale — confirm before r
 ## Stack
 
 - Python **3.12** on the VPS (Ubuntu 24.04) — the `=== STARTUP AUDIT ===` line reports
-  the live version; trust it over this file. The phone's cp314 wheel scarcity is
-  historical: wheels are now readily available, so a new binary dependency is no
-  longer likely to compile from source.
+  the live version; trust it over this file. CI pins the same version in
+  `.github/workflows/evals.yml` and the `runtime-version-pinned` eval fails if the two
+  diverge — change both together. The phone's cp314 wheel scarcity is historical: wheels
+  are now readily available, so a new binary dependency is no longer likely to compile
+  from source.
 - `python-telegram-bot >=21.0,<22.0` (async, job-queue). PTB v21's deprecated
   `asyncio.get_event_loop()` call is worked around in `main()` — don't remove it.
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`.

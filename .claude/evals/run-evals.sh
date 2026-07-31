@@ -491,6 +491,109 @@ else
   bad "skill-index-integrity" "$skill_index"
 fi
 
+# --- runtime-version-pinned ------------------------------------------------------------
+# Second occurrence of one class: CI testing a Python the fleet doesn't run. It was pinned
+# to 3.13 while the phone ran 3.14 (fixed 2026-07-26), then left at 3.14 after the VPS
+# cutover made the real runtime 3.12 — found 2026-07-31 by an audit, not by a check. The
+# comment on the pin warned about exactly this failure and still went stale, which is the
+# argument for a check instead of a comment.
+#
+# Both sides are single declared values, so this is decidable without reading prose (C14):
+# CLAUDE.md's Stack bullet vs. the workflow's python-version. A MISSING anchor fails too —
+# a check that silently passes when it can't find what it measures is not a check (C13).
+runtime_pin=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+problems = []
+claude = Path("CLAUDE.md")
+wf = Path(".github/workflows/evals.yml")
+
+declared = ci = None
+if not claude.exists():
+    problems.append("CLAUDE.md is missing")
+else:
+    m = re.search(r"^- Python \*\*(\d+\.\d+)\*\* on the VPS", claude.read_text(encoding="utf-8"), re.M)
+    if not m:
+        problems.append(
+            "CLAUDE.md's Stack section no longer declares the runtime in the form "
+            "'- Python **X.Y** on the VPS' — this check can't compare what it can't find")
+    else:
+        declared = m.group(1)
+
+if not wf.exists():
+    problems.append(".github/workflows/evals.yml is missing")
+else:
+    pins = re.findall(r'^\s*python-version:\s*"?(\d+\.\d+)"?\s*$', wf.read_text(encoding="utf-8"), re.M)
+    if len(pins) != 1:
+        problems.append(f"expected exactly one python-version pin in evals.yml, found {len(pins)}")
+    else:
+        ci = pins[0]
+
+if declared and ci and declared != ci:
+    problems.append(
+        f"CLAUDE.md says the fleet runs Python {declared}, CI tests {ci} — "
+        f"CI is exercising a runtime nothing runs. Change both together")
+
+print(" | ".join(problems))
+PYEOF
+)
+if [ -z "$runtime_pin" ]; then
+  ok "runtime-version-pinned: CI's Python matches the runtime CLAUDE.md declares"
+else
+  bad "runtime-version-pinned" "$runtime_pin"
+fi
+
+# --- claude-md-refs-resolve ------------------------------------------------------------
+# CLAUDE.md is loaded into every session, so a path it names that no longer exists sends
+# every future session somewhere empty. This is the mechanically-checkable half of the
+# 2026-07-31 audit's class ("the always-loaded doc describes a system that moved"): the
+# prose half isn't decidable, but "does this file exist" is.
+#
+# Two paths are deliberately absent and exempt — CLAUDE.md names them precisely to say
+# they are gone or must never be committed. That exemption list is this check's C14 escape
+# hatch: a scanner cannot tell "references a dead file" from "documents that it died", so
+# the distinction is made by hand, here, where it is visible.
+md_refs=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+EXEMPT = {
+    ".supervise.sh",        # phone-era supervisor; CLAUDE.md names it to say it manages nothing
+    ".claude/.runtime/",    # gitignored by design — "never commit it, never add it back"
+}
+ROOTS = ["", "telegram-companion-bot", "telegram-companion-bot/deploy",
+         ".claude/tools", ".claude/hooks", ".claude/evals", ".github/workflows"]
+EXTS = "md|sh|py|json|txt|yml|yaml|html|service|example"
+
+text = Path("CLAUDE.md").read_text(encoding="utf-8")
+missing = []
+for tok in sorted(set(re.findall(r"`([^`]+)`", text))):
+    if tok.startswith(("/", "~", "http")) or tok in EXEMPT:
+        continue  # absolute/remote paths point off this repo; exemptions are documented above
+    if tok.endswith("/"):
+        cand = tok.rstrip("/")
+        if not re.fullmatch(r"[.A-Za-z0-9_][A-Za-z0-9_./@-]*", cand):
+            continue
+    elif re.fullmatch(rf"[.A-Za-z0-9_@][A-Za-z0-9_./@-]*\.({EXTS})", tok):
+        cand = tok
+    else:
+        continue  # not a path-shaped token (globs, commands, env vars, version strings)
+    if not any((Path(r) / cand).exists() for r in ROOTS):
+        missing.append(tok)
+
+if missing:
+    print("CLAUDE.md names paths that do not exist: " + ", ".join(missing) +
+          " — rename, delete the reference, or add it to EXEMPT if the doc's point is "
+          "that the file is gone")
+PYEOF
+)
+if [ -z "$md_refs" ]; then
+  ok "claude-md-refs-resolve: every repo path CLAUDE.md names still exists"
+else
+  bad "claude-md-refs-resolve" "$md_refs"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

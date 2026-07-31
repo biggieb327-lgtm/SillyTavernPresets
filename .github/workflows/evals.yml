@@ -1,7 +1,8 @@
 # Push-time enforcement of .claude/evals/run-evals.sh — the same checks Claude Code
 # sessions run before claiming done, but guaranteed to run on EVERY push regardless of
-# who made it (web UI edit, phone push, session that died mid-task). The fleet deploys
-# by curling raw files from main, so main must never hold a tree that fails these.
+# who made it (web UI edit, phone push, session that died mid-task). deploy/vps-sync.sh
+# hard-resets the VPS checkout to origin/main before copying, so main must never hold a
+# tree that fails these.
 name: evals
 
 on:
@@ -17,16 +18,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          # Match the Termux runtime (3.14.6 observed on emily 2026-07-25). Was
-          # pinned to 3.13 until 2026-07-26, i.e. CI was testing a runtime the
-          # fleet no longer runs.
-          python-version: "3.14"
-      # Pillow is pinned <11 and ships no cp314 wheel, so pip builds it from
-      # source and needs the image codec headers. This is the CI equivalent of
-      # Termux's `pkg install libjpeg-turbo zlib freetype`. If Pillow is ever
-      # unpinned past 11, the wheel exists and this step can go.
-      - name: Install Pillow build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libjpeg-dev zlib1g-dev libfreetype-dev
+          # Must equal the version in CLAUDE.md's Stack section — the runtime the fleet
+          # actually runs. 3.12 is Ubuntu 24.04's system python, observed live on the VPS
+          # as /usr/lib/python3.12/py_compile.py in an owner-reported traceback
+          # (CHANGELOG v2026-07-25.11).
+          #
+          # This pin has now lagged the fleet twice: 3.13 while the phone ran 3.14, then
+          # 3.14 after the VPS cutover made it 3.12. The `runtime-version-pinned` eval
+          # fails if this line and CLAUDE.md ever disagree again — change both together.
+          python-version: "3.12"
+      # No build-dependency step is needed: every package in requirements.txt resolves to
+      # a cp312 manylinux wheel, so pip compiles nothing. Verified 2026-07-31 with
+      #   pip download -r telegram-companion-bot/requirements.txt pytest \
+      #     --python-version 3.12 --only-binary=:all: --platform manylinux2014_x86_64
+      # which resolved all 22 packages, Pillow included, with no source builds. If a
+      # future pin has no wheel, pip falls back to building and may need headers again —
+      # the pre-3.12 workflow installed libjpeg/zlib/freetype purely because Pillow<11
+      # ships no cp314 wheel.
       - name: Install dependencies
         run: pip install -r telegram-companion-bot/requirements.txt pytest
       - name: Run eval suite
