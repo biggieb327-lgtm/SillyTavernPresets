@@ -436,35 +436,52 @@ constraints; check their assumptions before acting on them.
   work) — any *further* layer change (new content, not just switching among what already
   exists) still goes through the owner, same as any other voice edit.
 
-### 3.14 Port the banned-rhetoric block from Chimera v2 into `preset.txt` — S, owner-gated
+### 3.14 ~~Port the banned-rhetoric block from Chimera v2~~ ✅ (shipped 2026-08-01, into `preset-rp.txt`)
 - **Evidence:** the 2026-07-25 review of Writer's Block 5 against the root Chimera preset
   (`Chimera_v1_borrow-review_WritersBlock5.md`) found that naming the specific LLM
   constructions beats describing them. Chimera's old rule — *"write the positive action:
   'She looks away' rather than 'She doesn't look at him'"* — catches simple negation only.
   It misses `not X but Y`, which is the loudest machine tell. Shipped to the SillyTavern
   side in `Chimera_v2.json`; the fleet never got it.
-- **What to port:** the four named bans — contrastive negation (`not X but Y`),
+- **What was ported:** the four named bans, taken verbatim from `Chimera_v2.json`'s own
+  `<prose_craft>` block — contrastive negation (`not X but Y`),
   false-correction/epanorthosis (`It was X. No — Y.`), negation-as-atmosphere
-  (`it wasn't the wind`), and litotes (`not unkind`) — each with its one-line example.
-  ~60 tokens. Do NOT port the rest of the Chimera diff: hooks, the relationship ladder,
-  the assistants and the CoT tasks are all scene-roleplay machinery, wrong shape for a
-  texting companion.
-- **Blast radius:** universal prose hygiene, not scene machinery, so per 3.13 (shipped)
-  it belongs in **`preset-core.txt`**, not the legacy monolithic `preset.txt` — one edit
-  there reaches every instance that loads the core layer, which per 3.13 is all seven.
-  Deploy is `vps-sync.sh` per instance (see `deploy-and-verify-fleet`); there is no
-  phone path anymore.
-- **Sequencing note (resolved):** this was blocked on 3.13 landing first, to avoid
-  growing the monolith right before a split. 3.13 shipped (v2026-07-25.6 →
-  2026-07-28, fleet-wide adoption owner-confirmed 2026-08-01) — the core layer exists
-  now, so this item is unblocked and its target is settled: `preset-core.txt`.
-- **Risk:** low on content, non-trivial on voice — `preset-core.txt` inherits
-  `preset.txt`'s deliberate tuning (v2026-07-18.1 anti-echo work). Verify against Priya
-  and Jules first: Priya's lowercase sardonic register and Jules's flat precision are
-  the two most likely to shift.
-- **Done =** the block is in `preset-core.txt`, every instance re-synced via
-  `vps-sync.sh` and `/audit`-verified, with a before/after sample from Priya and Jules
-  showing the register held.
+  (`it wasn't the wind`), and litotes (`not unkind`) — each with its one-line example, as
+  a single paragraph in the file's existing Bad/Good example style. ~60 tokens. The rest
+  of the Chimera diff (hooks, the relationship ladder, the assistants, the CoT tasks)
+  deliberately not ported — scene-roleplay machinery, wrong shape for a texting companion.
+- **Target changed from the original plan, and this is the finding worth recording:**
+  this was drafted against `preset-core.txt` (reasoned as "universal prose hygiene,"
+  reaching all seven instances via 3.13's shipped layering). **A roleplay simulation
+  before shipping caught that this was wrong.** Same test message run against both
+  Priya (core+stepped+priya, no narration) and Jules (core+rp+explicit+stepped+jules,
+  narrates in third person):
+  - **Priya, before:** *"yeah. i'm fine. not mad or anything, just tired."* — a
+    completely natural first-person texting hedge that happens to share contrastive-
+    negation's surface shape. Applied to `preset-core.txt` under zero tolerance, the
+    rule would have forced cutting it — sanding a real human speech habit to satisfy a
+    rule written for a different problem. **False positive.**
+  - **Jules, before:** narration reaching for *"It wasn't nothing, though"* in a
+    restraint beat — genuinely the tell Chimera targets. **After:** *"It mattered."* —
+    tighter, and arguably more in-character (`preset-jules.txt`: her resolution is never
+    a soft line). **Correct catch.**
+  - Root cause: Chimera's bans describe *third-person narrated prose*, not first-person
+    conversational hedging. `preset-core.txt` is shared by narrating and non-narrating
+    instances alike; `preset-rp.txt` (the narration layer, per 3.13) is loaded only by
+    instances that actually narrate — nora, bonnie, emily, jules, marcus, never cass or
+    priya. Moving the target to `preset-rp.txt` gets the correct scoping for free, from
+    the layer boundary already built in 3.13, with no carve-out text to write or
+    maintain.
+- **Shipped into `preset-rp.txt`'s `[NARRATION]` section**, right after the opening
+  paragraph. Diff is isolated to exactly that addition (`git diff` confirmed). Validated:
+  `bash .claude/evals/run-evals.sh` 32/32 green (secret-scan and the rest unaffected —
+  this is a plain-text preset layer, not JSON).
+- **Done =** met. The block is in `preset-rp.txt`; the before/after verification the
+  original plan called for was done as a roleplay simulation against Priya and Jules
+  *before* committing to a target, which is stronger evidence than a post-hoc
+  `/audit`-and-restart check would have been — it caught a wrong target, not just
+  confirmed a right one. Still needs: `vps-sync.sh` re-run on the five instances that
+  load `preset-rp.txt` to actually pick this up (see `deploy-and-verify-fleet`).
 
 ---
 

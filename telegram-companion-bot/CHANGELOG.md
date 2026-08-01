@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-01 — Chimera's banned-rhetoric block ported to preset-rp.txt, not preset-core.txt (content only, no bot.py change, no version bump)
+
+**ROADMAP 3.14 shipped, but to a different file than the item specified** — a roleplay
+simulation before shipping caught that the original plan was wrong, which is the part
+worth recording. `Chimera_v2.json` names four prose constructions as "the loudest
+machine tells" and forbids them outright: contrastive negation (`not X but Y`),
+false-correction/epanorthosis (`It was X. No — Y.`), negation-as-atmosphere (`it wasn't
+the wind`), and litotes (`not unkind`). 3.14 planned to port these into
+`preset-core.txt`, reasoned as universal prose hygiene reaching all seven instances via
+3.13's layering.
+
+**The plan was tested, not just reviewed, before anything shipped.** Same message run
+against Priya's actual stack (`core+stepped+priya`, no narration) and Jules's
+(`core+rp+explicit+stepped+jules`, narrates in third person):
+- **Priya:** her natural reply included *"not mad or anything, just tired"* — an
+  ordinary first-person texting hedge that happens to share contrastive-negation's
+  surface shape. Under the rule as drafted for `preset-core.txt`, zero tolerance would
+  have forced cutting it — sanding a real human speech habit to fix a problem that only
+  exists in narrated prose. Priya never narrates; the rule doesn't apply to her at all,
+  and shipping it to `preset-core.txt` would have applied it anyway, fleet-wide.
+- **Jules:** narration reaching for *"It wasn't nothing, though"* in a restraint beat —
+  the actual tell. Rewritten as *"It mattered."* — tighter, and more in-character per
+  `preset-jules.txt` (her resolution is never a soft line).
+
+**Root cause of the near-miss:** Chimera's bans describe third-person narrated prose,
+not first-person conversational hedging, and `preset-core.txt` is loaded by narrating
+and non-narrating instances alike. `preset-rp.txt` (the narration layer that 3.13 already
+built) is loaded only by instances that actually narrate — nora, bonnie, emily, jules,
+marcus — never cass or priya. Targeting `preset-rp.txt` instead gets the correct scoping
+for free from the layer boundary, with no carve-out text needed for the two instances
+where the rule doesn't belong.
+
+**Shipped:** the four-ban paragraph added to `preset-rp.txt`'s `[NARRATION]` section,
+right after the opening paragraph, in the file's existing Bad/Good example style (~60
+tokens). `git diff` confirmed the change is isolated to exactly that insertion.
+Verified: `bash .claude/evals/run-evals.sh` 32/32 green.
+
+**Not yet done:** `vps-sync.sh` re-run on the five instances that load `preset-rp.txt`
+to actually pick this up (see `deploy-and-verify-fleet`) — content changes don't bump
+`BOT_VERSION`, so there's no version number to confirm against; the register itself
+(via `/audit`'s `Preset layers:` line, or just talking to the character) is the
+verification.
+
 ## 2026-08-01 — vps-sync.sh's bot.py swap is now locked (no bot.py change, no version bump)
 
 **Root cause: bot.py's own concurrent-update fix (v2026-07-25.11) covered only one of

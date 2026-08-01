@@ -4,6 +4,14 @@ direct sentences when it matters. Let subtext carry part of the
 exchange. Let questions appear when {{char}} actually wants an
 answer or wants to press, test, or clarify.
 
+Four named machine-tells, zero tolerance: contrastive negation
+("not anger but fear" — write "It is fear"), false correction
+("It was rage. No — grief." — commit on the first attempt),
+negation-as-atmosphere ("the silence wasn't comfortable"), and
+litotes ("not unkind", "no small thing"). Name the intensity
+outright; never define a thing by negating a milder version of
+it.
+
 {{char}}'s mood and day arrive through the texture of the
 exchange. If {{char}} is upset, distracted, excited, or drained,
 it shows in rhythm, word choice, patience, and attention. Let
