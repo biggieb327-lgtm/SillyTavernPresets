@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.10 — Nora's reference photo was never being sent
+
+**Root cause: `SELFIE_BASE` defaults to `priya_base.png`, nora's `.env` never set it, and
+her photo is `nora_base.jpg` — wrong name and wrong extension.** `_has_base_image()`
+returned False, so every one of her selfies took the text-only branch and no reference
+photo was ever attached to the Gemini call. The file has been sitting in
+`/opt/telegram-bots/nora/` since 27 June.
+
+**Nothing reported it**, which is the part worth fixing. `selfie_ready()` returns True if
+the base image **or** `appearance.txt` exists; she has had an `appearance.txt` since 26
+June, so the check passed and the degradation from image-edit to text-only was completely
+silent. `[observed]` `grep -L SELFIE_BASE /opt/telegram-bots/*/.env` returned exactly one
+instance — hers.
+
+This supersedes v2026-08-01.9's diagnosis as the primary cause. That release measured two
+real problems (the identity anchor sat ~1000 characters from the end of the prompt; 29.9%
+of draws stacked a face-obscuring framing on a face-degrading camera) and both fixes stand
+on their own — but they were tuning an *edit* prompt for a call that was not editing
+anything. The v2026-08-01.9 analysis assumed a reference photo was attached. It was not.
+
+**Fix:**
+- `_resolve_base_image()` falls back to the single unambiguous `*_base.(png|jpg|jpeg|webp)`
+  in the instance directory when `SELFIE_BASE` names a file that is not there. With two or
+  more candidates it returns None rather than guessing — picking between two faces is how
+  you ship the wrong woman.
+- `_base_image()` now takes its mime type from the **resolved** file, not the configured
+  name. A `.jpg` announced as `image/png` is a working photo that still gets rejected.
+- The `=== STARTUP AUDIT ===` line gained `Selfie base:`, reporting the filename in play,
+  `AUTODETECTED (… set it in .env)`, or `TEXT-ONLY` with the candidates it saw. `/audit`
+  now answers "is she actually being sent her own face?" without a shell.
+- Kill switch `SELFIE_BASE_AUTODETECT=0`.
+
+**Reverted from v2026-08-01.9:** `telegram-companion-bot/nora/appearance.txt`, which that
+release added. Nora already had a real one on the instance, 381 bytes, dated 26 June — the
+repo copy was written from her card by this session and had never been compared against it.
+`vps-sync.sh` only copies seed files that are *missing*, so nothing was overwritten, but
+leaving an invented file in the seed directory is the exact divergence trap that script
+warns about (the jules atlas.txt case, 2026-07-29). The live instance is authoritative;
+the fabricated seed and its three tests are removed.
+
+**Verification:** 776/776 pytest, 32/32 evals, 10 new tests. Three assertions break-tested
+RED. The first attempt broke all three at once and the ambiguity test still passed — the
+autodetect-off injection masked the guess-the-first-candidate injection, so it was passing
+for the wrong reason. Re-run in isolation, it failed correctly. Break-tests need one
+injection at a time.
+
+**Still open:** the `SELFIE_BASE` values across the fleet were read with `grep -h`, which
+strips filenames, so two instances showing `SELFIE_BASE=nora_base.png` cannot be attributed
+to an instance. If a non-nora instance points at `nora_base.png` and has no such file, it
+is text-only too — the new startup audit line will say so on next restart.
+
 ## v2026-08-01.9 — Sometimes the selfie wasn't her
 
 **Root cause: the identity instruction is the FIRST thing in the image prompt, and two

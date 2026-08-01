@@ -5465,25 +5465,77 @@ class TestSelfieIdentityGuard:
             assert trait not in src.lower(), trait
 
 
-class TestNoraAppearanceSeed:
-    """v2026-08-01.9: nora had no appearance.txt, so SELFIE_APPEARANCE fell back to
-    'the same person as in the reference photo' -- a pointer, not a description. Any draw
-    that weakened the photo's influence left no verbal identity signal at all."""
+class TestBaseImageResolution:
+    """v2026-08-01.10: SELFIE_BASE defaults to a filename inherited from the home instance.
+    Nora's .env never set it, so her bot looked for priya_base.png, did not find it, and
+    generated every selfie from text alone -- with nora_base.jpg sitting in her own
+    directory. selfie_ready() never complained because it also accepts an appearance.txt."""
 
-    def _path(self):
+    def setup_method(self):
+        import tempfile
         from pathlib import Path
-        return Path(__file__).resolve().parent.parent / "nora" / "appearance.txt"
+        self._dir = Path(tempfile.mkdtemp(prefix="base_img_"))
+        self._saved = (bot.BASE_DIR, bot.SELFIE_BASE, bot.SELFIE_BASE_AUTODETECT)
+        bot.BASE_DIR = self._dir
+        bot.SELFIE_BASE = "priya_base.png"
+        bot.SELFIE_BASE_AUTODETECT = True
 
-    def test_seed_exists(self):
-        assert self._path().is_file()
+    def teardown_method(self):
+        import shutil
+        bot.BASE_DIR, bot.SELFIE_BASE, bot.SELFIE_BASE_AUTODETECT = self._saved
+        shutil.rmtree(self._dir, ignore_errors=True)
 
-    def test_reads_as_a_noun_phrase(self):
-        """It is interpolated as 'She's Nora, {…}' -- a sentence here would read wrong."""
-        text = self._path().read_text(encoding="utf-8").strip()
-        assert text and text[0].islower()
-        assert text.endswith(".")
+    def _touch(self, name, data=b"\x89PNG fake"):
+        (self._dir / name).write_bytes(data)
 
-    def test_states_an_explicit_adult_age(self):
-        """Gemini's image filter gets much stricter with no stated age (see SELFIE_APPEARANCE)."""
-        import re
-        assert re.search(r"\b\d{2}-year-old\b", self._path().read_text(encoding="utf-8"))
+    def test_exact_configured_name_wins(self):
+        self._touch("priya_base.png")
+        self._touch("nora_base.jpg")
+        assert bot._resolve_base_image().name == "priya_base.png"
+
+    def test_the_nora_case_wrong_name_and_extension(self):
+        """The reported bug: one candidate, different name AND suffix from the default."""
+        self._touch("nora_base.jpg")
+        assert bot._has_base_image()
+        assert bot._resolve_base_image().name == "nora_base.jpg"
+
+    def test_ambiguous_candidates_are_not_guessed(self):
+        """Two faces on disk is a real choice -- picking one is how you ship the wrong woman."""
+        self._touch("nora_base.jpg")
+        self._touch("priya_base.jpg")
+        assert bot._resolve_base_image() is None
+        assert not bot._has_base_image()
+
+    def test_no_candidates_is_text_only(self):
+        assert bot._resolve_base_image() is None
+
+    def test_non_image_files_are_not_candidates(self):
+        self._touch("nora_base.txt", b"not an image")
+        assert bot._resolve_base_image() is None
+
+    def test_kill_switch_requires_an_exact_match(self):
+        bot.SELFIE_BASE_AUTODETECT = False
+        self._touch("nora_base.jpg")
+        assert bot._resolve_base_image() is None
+
+    def test_mime_follows_the_resolved_file_not_the_configured_one(self):
+        """Configured name says .png; the real file is .jpg. Sending the wrong mime to
+        Gemini's inline_data is how a working photo still gets rejected."""
+        self._touch("nora_base.jpg")
+        _, mime = bot._base_image()
+        assert mime == "image/jpeg"
+
+    def test_status_line_names_the_autodetected_file_and_says_to_fix_the_env(self):
+        self._touch("nora_base.jpg")
+        status = bot._base_image_status()
+        assert "nora_base.jpg" in status and "AUTODETECTED" in status and ".env" in status
+
+    def test_status_line_flags_text_only_and_lists_what_it_saw(self):
+        bot.SELFIE_BASE_AUTODETECT = False
+        self._touch("nora_base.jpg")
+        status = bot._base_image_status()
+        assert "TEXT-ONLY" in status and "nora_base.jpg" in status
+
+    def test_status_line_is_quiet_when_correctly_configured(self):
+        self._touch("priya_base.png")
+        assert bot._base_image_status() == "priya_base.png"

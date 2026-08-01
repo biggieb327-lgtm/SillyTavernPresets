@@ -428,6 +428,15 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-01 — Break-tested three assertions by injecting all three faults at once. Two failed
+  correctly; the third test *passed*, and I nearly recorded it as verified. The autodetect-off
+  injection made `_resolve_base_image` return None for every input, so the "ambiguous candidates
+  are not guessed" test passed for the wrong reason — it was asserting None against a function
+  that could only return None. Re-run with that one injection alone, it failed correctly →
+  **one injection at a time.** Simultaneous injections can mask each other, and a break-test that
+  passes under injection is indistinguishable from one that is measuring nothing. Same shape as
+  C13 (a check that cannot fail is not verification), one level up: the *break-test itself* can be
+  the thing that cannot fail.
 - 2026-08-01 — Wrote an unverified inference into the changelog, the operational log *and* a
   report to the owner, in assertive voice with the hedge appended: "any instance falling through
   to the default gets a different woman's face and Nora's jacket… not yet confirmed against the

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.9"
+BOT_VERSION = "2026-08-01.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -612,6 +612,10 @@ SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
 GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
+# When SELFIE_BASE names a file that is not there, fall back to the single unambiguous
+# *_base.* image in the instance dir rather than silently generating from text alone.
+# Unset = active. Set to 0 to require an exact SELFIE_BASE match.
+SELFIE_BASE_AUTODETECT = os.getenv("SELFIE_BASE_AUTODETECT", "1").lower() not in ("0", "false", "no", "off")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = _env_float("SELFIE_GUIDANCE", "3.5")
 SELFIE_STEPS = _env_int("SELFIE_STEPS", "28")
@@ -5401,13 +5405,52 @@ def selfie_ready() -> bool:
     return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
 
 
+_BASE_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _resolve_base_image():
+    """The configured reference photo, or the one unambiguous candidate in the instance dir.
+
+    SELFIE_BASE defaults to a filename inherited from the home instance, so an instance
+    whose .env omits it looks for someone ELSE's photo, finds nothing, and silently drops
+    to text-only generation — no error, because selfie_ready() also accepts an
+    appearance.txt. Nora ran that way for weeks with a perfectly good nora_base.jpg on
+    disk: wrong name and wrong extension (v2026-08-01.10).
+
+    Falls back only when exactly ONE plausible base image exists. Several candidates means
+    a real choice, and guessing which face is hers is precisely the wrong thing to do."""
+    configured = BASE_DIR / SELFIE_BASE
+    if configured.exists():
+        return configured
+    if not SELFIE_BASE_AUTODETECT:
+        return None
+    found = sorted(p for p in BASE_DIR.glob("*_base.*")
+                   if p.suffix.lower() in _BASE_IMAGE_SUFFIXES and p.is_file())
+    return found[0] if len(found) == 1 else None
+
+
+def _base_image_status() -> str:
+    """One line for the startup audit: which photo is in play, or why none is."""
+    configured = BASE_DIR / SELFIE_BASE
+    resolved = _resolve_base_image()
+    if resolved is None:
+        others = [p.name for p in BASE_DIR.glob("*_base.*")
+                  if p.suffix.lower() in _BASE_IMAGE_SUFFIXES]
+        if others:
+            return f"TEXT-ONLY (SELFIE_BASE={SELFIE_BASE} missing; ambiguous: {', '.join(sorted(others))})"
+        return f"TEXT-ONLY (no reference photo; SELFIE_BASE={SELFIE_BASE})"
+    if resolved != configured:
+        return f"{resolved.name} (AUTODETECTED — SELFIE_BASE={SELFIE_BASE} not found; set it in .env)"
+    return resolved.name
+
+
 def _has_base_image() -> bool:
-    return (BASE_DIR / SELFIE_BASE).exists()
+    return _resolve_base_image() is not None
 
 
 def _base_image() -> tuple:
     """Returns (raw bytes, mime type) for the selfie reference photo."""
-    path = BASE_DIR / SELFIE_BASE
+    path = _resolve_base_image()
     mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return path.read_bytes(), mime
 
@@ -12252,11 +12295,11 @@ def _log_startup_diagnostic():
     log.warning(
         "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
-        "Maps: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
+        "Maps: %s | Selfie base: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
         STREAM_TIMEOUT, MAX_TOKENS,
-        (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"),
+        (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"), _base_image_status(),
         disk.free // (1024 * 1024), state_size, err_size,
         len(conversation_history), os.getpid(),
     )
