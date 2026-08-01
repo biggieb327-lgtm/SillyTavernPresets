@@ -8,8 +8,8 @@ description: Safely editing SillyTavern character cards, per-instance seed files
 Two distinct families live in this repo:
 
 - **Bot cards** — `telegram-companion-bot/{nora,bonnie,cass,emily_harper,priya,jules_nakagawa,marcus_calder}.json`
-  (`chara_card_v2` spec) + seed dirs `{nora,bonnie,cass,emily,priya}/` each holding
-  `people.txt, projects.txt, schedule.txt, atlas.txt`. These deploy to live bots.
+  (`chara_card_v2` spec) + seed dirs `{nora,bonnie,cass,emily,priya,jules,marcus}/` each
+  holding `people.txt, projects.txt, schedule.txt, atlas.txt`. These deploy to live bots.
 - **Root presets** — `TheAtelier*.json`, `UnifiedWritersRoom_*.json`,
   `caa16137-nora.json`, etc. at repo root. Live files the owner still uses in
   SillyTavern proper, but they deploy nowhere.
@@ -73,8 +73,10 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 
 3. **Seed files** are plain text the bot feeds into prompts as-is: keep the
    existing format of each file (headings/line style).
-   `preset.txt` is the shared texting-style voiceprint for ALL six bots — an edit
-   there changes every character; flag that blast radius before making it.
+   `preset.txt` is the shared texting-style voiceprint for ALL seven bots — an edit
+   there changes every character; flag that blast radius before making it. Most
+   instances now load layered `preset-*.txt` files instead (see ROADMAP 3.13) — check
+   the instance's `PRESET_FILES` before assuming `preset.txt` itself is what's live.
 
 4. **Validate** every touched JSON file:
    ```bash
@@ -87,9 +89,10 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    changes — the delivery gate won't fire. A dated changelog note
    (`## YYYY-MM-DD — ...`) is optional for notable content shifts.
 
-6. **Deploy (bot cards/seeds only):** user runs `sync-cards.sh` (dry-run first)
-   then `/restart` affected bots — see `deploy-and-verify-fleet` path C. Root
-   presets need no deploy; the owner loads them into SillyTavern manually.
+6. **Deploy (bot cards/seeds only):** user runs `vps-sync.sh <instance>` for each
+   affected instance (`sync-cards.sh` is phone-era and manages nothing now) — see
+   `deploy-and-verify-fleet`. Root presets need no deploy; the owner loads them into
+   SillyTavern manually.
 
 ## Quality bar
 
@@ -120,4 +123,4 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 ## What to report back
 
 Which files changed and why, validation output, canon constraints that shaped the
-edit, and the deploy step (sync-cards + restart) or its inapplicability.
+edit, and the deploy step (`vps-sync.sh` per instance) or its inapplicability.
