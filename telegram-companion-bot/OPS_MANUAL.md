@@ -477,13 +477,18 @@ see the next section).
 
 ## Group chat (experimental)
 
-Two character bots + you in one Telegram group, behind `GROUP_MODE=1` on exactly the
-pilot instances (Priya + Jules). **Read `GROUP_CHAT_DESIGN.md` before touching this** —
-the mechanisms (shared ledger, atomic claims, chain cap) exist because Telegram never
-delivers one bot's messages to another bot, and the design survived four adversarial
-review rounds; don't casually "simplify" it.
+Two character bots + you in one Telegram group, behind `GROUP_MODE=1`. **Two pilot
+pairs are live**: Priya+Jules (the original pilot) and Emily+Marcus (planned since
+Marcus's onboarding 2026-07-28, co-location confirmed 2026-08-01). Every other
+instance stays fully isolated — being on the VPS doesn't put a bot in a group; only
+`GROUP_MODE=1` + `GROUP_PEERS` does. **Read `GROUP_CHAT_DESIGN.md` before touching
+this** — the mechanisms (shared ledger, atomic claims, chain cap) exist because
+Telegram never delivers one bot's messages to another bot, and the design survived
+four adversarial review rounds; don't casually "simplify" it.
 
-Setup, once per pilot bot:
+Setup, once per pilot pair — steps below use Priya+Jules as the worked example;
+substitute the pair's own names and directories for a new one (this is exactly what
+Emily+Marcus's setup did):
 
 1. BotFather → `/setprivacy` → **Disable** (or the bot never sees unaddressed group
    messages). Then remove and re-add the bot to the group — Telegram applies privacy
