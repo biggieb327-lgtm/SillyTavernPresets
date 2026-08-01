@@ -5080,3 +5080,113 @@ class TestDupefactsCmd:
         bot.facts[chat_id] = []
         sent = self._run(chat_id, user_id=99999)
         assert sent == []
+
+
+class TestSelfieWeatherMatching:
+    """v2026-08-01.7: the selfie prompt composed its scene from weather-blind random
+    pools, then appended the live reading as a trailing hint that also said "don't
+    describe the weather explicitly". On a 70°F clear day the draw could produce
+    "bundled up against the cold" + a canvas jacket + a hoodie, and the image model
+    followed the scene over the one temperature token -- a rainy selfie on a sunny day."""
+
+    def setup_method(self):
+        self._saved = dict(bot._weather_cache)
+        self._match = bot.SELFIE_WEATHER_MATCH
+        bot.SELFIE_WEATHER_MATCH = True
+
+    def teardown_method(self):
+        bot._weather_cache.clear()
+        bot._weather_cache.update(self._saved)
+        bot.SELFIE_WEATHER_MATCH = self._match
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def test_temp_takes_air_temperature_not_feels_like(self):
+        """'feels like' is a second °F field; grabbing it would misjudge the threshold."""
+        self._set("70°F, feels like 65°F, light rain, wind 11mph")
+        assert bot._weather_temp_f() == 70.0
+
+    def test_temp_handles_negative_and_missing(self):
+        self._set("-4°F, snow, wind 9mph")
+        assert bot._weather_temp_f() == -4.0
+        self._set("")
+        assert bot._weather_temp_f() is None
+
+    def test_unknown_weather_is_not_warm(self):
+        """Absent data must not strip her jacket in January."""
+        self._set("")
+        assert bot._weather_is_warm() is False
+
+    def test_clear_is_distinct_from_merely_dry(self):
+        """Overcast is dry but grey -- the prompt must not claim 'no overcast' on it."""
+        self._set("55°F, overcast, wind 6mph")
+        assert bot._weather_outdoor_ok() and not bot._weather_is_clear()
+        self._set("70°F, clear, wind 11mph")
+        assert bot._weather_is_clear()
+
+    def test_scene_pool_never_returns_empty(self):
+        self._set("90°F, clear, wind 2mph")
+        assert bot._weather_scene_pool(["a", "b"], {"a", "b"}) == ["a", "b"]
+
+    def _cold_markers(self):
+        return (list(bot.SELFIE_COLD_ACTIVITIES) + list(bot.SELFIE_COLD_OUTFITS)
+                + ["courier jacket"])
+
+    def test_warm_clear_day_never_produces_cold_weather_content(self):
+        """The regression itself, across the whole random space."""
+        import random
+        self._set("70°F, clear, wind 11mph")
+        for seed in range(300):
+            random.seed(seed)
+            prompt = bot.build_selfie_prompt("", None)
+            for marker in self._cold_markers():
+                assert marker not in prompt, f"seed {seed}: {marker!r}"
+
+    def test_cold_day_still_allows_cold_content(self):
+        """The fix must not strip winter -- filtering is conditional, not global."""
+        import random
+        self._set("38°F, light snow, wind 12mph")
+        hits = 0
+        for seed in range(300):
+            random.seed(seed)
+            if any(m in bot.build_selfie_prompt("", None) for m in self._cold_markers()):
+                hits += 1
+        assert hits > 0
+
+    def test_dry_weather_carries_an_explicit_no_rain_negative(self):
+        import random
+        self._set("70°F, clear, wind 11mph")
+        random.seed(0)
+        assert "It is NOT raining" in bot.build_selfie_prompt("", None)
+
+    def test_rain_never_carries_the_no_rain_negative(self):
+        import random
+        self._set("52°F, rain, wind 14mph")
+        for seed in range(50):
+            random.seed(seed)
+            assert "It is NOT raining" not in bot.build_selfie_prompt("", seed and None)
+
+    def test_overcast_does_not_claim_clear_sky(self):
+        import random
+        self._set("55°F, overcast, wind 6mph")
+        random.seed(3)
+        prompt = bot.build_selfie_prompt("", None)
+        assert "It is NOT raining" in prompt
+        assert "no heavy grey overcast" not in prompt
+
+    def test_kill_switch_restores_previous_behavior(self):
+        """SELFIE_WEATHER_MATCH=0 must reproduce the pre-fix prompt exactly."""
+        import random
+        bot.SELFIE_WEATHER_MATCH = False
+        self._set("70°F, clear, wind 11mph")
+        hits = 0
+        for seed in range(300):
+            random.seed(seed)
+            prompt = bot.build_selfie_prompt("", None)
+            assert "It is NOT raining" not in prompt
+            assert "don't describe the weather explicitly" in prompt
+            if any(m in prompt for m in self._cold_markers()):
+                hits += 1
+        assert hits > 0

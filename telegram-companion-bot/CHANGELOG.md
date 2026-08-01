@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.7 — Nora sent a rainy selfie on a sunny day
+
+**Root cause: `build_selfie_prompt` composed the scene from weather-blind random pools,
+then appended the real weather as a trailing hint that told the image model not to render
+it.** Owner-reported: a rainy selfie while Seattle was sunny all day.
+
+The weather data was never wrong, and this is worth stating because it is where the
+investigation would naturally start. `/status` on nora showed `Weather: 70°F, clear,
+wind 11mph`, her day context was the Eastlake bike lane with no rain in it, and she was
+texting about the sun on her neck. Three plausible mechanisms were ruled out by that one
+command: the Open-Meteo fetch had not failed, the cache was not stale, and `world.txt`
+had not seeded a rainy day narrative.
+
+The defect is in prompt assembly. `_weather_outdoor_ok` screens for *precipitation* and
+`_weather_camera_pool` screens *camera presets*, but nothing screened the scene itself
+for **temperature**. `SELFIE_ACTIVITIES` contains "bundled up against the cold",
+`SELFIE_OUTFITS` contains "a beanie and a hoodie", and Ingrid's canvas courier jacket was
+appended to every outdoor shot unconditionally. A rendered prompt at 70°F clear:
+
+> ...She's **bundled up against the cold**. Over that, she's got on Ingrid's **oversized
+> vintage canvas courier jacket**... Somewhere in **Seattle**, in the afternoon...
+> Current weather: 70°F, clear, wind 11mph. Let it read in the lighting, atmosphere, and
+> what she might be wearing — **don't describe the weather explicitly, just let it show.**
+
+Four signals say cold-and-grey Seattle; one token says 70°F clear — and the final clause,
+phrased for a text model, reads to an image model as *suppress the weather*. The image
+followed the scene. 137 of 300 seeds produced contradictory content at that reading, which
+is why this was intermittent rather than constant.
+
+**Fix:** `_weather_temp_f` parses the air temperature (taking the first `°F` field, never
+"feels like"), and `_weather_scene_pool` drops cold-weather activities and outfits — and
+the jacket — at or above `SELFIE_WARM_F` (68°F). The weather clause is now directive
+("which the image must match") and a dry reading appends an explicit negative: *no rain,
+wet pavement, puddles, umbrellas, rain-streaked glass*. Clear-sky and no-precipitation are
+asserted separately, so an overcast day never claims "no heavy grey overcast".
+
+Unknown weather is deliberately **not** treated as warm — absent data must not strip her
+jacket in January. Kill switch `SELFIE_WEATHER_MATCH=0` restores the previous prompt
+byte-for-byte, pinned by a test. No new LLM calls; prompt assembly only.
+
+**Verification:** at 70°F clear, contradictory content across 300 seeds went 137 → 0, and
+the no-rain negative appears in 300/300. Cold and rainy readings are unchanged (winter
+content still appears; the negative never does). 11 new tests; the three load-bearing
+assertions were break-tested RED before being trusted (C3).
+
+**Left open deliberately:** Ingrid's courier jacket — a Nora-specific inheritance — is
+gated on `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, and that default describes a
+half-shaved head, septum ring and sleeved tattoos, which is Priya's look, not Nora's. Any
+instance falling through to the default gets both. Not touched here (out of scope for a
+weather fix), and not yet confirmed against the live instance dirs.
+
 ## v2026-08-01.6 — /dupefacts: a read-only diagnostic for near-duplicate facts
 
 **Not a fix — a deliberately narrow tool to gather evidence before writing one.**

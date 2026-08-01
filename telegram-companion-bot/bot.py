@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.6"
+BOT_VERSION = "2026-08-01.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5464,6 +5464,20 @@ SELFIE_ACTIVITIES = [
 ]
 # Activities that put her outside -- this is when Ingrid's jacket comes out.
 SELFIE_OUTDOOR_ACTIVITIES = {"out walking somewhere", "bundled up against the cold"}
+# Scene fragments that read as cold weather to an image model. Picked at random from the
+# pools above they will contradict a warm live reading, and the image follows the scene
+# (see v2026-08-01.7) -- so they are filtered out above SELFIE_WARM_F.
+SELFIE_COLD_ACTIVITIES = {
+    "bundled up against the cold", "wrapped in a blanket like a burrito",
+    "lying in bed under the covers",
+}
+SELFIE_COLD_OUTFITS = {
+    "an oversized hoodie", "a comfy sweater", "a beanie and a hoodie", "her usual layers",
+    "a cropped sweatshirt", "a zip-up over a tee",
+}
+SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
+# Kill switch (owner policy 2026-07-18): unset = matching active, 0 = pre-v2026-08-01.7 behavior.
+SELFIE_WEATHER_MATCH = os.getenv("SELFIE_WEATHER_MATCH", "1").lower() not in ("0", "false", "no", "off")
 # How the photo itself looks
 SELFIE_CAMERA = [
     "harsh on-camera flash, slightly washed out", "soft golden-hour light",
@@ -5497,6 +5511,40 @@ def _weather_outdoor_ok() -> bool:
         return True
     bad = ("rain", "snow", "sleet", "storm", "thunder", "drizzle", "showers", "hail", "fog")
     return not any(w in text for w in bad)
+
+
+def _weather_temp_f():
+    """Actual air temperature from the cached weather string, or None if unavailable.
+
+    `_fetch_weather` builds '70°F, clear, wind 11mph', optionally with a 'feels like 65°F'
+    second field. The FIRST match is always the real temperature — take only that one."""
+    m = re.search(r"(-?\d+)\s*°F", _weather_cache.get("text") or "")
+    return float(m.group(1)) if m else None
+
+
+def _weather_is_warm() -> bool:
+    """True only when we have a reading and it is warm. Unknown weather is not warm —
+    absent data must not strip her jacket in January."""
+    t = _weather_temp_f()
+    return t is not None and t >= SELFIE_WARM_F
+
+
+def _weather_is_clear() -> bool:
+    """True when the sky itself is clear -- not merely dry. 'overcast' is dry but grey,
+    so the two claims are asserted separately in the selfie prompt."""
+    text = (_weather_cache.get("text") or "").lower()
+    return any(w in text for w in ("clear", "sunny"))
+
+
+def _weather_scene_pool(pool, cold_set):
+    """Drop cold-weather scene fragments when the live reading is warm.
+
+    Mirrors _weather_camera_pool's contract: never return empty, fall back to the full
+    pool. Without this the random draw contradicts the weather line and the image
+    follows the scene, not the temperature (v2026-08-01.7)."""
+    if not (SELFIE_WEATHER_MATCH and _weather_is_warm()):
+        return list(pool)
+    return [x for x in pool if x not in cold_set] or list(pool)
 
 
 def _weather_camera_pool() -> list:
@@ -5542,10 +5590,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
+        pool = _weather_scene_pool(SELFIE_ACTIVITIES, SELFIE_COLD_ACTIVITIES)
         if _weather_outdoor_ok():
-            activity = random.choice(SELFIE_ACTIVITIES)
+            activity = random.choice(pool)
         else:
-            indoor = [a for a in SELFIE_ACTIVITIES if a not in SELFIE_OUTDOOR_ACTIVITIES]
+            indoor = [a for a in pool if a not in SELFIE_OUTDOOR_ACTIVITIES]
             activity = random.choice(indoor)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
@@ -5553,8 +5602,10 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     if current_fit:
         bits.append(f"Wearing {current_fit}.")
     elif random.random() < 0.55:
-        bits.append(f"Wearing {random.choice(SELFIE_OUTFITS)}.")
-    if outdoors and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
+        bits.append(f"Wearing {random.choice(_weather_scene_pool(SELFIE_OUTFITS, SELFIE_COLD_OUTFITS))}.")
+    # Ingrid's canvas jacket is outerwear -- at 70°F it reads as cold/wet Seattle.
+    if outdoors and not (SELFIE_WEATHER_MATCH and _weather_is_warm()) \
+            and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
         bits.append(
             "Over that, she's got on Ingrid's oversized vintage canvas courier jacket with the "
             "sleeves rolled up."
@@ -5565,9 +5616,24 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
     bits.append(f"Photo look: {random.choice(_weather_camera_pool())}.")
     if _weather_cache["text"]:
-        bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
-                    f"atmosphere, and what she might be wearing — don't describe the weather "
-                    f"explicitly, just let it show.")
+        if SELFIE_WEATHER_MATCH:
+            clause = (f"Current weather, which the image must match: {_weather_cache['text']}. "
+                      f"It sets the lighting, the sky, and what she's wearing.")
+            # An image model given only a positive cue and the word "Seattle" defaults to
+            # overcast drizzle. On a dry day the negative is what actually holds
+            # (v2026-08-01.7). Only assert what the reading supports: no-precipitation and
+            # clear-sky are separate claims, and "overcast" is dry.
+            if _weather_outdoor_ok():
+                neg = ["no rain", "no wet pavement or puddles", "no umbrellas",
+                       "no rain-streaked glass"]
+                if _weather_is_clear():
+                    neg.append("no heavy grey overcast")
+                clause += " It is NOT raining: " + ", ".join(neg) + "."
+        else:
+            clause = (f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
+                      f"atmosphere, and what she might be wearing — don't describe the weather "
+                      f"explicitly, just let it show.")
+        bits.append(clause)
     bits.append(_SELFIE_ANATOMY_RULE)
     bits.append(_SELFIE_REALISM_RULE)
     if chat_id is not None:
