@@ -5,9 +5,12 @@ description: End-to-end procedure for shipping any bot.py change (feature, bugfi
 
 # Ship a bot.py release
 
-The fleet deploys by curling raw files from `main`. Merging to main = making it
-deployable; the user then triggers the actual deploy from Telegram. Your job ends at
-"merged, green, deploy instructions given" — you cannot run `/update` yourself.
+All seven instances deploy from `main` via `deploy/vps-sync.sh` (one invocation per
+instance, run on the VPS as root) — see `deploy-and-verify-fleet` for the full command
+and the instance list. Merging to main = making it deployable; the user (or you, if you
+have VPS access this session) then runs `vps-sync.sh` per instance. `/update` is dead:
+the handler still exists but downloads over raw URLs, which 404 on the private repo.
+Your job ends at "merged, green, deploy instructions given."
 
 ## When NOT to use
 
@@ -38,7 +41,7 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    pytest can die at collection inside Debian's system cryptography. Both are
    environment gaps, not code bugs. Do not "fix" bot.py for them.
 
-3. **Implement.** Small diffs: one release = one theme (a mega-release risks all six
+3. **Implement.** Small diffs: one release = one theme (a mega-release risks all seven
    bots at once). New/changed env vars get documented in `.env.example`. Per owner
    policy (2026-07-18) new features default **ON** with a mandatory env kill switch —
    *unset = feature active*, `0`/off disables without a redeploy (see
@@ -85,10 +88,12 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    closed an operational-log "Next" item, note it there.
 
 9. **Hand off the deploy.** Tell the user exactly:
-   - `/update` to ONE bot → verify its `/audit` shows the new BOT_VERSION →
-     `/restart` to the other five → `/audit` each.
-   - If `run-bot.sh` changed, `/update` is NOT enough → point them at
-     `deploy-and-verify-fleet`.
+   - `/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>`,
+     once per instance (nora, bonnie, cass, emily, priya, jules, marcus) — it fetches
+     and hard-resets the checkout to `origin/main`, so it's correct even if the
+     on-disk checkout is stale.
+   - `/audit` on each instance afterward — MUST show the new BOT_VERSION.
+   - Full command block, verification, and rollback: `deploy-and-verify-fleet`.
 
 ## Quality bar
 
@@ -116,7 +121,7 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 - Leaving work on the claude/ branch: the fleet deploys from main, so an unmerged
   green branch ships nothing.
 - Proposing to split bot.py into modules. Recorded non-goal; the entire deploy
-  model (`/update` swaps one file, `bot.py.bak` rollback) depends on a single file.
+  model (`vps-sync.sh` swaps one file, `bot.py.bak` rollback) depends on a single file.
 - Running `git checkout -- bot.py` to undo an experiment while the file holds
   uncommitted real work — this destroyed ~700 lines once. Commit real work first;
   revert experiments by re-editing.
@@ -124,5 +129,5 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 ## What to report back
 
 Version shipped, one-line root cause, the three verification outputs (pasted),
-merge commit on main, CI status, and the exact deploy commands the user should send
-from Telegram.
+merge commit on main, CI status, and the exact `vps-sync.sh` command(s) the user
+should run on the VPS.
