@@ -41,15 +41,31 @@ seeds `bot.py` at `$BASE` before `vps-sync.sh` can ever run (step 2/8 of the ins
 so the backup source existing is a precondition already established, not a new
 assumption this fix introduces.
 
-**Verified — break-tested, not inspected, per the ROADMAP item's own "done when."** The
-locking mechanism was extracted and raced directly: a held lock's second concurrent
-`flock -n` attempt exits non-zero with the intended message while the first holds it
-(confirmed RED — the race path actually rejects); after the first releases, a fresh
-solo run acquires the lock normally (confirmed GREEN — no leftover lock, no
-false-positive rejection). `bash -n deploy/vps-sync.sh` clean. Full end-to-end
-concurrent-instance racing on the real VPS is still the final confirmation (no VPS
-access from this session) — the ROADMAP item's done-when is left open until that's run
-there.
+**Verified — break-tested, not inspected, per the ROADMAP item's own "done when," in
+two passes.** First, the locking mechanism was extracted and raced in isolation from
+this session (no VPS access here): a held lock's second concurrent `flock -n` attempt
+exits non-zero with the intended message while the first holds it, and a fresh solo run
+acquires the lock normally after release. `bash -n deploy/vps-sync.sh` clean.
+
+Second — the real thing, owner-run on the VPS. Round one raced `nora` against `bonnie`
+as the first invocation after merging: both started from the *pre-fix* script (a
+sync's checkout-reset is its own first action, so the very first call after a merge
+necessarily runs from whatever was already on disk), and instead surfaced a genuine
+git-level race — `bonnie`'s `git fetch` hit `error: cannot lock ref
+'refs/remotes/origin/main'` against `nora`'s concurrent fetch+reset, and `set -e`
+killed `bonnie`'s run right there, before it touched anything `bonnie`-specific.
+`nora` completed normally. Useful evidence (unguarded concurrent syncs on a shared
+checkout really do collide) but not a test of the fix itself, since neither run had it
+loaded yet.
+
+Round two, now that `nora`'s successful run had pulled the checkout — and the script
+that reads it — to the fix: raced `bonnie` against `cass`, baseline `bot.py` md5
+captured first. `cass` hit the flock and exited 1 with the intended retry message
+*before its own `git fetch` ever ran*. `bonnie` completed end-to-end — fetch, compile,
+backup, swap, restart, full hash + `STARTUP AUDIT` verification. `bot.py.bak`'s md5
+after the race matched the pre-race baseline exactly: the rollback point held the
+genuinely-previous code, not a corrupted copy of the new. ROADMAP 1.6's done-when is
+satisfied and closed.
 
 ## v2026-08-01.1 — Selfie prompt's fixed rules are findable (refactor, no behavior change)
 
