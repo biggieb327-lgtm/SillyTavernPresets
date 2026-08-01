@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.9 — Sometimes the selfie wasn't her
+
+**Root cause: the identity instruction is the FIRST thing in the image prompt, and two
+releases of appended scene text pushed ~1000 characters after it — while 30% of random
+draws stacked a face-obscuring framing on a face-degrading camera.** Owner-reported:
+selfies that don't look like Nora, intermittently. (Same report confirmed v2026-08-01.7's
+weather fix is working.)
+
+`build_selfie_prompt` opens with "Edit the attached photo of this exact woman — do not
+generate a new person…" as `bits[0]`, then appends 17 more instructions: pose, expression,
+activity, outfit, outerwear, scene, camera look, the weather clause (which v2026-08-01.7
+made longer), the anatomy rule, the realism rule, and a scene-dedup list naming *other
+setups*. On an image edit the last thing said sits nearest the output; the identity anchor
+was as far from it as it could be.
+
+Compounding that, the framing and camera pools are full of choices that legitimately make
+a candid phone photo — mirror shots, half-in-frame crops, motion blur, harsh flash, grainy
+low light, backlit shadow — and they were drawn independently. Measured over 2000 seeds:
+**29.9% of prompts drew a face-obscuring framing AND a face-degrading camera**, and only
+16.7% were clean. One soft choice is candid; two leave an edit model enough latitude to
+drift the face into a different woman. ~30% matches "on occasion" well.
+
+A third contributor, specific to Nora: she had **no `appearance.txt`**, so
+`SELFIE_APPEARANCE` fell back to `"an adult woman in her late 20s, the same person as in
+the reference photo"` — a *pointer*, not a description. Every verbal identity signal in
+her prompt was a reference to an image. Any draw that weakened the photo's influence left
+nothing behind it.
+
+**Fix:**
+- `_SELFIE_IDENTITY_TAIL` restates the identity constraint as the genuinely last line —
+  after the dedup list, deliberately, since that block names other setups.
+- A soft framing now filters soft camera looks out of the pool: stacked draws **29.9% → 0%**,
+  with one soft choice still freely available.
+- `telegram-companion-bot/nora/appearance.txt` written from her card's `<physicality>`
+  block, so her face has a verbal anchor and not just a photo pointer.
+- The shared identity line hardcoded **"freckles"** — Nora's trait, applied to all seven
+  characters. Now "distinguishing features". Same character-bleed family as the courier
+  jacket in v2026-08-01.8; a test pins the shared prompt against five such traits.
+
+Kill switch `SELFIE_IDENTITY_GUARD=0`. Prompt assembly only, no new LLM calls.
+
+**Verification:** 769/769 pytest, 32/32 evals, 10 new tests. Three load-bearing assertions
+break-tested RED (de-stacking, tail position, trait hardcoding). The tail-position case
+needed *two* tests: with `chat_id=None` there is no dedup block, so the simple "ends with"
+assertion still passed when the tail was moved back above it — only the dedup-present test
+caught the regression.
+
+**Not proven:** that this fixes what the owner saw. The mechanisms are real and measured,
+but nothing here confirms which draw produced any particular bad image — that needs
+selfies watched over time. Also unconfirmed: whether `SELFIE_BASE` is correctly set for
+each instance. It defaults to `priya_base.png`, so an instance whose `.env` omits it has
+**no** reference photo attached at all and generates from text alone.
+
 ## v2026-08-01.8 — She dresses once a day, and her jacket exists again
 
 **Three owner-reported items, one subsystem.**

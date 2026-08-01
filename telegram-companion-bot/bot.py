@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.8"
+BOT_VERSION = "2026-08-01.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5527,6 +5527,33 @@ _SELFIE_REALISM_RULE = (
     "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
     "watermarks, or captions in the image."
 )
+# Restated at the END of the prompt, not only the start. The identity instruction is bits[0]
+# and ~1000 characters of pose/scene/weather/camera instruction now follow it; on an edit the
+# nearest thing to the output is the last thing said (v2026-08-01.9).
+_SELFIE_IDENTITY_TAIL = (
+    "Most important: this is the same woman as the attached reference photo. Same face, same "
+    "bone structure, same hair, same distinguishing features. Change the pose, setting and "
+    "clothes — never the person."
+)
+# Draws that make a face hard to pin down: small in frame, obscured, blurred, blown out, or
+# in shadow. Any one is fine and wanted -- these are candid phone photos. TWO stacked is what
+# leaves an edit model enough latitude to drift the face into someone else.
+SELFIE_SOFT_FRAMINGS = {
+    "a mirror selfie", "a candid half-in-frame selfie",
+    "a wider selfie with the room visible behind her",
+    "a selfie with her face half-cut-off the frame",
+    "a bathroom mirror selfie with phone visible",
+    "a selfie peeking out from under a blanket",
+}
+SELFIE_SOFT_CAMERA = {
+    "harsh on-camera flash, slightly washed out", "grainy low-light phone photo",
+    "a little motion blur like it was taken too fast",
+    "overexposed light from a window behind her",
+    "cool blue late-night screen glow on her face", "a tiny bit out of focus",
+    "backlit so she's a little in shadow", "flat overhead lighting",
+}
+# Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
+SELFIE_IDENTITY_GUARD = os.getenv("SELFIE_IDENTITY_GUARD", "1").lower() not in ("0", "false", "no", "off")
 
 
 def _weather_outdoor_ok() -> bool:
@@ -5628,9 +5655,9 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     if _has_base_image():
         bits = [
             "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
-            "specific face, bone structure, hair color/texture, and freckles identical to the "
-            "reference image; this must be recognizably the same individual, just in a new "
-            f"pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
+            "specific face, bone structure, hair color/texture, and distinguishing features "
+            "identical to the reference image; this must be recognizably the same individual, "
+            f"just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
             f"New shot: {framing}.",
             f"Expression: {expression}.",
         ]
@@ -5671,7 +5698,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
-    bits.append(f"Photo look: {random.choice(_weather_camera_pool())}.")
+    camera_pool = _weather_camera_pool()
+    # One soft choice is candid; two is where the face stops being hers.
+    if SELFIE_IDENTITY_GUARD and framing in SELFIE_SOFT_FRAMINGS:
+        camera_pool = [c for c in camera_pool if c not in SELFIE_SOFT_CAMERA] or camera_pool
+    bits.append(f"Photo look: {random.choice(camera_pool)}.")
     if _weather_cache["text"]:
         if SELFIE_WEATHER_MATCH:
             clause = (f"Current weather, which the image must match: {_weather_cache['text']}. "
@@ -5700,6 +5731,10 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
                 "Vary the scenario — avoid recreating these recent setups: "
                 + "; ".join(f'"{s}"' for s in recent_scenes) + "."
             )
+    # Genuinely last: the scene-dedup list names other setups, which is the one appended
+    # block that could pull the image away from the reference if it had the final word.
+    if SELFIE_IDENTITY_GUARD and _has_base_image():
+        bits.append(_SELFIE_IDENTITY_TAIL)
     return " ".join(bits)
 
 

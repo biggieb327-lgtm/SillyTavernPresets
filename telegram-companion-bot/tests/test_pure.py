@@ -5385,3 +5385,105 @@ class TestOutdoorLayer:
         low = bot._APPEARANCE_DEFAULT.lower()
         for relic in ("tattoo", "septum", "half-shaved", "ink-stained", "sleeved"):
             assert relic not in low
+
+
+class TestSelfieIdentityGuard:
+    """v2026-08-01.9: selfies intermittently came back not looking like her. The identity
+    instruction is bits[0], and two releases of appended scene/weather/camera text pushed
+    ~1000 characters after it; meanwhile 30% of random draws stacked a face-obscuring
+    framing on a face-degrading camera, leaving an edit model room to drift the face."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._guard = bot.SELFIE_IDENTITY_GUARD
+        self._has_base = bot._has_base_image
+        self._wardrobe = dict(bot.wardrobe)
+        bot.SELFIE_IDENTITY_GUARD = True
+        bot._has_base_image = lambda: True
+        bot._weather_cache["text"] = "55°F, overcast, wind 6mph"
+        bot._weather_cache["ts"] = 9e9
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot._has_base_image = self._has_base
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _prompts(self, n=400, chat_id=None):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", chat_id))
+        return out
+
+    def test_soft_framing_never_pairs_with_soft_camera(self):
+        for p in self._prompts():
+            soft_f = any(f in p for f in bot.SELFIE_SOFT_FRAMINGS)
+            soft_c = any(c in p for c in bot.SELFIE_SOFT_CAMERA)
+            assert not (soft_f and soft_c), p
+
+    def test_stacking_still_happens_with_the_guard_off(self):
+        """Proves the previous test measures the guard, not an accident of the pools."""
+        bot.SELFIE_IDENTITY_GUARD = False
+        assert any(
+            any(f in p for f in bot.SELFIE_SOFT_FRAMINGS)
+            and any(c in p for c in bot.SELFIE_SOFT_CAMERA)
+            for p in self._prompts()
+        )
+
+    def test_identity_is_restated_as_the_final_instruction(self):
+        """Last word, after the scene-dedup list -- that block names other setups."""
+        for p in self._prompts(n=60):
+            assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+
+    def test_identity_tail_still_last_when_dedup_list_is_present(self):
+        bot._recent_selfie_hints[777] = ["on the fire escape", "at the counter"]
+        try:
+            for p in self._prompts(n=40, chat_id=777):
+                assert "avoid recreating these recent setups" in p
+                assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+        finally:
+            bot._recent_selfie_hints.pop(777, None)
+
+    def test_no_identity_tail_without_a_reference_photo(self):
+        """Nothing to be 'the same as' -- the tail would be an instruction to copy nothing."""
+        bot._has_base_image = lambda: False
+        assert not any(bot._SELFIE_IDENTITY_TAIL in p for p in self._prompts(n=40))
+
+    def test_kill_switch_removes_the_guard(self):
+        bot.SELFIE_IDENTITY_GUARD = False
+        assert not any(bot._SELFIE_IDENTITY_TAIL in p for p in self._prompts(n=40))
+
+    def test_shared_prompt_hardcodes_no_character_specific_feature(self):
+        """'freckles' was baked into the shared identity line -- Nora's trait, applied to
+        all seven. Same character-bleed family as the courier jacket (v2026-08-01.8)."""
+        import inspect
+        src = inspect.getsource(bot.build_selfie_prompt)
+        for trait in ("freckles", "septum", "tattoo", "blonde", "half-shaved"):
+            assert trait not in src.lower(), trait
+
+
+class TestNoraAppearanceSeed:
+    """v2026-08-01.9: nora had no appearance.txt, so SELFIE_APPEARANCE fell back to
+    'the same person as in the reference photo' -- a pointer, not a description. Any draw
+    that weakened the photo's influence left no verbal identity signal at all."""
+
+    def _path(self):
+        from pathlib import Path
+        return Path(__file__).resolve().parent.parent / "nora" / "appearance.txt"
+
+    def test_seed_exists(self):
+        assert self._path().is_file()
+
+    def test_reads_as_a_noun_phrase(self):
+        """It is interpolated as 'She's Nora, {…}' -- a sentence here would read wrong."""
+        text = self._path().read_text(encoding="utf-8").strip()
+        assert text and text[0].islower()
+        assert text.endswith(".")
+
+    def test_states_an_explicit_adult_age(self):
+        """Gemini's image filter gets much stricter with no stated age (see SELFIE_APPEARANCE)."""
+        import re
+        assert re.search(r"\b\d{2}-year-old\b", self._path().read_text(encoding="utf-8"))
