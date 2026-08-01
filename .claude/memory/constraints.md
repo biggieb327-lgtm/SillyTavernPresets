@@ -428,6 +428,13 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
+  flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
+  and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the
+  substring `"he "` matched inside `"the "` in an innocent inline comment. → a scanner over source
+  needs BOTH: strip comments (describing a defect is not committing it) and match on word
+  boundaries, never bare substrings. Two failed runs is cheap; a scanner that greens on the wrong
+  thing is not.
 - 2026-08-01 — Break-tested three assertions by injecting all three faults at once. Two failed
   correctly; the third test *passed*, and I nearly recorded it as verified. The autodetect-off
   injection made `_resolve_base_image` return None for every input, so the "ambiguous candidates

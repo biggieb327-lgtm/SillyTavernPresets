@@ -7,6 +7,34 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.11 — Marcus was being drawn as a woman
+
+**Root cause: the shared no-`appearance.txt` fallback hardcoded a sex.** `SELFIE_APPEARANCE`
+read `"an adult woman in her late 20s, the same person as in the reference photo"` for any
+named instance without an `appearance.txt`. Marcus Calder is 31, 6'2", a man — and has no
+reference photo on disk, so whatever describes him in an image prompt is that string alone.
+
+Found while auditing `SELFIE_BASE` across the fleet after v2026-08-01.10, which turned up
+how many instances fall back rather than configure. **Third instance of one class**, after
+Ingrid's courier jacket (v2026-08-01.8) and hardcoded "freckles" (v2026-08-01.9): shared
+code asserting one character's traits across all seven. The first two were cosmetic on a
+character who happened not to match. This one changes the person.
+
+**Fix:** both fallbacks are sex-neutral (`"an adult in their late 20s"`), keeping the
+explicit adult age that Gemini's image filter needs to avoid returning blacked-out frames.
+The startup-audit `Selfie base:` field now distinguishes the worst case — no reference
+photo *and* no `appearance.txt` reads `TEXT-ONLY, NO APPEARANCE.TXT — every selfie is a
+generic stranger`, because that state has nothing describing the character at all.
+
+The real fix for cass and marcus is content, not code: both have no base image on disk, so
+v2026-08-01.10's autodetect cannot help them. They need a reference photo, an
+`appearance.txt`, or both.
+
+**Verification:** 779/779 pytest, 32/32 evals, 3 new tests, the neutrality assertion
+break-tested RED. That test also failed twice before it was right: first it flagged its own
+explanatory comment (C14 — a scanner cannot tell doing-the-bad-thing from describing it),
+then `"he "` matched inside `"the "`. Word boundaries and comment stripping, both needed.
+
 ## v2026-08-01.10 — Nora's reference photo was never being sent
 
 **Root cause: `SELFIE_BASE` defaults to `priya_base.png`, nora's `.env` never set it, and

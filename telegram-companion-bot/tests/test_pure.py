@@ -5539,3 +5539,44 @@ class TestBaseImageResolution:
     def test_status_line_is_quiet_when_correctly_configured(self):
         self._touch("priya_base.png")
         assert bot._base_image_status() == "priya_base.png"
+
+
+class TestSharedPromptIsCharacterNeutral:
+    """v2026-08-01.11: marcus (31, 6'2", a man) shares bot.py with six women. The
+    no-appearance.txt fallback asserted "an adult woman in her late 20s", so an instance
+    with no appearance.txt and no reference photo generated the wrong person outright.
+    Third instance of this class after the courier jacket (.8) and freckles (.9)."""
+
+    def test_appearance_fallbacks_assert_no_sex(self):
+        """Comments are stripped first: the block explains the old wording, and a scanner
+        that cannot tell describing-the-bug from doing-it flags its own changelog (C14)."""
+        import inspect, re
+        src = inspect.getsource(bot)
+        block = src[src.find("_APPEARANCE_DEFAULT ="):src.find("CARD_NAME =")]
+        code = "\n".join(ln.split("#")[0] for ln in block.splitlines())
+        # Word boundaries, not substrings: "he " lives inside "the ", which made the first
+        # version of this test fail on an innocent comment.
+        hits = re.findall(r"\b(?:wom[ae]n|her|hers|she|m[ae]n|his|him|he)\b", code.lower())
+        assert not hits, f"sexed wording in the shared appearance fallback: {hits}"
+
+    def test_fallbacks_still_state_an_adult_age(self):
+        """Gemini returns blacked-out frames when no age is stated (see SELFIE_APPEARANCE)."""
+        import re
+        assert re.search(r"\b(20s|30s|\d{2}-year-old)\b", bot._APPEARANCE_DEFAULT)
+
+    def test_status_line_calls_out_the_worst_case(self):
+        """No photo AND no appearance.txt is not 'text-only', it is 'nobody in particular'."""
+        import tempfile, shutil
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp(prefix="neutral_"))
+        saved = (bot.BASE_DIR, bot._APPEARANCE_FILE, bot.SELFIE_BASE)
+        try:
+            bot.BASE_DIR = d
+            bot._APPEARANCE_FILE = d / "appearance.txt"
+            bot.SELFIE_BASE = "priya_base.png"
+            assert "NO APPEARANCE.TXT" in bot._base_image_status()
+            bot._APPEARANCE_FILE.write_text("a tall man in his 30s.")
+            assert "NO APPEARANCE.TXT" not in bot._base_image_status()
+        finally:
+            bot.BASE_DIR, bot._APPEARANCE_FILE, bot.SELFIE_BASE = saved
+            shutil.rmtree(d, ignore_errors=True)

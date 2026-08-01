@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.10"
+BOT_VERSION = "2026-08-01.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -639,7 +639,7 @@ _recent_meme_templates: dict = {}  # chat_id -> list of recently used template f
 # septum ring and sleeved tattoos, left over from a discarded card that made Priya a tattoo
 # artist (owner, 2026-08-01) -- a look no current character has. State an adult age
 # explicitly for the same reason the named-instance branch below does.
-_APPEARANCE_DEFAULT = "an adult woman in her late 20s."
+_APPEARANCE_DEFAULT = "an adult in their late 20s."
 _APPEARANCE_FILE = BASE_DIR / "appearance.txt"
 if _APPEARANCE_FILE.exists():
     SELFIE_APPEARANCE = _APPEARANCE_FILE.read_text(encoding="utf-8").strip()
@@ -649,7 +649,12 @@ else:
     # No age/appearance details for this instance -- state an adult age explicitly anyway,
     # since Gemini's image safety filter gets much stricter (and returns blacked-out images)
     # for photos of women with no stated age in casual/intimate settings.
-    SELFIE_APPEARANCE = "an adult woman in her late 20s, the same person as in the reference photo"
+    # Sex-neutral on purpose: this is shared code across seven characters, one of whom
+    # (marcus, 31, 6'2") is a man. It said "an adult woman in her late 20s" until
+    # v2026-08-01.11 — an instance with no appearance.txt and no reference photo was
+    # generating the wrong person entirely. Keep an explicit adult age: Gemini's image
+    # filter gets much stricter, and returns blacked-out frames, when none is stated.
+    SELFIE_APPEARANCE = "an adult in their late 20s, the same person as in the reference photo"
 
 CARD_NAME = os.getenv("CHARACTER_CARD", "priya.json")
 HEARTBEAT_MIN = _env_float("HEARTBEAT_MIN_HOURS", "2") * 3600  # random window low end
@@ -5438,6 +5443,9 @@ def _base_image_status() -> str:
                   if p.suffix.lower() in _BASE_IMAGE_SUFFIXES]
         if others:
             return f"TEXT-ONLY (SELFIE_BASE={SELFIE_BASE} missing; ambiguous: {', '.join(sorted(others))})"
+        if not _APPEARANCE_FILE.exists():
+            return (f"TEXT-ONLY, NO APPEARANCE.TXT — every selfie is a generic stranger "
+                    f"(SELFIE_BASE={SELFIE_BASE})")
         return f"TEXT-ONLY (no reference photo; SELFIE_BASE={SELFIE_BASE})"
     if resolved != configured:
         return f"{resolved.name} (AUTODETECTED — SELFIE_BASE={SELFIE_BASE} not found; set it in .env)"
