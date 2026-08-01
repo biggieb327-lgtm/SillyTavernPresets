@@ -199,6 +199,11 @@ These files shape what the character knows and references. All are editable from
 | `/nudges` | Show today's proactive message budget |
 | `/quiet <h>` | Pause proactive messages for X hours (e.g. `/quiet 3`) |
 | `/quiet off` | Cancel quiet mode early |
+| `/quietwin add <day> <HH:MM-HH:MM>` | Add a recurring weekly quiet window (e.g. `/quietwin add Fri 23:00-08:00`) |
+| `/quietwin list` | List recurring quiet windows |
+| `/quietwin del <n>` | Remove a recurring quiet window by number |
+| `/away [reason]` | Suppress proactive messages until `/back` or your next message |
+| `/back` | Clear away mode |
 
 ### Voice
 | Command | What it does |
