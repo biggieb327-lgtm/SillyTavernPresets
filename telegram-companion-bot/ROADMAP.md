@@ -5,8 +5,8 @@ changelog, and CLAUDE.md. Each item names its evidence — why it's on the list 
 effort (S/M/L), risk, and what "done" means. Ordered by track, sequenced at the bottom.
 
 **Deliberate non-goal, recorded to prevent future refactor urges:** bot.py stays a
-single file. The entire deploy model (`/update` swapping one shared file, update-all.sh
-curling one URL, `bot.py.bak` rollback) depends on it. The monolith's real cost —
+single file. The entire deploy model (`vps-sync.sh` swapping one shared file across all
+seven instances, `bot.py.bak` rollback) depends on it. The monolith's real cost —
 regressions in pure logic — is covered by Track 2.1 instead.
 
 ---
@@ -14,8 +14,9 @@ regressions in pure logic — is covered by Track 2.1 instead.
 ## Track 1 — Reliability & platform
 
 The phone *was* the existential risk (phantom process killer, OEM battery managers,
-Python-bump venv breaks). 1.2 retired it on 2026-07-26 — all six now run on the VPS
-under systemd. Items here predating that date were written under the phone's
+Python-bump venv breaks). 1.2 retired it on 2026-07-26 — six instances moved onto the
+VPS that day, marcus joined directly there on 2026-07-29, and all seven run under
+systemd now. Items here predating 2026-07-26 were written under the phone's
 constraints; check their assumptions before acting on them.
 
 ### 1.1 ~~Commit watchdog.sh to the repo~~ ✅ (shipped v2026-07-06.3)
@@ -435,18 +436,22 @@ constraints; check their assumptions before acting on them.
   ~60 tokens. Do NOT port the rest of the Chimera diff: hooks, the relationship ladder,
   the assistants and the CoT tasks are all scene-roleplay machinery, wrong shape for a
   texting companion.
-- **Blast radius:** `preset.txt` is fleet-wide — one edit changes all six characters at
-  once. Deploy is `sync-cards.sh` (dry-run first) + `/restart` per phone bot, and
-  `vps-sync.sh` for cass and jules.
-- **Sequencing note:** 3.13 is actively trying to *shrink* `preset.txt`. If the core/rp/
-  feature split lands first, this belongs in the **core** layer — it is universal prose
-  hygiene, not scene machinery. Adding it before the split just grows the monolith.
-- **Risk:** low on content, non-trivial on voice — `preset.txt` is deliberately tuned
-  (v2026-07-18.1 anti-echo work). Verify against Priya and Jules first: Priya's lowercase
-  sardonic register and Jules's flat precision are the two most likely to shift.
-- **Done =** the block is in `preset.txt` (or the core layer), all six bots restarted and
-  `/audit`-verified, with a before/after sample from Priya and Jules showing the register
-  held.
+- **Blast radius:** universal prose hygiene, not scene machinery, so per 3.13 (shipped)
+  it belongs in **`preset-core.txt`**, not the legacy monolithic `preset.txt` — one edit
+  there reaches every instance that loads the core layer, which per 3.13 is all seven.
+  Deploy is `vps-sync.sh` per instance (see `deploy-and-verify-fleet`); there is no
+  phone path anymore.
+- **Sequencing note (resolved):** this was blocked on 3.13 landing first, to avoid
+  growing the monolith right before a split. 3.13 shipped (v2026-07-25.6 →
+  2026-07-28, fleet-wide adoption owner-confirmed 2026-08-01) — the core layer exists
+  now, so this item is unblocked and its target is settled: `preset-core.txt`.
+- **Risk:** low on content, non-trivial on voice — `preset-core.txt` inherits
+  `preset.txt`'s deliberate tuning (v2026-07-18.1 anti-echo work). Verify against Priya
+  and Jules first: Priya's lowercase sardonic register and Jules's flat precision are
+  the two most likely to shift.
+- **Done =** the block is in `preset-core.txt`, every instance re-synced via
+  `vps-sync.sh` and `/audit`-verified, with a before/after sample from Priya and Jules
+  showing the register held.
 
 ---
 
