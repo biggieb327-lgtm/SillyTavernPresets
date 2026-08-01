@@ -4829,3 +4829,31 @@ class TestSelfiePromptFixedRules:
         which returns blacked-out images without an explicit SFW/clothed signal."""
         assert "No extra limbs." in bot._SELFIE_ANATOMY_RULE
         assert "Fully clothed, SFW." in bot._SELFIE_REALISM_RULE
+
+
+class TestCommandMenuMirrorsHandlers:
+    """_build_command_menu is hand-kept alongside the CommandHandler registrations in
+    main() (its own docstring says so) -- nothing enforced that until now. Found by
+    audit 2026-08-01: 17 unconditionally-registered commands (card, errors, fleet, life,
+    meme, note, notes, people, projects, quiet, quietwin, recap, restart, schedule,
+    setcard, today, update) were missing from the menu the whole time -- they worked if
+    typed, but never appeared in Telegram's autocomplete popup."""
+
+    def _registered_command_names(self):
+        import inspect
+        import re
+        src = inspect.getsource(bot.main)
+        return set(re.findall(r'CommandHandler\("([a-z_]+)"', src))
+
+    def test_every_registered_command_is_in_the_full_menu(self):
+        names = self._registered_command_names()
+        assert len(names) > 50, "sanity check: extraction found suspiciously few commands"
+        menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
+        missing = names - menu
+        assert not missing, f"registered but not in any menu list: {sorted(missing)}"
+
+    def test_the_full_menu_has_no_entries_without_a_handler(self):
+        names = self._registered_command_names()
+        menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
+        dead = menu - names
+        assert not dead, f"in the menu but no CommandHandler registers it: {sorted(dead)}"

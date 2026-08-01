@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.1"
+BOT_VERSION = "2026-08-01.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -12812,6 +12812,9 @@ _BASE_COMMANDS = [
     BotCommand("clear", "Wipe conversation history"),
     BotCommand("menu", "Open the inline button menu"),
     BotCommand("status", "Quick status: mood, outfit, today's context"),
+    BotCommand("recap", "2-3 sentence summary of recent conversation"),
+    BotCommand("card", "Show the currently loaded character card"),
+    BotCommand("setcard", "Update a character card field (/setcard <field> <value>)"),
     BotCommand("memory", "View what I remember"),
     BotCommand("remember", "Save a fact"),
     BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
@@ -12829,6 +12832,13 @@ _BASE_COMMANDS = [
     BotCommand("unpin", "Remove a pinned memory"),
     BotCommand("boundary", "Add a soft boundary note"),
     BotCommand("boundaries", "List boundaries"),
+    BotCommand("life", "View or replace the character's current life arc"),
+    BotCommand("people", "View or replace the people in her life"),
+    BotCommand("projects", "View or replace her ongoing projects"),
+    BotCommand("schedule", "View or replace her weekly schedule"),
+    BotCommand("today", "Append a mid-day note (what's happening today)"),
+    BotCommand("note", "Add something to what she knows about you"),
+    BotCommand("notes", "List your auto-collected notes"),
     BotCommand("mood", "Check her current mood"),
     BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
     BotCommand("vent", "Toggle vent mode (listening only)"),
@@ -12836,6 +12846,7 @@ _BASE_COMMANDS = [
     BotCommand("selfie", "Generate a selfie"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
+    BotCommand("meme", "Send a meme (optional hint)"),
     BotCommand("addjoke", "Add an inside joke"),
     BotCommand("jokes", "List inside jokes"),
     BotCommand("deljoke", "Remove a joke"),
@@ -12851,6 +12862,8 @@ _BASE_COMMANDS = [
     BotCommand("crons", "List recurring tasks"),
     BotCommand("crondel", "Remove a recurring task"),
     BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("quiet", "Pause proactive messages for X hours (/quiet 3, /quiet off)"),
+    BotCommand("quietwin", "Manage recurring quiet windows (add/list/del)"),
     BotCommand("away", "Mark yourself away (suppresses proactives)"),
     BotCommand("back", "Clear away mode"),
     BotCommand("heartbeat", "Trigger a proactive message now"),
@@ -12862,6 +12875,11 @@ _BASE_COMMANDS = [
     BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
     BotCommand("audit", "Bot health and error report"),
+    BotCommand("errors", "Show recent errors.log lines (admin only)"),
+    BotCommand("restart", "Clean restart via the supervisor (admin only)"),
+    BotCommand("update", "Self-deploy from main — dead on the private repo, "
+                          "replies with vps-sync.sh instructions (admin only)"),
+    BotCommand("fleet", "Fleet console: probe every peer's admin API (admin only)"),
 ]
 
 _PAYMENT_COMMANDS = [

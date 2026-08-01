@@ -362,6 +362,35 @@ on all three branches with the surrounding prose left intact.
 
 ---
 
+### C15 — Never `git checkout -- <file>` to revert a break-test edit; re-edit instead
+**seen: 2** — documented once already, in `repo-change-control`'s own "Common mistakes"
+("this destroyed ~700 lines once"), and repeated 2026-08-01 mid-session on bot.py's
+uncommitted command-menu fix. *Promoted directly on the repeat rather than waiting for a
+third occurrence — the first was already written down as exactly this trap, which makes
+repeating it the more damning of the two, not the more forgivable.*
+
+While break-testing a new regression eval (proving it fails RED before trusting it
+GREEN — the correct instinct), a single deliberately-broken line was stripped out of
+bot.py with `git checkout -- bot.py` to revert the break-test. `git checkout -- <path>`
+restores the file to its last **committed** state, not to "current minus my last edit"
+— and bot.py held ~18 lines of real, uncommitted work (17 command-menu additions from
+earlier in the same task) at that moment. All of it was silently discarded in one
+command, with no error or warning; git checkout succeeds identically whether it's
+discarding a scratch edit or a task's worth of real work. Caught immediately by
+`git diff --stat` showing zero changes where 18 lines were expected, so nothing shipped
+broken — the cost was a full redo of the earlier edits from memory, not a real defect.
+
+**Constraint:** revert a break-test change by **re-editing back to the original text**
+— the method every other break-test in this same session used correctly, before and
+after this one. Never `git checkout -- <file>` as the undo step, regardless of how
+small the intended revert looks or how confident the belief that nothing else changed.
+If a checkout-style revert ever seems like the only option, `git status`/`git diff
+--stat` first — but the safer default is to just not reach for checkout on a file that
+might hold uncommitted work. This class has now cost real content twice; there should
+not be a third.
+
+---
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because

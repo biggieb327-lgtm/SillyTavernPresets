@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.2 — 17 commands worked if typed but never appeared in Telegram's menu
+
+**Root cause: `_build_command_menu` is hand-kept alongside the `CommandHandler`
+registrations — its own docstring says so — and nothing enforced that until now.** An
+audit comparing every `app.add_handler(CommandHandler(...))` in `main()` against the
+menu builder's output found 17 unconditionally-registered commands missing from every
+menu list: `card`, `errors`, `fleet`, `life`, `meme`, `note`, `notes`, `people`,
+`projects`, `quiet`, `quietwin`, `recap`, `restart`, `schedule`, `setcard`, `today`,
+`update`. All 17 worked fine if a user typed them manually — the handlers were real —
+they simply never showed up in Telegram's autocomplete popup, so a user would only find
+them by already knowing they existed (from `OPS_MANUAL.md`, or trial and error).
+
+No dead entries in the other direction — nothing in the menu lacked a working handler.
+
+**Fix:** added all 17 to `_BASE_COMMANDS`, grouped near their thematic neighbors
+(`recap`/`card`/`setcard` near `status`; `life`/`people`/`projects`/`schedule`/`today`/
+`note`/`notes` — the Context Files group — near the memory commands; `quiet`/`quietwin`
+near `nudges`; `meme` near `selfie`; `errors`/`restart`/`update`/`fleet` alongside
+`audit`/`backup`, which were already unconditionally listed). This matches the existing
+convention exactly: `_MAPS_COMMANDS`'s own comment says unconditionally-registered
+handlers belong unconditionally in the menu, same as conditionally-registered ones
+(`traffic`, `payments`, `garmin`, `preset`) already mirror their own kill switches.
+`/update`'s description was written to match its actual current behavior (dead as a
+deploy path on the private repo, replies pointing at `vps-sync.sh`) rather than the
+stale "pull latest bot.py" description it would otherwise have inherited.
+
+**New regression test, `TestCommandMenuMirrorsHandlers`**, extracts every
+`CommandHandler("...")` name from `main()`'s source via `inspect.getsource` + regex and
+asserts it's a two-way match against `_build_command_menu(True, True, True, True)`'s
+full command set — both directions (registered-but-missing, and menu-but-dead), so this
+exact class can't recur silently again. Both assertions break-tested RED before being
+trusted: removing one menu entry and adding one fake unregistered entry each failed the
+correct assertion with the correct missing/dead name.
+
+**Self-inflicted near-miss while writing that break-test, logged as constraints C15:**
+reverted one break-test edit with `git checkout -- bot.py`, which restores the file to
+its last *committed* state, not "current minus my last edit" — and at that moment
+bot.py held this same commit's uncommitted menu-fix work. All 17 additions were
+silently wiped in one command. Caught immediately by `git diff --stat` showing zero
+changes where 18 lines were expected; the earlier edits were redone from memory rather
+than lost. No broken code shipped, but this is the second time this exact command has
+destroyed real uncommitted work in this repo (the first is `repo-change-control`'s own
+"Common mistakes" entry, "this destroyed ~700 lines once") — promoted straight to a
+numbered constraint rather than waiting for a third occurrence.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710 passed, `run-evals.sh`
+32/32 green, and the registered/menu name sets diffed programmatically both
+directions (empty both ways) independent of the new pytest coverage.
+
 ## 2026-08-01 — Chimera's banned-rhetoric block ported to preset-rp.txt, not preset-core.txt (content only, no bot.py change, no version bump)
 
 **ROADMAP 3.14 shipped, but to a different file than the item specified** — a roleplay
