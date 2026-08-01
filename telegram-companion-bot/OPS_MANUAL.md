@@ -149,6 +149,7 @@ grep -c HEALTHCHECK_URL /opt/telegram-bots/*/.env   # dead-man's-switch coverage
 | `/editmem <n> <new text>` | Edit a memory entry by number |
 | `/sourcemem <n>` | Show a memory entry's source/provenance |
 | `/reviewmem` | List memories pending review (low-confidence extractions); `/reviewmem ok <n>` or `/reviewmem no <n>` to resolve one |
+| `/dupefacts` | Diagnostic: flag near-duplicate facts in `facts`/`recent_facts` via embedding similarity (cosine ≥ `MEMORY_DEDUP_SIM`, same threshold `/addmem`'s auto-dedup uses). Reports candidate pairs only — never merges or deletes anything |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.

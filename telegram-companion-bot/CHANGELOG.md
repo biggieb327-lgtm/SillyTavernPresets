@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.6 — /dupefacts: a read-only diagnostic for near-duplicate facts
+
+**Not a fix — a deliberately narrow tool to gather evidence before writing one.**
+Follow-up to `v2026-08-01.5`'s fusion fix: asked whether embeddings could improve
+memory quality further. They can't fix the fusion bug (that was a generation-quality
+problem; embeddings solve retrieval, and `facts`/`recent_facts` are injected into every
+prompt unconditionally — there's no retrieval step for embeddings to improve). But
+`_summarize()`/`_consolidate_facts()`'s own dedup is exact-lowercase-string matching
+only, which would miss a fact reworded across consolidation passes sitting alongside
+its near-twin — and semantic dedup already exists for the *other* memory tier
+(`_is_semantic_dup`, gating `/addmem`'s auto path at `MEMORY_DEDUP_SIM`, default 0.92)
+but was never extended to facts.
+
+**Deliberately not auto-merge.** A similarity threshold with no real data behind it
+risks flagging genuinely distinct facts (two different Costco trips, worded
+similarly) as duplicates and silently discarding one — a new failure mode introduced
+speculatively rather than fixing an observed one. `/dupefacts` only reports candidate
+pairs for a human to judge; nothing is merged or deleted.
+
+**Shipped:**
+- `_embed_and_cache(text)` — like `_embed_memory_line` but returns the vector; shares
+  `_embeddings_cache`/`embeddings.json` with the memories.txt path, so facts get a
+  durable, reusable embedding cache for free.
+- `_find_near_duplicate_pairs(items, vecs, threshold)` — pure, the diagnostic sibling
+  of `_is_semantic_dup`: instead of "is this one new item a duplicate of anything,"
+  surfaces every near-duplicate pair already sitting in one list.
+- `/dupefacts` command (`_is_allowed`-gated, same as `/reviewmem`/`/editmem`/
+  `/sourcemem` — not admin-only): checks `facts` and `recent_facts` independently,
+  reports pairs at cosine ≥ `MEMORY_DEDUP_SIM` with their similarity score, or says
+  plainly that none were found. Reuses `MEMORY_DEDUP_SIM` rather than adding a new env
+  var — this is explicitly a temporary evidence-gathering tool, not a permanent
+  feature needing its own tunable.
+
+**Tests:** `TestFindNearDuplicatePairs` (pure, synthetic vectors, no network),
+`TestEmbedAndCache` (cache hit/miss/failure via a monkeypatched `_embed_text`), and
+`TestDupefactsCmd` (reports a real pair, says "none" plainly when there are none,
+never mutates `facts`/`recent_facts`, and a disallowed user gets nothing). The
+disallowed-user gate was break-tested RED (temporarily removed the `_is_allowed`
+check, confirmed the test caught it) before being trusted, restored via the Edit tool.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 729/729, `run-evals.sh`
+32/32 green.
+
 ## v2026-08-01.5 — recent-memory facts stopped fusing events with commentary about them
 
 **Root cause: `_summarize()`'s prompt had no instruction against conflating two

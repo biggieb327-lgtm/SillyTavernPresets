@@ -4917,3 +4917,166 @@ class TestFactAtomicity:
         src = inspect.getsource(bot._consolidate_facts)
         assert "ONE concrete thing" in src
         assert "do not fuse" in src.lower()
+
+
+class TestFindNearDuplicatePairs:
+    """Diagnostic-only sibling of _is_semantic_dup: surfaces every near-duplicate pair
+    already sitting in a list, for /dupefacts to report -- built 2026-08-01 to gather
+    real evidence on whether facts/recent_facts accumulate reworded near-duplicates
+    (the exact-string dedup in _summarize()/_consolidate_facts() would miss), before
+    any auto-merge logic gets written."""
+
+    def test_finds_a_pair_above_threshold(self):
+        items = ["went to costco", "went to costco again"]
+        vecs = [[1.0, 0.0], [0.99, 0.01]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.92)
+        assert out == [(pytest.approx(bot._cosine_sim(vecs[0], vecs[1])), items[0], items[1])]
+
+    def test_distinct_items_not_flagged(self):
+        items = ["went to costco", "started a new job"]
+        vecs = [[1.0, 0.0], [0.0, 1.0]]
+        assert bot._find_near_duplicate_pairs(items, vecs, 0.92) == []
+
+    def test_missing_vector_skipped_not_flagged(self):
+        items = ["a", "b", "c"]
+        vecs = [[1.0, 0.0], None, [1.0, 0.0]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.92)
+        # only the a/c pair has both vectors present
+        assert out == [(1.0, "a", "c")]
+
+    def test_sorted_highest_similarity_first(self):
+        items = ["a", "b", "c"]
+        vecs = [[1.0, 0.0], [0.95, 0.05], [0.99, 0.01]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.9)
+        sims = [s for s, _, _ in out]
+        assert sims == sorted(sims, reverse=True)
+
+    def test_single_item_no_pairs(self):
+        assert bot._find_near_duplicate_pairs(["only one"], [[1.0, 0.0]], 0.92) == []
+
+    def test_empty_list(self):
+        assert bot._find_near_duplicate_pairs([], [], 0.92) == []
+
+
+class TestEmbedAndCache:
+    def setup_method(self):
+        self._orig = dict(bot._embeddings_cache)
+        self._orig_embed_text = bot._embed_text
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig)
+        bot._embed_text = self._orig_embed_text
+
+    def test_returns_cached_vector_without_reembedding(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache["already known"] = [1.0, 0.0]
+        calls = []
+        bot._embed_text = lambda t: calls.append(t) or [0.0, 1.0]
+        out = bot._embed_and_cache("already known")
+        assert out == [1.0, 0.0]
+        assert calls == []
+
+    def test_embeds_and_caches_on_miss(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: [0.5, 0.5]
+        out = bot._embed_and_cache("new fact")
+        assert out == [0.5, 0.5]
+        assert bot._embeddings_cache["new fact"] == [0.5, 0.5]
+
+    def test_embed_failure_returns_none_and_does_not_cache(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: None
+        assert bot._embed_and_cache("unembeddable") is None
+        assert "unembeddable" not in bot._embeddings_cache
+
+    def test_strips_whitespace_for_the_cache_key(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: [1.0, 0.0]
+        bot._embed_and_cache("  padded text  ")
+        assert "padded text" in bot._embeddings_cache
+        assert "  padded text  " not in bot._embeddings_cache
+
+
+class TestDupefactsCmd:
+    """Behavioral check that the command wires the pure pieces together correctly and
+    stays strictly read-only (facts/recent_facts must be byte-identical after)."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_embed_text = bot._embed_text
+        self._orig_facts = dict(bot.facts)
+        self._orig_recent = dict(bot.recent_facts)
+        self._orig_allowed = set(bot.ALLOWED_USERS)
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._embed_text = self._orig_embed_text
+        bot.facts.clear()
+        bot.facts.update(self._orig_facts)
+        bot.recent_facts.clear()
+        bot.recent_facts.update(self._orig_recent)
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._orig_allowed)
+
+    def _run(self, chat_id, user_id=1):
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=chat_id),
+            effective_user=SimpleNamespace(id=user_id))
+        asyncio.run(bot.dupefacts_cmd(update, None))
+        return msg.sent
+
+    def test_reports_a_near_duplicate_pair(self):
+        chat_id = 555001
+        bot.ALLOWED_USERS.clear()  # empty = _is_allowed opens the door to anyone
+        bot._embeddings_cache.clear()
+        bot.recent_facts[chat_id] = [
+            "Costco food court trip: a joke about it",
+            "Costco food court trip: basically the same joke reworded",
+        ]
+        bot.facts[chat_id] = []
+        bot._embed_text = lambda t: [1.0, 0.0] if "Costco" in t else [0.0, 1.0]
+        sent = self._run(chat_id)
+        assert any("near-duplicate" in s.lower() or "match" in s.lower() for s in sent)
+        assert any("%" in s for s in sent)
+
+    def test_no_duplicates_says_so_plainly(self):
+        chat_id = 555002
+        bot.ALLOWED_USERS.clear()
+        bot._embeddings_cache.clear()
+        bot.recent_facts[chat_id] = ["went to costco", "started a new job"]
+        bot.facts[chat_id] = []
+        bot._embed_text = lambda t: [1.0, 0.0] if "costco" in t else [0.0, 1.0]
+        sent = self._run(chat_id)
+        assert any("no near-duplicate" in s.lower() for s in sent)
+
+    def test_never_mutates_facts_or_recent_facts(self):
+        chat_id = 555003
+        bot.ALLOWED_USERS.clear()
+        bot._embeddings_cache.clear()
+        before_recent = ["a", "b"]
+        before_facts = ["c"]
+        bot.recent_facts[chat_id] = list(before_recent)
+        bot.facts[chat_id] = list(before_facts)
+        bot._embed_text = lambda t: [1.0, 0.0]
+        self._run(chat_id)
+        assert bot.recent_facts[chat_id] == before_recent
+        assert bot.facts[chat_id] == before_facts
+
+    def test_disallowed_user_gets_nothing(self):
+        chat_id = 555004
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.add(424242)  # non-empty and excludes the test user below
+        bot.recent_facts[chat_id] = ["a", "b"]
+        bot.facts[chat_id] = []
+        sent = self._run(chat_id, user_id=99999)
+        assert sent == []

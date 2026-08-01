@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.5"
+BOT_VERSION = "2026-08-01.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1668,6 +1668,23 @@ def _embed_memory_line(line: str, precomputed_vec: list[float] | None = None):
         _embeddings_dirty = True
 
 
+def _embed_and_cache(text: str) -> list[float] | None:
+    """Like _embed_memory_line, but returns the vector instead of only caching it as
+    a side effect. Shares _embeddings_cache/embeddings.json with the memories.txt
+    semantic path -- the cache is just {text: vector}, agnostic to which collection a
+    string came from, so facts get the same durable, reusable cache for free."""
+    global _embeddings_dirty
+    key = text.strip()
+    cached = _embeddings_cache.get(key)
+    if cached:
+        return cached
+    vec = _embed_text(key)
+    if vec:
+        _embeddings_cache[key] = vec
+        _embeddings_dirty = True
+    return vec
+
+
 def _semantic_recall_vec(q_vec: list[float], entries: list[str],
                          top_k: int = 5) -> list[tuple[float, str]]:
     """Pure cosine ranking of entries against a precomputed query vector (no HTTP).
@@ -1700,6 +1717,28 @@ def _is_semantic_dup(vec: list[float], existing_vecs: list[list[float]],
     if not vec or not existing_vecs or threshold <= 0:
         return False
     return any(_cosine_sim(vec, ev) >= threshold for ev in existing_vecs if ev)
+
+
+def _find_near_duplicate_pairs(items: list[str], vecs: list, threshold: float
+                               ) -> list[tuple[float, str, str]]:
+    """Pure: given parallel texts and precomputed vectors (same index = same item),
+    return every pair at or above cosine `threshold`, highest similarity first.
+    Diagnostic-only sibling of _is_semantic_dup (which answers "is this ONE new item
+    a duplicate of anything existing") -- this instead surfaces ALL near-duplicate
+    pairs already sitting in one list, for /dupefacts to report, never merge. Missing
+    vectors (embed failures) are skipped, not treated as a non-match worth reporting."""
+    found = []
+    for i in range(len(items)):
+        if not vecs[i]:
+            continue
+        for j in range(i + 1, len(items)):
+            if not vecs[j]:
+                continue
+            sim = _cosine_sim(vecs[i], vecs[j])
+            if sim >= threshold:
+                found.append((sim, items[i], items[j]))
+    found.sort(key=lambda p: p[0], reverse=True)
+    return found
 
 
 def _load_lore_embeddings():
@@ -7728,6 +7767,46 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic only -- reports candidate near-duplicate facts via embedding
+    similarity, never merges or deletes anything. _summarize()/_consolidate_facts()'s
+    own dedup is exact-lowercase-string matching, which misses a fact reworded across
+    consolidation passes sitting alongside its near-twin. Built 2026-08-01 to gather
+    real evidence before writing any auto-merge logic -- a similarity threshold with
+    no data behind it risks flagging genuinely distinct facts (two different Costco
+    trips, worded similarly) as duplicates, so this surfaces candidates for a human
+    to judge rather than acting on them."""
+    if not _is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "🔍 Checking for near-duplicate facts (embedding compare, may take a moment)...")
+
+    async def _check(items):
+        items = [f.strip() for f in (items or []) if isinstance(f, str) and f.strip()]
+        if len(items) < 2:
+            return []
+        vecs = await asyncio.to_thread(lambda: [_embed_and_cache(f) for f in items])
+        return _find_near_duplicate_pairs(items, vecs, MEMORY_DEDUP_SIM)
+
+    long_dupes = await _check(facts.get(chat_id))
+    recent_dupes = await _check(recent_facts.get(chat_id))
+    await asyncio.to_thread(_save_embeddings)
+
+    if not long_dupes and not recent_dupes:
+        await update.message.reply_text(
+            f"No near-duplicate facts found (cosine ≥ {MEMORY_DEDUP_SIM:.2f} — the "
+            f"same threshold /addmem's auto-dedup already uses).")
+        return
+
+    lines = [f"Near-duplicate candidates (cosine ≥ {MEMORY_DEDUP_SIM:.2f}) — review "
+             f"only, nothing merged or deleted:"]
+    for label, dupes in (("long-term", long_dupes), ("recent", recent_dupes)):
+        for sim, a, b in dupes:
+            lines.append(f"\n[{label}] {sim:.0%} match\n- {a}\n- {b}")
+    await _reply_chunked(update, "\n".join(lines))
+
+
 async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update.effective_user.id):
         return
@@ -12838,6 +12917,7 @@ _BASE_COMMANDS = [
     BotCommand("editmem", "Edit a memory note by number"),
     BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
+    BotCommand("dupefacts", "Diagnostic: flag near-duplicate facts (reports only, no merge)"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
@@ -13107,6 +13187,7 @@ def main():
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
+    app.add_handler(CommandHandler("dupefacts", dupefacts_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
