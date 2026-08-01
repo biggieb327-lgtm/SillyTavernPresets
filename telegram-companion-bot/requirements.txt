@@ -6,17 +6,19 @@ pypdf>=4.0,<5.0
 Pillow>=10.0,<11.0
 
 # Optional — Garmin health feed only (GARMIN_EMAIL/GARMIN_PASSWORD). Deliberately NOT a
-# hard requirement: four of six instances have no watch, the phone venv is shared, and a
-# venv rebuild shouldn't pull a dep most bots never import. bot.py imports it in a
+# hard requirement: not every instance has a watch, the venv is shared across all seven,
+# and a venv rebuild shouldn't pull a dep most bots never import. bot.py imports it in a
 # try/except and reports "inert" in /audit when credentials exist without the library.
 #
-# Install into the VENV, not system python — the bots run ~/telegram-bot/venv/bin/python,
-# so a bare `pip install` lands somewhere they never look and /audit keeps saying "inert":
-#     ~/telegram-bot/venv/bin/pip install garminconnect       # phone
-#     /opt/telegram-bots/venv/bin/pip install garminconnect   # VPS
+# Install into the VENV, not system python — every instance runs
+# /opt/telegram-bots/venv/bin/python, so a bare `pip install` lands somewhere it never
+# looks and /audit keeps saying "inert":
+#     /opt/telegram-bots/venv/bin/pip install garminconnect
 # Then /restart that bot — the import happens once at module load.
 #
-# Confirmed installable on Termux under Python 3.14.6 (2026-07-25), despite 0.3.x needing
-# curl_cffi -> cffi. If a future version won't build there, `garminconnect<0.3` uses
-# pure-Python garth instead (but pulls Rust-based pydantic).
+# Was confirmed installable on Termux under Python 3.14.6 (2026-07-25), despite 0.3.x
+# needing curl_cffi -> cffi; not independently re-confirmed on the VPS's Python 3.12,
+# though wheels are readily available there for everything else in this file (see
+# CLAUDE.md Stack). If a version won't build, `garminconnect<0.3` uses pure-Python garth
+# instead (but pulls Rust-based pydantic).
 # garminconnect>=0.3
