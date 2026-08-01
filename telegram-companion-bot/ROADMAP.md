@@ -380,7 +380,7 @@ constraints; check their assumptions before acting on them.
   protected, so a new or reworded block can't silently become droppable.
 - `CONTEXT_TOKEN_BUDGET` still defaults to 0/off. Set it from the `/audit` numbers.
 
-### 3.13 Reduce the protected prompt floor — **mechanism + content both shipped; fleet-wide adoption unconfirmed**
+### 3.13 ~~Reduce the protected prompt floor~~ ✅ (mechanism + content shipped, fleet-wide adoption owner-confirmed 2026-08-01)
 - **Mechanism ✅ (v2026-07-25.5, `PRESET_FILES`):** ordered preset layer files, each
   injected as its own block; `sync-cards.sh` and `vps-sync.sh` are layer-aware. Inert by
   default — verified byte-identical prompt for the unset, explicit-single-layer, and legacy
@@ -409,18 +409,18 @@ constraints; check their assumptions before acting on them.
     4,830/4,444 (both ~43% below the 8,503-tok monolith); nora/bonnie/emily/jules land
     within ±35 tok of today's monolith on the full scene stack — the saving is fit, not a
     blanket cut, exactly as intended.
-- **Open — and this is the only piece left, verify before assuming either way:** whether
-  every instance's live `.env` on the VPS actually has `PRESET_FILES` set to its
-  recommended stack. The last explicit status in the changelog (2026-07-26) was "inert —
-  no instance loads any of them yet"; no later entry records a fleet-wide flip, and `.env`
-  files aren't tracked in this repo, so this can't be settled by reading the repo. Check
-  each instance's `/audit` `Preset layers:` line — cass is confirmed on layers
-  (v2026-07-25.6); the rest are unconfirmed, not confirmed-off.
-- **Do not action without the owner** if flipping any instance's `PRESET_FILES` for the
-  first time — `preset.txt` is voice-critical and deliberately tuned (v2026-07-18.1's
-  anti-echo work). `/preset core,rp` (v2026-07-26.1) swaps a stack live from Telegram and
-  `/preset reset` undoes it, so trying a stack costs an evening of conversation, not a
-  deploy.
+- **Fleet-wide adoption — owner-confirmed 2026-08-01, closing the gap the repo alone
+  couldn't settle.** As of the previous entry, the changelog's last explicit status
+  (2026-07-26) was "inert — no instance loads any of them yet," and `.env` files aren't
+  tracked in this repo, so nothing here could confirm the layers were actually live on
+  any instance beyond cass. The owner has now confirmed the layered preset is launched
+  and in use fleet-wide, and is switched live per instance via `/preset` from Telegram
+  (v2026-07-26.1) rather than requiring an `.env` edit + restart per experiment. Treat
+  this owner statement as the record; a per-instance `/audit` `Preset layers:` check is
+  the way to re-confirm it later if it's ever in doubt again.
+- `preset.txt` remains voice-critical and deliberately tuned (v2026-07-18.1's anti-echo
+  work) — any *further* layer change (new content, not just switching among what already
+  exists) still goes through the owner, same as any other voice edit.
 
 ### 3.14 Port the banned-rhetoric block from Chimera v2 into `preset.txt` — S, owner-gated
 - **Evidence:** the 2026-07-25 review of Writer's Block 5 against the root Chimera preset
