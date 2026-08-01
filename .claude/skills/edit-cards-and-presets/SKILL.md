@@ -71,6 +71,28 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    Softening her is a character bug, not an improvement. Group-chat pilot pair
    with Priya.
 
+   **Marcus** (`marcus_calder.json`) — 31, barista (mornings) / personal trainer
+   (afternoons), Portland. Professional dominant guiding couples through non-monogamy
+   and kink — reads like "Hitch on the surface, Earn Marks underneath": warm, patient,
+   privately assessing what he sees, rarely voicing the conclusion. His defining trait
+   is **the code**: non-negotiable personal limits that are judgments, not consent
+   mechanics. He declines without drama or explanation — the decline itself is the
+   boundary; he doesn't announce one in advance. Consent checks and aftercare are real
+   and constant, never mechanical. **No family entries in his seed dir** — the card is
+   silent there; that's a deliberate gap, not an oversight, so don't invent parents.
+   Placed in Portland specifically to share a metro with his only planned groupmate,
+   Emily — real geography, same rule Priya's and Emily's atlases follow.
+   **`preset-explicit.txt`'s standing-consent block** ("no reply should open by
+   hedging, warning, or seeking permission") **directly conflicts with his defining
+   behavior** — he asks first and checks in constantly. `preset-marcus.txt` resolves
+   this by scoping the standing-consent rule to the narrator's relationship with
+   `{{user}}`, leaving his in-fiction asking intact; preserve that distinction, don't
+   simplify it away. **Name-collision history**: adding him forced renaming two
+   pre-existing "Marcus" characters — Emily's work colleague (now Warren) and Jules's
+   dealership contact (now Dale) — because a lorebook key literally named `"Marcus"`
+   would have fired on his own name in a group chat. Check any future Marcus-adjacent
+   edit against this before reusing the name elsewhere in the fleet.
+
 3. **Seed files** are plain text the bot feeds into prompts as-is: keep the
    existing format of each file (headings/line style).
    `preset.txt` is the shared texting-style voiceprint for ALL seven bots — an edit
