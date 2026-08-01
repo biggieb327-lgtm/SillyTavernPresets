@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.7"
+BOT_VERSION = "2026-08-01.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -630,10 +630,12 @@ MEME_FONT_SIZE = _env_int("MEME_FONT_SIZE", "80")
 MEME_MIN_FONT_SIZE = 24
 MEME_DEDUP_SIZE = _env_int("MEME_DEDUP_SIZE", "5")
 _recent_meme_templates: dict = {}  # chat_id -> list of recently used template filenames
-_APPEARANCE_DEFAULT = (
-    "a 29-year-old woman, tall and lanky, half-shaved head with the long side pushed back, "
-    "septum ring, both arms sleeved in tattoos, paint- and ink-stained fingers."
-)
+# Fallback for an unnamed run (no instance dir argument) with no appearance.txt. It must
+# NOT describe any particular character: until v2026-08-01.8 this held a half-shaved head,
+# septum ring and sleeved tattoos, left over from a discarded card that made Priya a tattoo
+# artist (owner, 2026-08-01) -- a look no current character has. State an adult age
+# explicitly for the same reason the named-instance branch below does.
+_APPEARANCE_DEFAULT = "an adult woman in her late 20s."
 _APPEARANCE_FILE = BASE_DIR / "appearance.txt"
 if _APPEARANCE_FILE.exists():
     SELFIE_APPEARANCE = _APPEARANCE_FILE.read_text(encoding="utf-8").strip()
@@ -5476,8 +5478,31 @@ SELFIE_COLD_OUTFITS = {
     "a cropped sweatshirt", "a zip-up over a tee",
 }
 SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
+SELFIE_COLD_F = _env_float("SELFIE_COLD_F", "50")  # at/below this, bare-skin outfits are dropped
 # Kill switch (owner policy 2026-07-18): unset = matching active, 0 = pre-v2026-08-01.7 behavior.
 SELFIE_WEATHER_MATCH = os.getenv("SELFIE_WEATHER_MATCH", "1").lower() not in ("0", "false", "no", "off")
+
+# Outerwear this instance's character puts on to go outside in cool weather. Per-instance
+# because it is a specific object, not a generic layer -- Nora's is Ingrid's inherited
+# courier jacket. Empty (the default) means no outerwear line is added at all.
+OUTDOOR_LAYER = os.getenv("OUTDOOR_LAYER", "").strip()
+
+# --- Daily wardrobe rotation -----------------------------------------------------------
+# She dresses once a day, for that day's weather -- not fresh at random per photo.
+WARDROBE_DAILY = os.getenv("WARDROBE_DAILY", "1").lower() not in ("0", "false", "no", "off")
+WARDROBE_ROTATE_HOUR = _env_int("WARDROBE_ROTATE_HOUR", "7")  # morning: you dress for the day you get
+WARDROBE_RECENT_KEPT = _env_int("WARDROBE_RECENT_KEPT", "4")  # don't repeat the last N days' picks
+# Free-text outfit classification. Owner-authored outfits are arbitrary strings, so this is
+# keyword matching, not a lookup -- deliberately deterministic (no LLM call for a daily job).
+_OUTFIT_WARM_WORDS = (
+    "hoodie", "sweater", "sweatshirt", "coat", "jacket", "beanie", "scarf", "flannel",
+    "thermal", "parka", "fleece", "wool", "layers", "cardigan", "turtleneck", "puffer",
+    "gloves", "boots",
+)
+_OUTFIT_COOL_WORDS = (
+    "tank", "shorts", "sundress", "sandals", "crop", "tee", "t-shirt", "swimsuit",
+    "bikini", "camisole", "linen", "sleeveless",
+)
 # How the photo itself looks
 SELFIE_CAMERA = [
     "harsh on-camera flash, slightly washed out", "soft golden-hour light",
@@ -5534,6 +5559,36 @@ def _weather_is_clear() -> bool:
     so the two claims are asserted separately in the selfie prompt."""
     text = (_weather_cache.get("text") or "").lower()
     return any(w in text for w in ("clear", "sunny"))
+
+
+def _outfit_suits_weather(outfit: str) -> bool:
+    """Is this outfit plausible in the CURRENT reading? Unknown weather suits everything --
+    absent data must never narrow the wardrobe to nothing."""
+    t = _weather_temp_f()
+    if t is None:
+        return True
+    low = (outfit or "").lower()
+    if t >= SELFIE_WARM_F and any(w in low for w in _OUTFIT_WARM_WORDS):
+        return False
+    if t <= SELFIE_COLD_F and any(w in low for w in _OUTFIT_COOL_WORDS):
+        return False
+    return True
+
+
+def _pick_daily_outfit():
+    """Choose today's outfit: weather-appropriate, not one of the last few days'.
+
+    Prefers the owner-curated wardrobe and falls back to the built-in pool when it is
+    empty, so an instance with no /addoutfit history still changes clothes daily.
+    Returns None when there is genuinely nothing to pick."""
+    recent = wardrobe.get("recent") or []
+    for source in (wardrobe.get("outfits") or [], SELFIE_OUTFITS):
+        suitable = [o for o in source if _outfit_suits_weather(o)]
+        if not suitable:
+            continue
+        fresh = [o for o in suitable if o not in recent]
+        return random.choice(fresh or suitable)
+    return None
 
 
 def _weather_scene_pool(pool, cold_set):
@@ -5599,17 +5654,19 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
     current_fit = wardrobe.get("current")
+    # A hand-picked outfit is honored as-is. One the daily rotation chose this morning is
+    # re-checked, because the afternoon can outrun it -- otherwise the day's stale pick
+    # becomes exactly the frozen-snapshot contradiction v2026-08-01.7 removed.
+    if current_fit and wardrobe.get("auto") and SELFIE_WEATHER_MATCH \
+            and not _outfit_suits_weather(current_fit):
+        current_fit = None
     if current_fit:
         bits.append(f"Wearing {current_fit}.")
     elif random.random() < 0.55:
         bits.append(f"Wearing {random.choice(_weather_scene_pool(SELFIE_OUTFITS, SELFIE_COLD_OUTFITS))}.")
-    # Ingrid's canvas jacket is outerwear -- at 70°F it reads as cold/wet Seattle.
-    if outdoors and not (SELFIE_WEATHER_MATCH and _weather_is_warm()) \
-            and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
-        bits.append(
-            "Over that, she's got on Ingrid's oversized vintage canvas courier jacket with the "
-            "sleeves rolled up."
-        )
+    # Outerwear only goes on to go outside, and only when it's cool enough to want it.
+    if outdoors and OUTDOOR_LAYER and not (SELFIE_WEATHER_MATCH and _weather_is_warm()):
+        bits.append(f"Over that, she's got on {OUTDOOR_LAYER}.")
     if scene:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
@@ -7364,6 +7421,10 @@ async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = outfits[idx]
     wardrobe["current"] = text
+    # A hand-picked outfit is owner intent: never weather-filtered, and it holds for the
+    # rest of today by claiming today's rotation stamp. Rotation resumes tomorrow.
+    wardrobe["auto"] = False
+    wardrobe["picked"] = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     save_wardrobe()
     await update.message.reply_text(f"👗 Now wearing: {text}")
 
@@ -10722,6 +10783,40 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
         log.error("[day-events] failed: %s", e)
 
 
+async def wardrobe_rotate_job(context: ContextTypes.DEFAULT_TYPE):
+    """Morning: pick today's outfit for today's weather.
+
+    Runs in the MORNING, not at midnight, and re-reads the weather first. Picking a day's
+    clothes from midnight's reading is the same mistake world.txt makes -- a frozen
+    overnight snapshot standing in for the day (see v2026-08-01.7).
+
+    An outfit set by hand with /outfit holds for the rest of that day: it stamps
+    wardrobe["picked"] with today, and the same-day guard below then skips rotation.
+    Tomorrow the stamp is stale and rotation resumes (owner decision, 2026-08-01)."""
+    if not WARDROBE_DAILY:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    if wardrobe.get("picked") == today:
+        return
+    try:
+        await ensure_weather()
+        pick = _pick_daily_outfit()
+        if not pick:
+            return
+        recent = wardrobe.setdefault("recent", [])
+        recent.append(pick)
+        if len(recent) > WARDROBE_RECENT_KEPT:
+            del recent[:-WARDROBE_RECENT_KEPT]
+        wardrobe["current"] = pick
+        wardrobe["auto"] = True        # rotation's pick -- the selfie prompt may re-check it
+        wardrobe["picked"] = today
+        save_wardrobe()
+        print(f"[wardrobe] {NAME} is wearing: {pick}")
+    except Exception as e:
+        log.warning("[wardrobe] daily rotation failed: %s", e)
+        _count_error("wardrobe")
+
+
 async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
     """Midnight job: archive today's day.txt to memory + a dated file, then generate
     tomorrow's events so she starts the new day with a populated context."""
@@ -13356,6 +13451,11 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
+        if WARDROBE_DAILY:
+            _wr_h = max(0, min(23, WARDROBE_ROTATE_HOUR))
+            wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)
+            app.job_queue.run_daily(wardrobe_rotate_job, time=wardrobe_time)
+            log.info("Daily wardrobe rotation scheduled %02d:00.", _wr_h)
         if GARMIN_ENABLED and _Garmin is not None:
             for _gt in GARMIN_TIMES.split(","):
                 _gt = _gt.strip()

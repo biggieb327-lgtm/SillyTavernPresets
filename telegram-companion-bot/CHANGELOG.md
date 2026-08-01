@@ -7,6 +7,56 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.8 — She dresses once a day, and her jacket exists again
+
+**Three owner-reported items, one subsystem.**
+
+**1. The wardrobe never changed on its own.** `wardrobe["current"]` was only ever set by
+hand via `/outfit`; with nothing set, `build_selfie_prompt` drew a fresh random outfit per
+photo, so she could wear three different things in an hour and nothing in particular on
+any given day. Now `wardrobe_rotate_job` picks one weather-appropriate outfit each morning
+and she wears it all day.
+
+It runs at `WARDROBE_ROTATE_HOUR` (default 07:00 local), **not** at midnight, and re-reads
+the weather first. Picking a day's clothes from midnight's reading is precisely the
+frozen-overnight-snapshot mistake `world.txt` makes and v2026-08-01.7 was written to
+remove — rebuilding it one release later in a new place would have been the joke of the
+week. For the same reason, an outfit the *rotation* chose is re-checked against live
+weather at selfie time and dropped if the afternoon outran it; an outfit set *by hand* is
+never second-guessed.
+
+Selection prefers the `/addoutfit` wardrobe and falls back to the built-in pool when it's
+empty, so an instance with no wardrobe history still changes clothes daily. Free-text
+outfits are classified by keyword (`_OUTFIT_WARM_WORDS`/`_OUTFIT_COOL_WORDS`) against
+`SELFIE_WARM_F`/`SELFIE_COLD_F` — deterministic, and **no LLM call**. Unknown weather
+suits everything: absent data must never narrow the wardrobe to nothing.
+
+`/outfit` holds for the rest of that day and rotation resumes the next morning (owner
+decision, 2026-08-01) — implemented by having `/outfit` claim the day's `picked` stamp,
+which the job's same-day guard then honors without needing a second rule.
+
+**2. Ingrid's courier jacket had never once appeared.** It was gated on
+`SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, which holds only when `not IS_NAMED_INSTANCE`
+— an unnamed run from the code directory. `deploy/bot@.service` is
+`ExecStart=… bot.py /opt/telegram-bots/%i`, so every live instance is named and the branch
+was dead on all seven. It is now `OUTDOOR_LAYER`, per-instance env config: a specific
+object, unset by default, added only outdoors and only when it isn't warm. **Nora's
+instance needs `OUTDOOR_LAYER` set in her `.env` for the jacket to come back** — this
+release makes it possible, not automatic.
+
+**3. `_APPEARANCE_DEFAULT` described nobody.** A half-shaved head, septum ring and sleeved
+tattoos — a relic of a discarded card that made Priya a tattoo artist (owner, 2026-08-01).
+Unreachable on the fleet for the same argv reason, but wrong in the file. Now a neutral
+`"an adult woman in her late 20s."`, keeping the explicit adult age that Gemini's safety
+filter needs.
+
+**Verification:** 19 new tests; four load-bearing assertions break-tested RED
+independently (same-day guard, stale-auto-outfit re-check, warmth gate on outerwear,
+unknown-weather default). 759/759 pytest, 32/32 evals. One existing v2026-08-01.7
+assertion had been silently defanged by `OUTDOOR_LAYER` defaulting to empty — its
+"courier jacket" check could no longer fail — and was repaired to set the layer explicitly
+(C13).
+
 ## v2026-08-01.7 — Nora sent a rainy selfie on a sunny day
 
 **Root cause: `build_selfie_prompt` composed the scene from weather-blind random pools,
@@ -57,6 +107,14 @@ gated on `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, and that default describes 
 half-shaved head, septum ring and sleeved tattoos, which is Priya's look, not Nora's. Any
 instance falling through to the default gets both. Not touched here (out of scope for a
 weather fix), and not yet confirmed against the live instance dirs.
+
+> **Correction (v2026-08-01.8):** the paragraph above is wrong, and the flagged
+> uncertainty is what was wrong. `_APPEARANCE_DEFAULT` is reachable only when
+> `not IS_NAMED_INSTANCE`, i.e. when bot.py runs with no instance-directory argument.
+> `deploy/bot@.service` is `ExecStart=… bot.py /opt/telegram-bots/%i`, so all seven live
+> instances are named, and neither the tattoo-artist description nor the jacket has ever
+> reached a live selfie. The description was a relic of a discarded card (owner,
+> 2026-08-01); the jacket was unreachable code. Both are fixed in v2026-08-01.8.
 
 ## v2026-08-01.6 — /dupefacts: a read-only diagnostic for near-duplicate facts
 

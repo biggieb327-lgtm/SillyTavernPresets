@@ -5092,12 +5092,23 @@ class TestSelfieWeatherMatching:
     def setup_method(self):
         self._saved = dict(bot._weather_cache)
         self._match = bot.SELFIE_WEATHER_MATCH
+        self._layer = bot.OUTDOOR_LAYER
+        self._wardrobe = dict(bot.wardrobe)
         bot.SELFIE_WEATHER_MATCH = True
+        # OUTDOOR_LAYER defaults to "" since v2026-08-01.8, which would make the
+        # "courier jacket" half of _cold_markers unfalsifiable. Set it so the
+        # assertion still tests something (C13).
+        bot.OUTDOOR_LAYER = "Ingrid's oversized vintage canvas courier jacket"
+        bot.wardrobe.clear()
+        bot.wardrobe.update({"outfits": [], "current": None})
 
     def teardown_method(self):
         bot._weather_cache.clear()
         bot._weather_cache.update(self._saved)
         bot.SELFIE_WEATHER_MATCH = self._match
+        bot.OUTDOOR_LAYER = self._layer
+        bot.wardrobe.clear()
+        bot.wardrobe.update(self._wardrobe)
 
     def _set(self, text):
         bot._weather_cache["text"] = text
@@ -5190,3 +5201,187 @@ class TestSelfieWeatherMatching:
             if any(m in prompt for m in self._cold_markers()):
                 hits += 1
         assert hits > 0
+
+
+class TestDailyWardrobeRotation:
+    """v2026-08-01.8: she dresses once a day, for that day's weather, instead of drawing a
+    fresh random outfit per photo. Rotation runs in the MORNING and re-reads the weather --
+    picking a day's clothes from midnight's reading would rebuild the frozen-snapshot
+    contradiction v2026-08-01.7 removed."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._wardrobe = dict(bot.wardrobe)
+        self._daily, self._match = bot.WARDROBE_DAILY, bot.SELFIE_WEATHER_MATCH
+        self._save = bot.save_wardrobe
+        bot.save_wardrobe = lambda: None          # keep tests off the instance dir
+        bot.WARDROBE_DAILY = bot.SELFIE_WEATHER_MATCH = True
+        bot.wardrobe.clear()
+        bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.save_wardrobe = self._save
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+        bot.WARDROBE_DAILY, bot.SELFIE_WEATHER_MATCH = self._daily, self._match
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def _today(self):
+        from datetime import datetime
+        return (datetime.now(bot.TZ) if bot.TZ else datetime.now()).date().isoformat()
+
+    def _rotate(self):
+        import asyncio
+        asyncio.run(bot.wardrobe_rotate_job(None))
+
+    # --- classification ---
+    def test_warm_day_rejects_warm_clothing(self):
+        self._set("78°F, clear, wind 4mph")
+        assert not bot._outfit_suits_weather("an oversized hoodie")
+        assert bot._outfit_suits_weather("a tank top")
+
+    def test_cold_day_rejects_bare_skin(self):
+        self._set("38°F, light snow, wind 12mph")
+        assert not bot._outfit_suits_weather("shorts and sandals")
+        assert bot._outfit_suits_weather("a wool coat")
+
+    def test_unknown_weather_suits_everything(self):
+        """Absent data must never narrow the wardrobe to nothing."""
+        self._set("")
+        assert bot._outfit_suits_weather("an oversized hoodie")
+        assert bot._outfit_suits_weather("a tank top")
+
+    # --- picking ---
+    def test_prefers_owner_wardrobe_over_builtin_pool(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe["outfits"] = ["a linen shirt she stole"]
+        assert bot._pick_daily_outfit() == "a linen shirt she stole"
+
+    def test_falls_back_to_builtin_pool_when_wardrobe_empty(self):
+        """An instance with no /addoutfit history still changes clothes daily."""
+        self._set("75°F, clear, wind 5mph")
+        assert bot._pick_daily_outfit() in bot.SELFIE_OUTFITS
+
+    def test_falls_back_when_every_owner_outfit_is_wrong_for_the_weather(self):
+        self._set("85°F, clear, wind 2mph")
+        bot.wardrobe["outfits"] = ["a parka", "a wool coat"]
+        pick = bot._pick_daily_outfit()
+        assert pick in bot.SELFIE_OUTFITS and bot._outfit_suits_weather(pick)
+
+    def test_avoids_recent_picks(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe["outfits"] = ["a tank top", "a loose t-shirt"]
+        bot.wardrobe["recent"] = ["a tank top"]
+        assert bot._pick_daily_outfit() == "a loose t-shirt"
+
+    def test_picked_outfit_always_suits_the_weather(self):
+        import random
+        self._set("82°F, clear, wind 3mph")
+        for seed in range(80):
+            random.seed(seed)
+            assert bot._outfit_suits_weather(bot._pick_daily_outfit())
+
+    # --- the job ---
+    def test_rotation_sets_current_and_stamps_today(self):
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        assert bot.wardrobe["current"]
+        assert bot.wardrobe["auto"] is True
+        assert bot.wardrobe["picked"] == self._today()
+
+    def test_rotation_is_idempotent_within_a_day(self):
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        first = bot.wardrobe["current"]
+        self._rotate()
+        assert bot.wardrobe["current"] == first
+
+    def test_manual_outfit_holds_for_the_rest_of_the_day(self):
+        """Owner decision 2026-08-01: /outfit wins today, rotation resumes tomorrow."""
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe.update({"current": "a parka", "auto": False, "picked": self._today()})
+        self._rotate()
+        assert bot.wardrobe["current"] == "a parka"
+        assert bot.wardrobe["auto"] is False
+
+    def test_rotation_resumes_the_next_day(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe.update({"current": "a parka", "auto": False, "picked": "2020-01-01"})
+        self._rotate()
+        assert bot.wardrobe["current"] != "a parka"
+        assert bot.wardrobe["auto"] is True
+
+    def test_kill_switch_disables_rotation(self):
+        bot.WARDROBE_DAILY = False
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        assert bot.wardrobe.get("current") is None
+
+    # --- the loop back into the selfie prompt ---
+    def test_stale_auto_outfit_is_dropped_when_the_afternoon_outruns_it(self):
+        import random
+        self._set("84°F, clear, wind 3mph")
+        bot.wardrobe.update({"current": "a heavy wool coat", "auto": True})
+        for seed in range(40):
+            random.seed(seed)
+            assert "heavy wool coat" not in bot.build_selfie_prompt("", None)
+
+    def test_hand_picked_outfit_is_honored_even_against_the_weather(self):
+        """Owner intent is not second-guessed -- only rotation's own pick is re-checked."""
+        import random
+        self._set("84°F, clear, wind 3mph")
+        bot.wardrobe.update({"current": "a heavy wool coat", "auto": False})
+        random.seed(0)
+        assert "a heavy wool coat" in bot.build_selfie_prompt("", None)
+
+
+class TestOutdoorLayer:
+    """v2026-08-01.8: outerwear is per-instance config. It was gated on
+    `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, which is only true for an unnamed run --
+    every live instance passes its directory as argv[1], so the line was unreachable."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._layer = bot.OUTDOOR_LAYER
+        self._wardrobe = dict(bot.wardrobe)
+        bot.OUTDOOR_LAYER = "Ingrid's oversized vintage canvas courier jacket"
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.OUTDOOR_LAYER = self._layer
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def _prompts(self, n=300):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", None))
+        return out
+
+    def test_layer_appears_outdoors_in_cool_weather(self):
+        self._set("47°F, overcast, wind 8mph")
+        assert any("courier jacket" in p for p in self._prompts())
+
+    def test_layer_never_appears_on_a_warm_day(self):
+        self._set("78°F, clear, wind 4mph")
+        assert not any("courier jacket" in p for p in self._prompts())
+
+    def test_unset_layer_adds_nothing(self):
+        bot.OUTDOOR_LAYER = ""
+        self._set("47°F, overcast, wind 8mph")
+        assert not any("Over that" in p for p in self._prompts())
+
+    def test_appearance_default_names_no_character(self):
+        """The old default described a discarded tattoo-artist Priya card (owner, 2026-08-01)."""
+        low = bot._APPEARANCE_DEFAULT.lower()
+        for relic in ("tattoo", "septum", "half-shaved", "ink-stained", "sleeved"):
+            assert relic not in low

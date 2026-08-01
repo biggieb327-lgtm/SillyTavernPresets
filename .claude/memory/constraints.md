@@ -421,6 +421,17 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-01 — Wrote an unverified inference into the changelog, the operational log *and* a
+  report to the owner, in assertive voice with the hedge appended: "any instance falling through
+  to the default gets a different woman's face and Nora's jacket… not yet confirmed against the
+  live instance dirs". One `grep ExecStart deploy/bot@.service` the next turn showed every
+  instance passes its directory as argv[1], so `_APPEARANCE_DEFAULT` is unreachable live and the
+  claim was simply false. The hedge did not save it — the claim was still the headline, and it
+  was already in two permanent records. → when a claim is unverified and the verifying command is
+  one grep away, run the grep; if it genuinely can't be run, write the sentence as the open
+  question ("unknown whether X — check with Y") rather than as a finding with a disclaimer.
+  **C8 family** (ask what a reading actually measures) one step earlier: this is about what gets
+  written down, not what gets concluded. Promote if it recurs.
 - 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
   — leftover scaffolding from two half-finished versions of the same line, committed to the file
   in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on
