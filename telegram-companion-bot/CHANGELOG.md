@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.4 — /model shows every model role, not just chat
+
+**Root cause of the request:** while investigating a live memory-quality complaint
+(Priya re-surfacing a two-day-old topic as if it were new), the diagnosis needed to
+know which model was actually running `SUMMARY_MODEL`/`MOOD_MODEL` on that instance —
+and there was no cheap way to check. `/model` showed only the chat model.
+`/setmodel` with no args already lists every `MODEL_ROLES` entry, but it also fetches
+the live subscription model list and adds picker/usage framing, so it's not the
+quick glance a live-ops question needs.
+
+**Shipped:** `/model` now lists every role in `MODEL_ROLES` (chat, summary, caption,
+reaction, mood, vision, fallback, visionfallback) with its current effective value,
+reading straight off `globals()[var]` — the same mechanism `/setmodel` already writes
+through, so a live override shows up here too, not just the `.env`-loaded default.
+No live API call added; still cheap enough to check on every incident. Can't drift
+from `/setmodel`'s own role list because both read the same `MODEL_ROLES` dict.
+
+**Tests:** `TestModelInfoShowsEveryRole` — every role appears in the reply, the actual
+configured value shows (not a placeholder), and a source-level check that no
+subscription-list call was added. Break-tested RED (reverted to the single-model
+version, confirmed the role-coverage assertion fails with the missing role named)
+before being trusted, restored by re-editing per constraints C15.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 713/713, `run-evals.sh`
+32/32 green.
+
 ## v2026-08-01.3 — MEMORY_TOKEN_BUDGET now means real tokens (ROADMAP 4.4, owner-approved)
 
 **What this closes:** since v2026-07-26.2 made every other reported token figure real

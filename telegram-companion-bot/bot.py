@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.3"
+BOT_VERSION = "2026-08-01.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6420,9 +6420,14 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"🤖 Character: {NAME}\nModel: {NANOGPT_MODEL}"
-    )
+    """Quick read-only glance at every model role — unlike /setmodel with no args,
+    this makes no live API call and adds no usage/picker framing, so it's cheap to
+    check often. MODEL_ROLES is the single source of roles; this can't drift from
+    /setmodel's own list because it reads the same dict."""
+    lines = [f"🤖 Character: {NAME}"]
+    for role, var in MODEL_ROLES.items():
+        lines.append(f"{role}: {globals()[var] or '(unset)'}")
+    await update.message.reply_text("\n".join(lines))
 
 
 # --- Live-configurable models & settings (/setmodel, /settings) ---

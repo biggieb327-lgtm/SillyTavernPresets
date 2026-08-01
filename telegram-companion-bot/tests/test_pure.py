@@ -4858,3 +4858,41 @@ class TestCommandMenuMirrorsHandlers:
         menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
         dead = menu - names
         assert not dead, f"in the menu but no CommandHandler registers it: {sorted(dead)}"
+
+
+class TestModelInfoShowsEveryRole:
+    """/model used to show only the chat model, so a background slot (SUMMARY_MODEL,
+    MOOD_MODEL, ...) silently running something unexpected had no quick way to check
+    without /setmodel's heavier no-args output (a live subscription-list API call plus
+    picker framing). Requested after a live memory-quality investigation where the
+    fix candidate was exactly "which model is actually running this slot?"."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def _run(self):
+        msg = self._Msg()
+        update = SimpleNamespace(message=msg)
+        asyncio.run(bot.model_info(update, None))
+        assert len(msg.sent) == 1
+        return msg.sent[0]
+
+    def test_every_model_role_appears(self):
+        text = self._run()
+        for role in bot.MODEL_ROLES:
+            assert f"{role}:" in text, role
+
+    def test_shows_the_actual_configured_value_not_a_placeholder(self):
+        text = self._run()
+        assert bot.NANOGPT_MODEL in text
+
+    def test_no_live_api_call(self):
+        """Unlike /setmodel's no-args path, /model must stay cheap enough to check
+        often -- inspect the source rather than trying to detect a network call."""
+        import inspect
+        src = inspect.getsource(bot.model_info)
+        assert "_nanogpt_subscription_models" not in src

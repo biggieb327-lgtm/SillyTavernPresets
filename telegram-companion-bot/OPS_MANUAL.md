@@ -242,7 +242,7 @@ These files shape what the character knows and references. All are editable from
 ### Settings & Info
 | Command | What it does |
 |---|---|
-| `/model` | Show active models |
+| `/model` | Show every model role and its current value (chat, summary, caption, reaction, mood, vision, fallback, visionfallback) — read-only, no API call |
 | `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `vision`, `reaction`, `mood`, `fallback`) |
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats (subscription limits from NanoGPT) |
