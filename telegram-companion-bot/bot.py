@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.4"
+BOT_VERSION = "2026-08-01.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5982,7 +5982,12 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         f'  "facts": a curated list of specific, meaningful things about {uname} — events, '
         f"current situations, inside jokes, things worth carrying forward. Merge with the prior "
         f"facts; keep what a person would actually remember and care about (skip generic filler "
-        f"or purely transient observations); drop duplicates.\n"
+        f"or purely transient observations); drop duplicates. Each fact must describe ONE "
+        f"concrete thing, in one plain sentence, resolvable on its own without another fact for "
+        f"context. Do not fuse an event with separate commentary about it — a later remark on "
+        f"how something was phrased, categorized, or argued over — into a single sentence: state "
+        f"what happened; drop the meta-commentary unless it is itself the memorable point, and "
+        f"if so, state only that, plainly.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
     user = f"EXISTING MEMORY:\n{existing}\n\nNEW MESSAGES:\n{convo}"
@@ -6022,9 +6027,13 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: 
         f"You maintain {NAME}'s memory of {uname}. The facts list has grown too long. "
         f"Consolidate it: merge near-duplicates, combine related facts into one, drop trivia, and "
         f"fold superseded or minor details into the summary so nothing important is lost. Keep at "
-        f"most {target} facts — the most durable and relevant ones. Keep the "
-        f"summary as a first-person narrative in {NAME}'s own voice, like a memory she could "
-        f"recall and recount. Respond with ONLY a JSON object: "
+        f"most {target} facts — the most durable and relevant ones. When combining, the result "
+        f"must stay ONE concrete thing in one plain sentence, resolvable on its own — do not fuse "
+        f"an event with separate commentary about it (how it was phrased, categorized, or argued "
+        f"over) just because they share a topic. If two facts don't reduce to one clean sentence "
+        f"without cross-referencing each other, keep them as two facts rather than force a merge. "
+        f"Keep the summary as a first-person narrative in {NAME}'s own voice, like a memory she "
+        f"could recall and recount. Respond with ONLY a JSON object: "
         f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
     )
     raw = call_nanogpt(

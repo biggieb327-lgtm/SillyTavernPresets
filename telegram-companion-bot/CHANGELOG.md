@@ -7,6 +7,57 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.5 — recent-memory facts stopped fusing events with commentary about them
+
+**Root cause: `_summarize()`'s prompt had no instruction against conflating two
+different things into one fact.** Owner reported Priya re-surfacing a two-day-old topic
+as if she'd never been told — `/recall costco` turned up the actual culprit: *"Costco
+food court trip: 'in and out like a bad lover'—Priya called it self-reporting; Brian
+corrected it was a simile."* That's not one memory, it's three folded into a run-on
+sentence — the trip itself, a line Priya said about it, and a separate argument over
+how to categorize her own phrasing.
+
+**Ruled out first, not assumed:** checked whether a weak background model was the
+cause (`v2026-07-29.3`'s `SUMMARY_MODEL`-doing-caption-work bug was the obvious prior).
+It wasn't — `priya/.env` has no `SUMMARY_MODEL` override, so `_summarize()` was running
+on her own chat model, `zai-org/glm-5.1:thinking`, a strong reasoning model. A capable
+model still produced this, because nothing in the prompt told it not to: "a curated
+list of specific, meaningful things... a continuous recollection, not a list of events"
+is a compression instruction with no constraint keeping each fact resolvable on its
+own. `bot-code-invariants` #17 already mandates exactly this kind of discipline for
+`user_notes.txt` extraction (confidence gating, quote grounding, null-over-guess) — the
+`recent_facts`/summary pipeline had none of it.
+
+**Fix:** both `_summarize()` (writes new facts from scrolled-off messages) and
+`_consolidate_facts()` (merges the list when it passes `RECENT_FACTS_MAX`) now require
+each fact to describe ONE concrete thing, in one plain sentence, resolvable without
+cross-referencing another fact — and explicitly forbid fusing an event with separate
+commentary about it (a remark on how something was phrased, categorized, or argued
+over) just because they share a topic. `_consolidate_facts` additionally: if two facts
+don't reduce to one clean sentence without cross-referencing each other, keep them as
+two rather than force a merge — since repeated consolidation passes compound this exact
+error over time with no way to re-check against the original messages once they've
+scrolled out of context.
+
+**Prompt-only change, both functions still route through `SUMMARY_MODEL`** — no new
+call, no new env var, no kill switch needed (this fixes a defect, it doesn't add
+optional behavior).
+
+**Tests:** `TestFactAtomicity` pins the new constraint text in both function sources.
+Both assertions break-tested RED (temporarily removed each constraint independently,
+confirmed the corresponding test fails) before being trusted, restored via the Edit
+tool directly rather than the fragile string-replace-in-a-heredoc approach tried first,
+which left a syntactically mangled (though still-compiling) intermediate state — caught
+by re-reading the diff before trusting it, not shipped.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 715/715, `run-evals.sh`
+32/32 green.
+
+**Not yet confirmed:** whether this actually stops the re-surfacing behavior in
+practice — the fix targets the mechanism that produced the one bad example we have,
+but there's no way to verify "does Priya stop doing this" without watching her memory
+over the next several days of real conversation.
+
 ## v2026-08-01.4 — /model shows every model role, not just chat
 
 **Root cause of the request:** while investigating a live memory-quality complaint

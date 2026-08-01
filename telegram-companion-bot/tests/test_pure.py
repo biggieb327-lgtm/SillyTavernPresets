@@ -4896,3 +4896,24 @@ class TestModelInfoShowsEveryRole:
         import inspect
         src = inspect.getsource(bot.model_info)
         assert "_nanogpt_subscription_models" not in src
+
+
+class TestFactAtomicity:
+    """Live incident, 2026-08-01: a strong reasoning model (Priya's own SUMMARY_MODEL,
+    unset -> her chat model) still produced a garbled recent_facts entry that fused an
+    event (a Costco trip) with unrelated meta-commentary (an argument about how Priya's
+    own line should be categorized) into one run-on sentence. Not a weak-model problem --
+    _summarize()'s prompt had no instruction against exactly this kind of fusion. Fixed
+    by requiring each fact to be one concrete, self-contained thing."""
+
+    def test_summarize_requires_one_concrete_thing_per_fact(self):
+        import inspect
+        src = inspect.getsource(bot._summarize)
+        assert "ONE" in src and "concrete thing" in src
+        assert "meta-commentary" in src
+
+    def test_consolidate_facts_forbids_fusing_on_merge(self):
+        import inspect
+        src = inspect.getsource(bot._consolidate_facts)
+        assert "ONE concrete thing" in src
+        assert "do not fuse" in src.lower()
