@@ -146,6 +146,9 @@ grep -c HEALTHCHECK_URL /opt/telegram-bots/*/.env   # dead-man's-switch coverage
 | `/addmem <text>` | Manually add an NPC/world memory (auto-collected too — see below) |
 | `/mems` | List all stored NPC/world memories |
 | `/delmem <keyword or #>` | Remove an NPC/world memory |
+| `/editmem <n> <new text>` | Edit a memory entry by number |
+| `/sourcemem <n>` | Show a memory entry's source/provenance |
+| `/reviewmem` | List memories pending review (low-confidence extractions); `/reviewmem ok <n>` or `/reviewmem no <n>` to resolve one |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.
@@ -234,6 +237,7 @@ These files shape what the character knows and references. All are editable from
 | `/delpayment <n>` | Remove a bill |
 | `/editpayment <n> <field> <value>` | Edit a bill field |
 | `/week` | Payment summary for the current week |
+| `/remindpayments` | Trigger the payment-reminder check now, instead of waiting for its scheduled run |
 
 ### Settings & Info
 | Command | What it does |
@@ -258,6 +262,23 @@ These files shape what the character knows and references. All are editable from
 
 If a bot never responds to any of these either, it's not an app-level problem — see
 Troubleshooting below (the systemd unit or the process itself may be down).
+
+### Maps (needs `TOMTOM_API_KEY`)
+Handlers register unconditionally and reply "Maps aren't set up" without a key, so
+these are always in the Telegram command menu regardless of `TOMTOM_ENABLED`.
+| Command | What it does |
+|---|---|
+| `/route <from> to <destination>` | Travel time & directions, e.g. `/route Bellevue to SeaTac airport` |
+| `/nearby <thing>` | Places near your shared location, e.g. `/nearby coffee` |
+| `/place <name or address>` | Look up an address or business |
+| `/food` | Restaurants near your shared location |
+
+### Health (needs Garmin credentials — `GARMIN_EMAIL`/`GARMIN_PASSWORD`, see `.env.example`)
+| Command | What it does |
+|---|---|
+| `/health` | Latest cached metrics from your watch (sleep, resting HR, steps, Body Battery) |
+| `/healthnow` | Pull fresh watch data right now, bypassing the scheduled pull (rate-limited — see `GARMIN_LOGIN_COOLDOWN`) |
+| `/stress` | Recent sustained-stress reading (needs `STRESS_ALERTS=1`) |
 
 ### Western WA traffic (Emily only — needs `WSDOT_API_KEY`)
 | Command | What it does |
