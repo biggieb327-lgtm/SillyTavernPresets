@@ -1,131 +1,129 @@
 ---
 name: deploy-and-verify-fleet
-description: Choosing the correct deploy path for merged work and verifying it landed on all six bots. Load when work is on main and the user needs deploy instructions, when the user asks "how do I get this onto the bots", or when a deploy appears to have failed or half-landed.
+description: Choosing the correct deploy path for merged work and verifying it landed on all seven bots. Load when work is on main and the user needs deploy instructions, when the user asks "how do I get this onto the bots", or when a deploy appears to have failed or half-landed.
 ---
 
 # Deploy and verify the fleet
 
-Deploys pull raw files from `main` over public URLs. Claude cannot execute any of
-this — the phone runs it. Give the user exact commands and tell them what output
-proves success. There are four deploy paths; picking the wrong one is the main
-failure mode.
+All seven instances run on the VPS under systemd. Deploys read from a git checkout at
+`/opt/telegram-bots/.repo` (a read-only deploy key, not raw URLs — the repo has been
+private since 2026-07-28 and anonymous `raw.githubusercontent.com` URLs 404). Claude
+cannot run this from a session without VPS access — give the user exact commands and
+tell them what output proves success.
 
 ## When NOT to use
 
-- Work isn't merged to main yet → finish `repo-change-control` first (deploying a
-  branch is impossible; the curl URLs are pinned to main).
+- Work isn't merged to main yet → finish `repo-change-control` first (`vps-sync.sh`
+  hard-resets to `origin/main`, so deploying an unmerged branch is impossible).
 - The bot is broken for non-deploy reasons → `repo-debugging-playbook`.
-- *Migrating* an instance from phone to VPS → `vps-migration`. Routine deploys to
-  the VPS instances that already exist (cass, jules) are path E below.
+- *Migrating* an instance onto the VPS in the first place (there is no VPS directory
+  for it yet) → `vps-migration` / `install-vps.sh`. This skill is for the seven
+  instances that already exist.
 
-## The fleet is split
+## The fleet
 
-Phone: **nora, bonnie, emily, priya** (tmux + `run-bot.sh`).
-VPS: **cass, jules** (systemd `bot@<instance>` units).
-Both pull from `main`, but the commands differ — a phone path applied to a VPS
-instance silently does nothing, because the phone scripts skip instances with no
-local directory.
+All seven — **nora, bonnie, cass, emily, priya, jules, marcus** — are VPS instances at
+`/opt/telegram-bots/<instance>/`, running as systemd unit `bot@<instance>`. There is no
+phone fleet anymore (empty since 2026-07-26; the 14-day rollback soak on the phone ends
+2026-08-09). One deploy path covers all seven — no decision tree, no per-instance path
+letter.
 
-## Decision tree — what changed?
-
-| Changed | Path |
-|---|---|
-| bot.py only (and/or docs) — **phone bots** | **A: `/update` from Telegram** |
-| run-bot.sh (supervisor) — with or without bot.py | **B: `update-all.sh` via shell** (`/update` never regenerates the supervisor) |
-| Character cards / seed txt files only — **phone bots** | **C: `sync-cards.sh`** (or curl one card + rerun run-bot.sh) |
-| An instance's `.env` | **D: edit on-device or on the VPS, `/restart` that bot** |
-| Anything at all on a **VPS bot** (code, card, or preset) | **E: `vps-sync.sh`** |
+**`/update` is dead as a deploy path**, though the handler still exists: on the private
+repo it hits `repo_not_readable` and replies telling the owner to run `vps-sync.sh`
+instead (`update_cmd` in bot.py). **`update-all.sh` and `sync-cards.sh` are phone-era
+and manage nothing now** — do not hand them to the user.
 
 ## Procedure
 
-**Path A — bot.py release (the normal case):**
-1. User sends `/update` to ONE bot (any). It downloads bot.py from main, verifies
-   it compiles, keeps `bot.py.bak`, swaps the shared file at `~/telegram-bot/bot.py`,
-   restarts itself.
-2. User sends `/audit` to that bot — MUST show the new BOT_VERSION. If it still
-   shows the old one, stop: the update didn't take (see failure modes below).
-3. Only then: `/restart` to the other **phone** bots (they share the swapped file
-   at `~/telegram-bot/bot.py`).
-4. Run path E for cass and jules — they do not share the phone's file.
-5. `/audit` to each — all six show the new version.
-
-**Path B — supervisor changed. DEAD, kept for history.** Phone-only (tmux, `~/telegram-bot`)
-and the phone has been empty since 2026-07-26; the URL also 404s now that the repo is
-private. Never hand this to the operator — use path E.
+**One command per instance** — covers code, card, and preset layers together:
 ```bash
-# DEAD: phone-era, and raw URLs 404 on a private repo. Do not run.
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh | bash
-```
-It prints the downloaded BOT_VERSION and restarts every tmux session. Then `/audit`
-each bot. Note: `watchdog.sh` and `backup-all.sh` are NOT managed by update-all.sh —
-if those changed, the user reinstalls them manually (one-time curl, see OPS_MANUAL).
-
-**Path C — cards/seeds:** `bash sync-cards.sh --dry-run` first (shows what would be
-pulled), then without the flag, then `/restart` each affected bot. Card changes
-don't bump BOT_VERSION — verify by asking the character something the edit changed.
-
-**Path D — .env:** user edits on-device (phone) or on the VPS, `/restart` that bot,
-then check `/errors` for `[config]` warnings — bad numeric values fall back to
-defaults with a warning rather than crashing, so a typo shows up as a warning, not
-a crash.
-
-**Path E — every instance (all six are on the VPS since 2026-07-26).** One command per
-instance, and it covers code, card, and preset together:
-```bash
-# host: VPS (as root). NOT curl-piped: the repo went private 2026-07-28 and
-# raw.githubusercontent.com 404s. vps-sync.sh fetches and hard-resets the checkout to
-# origin/main before copying, so running the on-disk copy is correct even when stale.
+# host: VPS (as root). NOT curl-piped: the repo is private and raw URLs 404.
+# vps-sync.sh fetches and hard-resets the checkout to origin/main before copying,
+# so running it is correct even when the on-disk checkout looks stale.
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh bonnie
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh cass
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh emily
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh priya
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh jules
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh marcus
 ```
-`vps-sync.sh` pulls preset + card + bot.py, compile-checks, normalizes
-`CHARACTER_CARD`, restarts and enables the systemd unit, then prints verification
-output. Confirm with `/audit` to that bot as usual. Phone paths A/B/C never reach
-these instances — `update-all.sh`, `sync-cards.sh`, and `watchdog.sh` skip them
-automatically because there's no local directory.
+Only send the instances actually affected — a card-only edit needs just the instance(s)
+using that card; a bot.py change needs all seven. Each invocation: compile-checks
+bot.py before swapping it (keeping `bot.py.bak`), copies `preset.txt` + whatever preset
+layers that instance's own `PRESET_FILES` names, normalizes `CHARACTER_CARD` in
+`.env` to the repo's filename, restarts + enables the unit, then prints hash and
+`STARTUP AUDIT` verification. It also reports (never copies) any seed file
+(`people.txt`/`projects.txt`/`schedule.txt`/`atlas.txt`) present in the repo but
+missing on that instance — diff a sibling instance before copying one over, since a
+repo seed file can be an older generation than what's live (jules, 2026-07-29).
 
-**Rollback (any path):** `~/telegram-bot/bot.py.bak` is the previous bot.py. Shell:
-copy it back over bot.py and restart sessions. There is deliberately no `/rollback`
-command — a broken bot can't be trusted to roll itself back.
+**No known concurrent-deploy hazard right now** — but if you're running `vps-sync.sh`
+for two instances back to back, know that both write the *shared* `/opt/telegram-bots/bot.py`
+and `bot.py.bak`; ROADMAP 1.6 (unshipped as of this writing) tracks adding a `flock`
+around that swap. Until it ships, don't launch two instances' syncs concurrently.
+
+**Verify:** `/audit` to each synced instance — MUST show the new BOT_VERSION. If it
+still shows the old one, stop: the sync didn't take (see failure modes below).
+
+**Rollback (shared bot.py, all instances):**
+```bash
+cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
+for b in $(systemctl list-units 'bot@*' --no-legend --plain \
+          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
+  systemctl restart "bot@$b"
+done
+```
+There is deliberately no `/rollback` command — a broken bot can't be trusted to roll
+itself back. Cards and preset layers aren't versioned by `vps-sync.sh`'s backup step;
+if a card/preset edit needs rolling back, re-run `vps-sync.sh` after reverting the
+change on `main`.
 
 ## Deploy failure modes
 
-- `/update` says success, `/audit` shows old version → the push to main didn't
-  happen or CI-visible main differs from what you think; check the raw URL content
-  and `git log origin/main`.
-- `/update` refuses → downloaded bot.py doesn't compile; main is broken; fix
-  forward on main immediately (red main is a deploy blocker for the whole fleet).
-- One bot won't restart after the others succeeded → stale `bot.pid` or dead tmux
-  session: `tmux kill-session -t <name>` then rerun `run-bot.sh <dir> <name>`.
+- `vps-sync.sh` exits at "FATAL: no git checkout" → the deploy key or checkout is
+  missing on this host; see the script's own header and `deploy/MIGRATION.md` §
+  "Private-repo deploys".
+- `vps-sync.sh` exits at the `py_compile` step → the downloaded bot.py doesn't
+  compile; main is broken — fix forward on main immediately (red main is a fleet-wide
+  deploy blocker, and `evals.yml`'s hard-reset-before-copy note in CLAUDE.md says the
+  same).
+- `/audit` still shows the old BOT_VERSION after a sync reports success → check the
+  script's printed checkout HEAD against `git log origin/main`; the push may not have
+  actually reached `origin/main`.
+- One instance won't restart after others succeeded → `journalctl -u bot@<instance> -n 60`
+  for the crash reason; a stale unit state is `systemctl restart bot@<instance>` again,
+  not a fresh sync.
 
 ## Quality bar
 
-The user got: the path letter, exact copy-pasteable commands, the expected output
-at each step, and the rollback move — before they started.
+The user got: copy-pasteable commands for exactly the instances affected, the expected
+output at each step, and the rollback move — before they started.
 
 ## Verification checklist
 
-- [ ] Correct path chosen for what actually changed (check the merged diff, not memory)
-- [ ] Phone path AND path E both run when the change affects all six
-- [ ] All six bots verified — `/audit` shows expected BOT_VERSION (paths A/B/E) or
-      behavior/config confirmed (paths C/D)
-- [ ] Any `[config]` warnings in `/errors` after an .env change reviewed
+- [ ] Correct instance list chosen for what actually changed (check the merged diff,
+      not memory — a card change needs only that card's instance(s); bot.py needs all
+      seven)
+- [ ] Every synced instance verified — `/audit` shows the expected BOT_VERSION
+- [ ] Any seed-file gap `vps-sync.sh` reported was triaged (diffed against a sibling),
+      not silently copied over
 - [ ] CI green on main before telling the user to deploy
+- [ ] Two `vps-sync.sh` runs were not launched concurrently (no flock yet — ROADMAP 1.6)
 
 ## Common mistakes
 
-- Sending `/update` to all six bots — one `/update` + three `/restart` covers the
-  phone bots; six parallel downloads on phone bandwidth is not the design.
-- Forgetting cass and jules entirely. A "fleet deploy" that only ran the phone
-  paths has left two production bots on the old version, and nothing warns you —
-  the phone scripts skip them silently.
-- Using path A when run-bot.sh changed — the stale supervisor keeps running and
-  the "deployed" behavior never appears.
+- Handing the user `/update`, `update-all.sh`, or `sync-cards.sh` — all three are dead
+  phone-era paths that manage nothing on the VPS fleet.
+- Forgetting an instance entirely — there is no automatic "skip if not present"
+  behavior to fall back on; a `vps-sync.sh` never run for an instance leaves it on the
+  old version with nothing announcing it except a stale `/audit`.
 - Telling the user to deploy before the work is merged and CI is green on main.
 - Forgetting that `/audit` is the only proof a deploy landed — "the bot restarted"
   proves nothing about the version.
+- Running two `vps-sync.sh` invocations at once — no lock exists yet (ROADMAP 1.6).
 
 ## What to report back
 
-Which path was used, per-bot verification results (six `/audit` versions), any
-warnings seen, and rollback status if one was needed.
+Which instances were synced, per-instance verification (`/audit` versions), any seed-file
+or `[config]` warnings surfaced, and rollback status if one was needed.
