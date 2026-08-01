@@ -170,12 +170,7 @@ constraints; check their assumptions before acting on them.
 - `sync-cards.sh`: for each instance, reads CHARACTER_CARD from .env, pulls card +
   seed directory from main. Supports `--dry-run`.
 
-### 2.4 Selfie prompt constants hoisted — S, **built and parked, awaiting a carrier release**
-- **Status:** complete on `claude/github-commit-workflow-integration-ak6ql6`
-  (v2026-08-01.1, changelog entry written). **Not merged to `main` on purpose** — see
-  "why parked" below. This is the only open item that is code-complete but deliberately
-  unmerged; anyone shipping the next bot.py release should fold this branch in rather
-  than rebuild it.
+### 2.4 ~~Selfie prompt constants hoisted~~ ✅ (shipped v2026-08-01.1, riding with 1.6 as predicted)
 - **What:** the anatomy rule and the realism/SFW rule were inline literals appended
   mid-`build_selfie_prompt`; they are now `_SELFIE_ANATOMY_RULE` and
   `_SELFIE_REALISM_RULE`, sitting with the other `SELFIE_*` pools. No behavior change
@@ -183,14 +178,13 @@ constraints; check their assumptions before acting on them.
 - **Why it was worth doing:** these two fragments are the ones you edit when the image
   model returns extra limbs or a filter-tripped frame, and finding them meant reading a
   70-line function instead of grepping a constant name.
-- **Why parked:** zero user-visible change, so it does not justify a seven-instance deploy
-  by itself. Standing policy is merge-when-green; the owner's explicit call (2026-08-01)
-  was to bank it and let it ride the next functional release — 1.6 is the likely carrier.
+- **Shipped:** parked on 2026-08-01 as v2026-08-01.1 specifically to ride the next
+  functional release rather than justify a seven-instance deploy alone — 1.6 (v2026-08-01
+  merge to main) was that carrier, exactly as predicted when it was parked. All seven
+  instances are on `v2026-08-01.3` or later, which supersedes it.
 - **Origin:** prompted by `ShopDevX/adeptlydev` b6d7437 (push-chains → template literals).
   The generalized version of that lesson was **considered and rejected** as an invariant —
   see "Rejected or already covered" below.
-- **Done when:** merged to `main` as part of a release that has its own reason to deploy,
-  and the carrier release's `/audit` shows its BOT_VERSION on all seven instances.
 
 ---
 
@@ -215,7 +209,7 @@ constraints; check their assumptions before acting on them.
   bots); chain cap 2; fleet-wide fail-closed group posture; two CI evals pin the
   group/private memory boundary. On-device rollout steps in OPS_MANUAL.
 
-### 3.5 TomTom Maps — S
+### 3.5 ~~TomTom Maps~~ ✅ (all phases shipped; three follow-ups explicitly deferred, not open)
 - **Phase 1 ✅ (shipped v2026-07-11.7):** slash commands `/route`, `/nearby`, `/place`
   behind `TOMTOM_API_KEY` (fail-closed); per-instance `TOMTOM_TRAVEL_MODE`. Raw
   `api.tomtom.com` REST, defensive parsers, 20 tests. Owner provisions the key.
