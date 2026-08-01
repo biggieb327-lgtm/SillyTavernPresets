@@ -107,7 +107,7 @@ constraints; check their assumptions before acting on them.
   works across phone+VPS hosts mid-migration) and replies with one up/down /
   version / uptime / errors table — `fleet-status.sh` without the shell.
 
-### 1.6 Lock the vps-sync.sh bot.py swap — S, **next**
+### 1.6 ~~Lock the vps-sync.sh bot.py swap~~ — S, **shipped 2026-08-01, VPS race-test pending**
 - **Why now:** `perform_self_update` had exactly this bug and it bit on 2026-07-25
   (`FileNotFoundError: /opt/telegram-bots/bot.py.new`, operational log same date). Fixed
   in bot.py by a host-wide `flock` in v2026-07-25.11 — but `deploy/vps-sync.sh` performs
@@ -139,6 +139,16 @@ constraints; check their assumptions before acting on them.
   a correct `bot.py` and a `bot.py.bak` holding the genuinely previous version; the second
   run exits non-zero with a clear message rather than corrupting either. Verify by racing
   them deliberately on the VPS, not by inspection.
+- **Shipped 2026-08-01** (see CHANGELOG "vps-sync.sh's bot.py swap is now locked"): the
+  `flock` and the fatal backup are both in `deploy/vps-sync.sh` now. The locking
+  mechanism itself was extracted and raced in isolation — a held lock correctly rejects
+  a second concurrent `flock -n` attempt, and releases cleanly for the next solo run —
+  but that's a controlled stand-in, not the real script. **This item's own done-when is
+  explicit that verification means racing actual `vps-sync.sh` invocations on the VPS,
+  not inspection**, and no VPS access exists from this session. Don't mark this fully
+  closed until someone runs two real `vps-sync.sh nora` / `vps-sync.sh bonnie`-style
+  calls at the same instant against the shared host and confirms one wins cleanly and
+  the other exits non-zero without touching `bot.py.bak`.
 
 ---
 
@@ -560,7 +570,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete, not just the pilot.** All seven instances (nora, bonnie, cass, emily, priya, jules, migrated 2026-07-26; marcus stood up directly on the VPS 2026-07-29) run under systemd — the Termux phone is empty. Formal done-when isn't fully closed yet: the 14-day healthcheck soak that started 2026-07-26 runs through **2026-08-09**, and several 1.2 cleanup-batch checkboxes are still open (phone-side `~/jules-migrate.tar.gz` and per-instance `~/<name>-bot/` removal, `HEALTHCHECK_URL` re-pointed per instance). OPS_MANUAL's "VPS operations" section and marking CLAUDE.md's Termux quirks historical are both done (2026-07-26). |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
-| **Next** | 1.6 lock the `vps-sync.sh` bot.py swap | Closes the other half of the concurrent-deploy bug fixed in bot.py by v2026-07-25.11. Cass and jules share `/opt/telegram-bots`, and the documented deploy runs `vps-sync.sh` twice back to back — the exact race. Silent failure mode (a `bot.py.bak` holding the *new* code) is the reason this ranks above cosmetic work. Small: a `flock` plus making the backup failure fatal. |
+| ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | **Shipped 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Locking mechanism break-tested in isolation (held lock correctly rejects a second `flock -n`, releases cleanly after). **Not fully closed**: the item's own done-when requires racing real `vps-sync.sh` runs on the VPS, which this session couldn't do — needs that confirmation before treating it as done, not just shipped. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,

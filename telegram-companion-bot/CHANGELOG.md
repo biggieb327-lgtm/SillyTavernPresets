@@ -7,6 +7,50 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-01 — vps-sync.sh's bot.py swap is now locked (no bot.py change, no version bump)
+
+**Root cause: bot.py's own concurrent-update fix (v2026-07-25.11) covered only one of
+the two places that perform the swap.** `perform_self_update`'s host-wide `flock` fixed
+`/update` racing itself, but `deploy/vps-sync.sh` performs the identical
+fetch→compile→backup→swap sequence on the identical shared paths
+(`/opt/telegram-bots/bot.py`, `bot.py.bak`) with no guard at all — and the documented
+fleet deploy is exactly two-or-more back-to-back invocations against instances that
+share a host (every instance does, since the 2026-07-26 migration). ROADMAP 1.6 named
+this the other half of the class.
+
+**The race, unfixed:** two concurrent runs share the fetch, the compile target, the
+backup, and the final file. The loud failure is one run's `mv` deleting the other's
+`bot.py.new` mid-copy. The silent one is worse and is the real reason this ranked above
+cosmetic work: if instance B's `cp bot.py bot.py.bak` lands *after* instance A's `mv`,
+`bot.py.bak` becomes a copy of the **new** code, not the old — the rollback path looks
+intact and is not. Nothing would have reported it; the owner would only find out at the
+moment they actually needed to roll back.
+
+**Fix:** `flock -n` around the whole run, released automatically on exit. `flock` is
+util-linux and present by default on Ubuntu 24.04 — Termux's absence of it is exactly
+why bot.py's own phone-side guard and `watchdog.sh`'s PID-file guard already use
+different mechanisms; this is a fourth, VPS-specific one, not a unification of the
+other three. Only the code swap strictly needs covering (card/preset/`.env`/systemd-unit
+work is per-instance and never races across instances), but locking the entire script is
+simpler and equally correct, per the ROADMAP item's own note.
+
+**Also folded in:** the backup `cp` was `2>/dev/null || true` — a failed backup died
+silently, which is the same silent-rollback-loss failure mode as the race itself, just
+via a different door. Now unguarded and fatal like every other step. `install-vps.sh`
+seeds `bot.py` at `$BASE` before `vps-sync.sh` can ever run (step 2/8 of the installer),
+so the backup source existing is a precondition already established, not a new
+assumption this fix introduces.
+
+**Verified — break-tested, not inspected, per the ROADMAP item's own "done when."** The
+locking mechanism was extracted and raced directly: a held lock's second concurrent
+`flock -n` attempt exits non-zero with the intended message while the first holds it
+(confirmed RED — the race path actually rejects); after the first releases, a fresh
+solo run acquires the lock normally (confirmed GREEN — no leftover lock, no
+false-positive rejection). `bash -n deploy/vps-sync.sh` clean. Full end-to-end
+concurrent-instance racing on the real VPS is still the final confirmation (no VPS
+access from this session) — the ROADMAP item's done-when is left open until that's run
+there.
+
 ## v2026-08-01.1 — Selfie prompt's fixed rules are findable (refactor, no behavior change)
 
 **Root cause: the two prompt fragments most likely to need editing were the two hardest
