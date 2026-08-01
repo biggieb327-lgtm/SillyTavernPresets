@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-29.3"
+BOT_VERSION = "2026-08-01.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5434,6 +5434,21 @@ SELFIE_CAMERA = [
     "crisp and bright daylight", "a tiny bit out of focus", "shot from just slightly too close up",
     "flat overhead lighting", "backlit so she's a little in shadow",
 ]
+# Fixed rules appended to every selfie prompt. Generic (not per-instance), so they live
+# in code next to the other SELFIE_* pools rather than in a per-instance file like
+# appearance.txt. These two are the knobs to reach for when the image model misbehaves —
+# extra limbs, or a shot that comes back studio-glossy, captioned, or filter-tripped.
+_SELFIE_ANATOMY_RULE = (
+    "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
+    "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
+    "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
+    "it. No extra limbs."
+)
+_SELFIE_REALISM_RULE = (
+    "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
+    "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
+    "watermarks, or captions in the image."
+)
 
 
 def _weather_outdoor_ok() -> bool:
@@ -5514,17 +5529,8 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
         bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
                     f"atmosphere, and what she might be wearing — don't describe the weather "
                     f"explicitly, just let it show.")
-    bits.append(
-        "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
-        "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
-        "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
-        "it. No extra limbs."
-    )
-    bits.append(
-        "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
-        "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
-        "watermarks, or captions in the image."
-    )
+    bits.append(_SELFIE_ANATOMY_RULE)
+    bits.append(_SELFIE_REALISM_RULE)
     if chat_id is not None:
         recent_scenes = (_recent_selfie_hints.get(chat_id) or [])[-4:]
         if recent_scenes:

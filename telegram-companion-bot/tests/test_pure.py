@@ -4807,3 +4807,25 @@ class TestCaptionModelSlot:
         """Uniform captions must not accidentally move summarisation too."""
         import inspect
         assert "SUMMARY_MODEL" in inspect.getsource(bot._summarize)
+
+
+class TestSelfiePromptFixedRules:
+    """The anatomy and realism rules are appended to every selfie prompt, unconditionally.
+    They were inline literals inside build_selfie_prompt until v2026-08-01.1; hoisting them
+    to module constants is only safe if they still reach every prompt."""
+
+    def test_both_rules_appear_in_every_variant(self):
+        import random
+        for chat_id in (None, 999):
+            for hint in ("", "on the fire escape"):
+                for seed in range(20):
+                    random.seed(seed)
+                    prompt = bot.build_selfie_prompt(hint, chat_id)
+                    assert bot._SELFIE_ANATOMY_RULE in prompt
+                    assert bot._SELFIE_REALISM_RULE in prompt
+
+    def test_rules_carry_the_constraints_the_image_models_need(self):
+        """Regression guards: extra limbs (Flux/Kontext) and Gemini's safety filter,
+        which returns blacked-out images without an explicit SFW/clothed signal."""
+        assert "No extra limbs." in bot._SELFIE_ANATOMY_RULE
+        assert "Fully clothed, SFW." in bot._SELFIE_REALISM_RULE

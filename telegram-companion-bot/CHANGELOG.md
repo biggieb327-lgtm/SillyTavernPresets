@@ -7,6 +7,43 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.1 — Selfie prompt's fixed rules are findable (refactor, no behavior change)
+
+**Root cause: the two prompt fragments most likely to need editing were the two hardest
+to find.** `build_selfie_prompt` is a ~70-line conditional builder, and every generic
+selfie fragment — `SELFIE_EXPRESSIONS`, `SELFIE_FRAMINGS`, `SELFIE_OUTFITS`,
+`SELFIE_ACTIVITIES`, `SELFIE_CAMERA` — is hoisted to a module constant with its peers.
+Two were not: the anatomy rule ("exactly two arms... no extra limbs") and the realism/SFW
+rule, appended unconditionally from inline literals mid-function.
+
+Those two are precisely what you reach for when the image model misbehaves — extra limbs
+from Flux/Kontext, or Gemini's safety filter returning a blacked-out frame when the SFW
+signal is weak (the same filter that already forced the explicit-adult-age workaround at
+`SELFIE_APPEARANCE`). Image-prompt tuning is recurring work here, and it was starting
+from a code read instead of a grep.
+
+Now `_SELFIE_ANATOMY_RULE` and `_SELFIE_REALISM_RULE`, next to the other `SELFIE_*`
+pools. The conditional appends (weather, wardrobe, mood, scene dedup) are untouched —
+conditional assembly is correct and was never the problem.
+
+**No behavior change, proven not assumed:** 640 prompts across 40 seeds × both hint
+modes × both `chat_id` modes × weather present/absent × wardrobe set/unset, captured
+before and after — byte-for-byte identical. Two new tests pin that both rules reach every
+prompt and that the two constraint phrases survive; both were break-tested RED before
+being trusted (C3).
+
+Prompted by an external commit (`ShopDevX/adeptlydev` b6d7437) that replaced ~30-call
+`lines.push()` chains with template literals. That codebase's problem does not exist
+here — static prompt text lives in `preset.txt`, cards, and preset layers — so only the
+narrow real instance was taken. **Deliberately not turned into an invariant:** the class
+has zero occurrences in this repo, and `bot-code-invariants` rules are earned by
+incidents, not imported from other people's refactors.
+
+**Built to ride along, not to deploy alone.** No user-visible change, so this is not
+worth a seven-instance deploy on its own; it was parked on
+`claude/github-commit-workflow-integration-ak6ql6` to merge with the next functional
+release. If it reaches `main` under a later `BOT_VERSION`, that is expected.
+
 ## 2026-07-29 — install-vps.sh could not authenticate to the private repo (no bot.py change)
 
 **Root cause: the private-repo migration was applied to one script and not the other.**

@@ -156,6 +156,28 @@ constraints; check their assumptions before acting on them.
 - `sync-cards.sh`: for each instance, reads CHARACTER_CARD from .env, pulls card +
   seed directory from main. Supports `--dry-run`.
 
+### 2.4 Selfie prompt constants hoisted — S, **built and parked, awaiting a carrier release**
+- **Status:** complete on `claude/github-commit-workflow-integration-ak6ql6`
+  (v2026-08-01.1, changelog entry written). **Not merged to `main` on purpose** — see
+  "why parked" below. This is the only open item that is code-complete but deliberately
+  unmerged; anyone shipping the next bot.py release should fold this branch in rather
+  than rebuild it.
+- **What:** the anatomy rule and the realism/SFW rule were inline literals appended
+  mid-`build_selfie_prompt`; they are now `_SELFIE_ANATOMY_RULE` and
+  `_SELFIE_REALISM_RULE`, sitting with the other `SELFIE_*` pools. No behavior change
+  (640-prompt before/after diff, byte-identical). Two tests pin it, both break-tested RED.
+- **Why it was worth doing:** these two fragments are the ones you edit when the image
+  model returns extra limbs or a filter-tripped frame, and finding them meant reading a
+  70-line function instead of grepping a constant name.
+- **Why parked:** zero user-visible change, so it does not justify a seven-instance deploy
+  by itself. Standing policy is merge-when-green; the owner's explicit call (2026-08-01)
+  was to bank it and let it ride the next functional release — 1.6 is the likely carrier.
+- **Origin:** prompted by `ShopDevX/adeptlydev` b6d7437 (push-chains → template literals).
+  The generalized version of that lesson was **considered and rejected** as an invariant —
+  see "Rejected or already covered" below.
+- **Done when:** merged to `main` as part of a release that has its own reason to deploy,
+  and the carrier release's `/audit` shows its BOT_VERSION on all seven instances.
+
 ---
 
 ## Track 3 — Character & product features
@@ -481,6 +503,21 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   flags genuinely are off — they are off *on purpose*. See constraints C10: an
   unexplained default is not the same as an unintended one.
 
+- **"Add a prompt-assembly style rule to `bot-code-invariants`" — rejected 2026-08-01,
+  do not re-open.** Considered alongside 2.4 after `ShopDevX/adeptlydev` b6d7437 (a
+  TypeScript repo replacing ~30-call `lines.push()` chains with template literals).
+  Rejected on three grounds. (1) **The problem does not exist here:** static prompt text
+  lives in `preset.txt`, the character cards, and the preset layers — already single
+  blocks. The `.append()` chains in bot.py are genuinely conditional assembly, which is
+  what that commit *kept*, not what it removed. (2) **Zero occurrences**, against a
+  standing bar of two — the whole point of the two-occurrence rule is not to build
+  guardrails from imagination. (3) **Dilution:** all 17 `bot-code-invariants` rules trace
+  to a real incident (concurrency corruption, the memory-hallucination bug, the
+  phantom-process killer, PTB overriding `signal.signal`). A speculative rule 18 makes the
+  file skimmable rather than binding, which costs the 17 that were paid for in outages.
+  An eval was rejected for the same reason plus C14 — a scanner cannot distinguish static
+  concatenation from correct conditional assembly. 2.4's refactor *is* the guardrail: it
+  removes the mixed-shape example that would have taught the wrong pattern.
 - `/rollback` command — `bot.py.bak` + shell already covers it; a bad bot.py can't be
   trusted to run its own rollback anyway.
 - Group ledger pruning / bot liveness heartbeats — rotation already exists; liveness

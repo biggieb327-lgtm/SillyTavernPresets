@@ -383,6 +383,16 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-01 — Recommended a durable guardrail (a `bot-code-invariants` rule) for an
+  external commit's lesson *before* reading how the target code was organised. One grep
+  later — `SELFIE_EXPRESSIONS/FRAMINGS/OUTFITS/ACTIVITIES/CAMERA` are all already hoisted
+  module constants — showed the refactor itself removes the wrong-pattern example, making
+  the rule redundant, and that the class has zero occurrences here against a standing bar
+  of two. Self-caught and reversed in the next turn, but the first answer would have added
+  a speculative rule 18 to a file whose 17 rules were each earned by an incident → read the
+  code's existing organisation before proposing machinery to protect it; "is this already
+  solved structurally?" comes before "what rule would prevent this?" (C2 family: name the
+  class — and check it exists — before building for it).
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —
