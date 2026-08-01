@@ -380,7 +380,7 @@ constraints; check their assumptions before acting on them.
   protected, so a new or reworded block can't silently become droppable.
 - `CONTEXT_TOKEN_BUDGET` still defaults to 0/off. Set it from the `/audit` numbers.
 
-### 3.13 Reduce the protected prompt floor — **mechanism shipped, content split open**
+### 3.13 Reduce the protected prompt floor — **mechanism + content both shipped; fleet-wide adoption unconfirmed**
 - **Mechanism ✅ (v2026-07-25.5, `PRESET_FILES`):** ordered preset layer files, each
   injected as its own block; `sync-cards.sh` and `vps-sync.sh` are layer-aware. Inert by
   default — verified byte-identical prompt for the unset, explicit-single-layer, and legacy
@@ -390,24 +390,37 @@ constraints; check their assumptions before acting on them.
   in v2026-07-25.5). Moving it to the lorebook saves ~84 tokens — parked as not worth a
   release on size grounds; revisit only if there's a *behavioural* reason to make it
   conditional.
-- **Open: the content split.** `preset.txt` is 8,503 tok on every message, by section
-  ~1,760 universal / ~6,020 roleplay-scene machinery / ~727 feature-coupled. Prototype
-  core/rp/feature split measured **cass 11,031 → 4,758 (−57%)**; jules unchanged (she uses
-  every layer). The gain is signal-to-noise as much as size — ~700 tok of live per-turn
-  context currently competes with 8.5k of largely inapplicable instruction.
-- Two easy first cuts, low voice risk: `[RELATIONSHIP STAGE]` (323 tok) instructs every bot
-  about `CLOSENESS_ENABLED`, which **defaults to 0**; `[STEPPED THINKING]` (403 tok) is
-  likewise tied to `STEP_INTENT`. Both belong in a feature layer, not the core.
-- **Do not action without the owner.** `preset.txt` is voice-critical and deliberately tuned
-  (see v2026-07-18.1's anti-echo work); `[CHARACTER AUTHENTICITY]` alone is 2,386 tok.
-  Split one layer at a time, using `/audit`'s `Preset layers:` and `Card:` lines as the
-  evidence base.
-- **Experiment loop now cheap (v2026-07-26.1, `/preset`).** The reason this item stalled
-  was the cost of evaluating a split: an `.env` edit plus a restart per experiment, per
-  bot, on a phone keyboard. `/preset core,rp` swaps the stack live from Telegram and
-  `/preset reset` undoes it, so "does cass read better without the scene machinery?" is
-  now answered by talking to her for an evening rather than by a deploy. The remaining
-  gate is unchanged: the *content* decisions are the owner's.
+- **Content ✅, superseding the prototype numbers previously recorded here.** The
+  "core/rp/feature, cass 11,031 → 4,758 (−57%)" split named in earlier drafts of this item
+  was never shipped in that form. What actually shipped, across two releases, fits every
+  character rather than cutting size for its own sake:
+  - **v2026-07-25.6:** `preset.txt` carved into `preset-core.txt` (4,166 tok — voice,
+    anti-slop, agency, epistemic horizon, repair, self-check), `preset-rp.txt` (1,680 tok
+    — narration/scene machinery), `preset-explicit.txt` (1,930 tok), `preset-stepped.txt`
+    (403 tok, pairs with `STEP_INTENT`), `preset-closeness.txt` (323 tok, pairs with
+    `CLOSENESS_ENABLED`, default off). Cass moved onto `core+stepped`: 11,037 → 7,102
+    (−36%).
+  - **2026-07-26 → 2026-07-28:** a per-character format-contract layer for all seven —
+    `preset-{nora,bonnie,cass,emily,priya,jules,marcus}.txt` (~250-430 raw tok each) —
+    arbitrating where a card's format contract disagrees with the shared preset (Bonnie
+    runs long by design against core's "prefer shorter"; Priya is lowercase/no-markdown;
+    Emily is third-person; Marcus's asking-first is characterization, not the standing-
+    consent narrator rule). Measured stacks (raw / cal): cass 4,827/4,441, priya
+    4,830/4,444 (both ~43% below the 8,503-tok monolith); nora/bonnie/emily/jules land
+    within ±35 tok of today's monolith on the full scene stack — the saving is fit, not a
+    blanket cut, exactly as intended.
+- **Open — and this is the only piece left, verify before assuming either way:** whether
+  every instance's live `.env` on the VPS actually has `PRESET_FILES` set to its
+  recommended stack. The last explicit status in the changelog (2026-07-26) was "inert —
+  no instance loads any of them yet"; no later entry records a fleet-wide flip, and `.env`
+  files aren't tracked in this repo, so this can't be settled by reading the repo. Check
+  each instance's `/audit` `Preset layers:` line — cass is confirmed on layers
+  (v2026-07-25.6); the rest are unconfirmed, not confirmed-off.
+- **Do not action without the owner** if flipping any instance's `PRESET_FILES` for the
+  first time — `preset.txt` is voice-critical and deliberately tuned (v2026-07-18.1's
+  anti-echo work). `/preset core,rp` (v2026-07-26.1) swaps a stack live from Telegram and
+  `/preset reset` undoes it, so trying a stack costs an evening of conversation, not a
+  deploy.
 
 ### 3.14 Port the banned-rhetoric block from Chimera v2 into `preset.txt` — S, owner-gated
 - **Evidence:** the 2026-07-25 review of Writer's Block 5 against the root Chimera preset
@@ -539,7 +552,7 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
-| **Now** | 1.2 VPS Phase 2 — pilot jules | **Jules migrated to the VPS 2026-07-19** (Contabo, Ubuntu 24.04, systemd `bot@jules`, PID live); in 7-day soak. Pending: re-point `HEALTHCHECK_URL` to the VPS, remove the phone-side `~/jules-bot` after soak. Runbook updated with the stop-supervisor + whole-dir-tar fixes the pilot surfaced (see operational-log 2026-07-19). Remaining five bots next, same procedure. |
+| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete, not just the pilot.** All seven instances (nora, bonnie, cass, emily, priya, jules, migrated 2026-07-26; marcus stood up directly on the VPS 2026-07-29) run under systemd — the Termux phone is empty. Formal done-when isn't fully closed yet: the 14-day healthcheck soak that started 2026-07-26 runs through **2026-08-09**, and several 1.2 cleanup-batch checkboxes are still open (phone-side `~/jules-migrate.tar.gz` and per-instance `~/<name>-bot/` removal, `HEALTHCHECK_URL` re-pointed per instance). OPS_MANUAL's "VPS operations" section and marking CLAUDE.md's Termux quirks historical are both done (2026-07-26). |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | **Next** | 1.6 lock the `vps-sync.sh` bot.py swap | Closes the other half of the concurrent-deploy bug fixed in bot.py by v2026-07-25.11. Cass and jules share `/opt/telegram-bots`, and the documented deploy runs `vps-sync.sh` twice back to back — the exact race. Silent failure mode (a `bot.py.bak` holding the *new* code) is the reason this ranks above cosmetic work. Small: a `flock` plus making the backup failure fatal. |
