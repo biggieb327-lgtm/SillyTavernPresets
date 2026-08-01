@@ -421,6 +421,13 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
+  — leftover scaffolding from two half-finished versions of the same line, committed to the file
+  in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on
+  re-reading my own diff before running anything, and rewritten as a plain `if` with the two
+  claims separated. The cause was editing *while* still deciding the logic → settle the condition
+  in full before writing the Edit; an `if` that needs a ternary escape hatch to express is a sign
+  the branch isn't decided yet, not a sign it needs clever syntax.
 - 2026-08-01 — Recommended a durable guardrail (a `bot-code-invariants` rule) for an
   external commit's lesson *before* reading how the target code was organised. One grep
   later — `SELFIE_EXPRESSIONS/FRAMINGS/OUTFITS/ACTIVITIES/CAMERA` are all already hoisted
