@@ -24,4 +24,23 @@ if echo "$cmd" | grep -qE 'git add[^|;&]*\.env([[:space:]]|$|[^.a-zA-Z])' && ! e
   block "staging a .env file. Bot tokens and API keys must never be committed; .env.example is the shareable template."
 fi
 
+# git checkout/restore on a path that currently holds uncommitted changes (constraints.md
+# C15, seen: 2 — destroyed ~700 lines once, wiped a whole commit's worth of uncommitted
+# work once). `git checkout -- <file>` / `git restore <file>` silently discard the working
+# copy in favor of the last commit; on a clean file that's a no-op, on a dirty one it's
+# unrecoverable, and the two look identical until it's too late. Only fires when the
+# target actually has a diff right now -- a branch checkout (no matching file) or a
+# checkout of an already-clean file is not what C15 is about.
+if echo "$cmd" | grep -qE '\bgit[[:space:]]+(checkout|restore)[[:space:]]'; then
+  rest=$(echo "$cmd" | sed -E 's/.*\bgit[[:space:]]+(checkout|restore)[[:space:]]+//')
+  for tok in $rest; do
+    case "$tok" in
+      -*) continue ;;  # flags (--, --staged, -b, ...) are never the target path
+    esac
+    if [ -f "$tok" ] && ! git diff --quiet -- "$tok" 2>/dev/null; then
+      block "git checkout/restore on '$tok', which has uncommitted changes right now (constraints.md C15). This discards them silently and unrecoverably. Re-edit back to the original text instead -- if the changes are real work, commit first."
+    fi
+  done
+fi
+
 exit 0

@@ -389,6 +389,15 @@ If a checkout-style revert ever seems like the only option, `git status`/`git di
 might hold uncommitted work. This class has now cost real content twice; there should
 not be a third.
 
+**Graduated 2026-08-01 — `risk-guard.sh` (PreToolUse/Bash).** Blocks `git checkout <path>`
+/ `git restore <path>` only when `<path>` is a real file with a live `git diff` right
+now — a branch checkout or a checkout of an already-clean file is not what C15 is about,
+so those still pass through untouched. Break-tested in an isolated throwaway repo (not
+this one): checkout/restore on a dirty tracked file blocked (rc=2) in both `--`-prefixed
+and bare forms; the same commands on a clean file, a branch name, and `checkout -b`
+allowed (rc=0); the three pre-existing risk-guard checks (force-push to main, root `rm
+-rf`, staging `.env`) re-verified unaffected by the addition.
+
 ---
 
 ## Minor — running log
