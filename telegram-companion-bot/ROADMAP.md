@@ -511,21 +511,30 @@ whichever agent implements it):
 *(R4 prompt hygiene, R5 UX, and R6 evolution experiments from the same plan shipped as
 v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
-### 4.4 Retune `MEMORY_TOKEN_BUDGET` in calibrated units — S, owner-gated
+### 4.4 ~~Retune `MEMORY_TOKEN_BUDGET` in calibrated units~~ ✅ (code shipped 2026-08-01, per-instance `.env` rollout pending)
 - **Context:** v2026-07-26.2 made reported token counts real (provider `usage`, plus a
   calibration ratio for what can only be estimated). `MEMORY_TOKEN_BUDGET` was
   deliberately left on the raw `len//4` unit.
 - **Why it was left:** it is a tuned *recall* knob, not a cost ceiling. Every value in
   every `.env` was picked against the raw unit, so switching to calibrated counts would
-  fit fewer memory lines into the same nominal budget and change how much six live
+  fit fewer memory lines into the same nominal budget and change how much seven live
   characters remember — a personality change shipped as an accounting fix.
-- **The work:** read each instance's calibration ratio from `/audit`, multiply its
-  `MEMORY_TOKEN_BUDGET` by it so the *effective* recall is unchanged, then switch the
-  budget to `_tokens()` in the same release. Net behaviour-neutral by construction; after
-  that the knob means real tokens and can be tuned against a real ceiling.
-- **Do not action without the owner** — the whole point is that recall volume is a
-  product decision, and the migration is only safe if the multiply and the switch ship
-  together.
+- **Owner-approved 2026-08-01**, with each instance's calibration ratio supplied from
+  `/audit` (see `v2026-08-01.3` in CHANGELOG.md for the full table and the actual
+  multiplied values). All seven cluster tightly at 0.90-0.93 — the risk this item was
+  gated against was real in principle, small in practice for this fleet.
+- **Shipped:** `triggered_memories()` now costs memory lines with `_tokens()` (calibrated)
+  instead of `_est_tokens()` (raw). `TOKEN_CALIBRATION=0` reverts this to the raw unit
+  too, same kill switch as every other calibrated figure — no new one needed. Regression
+  test updated in place (`test_memory_budget_uses_calibrated_units`), break-tested RED
+  before being trusted.
+- **Not yet done:** the multiply half. Each instance's `.env` needs `MEMORY_TOKEN_BUDGET`
+  set to its own (prior value × its ratio) — CHANGELOG.md has the exact commands,
+  assuming the 300 default, **unconfirmed against each instance's actual `.env`** (no VPS
+  access this session to check for an existing override). Verify before running them.
+  Until that `.env` edit lands per instance, that instance is quietly running on the
+  shared in-code default (also 300, now calibrated) rather than its own prior effective
+  budget — close, given how tight the ratios are, but not exact.
 
 ### Rejected or already covered (recorded so they don't come back)
 - **"Sweep the remaining pre-2026-07-18 default-off flags to default-on" — withdrawn

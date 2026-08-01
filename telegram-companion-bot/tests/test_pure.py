@@ -3602,17 +3602,18 @@ class TestCalibratedTokens:
         with _CalFixture(ratio=1.25, n=7, enabled=False):
             assert "TOKEN_CALIBRATION=0" in bot._token_confidence()
 
-    def test_memory_budget_stays_on_the_raw_unit(self):
-        # Calibrating it would change how much six live characters recall — a
-        # personality change shipped as an accounting fix.
+    def test_memory_budget_uses_calibrated_units(self):
+        # ROADMAP 4.4, owner-approved 2026-08-01: MEMORY_TOKEN_BUDGET switched from the
+        # raw len//4 estimate to _tokens() (calibrated). Safe only because every live
+        # instance's .env was multiplied by its own measured ratio at cutover first, so
+        # this line changing is not itself the personality change -- that already
+        # happened, deliberately, in each instance's .env before this shipped.
         import inspect
-        src = inspect.getsource(bot.select_memories) if hasattr(bot, "select_memories") else ""
-        if not src:
-            import re
-            whole = inspect.getsource(bot)
-            m = re.search(r"budget = MEMORY_TOKEN_BUDGET.*?cost = (\w+)\(line\)",
-                          whole, re.S)
-            assert m and m.group(1) == "_est_tokens", "memory budget must use the raw unit"
+        import re
+        whole = inspect.getsource(bot)
+        m = re.search(r"budget = MEMORY_TOKEN_BUDGET.*?cost = (\w+)\(line\)",
+                      whole, re.S)
+        assert m and m.group(1) == "_tokens", "memory budget must use the calibrated unit"
 
 
 class TestUsageAccounting:

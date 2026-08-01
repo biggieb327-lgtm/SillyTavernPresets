@@ -7,6 +7,70 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-01.3 — MEMORY_TOKEN_BUDGET now means real tokens (ROADMAP 4.4, owner-approved)
+
+**What this closes:** since v2026-07-26.2 made every other reported token figure real
+(`usage.prompt_tokens`, per-instance calibration ratio), `MEMORY_TOKEN_BUDGET` was
+deliberately left on the raw `len//4` unit — a regression test
+(`test_memory_budget_stays_on_the_raw_unit`) pinned it there specifically so the switch
+couldn't ship as a side effect of some other release. Recalibrating this knob changes how
+much a character actually recalls per reply, which is a product decision, not an
+accounting fix — hence owner-gated rather than done the day 4.4 was filed.
+
+**Owner approved 2026-08-01** and supplied each instance's current calibration ratio
+straight from `/audit` (all well past the ~15-call EMA reconvergence point, 46-235
+measured calls each):
+
+| instance | ratio | 300 (old default) × ratio |
+|---|---|---|
+| bonnie | 0.91 | 273 |
+| emily | 0.90 | 270 |
+| nora | 0.92 | 276 |
+| priya | 0.92 | 276 |
+| cass | 0.91 | 273 |
+| marcus | 0.91 | 273 |
+| jules | 0.93 | 279 |
+
+**The fleet's ratios cluster tightly (0.90-0.93)** — worth recording because it changes
+how much this migration actually matters in practice: no character is far enough off
+from the others for the unit switch to meaningfully redistribute recall between them.
+The risk this item was gated against was real in principle, small in this instance.
+
+**Shipped:** `triggered_memories()`'s budget loop now costs each candidate line with
+`_tokens()` (calibrated) instead of `_est_tokens()` (raw) — one line changed, per the
+ROADMAP plan. `TOKEN_CALIBRATION=0` reverts this budget check to the raw unit too,
+same kill switch as every other calibrated figure; no new kill switch needed. The
+regression test was updated in place (renamed, not deleted) to assert the new intended
+behavior, `test_memory_budget_uses_calibrated_units` — same guard, opposite direction,
+so a future accidental revert back to raw units gets caught the same way this one
+protected against a future accidental *forward* switch.
+
+**Not yet done — this is the step that actually preserves recall volume:** the table
+above assumes every instance is still on the shared 300 default, which was not
+independently confirmed (`/audit` doesn't surface `MEMORY_TOKEN_BUDGET`, and this
+session has no VPS access to grep `.env` directly). **Check each instance's `.env` for
+an existing override before using these numbers** — multiply *that* value by the
+instance's ratio instead of 300 if one exists. Assuming the default and being wrong
+would undershoot or overshoot recall by whatever the real prior value was, not just the
+~8-10% the ratio itself accounts for. Once confirmed, set each instance's `.env`:
+```bash
+# host: VPS (as root)
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/bonnie/.env
+echo "MEMORY_TOKEN_BUDGET=270" >> /opt/telegram-bots/emily/.env
+echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/nora/.env
+echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/priya/.env
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/cass/.env
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/marcus/.env
+echo "MEMORY_TOKEN_BUDGET=279" >> /opt/telegram-bots/jules/.env
+```
+then `vps-sync.sh` (or just `/restart`, since these are `.env`-only edits and the code
+is already merged) per instance.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710, `run-evals.sh`
+32/32 green. The updated regression test was break-tested RED (reverted to
+`_est_tokens`, confirmed it fails with the expected message) before being trusted, then
+restored by re-editing — not `git checkout`, per constraints C15.
+
 ## v2026-08-01.2 — 17 commands worked if typed but never appeared in Telegram's menu
 
 **Root cause: `_build_command_menu` is hand-kept alongside the `CommandHandler`

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-01.2"
+BOT_VERSION = "2026-08-01.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3541,13 +3541,13 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     out = []
     budget = MEMORY_TOKEN_BUDGET
     for _, line in merged:
-        # Deliberately the RAW estimate, not the calibrated `_tokens()`. MEMORY_TOKEN_BUDGET
-        # is a tuned recall knob, not a real-cost ceiling: every value in every .env was
-        # chosen against this 4-chars-per-token unit. Swapping in a calibrated count would
-        # silently change how many memories six live characters recall — a personality
-        # change delivered as an accounting fix. Retuning the budget in calibrated units is
-        # an owner decision (ROADMAP 4.4), not a side effect of this release.
-        cost = _est_tokens(line)
+        # Calibrated as of ROADMAP 4.4 (owner-approved 2026-08-01): MEMORY_TOKEN_BUDGET
+        # now means real tokens, not the raw 4-chars-per-token guess. Every instance's
+        # .env was multiplied by its own measured calibration ratio at cutover (captured
+        # from /audit at that moment) so effective recall didn't move for anyone when
+        # this shipped — the switch itself is not the retune. TOKEN_CALIBRATION=0 reverts
+        # this budget check to the raw unit too, same as every other calibrated number.
+        cost = _tokens(line)
         if cost > budget:
             continue
         out.append(line)
