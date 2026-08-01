@@ -34,7 +34,7 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 4** (2026-07-19 ×1, 2026-07-26 ×3)
+**seen: 5** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1)
 Phone tooling (`update-all.sh`, `tmux kill-session`, `pkg`) was run on the VPS, and
 VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looked like
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
@@ -50,6 +50,13 @@ cannot reach and the owner runs these commands by hand, so nothing here can stop
 paste into the wrong shell. The hook enforces only the agent's half — that every block
 handed over is attributable to exactly one host. The operator's half stays prose
 (`CHEATSHEET.md`: `uname -o` before anything host-specific).
+**Occurrence 5 (2026-08-01) — the hook worked.** A `vps-sync.sh` deploy loop went out in
+a message that never named its host; host-guard blocked the turn and the block was
+relabelled before the session ended. Notable because the *preceding* deploy handoff in
+the same session carried `# host: VPS (as root)` correctly — the lapse came with a
+second, longer message where the commands were a follow-up rather than the main point.
+The failure mode to watch is not "forgot the rule", it is **"the command block was
+incidental to the message"**. No further mechanism needed; graduation is holding.
 
 ### C2 — Name the class before calling a fix done
 **seen: 2** (2026-07-26 ×2)
