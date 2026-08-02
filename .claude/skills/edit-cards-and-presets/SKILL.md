@@ -72,7 +72,7 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    with Priya.
 
    **Marcus** (`marcus_calder.json`) — 45, barista (mornings) / personal trainer
-   (afternoons), Portland. Professional dominant guiding couples through non-monogamy
+   (afternoons), Olympia WA. Professional dominant guiding couples through non-monogamy
    and kink — reads like "Hitch on the surface, Earn Marks underneath": warm, patient,
    privately assessing what he sees, rarely voicing the conclusion. His defining trait
    is **the code**: non-negotiable personal limits that are judgments, not consent
@@ -80,8 +80,13 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    boundary; he doesn't announce one in advance. Consent checks and aftercare are real
    and constant, never mechanical. **No family entries in his seed dir** — the card is
    silent there; that's a deliberate gap, not an oversight, so don't invent parents.
-   Placed in Portland specifically to share a metro with his only planned groupmate,
-   Emily — real geography, same rule Priya's and Emily's atlases follow.
+   Shares a metro with his only planned groupmate, Emily — real geography, same rule
+   Priya's and Emily's atlases follow. **Both were Portland, OR until 2026-08-02**, moved
+   together to Olympia so Emily's WSDOT (Washington State DOT) traffic integration matches
+   the state she lives in; moving only one would have split the pair the co-location exists
+   for. Their atlases were relocated place-by-place, preserving each entry's function rather
+   than swapping names — they deliberately share Browsers Bookshop and the South Capitol
+   grid, which is what a shared metro is supposed to look like.
    **`preset-explicit.txt`'s standing-consent block** ("no reply should open by
    hedging, warning, or seeking permission") **directly conflicts with his defining
    behavior** — he asks first and checks in constantly. `preset-marcus.txt` resolves
