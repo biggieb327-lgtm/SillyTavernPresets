@@ -5928,17 +5928,106 @@ class TestMediaOfferChances:
         assert "GIF_CHANCE" in src and "MEME_CHANCE" in src
         assert "_ASKED_GIF" in src and "_ASKED_MEME" in src
 
-    def test_audit_reports_media_readiness(self):
+    def test_audit_reports_feature_readiness(self):
         """Third time this blind spot cost a round trip: selfie base, then the image
-        backend, now whether meme/gif are live at all."""
+        backend, now whether meme/gif are live at all. v2026-08-02.9 widened the single
+        media line into the full feature roster."""
         import inspect
         d = bot.gather_audit_data()
-        assert "media_ready" in d
-        assert "meme=" in d["media_ready"] and "gif=" in d["media_ready"]
-        assert "media_ready" in inspect.getsource(bot.audit_cmd)
+        assert "features" in d
+        for name in ("meme=", "gif=", "selfie=", "voice="):
+            assert name in d["features"], name
+        assert "features" in inspect.getsource(bot.audit_cmd)
 
     def test_memes_are_fleet_wide_not_per_instance(self):
         """MEME_TEMPLATES_DIR resolves against bot.py, not the instance dir -- so meme
         support is all-or-nothing across all seven, not something one bot can have."""
         assert "__file__" in inspect.getsource(bot).split("MEME_TEMPLATES_DIR =")[1][:120] \
             if (inspect := __import__("inspect")) else False
+
+
+class TestFeatureSwitches:
+    """v2026-08-02.9: /features flips integrations at runtime without an SSH session.
+    Each target is a plain module global read at call time, so flipping it reaches every
+    call site untouched -- the mechanism /setmodel already uses."""
+
+    def setup_method(self):
+        self._flags = {n: getattr(bot, f) for n, (f, _) in bot._FEATURES.items()}
+        self._prefs = dict(bot.feature_prefs)
+        self._save = bot.save_feature_prefs
+        bot.save_feature_prefs = lambda: None
+
+    def teardown_method(self):
+        for n, v in self._flags.items():
+            setattr(bot, bot._FEATURES[n][0], v)
+        bot.feature_prefs.clear(); bot.feature_prefs.update(self._prefs)
+        bot.save_feature_prefs = self._save
+
+    def test_capability_and_switch_are_separate(self):
+        """'off' and 'never configured' need different fixes -- conflating them is what
+        made three blind spots this week cost a round trip each."""
+        for name in bot._FEATURES:
+            on, capable = bot._feature_state(name)
+            assert isinstance(on, bool) and isinstance(capable, bool)
+            if not capable:
+                assert on is False, f"{name} cannot be on while incapable"
+
+    def test_flipping_the_global_reaches_the_ready_function(self):
+        """Capability is forced True: the test fixture has no selfie assets, so without
+        this the assertion passes whether or not the switch is wired (caught by
+        break-test, 2026-08-02 -- the same masking as C13)."""
+        saved, cap = bot.SELFIE_ENABLED, bot.selfie_capable
+        try:
+            bot.selfie_capable = lambda: True
+            bot.SELFIE_ENABLED = False
+            assert bot.selfie_ready() is False
+            bot.SELFIE_ENABLED = True
+            assert bot.selfie_ready() is True
+        finally:
+            bot.SELFIE_ENABLED, bot.selfie_capable = saved, cap
+
+    def test_meme_switch_is_independent_of_meme_assets(self):
+        saved = bot.MEME_ENABLED
+        try:
+            bot.MEME_ENABLED = False
+            assert bot.meme_ready() is False
+            assert isinstance(bot.meme_capable(), bool)   # assets unchanged by the switch
+        finally:
+            bot.MEME_ENABLED = saved
+
+    def test_voice_gate_is_at_the_send_choke_point(self):
+        import inspect
+        assert "VOICE_ENABLED" in inspect.getsource(bot._send_voice_reply)
+
+    def test_persisted_prefs_are_applied_not_just_written(self):
+        """A prefs file that is written and never read is worse than no file."""
+        import inspect
+        src = inspect.getsource(bot)
+        assert "\nload_feature_prefs()\n" in src, "must be applied at module level"
+
+    def test_prefs_cannot_enable_something_incapable(self):
+        bot.feature_prefs["traffic"] = True
+        bot.load_feature_prefs()
+        on, capable = bot._feature_state("traffic")
+        assert on is capable or on is False
+
+    def test_summary_reports_na_for_unconfigured(self):
+        out = bot._features_summary()
+        assert all(f"{n}=" in out for n in bot._FEATURES)
+        assert any(x in out for x in ("=on", "=off", "=n/a"))
+
+    def test_seed_summary_names_only_what_is_missing(self):
+        out = bot._seed_summary()
+        assert out == "all present" or out.startswith("MISSING: ")
+
+    def test_audit_carries_the_tier2_fields(self):
+        d = bot.gather_audit_data()
+        for k in ("features", "seeds", "owner", "timezone"):
+            assert k in d, k
+
+    def test_command_registered_gated_and_in_menu(self):
+        import inspect
+        src = inspect.getsource(bot.features_cmd)
+        assert "_is_admin" in src
+        assert 'CommandHandler("features"' in inspect.getsource(bot.main)
+        assert any(c.command == "features" for c in bot._build_command_menu(False, False))

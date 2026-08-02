@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.8"
+BOT_VERSION = "2026-08-02.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -649,6 +649,12 @@ GIF_DEDUP_SIZE = _env_int("GIF_DEDUP_SIZE", "12")
 # dropping one after the fact leaves her text referring to an image that never arrives.
 # Always offered regardless when the user's own message mentions a gif/meme.
 GIF_CHANCE = _env_float("GIF_CHANCE", "0.35")
+# Runtime-toggleable via /features. Each is a plain module global read at call time, so
+# flipping it reaches every call site without touching them — the same mechanism /setmodel
+# uses. Env value is the boot default; /features overrides and persists.
+SELFIE_ENABLED = os.getenv("SELFIE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+MEME_ENABLED = os.getenv("MEME_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+VOICE_ENABLED = os.getenv("VOICE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 MEME_CHANCE = _env_float("MEME_CHANCE", "0.35")
 _ASKED_GIF = re.compile(r"\b[gj]ifs?\b", re.I)
 _ASKED_MEME = re.compile(r"\bmemes?\b", re.I)
@@ -5482,8 +5488,14 @@ async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0,
 
 
 # --- Selfies ---
-def selfie_ready() -> bool:
+def selfie_capable() -> bool:
+    """Has the assets. Separate from selfie_ready so /features can report *why* it is off:
+    missing assets and switched off are different problems with different fixes."""
     return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
+
+
+def selfie_ready() -> bool:
+    return SELFIE_ENABLED and selfie_capable()
 
 
 _BASE_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
@@ -6229,8 +6241,14 @@ async def send_gif(context, chat_id: int, query: str, announce_errors: bool = Fa
 
 
 # --- Memes ---
-def meme_ready() -> bool:
+def meme_capable() -> bool:
+    """Templates and font live beside bot.py, not in the instance dir — so this is
+    fleet-wide, not per-instance (source of a 2026-08-02 misreading)."""
     return MEME_TEMPLATES_DIR.is_dir() and any(MEME_TEMPLATES_DIR.glob("*.jpg")) and MEME_FONT_PATH.exists()
+
+
+def meme_ready() -> bool:
+    return MEME_ENABLED and meme_capable()
 
 
 def _pick_meme_template(chat_id: int) -> Path:
@@ -7814,6 +7832,8 @@ def _nanogpt_tts(text: str) -> bytes:
 
 async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
+    if not VOICE_ENABLED:
+        return
     try:
         tts = _inworld_tts if INWORLD_API_KEY else _nanogpt_tts
         audio = await asyncio.to_thread(tts, text)
@@ -10955,6 +10975,123 @@ async def gif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_gif(context, chat_id, query, announce_errors=True)
 
 
+# --- Runtime feature switches (/features) -------------------------------------------
+# name -> (module global to flip, capability probe). The probe answers "could this work at
+# all" (credential/assets present); the global answers "is it switched on". Keeping them
+# separate is the point: "off" and "never configured" need different fixes, and conflating
+# them is what made three separate blind spots this week take a round trip each.
+_FEATURES = {
+    "selfie":  ("SELFIE_ENABLED",  lambda: selfie_capable()),
+    "meme":    ("MEME_ENABLED",    lambda: meme_capable()),
+    "gif":     ("GIF_ENABLED",     lambda: bool(GIPHY_API_KEY)),
+    "voice":   ("VOICE_ENABLED",   lambda: True),
+    "traffic": ("TRAFFIC_ENABLED", lambda: bool(WSDOT_API_KEY)),
+    "maps":    ("TOMTOM_ENABLED",  lambda: bool(TOMTOM_API_KEY)),
+    "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD)),
+}
+FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"
+feature_prefs = {}
+
+
+def _feature_state(name: str) -> tuple:
+    """(on, capable) for one feature."""
+    flag, probe = _FEATURES[name]
+    try:
+        capable = bool(probe())
+    except Exception:
+        capable = False
+    return bool(globals().get(flag)) and capable, capable
+
+
+def load_feature_prefs():
+    """Re-apply persisted switches over the env defaults. Only ever turns things OFF or
+    back on within what the instance is capable of — it cannot conjure a missing key."""
+    if FEATURE_PREFS_FILE.exists():
+        try:
+            feature_prefs.update(json.loads(FEATURE_PREFS_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            log.warning("[features] prefs load failed: %s", e)
+    for name, want in list(feature_prefs.items()):
+        if name in _FEATURES:
+            globals()[_FEATURES[name][0]] = bool(want)
+
+
+def save_feature_prefs():
+    _atomic_write_text(FEATURE_PREFS_FILE, json.dumps(feature_prefs, indent=2))
+
+
+def _features_summary() -> str:
+    """One compact line for /audit: on / off / n/a, where n/a means never configured."""
+    bits = []
+    for name in _FEATURES:
+        on, capable = _feature_state(name)
+        if not capable:
+            bits.append(f"{name}=n/a")
+        else:
+            bits.append(f"{name}=" + ("on" if on else "off"))
+    return " ".join(bits)
+
+
+_SEED_FILES = ("atlas.txt", "people.txt", "projects.txt", "schedule.txt",
+               "life.txt", "setting.txt")
+
+
+def _seed_summary() -> str:
+    """Seed files feed straight into her prompts; a missing one costs content with no
+    error at all. jules ran without atlas.txt on the VPS for a while (vps-sync notes it)."""
+    missing = [f for f in _SEED_FILES if not (BASE_DIR / f).exists()]
+    return "all present" if not missing else "MISSING: " + ", ".join(missing)
+
+
+# Apply persisted switches now — module level, after every global they touch exists.
+# Without this the prefs file is written and never read, which is worse than no file.
+load_feature_prefs()
+
+
+# Apply persisted switches now — module level, after every global they touch exists.
+# Without this the prefs file is written and never read, which is worse than no file.
+
+
+async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/features  |  /features <name> on|off — flip an integration without an SSH session."""
+    if not _is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    if not args:
+        lines = ["\U0001F39B Features"]
+        for name in _FEATURES:
+            on, capable = _feature_state(name)
+            if not capable:
+                lines.append(f"{name}: n/a — not configured on this instance")
+            else:
+                lines.append(f"{name}: {'on' if on else 'off'}")
+        lines.append("")
+        lines.append("Usage: /features <name> on|off")
+        await update.message.reply_text("\n".join(lines))
+        return
+    name = args[0].strip().lower()
+    if name not in _FEATURES:
+        await update.message.reply_text("Unknown feature. One of: " + ", ".join(_FEATURES))
+        return
+    if len(args) < 2 or args[1].strip().lower() not in ("on", "off"):
+        on, capable = _feature_state(name)
+        await update.message.reply_text(
+            f"{name}: " + ("n/a — not configured" if not capable else ("on" if on else "off"))
+            + "\nUsage: /features " + name + " on|off")
+        return
+    want = args[1].strip().lower() == "on"
+    _, probe = _FEATURES[name]
+    if want and not _feature_state(name)[1]:
+        await update.message.reply_text(
+            f"Can't switch {name} on — it isn't configured on this instance "
+            f"(missing credential or assets). That needs a .env or file change, not a switch.")
+        return
+    globals()[_FEATURES[name][0]] = want
+    feature_prefs[name] = want
+    save_feature_prefs()
+    await update.message.reply_text(f"\U0001F39B {name} switched {'on' if want else 'off'}.")
+
+
 async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show or set the GIF content-safety level. high|medium|low only — Giphy's fourth
     rating ("r") is deliberately unreachable."""
@@ -12882,8 +13019,10 @@ def gather_audit_data() -> dict:
         "selfie_base": _base_image_status(),
         "selfie_provider": (f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
                             if SELFIE_PROVIDER == "nanogpt" else SELFIE_PROVIDER),
-        "media_ready": (f"meme={'on' if meme_ready() else 'off'} "
-                        f"gif={('on (' + gif_prefs.get('safety', 'high') + ')') if gif_ready() else 'off'}"),
+        "features": _features_summary(),
+        "seeds": _seed_summary(),
+        "owner": ("set" if get_owner() is not None else "NOT SET — nothing proactive can fire"),
+        "timezone": (str(TZ) if TZ else "(system default)"),
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
@@ -12952,7 +13091,9 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
         f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
-        f"Media: {d.get('media_ready', '?')}",
+        f"Features: {d.get('features', '?')}",
+        f"Seeds: {d.get('seeds', '?')}",
+        f"Owner: {d.get('owner', '?')} | TZ: {d.get('timezone', '?')}",
     ]
     ps = d.get("prompt_stats") or {}
     if ps:
@@ -13540,6 +13681,7 @@ _BASE_COMMANDS = [
     BotCommand("selfie", "Generate a selfie"),
     BotCommand("gif", "Search and send a GIF"),
     BotCommand("gifsafety", "GIF safety: high, medium or low"),
+    BotCommand("features", "Switch integrations on or off"),
     BotCommand("setbase", "Replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
@@ -13781,6 +13923,7 @@ def main():
     app.add_handler(CommandHandler("meme", meme_cmd))
     app.add_handler(CommandHandler("gif", gif_cmd))
     app.add_handler(CommandHandler("gifsafety", gifsafety_cmd))
+    app.add_handler(CommandHandler("features", features_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))

@@ -7,6 +7,43 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.9 — /features, and an audit that answers the questions we kept asking
+
+**A systematic pass over what `/audit` could not see**, prompted by three separate blind
+spots in one week that each cost a round trip: four bots with no reference photo, three on
+a weaker image backend, and "I'm not sure if memes are turned on for anyone besides
+Bonnie". The common shape is **per-instance things that fail silently**, so the audit went
+looking for the rest of them rather than waiting for the next one.
+
+**Three new lines:**
+- `Features:` — every integration as `on` / `off` / `n/a`, where `n/a` means never
+  configured. **`off` and `never configured` are different problems with different fixes**,
+  and conflating them is precisely what made those three incidents slow.
+- `Seeds:` — `all present`, or `MISSING: <files>`. Six files (`atlas`, `people`,
+  `projects`, `schedule`, `life`, `setting`) are read straight into her prompts, and a
+  missing one costs content with no error whatsoever. jules ran without `atlas.txt` on the
+  VPS for a stretch; `vps-sync.sh` still carries the comment about it.
+- `Owner:` / `TZ:` — no owner means nothing proactive can ever fire, and a wrong timezone
+  quietly breaks busy-blocks, midnight rotation and the 07:00 wardrobe pick. Both look like
+  healthy silence.
+
+Voice and traffic were the two credential-gated integrations reporting nothing at all,
+despite maps and health already being covered — half the traffic stack was visible and half
+wasn't, which is worse than neither.
+
+**`/features <name> on|off`** flips selfie, meme, gif, voice, traffic, maps or health at
+runtime and persists to `feature_prefs.json`. Each target is a plain module global read at
+call time, so flipping it reaches all 8-10 call sites without touching any of them — the
+same mechanism `/setmodel` already uses. It refuses to switch on anything the instance
+isn't capable of, and says why. `selfie_ready`/`meme_ready` split into `*_capable` (assets
+present) and `*_ready` (capable **and** switched on).
+
+**Verification:** 841/841 pytest, 33/33 evals. 10 new tests, three break-tested RED. A
+fourth injection — unwiring the switch from `selfie_ready` — **passed** its test, because
+the fixture has no selfie assets so `selfie_capable()` was False either way and the
+assertion held for the wrong reason. Hardened to force capability True, then confirmed RED.
+Same masking C13 describes, caught only because the injection was run.
+
 ## v2026-08-02.8 — How often she reaches for a GIF or a meme
 
 **`GIF_CHANCE` and `MEME_CHANCE` (both 0.35) gate whether she is OFFERED the option in a
