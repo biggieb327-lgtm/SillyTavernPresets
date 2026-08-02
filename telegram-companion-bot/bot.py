@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.9"
+BOT_VERSION = "2026-08-02.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -10980,14 +10980,19 @@ async def gif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # all" (credential/assets present); the global answers "is it switched on". Keeping them
 # separate is the point: "off" and "never configured" need different fixes, and conflating
 # them is what made three separate blind spots this week take a round trip each.
+# name -> (global flag, capability probe, detail probe or None). The detail exists because
+# "voice=on" was true on all seven and told you nothing: NanoGPT TTS works without Inworld,
+# so the capability probe can only ever return True. Which backend is the actual question.
 _FEATURES = {
-    "selfie":  ("SELFIE_ENABLED",  lambda: selfie_capable()),
-    "meme":    ("MEME_ENABLED",    lambda: meme_capable()),
-    "gif":     ("GIF_ENABLED",     lambda: bool(GIPHY_API_KEY)),
-    "voice":   ("VOICE_ENABLED",   lambda: True),
-    "traffic": ("TRAFFIC_ENABLED", lambda: bool(WSDOT_API_KEY)),
-    "maps":    ("TOMTOM_ENABLED",  lambda: bool(TOMTOM_API_KEY)),
-    "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD)),
+    "selfie":  ("SELFIE_ENABLED",  lambda: selfie_capable(), lambda: SELFIE_PROVIDER),
+    "meme":    ("MEME_ENABLED",    lambda: meme_capable(), None),
+    "gif":     ("GIF_ENABLED",     lambda: bool(GIPHY_API_KEY),
+                lambda: gif_prefs.get("safety", "high")),
+    "voice":   ("VOICE_ENABLED",   lambda: True,
+                lambda: "inworld" if INWORLD_API_KEY else "nanogpt"),
+    "traffic": ("TRAFFIC_ENABLED", lambda: bool(WSDOT_API_KEY), None),
+    "maps":    ("TOMTOM_ENABLED",  lambda: bool(TOMTOM_API_KEY), None),
+    "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD), None),
 }
 FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"
 feature_prefs = {}
@@ -10995,7 +11000,7 @@ feature_prefs = {}
 
 def _feature_state(name: str) -> tuple:
     """(on, capable) for one feature."""
-    flag, probe = _FEATURES[name]
+    flag, probe = _FEATURES[name][0], _FEATURES[name][1]
     try:
         capable = bool(probe())
     except Exception:
@@ -11027,8 +11032,16 @@ def _features_summary() -> str:
         on, capable = _feature_state(name)
         if not capable:
             bits.append(f"{name}=n/a")
-        else:
-            bits.append(f"{name}=" + ("on" if on else "off"))
+            continue
+        detail = _FEATURES[name][2]
+        suffix = ""
+        if on and detail is not None:
+            try:
+                d = detail()
+                suffix = f"({d})" if d else ""
+            except Exception:
+                suffix = ""
+        bits.append(f"{name}=" + ("on" if on else "off") + suffix)
     return " ".join(bits)
 
 
@@ -13023,6 +13036,7 @@ def gather_audit_data() -> dict:
         "seeds": _seed_summary(),
         "owner": ("set" if get_owner() is not None else "NOT SET — nothing proactive can fire"),
         "timezone": (str(TZ) if TZ else "(system default)"),
+        "location": WEATHER_LOCATION,
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
@@ -13093,7 +13107,8 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
         f"Features: {d.get('features', '?')}",
         f"Seeds: {d.get('seeds', '?')}",
-        f"Owner: {d.get('owner', '?')} | TZ: {d.get('timezone', '?')}",
+        f"Owner: {d.get('owner', '?')} | TZ: {d.get('timezone', '?')}"
+        f" | Location: {d.get('location', '?')}",
     ]
     ps = d.get("prompt_stats") or {}
     if ps:

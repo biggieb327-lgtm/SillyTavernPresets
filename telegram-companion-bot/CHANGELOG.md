@@ -7,6 +7,39 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.10 — voice=on told you nothing, and Location was missing
+
+**A fleet-wide `/audit` sweep across all seven exposed two flaws in the audit itself,
+shipped an hour earlier.**
+
+`voice=on` was true on every instance, because the capability probe I wrote was
+`lambda: True` — NanoGPT TTS works without an Inworld key, so it could never say anything
+else. It didn't distinguish Emily, the Inworld instance, from the six on the fallback. The
+feature registry now carries an optional **detail probe**, so it reads `voice=on(inworld)`
+or `voice=on(nanogpt)`, `gif=on(high)`, `selfie=on(gemini)`. Details are omitted when a
+feature is off, and a raising probe can't take the summary down with it — diagnostic output
+must never be the thing that fails.
+
+`Location:` joins the Owner/TZ line. Its absence was conspicuous: this entire session began
+with a weather bug, `WEATHER_LOCATION` is what drives weather, and nothing reported it.
+
+**What the sweep found in the fleet** (config, not code):
+- **Marcus runs `America/New_York`** while his atlas says Portland, OR and every other
+  instance is Pacific. Three hours off across schedule busy-blocks, midnight rotation, the
+  07:00 wardrobe pick and quiet windows — and he shares a group with Emily on Pacific. The
+  `TZ:` line added in v2026-08-02.9 found this on first use.
+- **`setting.txt` is missing on all seven** and exists in no repo seed. `SETTING` has never
+  been populated for anyone.
+- **`life.txt` is missing on priya, marcus and jules**; the other four have one, live-only.
+- **Four instances still load the monolithic `preset.txt`** while marcus/jules/cass are
+  layered. Every per-character layer already exists, and core+rp+explicit+stepped is 33,610
+  bytes against the monolith's 34,241 — so this is a `.env` line, not a rewrite.
+- **`DEFAULT_SETTING` is Nora's setting text**, the same home-instance character bleed as
+  `_APPEARANCE_DEFAULT` before v2026-08-01.11. Unreachable on named instances, wrong in the
+  file.
+
+**Verification:** 846/846 pytest, 33/33 evals. 5 new tests, both fixes break-tested RED.
+
 ## v2026-08-02.9 — /features, and an audit that answers the questions we kept asking
 
 **A systematic pass over what `/audit` could not see**, prompted by three separate blind

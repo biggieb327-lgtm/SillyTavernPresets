@@ -5952,7 +5952,7 @@ class TestFeatureSwitches:
     call site untouched -- the mechanism /setmodel already uses."""
 
     def setup_method(self):
-        self._flags = {n: getattr(bot, f) for n, (f, _) in bot._FEATURES.items()}
+        self._flags = {n: getattr(bot, spec[0]) for n, spec in bot._FEATURES.items()}
         self._prefs = dict(bot.feature_prefs)
         self._save = bot.save_feature_prefs
         bot.save_feature_prefs = lambda: None
@@ -6031,3 +6031,51 @@ class TestFeatureSwitches:
         assert "_is_admin" in src
         assert 'CommandHandler("features"' in inspect.getsource(bot.main)
         assert any(c.command == "features" for c in bot._build_command_menu(False, False))
+
+
+class TestFeatureDetailAndLocation:
+    """v2026-08-02.10: "voice=on" was true on all seven and said nothing -- NanoGPT TTS
+    works without Inworld, so the capability probe can only return True. Which backend is
+    the actual question. Also adds Location, conspicuously absent given this whole session
+    started with a weather bug and location is what drives weather."""
+
+    def test_every_feature_spec_is_a_three_tuple(self):
+        for name, spec in bot._FEATURES.items():
+            assert len(spec) == 3, name
+            assert isinstance(spec[0], str)
+            assert callable(spec[1])
+            assert spec[2] is None or callable(spec[2])
+
+    def test_voice_reports_which_backend(self):
+        saved = bot.INWORLD_API_KEY
+        try:
+            bot.INWORLD_API_KEY = "k"
+            assert "voice=on(inworld)" in bot._features_summary()
+            bot.INWORLD_API_KEY = ""
+            assert "voice=on(nanogpt)" in bot._features_summary()
+        finally:
+            bot.INWORLD_API_KEY = saved
+
+    def test_detail_is_omitted_when_the_feature_is_off(self):
+        saved = bot.VOICE_ENABLED
+        try:
+            bot.VOICE_ENABLED = False
+            out = bot._features_summary()
+            assert "voice=off" in out and "voice=off(" not in out
+        finally:
+            bot.VOICE_ENABLED = saved
+
+    def test_a_raising_detail_probe_does_not_break_the_summary(self):
+        """The summary is diagnostic output -- it must never be the thing that fails."""
+        saved = bot._FEATURES["meme"]
+        try:
+            bot._FEATURES["meme"] = (saved[0], saved[1], lambda: 1 / 0)
+            assert "meme=" in bot._features_summary()
+        finally:
+            bot._FEATURES["meme"] = saved
+
+    def test_location_is_reported(self):
+        import inspect
+        d = bot.gather_audit_data()
+        assert d["location"] == bot.WEATHER_LOCATION
+        assert "location" in inspect.getsource(bot.audit_cmd)
