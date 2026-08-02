@@ -437,6 +437,14 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-02 — Handed over a multi-step operator block whose later commands depended on a `cd`
+  earlier in the same block. The owner's shell was still in `~`, so seven `vps-sync.sh` calls
+  resolved against the wrong directory and failed at once. Every earlier message in the session
+  had used the absolute path; the regression came from compressing them into one "full sequence"
+  block. → **operator-facing command blocks must not depend on shell state set earlier in the
+  same block** — no relative paths after a `cd`, no variables defined upstream. Operators paste
+  subsets, and a relative path does not fail loudly, it silently targets the wrong place. Write
+  every path absolute even when it is longer. C1 family: the operator half nothing can guard.
 - 2026-08-02 — Used the hostname from the owner's shell prompt (`root@<host>#`) as the SSH
   target in an scp command handed to another machine. A prompt hostname is what the box calls
   itself locally; it is not a routable address from anywhere else, and the transfer would have
