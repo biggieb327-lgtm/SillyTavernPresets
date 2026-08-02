@@ -34,7 +34,7 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 5** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1)
+**seen: 6** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1)
 Phone tooling (`update-all.sh`, `tmux kill-session`, `pkg`) was run on the VPS, and
 VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looked like
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
@@ -57,6 +57,15 @@ the same session carried `# host: VPS (as root)` correctly — the lapse came wi
 second, longer message where the commands were a follow-up rather than the main point.
 The failure mode to watch is not "forgot the rule", it is **"the command block was
 incidental to the message"**. No further mechanism needed; graduation is holding.
+**Occurrence 6 (2026-08-02) — a shape the guard cannot resolve alone.** A block labelled
+`# host: phone (Termux)` held `scp /sdcard/... root@vps:/opt/telegram-bots/...`. That is
+correct: scp *runs* on the phone and *writes* to the VPS. But the block contains a VPS-only
+path, so the guard read it as mixed and blocked — correctly, since it cannot distinguish a
+remote destination argument from a local path, and guessing would defeat the check. The
+resolution is the `# host: both` pragma the hook already offers, plus splitting the purely
+local commands out. **Cross-host transfer commands (`scp`, `rsync`, `ssh <host> <cmd>`) are
+inherently two-host and must be labelled `# host: both` up front** — not discovered at the
+Stop hook. Both occurrences this session were labelling, never a wrong-host command.
 
 ### C2 — Name the class before calling a fix done
 **seen: 2** (2026-07-26 ×2)
