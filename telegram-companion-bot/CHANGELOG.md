@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.12 — the seed check looked at a different file than the loader
+
+**Root cause: `_SEED_FILES` hardcoded `"atlas.txt"` while `ATLAS_FILE` makes that name
+configurable.** Any instance pointing the atlas somewhere else would get
+`Seeds: MISSING: atlas.txt` from `/audit` while loading its atlas perfectly well — a
+false alarm from the exact line added in v2026-08-02.9 to stop false silence.
+
+Emily was that instance: she had `places.txt` alongside an `ATLAS_FILE` override, which
+is why her Portland→Olympia relocation appeared to land in `atlas.txt` and change nothing
+live. The `Seeds:` line could not have caught it, because it was checking a filename
+nobody had told it about. (Her override and the stale `places.txt` are both retired now —
+`grep -c 'Portland\|Burnside\|Powell' /opt/telegram-bots/emily/*.txt` returns 0 across
+every file.)
+
+`_seed_paths()` now resolves the atlas through the same global the loader reads, and
+reports whatever filename that turns out to be. The general rule this is an instance of:
+**an audit that checks a different path than the code loads is worse than no audit**, because
+it answers confidently about the wrong thing.
+
+Also removes a duplicated orphan comment block left above `features_cmd` in v2026-08-02.9.
+
+**Verification:** 859/859 pytest, 33/33 evals. 1 new test, break-tested RED (it reported
+`MISSING: atlas.txt` for a present `places.txt` — the live failure exactly).
+
 ## v2026-08-02.11 — life.txt evolves instead of sitting there
 
 **Root cause: nothing ever wrote `life.txt`.** `LIFE_ARC_FILE` was even commented
@@ -90,7 +114,8 @@ looking for the rest of them rather than waiting for the next one.
 - `Features:` — every integration as `on` / `off` / `n/a`, where `n/a` means never
   configured. **`off` and `never configured` are different problems with different fixes**,
   and conflating them is precisely what made those three incidents slow.
-- `Seeds:` — `all present`, or `MISSING: <files>`. Six files (`atlas`, `people`,
+- `Seeds:` — `all present`, or `MISSING: <files>`. Six files (`atlas` — under whatever
+  name `ATLAS_FILE` resolves to, since v2026-08-02.12 — `people`,
   `projects`, `schedule`, `life`, `setting`) are read straight into her prompts, and a
   missing one costs content with no error whatsoever. jules ran without `atlas.txt` on the
   VPS for a stretch; `vps-sync.sh` still carries the comment about it.

@@ -516,6 +516,14 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
+  then reported the Portland→Olympia relocation shipped. Every instance that already had the file
+  silently no-op'd, and Emily kept saying Burnside for a further two rounds. → **a placement block
+  is a write, and a write that silently declines is not a write.** When the intent is "this file
+  should now contain this", the block must overwrite (with a timestamped `.bak`) and the
+  verification must read the file back, not check that the command exited 0. Skip-if-exists is
+  correct only for *seeding something absent*, and then the report must say "seeded where missing",
+  never "updated". C13 family — the exit status could not fail.
 - 2026-08-02 — Read seven `/audit` outputs and reported "life.txt missing on priya, marcus,
   jules". Nora's line said `MISSING: life.txt, setting.txt` too, so it was four. Then handed over
   `cat /opt/telegram-bots/nora/life.txt` as the way to see the file format — naming the one bot in

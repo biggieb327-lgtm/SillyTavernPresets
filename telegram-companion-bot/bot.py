@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.11"
+BOT_VERSION = "2026-08-02.12"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11051,24 +11051,27 @@ def _features_summary() -> str:
     return " ".join(bits)
 
 
-_SEED_FILES = ("atlas.txt", "people.txt", "projects.txt", "schedule.txt",
-               "life.txt", "setting.txt")
+_SEED_FILES = ("people.txt", "projects.txt", "schedule.txt", "life.txt", "setting.txt")
+
+
+def _seed_paths() -> tuple:
+    """The atlas is the one seed whose filename is configurable (`ATLAS_FILE`), so it is
+    resolved through the same global the loader reads rather than assumed to be
+    `atlas.txt` — an audit that checks a different file than the code loads is worse
+    than no audit."""
+    return (ATLAS_FILE,) + tuple(BASE_DIR / f for f in _SEED_FILES)
 
 
 def _seed_summary() -> str:
     """Seed files feed straight into her prompts; a missing one costs content with no
     error at all. jules ran without atlas.txt on the VPS for a while (vps-sync notes it)."""
-    missing = [f for f in _SEED_FILES if not (BASE_DIR / f).exists()]
+    missing = [p.name for p in _seed_paths() if not p.exists()]
     return "all present" if not missing else "MISSING: " + ", ".join(missing)
 
 
 # Apply persisted switches now — module level, after every global they touch exists.
 # Without this the prefs file is written and never read, which is worse than no file.
 load_feature_prefs()
-
-
-# Apply persisted switches now — module level, after every global they touch exists.
-# Without this the prefs file is written and never read, which is worse than no file.
 
 
 async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

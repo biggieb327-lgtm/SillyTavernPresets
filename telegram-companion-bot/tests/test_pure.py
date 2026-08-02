@@ -6020,6 +6020,19 @@ class TestFeatureSwitches:
         out = bot._seed_summary()
         assert out == "all present" or out.startswith("MISSING: ")
 
+    def test_seed_check_follows_atlas_file_override(self, tmp_path, monkeypatch):
+        """v2026-08-02.12: the check hardcoded "atlas.txt" while the loader honours
+        ATLAS_FILE, so an instance pointing at another name (emily's places.txt) would
+        be reported MISSING an atlas it in fact loads fine."""
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "ATLAS_FILE", tmp_path / "places.txt")
+        for f in bot._SEED_FILES:
+            (tmp_path / f).write_text("x", encoding="utf-8")
+        assert bot._seed_summary().startswith("MISSING: places.txt")
+        (tmp_path / "places.txt").write_text("x", encoding="utf-8")
+        assert bot._seed_summary() == "all present"
+        assert "atlas.txt" not in bot._SEED_FILES, "atlas is resolved, never assumed"
+
     def test_audit_carries_the_tier2_fields(self):
         d = bot.gather_audit_data()
         for k in ("features", "seeds", "owner", "timezone"):
