@@ -5841,3 +5841,54 @@ class TestGifTagAndFiltering:
         """Invariant #8: no bare requests in an async handler."""
         import inspect
         assert "asyncio.to_thread" in inspect.getsource(bot.send_gif)
+
+
+class TestGifCommandAndRedaction:
+    """v2026-08-02.7: /gif is the parity command for /selfie and /meme, and the only way
+    to distinguish a working Giphy path from a silent one. Adding it surfaced a real leak:
+    Giphy takes api_key as a QUERY PARAMETER, so a requests exception carries it in the
+    URL, and /errors echoes errors.log into Telegram."""
+
+    def test_api_key_is_redacted_from_exception_text(self):
+        raw = "HTTPError: 401 for https://api.giphy.com/v1/gifs/search?api_key=sk_live_SECRET123&q=hi"
+        out = bot._redact_key(raw)
+        assert "sk_live_SECRET123" not in out
+        assert "api_key=<redacted>" in out
+        assert "q=hi" in out          # the useful part survives
+
+    def test_redaction_handles_bare_key_param_too(self):
+        assert "SECRET" not in bot._redact_key("https://x/api?key=SECRET&b=1")
+
+    def test_both_failure_paths_redact(self):
+        import inspect
+        src = inspect.getsource(bot.send_gif)
+        assert src.count("_redact_key") >= 2, "search and send paths must both redact"
+
+    def test_user_facing_errors_carry_no_exception_text(self):
+        """no-exception-leak: details stay in the log, the chat gets a generic line."""
+        import inspect
+        src = inspect.getsource(bot.send_gif)
+        for line in src.splitlines():
+            if "_say(" in line:
+                assert "{e}" not in line and "str(e)" not in line, line
+
+    def test_auto_path_stays_silent_by_default(self):
+        import inspect
+        sig = inspect.signature(bot.send_gif)
+        assert sig.parameters["announce_errors"].default is False
+
+    def test_gif_command_announces_errors(self):
+        """A manual command that silently does nothing is indistinguishable from broken."""
+        import inspect
+        assert "announce_errors=True" in inspect.getsource(bot.gif_cmd)
+
+    def test_gif_command_is_admin_gated_registered_and_in_menu(self):
+        import inspect
+        assert "_is_admin" in inspect.getsource(bot.gif_cmd)
+        assert 'CommandHandler("gif", gif_cmd)' in inspect.getsource(bot.main)
+        assert any(c.command == "gif" for c in bot._build_command_menu(False, False))
+
+    def test_distinguishes_no_key_from_no_results(self):
+        """The two failures need different fixes, so they must not read the same."""
+        src = inspect.getsource(bot.send_gif) if (inspect := __import__("inspect")) else ""
+        assert "GIPHY_API_KEY set" in src and "got past the" in src

@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.7 — /gif, and the API key that would have leaked into a chat
+
+**`/gif <words>` is the parity command for `/selfie` and `/meme`**, and the reason it
+matters is that every failure on the GIF path is deliberately silent — so without it, "she
+never sends GIFs" and "the Giphy call is broken" look identical and you'd wait days to tell
+them apart. Same blind spot as `/audit` not naming the image backend, which cost several
+rounds a day earlier.
+
+It announces what went wrong, and the messages distinguish the cases that need different
+fixes: no `GIPHY_API_KEY`, `GIF_ENABLED=0`, Giphy unreachable, or nothing surviving the
+filter at the current level. The auto path keeps `announce_errors=False` — mid-conversation
+a missing GIF must stay invisible.
+
+**Building it surfaced a real leak in v2026-08-02.6.** Giphy takes `api_key` as a **query
+parameter**, so a `requests` exception carries the full URL — key included — and
+`log.warning("[gif] search failed: %s", e)` wrote that into `errors.log`. `/errors` echoes
+recent errors to the owner in Telegram, so the key had a path from the log into a chat
+message. `_redact_key()` now scrubs `api_key=`/`key=` values from both the search and send
+failure paths before anything is logged, keeping the rest of the URL for diagnosis.
+
+That is a hazard of every key-in-query-string API, not just this one: the secret ends up in
+exception text that error handling then treats as safe to log.
+
+**Verification:** 824/824 pytest, 33/33 evals. 8 new tests; the redaction break-tested RED
+on both paths.
+
 ## v2026-08-02.6 — GIFs, via Giphy, chosen in her own words
 
 **Tenor was the plan until research killed it.** Google stopped issuing Tenor API keys on

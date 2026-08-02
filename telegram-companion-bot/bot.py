@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.6"
+BOT_VERSION = "2026-08-02.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6155,27 +6155,60 @@ def _giphy_search(query: str, safety: str, exclude_ids: set):
     return best
 
 
-async def send_gif(context, chat_id: int, query: str):
-    """Search and send one GIF. Silent on every failure — a missing GIF must never
-    surface as an error in a conversation, and never delays the reply it follows."""
-    if not (gif_ready() and query):
+_KEY_IN_URL = re.compile(r'((?:api_)?key=)[^&\s\'"]+', re.I)
+
+
+def _redact_key(text: str) -> str:
+    """Giphy takes api_key as a QUERY PARAMETER, so a requests exception carries it in
+    the URL. errors.log is echoed to the owner by /errors, so an unredacted exception
+    would walk the key from the log into a Telegram message (found 2026-08-02)."""
+    return _KEY_IN_URL.sub(r"\1<redacted>", str(text))
+
+
+async def send_gif(context, chat_id: int, query: str, announce_errors: bool = False):
+    """Search and send one GIF.
+
+    Silent by default: on the auto path a missing GIF must never surface as an error
+    mid-conversation. /gif passes announce_errors=True, because a manual command that
+    does nothing is indistinguishable from one that is broken -- which is the whole
+    reason the command exists.
+    """
+    async def _say(msg):
+        if announce_errors:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
+
+    if not GIF_ENABLED:
+        await _say("\U0001F39E GIFs are switched off for this instance (GIF_ENABLED=0).")
         return
+    if not GIPHY_API_KEY:
+        await _say("\U0001F39E No GIPHY_API_KEY set for this instance, so GIF search is inert.")
+        return
+    if not query:
+        return
+    level = gif_prefs.get("safety", "high")
     seen = set(_recent_gif_ids.get(chat_id) or [])
     try:
-        found = await asyncio.to_thread(_giphy_search, query, gif_prefs.get("safety", "high"), seen)
+        found = await asyncio.to_thread(_giphy_search, query, level, seen)
     except Exception as e:
-        log.warning("[gif] search failed: %s", e)
+        # Generic to the user, redacted in the log (no-exception-leak eval + the key).
+        log.warning("[gif] search failed: %s", _redact_key(e))
         _count_error("media")
+        await _say("\U0001F39E Couldn't reach Giphy just then.")
         return
     if not found:
-        log.info("[gif] no allowed candidate for %r", query)
+        await _say(f"\U0001F39E Nothing came back for {query!r} that got past the "
+                   f"{level} filter. Try different words, or /gifsafety.")
         return
     url, gid, title = found
     try:
         await context.bot.send_animation(chat_id=chat_id, animation=url)
     except Exception as e:
-        log.warning("[gif] send failed: %s", e)
+        log.warning("[gif] send failed: %s", _redact_key(e))
         _count_error("media")
+        await _say("\U0001F39E Found one but couldn't send it.")
         return
     buf = _recent_gif_ids.setdefault(chat_id, [])
     buf.append(gid)
@@ -10894,6 +10927,23 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"The next selfie uses it; no restart needed.{note}")
 
 
+async def gif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual GIF search — the parity command for /selfie and /meme, and the only way to
+    tell a working Giphy path from a silent one without waiting for her to use the tag."""
+    if not _is_admin(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "Usage: /gif <search words>\n"
+            f"Safety is {gif_prefs.get('safety', 'high')} — change it with /gifsafety.")
+        return
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
+    await send_gif(context, chat_id, query, announce_errors=True)
+
+
 async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show or set the GIF content-safety level. high|medium|low only — Giphy's fourth
     rating ("r") is deliberately unreachable."""
@@ -13474,6 +13524,7 @@ _BASE_COMMANDS = [
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
     BotCommand("selfie", "Generate a selfie"),
+    BotCommand("gif", "Search and send a GIF"),
     BotCommand("gifsafety", "GIF safety: high, medium or low"),
     BotCommand("setbase", "Replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
@@ -13714,6 +13765,7 @@ def main():
     app.add_handler(CommandHandler("selfie", selfie_cmd))
     app.add_handler(CommandHandler("setbase", setbase_cmd))
     app.add_handler(CommandHandler("meme", meme_cmd))
+    app.add_handler(CommandHandler("gif", gif_cmd))
     app.add_handler(CommandHandler("gifsafety", gifsafety_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
