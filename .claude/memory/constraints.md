@@ -483,9 +483,12 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   occurrence of the entry below**: asserting how a user-visible surface behaves without exercising
   that surface. Both times the claim was adjacent to real work and sounded safe. → before telling
   anyone a command/screen/report shows something, trace the path that renders it, or run it. At
-  `seen: 2` this is at the graduation bar; the narrow mechanism that would have caught it is an
-  eval asserting every key in `gather_audit_data()` is rendered by `audit_cmd` — not built yet,
-  deliberately, because it is one instance and the general shape may want something broader.
+  `seen: 2` this reached the graduation bar and the **owner ruled it stays prose until a third
+  occurrence** (2026-08-02) — an explicit, deliberate exception to rule 4, not an oversight, so
+  do not "fix" it by building a mechanism unprompted. The candidate if it recurs: an eval
+  asserting every key in `gather_audit_data()` is rendered by `audit_cmd`. Held back because that
+  catches one instance, while the real shape — claiming any user-visible surface behaves a way
+  without running it — likely wants something broader that a third case would reveal.
 - 2026-08-01 — Wrote an unverified inference into the changelog, the operational log *and* a
   report to the owner, in assertive voice with the hedge appended: "any instance falling through
   to the default gets a different woman's face and Nora's jacket… not yet confirmed against the
