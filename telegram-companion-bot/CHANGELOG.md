@@ -7,6 +7,44 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.11 — life.txt evolves instead of sitting there
+
+**Root cause: nothing ever wrote `life.txt`.** `LIFE_ARC_FILE` was even commented
+`# user-maintained`, `_read_life_arc()` only reads, and `/life` edits by hand — so a seeded
+arc stayed frozen indefinitely. The owner noticed Bonnie's hadn't moved in a while; it was
+never going to.
+
+`day.txt` already answers "what happened today" and regenerates nightly. The arc underneath
+— what she is currently *in* — had no equivalent. `_maybe_rotate_life_arc()` now runs from
+the midnight job and acts once every `LIFE_ROTATE_DAYS` (7).
+
+**It evolves rather than regenerates**, which is the whole design:
+- the current arc goes **into** the prompt, so unresolved threads carry over in the same
+  words where nothing about them has changed
+- **exactly one thing** may move per rotation — resolve, worsen, or a new thread starts. An
+  arc that turns over completely every week is not an arc, it is a new character weekly
+- the form is pinned: one paragraph, present tense, 40-60 words, and the small grievance she
+  is taking personally is explicitly part of it
+- vague filler is forbidden by name — "she has been reflecting on things" is the exact
+  failure mode for this kind of prompt
+- it is fed the last week of `day_*.txt` archives, so the arc moves because of what actually
+  happened rather than drifting on its own
+
+**Cadence uses a stamp file, not a weekday.** A weekday check skips the whole week if the
+bot is down that night; a stamp delays it instead. First run stamps and waits a full period,
+so a freshly seeded arc is not rewritten on its very first midnight.
+
+**Failure is always toward keeping what exists**: a short or empty result leaves the arc
+untouched, the previous version is archived as `life_YYYY-MM-DD.txt`, and `_life_arc_cache`
+is invalidated so the new text takes effect immediately rather than after its 5-minute TTL.
+
+One extra LLM call per week per instance. Invariant #3 governs per-message calls; this is
+weekly, and it runs off the loop.
+
+**Verification:** 858/858 pytest, 33/33 evals. 12 new tests, three break-tested RED —
+first-run guard, short-result guard, and whether the midnight job actually calls it. That
+last one matters: a rotation nothing invokes is the same bug as a `life.txt` nothing writes.
+
 ## v2026-08-02.10 — voice=on told you nothing, and Location was missing
 
 **A fleet-wide `/audit` sweep across all seven exposed two flaws in the audit itself,

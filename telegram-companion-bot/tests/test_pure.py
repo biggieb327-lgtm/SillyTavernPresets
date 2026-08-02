@@ -6079,3 +6079,67 @@ class TestFeatureDetailAndLocation:
         d = bot.gather_audit_data()
         assert d["location"] == bot.WEATHER_LOCATION
         assert "location" in inspect.getsource(bot.audit_cmd)
+
+
+class TestLifeArcRotation:
+    """v2026-08-02.11: life.txt was commented 'user-maintained' and nothing ever wrote it,
+    so a hand-seeded arc stayed frozen forever -- the owner noticed Bonnie's had not moved.
+    day.txt already answers 'what happened today'; this is the slower thing underneath."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot._maybe_rotate_life_arc)
+
+    def test_it_evolves_rather_than_replaces(self):
+        """The current arc must be IN the prompt, or each rotation is a fresh invention."""
+        src = self._src()
+        assert "current" in src
+        assert "EVOLUTION, not a replacement" in src
+        assert "carry over" in src
+
+    def test_only_one_thread_may_move(self):
+        """An arc that turns over completely every week is not an arc."""
+        assert "exactly ONE thing move" in self._src()
+
+    def test_it_keeps_the_form(self):
+        src = self._src()
+        assert "present tense" in src and "40-60 words" in src
+
+    def test_it_forbids_vague_filler(self):
+        """'She has been reflecting on things' is the failure mode for this kind of prompt."""
+        assert "reflecting" in self._src() and "concrete" in self._src().lower()
+
+    def test_cadence_uses_a_stamp_not_a_weekday(self):
+        """A weekday check skips the week entirely if the bot is down that night;
+        a stamp just delays it."""
+        src = self._src()
+        assert "LIFE_STAMP_FILE" in src and "LIFE_ROTATE_DAYS" in src
+
+    def test_first_run_stamps_and_waits(self):
+        """Otherwise a fresh instance rewrites its seeded arc on the very first midnight."""
+        assert "first run: stamp and wait" in self._src()
+
+    def test_a_short_or_empty_result_keeps_the_existing_arc(self):
+        """Never destroy a good arc because the model returned nothing useful."""
+        src = self._src()
+        assert "len(new) < 40" in src and "keeping the current arc" in src
+
+    def test_the_old_arc_is_archived(self):
+        assert 'life_{stamp}.txt' in self._src()
+
+    def test_cache_is_invalidated_so_it_takes_effect(self):
+        """_life_arc_cache has a 5-minute TTL; without this the new arc is invisible."""
+        assert "_life_arc_cache" in self._src()
+
+    def test_kill_switch_and_missing_file_both_short_circuit(self):
+        assert "LIFE_ROTATE and LIFE_ARC_FILE.exists()" in self._src()
+
+    def test_it_runs_off_the_event_loop(self):
+        """Invariant #8 -- and invariant #3 is satisfied because this is weekly, not
+        per-message."""
+        assert "asyncio.to_thread" in self._src()
+
+    def test_it_is_actually_called_from_the_midnight_job(self):
+        """A rotation nothing invokes is the same bug as a life.txt nothing writes."""
+        import inspect
+        assert "_maybe_rotate_life_arc()" in inspect.getsource(bot._rotate_day_context)

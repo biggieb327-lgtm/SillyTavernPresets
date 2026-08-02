@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.10"
+BOT_VERSION = "2026-08-02.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -721,7 +721,13 @@ ATLAS = (
 PEOPLE_FILE = BASE_DIR / "people.txt"
 PROJECTS_FILE = BASE_DIR / "projects.txt"
 SCHEDULE_FILE = BASE_DIR / "schedule.txt"
-LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
+LIFE_ARC_FILE = BASE_DIR / "life.txt"  # seeded by hand, then evolved (v2026-08-02.11)
+# Life arcs move in weeks, not days — day.txt already covers "what happened today".
+# Rotation is checked at midnight and acts only once every LIFE_ROTATE_DAYS, using a
+# stamp file rather than a weekday, so downtime delays it instead of skipping it.
+LIFE_ROTATE = os.getenv("LIFE_ROTATE", "1").lower() not in ("0", "false", "no", "off")
+LIFE_ROTATE_DAYS = _env_int("LIFE_ROTATE_DAYS", "7")
+LIFE_STAMP_FILE = BASE_DIR / ".life_rotated"
 # Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
 # explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
 # shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
@@ -11399,6 +11405,75 @@ async def wardrobe_rotate_job(context: ContextTypes.DEFAULT_TYPE):
         _count_error("wardrobe")
 
 
+async def _maybe_rotate_life_arc():
+    """Evolve life.txt every LIFE_ROTATE_DAYS, from what actually happened since.
+
+    day.txt answers "what happened today" and is regenerated nightly. life.txt is the
+    slower thing underneath — the arc a character is currently in — and until now nothing
+    ever wrote it, so a hand-seeded arc stayed frozen forever (owner noticed Bonnie's had
+    not moved).
+
+    Evolution, not replacement: the current arc goes into the prompt and unresolved
+    threads are required to survive. Exactly one thing is allowed to move per rotation,
+    because an arc that turns over completely every week is not an arc.
+    """
+    if not (LIFE_ROTATE and LIFE_ARC_FILE.exists()):
+        return
+    now = time.time()
+    try:
+        last = float(LIFE_STAMP_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        last = 0.0
+    if last and now - last < LIFE_ROTATE_DAYS * 86400:
+        return
+    if not last:                      # first run: stamp and wait a full period
+        _atomic_write_text(LIFE_STAMP_FILE, str(now))
+        return
+    try:
+        current = LIFE_ARC_FILE.read_text(encoding="utf-8").strip()
+        if not current:
+            return
+        recent = sorted(BASE_DIR.glob("day_*.txt"))[-LIFE_ROTATE_DAYS:]
+        happened = "\n".join(p.read_text(encoding="utf-8").strip()[:300] for p in recent)
+        projects = _read_projects()
+        prompt = (
+            f"Here is {NAME}'s current life arc — the slow-moving stuff going on with her "
+            f"right now:\n\n{current}\n\n"
+            + (f"What actually happened over the last stretch:\n{happened}\n\n" if happened else "")
+            + (f"Her standing projects:\n{projects}\n\n" if projects else "")
+            + "Write the UPDATED arc, as it stands now. Rules:\n"
+              "- Same shape as the current one: one short paragraph, present tense, "
+              "about 40-60 words. No headings, no list.\n"
+              "- This is an EVOLUTION, not a replacement. Threads that have not resolved "
+              "carry over, in the same words where nothing has changed about them.\n"
+              "- Let exactly ONE thing move: something resolves, worsens, or a new thread "
+              "starts. Not all of it. An arc that turns over completely is not an arc.\n"
+              "- Stay concrete and specific. No 'she has been reflecting on things'. Name "
+              "the actual thing.\n"
+              "- Keep the small grievance she is taking personally, or replace it with "
+              "another one. It is part of the form.\n"
+              "- Write only the paragraph."
+        )
+        msgs = [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
+                {"role": "user", "content": prompt}]
+        new = _strip_thinking(await asyncio.to_thread(call_nanogpt, msgs, SUMMARY_MODEL)).strip()
+        if not new or len(new) < 40:
+            log.warning("[life] rotation produced nothing usable; keeping the current arc")
+            return
+        stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d")
+        try:
+            (BASE_DIR / f"life_{stamp}.txt").write_text(current + "\n", encoding="utf-8")
+        except OSError as e:
+            log.warning("[life] archive failed: %s", e)
+        _atomic_write_text(LIFE_ARC_FILE, new + "\n")
+        _atomic_write_text(LIFE_STAMP_FILE, str(now))
+        _life_arc_cache["text"] = None      # 5-min TTL otherwise; take effect now
+        print(f"[life] arc rotated: {new[:110]}…")
+    except Exception as e:
+        log.error("[life] rotation failed: %s", e)
+        _count_error("memory")
+
+
 async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
     """Midnight job: archive today's day.txt to memory + a dated file, then generate
     tomorrow's events so she starts the new day with a populated context."""
@@ -11462,6 +11537,10 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             pass
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
+
+    # Slower than the day: checked nightly, acts weekly. After day generation so the arc
+    # update sees today's events already written.
+    await _maybe_rotate_life_arc()
 
     # Recompute closeness for all active chats
     if CLOSENESS_ENABLED:
