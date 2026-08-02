@@ -87,6 +87,14 @@ and `# handoff-ok: hostname`. Ten-case matrix — three defect shapes RED, seven
 blocks green including quoted regexes, IP and FQDN targets, and a `cd` with absolute paths
 after it — plus end-to-end checks that it blocks in situ, honours `stop_hook_active`, and
 fails open on a malformed payload.
+**Occurrence 3 (2026-08-02) — invented filenames that read as real ones.** An `scp` block
+used `nora_aspiration.jpg` as a stand-in for a path only the owner knew; it looked like a
+filename rather than a blank, so it was pasted verbatim and failed with `No such file`.
+**Placeholders must be unmistakable** — `<PATH-TO-NORA-IMAGE>` in angle brackets, never a
+plausible-looking name — and any block referencing files on the operator's machine should
+be preceded by the command that finds them. Not a new mechanism: handoff-guard reads
+argument tokens, and cannot know which filenames exist on a machine it has never seen.
+
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
 stays the operator's, and it is why the C1 entry says what it says.
