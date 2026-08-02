@@ -629,6 +629,60 @@ else
   bad "claude-md-refs-resolve" "$md_refs"
 fi
 
+# --- roadmap-claims-current ---------------------------------------------------------------
+# A skill saying "ROADMAP 1.6 (unshipped)" about an item ROADMAP.md marks ✅ is a stale
+# claim that reads as a live constraint. On 2026-08-02 that exact sentence — written before
+# the flock shipped on 2026-08-01 — was copied into three deploy handoffs as a current
+# hazard, and then into a NEW skill written the same day, propagating it further. C12's
+# second occurrence: prose about the system is a claim about when it was written.
+# Decidable half only: a doc naming a ROADMAP item AND a staleness word near it, where
+# ROADMAP.md's heading for that item is struck through or ticked.
+roadmap_stale=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+roadmap = Path("telegram-companion-bot/ROADMAP.md")
+if not roadmap.exists():
+    print("ROADMAP.md is missing — this check reads it as the source of truth")
+    raise SystemExit
+text = roadmap.read_text(encoding="utf-8")
+shipped = set()
+for m in re.finditer(r'^#{2,4}\s+(\d+\.\d+)(.*)$', text, re.M):
+    head = m.group(2)
+    if "✅" in head or "~~" in head or re.search(r'\b(shipped|done|closed)\b', head, re.I):
+        shipped.add(m.group(1))
+
+STALE = re.compile(r'unshipped|not yet shipped|no lock exists yet|no flock|yet —\s*ROADMAP'
+                   r'|until it ships|tracks adding', re.I)
+problems = []
+docs = [Path("CLAUDE.md")] + sorted(Path(".claude").rglob("*.md"))
+for f in docs:
+    body = f.read_text(encoding="utf-8")
+    for m in re.finditer(r'ROADMAP\s+(\d+\.\d+)', body):
+        item = m.group(1)
+        if item not in shipped:
+            continue
+        window = body[max(0, m.start() - 220):m.end() + 220]
+        # C14 escape hatch, made by hand and visible — same shape as `sweep-ok`. The
+        # constraints entry RECORDING this incident necessarily quotes the stale
+        # sentence, and this check cannot tell a live claim from its own post-mortem.
+        # Put `roadmap-ok:` plus the reason near the quote.
+        if "roadmap-ok" in window:
+            continue
+        if STALE.search(window):
+            problems.append(f"{f}: calls ROADMAP {item} unshipped, but ROADMAP.md marks it done")
+if problems:
+    print("\n".join(sorted(set(problems))) +
+          "\n  — the doc describes the system as it was when written; re-read the thing "
+          "that executes it and correct the claim")
+PYEOF
+)
+if [ -z "$roadmap_stale" ]; then
+  ok "roadmap-claims-current: no doc calls a shipped ROADMAP item unshipped"
+else
+  bad "roadmap-claims-current" "$roadmap_stale"
+fi
+
 # --- gate-corpus ------------------------------------------------------------------------
 # The guards are themselves guarded. Every scanner in sweep.py and the delivery gate's
 # handler-coverage check run against fixtures built to slip past a naive implementation —

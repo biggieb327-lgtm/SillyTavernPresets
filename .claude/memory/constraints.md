@@ -412,7 +412,7 @@ No new hook is owed. The reporting half — claiming a green you did not observe
 code shape to intercept and stays prose, per rule 4.
 
 ### C12 — A command copied out of documentation is a claim about the past
-**seen: 1** (2026-07-29)
+**seen: 2** (2026-07-29, 2026-08-02)
 I handed the owner `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily`, lifted
 from CLAUDE.md's Deployment block. It failed twice over: `<raw-base>` was a literal
 placeholder I never substituted, and the URL is dead regardless — **the repo went private
@@ -425,6 +425,31 @@ The doc was not lying; it was *stale*. CLAUDE.md described a deploy path that wa
 until 2026-07-28. A command in documentation is a historical claim about how the system
 worked when someone last wrote it down — exactly the C8 problem, applied to instructions
 rather than to readings.
+
+**Occurrence 2 (2026-08-02) — a constraint, not a command, and I propagated it.**
+`deploy-and-verify-fleet` said "ROADMAP 1.6 (unshipped as of this writing) tracks adding a
+`flock` … until it ships, don't launch two syncs concurrently."
+<!-- roadmap-ok: this entry quotes the stale sentence as the incident record; the eval
+     cannot tell a live claim from its own post-mortem (C14). -->
+The flock shipped
+2026-08-01 and was race-confirmed on the real VPS; the sentence was one day stale. I
+repeated it as a live hazard in **three** deploy handoffs, and then wrote it into a
+**new** skill the same day — turning one stale sentence into two. The deploy advice it
+produced (run sequentially) stayed correct by luck; the stated reason was wrong, and the
+real reason is the opposite shape — a concurrent run is now *refused*, so it deploys
+nothing and leaves that instance on the old version.
+
+**The generalisation from occurrence 1:** it is not only *commands* that are historical
+claims. Any doc sentence describing what the system currently lacks — a missing guard, an
+unshipped item, a known hazard — is a claim about the day it was written. Read the thing
+that executes it: `grep flock deploy/vps-sync.sh` was five seconds and settled it.
+
+**Graduated 2026-08-02:** the `roadmap-claims-current` eval. It fails when any doc under
+`.claude/` or `CLAUDE.md` names a ROADMAP item AND carries a staleness word near it while
+`ROADMAP.md` marks that item shipped. Break-tested by re-injecting the exact sentence
+above. **What it does NOT cover:** staleness with no ROADMAP number to key on — the
+general "prose describes a system that moved" class stays prose, because deciding it
+needs the system, not a regex (C14).
 
 **Constraint:** before handing over any operational command, take it from the thing that
 executes it — the script's own usage header, the unit file, `--help` — not from prose

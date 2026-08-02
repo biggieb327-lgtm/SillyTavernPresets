@@ -58,10 +58,16 @@ layers that instance's own `PRESET_FILES` names, normalizes `CHARACTER_CARD` in
 missing on that instance — diff a sibling instance before copying one over, since a
 repo seed file can be an older generation than what's live (jules, 2026-07-29).
 
-**No known concurrent-deploy hazard right now** — but if you're running `vps-sync.sh`
-for two instances back to back, know that both write the *shared* `/opt/telegram-bots/bot.py`
-and `bot.py.bak`; ROADMAP 1.6 (unshipped as of this writing) tracks adding a `flock`
-around that swap. Until it ships, don't launch two instances' syncs concurrently.
+**The shared swap is locked** (ROADMAP 1.6, shipped 2026-08-01, race-confirmed on the
+real VPS). `vps-sync.sh` takes a non-blocking `flock` on `$BASE/.vps-sync.lock` before it
+touches the shared `/opt/telegram-bots/bot.py` and `bot.py.bak`, and `set -euo pipefail`
+makes the backup `cp` fatal rather than `|| true`. So a concurrent second run cannot
+corrupt the rollback point — **it refuses**: `flock -n` fails, the run prints
+`another sync is swapping bot.py on this host; retry` and exits 1.
+
+Still run them **sequentially**, for a different reason than the old one: a rejected run
+deploys nothing, so a concurrent launch leaves that instance silently on the previous
+version. The loop below stops on the first non-zero exit, which is what you want.
 
 **Verify:** `/audit` to each synced instance — MUST show the new BOT_VERSION. If it
 still shows the old one, stop: the sync didn't take (see failure modes below).
@@ -109,7 +115,8 @@ output at each step, and the rollback move — before they started.
 - [ ] Any seed-file gap `vps-sync.sh` reported was triaged (diffed against a sibling),
       not silently copied over
 - [ ] CI green on main before telling the user to deploy
-- [ ] Two `vps-sync.sh` runs were not launched concurrently (no flock yet — ROADMAP 1.6)
+- [ ] Every instance actually synced — a concurrent run is refused by the `flock`
+      (ROADMAP 1.6), so a rejected one leaves that instance on the OLD version
 
 ## Common mistakes
 
@@ -121,7 +128,9 @@ output at each step, and the rollback move — before they started.
 - Telling the user to deploy before the work is merged and CI is green on main.
 - Forgetting that `/audit` is the only proof a deploy landed — "the bot restarted"
   proves nothing about the version.
-- Running two `vps-sync.sh` invocations at once — no lock exists yet (ROADMAP 1.6).
+- Running two `vps-sync.sh` invocations at once. The lock (ROADMAP 1.6) makes this
+  safe rather than corrupting, but the loser exits 1 without deploying — check every
+  instance's `/audit`, don't assume the batch landed.
 
 ## What to report back
 

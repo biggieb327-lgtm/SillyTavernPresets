@@ -65,6 +65,8 @@ container.
 - Reporting CI green without polling it.
 - Deploying before the merge lands (`vps-sync.sh` reads `origin/main`, so it would ship
   the previous release and look like a no-op).
-- Running two `vps-sync.sh` invocations concurrently — no flock exists yet (ROADMAP 1.6).
+- Assuming a `vps-sync.sh` batch landed. The swap is locked (ROADMAP 1.6, shipped
+  2026-08-01), so a concurrent run is refused rather than corrupting — but a refused
+  run deploys nothing, so it leaves that instance on the old version. `/audit` each.
 - Treating `verify.sh --quick` as sufficient for a release. It skips the sweep, which is
   where a fix's *class* shows up.
