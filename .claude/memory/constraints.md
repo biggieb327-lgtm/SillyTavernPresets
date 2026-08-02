@@ -206,6 +206,28 @@ which already carries the same family of lesson (`BOT_TIMEZONE` was *referenced*
 everywhere and still did nothing). This is the case that forced rule 4 above to admit
 skills as a graduation target.
 
+**Graduated 2026-08-02, after a third occurrence (the owner's stated trigger).** Three
+instances, one family — a claim stated as settled on evidence that was merely compatible
+with it:
+1. `_APPEARANCE_DEFAULT` asserted as reachable on live instances without checking the
+   launch path (`bot@.service` passes the instance dir, so it never was).
+2. `/audit` asserted to show the selfie-base field, which had only been added to the
+   startup log line — a different code path.
+3. An uploaded image called "confirmed" to be `priya_base.jpg` because `file` reported the
+   same 1024x1024 progressive JPEG. Matching size is consistent with sameness and
+   establishes nothing; they were different images, and three appearance.txt files were
+   written on that footing.
+**Sharpened constraint:** state what a reading *excludes*, not only what it is compatible
+with. Dimensions exclude almost nothing; a hash excludes everything but the file itself.
+**Mechanisms:** `.claude/hooks/claim-guard.sh` + `claim_guard.py` (Stop hook) blocks
+identity/sameness claims resting on metadata with no hash — nine-case matrix, RED on the
+exact sentence from #3, green on hedged wording, hashed comparisons, tables, and metadata
+without a claim. Escape hatch `# claim-ok`. The `audit-keys-rendered` eval pins #2's shape:
+any key in `gather_audit_data()` that no user-facing surface renders fails the suite.
+**What stays prose, deliberately:** #1's shape — asserting a code path behaves some way
+without exercising it. The text reads identically whether or not the path was run, so no
+scanner can see it; rule 4 permits prose exactly here.
+
 ### C9 — Verify a load-bearing hypothesis before shipping, not after
 **seen: 1** (2026-07-27)
 v2026-07-27.1 shipped to `main`, CI-green, on the claim that all six instances had run
@@ -477,38 +499,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   passes under injection is indistinguishable from one that is measuring nothing. Same shape as
   C13 (a check that cannot fail is not verification), one level up: the *break-test itself* can be
   the thing that cannot fail.
-- 2026-08-02 — Told the owner Priya's uploaded image was "confirmed" to be her reference photo
-  because `file` reported the same 1024x1024 progressive JPEG as `priya_base.jpg`. Matching
-  dimensions measure *same size*, not *same file* — and the images were in fact aspiration shots,
-  not the base photos at all. **Third occurrence** of the shape below, and the one the owner set
-  as the trigger to graduate it (2026-08-02: "leave it as prose until a third occurrence").
-  Worse than the first two because I used the word "confirmed" over evidence that was merely
-  consistent, and three appearance.txt files were written on top of it. → C8, sharpened: state
-  what a reading *excludes*, not just what it is compatible with. Dimensions exclude almost
-  nothing; a hash excludes everything but the file itself.
-- 2026-08-02 — Added the selfie-base field to the `=== STARTUP AUDIT ===` log line, then told
-  the owner `/audit` would show it. Different code paths — `audit_cmd` builds its own lines from
-  `gather_audit_data()` and never saw the field. The owner checked and it wasn't there. **Second
-  occurrence of the entry below**: asserting how a user-visible surface behaves without exercising
-  that surface. Both times the claim was adjacent to real work and sounded safe. → before telling
-  anyone a command/screen/report shows something, trace the path that renders it, or run it. At
-  `seen: 2` this reached the graduation bar and the **owner ruled it stays prose until a third
-  occurrence** (2026-08-02) — an explicit, deliberate exception to rule 4, not an oversight, so
-  do not "fix" it by building a mechanism unprompted. The candidate if it recurs: an eval
-  asserting every key in `gather_audit_data()` is rendered by `audit_cmd`. Held back because that
-  catches one instance, while the real shape — claiming any user-visible surface behaves a way
-  without running it — likely wants something broader that a third case would reveal.
-- 2026-08-01 — Wrote an unverified inference into the changelog, the operational log *and* a
-  report to the owner, in assertive voice with the hedge appended: "any instance falling through
-  to the default gets a different woman's face and Nora's jacket… not yet confirmed against the
-  live instance dirs". One `grep ExecStart deploy/bot@.service` the next turn showed every
-  instance passes its directory as argv[1], so `_APPEARANCE_DEFAULT` is unreachable live and the
-  claim was simply false. The hedge did not save it — the claim was still the headline, and it
-  was already in two permanent records. → when a claim is unverified and the verifying command is
-  one grep away, run the grep; if it genuinely can't be run, write the sentence as the open
-  question ("unknown whether X — check with Y") rather than as a finding with a disclaimer.
-  **C8 family** (ask what a reading actually measures) one step earlier: this is about what gets
-  written down, not what gets concluded. Promote if it recurs.
 - 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
   — leftover scaffolding from two half-finished versions of the same line, committed to the file
   in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on

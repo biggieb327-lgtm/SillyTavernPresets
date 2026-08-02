@@ -77,6 +77,12 @@
           },
           {
             "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/claim-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Claim guard (C8 family)"
+          },
+          {
+            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"

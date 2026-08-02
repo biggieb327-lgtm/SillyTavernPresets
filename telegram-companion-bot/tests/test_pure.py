@@ -5601,3 +5601,36 @@ class TestAuditReportsSelfieBase:
     def test_field_matches_the_startup_audit_source(self):
         """Both surfaces must report the same thing, or they disagree under a real fault."""
         assert bot.gather_audit_data()["selfie_base"] == bot._base_image_status()
+
+
+class TestBaseImageMimeSniffing:
+    """v2026-08-02.2: the mime type came from the filename extension. Renaming a PNG to
+    .jpg -- routine when swapping reference photos around -- declared PNG bytes as
+    image/jpeg, and a rejected reference means the face falls back to the text."""
+
+    def test_png_bytes_named_jpg_are_still_png(self):
+        assert bot._sniff_mime(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00", ".jpg") == "image/png"
+
+    def test_jpeg_bytes_named_png_are_still_jpeg(self):
+        assert bot._sniff_mime(b"\xff\xd8\xff\xe0\x00\x10JFIF", ".png") == "image/jpeg"
+
+    def test_webp_is_recognised(self):
+        assert bot._sniff_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 ", ".png") == "image/webp"
+
+    def test_unrecognised_bytes_fall_back_to_the_extension(self):
+        """Never worse than the old behaviour on a format we don't know."""
+        assert bot._sniff_mime(b"garbagegarb", ".png") == "image/png"
+        assert bot._sniff_mime(b"garbagegarb", ".jpg") == "image/jpeg"
+
+    def test_end_to_end_through_base_image(self):
+        import tempfile, shutil
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp(prefix="mime_"))
+        saved = (bot.BASE_DIR, bot.SELFIE_BASE)
+        try:
+            bot.BASE_DIR, bot.SELFIE_BASE = d, "nora_base.jpg"
+            (d / "nora_base.jpg").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+            assert bot._base_image()[1] == "image/png"
+        finally:
+            bot.BASE_DIR, bot.SELFIE_BASE = saved
+            shutil.rmtree(d, ignore_errors=True)

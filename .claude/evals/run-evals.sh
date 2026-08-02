@@ -346,6 +346,35 @@ else
   bad "audit-plain-text" "/audit uses parse_mode again — a card field name or prompt heading with '_' or '[' will make Telegram reject the message and /audit will silently stop working (see CHANGELOG v2026-07-25.7)"
 fi
 
+# 2026-08-02: the selfie-base status was added to gather_audit_data() and the STARTUP
+# AUDIT log line, and the owner was told /audit would show it. audit_cmd builds its own
+# lines and never rendered it. A key that reaches the data dict but no user-facing
+# surface is invisible in exactly the situation it was added for. Every key must be
+# either rendered by audit_cmd or listed as API-only below.
+api_only='away_users config_warnings llm_stats card_fields preset_override token_calibration memory_review_pending'
+unrendered=$(python3 - "$BOT" "$api_only" <<'PYEOF'
+import re, sys, pathlib
+src = pathlib.Path(sys.argv[1]).read_text()
+allowed = set(sys.argv[2].split())
+gather = re.search(r'def gather_audit_data.*?\n    return \{(.*?)\n    \}', src, re.S)
+cmd = re.search(r'async def audit_cmd.*?(?=\nasync def |\ndef )', src, re.S)
+if not gather or not cmd:
+    print("PARSE-FAIL")
+else:
+    keys = set(re.findall(r'^\s*"([a-z_]+)":', gather.group(1), re.M))
+    body = cmd.group(0)
+    missing = sorted(k for k in keys - allowed if k not in body)
+    print(" ".join(missing))
+PYEOF
+)
+if [ "$unrendered" = "PARSE-FAIL" ]; then
+  bad "audit-keys-rendered" "could not locate gather_audit_data/audit_cmd — the eval needs updating, not the code"
+elif [ -z "$unrendered" ]; then
+  ok "audit-keys-rendered: every /audit data key reaches the rendered output (or is API-only)"
+else
+  bad "audit-keys-rendered" "gather_audit_data keys never rendered by /audit:$unrendered — add a line to audit_cmd or list the key as API-only in this eval (2026-08-02: selfie_base was added to the data and the log line but not /audit, and the owner was told otherwise)"
+fi
+
 # 2026-07-25 config audit: .env.example had drifted badly from bot.py in BOTH directions
 # — 7 variables documented that nothing read (setting NUDGE_MAX looked like it capped
 # proactive messages and did nothing), and 65 read that were undocumented, including

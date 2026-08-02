@@ -7,6 +7,31 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.2 — The mime type comes from the bytes, not the filename
+
+**Root cause: `_base_image()` derived the mime type from the file extension.** Renaming a
+PNG to `.jpg` — routine when swapping reference photos between instances — declared PNG
+data as `image/jpeg` to Gemini's `inline_data`. A rejected reference means the face falls
+back to whatever the text says, silently.
+
+Investigated and cleared as the cause of Nora's drift (`ffd8 ffe0`, a genuine JFIF JPEG),
+and deliberately **not** shipped at that point: it fixed nothing observed. Shipping now
+because the owner is about to replace several base photos, which is exactly the operation
+that produces an extension/format mismatch.
+
+`_sniff_mime()` reads the magic bytes — PNG signature, JPEG SOI, RIFF/WEBP — and falls
+back to the extension for anything unrecognised, so it is never worse than before.
+
+**Verification:** 787/787 pytest, 33/33 evals. 5 new tests including PNG-named-`.jpg`,
+JPEG-named-`.png`, WebP, unrecognised-bytes fallback, and an end-to-end pass through
+`_base_image()`.
+
+**Also, a new eval — `audit-keys-rendered`.** v2026-08-02.1 added `selfie_base` to
+`gather_audit_data()` and the startup log line, and the owner was told `/audit` would show
+it; `audit_cmd` builds its own lines and never rendered it. The eval now fails if any key
+in the audit data reaches no user-facing surface, unless listed as API-only. Break-tested
+RED by removing the `Selfie base:` line.
+
 ## v2026-08-02.1 — /audit reports which reference photo is in play
 
 **Root cause: v2026-08-01.10 added the selfie-base status to the `=== STARTUP AUDIT ===`

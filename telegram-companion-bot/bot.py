@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.1"
+BOT_VERSION = "2026-08-02.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5456,11 +5456,26 @@ def _has_base_image() -> bool:
     return _resolve_base_image() is not None
 
 
+def _sniff_mime(head: bytes, suffix: str) -> str:
+    """Mime type from the file's magic bytes, falling back to the extension.
+
+    A filename is a claim; the bytes are the fact. Declaring PNG data as
+    image/jpeg gets the reference photo rejected, and a rejected reference means
+    the face falls back to whatever the text says (v2026-08-02.2)."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png" if suffix == ".png" else "image/jpeg"
+
+
 def _base_image() -> tuple:
     """Returns (raw bytes, mime type) for the selfie reference photo."""
     path = _resolve_base_image()
-    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-    return path.read_bytes(), mime
+    raw = path.read_bytes()
+    return raw, _sniff_mime(raw[:12], path.suffix.lower())
 
 
 def _base_data_url():
