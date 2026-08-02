@@ -5580,3 +5580,24 @@ class TestSharedPromptIsCharacterNeutral:
         finally:
             bot.BASE_DIR, bot._APPEARANCE_FILE, bot.SELFIE_BASE = saved
             shutil.rmtree(d, ignore_errors=True)
+
+
+class TestAuditReportsSelfieBase:
+    """v2026-08-02.1: v2026-08-01.10 put the selfie-base status in the STARTUP AUDIT log
+    line only, and I told the owner /audit would show it. Different code paths -- it did
+    not. /audit is the one surface reachable from Telegram, which is the whole point when
+    the question is 'is this bot being sent its own face?'."""
+
+    def test_gathered_data_carries_the_field(self):
+        assert "selfie_base" in bot.gather_audit_data()
+
+    def test_it_reaches_the_rendered_audit_text(self):
+        """The HTTP API and /audit share gather_audit_data, but only /audit renders lines;
+        a key in the dict that no line prints is exactly the gap this closes."""
+        import inspect
+        src = inspect.getsource(bot.audit_cmd)
+        assert "selfie_base" in src and "Selfie base:" in src
+
+    def test_field_matches_the_startup_audit_source(self):
+        """Both surfaces must report the same thing, or they disagree under a real fault."""
+        assert bot.gather_audit_data()["selfie_base"] == bot._base_image_status()

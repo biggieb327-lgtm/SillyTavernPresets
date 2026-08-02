@@ -7,6 +7,37 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.1 — /audit reports which reference photo is in play
+
+**Root cause: v2026-08-01.10 added the selfie-base status to the `=== STARTUP AUDIT ===`
+log line, and I told the owner `/audit` would show it. Those are different code paths.**
+Owner checked and it was not there.
+
+`/audit` is the only surface for this that is reachable from Telegram, which matters
+because the question it answers — "is this bot actually being sent its own face?" — is
+otherwise a `journalctl` away, on a host the owner has to SSH into.
+
+`gather_audit_data()` gained `selfie_base` (shared with the admin HTTP API) and `audit_cmd`
+renders it as a `Selfie base:` line. Same `_base_image_status()` source as the startup line,
+so the two surfaces cannot disagree — a test pins that equality.
+
+Also adds `cass/appearance.txt` and `marcus/appearance.txt`, written from the reference
+photos the owner supplied rather than from the cards. Neither instance had one, and with no
+base image either, both were generating from the bare fallback string.
+
+**Two card/photo discrepancies, deliberately resolved toward the photo** — the photo is what
+an image edit actually anchors on, so a description that fights it recreates the
+contradiction class this week's releases have been removing:
+- Marcus's card says *"close-cropped hair"* and age **31**. His photo shows a clean-shaven
+  scalp, a full beard going grey, and reads mid-40s. `appearance.txt` describes the photo.
+- Cass's card has no physical block at all, so the photo is the only source for her.
+
+Neither card was edited — that is a content decision for the owner, and `edit-cards-and-presets`
+is the right path if the cards should move instead.
+
+**Verification:** 782/782 pytest, 32/32 evals, 3 new tests, the rendered-line assertion
+break-tested RED.
+
 ## v2026-08-01.11 — Marcus was being drawn as a woman
 
 **Root cause: the shared no-`appearance.txt` fallback hardcoded a sex.** `SELFIE_APPEARANCE`
