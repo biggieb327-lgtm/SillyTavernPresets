@@ -477,6 +477,15 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   passes under injection is indistinguishable from one that is measuring nothing. Same shape as
   C13 (a check that cannot fail is not verification), one level up: the *break-test itself* can be
   the thing that cannot fail.
+- 2026-08-02 — Added the selfie-base field to the `=== STARTUP AUDIT ===` log line, then told
+  the owner `/audit` would show it. Different code paths — `audit_cmd` builds its own lines from
+  `gather_audit_data()` and never saw the field. The owner checked and it wasn't there. **Second
+  occurrence of the entry below**: asserting how a user-visible surface behaves without exercising
+  that surface. Both times the claim was adjacent to real work and sounded safe. → before telling
+  anyone a command/screen/report shows something, trace the path that renders it, or run it. At
+  `seen: 2` this is at the graduation bar; the narrow mechanism that would have caught it is an
+  eval asserting every key in `gather_audit_data()` is rendered by `audit_cmd` — not built yet,
+  deliberately, because it is one instance and the general shape may want something broader.
 - 2026-08-01 — Wrote an unverified inference into the changelog, the operational log *and* a
   report to the owner, in assertive voice with the hedge appended: "any instance falling through
   to the default gets a different woman's face and Nora's jacket… not yet confirmed against the
