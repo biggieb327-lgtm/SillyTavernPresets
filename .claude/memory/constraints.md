@@ -95,6 +95,17 @@ plausible-looking name — and any block referencing files on the operator's mac
 be preceded by the command that finds them. Not a new mechanism: handoff-guard reads
 argument tokens, and cannot know which filenames exist on a machine it has never seen.
 
+**Occurrence 4 (2026-08-02) — an interactive `read` inside a pasted block.** A block began
+`read -r -s -p "Giphy API key: " GIPHY_KEY` and continued with the loop that used it. Pasting
+buffers every line on the terminal's stdin, so `read` consumed the *next line of the block*
+(`for i in nora bonnie priya; do`) as the key; the loop header vanished, the body ran with an
+empty `$i`, and a stray `/opt/telegram-bots/.env` was created. **Never put a command that
+reads stdin — `read`, `passwd`, anything interactive — in a block intended to be pasted.**
+Either split it into its own block with an explicit "run this alone" instruction, or avoid
+stdin entirely. Same family as the `cd`-then-relative-paths case: the block was correct when
+executed line by line and wrong when used the way operators actually use it. handoff-guard
+cannot see this one — the paste semantics are in the terminal, not the text.
+
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
 stays the operator's, and it is why the C1 entry says what it says.
