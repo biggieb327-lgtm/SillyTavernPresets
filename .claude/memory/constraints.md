@@ -680,3 +680,4 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
 - 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
+- 2026-08-02 — Break-testing five injections with one script: the revert anchor for injection 2 (`asyncio.create_task(maintain_memory(chat_id))`) occurs **3×** in bot.py, so the revert would have rewritten two unrelated call sites. The `assert count == 1` guard caught it and stopped with the injection still applied, costing a manual repair → when a script both injects AND reverts, the *revert* anchor needs the uniqueness check as much as the inject anchor, and both should be checked BEFORE the first write, not between them (C7's positional-vs-content lesson applied to a string that is content-anchored but not unique).
