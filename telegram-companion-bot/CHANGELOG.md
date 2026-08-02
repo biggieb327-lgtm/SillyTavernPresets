@@ -7,6 +7,35 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.5 — /audit names the image backend
+
+**Root cause of a fleet split nobody could see: `SELFIE_PROVIDER` defaults to `nanogpt`
+unless `GEMINI_API_KEY` is set, and three instances have no key.** `grep -H
+'GEMINI_API_KEY' /opt/telegram-bots/*/.env` returns nothing at all for jules and only
+commented lines for priya and marcus. Those three run NanoGPT's `flux-kontext`; bonnie,
+cass, emily and nora run Gemini.
+
+That maps exactly onto the complaints. Jules's selfie came back as a visibly older,
+differently-boned woman while her reference was correctly attached and correctly cropped —
+`/audit` confirmed `Selfie base: jules_base.png`, and the file was 752x1085, one clean
+crop. Priya, also on NanoGPT, was "a bit different". Every bot reported as fine is on
+Gemini. (Nora was the earlier exception and had a separate, established cause: no
+reference photo attached at all until v2026-08-01.10.)
+
+**`/audit` reported which photo was in play but never which backend consumed it**, so a
+three-instance split in image quality was invisible from Telegram — the same observability
+gap as the selfie-base one, one layer further down. The `Selfie base:` line now reads
+`<file> via <provider>`, and names the model on NanoGPT since "nanogpt" alone doesn't say
+`flux-kontext`.
+
+**Not a code fix.** `flux-kontext` preserving identity worse than Gemini on an edit is a
+model difference, not a bug — the remedy is a `GEMINI_API_KEY` in those three `.env` files,
+which is the owner's to apply.
+
+**Verification:** 802/802 pytest, 33/33 evals. 3 new tests; the render assertion
+break-tested RED, and `audit-keys-rendered` caught the same injection independently, which
+is the eval doing exactly the job it was added for one release ago.
+
 ## v2026-08-02.4 — /setbase never worked as a caption
 
 **Root cause: PTB's `CommandHandler` matches `message.text` + `message.entities` only.**

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.4"
+BOT_VERSION = "2026-08-02.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -12626,6 +12626,8 @@ def gather_audit_data() -> dict:
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
         "selfie_base": _base_image_status(),
+        "selfie_provider": (f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
+                            if SELFIE_PROVIDER == "nanogpt" else SELFIE_PROVIDER),
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
@@ -12693,7 +12695,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"PID: {d['pid']}",
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
-        f"Selfie base: {d.get('selfie_base', '?')}",
+        f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
     ]
     ps = d.get("prompt_stats") or {}
     if ps:

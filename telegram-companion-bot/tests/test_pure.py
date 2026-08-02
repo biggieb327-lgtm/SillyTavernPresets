@@ -5722,3 +5722,25 @@ class TestSetBaseCaptionDispatch:
         i = main_src.index("CaptionRegex")
         window = main_src[i - 200:i + 100]
         assert "Document.IMAGE" in window and "filters.PHOTO" in window
+
+
+class TestAuditReportsSelfieProvider:
+    """v2026-08-02.5: three instances were silently on NanoGPT's flux-kontext because their
+    .env had no GEMINI_API_KEY, and flux-kontext preserves identity far worse than Gemini on
+    an edit. /audit reported which reference photo was in play but never which backend
+    consumed it, so the split was invisible from Telegram."""
+
+    def test_provider_is_gathered_and_rendered(self):
+        import inspect
+        assert "selfie_provider" in bot.gather_audit_data()
+        assert "selfie_provider" in inspect.getsource(bot.audit_cmd)
+
+    def test_nanogpt_reports_the_model_too(self):
+        """'nanogpt' alone doesn't say flux-kontext, which is the part that matters."""
+        import inspect
+        src = inspect.getsource(bot.gather_audit_data)
+        assert "SELFIE_MODEL" in src and "nanogpt" in src
+
+    def test_value_is_a_non_empty_string(self):
+        v = bot.gather_audit_data()["selfie_provider"]
+        assert isinstance(v, str) and v
