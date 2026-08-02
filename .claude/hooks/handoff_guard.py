@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Operator-handoff guard — see handoff-guard.sh for scope and rationale.
 
-Two failure shapes, both from 2026-08-02, both in the handoff rather than the work:
+Three failure shapes, all from 2026-08-02, all in the handoff rather than the work:
 
   A. A block whose later commands depend on shell state set earlier in the SAME block
      (a `cd`, then relative paths). The owner's shell was elsewhere, so seven
@@ -15,7 +15,12 @@ Two failure shapes, both from 2026-08-02, both in the handoff rather than the wo
 Scoped to operator-facing blocks only — ones carrying a `# host:` pragma or containing
 commands specific to a host in this fleet. Illustrative snippets are left alone.
 
-Escape hatches, per block: `# handoff-ok: relative`, `# handoff-ok: hostname`.
+  C. A stdin-reading command (`read`) with more lines after it in the same block.
+     Pasting buffers the whole block on the terminal's stdin, so `read` consumed the
+     loop header as its input; the loop then ran with an empty variable.
+
+Escape hatches, per block: `# handoff-ok: relative`, `# handoff-ok: hostname`,
+`# handoff-ok: interactive`.
 
 Fails OPEN on anything unexpected, same as host_guard: a guard that breaks sessions
 gets disabled, which is worse than no guard.
@@ -35,6 +40,10 @@ except ImportError:
 PRAGMA_HOST = re.compile(r'#\s*host:\s*(?:vps|phone|both)\b', re.I)
 OK_RELATIVE = re.compile(r'#\s*handoff-ok:\s*relative\b', re.I)
 OK_HOSTNAME = re.compile(r'#\s*handoff-ok:\s*hostname\b', re.I)
+OK_INTERACTIVE = re.compile(r'#\s*handoff-ok:\s*interactive\b', re.I)
+# Commands that consume stdin. In a pasted block the terminal has already buffered every
+# following line, so these swallow the next line of the block instead of prompting.
+STDIN_CMD = re.compile(r'(?:^|[;&|]\s*)(read|passwd|gpg|ssh-keygen)\b')
 
 CD = re.compile(r'(?:^|[;&|]\s*|\bthen\s+|\bdo\s+)cd\s+\S')
 SSH_TARGET = re.compile(r'\b(?:ssh|scp|rsync)\b[^\n]*?(?<![\w.-])[A-Za-z_][\w.-]*@([\w.-]+)')
@@ -91,6 +100,22 @@ def check(text: str) -> list:
                         f"path silently targets the wrong directory instead of failing. "
                         f"Write every path absolute.")
                     break
+
+        if not OK_INTERACTIVE.search(block):
+            lines = block.splitlines()
+            for idx, line in enumerate(lines):
+                if not STDIN_CMD.search(_strip(line)):
+                    continue
+                rest = [l for l in lines[idx + 1:]
+                        if l.strip() and not l.strip().startswith("#")]
+                if rest:
+                    problems.append(
+                        f"  block starting {first!r} runs a stdin-reading command "
+                        f"({STDIN_CMD.search(_strip(line)).group(1)}) with {len(rest)} more "
+                        f"line(s) after it. Pasting buffers the whole block, so it consumes "
+                        f"the NEXT LINE as input instead of prompting. Split it into its own "
+                        f"block marked run-alone.")
+                break
 
         if not OK_HOSTNAME.search(block):
             for host in SSH_TARGET.findall(block):

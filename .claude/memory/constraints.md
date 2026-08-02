@@ -103,8 +103,13 @@ empty `$i`, and a stray `/opt/telegram-bots/.env` was created. **Never put a com
 reads stdin — `read`, `passwd`, anything interactive — in a block intended to be pasted.**
 Either split it into its own block with an explicit "run this alone" instruction, or avoid
 stdin entirely. Same family as the `cd`-then-relative-paths case: the block was correct when
-executed line by line and wrong when used the way operators actually use it. handoff-guard
-cannot see this one — the paste semantics are in the terminal, not the text.
+executed line by line and wrong when used the way operators actually use it.
+**Correction, same day:** the first draft of this entry claimed handoff-guard "cannot see
+this one — the paste semantics are in the terminal, not the text". That was itself an
+unchecked assertion (C8). The signature is perfectly mechanical: a stdin-reading command
+with further command lines after it in the same block. handoff-guard now checks it — six-case
+matrix, RED on the real block, green on a lone `read`, a trailing `read`, comment-only
+`read`, and the `# handoff-ok: interactive` hatch.
 
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
