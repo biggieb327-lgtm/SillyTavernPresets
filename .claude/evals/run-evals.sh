@@ -629,6 +629,21 @@ else
   bad "claude-md-refs-resolve" "$md_refs"
 fi
 
+# --- gate-corpus ------------------------------------------------------------------------
+# The guards are themselves guarded. Every scanner in sweep.py and the delivery gate's
+# handler-coverage check run against fixtures built to slip past a naive implementation —
+# anchor slips, line-window escapes, substring collisions, deletion-only diff hunks, and a
+# deliberately unparseable input that must make the gate fail CLOSED. 14 of the first 34
+# cases deviated when this was written (2026-08-02), including the gate silently passing
+# whenever sweep raised. It also fails if sweep.py stops parsing, which is how three
+# docstring-boundary slips in one session would have been caught.
+corpus=$(python3 .claude/tools/gate_corpus/run.py 2>&1)
+if [ $? -eq 0 ]; then
+  ok "gate-corpus: $(printf '%s' "$corpus" | tail -1)"
+else
+  bad "gate-corpus" "$(printf '%s' "$corpus" | tail -25)"
+fi
+
 # --- handlers-exercised -----------------------------------------------------------------
 # The handlers whose defects reached the fleet BECAUSE their only tests read their source.
 # `/features <name> on|off` raised ValueError on every invocation for four releases while

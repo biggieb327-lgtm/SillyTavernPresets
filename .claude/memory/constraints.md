@@ -175,7 +175,7 @@ phantom killer. Three stale assumptions in one function.
 only documentation. An assertion is a claim about the world too.
 
 ### C7 — Anchor edits on content, not position
-**seen: 2** (2026-07-26, 2026-07-27) — *promoted from the Minor log by
+**seen: 5** (2026-07-26, 2026-07-27, 2026-08-02 ×3) — *promoted from the Minor log by
 `sweep.py constraints-drift`, its first real find.*
 Two edits went wrong the same way: **the surrounding structure was not confirmed before
 writing.** A paragraph was added to a function anchored on `n = 0` — a content anchor,
@@ -197,6 +197,20 @@ which matches on a unique surrounding string and cannot drift.
 line address against anything outside `/tmp`/scratchpad. Nine-case matrix; the four
 must-not-fire cases (content-anchored substitution, read-only `sed -n`, throwaway
 paths, `# anchor-ok`) all pass.
+**Occurrences 3-5 (2026-08-02) — the docstring failure again, three times in one hour.**
+Rewriting three `sweep.py` scanners, each edit anchored on the first line of the function
+BODY and prepended explanatory prose. In all three the docstring had already closed above
+that line, so the prose landed in executable position and the module stopped parsing. The
+anchor matched exactly what it was meant to match, every time; what was never checked was
+what sat immediately above it — which is this constraint, verbatim, five years of
+sessions notwithstanding. **The tell is specific and worth naming: prepending prose to a
+function body is almost always an edit to its DOCSTRING, so the anchor should include the
+docstring's closing `\"\"\"`, not the code line after it.**
+**Graduated further 2026-08-02:** the `gate-corpus` eval imports `sweep.py`, so an
+unparseable version now fails CI and the corpus run alike — the first mechanism that can
+see this failure mode at all. It catches the *consequence*, not the edit; the edit itself
+still needs the rule above.
+
 **What it does NOT cover:** the docstring failure. That was an Edit-tool call whose
 anchor matched correctly — no hook can see that the *assumption above the anchor* was
 wrong. Detecting line-index splicing inside a Python heredoc was also rejected:

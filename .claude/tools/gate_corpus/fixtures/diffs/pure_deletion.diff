@@ -1,0 +1,4 @@
+@@ -10,3 +9,0 @@ def something():
+-    gone = 1
+-    gone = 2
+-    gone = 3
