@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.2"
+BOT_VERSION = "2026-08-02.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -10649,6 +10649,83 @@ async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_selfie(context, chat_id, hint, announce_errors=True)
 
 
+_BASE_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"\xff\xd8\xff", "JPEG"),
+)
+
+
+async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Replace this instance's selfie reference photo, over Telegram.
+
+    Send the image as a FILE with /setbase as the caption, or reply to one with
+    /setbase. A photo sent the normal way also works, but Telegram recompresses
+    those and the reference is the strongest identity signal in the whole selfie
+    pipeline -- a re-encoded one anchors worse.
+
+    Exists because the scp route kept failing: those commands are phone-local
+    while the owner's session is on the VPS, and three separate attempts went
+    into the wrong shell. That is C1's operator half, which no hook can catch --
+    so the transfer is removed rather than re-explained (v2026-08-02.3).
+
+    Takes effect immediately: _resolve_base_image() stats the path per selfie,
+    so there is no restart and no .env edit -- the file keeps SELFIE_BASE's name.
+    """
+    if not _is_admin(update.effective_user.id):
+        return
+    msg = update.message
+    src = msg.reply_to_message or msg
+    compressed = False
+    doc = getattr(src, "document", None)
+    photos = getattr(src, "photo", None)
+    if doc is not None and (getattr(doc, "mime_type", "") or "").startswith("image/"):
+        tg_file = await doc.get_file()
+    elif photos:
+        tg_file = await photos[-1].get_file()
+        compressed = True
+    else:
+        await msg.reply_text(
+            "📷 Send the image as a FILE with /setbase as the caption, or reply to one "
+            "with /setbase.\nSending it as a normal photo works too, but Telegram "
+            "recompresses those and the reference photo anchors her face — send as a file "
+            "if you can.")
+        return
+
+    raw = bytes(await tg_file.download_as_bytearray())
+    fmt = next((name for magic, name in _BASE_IMAGE_MAGIC if raw.startswith(magic)), None)
+    if fmt is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        fmt = "WebP"
+    if fmt is None:
+        await msg.reply_text("That isn't a PNG, JPEG or WebP — refusing to install it as "
+                             "the reference photo.")
+        return
+    if len(raw) < 8192:
+        await msg.reply_text(f"That file is only {len(raw)} bytes — too small to be a usable "
+                             f"reference photo. Not installing it.")
+        return
+
+    dest = BASE_DIR / SELFIE_BASE
+    try:
+        if dest.exists():
+            (dest.parent / (dest.name + ".prev")).write_bytes(dest.read_bytes())
+        tmp = dest.parent / (dest.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(dest)
+    except OSError as e:
+        log.error("[setbase] write failed: %s", e)
+        _count_error("media")
+        await msg.reply_text("Couldn't write the reference photo — check the instance "
+                             "directory's permissions.")
+        return
+
+    note = ("\n⚠️ Sent as a compressed photo. Resend as a file for the original quality."
+            if compressed else "")
+    prev = "  (previous kept as %s.prev)" % dest.name if (dest.parent / (dest.name + ".prev")).exists() else ""
+    await msg.reply_text(
+        f"📷 Reference photo updated: {dest.name} — {fmt}, {len(raw) // 1024} KB.{prev}\n"
+        f"The next selfie uses it; no restart needed.{note}")
+
+
 async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update.effective_user.id):
         return
@@ -13202,6 +13279,7 @@ _BASE_COMMANDS = [
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
     BotCommand("selfie", "Generate a selfie"),
+    BotCommand("setbase", "Replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
     BotCommand("meme", "Send a meme (optional hint)"),
@@ -13438,6 +13516,7 @@ def main():
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("heartbeat", heartbeat_now))
     app.add_handler(CommandHandler("selfie", selfie_cmd))
+    app.add_handler(CommandHandler("setbase", setbase_cmd))
     app.add_handler(CommandHandler("meme", meme_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))

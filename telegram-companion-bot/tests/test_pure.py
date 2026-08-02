@@ -5634,3 +5634,52 @@ class TestBaseImageMimeSniffing:
         finally:
             bot.BASE_DIR, bot.SELFIE_BASE = saved
             shutil.rmtree(d, ignore_errors=True)
+
+
+class TestSetBaseCommand:
+    """v2026-08-02.3: /setbase installs the selfie reference photo over Telegram.
+
+    Built because the scp route failed three times in one session -- those commands are
+    phone-local while the owner's shell is on the VPS. That is C1's operator half, which
+    no hook can catch, so the transfer was removed rather than re-explained."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot.setbase_cmd)
+
+    def test_admin_gated(self):
+        """It overwrites a file in the instance directory -- not for arbitrary users."""
+        assert "_is_admin" in self._src()
+
+    def test_registered_as_a_handler_and_in_the_menu(self):
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert 'CommandHandler("setbase"' in main_src
+        assert any(c.command == "setbase"
+                   for c in bot._build_command_menu(False, False))
+
+    def test_rejects_non_image_bytes(self):
+        """Magic-byte check, not a trusted mime header or filename."""
+        src = self._src()
+        assert "_BASE_IMAGE_MAGIC" in src and "refusing to install" in src
+
+    def test_recognises_the_three_formats_it_claims(self):
+        names = {name for _, name in bot._BASE_IMAGE_MAGIC}
+        assert names == {"PNG", "JPEG"}
+        assert "WEBP" in self._src()
+
+    def test_backs_up_the_previous_photo(self):
+        """A bad swap must be recoverable without another transfer."""
+        assert ".prev" in self._src()
+
+    def test_writes_atomically(self):
+        """A half-written reference photo is worse than an old one."""
+        src = self._src()
+        assert ".tmp" in src and "tmp.replace(dest)" in src
+
+    def test_targets_selfie_base_so_no_env_edit_is_needed(self):
+        assert "BASE_DIR / SELFIE_BASE" in self._src()
+
+    def test_warns_when_telegram_compressed_the_image(self):
+        src = self._src()
+        assert "compressed" in src and "Resend as a file" in src

@@ -7,6 +7,36 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.3 — /setbase: install a reference photo over Telegram
+
+**Root cause: the only route for getting a reference photo onto an instance was
+phone-local `scp`, and the owner's shell is on the VPS.** Three separate attempts in one
+session went into the wrong shell — `termux-setup-storage: command not found`, then two
+`ls /sdcard/...` that matched nothing. That is C1's operator half: the agent can label a
+block, but nothing stops a paste landing in the wrong terminal.
+
+Re-explaining it a fourth time was not going to work, so the transfer is gone instead.
+`/setbase` takes the image over Telegram — send it as a **file** with `/setbase` as the
+caption, or reply to one with `/setbase`. A normal photo works too but Telegram
+recompresses those, and the reference is the strongest identity signal in the selfie
+pipeline, so the reply says so explicitly.
+
+Details that matter:
+- **Format checked by magic bytes**, not the filename or Telegram's mime header — PNG,
+  JPEG, WebP. Anything else is refused rather than installed.
+- **Writes to `SELFIE_BASE`'s existing name**, so no `.env` edit. Combined with
+  v2026-08-02.2's byte-sniffed mime, a PNG landing at `nora_base.jpg` is now harmless.
+- **Previous photo kept as `<name>.prev`**, because a bad swap should be recoverable
+  without another transfer.
+- **Atomic**: written to `.tmp` and renamed. A half-written reference is worse than a
+  stale one.
+- **Takes effect immediately** — `_resolve_base_image()` stats the path per selfie, so
+  there is no restart and no deploy.
+- Admin-gated; it overwrites a file in the instance directory.
+
+**Verification:** 795/795 pytest, 33/33 evals. 8 new tests; the admin gate, handler
+registration and atomic write break-tested RED.
+
 ## v2026-08-02.2 — The mime type comes from the bytes, not the filename
 
 **Root cause: `_base_image()` derived the mime type from the file extension.** Renaming a
