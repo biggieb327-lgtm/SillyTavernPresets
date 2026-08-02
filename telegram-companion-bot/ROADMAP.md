@@ -208,6 +208,12 @@ constraints; check their assumptions before acting on them.
   Shared flock'd ledger + atomic claim files (Telegram never delivers bot messages to
   bots); chain cap 2; fleet-wide fail-closed group posture; two CI evals pin the
   group/private memory boundary. On-device rollout steps in OPS_MANUAL.
+- **Banter tuning ✅ (v2026-08-02.13):** the v1 caps made a back-and-forth impossible
+  rather than rare (chain 2 with two bots = one reply per human message; the 20s send
+  throttle sat inside the ~16s exchange round-trip and killed alternation on its own).
+  Chain cap 6, base prob 0.5, gap 8s, budget 50, and a new `GROUP_CHAIN_DECAY` that
+  shrinks the reply chance with exchange depth — including for addressed messages,
+  which no longer bypass the gate. `GROUP_BANTER=0` restores every v1 number.
 
 ### 3.5 ~~TomTom Maps~~ ✅ (all phases shipped; three follow-ups explicitly deferred, not open)
 - **Phase 1 ✅ (shipped v2026-07-11.7):** slash commands `/route`, `/nearby`, `/place`

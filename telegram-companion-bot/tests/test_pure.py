@@ -322,9 +322,14 @@ class TestIsAddressed:
         assert not bot._is_addressed("", "Priya", "priya_bot")
 
 
+def _chain(n: int) -> list:
+    """A ledger tail whose last n entries are bot messages (chain length n)."""
+    return [_human(1)] + [_bot(2 + i) for i in range(n)]
+
+
 class TestShouldReplyToBot:
     def test_cap_overrides_addressed(self):
-        entries = [_human(1), _bot(2), _bot(3)]  # chain == GROUP_BOT_CHAIN_MAX (2)
+        entries = _chain(bot.GROUP_BOT_CHAIN_MAX)
         assert not bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=True)
 
     def test_addressed_below_cap(self):
@@ -335,6 +340,53 @@ class TestShouldReplyToBot:
         entries = [_human(1), _bot(2)]
         assert bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=False)
         assert not bot._should_reply_to_bot(entries, prob_roll=0.99, addressed=False)
+
+    def test_chain_longer_than_two_is_reachable(self):
+        # The v1 defaults ended every exchange at 2 bot messages, which read as "they
+        # only ever reply once". A third comeback must be possible at all.
+        assert bot.GROUP_BOT_CHAIN_MAX > 2
+        assert bot._should_reply_to_bot(_chain(2), prob_roll=0.0, addressed=False)
+
+    def test_probability_decays_with_depth(self):
+        # Same roll, deeper chain → the reply that passed at depth 0 fails later on.
+        roll = bot.GROUP_BOT_REPLY_PROB * 0.9
+        assert bot._should_reply_to_bot(_chain(1), roll, addressed=False)
+        assert not bot._should_reply_to_bot(
+            _chain(bot.GROUP_BOT_CHAIN_MAX - 1), roll, addressed=False)
+
+    def test_addressed_is_certain_at_depth_zero_only(self):
+        # Being named starts at 1.0 (v1 behaviour for the first comeback) but decays
+        # with everything else — otherwise name-dropping runs every chain to the cap.
+        assert bot._should_reply_to_bot(_chain(1), prob_roll=0.999, addressed=True)
+        assert not bot._should_reply_to_bot(_chain(2), prob_roll=0.999, addressed=True)
+
+    def test_decay_of_one_is_the_flat_v1_gate(self, monkeypatch):
+        monkeypatch.setattr(bot, "GROUP_CHAIN_DECAY", 1.0)
+        for depth in range(1, bot.GROUP_BOT_CHAIN_MAX):
+            assert bot._should_reply_to_bot(_chain(depth), prob_roll=0.999, addressed=True)
+
+    def test_cap_still_wins_over_decay_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "GROUP_CHAIN_DECAY", 1.0)
+        assert not bot._should_reply_to_bot(
+            _chain(bot.GROUP_BOT_CHAIN_MAX), prob_roll=0.0, addressed=True)
+
+
+class TestGroupBanterDefaults:
+    def test_kill_switch_present_and_on_by_default(self):
+        # Owner policy: new behaviour defaults ON with an env kill switch. The fixture
+        # sets no GROUP_* vars, so this is the shipped default.
+        assert bot.GROUP_BANTER is True
+
+    def test_send_throttle_allows_alternation(self):
+        # A bot's own messages land ~2 turns apart in a live exchange (poll ≤5s +
+        # claim delay ≤3s + generation, twice). A throttle at or above that window
+        # silently ends every exchange, which is what 20s did.
+        assert bot.GROUP_MIN_GAP_SECONDS <= 16
+
+    def test_budget_covers_a_full_chain_of_exchanges(self):
+        # Longer chains spend the daily bot-to-bot budget faster; a budget that runs
+        # out mid-evening reproduces the original complaint silently.
+        assert bot.GROUP_DAILY_BOT_BUDGET >= bot.GROUP_BOT_CHAIN_MAX * 8
 
 
 class TestClaimDelay:

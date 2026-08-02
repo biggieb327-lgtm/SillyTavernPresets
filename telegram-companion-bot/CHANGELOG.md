@@ -7,6 +7,65 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.13 — the group bots could only ever answer once, and three separate limits said so
+
+**Root cause: the v1 group-chat tuning made a real back-and-forth arithmetically
+impossible, not merely unlikely.** Owner report: "they only reply once per my reply."
+Three defaults compound, and fixing any one alone would have changed nothing:
+
+1. **`GROUP_BOT_CHAIN_MAX=2`** is a hard ceiling on consecutive bot messages since the
+   last human one. Two bots means the best case was always `human → A → B → silence` —
+   the third message was never reachable, whatever anyone said.
+2. **`GROUP_BOT_REPLY_PROB=0.35`** flat. So the *second* message only happened about a
+   third of the time when the first bot didn't name the second — which is why the
+   observed behaviour was usually one reply, not two.
+3. **`GROUP_MIN_GAP_SECONDS=20`** throttles a bot's own consecutive group messages, and
+   in a live exchange a bot's turns land **~16s apart** (poll ≤5s + claim delay 0.5–3s +
+   generation, twice). The throttle is *inside* that window, so it silently kills
+   alternation. This is the one that matters most: raising the chain cap alone would
+   have hit the throttle instead and produced the same single reply.
+
+None of this was a bug — §3 of `GROUP_CHAT_DESIGN.md` chose these numbers to bound loop
+risk and cost on an unproven pilot. The pilot has now run since 2026-07-28 without a
+runaway, so the trade is being re-struck deliberately.
+
+**Fix — `GROUP_BANTER` (default on, `GROUP_BANTER=0` reverts every number below):**
+
+| Knob | v1 | now | why |
+|---|---|---|---|
+| `GROUP_BOT_CHAIN_MAX` | 2 | **6** | a chain of 3+ is reachable at all |
+| `GROUP_BOT_REPLY_PROB` | 0.35 | **0.5** | first comeback is a coin flip, not a third |
+| `GROUP_MIN_GAP_SECONDS` | 20 | **8** | below the ~16s exchange round-trip, so alternation survives |
+| `GROUP_DAILY_BOT_BUDGET` | 30 | **50** | longer chains spend it faster; running dry mid-evening reproduces the original complaint silently |
+| `GROUP_CHAIN_DECAY` | — | **0.75** | new |
+
+**The decay is what makes the higher cap safe.** `_should_reply_to_bot` no longer uses a
+flat probability: the chance is multiplied by `GROUP_CHAIN_DECAY ** depth`, where depth
+is how many bot messages deep the exchange already is. A chain typically runs 3–4
+messages and reaches the 6 cap rarely, so exchanges end by petering out rather than
+stopping mid-sentence at a wall. Expected cost per human beat is a geometric series
+(≈3.3 model calls), not the cap (6).
+
+**Being named no longer bypasses the gate** — it sets the starting probability to 1.0
+(v1 behaviour for the first comeback) and then decays with everything else. This is a
+*tightening*, and it is load-bearing: naming the peer is the LLM's favourite register in
+these exchanges ("jules, no" / "priya, wrong"), so under the old free pass a higher cap
+would have driven **every** chain to the ceiling — precisely where the cost is. The
+claim, the under-lock pre-send cap re-check, the throttle and the daily budget are all
+untouched; §3's defence-in-depth argument still holds with one more layer.
+
+`/audit`'s group line now reports `banter on|off (decay N)` alongside the existing
+chain/budget counters, so "why did they stop?" stays answerable from Telegram.
+
+**Not changed:** the human-facing path. An addressed human message is still answered
+deterministically by whoever was addressed; an unaddressed one still goes to exactly one
+bot via the claim. `_group_deliver`'s allowlist and `GROUP_ALLOWED_COMMANDS` are
+untouched, so the group↔DM memory boundary is exactly where it was.
+
+**Tests:** 8 new (867 total), break-tested red — with the decay reverted to a flat gate
+the depth tests fail, and with the v1 cap the reachability test fails. Both group evals
+(`group-deliver-clean`, `group-cmd-allowlist`) green and untouched.
+
 ## v2026-08-02.12 — the seed check looked at a different file than the loader
 
 **Root cause: `_SEED_FILES` hardcoded `"atlas.txt"` while `ATLAS_FILE` makes that name

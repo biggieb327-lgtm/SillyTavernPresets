@@ -234,12 +234,18 @@ is evaluated:
 - **Hard cap.** `_bot_chain_len(entries)` counts consecutive `kind == "bot"` entries at
   the ledger tail. Checked twice: at decision time (before spending a model call), and
   **re-checked under the ledger's exclusive lock immediately before `send_message`** —
-  if the chain reached `GROUP_BOT_CHAIN_MAX` (default **2**) while the reply was
+  if the chain reached `GROUP_BOT_CHAIN_MAX` (default **6** since v2026-08-02.13; **2**
+  in v1 and with `GROUP_BANTER=0`) while the reply was
   generating, the generated reply is discarded, not sent. A wasted model call is the
-  price of never exceeding the cap. The lock is **released before** `send_message` —
+  price of never exceeding the cap. (Cap value is a tuning knob, not a structural
+  assumption: nothing in the argument below depends on it being 2. The N=2 that the
+  race-freedom proof rests on is the number of *bots*, not the chain length.)
+  The lock is **released before** `send_message` —
   see the lock discipline below for why that window is provably empty at N=2. Any
-  human message resets the chain to zero by construction. Worst case per human beat:
-  human → bot A → bot B → silence.
+  human message resets the chain to zero by construction. Worst case per human beat is
+  `GROUP_BOT_CHAIN_MAX` bot messages — under v1's cap of 2 that was exactly
+  human → bot A → bot B → silence, which is *also* the best case with two bots, and is
+  why the pilot read as "they only ever reply once" (v2026-08-02.13).
 - **Lock discipline (binding on the implementation).** bot.py has no existing `flock`
   usage; every blocking syscall elsewhere goes through a worker thread, and ledger I/O
   follows the same rule: *every* flock acquire/release (append, read, rotate, the
@@ -255,10 +261,19 @@ is evaluated:
   real (two bots answering *different* messages) but bounded race — one message over
   cap, worst case — documented as the residual risk of the out-of-scope N≥3
   configuration.
-- **Probability gate.** Below the cap, a bot replies to another bot's message only if
-  `_is_addressed(...)` or `random() < GROUP_BOT_REPLY_PROB` (default **0.35**) — most
-  bot remarks get no reply, which reads natural (group chats are full of unanswered
-  messages) and keeps cost down. Passing the gate still requires winning the claim.
+- **Probability gate, decaying with depth** (v2026-08-02.13; v1 was a flat gate that
+  being addressed bypassed entirely). Below the cap, a bot replies to another bot's
+  message only if `random() < base × GROUP_CHAIN_DECAY ** depth`, where `base` is
+  `GROUP_BOT_REPLY_PROB` (default **0.5**) or **1.0** if `_is_addressed(...)`, and
+  `depth` is how many bot messages deep the exchange already is (0 for the first
+  comeback). Most bot remarks still get no reply, which reads natural; deep exchanges
+  get progressively rarer, so a chain ends by petering out rather than by hitting the
+  cap mid-sentence. Expected cost per beat is therefore a geometric series (~3.3 calls
+  at the shipped defaults), not the cap. **Addressing no longer skips the gate** — it
+  only raises the starting probability. That closes the interaction that makes a higher
+  cap dangerous: naming the peer is the LLM's dominant register in these exchanges, so
+  a free pass would run every chain to the ceiling. Passing the gate still requires
+  winning the claim.
 - **Self-filter.** A bot never processes its own ledger entries (`sender == NAME`).
 - **Send throttle.** `GROUP_MIN_GAP_SECONDS=20` minimum between a bot's own consecutive
   group messages — even a logic bug upstream can't produce a message torrent.
@@ -273,10 +288,12 @@ bounds the damage.
 
 ## 4. Cost (hard problem 3)
 
-Worst case per human message: **≤2 chat-model calls fleet-wide plus amortized
-summarization**. The "≤2" is a consequence of the mechanisms in §2–§3, not a separate
-promise: the claim gives an unaddressed message exactly one responder, and the chain
-cap ends every bot exchange at two. Summarization (`maintain_memory`, SUMMARY_MODEL) is
+Worst case per human message: **≤`GROUP_BOT_CHAIN_MAX` chat-model calls fleet-wide plus
+amortized summarization** — ≤2 under v1's cap, ≤6 at the v2026-08-02.13 defaults, with
+an *expected* ~3.3 because the reply probability decays with chain depth (§3). The bound
+is a consequence of the mechanisms in §2–§3, not a separate promise: the claim gives an
+unaddressed message exactly one responder, and the chain cap ends every bot exchange.
+Summarization (`maintain_memory`, SUMMARY_MODEL) is
 kept and runs on its normal amortized schedule — it is not per-beat, but it is not zero
 either. Every other side call is off in groups:
 
@@ -430,10 +447,12 @@ All new, all inert unless `GROUP_MODE=1`:
 | `GROUP_ALLOWED_CHATS` | empty (fail closed) | Comma-separated group chat ids this bot may participate in |
 | `GROUP_PEERS` | empty | Names of the other character(s) in the group |
 | `GROUP_PEER_NOTES` | empty | Optional `Name: relationship line` per peer, `;`-separated |
-| `GROUP_BOT_REPLY_PROB` | `0.35` | Chance of replying to an unaddressed bot message |
-| `GROUP_BOT_CHAIN_MAX` | `2` | Consecutive bot messages allowed since last human one |
-| `GROUP_MIN_GAP_SECONDS` | `20` | Min seconds between own group messages |
-| `GROUP_DAILY_BOT_BUDGET` | `30` | Max bot-to-bot replies per day |
+| `GROUP_BANTER` | `1` | Kill switch for the v2026-08-02.13 tuning; `0` restores every v1 default in this table |
+| `GROUP_BOT_REPLY_PROB` | `0.5` (v1: `0.35`) | Base chance of replying to an unaddressed bot message |
+| `GROUP_CHAIN_DECAY` | `0.75` (v1: flat, i.e. `1.0`) | Reply chance is multiplied by this per step deeper into an exchange |
+| `GROUP_BOT_CHAIN_MAX` | `6` (v1: `2`) | Consecutive bot messages allowed since last human one |
+| `GROUP_MIN_GAP_SECONDS` | `8` (v1: `20`) | Min seconds between own group messages. Must stay below the ~16s two-turn round-trip or it silently ends every exchange |
+| `GROUP_DAILY_BOT_BUDGET` | `50` (v1: `30`) | Max bot-to-bot replies per day |
 | `GROUP_POLL_SECONDS` | `5` | Ledger poll cadence |
 | `GROUP_ALTERNATION_PENALTY` | `2.0` | Extra claim delay if this bot spoke last |
 | `GROUP_LEDGER_DIR` | dir of bot.py | Shared dir for ledger + claim files |
@@ -486,15 +505,19 @@ Acceptance script (all must pass before the pilot is called working):
    the live-handler-vs-poll-job double-answer race directly (the poll job must never
    act on human entries). Repeat ×5 and count Priya's messages.
 3. `jules you're wrong about this` (name, no @) → only Jules answers, once.
-4. Human line → bot A answers → bot B chimes in → **silence** (chain cap 2 holds), ×5.
-   **Space the repeats >20s apart** — inside the `GROUP_MIN_GAP_SECONDS=20` window the
+4. Human line → bot A answers → bot B chimes in → … → **silence at or before
+   `GROUP_BOT_CHAIN_MAX` bot messages** (count them; under v1's cap of 2 this was
+   exactly A then B), ×5.
+   **Space the repeats past `GROUP_MIN_GAP_SECONDS`** — inside that window the
    send throttle could mask a cap failure and produce a false pass; the point is to
    observe the *cap* holding, so the throttle must be out of the picture.
-5. Adversarial loop bait, ×5 (same >20s spacing, same reason): `priya, ask jules a
+5. Adversarial loop bait, ×5 (same spacing, same reason): `priya, ask jules a
    question` — the reply will near-certainly name Jules, Jules's reply will
-   near-certainly name Priya. Verify the exchange still stops at 2 bot messages under
-   real poll timing (this probes the addressed-bypasses-nothing rule and the
-   under-lock cap re-check).
+   near-certainly name Priya. Verify the exchange still stops at `GROUP_BOT_CHAIN_MAX`
+   bot messages under real poll timing (this probes the addressed-bypasses-nothing rule
+   and the under-lock cap re-check). Since v2026-08-02.13 this is the sharpest test in
+   the script: naming is what the decayed probability gate is there to bound, so a run
+   that reaches the cap on all five repeats means the decay is not doing its job.
 6. Restart one pilot mid-conversation → no replay of old messages (staleness guard).
 7. **Full flat-file freeze check.** Before the session:
    `sha256sum ~/priya-bot/{memories.txt,user_notes.txt,people.txt,projects.txt,life.txt,jokes.json,wardrobe.json,embeddings.json,reminders.json,cron_jobs.json} > /tmp/pre.sha`

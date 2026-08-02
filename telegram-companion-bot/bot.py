@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.12"
+BOT_VERSION = "2026-08-02.13"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -387,12 +387,21 @@ GROUP_ALLOWED_CHATS: set[int] = _parse_id_set(
     os.getenv("GROUP_ALLOWED_CHATS", ""), "GROUP_ALLOWED_CHATS")
 GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
 GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line; Name2: ..."
-GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.35")
-GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "2")
+# Banter defaults. v1 allowed 2 consecutive bot messages with a flat 35% reply chance
+# and a 20s per-bot send throttle — which, in a 2-bot group, is one reply per human
+# message and a thread that dies immediately (the throttle alone kills alternation: a
+# bot's own messages land ~16s apart in a live exchange, inside the 20s window).
+# GROUP_BANTER raises the ceiling and decays the reply chance with the depth of the
+# exchange instead of ending it at a wall. GROUP_BANTER=0 restores the v1 numbers
+# exactly; any knob set explicitly in .env still wins over both sets.
+GROUP_BANTER = os.getenv("GROUP_BANTER", "1").lower() not in ("0", "false", "no", "off")
+GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.5" if GROUP_BANTER else "0.35")
+GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "6" if GROUP_BANTER else "2")
+GROUP_CHAIN_DECAY = _env_float("GROUP_CHAIN_DECAY", "0.75" if GROUP_BANTER else "1.0")
 GROUP_POLL_SECONDS = _env_int("GROUP_POLL_SECONDS", "5")
-GROUP_MIN_GAP_SECONDS = _env_float("GROUP_MIN_GAP_SECONDS", "20")
+GROUP_MIN_GAP_SECONDS = _env_float("GROUP_MIN_GAP_SECONDS", "8" if GROUP_BANTER else "20")
 GROUP_ALTERNATION_PENALTY = _env_float("GROUP_ALTERNATION_PENALTY", "2.0")
-GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "30")
+GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "50" if GROUP_BANTER else "30")
 GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
@@ -2173,10 +2182,21 @@ def _is_addressed(text: str, char_name: str, bot_username: str, replied_to_own: 
 
 def _should_reply_to_bot(entries: list[dict], prob_roll: float, addressed: bool) -> bool:
     """Reply to a peer bot's message? The chain cap overrides even being addressed —
-    that's the loop-prevention primary (design §3)."""
-    if _bot_chain_len(entries) >= GROUP_BOT_CHAIN_MAX:
+    that's the loop-prevention primary (design §3).
+
+    Below the cap the chance decays with the depth of the exchange: the first comeback
+    is likely, the fifth rarely happens, so a long chain ends by petering out instead
+    of hitting a wall mid-sentence. Being named is no longer a free pass past the gate
+    either — it only sets the starting probability to 1.0, which still decays. Without
+    that, name-dropping (the LLM's favourite register in these exchanges: "jules, no")
+    would drive every chain straight to the cap, which is exactly where the cost is.
+    GROUP_CHAIN_DECAY=1.0 disables the decay and restores the v1 flat gate."""
+    chain = _bot_chain_len(entries)
+    if chain >= GROUP_BOT_CHAIN_MAX:
         return False
-    return addressed or prob_roll < GROUP_BOT_REPLY_PROB
+    depth = max(0, chain - 1)  # 0 while answering the first bot message of an exchange
+    base = 1.0 if addressed else GROUP_BOT_REPLY_PROB
+    return prob_roll < base * (max(0.0, GROUP_CHAIN_DECAY) ** depth)
 
 
 def _claim_delay(entries: list[dict], char_name: str, jitter_roll: float) -> float:
@@ -13250,7 +13270,8 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             chain = _bot_chain_len(await asyncio.to_thread(_ledger_tail, gid, 10))
             lines.append(
                 f"Group {gid}: ledger {lsize} KB, bot-sends today "
-                f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}"
+                f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}, "
+                f"banter {'on' if GROUP_BANTER else 'off'} (decay {GROUP_CHAIN_DECAY})"
             )
     # Sent as PLAIN TEXT deliberately. /audit interpolates arbitrary diagnostic strings —
     # card field names (system_prompt, mes_example), prompt block headings
