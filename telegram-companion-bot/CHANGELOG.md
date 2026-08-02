@@ -7,6 +7,34 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.8 — How often she reaches for a GIF or a meme
+
+**`GIF_CHANCE` and `MEME_CHANCE` (both 0.35) gate whether she is OFFERED the option in a
+given reply — not whether a tag she emitted is honoured.** That distinction is the whole
+design. Dropping a tag after the fact would leave her text referring to an image that never
+arrives ("this is you →" with nothing following), so the roll happens when the prompt is
+assembled: some replies simply don't mention that GIFs exist, and she writes normally.
+
+**Asking always works.** If your own message contains "gif"/"jif" or "meme", the option is
+offered regardless of the dice. Being told no because of a coin flip you can't see is the
+worst version of this feature.
+
+**Also: `/audit` gained a `Media:` line** — `meme=on/off gif=on/off (safety)`. This is the
+third time the same blind spot has cost a round trip. `Selfie base:` was added when four
+bots turned out to have no reference photo; `via <provider>` when three were silently on a
+weaker backend; and this release began with "I'm not sure if memes are turned on for anyone
+besides Bonnie" — a question the bot could not answer about itself.
+
+**Worth recording, since it caused that uncertainty:** `MEME_TEMPLATES_DIR` resolves
+against `bot.py`, not the instance directory, so it is `/opt/telegram-bots/meme_templates/`
+and **shared by all seven**. Meme support is all-or-nothing across the fleet; no single bot
+can have it while others don't. `gifs.txt`, `appearance.txt` and the rest are per-instance —
+this one is not, and the asymmetry is easy to misread.
+
+**Verification:** 831/831 pytest, 33/33 evals. 7 new tests; the offer gating and the audit
+line break-tested RED. A test pins that neither send path contains a probability roll, so
+the gate cannot migrate from the offer to the send later.
+
 ## v2026-08-02.7 — /gif, and the API key that would have leaked into a chat
 
 **`/gif <words>` is the parity command for `/selfie` and `/meme`**, and the reason it

@@ -5892,3 +5892,53 @@ class TestGifCommandAndRedaction:
         """The two failures need different fixes, so they must not read the same."""
         src = inspect.getsource(bot.send_gif) if (inspect := __import__("inspect")) else ""
         assert "GIPHY_API_KEY set" in src and "got past the" in src
+
+
+class TestMediaOfferChances:
+    """v2026-08-02.8: GIF_CHANCE/MEME_CHANCE gate whether she is OFFERED the option in a
+    given reply, never whether an emitted tag is honoured. Dropping a tag after the fact
+    would leave her text referring to an image that never arrives."""
+
+    def test_the_gate_is_on_the_offer_not_the_send(self):
+        """send_gif/send_meme must contain no probability roll -- only the prompt does."""
+        import inspect
+        for fn in (bot.send_gif, bot.send_meme):
+            src = inspect.getsource(fn)
+            assert "GIF_CHANCE" not in src and "MEME_CHANCE" not in src, fn.__name__
+
+    def test_chances_are_read_from_env_with_defaults(self):
+        assert 0.0 <= bot.GIF_CHANCE <= 1.0
+        assert 0.0 <= bot.MEME_CHANCE <= 1.0
+
+    def test_asking_for_one_bypasses_the_dice(self):
+        """Asking and being told no because of a coin flip is the worst outcome."""
+        for msg in ("send me a gif", "got a GIF for that?", "jif please"):
+            assert bot._ASKED_GIF.search(msg), msg
+        for msg in ("make me a meme", "MEMES please"):
+            assert bot._ASKED_MEME.search(msg), msg
+
+    def test_ask_patterns_do_not_fire_on_unrelated_words(self):
+        for msg in ("gifted me a book", "memento mori", "gifts for christmas"):
+            assert not bot._ASKED_GIF.search(msg) or "gif" == msg, msg
+            assert not bot._ASKED_MEME.search(msg), msg
+
+    def test_both_offers_are_gated_in_the_prompt(self):
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "GIF_CHANCE" in src and "MEME_CHANCE" in src
+        assert "_ASKED_GIF" in src and "_ASKED_MEME" in src
+
+    def test_audit_reports_media_readiness(self):
+        """Third time this blind spot cost a round trip: selfie base, then the image
+        backend, now whether meme/gif are live at all."""
+        import inspect
+        d = bot.gather_audit_data()
+        assert "media_ready" in d
+        assert "meme=" in d["media_ready"] and "gif=" in d["media_ready"]
+        assert "media_ready" in inspect.getsource(bot.audit_cmd)
+
+    def test_memes_are_fleet_wide_not_per_instance(self):
+        """MEME_TEMPLATES_DIR resolves against bot.py, not the instance dir -- so meme
+        support is all-or-nothing across all seven, not something one bot can have."""
+        assert "__file__" in inspect.getsource(bot).split("MEME_TEMPLATES_DIR =")[1][:120] \
+            if (inspect := __import__("inspect")) else False

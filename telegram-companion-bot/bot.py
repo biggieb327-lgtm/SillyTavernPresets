@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.7"
+BOT_VERSION = "2026-08-02.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -644,6 +644,14 @@ GIPHY_SEARCH_URL = os.getenv("GIPHY_SEARCH_URL", "https://api.giphy.com/v1/gifs/
 GIF_TIMEOUT = _env_int("GIF_TIMEOUT", "8")
 GIF_CANDIDATES = _env_int("GIF_CANDIDATES", "25")
 GIF_DEDUP_SIZE = _env_int("GIF_DEDUP_SIZE", "12")
+# How often she is OFFERED the option, per reply — not how often a tag is honoured.
+# Gating the offer throttles frequency without ever discarding a tag she chose to emit:
+# dropping one after the fact leaves her text referring to an image that never arrives.
+# Always offered regardless when the user's own message mentions a gif/meme.
+GIF_CHANCE = _env_float("GIF_CHANCE", "0.35")
+MEME_CHANCE = _env_float("MEME_CHANCE", "0.35")
+_ASKED_GIF = re.compile(r"\b[gj]ifs?\b", re.I)
+_ASKED_MEME = re.compile(r"\bmemes?\b", re.I)
 # Giphy's rating is CUMULATIVE — "pg-13" also returns g and pg. "r" is deliberately
 # unreachable: /gifsafety offers only these three (owner decision 2026-08-02).
 _GIF_RATING = {"high": "g", "medium": "pg", "low": "pg-13"}
@@ -4573,14 +4581,17 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
             f"and don't overuse it."
         )
-    if not group and gif_ready():
+    _asked = latest_user_content or ""
+    if not group and gif_ready() and (
+            _ASKED_GIF.search(_asked) or random.random() < GIF_CHANCE):
         cap_lines.append(
             f"- Send a GIF when a reaction lands better than words: "
             f"[gif: a short search phrase]. Write the phrase the way YOU would say it — "
             f"it is searched literally, so your own wording is what makes it yours rather "
             f"than a generic reaction. Don't overuse it."
         )
-    if not group and meme_ready():
+    if not group and meme_ready() and (
+            _ASKED_MEME.search(_asked) or random.random() < MEME_CHANCE):
         cap_lines.append(
             f"- Send a meme when the moment genuinely calls for it (a joke, a shared "
             f"reaction, something {uname} said that's begging for one): "
@@ -12871,6 +12882,8 @@ def gather_audit_data() -> dict:
         "selfie_base": _base_image_status(),
         "selfie_provider": (f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
                             if SELFIE_PROVIDER == "nanogpt" else SELFIE_PROVIDER),
+        "media_ready": (f"meme={'on' if meme_ready() else 'off'} "
+                        f"gif={('on (' + gif_prefs.get('safety', 'high') + ')') if gif_ready() else 'off'}"),
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
@@ -12939,6 +12952,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
         f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
+        f"Media: {d.get('media_ready', '?')}",
     ]
     ps = d.get("prompt_stats") or {}
     if ps:
