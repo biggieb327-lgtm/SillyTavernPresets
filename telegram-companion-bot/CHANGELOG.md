@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.15 — /features told you less about features than /audit did
+
+**Root cause: the detail suffix was written into `_features_summary()` — the `/audit`
+line — and never into the listing.** `/features` showed `voice: on`; `/audit` showed
+`voice=on(inworld)`. So the command *dedicated* to features answered less about them than
+the general audit line, and the question v2026-08-02.10 added those suffixes to answer —
+which TTS backend is actually live, since NanoGPT TTS works without Inworld and the
+capability probe can only ever return `True` — was reachable only from the other command.
+
+The listing now carries the same three details: the voice backend, the GIF safety level,
+and the selfie provider. Both call sites go through one new `_feature_detail()` rather
+than a second copy of the logic, because a second copy is exactly how the listing drifts
+back to saying less than the line it exists to expand on. `/audit` keeps its packed form
+(`voice=on(inworld)`); the listing spaces it (`voice: on (inworld)`).
+
+**A switched-off feature shows no detail at all** — naming a backend beside `off` claims
+something is running that isn't.
+
+**Verification:** 887/887 pytest (2 new), 34/34 evals, `py_compile` clean. Both new tests
+break-tested RED. They drive `features_cmd` with fake Telegram objects rather than reading
+its source — the rule v2026-08-02.14 established, and the delivery gate now enforces it
+for any `*_cmd` a diff touches.
+
 ## v2026-08-02.14 — /features never actually flipped anything, and five more from one review
 
 **Root cause of the batch: the tests for this week's features asserted on handler

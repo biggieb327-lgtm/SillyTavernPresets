@@ -6284,6 +6284,31 @@ class TestFeaturesCmdActuallyFlips:
         assert self._run([])[0].startswith("\U0001F39B Features")
         assert "voice" in self._run(["voice"])[0]
 
+    def test_the_listing_carries_the_same_detail_audit_does(self, tmp_path):
+        """v2026-08-02.15: the command dedicated to features said less about them than
+        /audit's one-line summary — `voice: on` against `voice=on(inworld)`. Which TTS
+        backend is live is the actual question (v2026-08-02.10), and it was answerable
+        only from the general audit."""
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = True
+        saved = bot.INWORLD_API_KEY
+        try:
+            bot.INWORLD_API_KEY = "k"
+            assert "voice: on (inworld)" in self._run([])[0]
+            assert "voice=on(inworld)" in bot._features_summary(), "audit keeps its packing"
+            bot.INWORLD_API_KEY = ""
+            assert "voice: on (nanogpt)" in self._run([])[0]
+        finally:
+            bot.INWORLD_API_KEY = saved
+
+    def test_a_switched_off_feature_shows_no_detail(self, tmp_path):
+        """The detail describes what is running. Printing a backend beside `off` would
+        claim something is live that isn't."""
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = False
+        out = self._run([])[0]
+        assert "voice: off" in out and "voice: off (" not in out
+
     def test_non_admin_gets_nothing(self, tmp_path):
         bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
         bot.ALLOWED_USERS.discard(4242)

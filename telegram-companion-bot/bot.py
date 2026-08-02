@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.14"
+BOT_VERSION = "2026-08-02.15"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -11090,6 +11090,25 @@ def save_feature_prefs():
     _atomic_write_text(FEATURE_PREFS_FILE, json.dumps(feature_prefs, indent=2))
 
 
+def _feature_detail(name: str, on: bool) -> str:
+    """The detail value for a feature that is ON — which TTS backend, which GIF safety
+    level, which image provider — or "" when there is nothing to say. Returns it raw;
+    callers pick the punctuation, because /audit packs it (`voice=on(inworld)`) and the
+    /features listing spaces it out (`voice: on (inworld)`).
+
+    Shared by both on purpose. "voice=on" was true on all seven and answered nothing
+    (v2026-08-02.10); a second copy of this logic is how the listing drifts back to
+    saying less than the audit line it exists to expand on."""
+    detail = _FEATURES[name][2]
+    if not on or detail is None:
+        return ""
+    try:
+        d = detail()
+    except Exception:
+        return ""
+    return str(d) if d else ""
+
+
 def _features_summary() -> str:
     """One compact line for /audit: on / off / n/a, where n/a means never configured."""
     bits = []
@@ -11098,15 +11117,8 @@ def _features_summary() -> str:
         if not capable:
             bits.append(f"{name}=n/a")
             continue
-        detail = _FEATURES[name][2]
-        suffix = ""
-        if on and detail is not None:
-            try:
-                d = detail()
-                suffix = f"({d})" if d else ""
-            except Exception:
-                suffix = ""
-        bits.append(f"{name}=" + ("on" if on else "off") + suffix)
+        d = _feature_detail(name, on)
+        bits.append(f"{name}=" + ("on" if on else "off") + (f"({d})" if d else ""))
     return " ".join(bits)
 
 
@@ -11145,7 +11157,8 @@ async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not capable:
                 lines.append(f"{name}: n/a — not configured on this instance")
             else:
-                lines.append(f"{name}: {'on' if on else 'off'}")
+                d = _feature_detail(name, on)
+                lines.append(f"{name}: " + ("on" if on else "off") + (f" ({d})" if d else ""))
         lines.append("")
         lines.append("Usage: /features <name> on|off")
         await update.message.reply_text("\n".join(lines))
