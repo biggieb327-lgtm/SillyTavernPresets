@@ -426,6 +426,18 @@ constraints; check their assumptions before acting on them.
   (v2026-07-26.1) rather than requiring an `.env` edit + restart per experiment. Treat
   this owner statement as the record; a per-instance `/audit` `Preset layers:` check is
   the way to re-confirm it later if it's ever in doubt again.
+- **Correction, 2026-08-02: "fleet-wide" was true of cass, jules and marcus only.** The
+  `/audit` sweep run the next day (see CHANGELOG v2026-08-02.10) found **nora, bonnie,
+  emily and priya still loading the monolithic `preset.txt`** — every per-character layer
+  already existed in the repo, so the gap was four `.env` lines, not missing content.
+  Bonnie and emily were switched over during that pass; nora and priya followed on
+  2026-08-02 with the `v2026-08-02.12` deploy (nora `core,rp,explicit,stepped,nora`;
+  priya `core,stepped,priya`), owner-reported deployed and verified. **The lesson is the
+  one the previous bullet half-anticipated:** an owner statement settles intent, not
+  per-instance config — the `Preset layers:` line named there as the fallback check was
+  in fact the only thing that could have caught this, and running it took one day. All
+  seven are layered as of this date; re-confirm per instance rather than trusting this
+  sentence if it ever matters again.
 - `preset.txt` remains voice-critical and deliberately tuned (v2026-07-18.1's anti-echo
   work) — any *further* layer change (new content, not just switching among what already
   exists) still goes through the owner, same as any other voice edit.

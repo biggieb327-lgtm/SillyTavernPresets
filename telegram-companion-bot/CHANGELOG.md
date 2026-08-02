@@ -100,6 +100,15 @@ with a weather bug, `WEATHER_LOCATION` is what drives weather, and nothing repor
   `_APPEARANCE_DEFAULT` before v2026-08-01.11. Unreachable on named instances, wrong in the
   file.
 
+**All five closed 2026-08-02** — recorded here because a findings list with no resolution
+reads as current state to the next session. Marcus moved to `America/Los_Angeles` (and to
+Olympia, with Emily, so her WSDOT traffic matches her state); `setting.txt` authored for all
+seven and `life.txt` for the four that lacked one, then made self-evolving in
+v2026-08-02.11; bonnie/emily switched to layered presets in this pass, nora/priya with the
+v2026-08-02.12 deploy, so all seven are layered; `DEFAULT_SETTING` neutralized in code.
+Config remedies are owner-applied and owner-reported verified — `.env` files are not in
+this repo, so a per-instance `/audit` is the only reading that settles any of them.
+
 **Verification:** 846/846 pytest, 33/33 evals. 5 new tests, both fixes break-tested RED.
 
 ## v2026-08-02.9 — /features, and an audit that answers the questions we kept asking
