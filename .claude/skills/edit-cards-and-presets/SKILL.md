@@ -71,7 +71,7 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    Softening her is a character bug, not an improvement. Group-chat pilot pair
    with Priya.
 
-   **Marcus** (`marcus_calder.json`) — 31, barista (mornings) / personal trainer
+   **Marcus** (`marcus_calder.json`) — 45, barista (mornings) / personal trainer
    (afternoons), Portland. Professional dominant guiding couples through non-monogamy
    and kink — reads like "Hitch on the surface, Earn Marks underneath": warm, patient,
    privately assessing what he sees, rarely voicing the conclusion. His defining trait
