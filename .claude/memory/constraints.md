@@ -477,6 +477,15 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   passes under injection is indistinguishable from one that is measuring nothing. Same shape as
   C13 (a check that cannot fail is not verification), one level up: the *break-test itself* can be
   the thing that cannot fail.
+- 2026-08-02 — Told the owner Priya's uploaded image was "confirmed" to be her reference photo
+  because `file` reported the same 1024x1024 progressive JPEG as `priya_base.jpg`. Matching
+  dimensions measure *same size*, not *same file* — and the images were in fact aspiration shots,
+  not the base photos at all. **Third occurrence** of the shape below, and the one the owner set
+  as the trigger to graduate it (2026-08-02: "leave it as prose until a third occurrence").
+  Worse than the first two because I used the word "confirmed" over evidence that was merely
+  consistent, and three appearance.txt files were written on top of it. → C8, sharpened: state
+  what a reading *excludes*, not just what it is compatible with. Dimensions exclude almost
+  nothing; a hash excludes everything but the file itself.
 - 2026-08-02 — Added the selfie-base field to the `=== STARTUP AUDIT ===` log line, then told
   the owner `/audit` would show it. Different code paths — `audit_cmd` builds its own lines from
   `gather_audit_data()` and never saw the field. The owner checked and it wasn't there. **Second
