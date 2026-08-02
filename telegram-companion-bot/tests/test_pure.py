@@ -6495,3 +6495,156 @@ class TestSetbaseBackupClaim:
         sent = self._run(tmp_path, monkeypatch)
         assert "previous kept as x_base.png.prev" in sent[0]
         assert (tmp_path / "x_base.png.prev").read_bytes() == b"the old reference photo"
+
+
+# --- v2026-08-02: the source-assertion backlog, driven ---------------------------------
+# `sweep.py source-assertion` listed 12 handlers the suite MENTIONED but never CALLED —
+# the state that reads as covered while proving nothing about dispatch. /features sat in
+# that list and raised ValueError on every invocation for four releases. These drive each
+# one with fake Telegram objects. The uniform contract: a command either ANSWERS or is
+# deliberately silent because a gate rejected the caller. Nothing here reads source.
+
+class _CmdMsg:
+    def __init__(self):
+        self.sent = []
+
+    async def reply_text(self, text, **kwargs):
+        self.sent.append(text)
+        return SimpleNamespace(message_id=1)
+
+    async def set_reaction(self, *a, **k):
+        return None
+
+
+def _cmd_update(uid=7001, chat_id=9001):
+    msg = _CmdMsg()
+    return SimpleNamespace(
+        message=msg,
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_user=SimpleNamespace(id=uid, first_name="Tester"),
+    ), msg
+
+
+def _cmd_ctx(*args):
+    return SimpleNamespace(args=list(args), bot=SimpleNamespace())
+
+
+class TestEveryCommandHandlerActuallyRuns:
+    """One DIRECT call per handler. Deliberately not routed through a helper that takes
+    the handler as an argument: `self._run(bot.vibe_cmd)` passes a reference, and
+    `source-assertion` counts that as a mention, not a call — correctly, since a
+    reference proves nothing ran. The first draft of this class did exactly that and the
+    scanner still reported all twelve."""
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        """An id that is neither allow-listed nor the owner. A fixed literal is unsafe:
+        another test in this file claims ownership of 999999 when none is set, so a
+        hardcoded outsider silently became an admin depending on test order."""
+        owner, uid = bot.get_owner(), 424242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    # ── admin-gated ───────────────────────────────────────────────────────────
+    def test_audit_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_audit_cmd_is_admin_gated(self):
+        u, m = _cmd_update(self._outsider())
+        asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
+        assert m.sent == [], "a non-admin must get silence, not a partial audit"
+
+    def test_preset_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.preset_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_gif_cmd_answers_without_a_query(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.gif_cmd(u, _cmd_ctx()))
+        assert m.sent and "Usage" in m.sent[0]
+
+    def test_update_cmd_reports_the_dead_deploy_path(self, monkeypatch):
+        """/update downloads over raw URLs, which 404 on the private repo. It must SAY
+        so — the handler is kept for exactly that reply."""
+        monkeypatch.setattr(bot, "perform_self_update",
+                            lambda force: {"ok": False, "reason": "repo_not_readable",
+                                           "detail": "404"})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.update_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    # ── allowed-user gated ────────────────────────────────────────────────────
+    def test_stress_cmd_explains_why_it_is_off(self):
+        """No Garmin credentials in the fixture, so it must explain rather than pretend
+        to check — the distinction v2026-08-02.14 restored."""
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.stress_cmd(u, _cmd_ctx()))
+        assert m.sent and ("off" in m.sent[0].lower() or "set up" in m.sent[0].lower())
+
+    # ── ungated ───────────────────────────────────────────────────────────────
+    def test_card_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.card_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_setcard_cmd_usage(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.setcard_cmd(u, _cmd_ctx()))
+        assert "Usage" in m.sent[0]
+
+    def test_setcard_cmd_rejects_an_unknown_field(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.setcard_cmd(u, _cmd_ctx("nosuchfield", "x")))
+        assert "Unknown field" in m.sent[0]
+
+    def test_status_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.status_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_vibe_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.vibe_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_energy_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.energy_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_schedule_cmd_shows_the_schedule(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.schedule_cmd(u, _cmd_ctx()))
+        assert "Schedule" in m.sent[0]
+
+    def test_notes_cmd_handles_an_empty_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "USER_NOTES_FILE", tmp_path / "user_notes.txt")
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.notes_cmd(u, _cmd_ctx()))
+        assert "No notes yet" in m.sent[0]
+
+    def test_the_backlog_stays_empty(self):
+        """The check that keeps it at zero: sweep's own coverage query must report no
+        handler this suite mentions but never calls."""
+        import pathlib as _pl
+        import sys
+        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
+                               ".claude" / "tools"))
+        import sweep
+        stranded = sorted(n for n in sweep._handler_coverage()[0]
+                          if n not in sweep._handler_coverage()[1])
+        assert stranded == [], stranded
