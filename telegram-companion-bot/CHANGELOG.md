@@ -7,6 +7,64 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.14 — /features never actually flipped anything, and five more from one review
+
+**Root cause of the batch: the tests for this week's features asserted on handler
+*source* instead of calling the handler.** `features_cmd` ended with
+`_, probe = _FEATURES[name]` — a 3-tuple unpacked into two names — so **every**
+`/features <name> on|off` raised `ValueError` before reaching the flip. The switch never
+moved, nothing persisted, and the owner got silence, because an exception inside a PTB
+handler is logged and swallowed. The suite was green throughout: one test asserted the
+specs *are* 3-tuples, another read the handler's source for `_is_admin`, and the
+`probe` name the unpack bound was never used, so no linter cared either. This is the fifth
+member of the family v2026-08-02.4 named (C8: reading a function's source proves the code
+exists, never that it runs), and the second to reach the fleet. **Every test added in this
+release exercises the handler.**
+
+The rest of the batch, all from the same review:
+
+- **Proactive messages dropped their GIFs.** `send_triggered` computed `gif_query` and
+  never used it — `_deliver` grew the GIF path and this second caller was missed. A
+  tag-only proactive message sent *nothing* and stored an empty assistant turn, putting a
+  blank into history.
+- **`/features health off` didn't stop the health monitors.** `STRESS_ALERTS`,
+  `BB_ALERTS` and `RHR_ALERTS` were computed as `GARMIN_ENABLED and <env>` **at import**,
+  so flipping `GARMIN_ENABLED` at runtime left the monitors reading a frozen copy: alerts
+  kept firing while `/features` and `/audit` both reported `health=off`. They are now the
+  static env preference alone, read through **`_alerts_on()`**, which ANDs the live parent
+  at call time. `_garmin_off_reason()` gained the runtime-switch case for the same reason —
+  `/health` and `/healthnow` were answering normally with the feature switched off.
+- **Switching a feature off was a one-way trip until restart.** The Garmin jobs and the
+  traffic poll were *registered* under their switches, so `/features health on` (or
+  `traffic on`) could not start anything that startup had skipped. Both now register on
+  **capability** — every one of those jobs already re-checks its own gate when it fires.
+- **"Off" was still being reported as "never configured"** in `send_selfie`, `send_meme`,
+  `/route`, `/nearby`, `/place`, `/food`, `/traffic` and `/incidents` — the exact
+  conflation v2026-08-02.9 split `*_capable` from `*_ready` to end. They need different
+  fixes (a `.env` edit or a file, versus one `/features` command), and the old message sent
+  the owner hunting for a reference photo that was already there. New helper
+  **`_feature_off_reason()`**; `send_gif` already did this correctly and was the template.
+  The paths in those messages were phone-era (`~/telegram-bot/…`) and now render from
+  `BASE_DIR` / `MEME_TEMPLATES_DIR`, so they name the file the instance actually reads.
+- **`/setbase` could claim a backup it didn't make.** It decided the
+  "previous kept as `.prev`" suffix by stat-ing the path *after* the write, so a leftover
+  `.prev` from an earlier run made a first-ever install report a backup of a file that had
+  never been there. It now tracks whether the backup branch ran.
+- **`GROUP_CHAT_DESIGN.md` §3 contradicted itself.** The throttle and budget bullets still
+  said `GROUP_MIN_GAP_SECONDS=20` / `GROUP_DAILY_BOT_BUDGET=30` after v2026-08-02.13 moved
+  them to 8 / 50 — the same doc's own table and the code both said the new values. §3 is
+  the section `group-chat-changes` makes you read before touching any `GROUP_*` code.
+
+**Verification:** 885/885 pytest (18 new), 33/33 evals, `py_compile` clean. Five defects
+break-tested RED by re-injecting the original code; the two that could not be (both
+docs) are covered by the eval suite's own consistency checks. The `/features`,
+`send_triggered` and `/setbase` tests drive the real handlers with fake Telegram objects,
+so they fail on a broken dispatch path rather than on a changed string.
+
+**Not changed, deliberately:** the review also flagged the traffic *poll job* as ignoring
+the switch. It does not — `traffic_poll_job` re-checks `TRAFFIC_ENABLED` on every firing
+(the registration asymmetry above was the real defect there, in the opposite direction).
+
 ## v2026-08-02.13 — the group bots could only ever answer once, and three separate limits said so
 
 **Root cause: the v1 group-chat tuning made a real back-and-forth arithmetically

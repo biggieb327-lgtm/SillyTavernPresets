@@ -275,9 +275,11 @@ is evaluated:
   a free pass would run every chain to the ceiling. Passing the gate still requires
   winning the claim.
 - **Self-filter.** A bot never processes its own ledger entries (`sender == NAME`).
-- **Send throttle.** `GROUP_MIN_GAP_SECONDS=20` minimum between a bot's own consecutive
-  group messages — even a logic bug upstream can't produce a message torrent.
-- **Daily budget.** `GROUP_DAILY_BOT_BUDGET=30` bot-to-bot replies per instance per day
+- **Send throttle.** `GROUP_MIN_GAP_SECONDS=8` (v1: `20`) minimum between a bot's own
+  consecutive group messages — even a logic bug upstream can't produce a message torrent.
+  It has to stay below the ~16s two-turn round-trip; at v1's 20s the throttle sat *inside*
+  the exchange and ended alternation by itself (§10, v2026-08-02.13).
+- **Daily budget.** `GROUP_DAILY_BOT_BUDGET=50` (v1: `30`) bot-to-bot replies per instance per day
   (counter in state.json, reset at midnight rotation). At the cap the bot simply stops
   replying to bots until tomorrow; human-addressed messages are unaffected.
 

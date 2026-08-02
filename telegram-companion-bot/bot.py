@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.13"
+BOT_VERSION = "2026-08-02.14"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2038,8 +2038,13 @@ if GARMIN_ENABLED and _Garmin is None:
         f"health feed inert ({_pip_hint('garminconnect')})")
 
 # Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
-# "wound up" without false-alarming on workouts. Only active when the feed is configured.
-STRESS_ALERTS = GARMIN_ENABLED and os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+# "wound up" without false-alarming on workouts.
+#
+# These three flags are the STATIC env preference only — they deliberately no longer fold in
+# GARMIN_ENABLED. `/features health off` flips GARMIN_ENABLED at runtime, and a flag that
+# baked the parent in at import kept firing alerts while /features and /audit both reported
+# health=off. Read them through _alerts_on(), never bare.
+STRESS_ALERTS = os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 STRESS_THRESHOLD = _env_int("STRESS_THRESHOLD", "60")          # 0-100; sustained above this = high
 STRESS_SUSTAINED_MIN = _env_int("STRESS_SUSTAINED_MIN", "45")  # must stay high this long to trigger
 STRESS_POLL_MIN = _env_int("STRESS_POLL_MIN", "30")            # how often to check
@@ -2048,14 +2053,14 @@ STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time; a r
 
 # Body Battery: Garmin's 0-100 energy-reserve gauge. Bottoming out means genuinely depleted.
 # Polled on the stress cadence — the client is cached, so it's one extra GET, not a login.
-BB_ALERTS = GARMIN_ENABLED and os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_ALERTS = os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 BB_LOW_THRESHOLD = _env_int("BB_LOW_THRESHOLD", "20")
 BB_ALERT_COOLDOWN_HOURS = _env_float("BB_ALERT_COOLDOWN_HOURS", "8")
 BB_ALERT_FILE = BASE_DIR / ".bb_alert"
 
 # Resting-HR morning check: resting HR notably above the user's OWN rolling baseline is an
 # early "run down / coming down with something" signal.
-RHR_ALERTS = GARMIN_ENABLED and os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ALERTS = os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 RHR_ELEVATED_DELTA = _env_int("RHR_ELEVATED_DELTA", "7")  # bpm above baseline to flag
 RHR_BASELINE_DAYS = _env_int("RHR_BASELINE_DAYS", "14")   # rolling window for the baseline median
 RHR_BASELINE_MIN_DAYS = _env_int("RHR_BASELINE_MIN_DAYS", "3")  # no alert below this much history
@@ -2066,6 +2071,14 @@ try:
     _RHR_H, _RHR_M = (int(x) for x in RHR_CHECK_TIME.split(":"))
 except Exception:
     _RHR_H, _RHR_M = 8, 0
+
+
+def _alerts_on(flag: bool) -> bool:
+    """Is a health monitor live right now? The env preference AND the parent feed switch,
+    read at call time so `/features health off` stops the monitors immediately. Every
+    STRESS_ALERTS / BB_ALERTS / RHR_ALERTS read goes through this — a bare read is the bug
+    it exists to prevent."""
+    return bool(GARMIN_ENABLED and flag)
 
 # --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
@@ -6101,12 +6114,16 @@ async def _infer_scene(chat_id: int) -> str:
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(f"📷 No reference photo or appearance.txt set. Drop a photo at "
-                      f"~/telegram-bot/{SELFIE_BASE} or write a description to "
-                      f"~/telegram-bot/appearance.txt and restart."),
-            )
+            # Two different problems, two different fixes (v2026-08-02.9): a missing asset
+            # needs a file, a switched-off feature needs one command. One message for both
+            # sent the owner hunting for a photo that was already there.
+            if not selfie_capable():
+                text = (f"📷 No reference photo or appearance.txt set. Drop a photo at "
+                        f"{BASE_DIR / SELFIE_BASE} or write a description to "
+                        f"{_APPEARANCE_FILE} and restart.")
+            else:
+                text = "📷 Selfies are switched off for this instance — /features selfie on."
+            await context.bot.send_message(chat_id=chat_id, text=text)
         return
     if not hint:
         hint = await _infer_scene(chat_id)
@@ -6396,11 +6413,12 @@ async def send_meme(context, chat_id: int, hint: str = "", top: str = None, bott
     otherwise (the /meme command path) captions are generated from hint + conversation."""
     if not meme_ready():
         if announce_errors:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🖼️ No meme templates found. Drop some .jpg templates in "
-                     "~/telegram-bot/meme_templates/ and a font at ~/telegram-bot/fonts/Anton-Regular.ttf.",
-            )
+            if not meme_capable():
+                text = (f"🖼️ No meme templates found. Drop some .jpg templates in "
+                        f"{MEME_TEMPLATES_DIR}/ and a font at {MEME_FONT_PATH}.")
+            else:
+                text = "🖼️ Memes are switched off for this instance — /features meme on."
+            await context.bot.send_message(chat_id=chat_id, text=text)
         return
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
@@ -10543,7 +10561,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
     remember(chat_id, "assistant", clean or (
         "[sent a selfie]" if selfie_hint is not None else
-        "[sent a meme]" if meme_caption is not None else ""
+        "[sent a meme]" if meme_caption is not None else
+        "[sent a gif]" if gif_query else ""
     ))
     if clean:
         await send_bubbles(context, chat_id, clean)
@@ -10551,6 +10570,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
+    if gif_query:
+        await send_gif(context, chat_id, gif_query)
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
     return text
@@ -10963,9 +10984,11 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     dest = BASE_DIR / SELFIE_BASE
+    backed_up = False
     try:
         if dest.exists():
             (dest.parent / (dest.name + ".prev")).write_bytes(dest.read_bytes())
+            backed_up = True
         tmp = dest.parent / (dest.name + ".tmp")
         tmp.write_bytes(raw)
         tmp.replace(dest)
@@ -10978,7 +11001,10 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     note = ("\n⚠️ Sent as a compressed photo. Resend as a file for the original quality."
             if compressed else "")
-    prev = "  (previous kept as %s.prev)" % dest.name if (dest.parent / (dest.name + ".prev")).exists() else ""
+    # Whether the backup branch RAN this time — not whether a .prev exists. A leftover
+    # .prev from an earlier /setbase made the first install of a fresh photo claim a
+    # backup of a file that had never been there.
+    prev = "  (previous kept as %s.prev)" % dest.name if backed_up else ""
     await msg.reply_text(
         f"📷 Reference photo updated: {dest.name} — {fmt}, {len(raw) // 1024} KB.{prev}\n"
         f"The next selfie uses it; no restart needed.{note}")
@@ -11032,6 +11058,19 @@ def _feature_state(name: str) -> tuple:
     except Exception:
         capable = False
     return bool(globals().get(flag)) and capable, capable
+
+
+def _feature_off_reason(name: str, missing: str, label: str) -> str:
+    """Why a credential-gated command is inert: never configured (needs a `.env` edit or a
+    file) vs. switched off (needs one `/features` command). Ending that conflation is what
+    v2026-08-02.9 was for, and every command that still printed the credential sentence for
+    both cases quietly undid it."""
+    on, capable = _feature_state(name)
+    if not capable:
+        return missing
+    if not on:
+        return f"{label} switched off for this instance — /features {name} on turns it back on."
+    return ""
 
 
 def load_feature_prefs():
@@ -11122,7 +11161,6 @@ async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "\nUsage: /features " + name + " on|off")
         return
     want = args[1].strip().lower() == "on"
-    _, probe = _FEATURES[name]
     if want and not _feature_state(name)[1]:
         await update.message.reply_text(
             f"Can't switch {name} on — it isn't configured on this instance "
@@ -12046,7 +12084,8 @@ def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
 
 async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     parsed = _parse_route_query(" ".join(context.args) if context.args else "")
     if not parsed:
@@ -12072,7 +12111,8 @@ async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     loc = user_location.get(update.effective_chat.id)
     if not loc:
@@ -12092,7 +12132,8 @@ async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     query = " ".join(context.args) if context.args else ""
     if not query:
@@ -12111,7 +12152,8 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     loc = user_location.get(update.effective_chat.id)
     if not loc:
@@ -12403,7 +12445,7 @@ def _stress_alert_ts() -> float:
 
 def _recent_stress_high():
     """Off-loop: has stress stayed high over the last STRESS_SUSTAINED_MIN minutes?"""
-    if not STRESS_ALERTS or _Garmin is None:
+    if not _alerts_on(STRESS_ALERTS) or _Garmin is None:
         return (False, None)
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -12417,7 +12459,7 @@ def _recent_stress_high():
 
 async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic: sustained high stress → one gentle in-character check-in."""
-    if not STRESS_ALERTS:
+    if not _alerts_on(STRESS_ALERTS):
         return
     owner = get_owner()
     if owner is None:
@@ -12458,7 +12500,7 @@ def _bb_alert_ts() -> float:
 
 def _body_battery_now():
     """Off-loop: latest Body Battery (0-100), or None."""
-    if not BB_ALERTS or _Garmin is None:
+    if not _alerts_on(BB_ALERTS) or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -12471,7 +12513,7 @@ def _body_battery_now():
 
 async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
-    if not BB_ALERTS:
+    if not _alerts_on(BB_ALERTS):
         return
     owner = get_owner()
     if owner is None:
@@ -12506,7 +12548,7 @@ async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 def _resting_hr_today():
     """Off-loop: today's resting heart rate, or None."""
-    if not RHR_ALERTS or _Garmin is None:
+    if not _alerts_on(RHR_ALERTS) or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -12539,7 +12581,7 @@ def _record_rhr(date_str: str, rhr: int):
 
 async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Once daily: resting HR notably above the user's own baseline → early run-down check-in."""
-    if not RHR_ALERTS:
+    if not _alerts_on(RHR_ALERTS):
         return
     owner = get_owner()
     if owner is None:
@@ -12751,6 +12793,11 @@ def _garmin_off_reason() -> str:
     if _Garmin is None:
         return ("The garminconnect library isn't installed "
                 f"({_pip_hint('garminconnect')}).")
+    # Last, because the three above are more specific causes of the same silence. Without
+    # this case `/features health off` left every health command answering normally while
+    # `/features` and `/audit` both reported health=off.
+    if not GARMIN_ENABLED:
+        return "The health feed is switched off — /features health on turns it back on."
     return ""
 
 
@@ -12804,7 +12851,7 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update.effective_user.id):
         return
-    if not STRESS_ALERTS:
+    if not _alerts_on(STRESS_ALERTS):
         reason = _garmin_off_reason()
         await update.message.reply_text(
             reason or "Stress monitoring is off (STRESS_ALERTS=0).")
@@ -12822,7 +12869,9 @@ async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TRAFFIC_ENABLED:
-        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "traffic", "Traffic monitoring isn't set up (WSDOT_API_KEY missing).",
+            "Traffic monitoring is"))
         return
     chat_id = update.effective_chat.id
     loc = user_location.get(chat_id)
@@ -12838,7 +12887,9 @@ async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def incidents_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TRAFFIC_ENABLED:
-        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "traffic", "Traffic monitoring isn't set up (WSDOT_API_KEY missing).",
+            "Traffic monitoring is"))
         return
     chat_id = update.effective_chat.id
     alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
@@ -14126,7 +14177,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
-    if TRAFFIC_ENABLED:
+    # Registered whenever the key exists (same reasoning as the health commands below):
+    # both handlers explain why they're inert, and an unregistered command is silent.
+    if WSDOT_API_KEY:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
     # Registered whenever credentials exist (even if the kill switch is off or the library
@@ -14170,7 +14223,11 @@ def main():
             wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)
             app.job_queue.run_daily(wardrobe_rotate_job, time=wardrobe_time)
             log.info("Daily wardrobe rotation scheduled %02d:00.", _wr_h)
-        if GARMIN_ENABLED and _Garmin is not None:
+        # Scheduled on CAPABILITY, not on the switch: every one of these jobs re-checks its
+        # own gate when it fires, so registering them whenever the credentials exist makes
+        # `/features health off` → `on` live. Gating registration on the switch made "off"
+        # a one-way trip until the next restart.
+        if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:
             for _gt in GARMIN_TIMES.split(","):
                 _gt = _gt.strip()
                 if not _gt:
@@ -14187,12 +14244,12 @@ def main():
             if STRESS_ALERTS:
                 app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
                                             first=STRESS_POLL_MIN * 60)
-                log.info("Stress monitoring on (every %d min, threshold %d).",
+                log.info("Stress monitoring scheduled (every %d min, threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, STRESS_THRESHOLD)
             if BB_ALERTS:
                 app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
                                             first=STRESS_POLL_MIN * 60)
-                log.info("Body Battery monitoring on (every %d min, low threshold %d).",
+                log.info("Body Battery monitoring scheduled (every %d min, low threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, BB_LOW_THRESHOLD)
             if RHR_ALERTS:
                 _rhtime = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
@@ -14223,7 +14280,7 @@ def main():
         if MEMORY_SEMANTIC_LIVE and LORE:
             app.job_queue.run_once(_embed_lore_job, when=20)
             log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
-        if TRAFFIC_ENABLED:
+        if WSDOT_API_KEY:  # capability, not the switch — traffic_poll_job re-checks it
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
             log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)
