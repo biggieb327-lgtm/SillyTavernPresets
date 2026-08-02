@@ -38,12 +38,23 @@ import os as _os
 BOT = Path(_os.getenv("SWEEP_BOT") or REPO / "telegram-companion-bot" / "bot.py")
 ENV = Path(_os.getenv("SWEEP_ENV") or REPO / "telegram-companion-bot" / ".env.example")
 CONSTRAINTS = Path(_os.getenv("SWEEP_CONSTRAINTS") or REPO / ".claude" / "memory" / "constraints.md")
+TESTS = Path(_os.getenv("SWEEP_TESTS") or REPO / "telegram-companion-bot" / "tests" / "test_pure.py")
 
 # Sites reviewed and justified. Keep the reason — an allowlist without one rots into
 # "this was noisy once".
 ALLOW_MARKDOWN = {
     "quietwin_cmd": "int index, fixed Mon-Sun names, HH:MM strings — no metachars possible",
     "fleet_cmd": "an int, inside a ``` fence where metachars are literal",
+}
+
+ALLOW_SHARED_WRITES = {
+    "_maybe_rotate_life_arc": (
+        "writes BASE_DIR, the INSTANCE dir. Flagged only because BASE_DIR's *fallback* "
+        "(line 97) is __file__'s parent, which applies when no instance dir is passed — "
+        "the dev case, one process, no race. Every deployed instance sets it."),
+    "_perform_self_update_locked": (
+        "genuinely writes the shared code dir, and is correctly serialized: the caller "
+        "holds the host-wide update lock, which is what the _locked suffix means."),
 }
 
 
@@ -102,7 +113,10 @@ def shared_writes() -> list[str]:
         if not any(w in line for w in writes):
             continue
         if any(re.search(rf'\b{re.escape(n)}\b', line) for n in shared):
-            out.append(f"{BOT.name}:{i} {_enclosing_def(lines, i)}(): {line.strip()[:76]}")
+            fn = _enclosing_def(lines, i)
+            if fn in ALLOW_SHARED_WRITES:
+                continue
+            out.append(f"{BOT.name}:{i} {fn}(): {line.strip()[:76]}")
     return out
 
 
@@ -132,8 +146,16 @@ def silent_return() -> list[str]:
             continue
         if not fn.name.endswith("_cmd"):
             continue
+        # A `return` inside a nested helper returns from the HELPER, not the handler, so
+        # it cannot leave the user unanswered. dupefacts_cmd's inner `_check` returning []
+        # for a short list was reported for months on exactly this confusion.
+        nested = [n for n in ast.walk(fn)
+                  if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n is not fn]
+        inner = {ln for n in nested for ln in range(n.lineno, (n.end_lineno or n.lineno) + 1)}
         for node in ast.walk(fn):
             if not isinstance(node, ast.If):
+                continue
+            if node.lineno in inner:
                 continue
             test = " ".join(lines[node.test.lineno - 1:node.test.end_lineno])
             if any(g in test for g in GUARD):
@@ -280,10 +302,73 @@ def constraints_drift() -> list[str]:
     return out
 
 
+def _handler_coverage() -> tuple[dict, set]:
+    """({handler: mention count}, {handlers the tests actually CALL}).
+
+    Shared by the source-assertion scanner and `.claude/hooks/delivery-gate.sh`, which
+    blocks a turn that ships a changed `*_cmd` no test drives. One implementation on
+    purpose: two copies of "does a test exercise this" would drift, and the drift would
+    be invisible in exactly the direction that lets a broken handler through."""
+    handlers = {n.name for n in ast.walk(ast.parse(BOT.read_text(encoding="utf-8")))
+                if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                and n.name.endswith("_cmd")}
+    tree = ast.parse(TESTS.read_text(encoding="utf-8"))
+    mentioned, called = {}, set()
+    for node in ast.walk(tree):
+        # bot.<name> anywhere — a mention, wherever it appears
+        if isinstance(node, ast.Attribute) and getattr(node.value, "id", "") == "bot":
+            if node.attr in handlers:
+                mentioned[node.attr] = mentioned.get(node.attr, 0) + 1
+        # bot.<name>(...) — an actual call, the only thing that exercises dispatch
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if getattr(node.func.value, "id", "") == "bot" and node.func.attr in handlers:
+                called.add(node.func.attr)
+    return mentioned, called
+
+
+def handlers_at_lines(linenos) -> set[str]:
+    """Which `*_cmd` handlers own these 1-indexed lines of bot.py.
+
+    Exact line ranges, not git's hunk header: the header names the enclosing function
+    only when the change sits below the hunk's leading context, so a change in a
+    handler's first few lines is attributed to the PRECEDING function. The first draft
+    of the delivery-gate check used the header and silently missed exactly that case."""
+    want = set(linenos)
+    out = set()
+    for n in ast.walk(ast.parse(BOT.read_text(encoding="utf-8"))):
+        if not isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        if not n.name.endswith("_cmd"):
+            continue
+        if any(n.lineno <= ln <= (n.end_lineno or n.lineno) for ln in want):
+            out.add(n.name)
+    return out
+
+
+def source_assertion() -> list[str]:
+    """A test that only READS a handler's source cannot fail for the reason the handler
+    exists. `/features <name> on|off` raised ValueError on every invocation for four
+    releases while two tests covering it stayed green: one asserted the specs are
+    3-tuples, the other grepped the handler text for "_is_admin". Neither called it
+    (v2026-08-02.14; C8's fifth member, second to reach the fleet).
+
+    Flagged: a command handler the tests MENTION but never CALL. That is the dangerous
+    state — it reads as covered. A handler with no tests at all is honestly untested and
+    is not reported here. A mention inside inspect.getsource(...) counts as a mention,
+    never as a call; driving the handler with fake Telegram objects is what counts."""
+    if not TESTS.exists():
+        return [f"{TESTS} is missing — the test suite is the input to this check"]
+    mentioned, called = _handler_coverage()
+    return [f"{TESTS.name}: {name}() is referenced {n}× but never called — the tests read "
+            f"it, nothing runs it"
+            for name, n in sorted(mentioned.items()) if name not in called]
+
+
 SCANNERS = {
     "markdown-interp": markdown_interp,
     "shared-writes": shared_writes,
     "silent-return": silent_return,
+    "source-assertion": source_assertion,
     "env-drift": env_drift,
     "install-hint": install_hint,
     "constraints-drift": constraints_drift,

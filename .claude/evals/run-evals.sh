@@ -629,6 +629,36 @@ else
   bad "claude-md-refs-resolve" "$md_refs"
 fi
 
+# --- handlers-exercised -----------------------------------------------------------------
+# The handlers whose defects reached the fleet BECAUSE their only tests read their source.
+# `/features <name> on|off` raised ValueError on every invocation for four releases while
+# two tests "covering" it stayed green (v2026-08-02.14). The delivery gate enforces this for
+# handlers a diff touches; this pins the ones already paid for, so deleting the behavioural
+# tests reds CI instead of quietly restoring the blind spot.
+exercised=$(python3 - <<'PYEOF'
+import sys
+sys.path.insert(0, ".claude/tools")
+import sweep
+
+REQUIRED = {
+    "features_cmd": "v2026-08-02.14 — ValueError on every invocation, 4 releases, tests read the source",
+    "setbase_cmd":  "v2026-08-02.4 + .14 — dispatch never fired, then a false backup claim",
+    "dupefacts_cmd": "already driven end-to-end; keeps at least one worked example in the suite",
+}
+_, called = sweep._handler_coverage()
+missing = [f"{n} ({why})" for n, why in REQUIRED.items() if n not in called]
+if missing:
+    print("no test CALLS these handlers: " + "; ".join(missing) +
+          " — a test that reads a handler's source cannot fail for the reason the "
+          "handler exists; drive it with fake Telegram objects instead")
+PYEOF
+)
+if [ -z "$exercised" ]; then
+  ok "handlers-exercised: the handlers that shipped broken are driven by tests, not grepped"
+else
+  bad "handlers-exercised" "$exercised"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

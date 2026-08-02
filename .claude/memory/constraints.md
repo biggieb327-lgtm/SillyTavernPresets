@@ -495,6 +495,56 @@ allowed (rc=0); the three pre-existing risk-guard checks (force-push to main, ro
 
 ---
 
+
+### C17 — Count an anchor's matches before writing through it
+**seen: 2** (2026-07-31, 2026-08-02) — *promoted from the Minor log; both entries deleted.*
+Two edits assumed a string named exactly one place and wrote through it without asking how
+many it matched. `replace_all` on the fragment `principle 8` landed mid-sentence in two
+different grammatical positions and needed two repair edits. A break-test script whose
+*revert* anchor (`asyncio.create_task(maintain_memory(chat_id))`) occurred three times
+would have rewritten two unrelated call sites; only an `assert count == 1` stopped it, and
+it stopped mid-run with the injection still applied.
+**This is not C7.** C7 is about what sits *above* an anchor — the structure you did not
+read. This is about how many places the anchor *is*. An anchor can be perfectly
+content-addressed, sit in exactly the structure you expect, and still match six times.
+**Constraint:** before any programmatic write keyed on a string — `replace_all`, an
+in-place `sed`, a `.replace()` in a helper script — count the matches first and require
+the count you intend. In a script that is a literal `assert s.count(old) == 1`. Check the
+*revert* anchor too: a script that injects and then reverts has two anchors, and only one
+of them is usually thought about.
+**Graduated 2026-08-02 (partially — the gap is stated):** `.claude/hooks/anchor-guard.sh`
+already blocks the positional half (numeric in-place `sed` addresses). The multiplicity
+half is not hookable: a hook cannot know whether three matches were intended, and one that
+guessed would fire on every legitimate `replace_all` and get disabled. What is mechanical
+is the assertion inside the script, now the documented shape in `add-regression-eval`.
+
+### C18 — A break-test proves one assertion, not the check
+**seen: 4** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01) — *promoted from the Minor
+log; all four entries deleted.*
+Four checks passed their break-test and were still dead in ways the break-test could not
+see. Three faults injected **at once**: two tests failed correctly, the third passed for
+the wrong reason (the injection made the function return `None` for every input, and the
+test asserted `None`). A backtick-pairing scanner **desynchronized below a fence** and
+reported PASS on a clean tree and on an injected bad reference alike — caught only because
+one break-test mode refused to go red. A `sweep-ok` pragma matched with a colon the real
+markers did not have, so the helper self-reported forever. The first `no-live-raw-urls`
+draft let a **whole file** opt out via one exemption.
+**The cause is one thing:** an injection exercises the single path it touches. Everything
+else in the check — the other assertions, the tokenizer, the exemption logic, the corpus
+it will actually run against — stays unproven, and a green break-test reads as if it had
+covered all of it.
+**Constraint:** inject **one fault at a time**, and re-run the whole check after each.
+Break-test against the *real* corpus (the file with the fences, the tree with the
+pragmas), never a minimal fixture that omits the structure the check must survive. **A
+break-test that will not go red is a bug in the check, not a clean tree** — that is the
+signal, and it has now paid out twice.
+**Graduated 2026-08-02 (deliberately prose, and here is why):** nothing can observe from
+outside whether two injections were applied together — the run looks identical either way.
+The mechanical descendants are the products this forced: `sweep.py`'s `SWEEP_BOT` /
+`SWEEP_TESTS` / `SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a
+deliberately broken corpus, and the `source-assertion` scanner was itself break-tested by
+running it against the test suite as it stood *before* the bug it describes shipped.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
@@ -538,15 +588,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   needs BOTH: strip comments (describing a defect is not committing it) and match on word
   boundaries, never bare substrings. Two failed runs is cheap; a scanner that greens on the wrong
   thing is not.
-- 2026-08-01 — Break-tested three assertions by injecting all three faults at once. Two failed
-  correctly; the third test *passed*, and I nearly recorded it as verified. The autodetect-off
-  injection made `_resolve_base_image` return None for every input, so the "ambiguous candidates
-  are not guessed" test passed for the wrong reason — it was asserting None against a function
-  that could only return None. Re-run with that one injection alone, it failed correctly →
-  **one injection at a time.** Simultaneous injections can mask each other, and a break-test that
-  passes under injection is indistinguishable from one that is measuring nothing. Same shape as
-  C13 (a check that cannot fail is not verification), one level up: the *break-test itself* can be
-  the thing that cannot fail.
 - 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
   — leftover scaffolding from two half-finished versions of the same line, committed to the file
   in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on
@@ -564,18 +605,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   code's existing organisation before proposing machinery to protect it; "is this already
   solved structurally?" comes before "what rule would prevent this?" (C2 family: name the
   class — and check it exists — before building for it).
-- 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
-  over a file containing a ``` fence. Three-backtick delimiters pair against each other,
-  so the tokenizer desynchronized and the check was blind to everything below the fence —
-  it reported PASS on a clean tree and on an injected bad reference alike. Found only
-  because break-test mode 5 refused to go red. → **Strip fenced blocks before pairing
-  inline backticks, and treat a break-test that won't go red as a bug in the check, never
-  as proof the tree is clean.**
-- 2026-07-31 — Used `Edit` with `replace_all` on the fragment `principle 8` across the
-  scaffolding audit, and it landed mid-sentence in two different grammatical positions
-  ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
-  had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
-  match sits inside a sentence, edit each site individually.**
 - 2026-07-31 — Grepped `routines.md` for Routine headings with `| head -20`, saw no
   `character-pass-monthly`, and started writing it up as doc drift; the heading was at
   line 242, past the cut. → **A `head`-truncated grep proves presence, never absence.
@@ -636,15 +665,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   handed to an operator reads as a failed deploy → when stating the expected output of a
   verification command, **measure it against the repo copy first**, don't recall it. (C3's
   neighbour: a check with a wrong expected value is as misleading as one that cannot fire.)
-- 2026-07-29 — The first draft of the `no-live-raw-urls` eval let a whole file opt out if
-  any marker word (`404`, `historical`, `DEAD`) appeared in its first 25 lines. CHEATSHEET.md's
-  header *explains* that raw URLs 404, so the entire file was exempt and a re-injected
-  defect passed — in the file the check most needed to guard. Caught only because I
-  break-tested against a second file → **an opt-out matched loosely is an opt-out for
-  everything.** Use a literal pragma for exemptions, and break-test in a file that is
-  *not* the one you developed against. (C3 family, and the reason the 26→27 eval is
-  trustworthy.) — **promoted 2026-07-29 into C14** as its third and only silent-failing
-  instance; kept here because the pragma lesson is narrower than C14's region-scoping rule.
 - 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
   conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
   Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length
@@ -673,11 +693,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   guard looked dead. The *test* was broken, not the code → when a break-test shows
   nothing firing, suspect the harness before the check. Build fixtures in Python, not
   shell quoting.
-- 2026-07-27 — Wrote a `sweep-ok` pragma check for `install-hint` that matched
-  `"sweep-ok:"` with a colon, while the inline markers had none, so the helper kept
-  self-reporting → match pragmas loosely; make the scanner fit the annotation, not the
-  other way round.
 - 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
-- 2026-08-02 — Break-testing five injections with one script: the revert anchor for injection 2 (`asyncio.create_task(maintain_memory(chat_id))`) occurs **3×** in bot.py, so the revert would have rewritten two unrelated call sites. The `assert count == 1` guard caught it and stopped with the injection still applied, costing a manual repair → when a script both injects AND reverts, the *revert* anchor needs the uniqueness check as much as the inject anchor, and both should be checked BEFORE the first write, not between them (C7's positional-vs-content lesson applied to a string that is content-anchored but not unique).
+- 2026-08-02 — `risk-guard.sh` blocked a script because the script *quoted* a constraint's title, which contains the command pattern the guard forbids. Nothing was being run; the words were an anchor string. C14 exactly, in a hook rather than a scanner, and the second time this week a guard fired on prose about the thing it guards → when a helper script must mention a forbidden pattern, put the script in a file and run the file; do not inline it where a PreToolUse hook reads the command text.

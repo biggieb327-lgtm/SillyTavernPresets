@@ -75,19 +75,36 @@ Your job ends at "merged, green, deploy instructions given."
    hit may be correctly mitigated). Triage each one, then load `fix-the-class` if the
    sweep — or the shape of the bug — suggests other instances exist.
 
-7. **Commit on the session's `claude/...` branch, then merge to `main` and push.**
-   Standing policy (owner-approved 2026-07-11): merge autonomously **only when step 6
-   is fully green**. Any red check = stop, report, do not merge.
+7. **Review the diff before merging it.** Green tests are not a review: on 2026-08-02 a
+   `/code-review` pass over one day's 13 releases found six defects a fully green suite
+   had shipped, including `/features <name> on|off` raising `ValueError` on every
+   invocation for four releases. Run it on the diff you are about to merge:
+   ```bash
+   /code-review          # reviews the working diff; /review is for a GitHub PR
+   ```
+   Fix what it finds, or say in the report why a finding is not real —
+   `verify-external-audit` applies to its output exactly as it does to any other
+   outside claim, because a review is a batch of *claims*, not a batch of defects.
+   **Two of the six were mis-diagnosed** on that pass and re-checking changed the fix.
+
+   Mechanically enforced half: the delivery gate blocks the turn if the diff touches a
+   `*_cmd` handler that no test **calls** (`sweep.py source-assertion` lists the
+   backlog). A test that reads a handler's source cannot fail for the reason the
+   handler exists — that is the defect the review found, five times over.
+
+8. **Commit on the session's `claude/...` branch, then merge to `main` and push.**
+   Standing policy (owner-approved 2026-07-11): merge autonomously **only when steps 6–7
+   are fully green**. Any red check = stop, report, do not merge.
    ```bash
    git checkout main && git pull origin main && git merge <branch> && git push -u origin main
    ```
    Never force-push main (risk-guard blocks it; deploys would brick).
 
-8. **Update planning docs in the same session**: mark the shipped item done in
+9. **Update planning docs in the same session**: mark the shipped item done in
    `ROADMAP.md` (this was skipped after R1–R6 and the docs drifted). If the release
    closed an operational-log "Next" item, note it there.
 
-9. **Hand off the deploy.** Tell the user exactly:
+10. **Hand off the deploy.** Tell the user exactly:
    - `/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>`,
      once per instance (nora, bonnie, cass, emily, priya, jules, marcus) — it fetches
      and hard-resets the checkout to `origin/main`, so it's correct even if the
@@ -106,6 +123,8 @@ Your job ends at "merged, green, deploy instructions given."
 ## Verification checklist
 
 - [ ] py_compile, pytest, run-evals.sh all green — actual output seen, not assumed
+- [ ] `/code-review` run on the diff; every finding fixed or refuted in the report
+- [ ] No `*_cmd` the diff touches is left un-called by tests (the delivery gate blocks it)
 - [ ] BOT_VERSION bumped and equals the newest `## v` changelog heading
 - [ ] New env vars in `.env.example`, unset = old behavior
 - [ ] New pure functions have tests
