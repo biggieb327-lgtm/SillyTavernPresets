@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.3"
+BOT_VERSION = "2026-08-02.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -13586,6 +13586,14 @@ def main():
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
+    # /setbase as a photo/document CAPTION. PTB's CommandHandler matches only
+    # message.text + message.entities (verified in its check_update source), so a
+    # caption never reaches it and the message falls through to normal chat — which
+    # is exactly what happened on first use (v2026-08-02.4). Registered BEFORE
+    # handle_photo/handle_document so it wins the dispatch.
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.IMAGE) & filters.CaptionRegex(r"^/setbase\b"),
+        setbase_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))

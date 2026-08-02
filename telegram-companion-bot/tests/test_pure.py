@@ -5683,3 +5683,42 @@ class TestSetBaseCommand:
     def test_warns_when_telegram_compressed_the_image(self):
         src = self._src()
         assert "compressed" in src and "Resend as a file" in src
+
+
+class TestSetBaseCaptionDispatch:
+    """v2026-08-02.4: /setbase was documented as working as a photo caption. It could not.
+
+    PTB's CommandHandler.check_update requires message.text AND message.entities; a caption
+    populates message.caption/caption_entities instead, so the update fell through to normal
+    chat and the model answered it conversationally. v2026-08-02.3's tests all asserted on
+    handler SOURCE -- registration, admin gate, atomic write -- and never exercised dispatch,
+    which is why they were green on a path that could not run."""
+
+    def test_command_handler_really_does_ignore_captions(self):
+        """Pins the library behaviour this fix exists for, by exercising it rather than
+        asserting it. If a future PTB matches captions, this fails and the extra handler
+        can be reconsidered."""
+        import inspect
+        from telegram.ext import CommandHandler
+        src = inspect.getsource(CommandHandler.check_update)
+        assert "message.text" in src
+        assert "caption" not in src.lower()
+
+    def test_caption_handler_is_registered(self):
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert "CaptionRegex" in main_src and "setbase" in main_src
+
+    def test_caption_handler_precedes_the_photo_handler(self):
+        """handle_photo would otherwise swallow the update and reply conversationally."""
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert main_src.index("CaptionRegex") < main_src.index("filters.PHOTO, handle_photo")
+
+    def test_it_accepts_documents_too(self):
+        """Sending as a file is the recommended path -- Telegram recompresses photos."""
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        i = main_src.index("CaptionRegex")
+        window = main_src[i - 200:i + 100]
+        assert "Document.IMAGE" in window and "filters.PHOTO" in window

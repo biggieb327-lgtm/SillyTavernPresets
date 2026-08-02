@@ -232,6 +232,15 @@ identity/sameness claims resting on metadata with no hash — nine-case matrix, 
 exact sentence from #3, green on hedged wording, hashed comparisons, tables, and metadata
 without a claim. Escape hatch `# claim-ok`. The `audit-keys-rendered` eval pins #2's shape:
 any key in `gather_audit_data()` that no user-facing surface renders fails the suite.
+**Occurrence 4 (2026-08-02) — and it shipped.** `/setbase` was documented as working as a
+photo caption. PTB's `CommandHandler` matches `message.text` only, so it never could. All
+eight tests were green because every one asserted on the handler's *source* — `_is_admin`
+present, `CommandHandler("setbase"` registered, write atomic — and none exercised dispatch.
+**Sharpened further: reading a function's source is not exercising it.** A test that greps
+code proves the code exists; whether the framework ever calls it is a different claim
+needing a different test. The fix's own test now runs PTB's `check_update` rather than
+describing it.
+
 **What stays prose, deliberately:** #1's shape — asserting a code path behaves some way
 without exercising it. The text reads identically whether or not the path was run, so no
 scanner can see it; rule 4 permits prose exactly here.

@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.4 — /setbase never worked as a caption
+
+**Root cause: PTB's `CommandHandler` matches `message.text` + `message.entities` only.**
+A photo or document caption populates `message.caption` / `caption_entities`, so a
+`/setbase` caption never reached the handler — the update fell through to `handle_photo`
+and the model answered it as conversation, inventing a `[setbase: 60°F, clear, wind 3mph,
+summer]` tag by analogy with `[selfie: …]`. Verified by reading `check_update` in the
+installed wheel, not assumed.
+
+v2026-08-02.3 shipped that path *and documented it as the recommended one* the same day.
+
+**Why the tests were green on a path that could not run:** all eight asserted on the
+handler's **source** — that `_is_admin` appears in it, that `CommandHandler("setbase"` is
+in `main()`, that the write is atomic. Not one exercised dispatch. Reading a function's
+source proves the code exists; it proves nothing about whether the framework will ever
+call it. Fourth occurrence of the assert-without-exercising family (C8), and the first to
+reach the fleet.
+
+**Fix:** a `MessageHandler` on `(PHOTO | Document.IMAGE) & CaptionRegex(r"^/setbase\b")`,
+registered **before** `handle_photo` so it wins dispatch. The `CommandHandler` stays for
+the reply-to-a-photo path, which was always fine since that is a text message.
+
+**Verification:** 799/799 pytest, 33/33 evals. 4 new tests, three break-tested RED. One of
+them exercises PTB's `check_update` rather than describing it, so if a future PTB starts
+matching captions the test fails and the extra handler can be reconsidered.
+
 ## v2026-08-02.3 — /setbase: install a reference photo over Telegram
 
 **Root cause: the only route for getting a reference photo onto an instance was
