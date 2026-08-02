@@ -516,6 +516,13 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-02 — Read seven `/audit` outputs and reported "life.txt missing on priya, marcus,
+  jules". Nora's line said `MISSING: life.txt, setting.txt` too, so it was four. Then handed over
+  `cat /opt/telegram-bots/nora/life.txt` as the way to see the file format — naming the one bot in
+  that group guaranteed not to have one. → when summarising several structured outputs, extract
+  the field from each into a list and read the list, rather than forming an impression while
+  scrolling. Seven near-identical blocks is exactly where the eye fills in what it expects.
+  C8 family: the reading was there, I just did not actually perform it.
 - 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
   flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
   and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the
