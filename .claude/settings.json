@@ -71,6 +71,12 @@
           },
           {
             "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Handoff guard (C1 family)"
+          },
+          {
+            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"

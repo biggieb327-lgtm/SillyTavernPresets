@@ -67,6 +67,30 @@ local commands out. **Cross-host transfer commands (`scp`, `rsync`, `ssh <host> 
 inherently two-host and must be labelled `# host: both` up front** — not discovered at the
 Stop hook. Both occurrences this session were labelling, never a wrong-host command.
 
+### C16 — A handed-over command block must work on someone else's machine
+**seen: 2** (2026-08-02 ×2) — *promoted straight to a mechanism the day both occurred;
+rule 4's bar is two, and both had already cost a round trip.*
+Two shapes, one session, both in the **handoff** rather than the work:
+- A "full sequence" block did `cd /opt/telegram-bots` and then used relative paths. The
+  owner's shell was in `~`; seven `vps-sync.sh` calls resolved against the wrong directory
+  and failed at once. Every earlier message that session had used absolute paths — the
+  regression came from compressing them into one block.
+- An `scp` target was taken from the owner's shell prompt (`root@vmi3420780`). A prompt
+  hostname is what a box calls itself locally, not an address another machine can route to.
+**Constraint:** write every path absolute, even when longer, and take ssh/scp targets from
+something that routes — never from a prompt, `hostname`, or a window title. Assume the
+operator pastes a *subset* of the block, in a shell you did not set up.
+**Graduated 2026-08-02:** `.claude/hooks/handoff-guard.sh` + `handoff_guard.py`, a Stop
+hook. Scoped to operator-facing blocks (a `# host:` pragma, or fleet host-specific
+commands), so illustrative snippets are untouched. Escape hatches `# handoff-ok: relative`
+and `# handoff-ok: hostname`. Ten-case matrix — three defect shapes RED, seven legitimate
+blocks green including quoted regexes, IP and FQDN targets, and a `cd` with absolute paths
+after it — plus end-to-end checks that it blocks in situ, honours `stop_hook_active`, and
+fails open on a malformed payload.
+**Division of labour:** `host-guard` answers *which machine is this for?*; this answers
+*will it actually work there?* Neither can stop a paste into the wrong shell — that half
+stays the operator's, and it is why the C1 entry says what it says.
+
 ### C2 — Name the class before calling a fix done
 **seen: 2** (2026-07-26 ×2)
 v2026-07-26.6 fixed one `pip install` hint and shipped; three more hardcoded install
@@ -437,21 +461,6 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
-- 2026-08-02 — Handed over a multi-step operator block whose later commands depended on a `cd`
-  earlier in the same block. The owner's shell was still in `~`, so seven `vps-sync.sh` calls
-  resolved against the wrong directory and failed at once. Every earlier message in the session
-  had used the absolute path; the regression came from compressing them into one "full sequence"
-  block. → **operator-facing command blocks must not depend on shell state set earlier in the
-  same block** — no relative paths after a `cd`, no variables defined upstream. Operators paste
-  subsets, and a relative path does not fail loudly, it silently targets the wrong place. Write
-  every path absolute even when it is longer. C1 family: the operator half nothing can guard.
-- 2026-08-02 — Used the hostname from the owner's shell prompt (`root@<host>#`) as the SSH
-  target in an scp command handed to another machine. A prompt hostname is what the box calls
-  itself locally; it is not a routable address from anywhere else, and the transfer would have
-  failed to resolve. The owner caught it and supplied the IP. → an SSH/scp target is a network
-  fact, not a display string: take it from something that routes (known_hosts, an ssh config
-  Host entry, an address the owner gave), never from a shell prompt, `hostname`, or a window
-  title. C8 family — ask what the reading actually measures before building on it.
 - 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
   flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
   and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the

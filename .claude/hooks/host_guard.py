@@ -45,6 +45,19 @@ def last_assistant_text(path: str) -> str:
     return ""
 
 
+def _seen() -> str:
+    """Read C1's live count rather than hardcoding it — the message said 4 while the
+    file said 6, which undersells the constraint to the one reader who needs it."""
+    try:
+        with open(".claude/memory/constraints.md", encoding="utf-8") as fh:
+            body = fh.read()
+        i = body.find("### C1 ")
+        m = re.search(r'\*\*seen:\s*(\d+)\*\*', body[i:i + 400]) if i >= 0 else None
+        return m.group(1) if m else "?"
+    except OSError:
+        return "?"
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -92,11 +105,11 @@ def main() -> int:
 
     if problems:
         sys.stderr.write(
-            "[host-guard] constraint C1 (.claude/memory/constraints.md, seen: 4) — "
+            f"[host-guard] constraint C1 (.claude/memory/constraints.md, seen: {_seen()}) — "
             "a command block is not clearly attributable to one host:\n"
             + "\n".join(problems)
             + "\n Fix the labelling before finishing. Wrong-host execution has cost "
-              "four incidents, including a silent no-op mid-cutover.\n")
+              "repeated incidents, including a silent no-op mid-cutover.\n")
         return 2
     return 0
 
