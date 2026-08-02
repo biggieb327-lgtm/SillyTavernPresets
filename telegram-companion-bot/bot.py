@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.5"
+BOT_VERSION = "2026-08-02.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -634,6 +634,31 @@ MEME_FONT_SIZE = _env_int("MEME_FONT_SIZE", "80")
 MEME_MIN_FONT_SIZE = 24
 MEME_DEDUP_SIZE = _env_int("MEME_DEDUP_SIZE", "5")
 _recent_meme_templates: dict = {}  # chat_id -> list of recently used template filenames
+
+# --- GIFs (Giphy search, tag-driven) -------------------------------------------------
+# She emits [gif: query] in her own words; candidates are filtered and one is sent as an
+# animation. NO new LLM call — it rides the reply she was already generating (invariant #3).
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
+GIF_ENABLED = os.getenv("GIF_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+GIPHY_SEARCH_URL = os.getenv("GIPHY_SEARCH_URL", "https://api.giphy.com/v1/gifs/search")
+GIF_TIMEOUT = _env_int("GIF_TIMEOUT", "8")
+GIF_CANDIDATES = _env_int("GIF_CANDIDATES", "25")
+GIF_DEDUP_SIZE = _env_int("GIF_DEDUP_SIZE", "12")
+# Giphy's rating is CUMULATIVE — "pg-13" also returns g and pg. "r" is deliberately
+# unreachable: /gifsafety offers only these three (owner decision 2026-08-02).
+_GIF_RATING = {"high": "g", "medium": "pg", "low": "pg-13"}
+# Applied at EVERY safety level, on top of Giphy's rating. Giphy's own issue tracker
+# carries long-standing reports of `rating` returning mixed results, so this is the
+# load-bearing filter rather than a backstop. Erring broad is correct here: a false
+# positive costs one missing GIF, a false negative sends a stranger's porn to a private
+# chat. Violence terms are kept narrow ("kill" would eat "killing it").
+_GIF_DENY = (
+    "nsfw", "porn", "hentai", "nude", "nudity", "naked", "topless", "boob", "tits",
+    "twerk", "stripper", "sexy", "sex ", "orgasm", "fetish", "bdsm", "onlyfans",
+    "lingerie", "thong", "bikini", "gore", "murder", "suicide", "behead", "nazi",
+    "swastika",
+)
+_recent_gif_ids: dict = {}   # chat_id -> recently sent Giphy ids (anti-repeat)
 # Fallback for an unnamed run (no instance dir argument) with no appearance.txt. It must
 # NOT describe any particular character: until v2026-08-01.8 this held a half-shaved head,
 # septum ring and sleeved tattoos, left over from a discarded card that made Priya a tattoo
@@ -2927,6 +2952,28 @@ def save_wardrobe():
 
 load_wardrobe()
 
+GIF_PREFS_FILE = BASE_DIR / "gif_prefs.json"
+gif_prefs = {"safety": os.getenv("GIF_SAFETY", "high").lower()}
+
+
+def load_gif_prefs():
+    """Runtime GIF safety level, persisted. Unlike /setmodel this survives a restart —
+    a safety setting silently reverting is the wrong failure direction."""
+    if GIF_PREFS_FILE.exists():
+        try:
+            gif_prefs.update(json.loads(GIF_PREFS_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            log.warning("[gif] prefs load failed: %s", e)
+    if gif_prefs.get("safety") not in _GIF_RATING:
+        gif_prefs["safety"] = "high"       # unknown value fails safe, never open
+
+
+def save_gif_prefs():
+    _atomic_write_text(GIF_PREFS_FILE, json.dumps(gif_prefs, indent=2))
+
+
+load_gif_prefs()
+
 
 # --- Vibe mode ---
 VIBE_PROMPTS = {
@@ -4526,6 +4573,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
             f"and don't overuse it."
         )
+    if not group and gif_ready():
+        cap_lines.append(
+            f"- Send a GIF when a reaction lands better than words: "
+            f"[gif: a short search phrase]. Write the phrase the way YOU would say it — "
+            f"it is searched literally, so your own wording is what makes it yours rather "
+            f"than a generic reaction. Don't overuse it."
+        )
     if not group and meme_ready():
         cap_lines.append(
             f"- Send a meme when the moment genuinely calls for it (a joke, a shared "
@@ -5248,9 +5302,20 @@ def extract_tags(text: str):
     sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
     if sr:
         text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
-    if reaction or sm or mm or sr:
+    # Same safety net as [search:]: _gif_query has already read it, but an unstripped
+    # tag reaches the user verbatim (v2026-07-29.1, and [setbase: ..] on 2026-08-02).
+    gr = re.search(r"\[gif:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
+    if gr:
+        text = re.sub(r"\[gif:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+    if reaction or sm or mm or sr or gr:
         text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), reaction, selfie_hint, meme_caption
+
+
+def _gif_query(text: str):
+    """Read the [gif: ..] tag. Must run BEFORE extract_tags, which strips it."""
+    m = re.search(r"\[gif:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
 
 
 def _extract_search(text: str):
@@ -6019,6 +6084,104 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
             await context.bot.send_message(chat_id=chat_id, text=f"📷 Couldn't make that one: {e}")
     finally:
         uploading.cancel()
+
+
+def gif_ready() -> bool:
+    """A missing key degrades to no GIFs rather than errors — same shape as selfie_ready."""
+    return bool(GIF_ENABLED and GIPHY_API_KEY)
+
+
+_gif_taste_cache = {"mtime": None, "likes": (), "bans": ()}
+
+
+def _gif_taste() -> tuple:
+    """Per-instance taste from gifs.txt: a line starting with '-' bans a term, any other
+    non-comment line is a term she likes. Curating vocabulary, not individual GIFs —
+    the same division as appearance.txt vs the reference photo."""
+    path = BASE_DIR / "gifs.txt"
+    try:
+        mtime = path.stat().st_mtime if path.exists() else None
+    except OSError:
+        mtime = None
+    if mtime == _gif_taste_cache["mtime"]:
+        return _gif_taste_cache["likes"], _gif_taste_cache["bans"]
+    likes, bans = [], []
+    if mtime is not None:
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                (bans if line.startswith("-") else likes).append(line.lstrip("-").strip().lower())
+        except OSError as e:
+            log.warning("[gif] taste file unreadable: %s", e)
+    _gif_taste_cache.update({"mtime": mtime, "likes": tuple(likes), "bans": tuple(bans)})
+    return _gif_taste_cache["likes"], _gif_taste_cache["bans"]
+
+
+def _gif_blocked(blob: str, bans: tuple) -> bool:
+    """True if this candidate's text trips the global deny-list or her own ban terms."""
+    return any(bad in blob for bad in _GIF_DENY) or any(b and b in blob for b in bans)
+
+
+def _giphy_search(query: str, safety: str, exclude_ids: set):
+    """(url, gif_id, title) for the best allowed candidate, or None. Runs in a worker
+    thread — never call bare requests from a handler (invariant #8)."""
+    params = {
+        "api_key": GIPHY_API_KEY, "q": query[:120], "limit": GIF_CANDIDATES,
+        "rating": _GIF_RATING.get(safety, "g"), "lang": "en",
+    }
+    r = _get_session().get(GIPHY_SEARCH_URL, params=params, timeout=GIF_TIMEOUT)
+    r.raise_for_status()
+    items = (r.json() or {}).get("data") or []
+    likes, bans = _gif_taste()
+    best, best_score = None, -1
+    for it in items:
+        gid = it.get("id")
+        if not gid or gid in exclude_ids:
+            continue
+        blob = " ".join(str(it.get(k) or "") for k in ("title", "slug", "alt_text")).lower()
+        if _gif_blocked(blob, bans):
+            continue
+        images = it.get("images") or {}
+        url = ((images.get("downsized") or {}).get("url")
+               or (images.get("fixed_height") or {}).get("url")
+               or (images.get("original") or {}).get("url"))
+        if not url:
+            continue
+        score = sum(1 for w in likes if w and w in blob)
+        if score > best_score:
+            best, best_score = (url, gid, (it.get("title") or "").strip()), score
+    return best
+
+
+async def send_gif(context, chat_id: int, query: str):
+    """Search and send one GIF. Silent on every failure — a missing GIF must never
+    surface as an error in a conversation, and never delays the reply it follows."""
+    if not (gif_ready() and query):
+        return
+    seen = set(_recent_gif_ids.get(chat_id) or [])
+    try:
+        found = await asyncio.to_thread(_giphy_search, query, gif_prefs.get("safety", "high"), seen)
+    except Exception as e:
+        log.warning("[gif] search failed: %s", e)
+        _count_error("media")
+        return
+    if not found:
+        log.info("[gif] no allowed candidate for %r", query)
+        return
+    url, gid, title = found
+    try:
+        await context.bot.send_animation(chat_id=chat_id, animation=url)
+    except Exception as e:
+        log.warning("[gif] send failed: %s", e)
+        _count_error("media")
+        return
+    buf = _recent_gif_ids.setdefault(chat_id, [])
+    buf.append(gid)
+    if len(buf) > GIF_DEDUP_SIZE:
+        buf.pop(0)
+    print(f"[gif] {query!r} -> {gid}" + (f" ({title})" if title else ""))
 
 
 # --- Memes ---
@@ -9515,6 +9678,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     if memcheck_m:
         ai_response = _MEMCHECK_RE.sub("", ai_response).strip()
         asyncio.create_task(_handle_memcheck(context, chat_id, memcheck_m.group(1).strip()))
+    gif_query = _gif_query(ai_response)
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
@@ -9522,6 +9686,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
         "[sent a meme]" if meme_caption is not None else
+        "[sent a gif]" if gif_query else
         (f"[reacted {reaction}]" if reaction else "")
     )
     remember(chat_id, "user", user_memory_text)
@@ -9548,6 +9713,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
+    if gif_query:
+        await send_gif(context, chat_id, gif_query)
     if inside_jokes and clean:
         _check_joke_used(clean)
     if clean:
@@ -10276,6 +10443,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
+    gif_query = _gif_query(text)
     clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
     if clean:
         clean = _strip_persona_breaks(clean)
@@ -10724,6 +10892,31 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         f"📷 Reference photo updated: {dest.name} — {fmt}, {len(raw) // 1024} KB.{prev}\n"
         f"The next selfie uses it; no restart needed.{note}")
+
+
+async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show or set the GIF content-safety level. high|medium|low only — Giphy's fourth
+    rating ("r") is deliberately unreachable."""
+    if not _is_admin(update.effective_user.id):
+        return
+    cur = gif_prefs.get("safety", "high")
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            f"\U0001F39E GIF safety: {cur} (Giphy rating '{_GIF_RATING[cur]}')\n"
+            f"Usage: /gifsafety high|medium|low\n"
+            f"high='g', medium='pg', low='pg-13'. Giphy's rating is cumulative, and its "
+            f"own issue tracker reports it leaking, so a local deny-list runs at every "
+            f"level regardless of this setting.")
+        return
+    want = args[0].strip().lower()
+    if want not in _GIF_RATING:
+        await update.message.reply_text("Pick one of: high, medium, low.")
+        return
+    gif_prefs["safety"] = want
+    save_gif_prefs()
+    await update.message.reply_text(
+        f"\U0001F39E GIF safety set to {want} (Giphy rating '{_GIF_RATING[want]}').")
 
 
 async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13281,6 +13474,7 @@ _BASE_COMMANDS = [
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
     BotCommand("selfie", "Generate a selfie"),
+    BotCommand("gifsafety", "GIF safety: high, medium or low"),
     BotCommand("setbase", "Replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
@@ -13520,6 +13714,7 @@ def main():
     app.add_handler(CommandHandler("selfie", selfie_cmd))
     app.add_handler(CommandHandler("setbase", setbase_cmd))
     app.add_handler(CommandHandler("meme", meme_cmd))
+    app.add_handler(CommandHandler("gifsafety", gifsafety_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))

@@ -5744,3 +5744,100 @@ class TestAuditReportsSelfieProvider:
     def test_value_is_a_non_empty_string(self):
         v = bot.gather_audit_data()["selfie_provider"]
         assert isinstance(v, str) and v
+
+
+class TestGifTagAndFiltering:
+    """v2026-08-02.6: [gif: query] search via Giphy. Tenor was the original plan until
+    research showed Google terminated its API on 2026-06-30. Giphy's `rating` is
+    cumulative and its own issue tracker reports it returning mixed ratings, so the local
+    deny-list is load-bearing rather than a backstop."""
+
+    def setup_method(self):
+        self._saved = dict(bot.gif_prefs)
+        self._cache = dict(bot._gif_taste_cache)
+        bot._gif_taste_cache.update({"mtime": None, "likes": (), "bans": ()})
+
+    def teardown_method(self):
+        bot.gif_prefs.clear(); bot.gif_prefs.update(self._saved)
+        bot._gif_taste_cache.clear(); bot._gif_taste_cache.update(self._cache)
+
+    # --- the leak trap ---
+    def test_gif_tag_is_stripped_from_user_facing_text(self):
+        """An unregistered tag reaches the user verbatim -- v2026-07-29.1, and the
+        [setbase: 60F, clear...] leak on 2026-08-02."""
+        clean, *_ = bot.extract_tags("that's the worst thing i've heard [gif: disgusted recoil]")
+        assert "[gif:" not in clean and "disgusted" not in clean
+        assert clean == "that's the worst thing i've heard"
+
+    def test_query_is_readable_before_stripping(self):
+        assert bot._gif_query("ha [gif: derby wipeout] classic") == "derby wipeout"
+        assert bot._gif_query("no tag here") is None
+
+    def test_extract_tags_still_returns_four_values(self):
+        """The 4-tuple contract is pinned; [gif:] rides alongside like [search:] does."""
+        out = bot.extract_tags("hi [gif: x]")
+        assert len(out) == 4
+
+    # --- safety ---
+    def test_rating_map_offers_only_three_levels_and_never_r(self):
+        assert set(bot._GIF_RATING) == {"high", "medium", "low"}
+        assert "r" not in set(bot._GIF_RATING.values())
+        assert bot._GIF_RATING["high"] == "g"
+
+    def test_denylist_blocks_regardless_of_safety_level(self):
+        for term in ("nsfw", "porn", "nude", "hentai", "gore"):
+            assert bot._gif_blocked(f"funny {term} reaction", ()), term
+
+    def test_denylist_does_not_eat_ordinary_phrases(self):
+        """A false positive costs one GIF; the list still has to be usable."""
+        for ok in ("killing it at work", "shooting hoops", "class dismissed",
+                   "blood orange juice", "passing the ball"):
+            assert not bot._gif_blocked(ok, ()), ok
+
+    def test_instance_ban_terms_are_honoured(self):
+        assert bot._gif_blocked("a clown car", ("clown",))
+        assert not bot._gif_blocked("a clown car", ("mime",))
+
+    def test_empty_ban_term_does_not_block_everything(self):
+        """A blank line in gifs.txt must not ban every GIF."""
+        assert not bot._gif_blocked("anything at all", ("",))
+
+    # --- degradation ---
+    def test_not_ready_without_an_api_key(self):
+        saved = bot.GIPHY_API_KEY
+        try:
+            bot.GIPHY_API_KEY = ""
+            assert bot.gif_ready() is False
+        finally:
+            bot.GIPHY_API_KEY = saved
+
+    def test_kill_switch_disables_it(self):
+        saved = (bot.GIF_ENABLED, bot.GIPHY_API_KEY)
+        try:
+            bot.GIF_ENABLED, bot.GIPHY_API_KEY = False, "k"
+            assert bot.gif_ready() is False
+        finally:
+            bot.GIF_ENABLED, bot.GIPHY_API_KEY = saved
+
+    def test_unknown_persisted_safety_falls_back_to_high(self):
+        """An unrecognised value must fail safe, never open."""
+        bot.gif_prefs["safety"] = "off"
+        bot.load_gif_prefs()
+        assert bot.gif_prefs["safety"] == "high"
+
+    def test_command_is_registered_and_in_the_menu(self):
+        import inspect
+        assert 'CommandHandler("gifsafety"' in inspect.getsource(bot.main)
+        assert any(c.command == "gifsafety" for c in bot._build_command_menu(False, False))
+
+    def test_no_new_llm_call_in_the_gif_path(self):
+        """Invariant #3: it rides the reply that already happened."""
+        import inspect
+        src = inspect.getsource(bot.send_gif) + inspect.getsource(bot._giphy_search)
+        for banned in ("call_nanogpt", "generate_reply", "_do_request"):
+            assert banned not in src, banned
+
+    def test_search_runs_off_the_event_loop(self):
+        """Invariant #8: no bare requests in an async handler."""
+        import inspect
+        assert "asyncio.to_thread" in inspect.getsource(bot.send_gif)

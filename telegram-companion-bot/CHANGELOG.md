@@ -7,6 +7,52 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-02.6 — GIFs, via Giphy, chosen in her own words
+
+**Tenor was the plan until research killed it.** Google stopped issuing Tenor API keys on
+2026-01-13 and terminated the API entirely on **2026-06-30** — a month before this was
+written. Existing keys return errors; Discord, X, Bluesky and WhatsApp all migrated. The
+integration was never started. KLIPY was evaluated next: its content filter is a better
+fit (`high`/`medium`/`low`/`off`, matching the requested knobs exactly) and it is free
+forever, but it **inserts advertisements into search results** and its endpoint takes a
+`CUSTOMER_ID` — a per-user identifier handed to an ad network from private chats. Its docs
+were unreadable from this container (403), so the field marking an ad could not be
+identified, and an integration was not built on guesses. Giphy by elimination.
+
+**How it works:** she emits `[gif: a short search phrase]` in her own wording, the phrase
+is searched, candidates are filtered, and one is sent with `send_animation`. **No new LLM
+call** — it rides the reply she was already generating, which is what invariant #3
+requires.
+
+**Safety is layered, because Giphy's own filter cannot be trusted alone.** `/gifsafety
+high|medium|low` maps to Giphy's `rating` (`g` / `pg` / `pg-13`) and persists to
+`gif_prefs.json` — unlike `/setmodel`, since a safety level silently reverting on restart
+is the wrong failure direction, and an unrecognised persisted value falls back to `high`
+rather than open. Giphy's rating is **cumulative** (`pg-13` also returns `g` and `pg`) and
+its issue tracker carries long-standing reports of mixed ratings coming back regardless,
+so a local deny-list runs at **every** level on each candidate's title and slug. Its
+fourth rating, `r`, is unreachable by construction. The deny-list errs broad on sexual and
+graphic terms — a false positive costs one missing GIF — but stays narrow on violence,
+since "kill" would eat "killing it".
+
+**In-character selection** comes from two places: her own query wording, and a per-instance
+`gifs.txt` where a leading `-` bans a term and any other line is a term she is scored
+toward. You curate the vocabulary, not the GIFs — the same division as `appearance.txt`
+versus the reference photo. Plus a recent-id ring buffer so she doesn't repeat herself.
+
+**The tag is stripped in the same commit that teaches her to emit it.** `extract_tags`
+removes tags by name, so an unregistered one reaches the user verbatim — that is
+v2026-07-29.1, and you watched `[setbase: 60°F, clear…]` do it on 2026-08-02. `[gif:]`
+rides alongside `[search:]` rather than extending the pinned 4-tuple contract.
+
+Every failure is silent: no API key, a search timeout, nothing passing the filter, a send
+error. A missing GIF must never surface as an error mid-conversation, and never delays the
+reply it follows.
+
+**Verification:** 816/816 pytest, 33/33 evals. 14 new tests; four break-tested RED — the
+tag leak, the deny-list, per-instance bans, and the unknown-value fail-safe. The
+`env-vars-documented` eval caught `GIPHY_SEARCH_URL` undocumented before this shipped.
+
 ## v2026-08-02.5 — /audit names the image backend
 
 **Root cause of a fleet split nobody could see: `SELFIE_PROVIDER` defaults to `nanogpt`
