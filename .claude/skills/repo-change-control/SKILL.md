@@ -58,12 +58,13 @@ Your job ends at "merged, green, deploy instructions given."
      first, fix second**. The `version-changelog-sync` eval fails if the newest
      `## v` heading ≠ BOT_VERSION.
 
-6. **Verify** — the standing block, all three, paste real output:
+6. **Verify** — one command, and paste its real output:
    ```bash
-   python3 -m py_compile telegram-companion-bot/bot.py
-   python -m pytest telegram-companion-bot/tests/ -q
-   bash .claude/evals/run-evals.sh
+   bash .claude/tools/verify.sh
    ```
+   Runs py_compile, pytest, `run-evals.sh` and `gate_corpus`, then prints the advisory
+   sweep. It exists so "I ran the tests" cannot quietly mean a different subset each
+   time. The individual commands still work if you need one in isolation.
 
    **If this release FIXES something, also sweep for the rest of the class** before
    step 7 — on 2026-07-25 every point fix that day turned out to be a class, and the
@@ -122,13 +123,14 @@ Your job ends at "merged, green, deploy instructions given."
 
 ## Verification checklist
 
-- [ ] py_compile, pytest, run-evals.sh all green — actual output seen, not assumed
+- [ ] `bash .claude/tools/verify.sh` green — actual output seen, not assumed
 - [ ] `/code-review` run on the diff; every finding fixed or refuted in the report
 - [ ] No `*_cmd` the diff touches is left un-called by tests (the delivery gate blocks it)
 - [ ] BOT_VERSION bumped and equals the newest `## v` changelog heading
 - [ ] New env vars in `.env.example`, unset = old behavior
 - [ ] New pure functions have tests
-- [ ] Merged to main and pushed; CI (`evals` workflow) green on main
+- [ ] Merged to main and pushed; CI (`evals` workflow) **polled** on main and
+      reported as `<sha> | completed | success` — not asserted from having pushed
 - [ ] ROADMAP/plan docs updated
 - [ ] Deploy instructions given to the user
 

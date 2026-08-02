@@ -64,11 +64,22 @@ Every claim gets a verdict with line evidence before any fix.
    report are enough. Record both fields — a table of claim → verdict → disposition →
    evidence. A verdict with no disposition is half a record.
 
-4. **Fix only CONFIRMED claims**, via `repo-change-control` (one release; audit fixes
+4. **Before fixing a batch, classify each CONFIRMED claim INDEPENDENT or COUPLED** —
+   does it touch the same function or lines as another? Coupled ones must be worked in
+   sequence by one worker; independent ones can be split across `coder` subagents with a
+   strict scope contract (fix only your finding, add one test that fails before and
+   passes after, touch nothing else). Two reasons this is worth the minute it takes: a
+   fix for finding 3 silently reverting finding 1 is the failure it prevents, and the
+   classification is what tells you whether parallelism is even available. On 2026-08-02
+   six findings all landed in bot.py and four were coupled through the same feature
+   table, so the batch was correctly worked inline — the answer is often "sequential",
+   and knowing that is the point.
+
+5. **Fix only CONFIRMED claims**, via `repo-change-control` (one release; audit fixes
    are a coherent theme). Order by user impact, not by the auditor's severity
    labels — external severity was wrong before.
 
-5. If a CONFIRMED claim reveals a failure class that has now bitten twice →
+6. If a CONFIRMED claim reveals a failure class that has now bitten twice →
    `add-regression-eval`.
 
 ## Quality bar

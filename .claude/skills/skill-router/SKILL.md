@@ -21,6 +21,7 @@ such exemption.
 | A live bot is misbehaving, restarting, or silent | `repo-debugging-playbook` |
 | The cause looks device-level (SIGKILL/137, venv, tzdata, pkg upgrade), or you're touching watchdog/backup/cleanup | `termux-device-ops` |
 | Editing an `.env`, choosing/changing a model, or working on note follow-ups, day threads, or the shared world | `bot-config-reference` |
+| The work is written and needs to become a deployed release (sequencing only) | `ship` |
 | Work is merged; user needs to get it onto the fleet, or a deploy went wrong | `deploy-and-verify-fleet` |
 | Editing character cards, seed files, preset.txt, or root SillyTavern presets | `edit-cards-and-presets` |
 | A fix is about to ship, or a check/eval is being written | `fix-the-class` |

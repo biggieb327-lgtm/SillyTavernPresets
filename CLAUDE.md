@@ -47,9 +47,15 @@ The machinery that enforces this is real, not advisory:
   presets were public via raw URLs for months — assume anything committed before then
   is exposed) and
   BOT_VERSION↔changelog sync.
+- **`.claude/tools/verify.sh`** — the standing verification block as one command
+  (compile, pytest, evals, gate corpus, then the advisory sweep). Run this rather than
+  four remembered invocations; `--quick` drops the sweep and is not enough for a release.
+- **`.claude/tools/gate_corpus/`** — the guards, guarded: fixtures built to slip past
+  each scanner and the delivery gate. 14 of the first 34 cases deviated, including the
+  gate passing silently whenever `sweep.py` raised. Run by the `gate-corpus` eval.
 - **Hooks** (`.claude/hooks/`) — including a **delivery gate** that blocks ending a
-  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
-  evidence.
+  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, compile
+  evidence, or a test that *calls* any `*_cmd` the diff touched.
 - **CI** (`.github/workflows/evals.yml`) — same evals + pytest on `main`/`claude/**`.
   `vps-sync.sh` hard-resets the VPS checkout to `origin/main` before copying, so
   **a red run on main is a deploy blocker.**
