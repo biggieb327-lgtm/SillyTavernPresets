@@ -564,6 +564,18 @@ show up first. A section with nothing in it means under-reporting, not a clean r
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
 promotes was still worth ten seconds to write.
 
+**Last promotion pass: 2026-08-02** — `sweep.py constraints-drift` reads this line and
+counts only what has arrived *since* it, which is what "is another pass worth running"
+actually asks. **Update the date whenever you run a pass**, including one that promotes
+nothing. Counting the *total* instead is what made the check useless: the 2026-08-02 pass
+promoted six entries into C17/C18 and left 19 with no shared causes, and a total-based
+threshold would have demanded a seventh pass that could only invent clusters.
+
+**Archiving:** an entry earns its place by being available to pair with a *future* one.
+After 30 days nothing has, so move it under `## Minor — archived` at the bottom — kept
+verbatim and searchable, just out of the promotion count. The scanner names the entries
+that are due. Archiving is not deletion and needs no judgement call; promotion does.
+
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
 - 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
@@ -697,3 +709,12 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
 - 2026-08-02 — `risk-guard.sh` blocked a script because the script *quoted* a constraint's title, which contains the command pattern the guard forbids. Nothing was being run; the words were an anchor string. C14 exactly, in a hook rather than a scanner, and the second time this week a guard fired on prose about the thing it guards → when a helper script must mention a forbidden pattern, put the script in a file and run the file; do not inline it where a PreToolUse hook reads the command text.
+- 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
+
+## Minor — archived
+
+Entries that sat 30 days without pairing with anything. Kept verbatim — they are still
+searchable evidence, and a shape that reappears after two months is worth finding — but
+out of the promotion count, per the archiving rule above. Newest first.
+
+*(empty as of 2026-08-02: the whole active log is 8 days old, so nothing is due yet.)*

@@ -25,8 +25,10 @@ every site, not to decide.
 from __future__ import annotations
 
 import ast
+import math as _math
 import re
 import sys
+from datetime import date as _date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -39,6 +41,9 @@ BOT = Path(_os.getenv("SWEEP_BOT") or REPO / "telegram-companion-bot" / "bot.py"
 ENV = Path(_os.getenv("SWEEP_ENV") or REPO / "telegram-companion-bot" / ".env.example")
 CONSTRAINTS = Path(_os.getenv("SWEEP_CONSTRAINTS") or REPO / ".claude" / "memory" / "constraints.md")
 TESTS = Path(_os.getenv("SWEEP_TESTS") or REPO / "telegram-companion-bot" / "tests" / "test_pure.py")
+# Overridable for the same reason as the paths above: the archive rule is time-dependent,
+# and a rule that cannot be run against a chosen date cannot be proved to fire at all.
+_TODAY = _os.getenv("SWEEP_TODAY") or _date.today().isoformat()
 
 # Sites reviewed and justified. Keep the reason — an allowlist without one rots into
 # "this was noisy once".
@@ -243,16 +248,43 @@ que ran run than that the their them then there these they this to two use used 
 was were what when which while who with would you your it's don't wasn't""".split())
 
 
+ARCHIVE_HEADING = "## Minor — archived"
+ARCHIVE_AFTER_DAYS = 30
+PAIR_LIMIT = 5      # a ranking nobody reads is just a list; show the strongest few
+PAIR_MAX_DF = 2     # a token in exactly 2 entries IS those entries' shared vocabulary
+PAIR_MIN_RARE = 2   # one rare word in common is a coincidence; two is a candidate
+
+
 def _minor_entries(text: str) -> list[tuple[str, str]]:
-    """(date, body) for each `- YYYY-MM-DD — …` bullet under the Minor heading."""
+    """(date, body) for each `- YYYY-MM-DD — …` bullet in the ACTIVE Minor section.
+
+    Archived entries are excluded deliberately: a Minor entry earns its place by being
+    available to pair with a FUTURE one, and after ARCHIVE_AFTER_DAYS nothing has. Its
+    remaining value is archaeological, which the archive preserves — so counting it
+    against the promotion threshold only guarantees the threshold fires forever."""
     tail = text.split("## Minor", 1)
     if len(tail) < 2:
         return []
+    # Line-anchored: the archiving RULE in the header names this heading mid-sentence,
+    # and a plain .split() truncated the active section there — the scanner then read
+    # zero entries and reported a confident all-clear. C14, in the parser this time.
+    active = re.split(rf'^{re.escape(ARCHIVE_HEADING)}', tail[1], maxsplit=1, flags=re.M)[0]
     out = []
     for m in re.finditer(r'^- (\d{4}-\d{2}-\d{2}) — (.+?)(?=^- \d{4}-\d{2}-\d{2} —|\Z)',
-                         tail[1], re.M | re.S):
+                         active, re.M | re.S):
         out.append((m.group(1), " ".join(m.group(2).split())))
     return out
+
+
+def _last_promotion(text: str) -> str:
+    """The date of the last promotion pass, from the Minor header. The backlog check
+    counts what has arrived SINCE it — that is what "is another pass worth running"
+    actually asks. Counting the total instead fires forever once the log is healthy:
+    on 2026-08-02 a pass promoted six entries into C17/C18 and left 19 with no shared
+    causes, and a total-based check would have demanded a seventh pass that could only
+    invent clusters."""
+    m = re.search(r'\*\*Last promotion pass:\s*(\d{4}-\d{2}-\d{2})', text)
+    return m.group(1) if m else ""
 
 
 def constraints_drift() -> list[str]:
@@ -283,22 +315,68 @@ def constraints_drift() -> list[str]:
                        f"'**Graduated' line — it owes a hook/eval/scanner, not more prose")
 
     minors = _minor_entries(text)
-    if len(minors) > 8:
-        out.append(f"Minor log holds {len(minors)} entries (>8) — run a promotion pass; "
-                   f"pairs sharing a cause become a numbered constraint")
+    last = _last_promotion(text)
+    pass_due = False  # defined before the branch: a missing header line must not NameError
+    if not last:
+        out.append("the Minor header has no '**Last promotion pass: YYYY-MM-DD**' line — "
+                   "the backlog check counts entries added since it and cannot run without it")
+    else:
+        since = [d for d, _ in minors if d > last]
+        pass_due = len(since) > 8
+        if pass_due:
+            out.append(f"{len(since)} Minor entries added since the last promotion pass "
+                       f"({last}) — run one; pairs sharing a cause become a numbered "
+                       f"constraint")
+        stale = [d for d, _ in minors
+                 if (_date.fromisoformat(_TODAY) - _date.fromisoformat(d)).days
+                 > ARCHIVE_AFTER_DAYS]
+        if stale:
+            out.append(f"{len(stale)} active Minor entries are older than "
+                       f"{ARCHIVE_AFTER_DAYS} days (oldest {min(stale)}) — move them under "
+                       f"'{ARCHIVE_HEADING}'; nothing has paired with them, so they are "
+                       f"archaeology now, not candidates")
 
+    # Pairs are the INPUT to a promotion pass, so they are listed only when one is due.
+    # Otherwise they restate, every run, the candidates the last pass already looked at
+    # and rejected — which is how the previous version stayed permanently noisy even
+    # right after a clean pass.
+    if not pass_due:
+        return out
+
+    # Ranked by how DISTINCTIVE the shared vocabulary is. Raw overlap made this unusable:
+    # 19 entries produced 62 pairs, more pairs than entries, every one needing human
+    # judgement — so nobody read any.
     toks = []
     for date, body in minors:
         words = {w for w in re.findall(r'[a-z_][a-z0-9_.\-]{3,}', body.lower())
                  if w not in _STOP}
         toks.append((date, body, words))
+    df: dict = {}
+    for _, _, words in toks:
+        for w in words:
+            df[w] = df.get(w, 0) + 1
+    n = max(len(toks), 1)
+    # Score on the RARE shared tokens only. Summing over all of them rewarded length:
+    # the top pair under that scoring shared 'blocks', 'missing', 'where' — three words
+    # that mean nothing together. Restricting to df<=2 took 96 pairs down to 14 and put
+    # the two genuinely-related marcus entries (preset-core.txt, preset-explicit.txt) at
+    # the top, which is the outcome the heuristic was always reaching for.
+    ranked = []
     for i in range(len(toks)):
         for j in range(i + 1, len(toks)):
-            shared = toks[i][2] & toks[j][2]
-            if len(shared) >= 3:
-                out.append(f"Minor {toks[i][0]} + {toks[j][0]} share "
-                           f"{sorted(shared)[:4]} — candidate shared cause, promote if real: "
-                           f"'{toks[i][1][:45]}…' / '{toks[j][1][:45]}…'")
+            rare = {w for w in toks[i][2] & toks[j][2] if df[w] <= PAIR_MAX_DF}
+            if len(rare) < PAIR_MIN_RARE:
+                continue
+            score = sum(_math.log(n / df[w]) for w in rare)
+            ranked.append((score, i, j, sorted(rare, key=lambda w: (df[w], w))[:3]))
+    ranked.sort(key=lambda r: (-r[0], r[1], r[2]))
+    for score, i, j, rarest in ranked[:PAIR_LIMIT]:
+        out.append(f"Minor {toks[i][0]} + {toks[j][0]} (score {score:.1f}) share {rarest} "
+                   f"— candidate shared cause, promote if real: "
+                   f"'{toks[i][1][:45]}…' / '{toks[j][1][:45]}…'")
+    if len(ranked) > PAIR_LIMIT:
+        out.append(f"({len(ranked) - PAIR_LIMIT} weaker pairs above the score floor not "
+                   f"shown — raise PAIR_LIMIT in sweep.py to see them)")
     return out
 
 
