@@ -60,6 +60,52 @@ Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.
 Every completion must include the verification command actually run.
 
+## Vocabulary — use the repo's words, invent none
+
+Invented terms read as precision and carry none. A session coins a label, uses it as
+though it were shared, and the owner (or the next session) has to reverse-engineer what
+it meant. Four rules, each checkable from the transcript:
+
+1. **If a thing has a name in the code, use that name verbatim.** Env var, function,
+   file, command, systemd unit, `/audit` field. `GROUP_CHAIN_DECAY`, not "the dampening
+   factor"; `_handle_group_message`, not "the group entry point". A reader can grep an
+   identifier; nobody can grep a phrase you made up.
+2. **No name is a finding, not a licence to invent one.** Something load-bearing with no
+   identifier is a real gap — say so plainly ("the path from the claim to the gap check
+   has no name"), then either describe it in ordinary words every time it comes up, or
+   give it a name *in the code* in the same change. A term that lives only in prose is
+   not a name; it is private shorthand.
+3. **Plain words over coined ones** — in reports, commit messages, changelog rows, and
+   docs alike. One meaning per word, one idea per sentence, verbs instead of
+   nominalizations ("the gate blocks the turn", not "turn-blocking enforcement").
+   Metaphor may illustrate a mechanism, never replace it: if removing the metaphor
+   empties the sentence, the sentence was already empty. (These are the operative habits
+   of ASD-STE100 Simplified Technical English — you need the habits, not the standard.)
+4. **Never let a subagent's shorthand escape into the report or the diff.** Agents coin
+   terms freely and their reports compound each other's. Translate what an agent returns
+   into repo terms and code identifiers before relaying or acting on it. An agent's
+   coinage is not a finding.
+
+Naming is not banned — *silent* naming is. If a term genuinely earns existence, say so
+once and out loud ("calling this X for the rest of this report") and add it to the table
+below in the same change.
+
+**The sanctioned shorthand.** These are the repo terms with no single identifier to
+grep, and the only ones that need no introduction. Everything else comes from the code,
+or gets said in plain words.
+
+| Term | Means | Owned by |
+|---|---|---|
+| the fleet | all seven bot instances together | this file, Bot instances |
+| instance | one bot — a directory, `.env`, and card, sharing one `bot.py` | this file, Bot instances |
+| the voiceprint | `preset.txt`, the shared texting style feeding every bot | `edit-cards-and-presets` |
+| preset layer | the per-instance preset text layered onto the voiceprint | `edit-cards-and-presets` |
+| the delivery gate | the hook that blocks a turn shipping `bot.py` without version + changelog + compile evidence | `.claude/hooks/delivery-gate.sh` |
+| break-test | proving a check goes RED before trusting its GREEN | `add-regression-eval` |
+| the class | every other place the bug shape you just fixed occurs | `fix-the-class` |
+| kill switch | the env var that disables a default-on feature without a redeploy | `bot-code-invariants` #16 |
+| Routine | a scheduled session that fires with nobody watching | `.claude/operating/routines.md` |
+
 ## Where things live
 
 **`.claude/skills/skill-router/SKILL.md` is the routing table — read it, don't guess.**
