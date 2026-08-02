@@ -437,6 +437,13 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-02 — Used the hostname from the owner's shell prompt (`root@<host>#`) as the SSH
+  target in an scp command handed to another machine. A prompt hostname is what the box calls
+  itself locally; it is not a routable address from anywhere else, and the transfer would have
+  failed to resolve. The owner caught it and supplied the IP. → an SSH/scp target is a network
+  fact, not a display string: take it from something that routes (known_hosts, an ssh config
+  Host entry, an address the owner gave), never from a shell prompt, `hostname`, or a window
+  title. C8 family — ask what the reading actually measures before building on it.
 - 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
   flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
   and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the
