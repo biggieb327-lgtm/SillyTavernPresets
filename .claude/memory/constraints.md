@@ -219,9 +219,9 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 3** (2026-07-26 ×2, 2026-07-27) — *promoted by check 6 of the weekly hygiene
-Routine, from three Minor entries sharing one cause.*
-Three conclusions were drawn from readings that did not mean what they appeared to:
+**seen: 4** (2026-07-26 ×2, 2026-07-27, 2026-08-03) — *promoted by check 6 of the weekly
+hygiene Routine, from three Minor entries sharing one cause.*
+Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
   changed since, and a test recommendation was built on it — **stale**
 - `grep '^MODEL='` returned nothing across six instances, read as "no model set"; the
@@ -230,12 +230,22 @@ Three conclusions were drawn from readings that did not mean what they appeared 
 - `/errors` output full of `Conflict` tracebacks was read as a live fight; `errors.log`
   is historical, persists across restarts, and travels inside migration tars — **wrong
   currency**
-Two of these sent a live diagnosis down the wrong path for several rounds.
+- **2026-08-03** — an A/B pack for the selfie face lock was built from contiguous seeds
+  0-3 and handed to the owner to generate. All four drew close or partial-face framings;
+  the reported failure was a *wide* shot with the face small in frame, and no seed drew a
+  wide framing at all. Both arms kept her glasses in all eight images, so the bug never
+  reproduced — **wrong sample**: the test could not fail for the reason the bug occurs.
+  Caught only when the returned images were compared against the prompts that made them.
+Two of the first three sent a live diagnosis down the wrong path for several rounds; the
+fourth would have turned "the lock wins 3 of 4" into a claim about a failure the run
+never contained.
 **Constraint:** before concluding from any output, state what it actually covers — how
 current is it, what scope does it span, and what would absence of a result mean? A grep
 that finds nothing is only evidence if the pattern was right. A log tail proves what was
 written, never what is happening now. A reading from earlier in the session is a
-historical claim, not a live one.
+historical claim, not a live one. When the reading is a *sample* — seeds, fixtures,
+test inputs — check that the sample can exhibit the failure before running it; an even
+sample is the wrong sample when you are hunting one draw.
 **Graduated 2026-07-27 — prose, deliberately.** No hook, scanner, or eval can see
 "trusted a reading that did not mean what it appeared to": there is no code shape and no
 tool call to intercept. Extended

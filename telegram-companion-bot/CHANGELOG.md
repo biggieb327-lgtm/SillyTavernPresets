@@ -84,10 +84,29 @@ appended `_SELFIE_*_RULE` constants escaped it — and this release adds two mor
 It now scans their values alongside the function source. Break-tested by putting "freckles"
 into `_SELFIE_PRESERVE_RULE`: RED.
 
-**Not proven:** that this fixes what the owner saw. The mechanisms are real and the before/
-after prompts are readable, but no image has been generated from either — this container has
-no `GEMINI_API_KEY`. Same caveat v2026-08-01.9 carried, and the preview tool exists so the
-next person does not have to guess.
+**Not proven when shipped:** the mechanisms are real and the before/after prompts are
+readable, but no image had been generated from either — this container has no
+`GEMINI_API_KEY`. Same caveat v2026-08-01.9 carried, and the preview tool exists so the next
+person does not have to guess.
+
+**A/B result, 2026-08-03 (owner-run, 4 seeds × off/on, Gemini + Emily's reference photo).**
+The face lock is closer to the reference in 3 pairs of 4 and worse in 1 — a real signal, not
+a settled one. Where it wins it wins in the predicted direction: fuller cheeks, a softer jaw,
+and freckles at the reference's density and distribution instead of a smoother, narrower,
+more conventionally attractive face. The loss (seed 2, `a mirror selfie` + `shot from just
+slightly too close up`) produced a longer, more angular face with the freckles nearly gone,
+so no structural story separates it from the wins — that pair drew a soft framing, and so did
+a pair the lock won.
+
+**What the A/B did NOT test, and this is the important part.** Seeds 0–3 drew
+`a bathroom mirror selfie`, `a selfie with her face half-cut-off the frame`, `a mirror
+selfie` and `a selfie with her face half-cut-off the frame` — every one a close or
+partial-face shot. The reported failure was a **wide** shot with the room behind her and the
+face small in frame, and none of the four seeds drew a wide framing at all. Both arms kept
+her glasses in all 8 images, so **the original bug did not reproduce in either arm** — this
+test measured the lock's effect on draws that were not failing, not its effect on the draw
+that was. Contiguous seeds sample the pools evenly, which is the wrong sample when hunting
+one draw; `--seeds 4,16,22,26,44` covers the five wide framings, one seed each.
 
 **Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
 muted greens and greys — oversized sweaters, soft and worn-in"*, and the prompt separately

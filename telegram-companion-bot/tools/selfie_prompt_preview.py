@@ -64,6 +64,11 @@ def main() -> None:
     ap.add_argument("instance", help="seed directory name, e.g. emily")
     ap.add_argument("-n", type=int, default=5, help="how many prompts to render (default 5)")
     ap.add_argument("--seed", type=int, default=0, help="first RNG seed (default 0)")
+    # Contiguous seeds sample the pools evenly, which is the wrong sample when you are
+    # hunting one draw. The 2026-08-03 A/B ran seeds 0-3 and drew no wide framing at all,
+    # so it never tested the shape the reported failure had.
+    ap.add_argument("--seeds", default="",
+                    help="comma-separated explicit seeds, e.g. 4,16,22 (overrides --seed/-n)")
     ap.add_argument("--hint", default="", help="pin the scene, as a [selfie: ...] tag would")
     ap.add_argument("--weather", default="55°F, overcast, wind 6mph",
                     help="weather reading to simulate; empty string for none")
@@ -95,13 +100,15 @@ def main() -> None:
               f"OUTDOOR_LAYER={bot.OUTDOOR_LAYER!r}, wardrobe.json\n")
 
         modes = [False, True] if args.diff else [bot.SELFIE_FACE_LOCK]
-        for i in range(args.n):
+        seeds = ([int(s) for s in args.seeds.split(",") if s.strip()] if args.seeds
+                 else [args.seed + i for i in range(args.n)])
+        for seed in seeds:
             for lock in modes:
                 bot.SELFIE_FACE_LOCK = lock
-                random.seed(args.seed + i)
+                random.seed(seed)
                 prompt = bot.build_selfie_prompt(args.hint, None)
-                label = f"seed {args.seed + i}" + (f"  FACE_LOCK={'on' if lock else 'off'}"
-                                                   if args.diff else "")
+                label = f"seed {seed}" + (f"  FACE_LOCK={'on' if lock else 'off'}"
+                                          if args.diff else "")
                 print(f"--- {label}  ({len(prompt)} chars) ---")
                 print(prompt)
                 print()
