@@ -34,7 +34,7 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 6** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1)
+**seen: 7** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1)
 Phone tooling (`update-all.sh`, `tmux kill-session`, `pkg`) was run on the VPS, and
 VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looked like
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
@@ -66,6 +66,17 @@ resolution is the `# host: both` pragma the hook already offers, plus splitting 
 local commands out. **Cross-host transfer commands (`scp`, `rsync`, `ssh <host> <cmd>`) are
 inherently two-host and must be labelled `# host: both` up front** — not discovered at the
 Stop hook. Both occurrences this session were labelling, never a wrong-host command.
+
+**Occurrence 7 (2026-08-03) — two userlands, one machine.** Termux install instructions ran
+`pkg install proot-distro` and then, after `proot-distro login debian`, `apt install` and a
+`curl | bash`. One physical device, but two environments with different package managers, and
+the block's only marker for the switch was a `# now inside Debian` comment. host-guard read
+`pkg` + `apt` as a phone/VPS mix and blocked — the right call for the wrong reason, and the
+block was genuinely confusing regardless. **A host label answers "which machine"; it does not
+answer "which userland on that machine."** Nested environments — proot-distro, a container, a
+VM, a venv shell — need their own block and their own heading, not a comment inside someone
+else's. Off-fleet advice is still handover: the guard does not care that the topic was not
+the bots, and neither should the labelling.
 
 ### C16 — A handed-over command block must work on someone else's machine
 **seen: 2** (2026-08-02 ×2) — *promoted straight to a mechanism the day both occurred;
@@ -110,6 +121,19 @@ unchecked assertion (C8). The signature is perfectly mechanical: a stdin-reading
 with further command lines after it in the same block. handoff-guard now checks it — six-case
 matrix, RED on the real block, green on a lone `read`, a trailing `read`, comment-only
 `read`, and the `# handoff-ok: interactive` hatch.
+
+**Occurrence 5 (2026-08-03) — a command that starts a nested interactive shell, mid-block.**
+Termux instructions put `proot-distro login debian` in the middle of a block and continued
+with the commands meant to run inside it. Pasted whole, the trailing lines land in whatever
+stdin the new shell inherits — the same hazard as occurrence 4's `read`, from a different
+cause: there the command *consumed* the following lines, here it *changes who executes* them.
+The family is one line down: **any command that hands the terminal to a nested shell
+(`proot-distro login`, `su`, `ssh <host>` with no command, `docker exec -it`, `chroot`) must
+end its block.** Whether handoff-guard already flags this shape was not checked before
+writing this entry — the signature looks as mechanical as `read`'s (a shell-switching command
+with further command lines after it), so it is a candidate for the same six-case treatment,
+but that is a hypothesis until someone runs it. Not asserting the guard is blind to it; that
+exact unchecked assertion is what occurrence 4 had to correct.
 
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
