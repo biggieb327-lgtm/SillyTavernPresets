@@ -34,7 +34,10 @@ which is why this file no longer restates it. Project rules here override it.
 
 For complex work (multi-step, behavior-changing, or fleet-touching), read
 `.claude/operating/fable-to-opus.md` before acting — it carries owner-settled
-decisions and session-earned traps. For simple work, do not load it.
+decisions and session-earned traps. For simple work, do not load it. Its dated
+numbers (BOT_VERSION, test/eval counts) are a handoff-time snapshot, not live
+state — check `bot.py` and `CHANGELOG.md` for current figures; the decisions
+and traps still hold even as the numbers age.
 
 Detailed procedure lives in skills, not here. `.claude/skills/skill-router/SKILL.md`
 is the index — consult it and load on demand.
@@ -182,6 +185,10 @@ ends **2026-08-09**; after that date this sentence is stale — confirm before r
 - Repo `biggieb327-lgtm/SillyTavernPresets` — **private since 2026-07-28**. Anonymous
   `raw.githubusercontent.com` URLs 404, so any doc or script still telling you to `curl`
   one is stale. Deploys read from the checkout at `/opt/telegram-bots/.repo`.
+- **Trained knowledge of these APIs drifts; the pins above don't.** Before relying on
+  undocumented `python-telegram-bot` or NanoGPT behavior, check current docs or a web
+  fetch rather than memory — this file only records traps already hit (the
+  `asyncio.get_event_loop()` line above); the next one won't be here yet.
 
 ## Deployment
 
@@ -247,6 +254,14 @@ each with a threshold and a test, so they are not restated here. What is project
    already loaded, or the budget-governor is live. This is the **durable** statement of
    the grant, paid once per session; `.claude/hooks/agent-authorization.py` re-asserts it
    only on the turns where a server-side instruction would otherwise override it.
+7. **Never edit a check, test, or eval to make it pass — fix what it's checking, or
+   state the exception.** The one legitimate exception is deliberately widening a
+   check's scope, in the same commit, with the rationale written down
+   (`add-regression-eval`, `group-chat-changes`). Silently loosening an assertion to
+   turn red green is how the `/features` `ValueError` (2026-08-02) shipped past two
+   rounds of tests that asserted on source text instead of calling the handler — the
+   delivery gate and evals are the repo's memory of past pain; satisfy them, don't
+   argue with them.
 
 ## Git workflow
 

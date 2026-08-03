@@ -5,6 +5,10 @@ the operating manual. This file is what that session knew that the repo's other
 docs don't say. Read order for your first session here: `CLAUDE.md` (Operating
 rule) → `.claude/OPERATING_MANUAL.md` → the skill the router points you at.
 
+**Numbers below (BOT_VERSION, test/eval counts) are a snapshot at 2026-07-11
+handoff time, not live state** — check `bot.py` and `CHANGELOG.md` for current
+figures. The decisions and traps below still hold; only the counts have aged.
+
 ## Decisions made with the owner's explicit authority (2026-07-11)
 
 These were asked and answered — don't re-ask, don't re-litigate:
