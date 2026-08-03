@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.2"
+BOT_VERSION = "2026-08-03.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6021,7 +6021,17 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
             f"Expression: {expression}.",
         ]
     if chat_id is not None:
-        bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
+        # "let it read in her face" is the ONLY instruction in the whole prompt that tells
+        # the model to modify her face, and it lands ~1500 characters before the rules that
+        # say copy it exactly. Mood still steers the shot — through the expression already
+        # drawn above and through posture, which is where a mood shows in a photograph
+        # anyway. Text-only instances keep the old wording: with no reference photo there is
+        # no face being preserved for it to contradict (v2026-08-03.3).
+        if SELFIE_FACE_LOCK and _has_base_image():
+            bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it colour that "
+                        f"expression and how she's holding herself.")
+        else:
+            bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
         pool = _weather_scene_pool(SELFIE_ACTIVITIES, SELFIE_COLD_ACTIVITIES)

@@ -5548,6 +5548,7 @@ class TestSelfieFaceLock:
         self._guard = bot.SELFIE_IDENTITY_GUARD
         self._has_base = bot._has_base_image
         self._wardrobe = dict(bot.wardrobe)
+        self._mood_vibe = bot._mood_vibe
         bot.SELFIE_FACE_LOCK = True
         bot.SELFIE_IDENTITY_GUARD = True
         bot._has_base_image = lambda: True
@@ -5558,6 +5559,8 @@ class TestSelfieFaceLock:
     def teardown_method(self):
         bot.SELFIE_FACE_LOCK = self._lock
         bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot._mood_vibe = self._mood_vibe
+        bot._recent_selfie_hints.pop(901, None)
         bot._has_base_image = self._has_base
         bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
         bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
@@ -5612,6 +5615,32 @@ class TestSelfieFaceLock:
             assert "the photo outranks" not in p
             assert f"new pose/setting. She's {bot.NAME}" in p
             assert "New shot:" in p
+
+    def test_mood_line_stops_instructing_a_face_edit(self):
+        """v2026-08-03.3: `let it read in her face` was the only instruction in the prompt
+        telling the model to modify her face, ~1500 chars ahead of the rules saying copy it.
+        Production always passes a chat_id, so it was in every live selfie -- and in none of
+        the 22 A/B images, because the preview tool passed chat_id=None."""
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" not in p
+            assert "how she's holding herself" in p
+
+    def test_mood_itself_is_not_lost(self):
+        """The mood still has to reach the image -- the fix is the verb, not the feature."""
+        bot._mood_vibe = lambda _cid: "wistful [vibe: nostalgic]"
+        for p in self._prompts(chat_id=901):
+            assert "Her mood right now: wistful [vibe: nostalgic]" in p
+
+    def test_text_only_instances_keep_the_old_mood_wording(self):
+        """With no reference photo there is no preserved face for it to contradict."""
+        bot._has_base_image = lambda: False
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" in p
+
+    def test_mood_kill_switch_restores_the_old_wording(self):
+        bot.SELFIE_FACE_LOCK = False
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" in p
 
     def test_eyewear_is_stated_both_ways_never_asserted(self):
         """The rule is shared by all seven. Asserting glasses would put them on characters

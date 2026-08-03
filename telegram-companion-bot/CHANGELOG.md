@@ -7,6 +7,44 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.3 — The prompt told the model to change her face
+
+**Root cause: `Her mood right now: {mood} — let it read in her face.` is the only
+instruction in the entire selfie prompt that tells the model to modify her face, and it sits
+~1500 characters ahead of every rule that says copy it exactly.** It is gated on
+`chat_id is not None`, which production always satisfies, so it has been in every live
+selfie — and in none of the 22 A/B images v2026-08-03.2 was judged on, because the preview
+tool passed `chat_id=None`. The owner noticed the gap from the other end: *"the selfies
+seemed better in the test than the actual ones."* The mood line and the scene-dedup block
+are the two things the test prompt was missing.
+
+This is the same shape as the rest of v2026-08-03.2 — a contradiction hands an edit model
+latitude — except this one is not implicit. `_SELFIE_PRESERVE_RULE` says copy her face out
+of the reference; the mood line says make her face show wistfulness. Both cannot hold.
+
+**Fix:** when a reference photo is attached, the mood reaches the image through the
+expression already drawn above it and through posture, which is where a mood shows in a
+photograph anyway:
+
+    Her mood right now: {mood} — let it colour that expression and how she's holding herself.
+
+The mood itself is untouched; the fix is the verb, not the feature, and a test pins that the
+value still reaches the prompt. **Text-only instances keep the old wording** — with no
+reference photo there is no preserved face for it to contradict. Reuses the
+`SELFIE_FACE_LOCK` kill switch rather than adding a second one: it is the same feature
+(stop the prompt inviting face edits), and `SELFIE_FACE_LOCK=0` now restores the whole
+v2026-08-03.1 prompt including this line.
+
+**Sequencing, stated plainly:** the reference photo is still the bigger lever. Emily's is a
+full-body beach shot with her face at ~8% of frame height (see v2026-08-03.2 above), and no
+prompt wording recovers identity from ~100px of face. This change is justified on internal
+consistency alone — an instruction to alter the face contradicts four appended rules to
+preserve it — but if the reference is swapped and this deploys together, neither will be
+attributable. Swap the photo first, watch a few selfies, then deploy.
+
+**Verification:** `.claude/tools/verify.sh` green. 4 new tests, all four break-tested RED one
+injection at a time.
+
 ## v2026-08-03.2 — Emily's selfie was a better-looking stranger with no glasses
 
 **Root cause: the prompt asked the model to keep her face without ever saying what a face
