@@ -7,6 +7,98 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.2 — Emily's selfie was a better-looking stranger with no glasses
+
+**Root cause: the prompt asked the model to keep her face without ever saying what a face
+is made of, and handed it a written description of her in the same breath as the photo.**
+Owner-reported with a before/after pair: the reference is a freckled woman in oversized
+round glasses; the selfie came back with different bone structure, no freckles and no
+glasses — recognisably a different, more conventionally attractive person with the right
+hair colour. The reference photo was attached and correct, so this is none of the earlier
+causes (v2026-08-01.10's missing photo, v2026-08-02.2's rejected mime type,
+v2026-08-02.5's weaker `flux-kontext` — Emily is on Gemini).
+
+Two shapes in the prompt, both of which survived v2026-08-01.9:
+
+**1. `SELFIE_APPEARANCE` sat INSIDE the identity sentence.** `bits[0]` ended
+`"...just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}"`, so one sentence gave
+the model a face to copy *and* a written spec — "auburn waves, hazel eyes, oversized round
+glasses" — that it can satisfy with a face it invents. Every one of these is a full
+re-render (pose, framing, setting and clothes all change), and on a re-render synthesising
+from the words is the cheaper path than copying from the pixels. The paragraph's later
+clauses go first, which is exactly where Emily's glasses are.
+
+This is **not** a reversal of v2026-08-01.9, which added `appearance.txt` files precisely
+so a face had a verbal anchor and not only a photo pointer. The words stay. What changed is
+their rank: they are now introduced as *"Who she is, as context only — the photo outranks
+every word of it, and her face is never drawn from this text"*, ahead of the scene block
+rather than fused into the identity claim.
+
+**2. "Keep her face identical" never said which parts of a face.** Nothing in the prompt
+contradicted a plausible, better-boned woman with the right hair. `_SELFIE_PRESERVE_RULE`
+now enumerates what gets copied — face shape and bone structure, eyes, nose, mouth, brows,
+skin tone and skin marks, hairline, hair colour and texture, apparent age — and names the
+failure directly: *"an ordinary face that matches the reference is right, and a
+better-looking one that does not is wrong."* Image models regress faces toward an
+attractive mean unless told not to.
+
+**Eyewear is stated both ways, never asserted** (*"if she is wearing glasses there she is
+wearing those same glasses here; if she is wearing none, add none"*). Asserting glasses in
+a rule shared by all seven instances is the character-bleed trap of v2026-08-01.8's courier
+jacket and .9's hardcoded freckles, one release later; a test pins it.
+
+**Fix:**
+- `_SELFIE_PRESERVE_RULE` and `_SELFIE_FACE_CLARITY_RULE`, appended next to
+  `_SELFIE_IDENTITY_TAIL` — nearest the output is where an edit instruction lands hardest
+  (v2026-08-01.9's finding). The tail keeps the last word; it is the shortest statement of
+  the same constraint.
+- `_SELFIE_CHANGE_SCOPE` ("Everything that follows changes the pose, the setting, her
+  clothes and the camera. None of it changes her.") before the scene block, so ~1000 characters of
+  pose/weather/camera read as an edit spec instead of a description of a photo to produce.
+- `"New shot:"` → `"Framing:"` on the edit branch. "New shot" is a generate cue in the one
+  place the model must not generate.
+- The clarity rule is deliberately compatible with every framing in the pools. "Her face is
+  large in frame" would contradict the half-in-frame and wider draws, and a prompt that
+  contradicts itself hands back the latitude this removes — a test pins that too.
+- All of it is gated on `_has_base_image()`. "Copy her face out of the reference photo"
+  with no photo attached is an instruction to copy nothing.
+
+Kill switch `SELFIE_FACE_LOCK=0` restores the v2026-08-03.1 prompt. Separate from
+`SELFIE_IDENTITY_GUARD` on purpose: that one also owns the de-stacking and the tail, both
+of which should survive turning this off. Prompt assembly only, no new LLM calls.
+
+**The cost, stated plainly:** the prompt grows 1785 → 2734 characters for Emily, +53%.
+More text is itself a dilution risk, and the honest position is that this trades a general
+dilution for a specific, named constraint. It is worth A/B-ing before it is believed.
+
+**New: `tools/selfie_prompt_preview.py`.** Every face-drift release so far has been argued
+from generated images and inference, because nothing could show the prompt itself.
+`python3 tools/selfie_prompt_preview.py emily --diff` renders what an instance would send,
+with the face lock off and on, ready to paste into Gemini with the reference photo. Repo-only
+— `vps-sync.sh` does not copy `tools/`. It reads the *committed* seed files, so where a live
+instance has diverged the live instance is authoritative (v2026-08-01.10).
+
+**One test widened, with the reason:** `test_shared_prompt_hardcodes_no_character_specific_feature`
+scanned `build_selfie_prompt`'s source only, so a character trait living in one of the
+appended `_SELFIE_*_RULE` constants escaped it — and this release adds two more of those.
+It now scans their values alongside the function source. Break-tested by putting "freckles"
+into `_SELFIE_PRESERVE_RULE`: RED.
+
+**Not proven:** that this fixes what the owner saw. The mechanisms are real and the before/
+after prompts are readable, but no image has been generated from either — this container has
+no `GEMINI_API_KEY`. Same caveat v2026-08-01.9 carried, and the preview tool exists so the
+next person does not have to guess.
+
+**Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
+muted greens and greys — oversized sweaters, soft and worn-in"*, and the prompt separately
+appends `"Wearing {outfit}."` — two clothing instructions in one prompt, which is the
+contradiction-equals-latitude problem in the content layer. Appearance files should describe
+a body and a face, not a wardrobe; the wardrobe rotation owns clothes. Left alone here
+because the repo seed and the live instance can differ and the live one is authoritative.
+
+**Verification:** see the report — `.claude/tools/verify.sh`, 8 new tests, five assertions
+break-tested RED one injection at a time.
+
 ## v2026-08-03.1 — Priya sent her whole deliberation as the reply, in four messages
 
 **Root cause: a thinking model can emit its ENTIRE chain-of-thought as ordinary

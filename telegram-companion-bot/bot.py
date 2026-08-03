@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.1"
+BOT_VERSION = "2026-08-03.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5853,6 +5853,48 @@ SELFIE_SOFT_CAMERA = {
 # Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
 SELFIE_IDENTITY_GUARD = os.getenv("SELFIE_IDENTITY_GUARD", "1").lower() not in ("0", "false", "no", "off")
 
+# --- Face lock (v2026-08-03.2) ---------------------------------------------------------
+# Two prompt shapes let an edit model rebuild the face instead of copying it, and both
+# survived v2026-08-01.9:
+#
+# 1. `SELFIE_APPEARANCE` sat INSIDE the identity sentence ("...just in a new pose/setting.
+#    She's <name>, <paragraph>"), so one sentence gave the model a photo to copy AND a
+#    written spec it could satisfy with a face it invents. On a re-render — which every
+#    one of these is, since pose, setting and framing all change — inventing is the
+#    cheaper path, and the paragraph's buried details are the first thing dropped.
+# 2. "Keep her face identical" never said WHICH parts of a face, so nothing in the prompt
+#    contradicted a plausible, better-looking, differently-boned woman with the right
+#    hair colour.
+#
+# The rules below are generic on purpose (categories, never one character's trait — the
+# character-bleed family of v2026-08-01.8 and .9), and they are conditional on the
+# reference photo rather than asserting what it shows.
+_SELFIE_PRESERVE_RULE = (
+    "Copy her face out of the reference photo instead of drawing a new one: the same face "
+    "shape and bone structure, the same eyes, nose, mouth and brows, the same skin tone and "
+    "the same marks on her skin, the same hairline, hair colour and hair texture, the same "
+    "apparent age. Her eyewear matches the reference exactly — if she is wearing glasses "
+    "there she is wearing those same glasses here; if she is wearing none, add none. Do not "
+    "beautify, slim, smooth or restyle her: an ordinary face that matches the reference is "
+    "right, and a better-looking one that does not is wrong."
+)
+# Compatible with every framing in the pools on purpose. "Her face is large in frame" would
+# contradict the half-in-frame and wider draws, and a prompt that contradicts itself hands
+# back exactly the latitude this is trying to remove.
+_SELFIE_FACE_CLARITY_RULE = (
+    "However wide, candid or off-centre the framing is, whatever part of her face is in "
+    "frame is sharp and clearly hers — not blurred away, not lost in shadow, not smoothed "
+    "flat."
+)
+# Said once, before the scene instructions, so the block that follows reads as an edit
+# spec rather than as a description of a photo to produce from scratch.
+_SELFIE_CHANGE_SCOPE = (
+    "Everything that follows changes the pose, the setting, her clothes and the camera. "
+    "None of it changes her."
+)
+# Kill switch: unset = face lock active, 0 = the v2026-08-03.1 prompt.
+SELFIE_FACE_LOCK = os.getenv("SELFIE_FACE_LOCK", "1").lower() not in ("0", "false", "no", "off")
+
 
 def _weather_outdoor_ok() -> bool:
     """Return False if current weather makes outdoor selfie shots implausible."""
@@ -5951,14 +5993,26 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     framing = random.choice(SELFIE_FRAMINGS)
     expression = random.choice(SELFIE_EXPRESSIONS)
     if _has_base_image():
-        bits = [
+        anchor = (
             "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
             "specific face, bone structure, hair color/texture, and distinguishing features "
             "identical to the reference image; this must be recognizably the same individual, "
-            f"just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
-            f"New shot: {framing}.",
-            f"Expression: {expression}.",
-        ]
+            "just in a new pose/setting."
+        )
+        if SELFIE_FACE_LOCK:
+            bits = [
+                anchor,
+                # Demoted out of the sentence above and explicitly ranked below the photo:
+                # the words are still there as an anchor (v2026-08-01.9 added them for a
+                # reason) but they no longer read as a spec to draw a person from.
+                f"Who she is, as context only — the photo outranks every word of it, and her "
+                f"face is never drawn from this text: {NAME}, {SELFIE_APPEARANCE}",
+                _SELFIE_CHANGE_SCOPE,
+                f"Framing: {framing}.",
+            ]
+        else:
+            bits = [f"{anchor} She's {NAME}, {SELFIE_APPEARANCE}", f"New shot: {framing}."]
+        bits.append(f"Expression: {expression}.")
     else:
         bits = [
             f"Generate a realistic phone selfie of {NAME}, {SELFIE_APPEARANCE} Keep her face, "
@@ -6031,6 +6085,11 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
             )
     # Genuinely last: the scene-dedup list names other setups, which is the one appended
     # block that could pull the image away from the reference if it had the final word.
+    # The face rules sit here rather than up with the anatomy/realism rules for the same
+    # reason the tail does — nearest the output is where an edit instruction lands hardest.
+    if SELFIE_FACE_LOCK and _has_base_image():
+        bits.append(_SELFIE_PRESERVE_RULE)
+        bits.append(_SELFIE_FACE_CLARITY_RULE)
     if SELFIE_IDENTITY_GUARD and _has_base_image():
         bits.append(_SELFIE_IDENTITY_TAIL)
     return " ".join(bits)

@@ -5453,9 +5453,11 @@ class TestSelfieIdentityGuard:
     def setup_method(self):
         self._weather = dict(bot._weather_cache)
         self._guard = bot.SELFIE_IDENTITY_GUARD
+        self._lock = bot.SELFIE_FACE_LOCK
         self._has_base = bot._has_base_image
         self._wardrobe = dict(bot.wardrobe)
         bot.SELFIE_IDENTITY_GUARD = True
+        bot.SELFIE_FACE_LOCK = True
         bot._has_base_image = lambda: True
         bot._weather_cache["text"] = "55°F, overcast, wind 6mph"
         bot._weather_cache["ts"] = 9e9
@@ -5463,6 +5465,7 @@ class TestSelfieIdentityGuard:
 
     def teardown_method(self):
         bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot.SELFIE_FACE_LOCK = self._lock
         bot._has_base_image = self._has_base
         bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
         bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
@@ -5515,11 +5518,114 @@ class TestSelfieIdentityGuard:
 
     def test_shared_prompt_hardcodes_no_character_specific_feature(self):
         """'freckles' was baked into the shared identity line -- Nora's trait, applied to
-        all seven. Same character-bleed family as the courier jacket (v2026-08-01.8)."""
+        all seven. Same character-bleed family as the courier jacket (v2026-08-01.8).
+
+        WIDENED v2026-08-03.2: this read build_selfie_prompt's source and nothing else, so
+        a trait living in one of the appended _SELFIE_*_RULE constants escaped it entirely
+        -- and .2 adds two more such constants. Scans their VALUES (not their source), so
+        the surrounding comments, which have to name the traits to explain them, are out of
+        scope for the same reason as C14."""
         import inspect
-        src = inspect.getsource(bot.build_selfie_prompt)
+        shared = [inspect.getsource(bot.build_selfie_prompt)] + [
+            bot._SELFIE_ANATOMY_RULE, bot._SELFIE_REALISM_RULE, bot._SELFIE_IDENTITY_TAIL,
+            bot._SELFIE_PRESERVE_RULE, bot._SELFIE_FACE_CLARITY_RULE, bot._SELFIE_CHANGE_SCOPE,
+        ]
         for trait in ("freckles", "septum", "tattoo", "blonde", "half-shaved"):
-            assert trait not in src.lower(), trait
+            for text in shared:
+                assert trait not in text.lower(), trait
+
+
+class TestSelfieFaceLock:
+    """v2026-08-03.2: Emily's selfies came back as a different, better-looking woman with
+    her glasses gone, with the reference photo correctly attached. Two prompt shapes let an
+    edit model rebuild the face rather than copy it -- the appearance paragraph sat inside
+    the identity sentence as a spec it could satisfy with an invented face, and 'keep her
+    face identical' never said which parts of a face."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._lock = bot.SELFIE_FACE_LOCK
+        self._guard = bot.SELFIE_IDENTITY_GUARD
+        self._has_base = bot._has_base_image
+        self._wardrobe = dict(bot.wardrobe)
+        bot.SELFIE_FACE_LOCK = True
+        bot.SELFIE_IDENTITY_GUARD = True
+        bot._has_base_image = lambda: True
+        bot._weather_cache["text"] = "55°F, overcast, wind 6mph"
+        bot._weather_cache["ts"] = 9e9
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.SELFIE_FACE_LOCK = self._lock
+        bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot._has_base_image = self._has_base
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _prompts(self, n=60, chat_id=None):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", chat_id))
+        return out
+
+    def test_appearance_text_is_ranked_below_the_photo(self):
+        """The regression that matters: appearance.txt back inside the identity sentence,
+        where it reads as a person to draw rather than context about one to copy."""
+        for p in self._prompts():
+            assert "the photo outranks every word of it" in p
+            assert f"new pose/setting. She's {bot.NAME}" not in p
+
+    def test_the_face_rules_are_appended_when_a_reference_is_attached(self):
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE in p
+            assert bot._SELFIE_FACE_CLARITY_RULE in p
+            assert bot._SELFIE_CHANGE_SCOPE in p
+
+    def test_identity_tail_still_has_the_last_word(self):
+        """The face rules are appended in the same region as the tail; the tail stays last
+        because it is the shortest, most direct statement of the constraint."""
+        bot._recent_selfie_hints[778] = ["on the fire escape", "at the counter"]
+        try:
+            for p in self._prompts(chat_id=778):
+                assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+                assert p.index(bot._SELFIE_PRESERVE_RULE) > p.index("avoid recreating")
+        finally:
+            bot._recent_selfie_hints.pop(778, None)
+
+    def test_nothing_is_added_without_a_reference_photo(self):
+        """'Copy her face out of the reference photo' with no photo attached is an
+        instruction to copy nothing -- the same reason the identity tail is gated."""
+        bot._has_base_image = lambda: False
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE not in p
+            assert bot._SELFIE_FACE_CLARITY_RULE not in p
+            assert bot._SELFIE_CHANGE_SCOPE not in p
+            assert "the photo outranks" not in p
+
+    def test_kill_switch_restores_the_previous_prompt(self):
+        bot.SELFIE_FACE_LOCK = False
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE not in p
+            assert bot._SELFIE_FACE_CLARITY_RULE not in p
+            assert "the photo outranks" not in p
+            assert f"new pose/setting. She's {bot.NAME}" in p
+            assert "New shot:" in p
+
+    def test_eyewear_is_stated_both_ways_never_asserted(self):
+        """The rule is shared by all seven. Asserting glasses would put them on characters
+        who do not wear any -- the character-bleed trap, one release after the last one."""
+        rule = bot._SELFIE_PRESERVE_RULE.lower()
+        assert "if she is wearing glasses" in rule
+        assert "if she is wearing none, add none" in rule
+
+    def test_clarity_rule_does_not_contradict_the_framing_pools(self):
+        """A face-size demand would fight the half-in-frame and wider draws, and a prompt
+        that contradicts itself hands back the latitude this is removing."""
+        low = bot._SELFIE_FACE_CLARITY_RULE.lower()
+        for demand in ("large in frame", "fills the frame", "close-up", "centred", "centered"):
+            assert demand not in low, demand
 
 
 class TestBaseImageResolution:
