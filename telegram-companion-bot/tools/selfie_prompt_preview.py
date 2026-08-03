@@ -27,6 +27,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SEED_FILES = ("appearance.txt", "atlas.txt", "setting.txt")
+# Any id works; it only has to be a key the stubbed state answers to.
+_PREVIEW_CHAT_ID = 1
 
 
 def _fake_instance(instance: str, card: Path) -> Path:
@@ -76,6 +78,13 @@ def main() -> None:
     # "Seattle" — wrong for all seven instances, and it lands in the pasted prompt.
     ap.add_argument("--location", default="",
                     help="override WEATHER_LOCATION, e.g. 'Olympia, WA' (default: the .env default)")
+    # Production ALWAYS passes a real chat_id, which adds two blocks this tool was silently
+    # dropping — the mood line ("let it read in her face", an instruction to change her face)
+    # and the scene-dedup list. A preview that omits them is not previewing production.
+    ap.add_argument("--mood", default="neutral",
+                    help="mood string for the 'let it read in her face' line; empty to omit it")
+    ap.add_argument("--recent", default="",
+                    help="semicolon-separated recent scenes for the dedup block, as production sends")
     ap.add_argument("--diff", action="store_true",
                     help="render each prompt with SELFIE_FACE_LOCK off, then on")
     args = ap.parse_args()
@@ -98,9 +107,19 @@ def main() -> None:
             bot._weather_cache["text"] = args.weather
             bot._weather_cache["ts"] = 9e9
 
+        # chat_id is what gates the mood line and the dedup block. Passing None renders a
+        # prompt no live instance ever sends; passing an id with the state stubbed renders
+        # the real one.
+        chat_id = None if not args.mood else _PREVIEW_CHAT_ID
+        if chat_id is not None:
+            bot._mood_vibe = lambda _cid: args.mood
+            recent = [s.strip() for s in args.recent.split(";") if s.strip()]
+            bot._recent_selfie_hints[chat_id] = recent
+
         print(f"# instance={args.instance}  card={card.name}  NAME={bot.NAME}")
         print(f"# appearance.txt: {'yes' if (REPO / args.instance / 'appearance.txt').exists() else 'NO'}")
         print(f"# weather={args.weather or '(none)'}  hint={args.hint or '(none)'}")
+        print(f"# mood={args.mood or '(omitted — chat_id=None, NOT what production sends)'}  recent={args.recent or '(none)'}")
         # Read from the fake .env, so they are defaults and not this instance's real values.
         print(f"# NOT previewed (live .env only): WEATHER_LOCATION={bot.WEATHER_LOCATION!r}, "
               f"OUTDOOR_LAYER={bot.OUTDOOR_LAYER!r}, wardrobe.json\n")
@@ -112,7 +131,7 @@ def main() -> None:
             for lock in modes:
                 bot.SELFIE_FACE_LOCK = lock
                 random.seed(seed)
-                prompt = bot.build_selfie_prompt(args.hint, None)
+                prompt = bot.build_selfie_prompt(args.hint, chat_id)
                 label = f"seed {seed}" + (f"  FACE_LOCK={'on' if lock else 'off'}"
                                           if args.diff else "")
                 print(f"--- {label}  ({len(prompt)} chars) ---")

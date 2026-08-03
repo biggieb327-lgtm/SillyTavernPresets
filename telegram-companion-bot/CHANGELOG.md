@@ -143,6 +143,78 @@ same contradiction-equals-latitude shape this release is about, in a different c
 `WEATHER_LOCATION`, so every previewed prompt said "Seattle", which is wrong for all seven
 instances and was landing in the pasted text.
 
+**Round 3 (owner-run, the reported scene via `--hint`, off/on, 2 seeds) — clean again, and
+the tool was the reason.** The hint reproduced the scene faithfully: cross-legged on the
+floor, polaroids spread around her, window behind. All four images kept her glasses,
+freckles and hair colour, and the locked arm on seed 44 is the closest match to the
+reference of the 22 images generated so far — hair up in the reference's own messy curly
+style. **The bug has now failed to reproduce 22 times out of 22.**
+
+**Root cause of the non-reproduction: `selfie_prompt_preview.py` was not previewing
+production.** It called `build_selfie_prompt(hint, None)`, and `chat_id is None` gates off
+two blocks that every live selfie carries:
+
+1. `Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.` — an explicit
+   instruction to make her face reflect something, sitting immediately after `Expression:`
+   and ~1500 characters before the identity tail. Nothing else in the prompt tells the model
+   to change her face.
+2. The scene-dedup list, which names other setups — the block v2026-08-01.9 already
+   identified as the one appended text that could pull the image away from the reference,
+   and deliberately put the identity tail after.
+
+Three rounds of A/B therefore compared two variants of a prompt **no instance has ever
+sent**, and the one instruction in the live prompt that targets her face was absent from all
+22 images. This is the third C8 recurrence in the same investigation and the worst of them:
+the first two picked the wrong sample, this one used the wrong prompt.
+
+`--mood` and `--recent` render the production shape; `--mood ""` restores the old
+`chat_id=None` behavior and the header now says so explicitly. The live prompt is 1905/2861
+characters, not 1721/2677.
+
+**Not yet tested:** whether the mood line is a drift lever. It is a plausible mechanism, not
+a demonstrated one — no image has been generated with it present. Round 4 is that A/B; do
+not treat it as diagnosed before it runs.
+
+### The reference photo is a full-body beach shot, and the "baseline" was never the reference
+
+Asked for `emily_base.png` itself, the owner sent a file that is **a standing full-body
+photo on a beach** — sea and sand behind her, half-up curly hair, round glasses, crop top
+and denim shorts. Her face occupies roughly **8% of the frame height**, on the order of a
+hundred pixels tall.
+
+That is very likely the whole story, and it makes every earlier diagnosis secondary:
+
+- **An edit model cannot copy a face it cannot see.** Given a reference with ~100px of face,
+  there is almost no identity information to carry into a close phone selfie, so the model
+  synthesises one. Glasses survive because they are large and high-contrast; bone structure,
+  freckle pattern and jawline do not. That matches every symptom in the original report
+  exactly, and it explains the intermittency the prompt-side theories never did.
+- **The transformation distance is enormous.** Every prompt asks for a close, indoor,
+  handheld phone selfie; the reference is a standing full-body outdoor shot in summer
+  clothes. Pose, distance, lens, lighting and wardrobe all change at once.
+- **The 22 A/B images were scored against the wrong image.** The grey-hoodie portrait the
+  owner has been sending as "the baseline" is itself a *generated selfie* — it carries the
+  same Gemini watermark as the outputs. So the comparisons measured drift from one
+  generation to another, not from the reference. Every "closer to baseline" verdict in the
+  three rounds above is weaker than it reads.
+
+**Fix is content, not code:** replace the reference with a close, front-facing portrait crop
+where the face fills much of the frame — `/setbase` sent as a **file**, not a photo, so
+Telegram does not recompress it (v2026-08-02.3). The grey-hoodie image is, ironically, a far
+better reference than the actual reference.
+
+**Not established, and it needs one command.** The uploaded copy hashes
+`026711a0…` against the VPS's `27ff3293…`, and arrives with JPEG magic bytes (`ff d8 ff e0`)
+under a `.png` name while the VPS file has genuine PNG magic (`89 50 4e 47`) — consistent
+with the upload path transcoding it, but that is an inference, and a hash of a re-encoded
+copy settles nothing. `sha256sum` on the owner's local file, compared against `27ff3293…`,
+is what confirms this beach photo is the one the fleet sends.
+
+**The observability gap this exposes is the same one twice.** Nothing in the system ever
+showed anyone what the reference photo *is*. `/audit` reports the filename and provider —
+enough to prove a file is in play, never enough to see that the face in it is unusably
+small. Two releases were spent tuning prompt text against an image nobody had looked at.
+
 **Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
 muted greens and greys — oversized sweaters, soft and worn-in"*, and the prompt separately
 appends `"Wearing {outfit}."` — two clothing instructions in one prompt, which is the
