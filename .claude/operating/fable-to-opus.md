@@ -32,8 +32,18 @@ These were asked and answered — don't re-ask, don't re-litigate:
 - Skill names were chosen by the owner: `repo-debugging-playbook`,
   `repo-change-control`, `repo-validation-gate` (this one is live and preloaded).
   `bot-code-invariants` is the companion checklist `repo-change-control` loads.
-- Baseline at handoff: `main` at `253c7bd`, BOT_VERSION `2026-07-11.6`, 162 pytest
-  tests, 14 evals, CI green. R1–R6 from `IMPROVEMENTS_PLAN.md` are all shipped.
+- Baseline at handoff (2026-07-11): `main` at `253c7bd`, BOT_VERSION `2026-07-11.6`,
+  162 pytest tests, 14 evals, CI green. R1–R6 from `IMPROVEMENTS_PLAN.md` are all
+  shipped.
+- Current state (refreshed 2026-08-03, three weeks and dozens of releases later —
+  re-verify rather than trusting this line too): `origin/main` at `e96443d`,
+  BOT_VERSION `2026-08-02.15`, 36 evals (35 pass + 1 environment-only skip, this
+  sandbox is missing Pillow — see `.claude/evals/run-evals.sh` output), ~902
+  `test_*` functions in `telegram-companion-bot/tests/test_pure.py` (grep count;
+  `pytest` isn't installed in this sandbox to collect it directly). **Local `main`
+  can be a stale, unrelated ref with no merge-base against `origin/main`** (hit
+  2026-07-29 and again while writing this line, 2026-08-03) — always check
+  `origin/main`, never local `main`.
 - Known doc drift I did NOT fix (deliberately — not asked): `ROADMAP.md` Track 4
   and `IMPROVEMENTS_PLAN.md` still show R1–R6 as pending. First bot.py session
   should mark them done per `repo-change-control` step 8.
