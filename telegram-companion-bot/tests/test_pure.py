@@ -5535,6 +5535,40 @@ class TestSelfieIdentityGuard:
                 assert trait not in text.lower(), trait
 
 
+class TestSelfieProviderLabel:
+    """v2026-08-03.6: /audit said 'gemini' and nothing else, while the NanoGPT branch named
+    its model. GEMINI_IMAGE_MODEL is per-instance and changes without a code deploy, so the
+    one field you check after changing it was the one field not reported."""
+
+    def setup_method(self):
+        self._saved = (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
+                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL)
+
+    def teardown_method(self):
+        (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
+         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL) = self._saved
+
+    def test_gemini_names_its_model(self):
+        bot.SELFIE_PROVIDER = "gemini"
+        bot.GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
+        bot.GEMINI_RESPONSE_MODALITIES = ["TEXT", "IMAGE"]
+        label = bot._selfie_provider_label()
+        assert "gemini-3-pro-image-preview" in label
+        assert "TEXT+IMAGE" in label
+
+    def test_nanogpt_still_names_its_model(self):
+        bot.SELFIE_PROVIDER = "nanogpt"
+        bot.SELFIE_MODEL = "flux-kontext"
+        assert bot._selfie_provider_label() == "nanogpt (flux-kontext)"
+
+    def test_audit_payload_and_startup_line_use_the_same_label(self):
+        """Two surfaces, one value -- they disagreed once already (v2026-08-02.1)."""
+        import inspect
+        src = inspect.getsource(bot._log_startup_diagnostic)
+        assert "_selfie_provider_label()" in src
+        assert "Selfie model: %s" in src
+
+
 class TestGeminiResponseModalities:
     """v2026-08-03.5: GEMINI_IMAGE_MODEL was env-tunable but responseModalities was hardcoded
     to ["IMAGE"], and gemini-3-pro-image-preview requires ["TEXT","IMAGE"] — so switching to
@@ -6092,10 +6126,20 @@ class TestAuditReportsSelfieProvider:
         assert "selfie_provider" in inspect.getsource(bot.audit_cmd)
 
     def test_nanogpt_reports_the_model_too(self):
-        """'nanogpt' alone doesn't say flux-kontext, which is the part that matters."""
-        import inspect
-        src = inspect.getsource(bot.gather_audit_data)
-        assert "SELFIE_MODEL" in src and "nanogpt" in src
+        """'nanogpt' alone doesn't say flux-kontext, which is the part that matters.
+
+        REWRITTEN v2026-08-03.6, not loosened: this read `gather_audit_data`'s SOURCE for the
+        strings "SELFIE_MODEL" and "nanogpt", so it went red the moment that logic moved into
+        `_selfie_provider_label()` — while the behavior it is named for was still correct. A
+        source assertion cannot fail for the reason the test exists; that is the family that
+        shipped the `/features` ValueError past twelve green tests (v2026-08-02.4). It now
+        calls the function and checks the rendered value."""
+        saved = (bot.SELFIE_PROVIDER, bot.SELFIE_MODEL)
+        try:
+            bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = "nanogpt", "flux-kontext"
+            assert bot.gather_audit_data()["selfie_provider"] == "nanogpt (flux-kontext)"
+        finally:
+            bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = saved
 
     def test_value_is_a_non_empty_string(self):
         v = bot.gather_audit_data()["selfie_provider"]

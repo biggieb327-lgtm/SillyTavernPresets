@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.5"
+BOT_VERSION = "2026-08-03.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -13214,6 +13214,19 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Self-audit ---
+def _selfie_provider_label() -> str:
+    """Which backend AND which model, for both backends.
+
+    Only the NanoGPT branch named its model, so "gemini" was the whole answer on the Gemini
+    path — and `GEMINI_IMAGE_MODEL` is per-instance, changes without a code deploy, and is
+    the thing you check after changing it. Third time this session that a load-bearing selfie
+    input had no surface (the prompt, the reference photo, now the model), and the same
+    remedy each time: report it where the owner already looks (v2026-08-03.6)."""
+    if SELFIE_PROVIDER == "gemini":
+        return f"gemini ({GEMINI_IMAGE_MODEL}, modalities {'+'.join(GEMINI_RESPONSE_MODALITIES)})"
+    return f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
+
+
 def _log_startup_diagnostic():
     import platform, shutil
     disk = shutil.disk_usage(BASE_DIR)
@@ -13222,11 +13235,12 @@ def _log_startup_diagnostic():
     log.warning(
         "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
-        "Maps: %s | Selfie base: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
+        "Maps: %s | Selfie base: %s | Selfie model: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
         STREAM_TIMEOUT, MAX_TOKENS,
         (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"), _base_image_status(),
+        _selfie_provider_label(),
         disk.free // (1024 * 1024), state_size, err_size,
         len(conversation_history), os.getpid(),
     )
@@ -13453,8 +13467,7 @@ def gather_audit_data() -> dict:
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
         "selfie_base": _base_image_status(),
-        "selfie_provider": (f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
-                            if SELFIE_PROVIDER == "nanogpt" else SELFIE_PROVIDER),
+        "selfie_provider": _selfie_provider_label(),
         "features": _features_summary(),
         "seeds": _seed_summary(),
         "owner": ("set" if get_owner() is not None else "NOT SET — nothing proactive can fire"),

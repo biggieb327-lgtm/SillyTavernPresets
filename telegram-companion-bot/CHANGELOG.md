@@ -7,6 +7,39 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.6 — /audit said "gemini" and stopped there
+
+**Root cause: only the NanoGPT branch named its model.** `selfie_provider` rendered
+`nanogpt (flux-kontext)` but plain `gemini` — and `GEMINI_IMAGE_MODEL` is per-instance,
+changes with an `.env` edit and a restart rather than a deploy, and is exactly the field you
+check after changing it. With the fleet about to move to `gemini-3-pro-image-preview`, the
+one value worth verifying was the one value not reported.
+
+`_selfie_provider_label()` now renders
+`gemini (gemini-3-pro-image-preview, modalities TEXT+IMAGE)` and keeps
+`nanogpt (flux-kontext)` unchanged. Both `/audit` and the `=== STARTUP AUDIT ===` line call
+it — the same function, because those two surfaces disagreed once already (v2026-08-02.1,
+where the startup line had the selfie base and `/audit` did not). The startup line gains a
+`Selfie model:` field it never had.
+
+**Third instance of one class in a single session**, and worth naming as such: the selfie
+prompt had no surface (fixed by `tools/selfie_prompt_preview.py`), the reference photo had no
+surface (still open — `/audit` names the file, never what is in it), and the image model had
+no surface. Each was found only when someone needed to check it and could not. The standing
+question for this subsystem is not "does it work" but "can the owner see what it is using".
+
+**One pre-existing test rewritten, not loosened.**
+`test_nanogpt_reports_the_model_too` read `gather_audit_data`'s *source* for the strings
+`SELFIE_MODEL` and `nanogpt`, so it went red the moment that logic moved into the shared
+helper — while the behavior it is named for was still correct. Rather than repoint the grep
+at the new function, it now calls `gather_audit_data()` and asserts the rendered value is
+`nanogpt (flux-kontext)`. A source assertion cannot fail for the reason the test exists; that
+is the family that shipped the `/features` `ValueError` past twelve green tests
+(v2026-08-02.4). Break-tested RED against a stubbed-out NanoGPT branch.
+
+**Verification:** `.claude/tools/verify.sh` green. 3 new tests plus one rewritten, all four
+break-tested RED one injection at a time.
+
 ## v2026-08-03.5 — The selfie model was tunable; what the model demands was not
 
 **Root cause: `GEMINI_IMAGE_MODEL` has been an env var since the Gemini backend landed, but
