@@ -36,9 +36,7 @@ in `list_triggers` without an entry here and that is not drift.
   chasing for a best-effort, capped-at-3-ideas step. **Decision: drop Reddit
   as a source for this step**; point it at sources a fired session can
   actually reach (GitHub, technical blogs, Hacker News) via `WebSearch`
-  instead. See "Pending prompt update" below — **not yet applied to the live
-  trigger**, this session has no `claude-code-remote` MCP tools to call
-  `update_trigger`.
+  instead. **Applied to the live trigger 2026-08-03** via `update_trigger`.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -48,7 +46,8 @@ in `list_triggers` without an entry here and that is not drift.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one evidence-based
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
-  runs a bounded Reddit scan (max ~5 searches) and may append up to 3 URL-cited
+  runs a bounded external-ideas scan (GitHub, blogs, Hacker News — Reddit dropped
+  2026-08-03, unreachable from a fired session) and may append up to 3 URL-cited
   "External ideas (unvetted — owner approval required)" to the same proposal file
   — ideas only, never implemented by the loop.
 
@@ -71,36 +70,6 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    eval that would prove it worked) to
    .claude/memory/improvement-proposals/<YYYY-MM>.md. If nothing qualifies, write
    no proposal — do not invent a pattern.
-3. Reddit ideas (runs whether or not a pattern qualified): bounded external scan
-   for ideas genuinely applicable to this companion-bot fleet (companion
-   features, python-telegram-bot pitfalls, model/API practices). Reddit access:
-   WebFetch cannot reach reddit — use Bash curl against the public JSON API, e.g.
-   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
-   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
-   for r/SillyTavernAI, r/LocalLLaMA, r/TelegramBots (max ~5 requests; WebSearch
-   may supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
-   environment's network policy blocks reddit.com — report this step as "SKIPPED
-   (network policy blocks reddit.com; owner can allow it in the environment's
-   network settings)". Never fabricate sources. If any ideas apply, add an
-   "External ideas (unvetted — owner approval required)" section to the same
-   <YYYY-MM>.md file: max 3 ideas, each with its thread URL and one line on why
-   it fits this fleet. Ideas only — never implemented by this loop.
-4. If the <YYYY-MM>.md file has content: commit only that file to the branch
-   claude/improvement-loop (reset it to origin/main first if it already exists)
-   and push ONLY to claude/improvement-loop. NEVER push to main or any other
-   branch. If the file has no content: push NOTHING, create NO branch, and end
-   with the one-line summary "improvement-loop: nothing this month".
-5. Do NOT implement anything, and do NOT modify bot.py, hooks, evals, or any
-   other file — implementation belongs to system-fixer in a reviewed session.
-```
-
-### Pending prompt update (drafted 2026-08-03, owner-directed, NOT yet applied)
-
-Reddit dropped per the decision above. Once applied via `update_trigger`, replace
-step 3 of the live prompt with this text, and in the SAME session move it into the
-"### Verbatim prompt" block above (this file's own sync rule):
-
-```
 3. External ideas (runs whether or not a pattern qualified): bounded external scan
    for ideas genuinely applicable to this companion-bot fleet (companion
    features, python-telegram-bot pitfalls, model/API practices). Use WebSearch
@@ -117,11 +86,14 @@ step 3 of the live prompt with this text, and in the SAME session move it into t
    "External ideas (unvetted — owner approval required)" section to the same
    <YYYY-MM>.md file: max 3 ideas, each with its source URL and one line on
    why it fits this fleet. Ideas only — never implemented by this loop.
+4. If the <YYYY-MM>.md file has content: commit only that file to the branch
+   claude/improvement-loop (reset it to origin/main first if it already exists)
+   and push ONLY to claude/improvement-loop. NEVER push to main or any other
+   branch. If the file has no content: push NOTHING, create NO branch, and end
+   with the one-line summary "improvement-loop: nothing this month".
+5. Do NOT implement anything, and do NOT modify bot.py, hooks, evals, or any
+   other file — implementation belongs to system-fixer in a reviewed session.
 ```
-
-Also update the "What it does" bullet above: "runs a bounded Reddit scan" →
-"runs a bounded external-ideas scan (GitHub, blogs, Hacker News — Reddit
-dropped 2026-08-03, unreachable from a fired session)".
 
 ---
 
@@ -314,8 +286,9 @@ brief — do not claim anything is new or recurring. Fix nothing.
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
-  fleet-wide texting voiceprint), and runs a bounded Reddit scan for card-writing
-  techniques (every idea URL-cited). Findings go to
+  fleet-wide texting voiceprint), and runs a bounded external-ideas scan for
+  card-writing techniques (GitHub, blogs, HuggingFace — Reddit dropped 2026-08-03,
+  unreachable from a fired session; every idea URL-cited). Findings go to
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
@@ -323,9 +296,9 @@ brief — do not claim anything is new or recurring. Fix nothing.
   note (it feeds all six bots).
 - **Reddit access — dropped 2026-08-03, owner decision.** Same diagnosis and
   decision as `improvement-loop-monthly`'s "Reddit access" note above (not
-  restated here to avoid the two copies drifting) — see "Pending prompt
-  update" below. **Not yet applied to the live trigger.** Fired sessions also
-  carry no MCP connectors (same as the other Routines).
+  restated here to avoid the two copies drifting). **Applied to the live
+  trigger 2026-08-03** via `update_trigger`. Fired sessions also carry no MCP
+  connectors (same as the other Routines).
 
 ### Verbatim prompt
 
@@ -375,36 +348,6 @@ seed file, or preset, and never push to main.
       blast-radius rule applies here: every preset.txt proposal MUST include a
       before/after quote and an explicit note of the fleet-wide effect. Tag
       proposals [fleet preset].
-4. Reddit ideas: bounded pass for card-writing techniques applicable to the
-   characters/presets reviewed above. Reddit access: WebFetch cannot reach
-   reddit — use Bash curl against the public JSON API, e.g.
-   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
-   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
-   (and thread permalinks with .json appended) for r/SillyTavernAI and similar
-   character/roleplay-writing subreddits (max ~5 requests; WebSearch may
-   supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
-   environment's network policy blocks reddit.com — report this step as "SKIPPED
-   (network policy blocks reddit.com; owner can allow it in the environment's
-   network settings)". Cite every external idea with its thread URL; never
-   fabricate sources.
-5. If there are findings or ideas: write ONE file
-   character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
-   [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea]
-   with its evidence or URL, phrased as concrete edits the owner could apply.
-   NOTHING is applied without owner approval. Commit only that file to the branch
-   claude/character-review (reset it to origin/main first if it already exists)
-   and push ONLY to claude/character-review — NEVER to main or any other branch.
-6. If nothing to propose: push NOTHING, create NO branch, and end with
-   "character-pass: no proposals this month".
-```
-
-### Pending prompt update (drafted 2026-08-03, owner-directed, NOT yet applied)
-
-Reddit dropped per the decision above. Once applied via `update_trigger`, replace
-step 4 of the live prompt with this text, and in the SAME session move it into the
-"### Verbatim prompt" block above (this file's own sync rule):
-
-```
 4. External ideas: bounded pass for card-writing techniques applicable to the
    characters/presets reviewed above. Use WebSearch (max ~5 queries), scoped
    to sources a fired session can actually reach — SillyTavern's own GitHub
@@ -414,13 +357,16 @@ step 4 of the live prompt with this text, and in the SAME session move it into t
    developers.reddit.com — see routines.md for the full diagnosis. Do not
    attempt reddit.com. Cite every external idea with its source URL; never
    fabricate sources.
+5. If there are findings or ideas: write ONE file
+   character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
+   [inbox card] / [fleet card] / [root preset] / [fleet preset] / [external idea]
+   with its evidence or URL, phrased as concrete edits the owner could apply.
+   NOTHING is applied without owner approval. Commit only that file to the branch
+   claude/character-review (reset it to origin/main first if it already exists)
+   and push ONLY to claude/character-review — NEVER to main or any other branch.
+6. If nothing to propose: push NOTHING, create NO branch, and end with
+   "character-pass: no proposals this month".
 ```
-
-Also update step 5's tag list above: `[reddit idea]` → `[external idea]`, and
-the "What it does" bullet's "runs a bounded Reddit scan for card-writing
-techniques" → "runs a bounded external-ideas scan for card-writing techniques
-(GitHub, blogs, HuggingFace — Reddit dropped 2026-08-03, unreachable from a
-fired session)".
 
 ---
 
