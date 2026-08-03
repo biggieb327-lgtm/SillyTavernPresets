@@ -15,7 +15,7 @@ import sys
 VPS = re.compile(r'\b(?:systemctl|journalctl)\b|/opt/telegram-bots|\bapt(?:-get)?\s+install\b')
 PHONE = re.compile(r'\btmux\b|\bpkg\s+install\b|\btermux[\w-]*\b|\badb\s+shell\b'
                    r'|~/telegram-bot\b|~/[a-z]+-bot\b|/data/data/com\.termux')
-PRAGMA = re.compile(r'#\s*host:\s*(vps|phone|both)\b', re.I)
+PRAGMA = re.compile(r'#\s*host:\s*(vps|phone|both|other)\b', re.I)
 FENCE = re.compile(r'```[a-zA-Z]*\n(.*?)```', re.S)
 
 
@@ -77,6 +77,19 @@ def main() -> int:
         has_vps, has_phone = bool(VPS.search(block)), bool(PHONE.search(block))
         if not (has_vps or has_phone):
             continue                                    # not host-specific; ignore
+        # `other` = a machine that is neither fleet host, so VPS/PHONE token lists do not
+        # apply to it. Added 2026-08-03 (C1 occurrence 7): a Debian rootfs running under
+        # proot-distro ON the phone is one attributable host, but `apt install` is on the
+        # VPS list, so a correct `# host: phone (Debian rootfs)` read as a contradiction.
+        # The only labels that satisfied the guard were false ones, and satisfying a check
+        # with a false claim is the failure this repo bans outright.
+        #
+        # This does NOT weaken the contract. The guard has never verified a label against
+        # reality — it cannot, it has never seen either machine — it forces an EXPLICIT
+        # claim, because a wrong explicit claim is visible in review and an absent one is
+        # not. `other` is such a claim, and it is required to say which machine in prose.
+        if pragma == "other":
+            continue
 
         first = next((l.strip() for l in block.splitlines() if l.strip()), "")[:60]
 

@@ -77,6 +77,17 @@ answer "which userland on that machine."** Nested environments — proot-distro,
 VM, a venv shell — need their own block and their own heading, not a comment inside someone
 else's. Off-fleet advice is still handover: the guard does not care that the topic was not
 the bots, and neither should the labelling.
+**The relabelled block then tripped the guard a second time, and that one was the guard's
+gap.** `# host: phone (Debian rootfs)` is a correct, single-host label, but `apt install` is
+on the VPS token list, so it read as a contradiction. Every label that satisfied the checker
+was false — `vps` (wrong machine) or `both` (one machine, not two) — and satisfying a check
+with a false claim is the one thing CLAUDE.md working principle 7 bans outright. Fixed the
+vocabulary instead: **`# host: other` for a machine that is neither fleet host**, which skips
+the VPS/PHONE token checks because those lists describe the fleet and nothing else. It does
+not weaken the contract — the guard has never verified a label against reality and cannot,
+having seen neither machine; it forces an *explicit* claim, and `other` is one. Five-case
+matrix: the mislabelled block RED, the `other` label green, and a mixed fleet block, a
+contradicting `# host: vps`, and an unlabelled fleet block all still RED.
 
 ### C16 — A handed-over command block must work on someone else's machine
 **seen: 2** (2026-08-02 ×2) — *promoted straight to a mechanism the day both occurred;

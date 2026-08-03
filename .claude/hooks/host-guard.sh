@@ -13,7 +13,10 @@
 #      on one machine in this fleet — this is the shape that wasted the most time)
 #   B. a block with host-specific commands while the message never names that host
 #
-# Escape hatch: put `# host: vps`, `# host: phone`, or `# host: both` in the block.
+# Escape hatch: put `# host: vps`, `# host: phone`, `# host: both`, or `# host: other` in
+# the block. `other` means a machine that is neither fleet host — a laptop, a rented box, a
+# Debian rootfs under proot-distro — so the VPS/PHONE token lists, which describe the fleet
+# and nothing else, do not apply. Name the actual machine in prose beside it (C1 occ. 7).
 # A pragma that CONTRADICTS the commands in the block is itself an error and blocks.
 set -u
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
