@@ -72,6 +72,10 @@ def main() -> None:
     ap.add_argument("--hint", default="", help="pin the scene, as a [selfie: ...] tag would")
     ap.add_argument("--weather", default="55°F, overcast, wind 6mph",
                     help="weather reading to simulate; empty string for none")
+    # The fake .env has no WEATHER_LOCATION, so every previewed prompt otherwise says
+    # "Seattle" — wrong for all seven instances, and it lands in the pasted prompt.
+    ap.add_argument("--location", default="",
+                    help="override WEATHER_LOCATION, e.g. 'Olympia, WA' (default: the .env default)")
     ap.add_argument("--diff", action="store_true",
                     help="render each prompt with SELFIE_FACE_LOCK off, then on")
     args = ap.parse_args()
@@ -88,6 +92,8 @@ def main() -> None:
         # the edit branch is forced on. That is the branch every live instance with a base
         # photo takes, and the only one the face lock touches.
         bot._has_base_image = lambda: True
+        if args.location:
+            bot.WEATHER_LOCATION = args.location
         if args.weather:
             bot._weather_cache["text"] = args.weather
             bot._weather_cache["ts"] = 9e9

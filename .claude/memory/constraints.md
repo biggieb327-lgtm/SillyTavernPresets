@@ -236,6 +236,11 @@ Four conclusions were drawn from readings that did not mean what they appeared t
   wide framing at all. Both arms kept her glasses in all eight images, so the bug never
   reproduced — **wrong sample**: the test could not fail for the reason the bug occurs.
   Caught only when the returned images were compared against the prompts that made them.
+  **The retry repeated the mistake one layer down**: round 2 selected seeds by the
+  `Framing:` line in the prompt text, and Gemini largely ignores `Framing:` — a low-angle
+  draw came back at eye level, a wider-with-room-behind draw came back outdoors. The sample
+  was chosen by a directive the model does not obey, so round 2 did not test what it was
+  built to test either — **wrong instrument**.
 Two of the first three sent a live diagnosis down the wrong path for several rounds; the
 fourth would have turned "the lock wins 3 of 4" into a claim about a failure the run
 never contained.

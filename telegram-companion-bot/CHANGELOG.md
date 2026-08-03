@@ -108,6 +108,41 @@ test measured the lock's effect on draws that were not failing, not its effect o
 that was. Contiguous seeds sample the pools evenly, which is the wrong sample when hunting
 one draw; `--seeds 4,16,22,26,44` covers the five wide framings, one seed each.
 
+**Round 2 (owner-run, the five wide framings, off/on) — the win does not survive it.** The
+lock is clearly closer on 2 pairs (seeds 22 and 44), clearly worse on 1 (seed 4), roughly
+level on 2. Seed 44 is the most informative: it is the wide-with-the-room-behind-her draw
+that most resembles the report, and the unlocked arm came back near-freckleless and
+smoothed — the exact regression `_SELFIE_PRESERVE_RULE` names — while the locked arm kept
+freckles at the reference's density. Combined across both rounds the lock leads roughly 5–3
+with 1 level over 9 pairs. That is a mild preference, not a fix, and it should be described
+that way.
+
+**The wide framings never rendered.** Seed 16 asked for `a low-angle selfie from below` and
+came back at eye level; seed 22 asked for `a high-angle selfie looking up at the camera` and
+came back at eye level; seed 26 asked for `a selfie held up high looking down` and came back
+as a third-person kitchen shot with both her hands occupied (the anatomy rule did not hold
+either); seed 44 asked for `a wider selfie with the room visible behind her` and came back
+outdoors at the Capitol. **Gemini is largely ignoring `Framing:`.** So round 2 did not test
+what it was built to test — the framing pool was selected on the prompt's text, and the text
+is not what the model drew. Second-order C8, one layer under the first: the sample was
+chosen by a directive the model does not obey.
+
+**Where this points instead.** If framing directives do not render, the "face small in frame"
+condition in the reported image did not come from a random framing draw. That image showed a
+specific narrative moment — polaroids spread over the floor — which is the shape of a
+`[selfie: …]` hint written by the model mid-conversation, not of anything in `SELFIE_FRAMINGS`.
+A hint replaces the atlas scene and lands in `Background/setting:`, and it can be far more
+elaborate than any pooled draw. **Reproducing with `--hint` is the next test, and nothing
+before it has actually reproduced the bug.**
+
+**Found while building that test, not fixed here:** `_daypart()` is appended after the hint,
+so a `[selfie: … at dusk]` produces `Background/setting: … showing dusk, Olympia, WA, in the
+morning.` A user- or model-pinned time of day is silently contradicted by the clock — the
+same contradiction-equals-latitude shape this release is about, in a different clause.
+`--location` was added to the preview tool in the same pass: the fake instance has no
+`WEATHER_LOCATION`, so every previewed prompt said "Seattle", which is wrong for all seven
+instances and was landing in the pasted text.
+
 **Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
 muted greens and greys — oversized sweaters, soft and worn-in"*, and the prompt separately
 appends `"Wearing {outfit}."` — two clothing instructions in one prompt, which is the
