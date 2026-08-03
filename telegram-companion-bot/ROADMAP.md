@@ -331,7 +331,10 @@ constraints; check their assumptions before acting on them.
      extension. **Reduced prompt (≤5k), not the full reply context.**
   3. Route through the `_do_request` choke point (invariant #4) even though the thought
      is internal, and never let the raw thought reach the user (the documented
-     planning-leak class — Priya's leaked monologue).
+     planning-leak class — Priya's leaked monologue). **Since v2026-08-03.1 the reply
+     path also refuses reasoning-shaped completions outright** (`REASONING_LEAK_GUARD`);
+     a hidden thinking call must not route its output through `generate_reply`, or the
+     guard will correctly reject the thought it was asked to produce.
   4. **A/B protocol (the old "demonstrably improves replies" could never conclude —
      there is no automatic quality metric for companion replies):** pick ONE
      non-reasoning-model instance (jules), alternate `STEP_THINK_CALL` on/off **by day
