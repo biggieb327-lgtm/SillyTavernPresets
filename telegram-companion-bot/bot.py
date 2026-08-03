@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.3"
+BOT_VERSION = "2026-08-03.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6110,26 +6110,64 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
 _IMAGE_RETRIES = 3
 
 
-def _post_with_retries(url, **kwargs):
-    for attempt in range(_IMAGE_RETRIES):
+# Statuses worth trying again. Gemini's image endpoint returns 503 under load and 429 when
+# rate-limited, and both clear on their own in seconds — but `requests` does not raise on a
+# 5xx, so these came back as ordinary responses, sailed past the transport-only except
+# clause below, and only became an error at `raise_for_status()` one frame up. One
+# overloaded second on Google's side was a failed selfie (owner-reported 2026-08-03).
+# A 4xx that is not 429 is ours — a bad prompt, a bad key — and retrying only delays the
+# real error by six seconds.
+_IMAGE_RETRY_STATUSES = (429, 500, 502, 503, 504)
+_IMAGE_RETRY_AFTER_CAP = 10  # seconds; a hostile or absurd header must not stall the handler
+# Kill switch: unset = transient statuses retried, 0 = pre-v2026-08-03.4 (transport only).
+IMAGE_RETRY_TRANSIENT = os.getenv("IMAGE_RETRY_TRANSIENT", "1").lower() not in (
+    "0", "false", "no", "off")
+
+
+def _retry_delay(attempt: int, resp=None) -> float:
+    """Backoff for the next image-API attempt, honoring Retry-After when the server sends
+    a usable one. Falls back to the original 2s/4s ramp."""
+    if resp is not None:
+        raw = (resp.headers or {}).get("Retry-After", "")
         try:
-            return _get_session().post(url, **kwargs)
+            wait = float(str(raw).strip())
+        except (TypeError, ValueError):
+            wait = 0.0
+        if 0 < wait <= _IMAGE_RETRY_AFTER_CAP:
+            return wait
+    return 2.0 * (attempt + 1)
+
+
+def _image_request_with_retries(method: str, url, **kwargs):
+    """One retry loop for both image verbs — transport failures AND transient statuses.
+
+    Returns the final response even when it is still a retryable status; the caller's
+    `raise_for_status()` stays the single place an HTTP failure becomes an exception."""
+    for attempt in range(_IMAGE_RETRIES):
+        last = attempt == _IMAGE_RETRIES - 1
+        try:
+            resp = getattr(_get_session(), method)(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            if attempt == _IMAGE_RETRIES - 1:
+            if last:
                 raise
             print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
-            time.sleep(2 * (attempt + 1))
+            time.sleep(_retry_delay(attempt))
+            continue
+        if IMAGE_RETRY_TRANSIENT and not last \
+                and getattr(resp, "status_code", None) in _IMAGE_RETRY_STATUSES:
+            print(f"[selfie] upstream {resp.status_code}, retrying "
+                  f"({attempt + 1}/{_IMAGE_RETRIES})...")
+            time.sleep(_retry_delay(attempt, resp))
+            continue
+        return resp
+
+
+def _post_with_retries(url, **kwargs):
+    return _image_request_with_retries("post", url, **kwargs)
 
 
 def _get_with_retries(url, **kwargs):
-    for attempt in range(_IMAGE_RETRIES):
-        try:
-            return _get_session().get(url, **kwargs)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            if attempt == _IMAGE_RETRIES - 1:
-                raise
-            print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
-            time.sleep(2 * (attempt + 1))
+    return _image_request_with_retries("get", url, **kwargs)
 
 
 _GEMINI_STRIP = re.compile(
@@ -6285,6 +6323,20 @@ async def _infer_scene(chat_id: int) -> str:
         return ""
 
 
+def _media_error_text(icon: str, e: Exception) -> str:
+    """A transient upstream outage and a real failure need different words — the same split
+    v2026-08-02.9 made for missing-asset vs switched-off, one layer out. By the time this
+    runs the retries are already spent, so `503 Server Error: Service Unavailable for url:
+    https://generativelanguage.googleapis.com/...` tells the owner nothing they can act on.
+    Anything without a recognised transient status keeps the raw text: an unfamiliar error
+    is exactly when the details matter."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code in _IMAGE_RETRY_STATUSES:
+        return (f"{icon} The image service is busy right now (HTTP {code}) — I tried "
+                f"{_IMAGE_RETRIES} times. Ask me again in a minute.")
+    return f"{icon} Couldn't make that one: {e}"
+
+
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
@@ -6321,7 +6373,7 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         log.error("[selfie] failed: %s", e)
         _count_error("media")
         if announce_errors:
-            await context.bot.send_message(chat_id=chat_id, text=f"📷 Couldn't make that one: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=_media_error_text("📷", e))
     finally:
         uploading.cancel()
 

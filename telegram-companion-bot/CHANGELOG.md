@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.4 — A one-second Gemini outage was a failed selfie
+
+**Root cause: `requests` does not raise on a 5xx, and the image retry loop only caught
+transport exceptions.** A 503 came back as an ordinary response object, went straight past
+`except (ConnectionError, Timeout)`, was returned to the caller, and became an error one
+frame later at `raise_for_status()` — where nothing retried it. Owner-reported live:
+
+    📷 Couldn't make that one: 503 Server Error: Service Unavailable for url:
+    https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent
+
+Gemini's image endpoint returns 503 under load and 429 when rate-limited, and both clear on
+their own within seconds. The retry loop had been in place since the Termux days and read as
+though it covered this; it never did. Same family as v2026-07-26's finding that
+`requests` does not raise on 4xx/5xx, in the one place that lesson had not been applied.
+
+**Fix:**
+- `_image_request_with_retries` — one loop for both verbs, retrying transport failures **and**
+  `_IMAGE_RETRY_STATUSES` (429, 500, 502, 503, 504). `_post_with_retries` and
+  `_get_with_retries` are now thin wrappers, so the NanoGPT URL fetch gets the same treatment
+  as the generate call rather than a copy that would drift.
+- **A 4xx that is not 429 is never retried.** A bad prompt or a bad key is ours; retrying only
+  delays the real error by six seconds.
+- `Retry-After` is honored when the server sends a usable one, **capped at 10s** so an absurd
+  or hostile header cannot stall the handler; otherwise the original 2s/4s ramp.
+- The final response is **returned, not raised**, even when it is still a retryable status —
+  the caller's `raise_for_status()` stays the single place an HTTP failure becomes an
+  exception.
+- `_media_error_text` gives a transient outage plain words instead of a status line and a
+  URL: *"The image service is busy right now (HTTP 503) — I tried 3 times. Ask me again in a
+  minute."* Anything without a recognised transient status keeps the raw text, because an
+  unfamiliar error is exactly when the details matter. Same split as v2026-08-02.9's
+  missing-asset vs switched-off, one layer out.
+
+Kill switch `IMAGE_RETRY_TRANSIENT=0` restores transport-only retries. Runs inside the
+existing `asyncio.to_thread` hop, so the added sleeps do not touch the event loop.
+
+**Verification:** `.claude/tools/verify.sh` green. 10 new tests; five assertions break-tested
+RED one injection at a time, including one that widens `_IMAGE_RETRY_STATUSES` to include 400
+and proves the not-retried test would catch it.
+
 ## v2026-08-03.3 — The prompt told the model to change her face
 
 **Root cause: `Her mood right now: {mood} — let it read in her face.` is the only

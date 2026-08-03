@@ -5535,6 +5535,97 @@ class TestSelfieIdentityGuard:
                 assert trait not in text.lower(), trait
 
 
+class TestImageRetryOnTransientStatus:
+    """v2026-08-03.4: a Gemini 503 was a failed selfie. `requests` does not raise on 5xx, so
+    the response came back normally, sailed past the transport-only except clause, and only
+    became an error at raise_for_status() one frame up — where nothing retried it."""
+
+    def setup_method(self):
+        self._sleep = bot.time.sleep
+        self._session = bot._get_session
+        self._flag = bot.IMAGE_RETRY_TRANSIENT
+        self.slept = []
+        bot.time.sleep = self.slept.append
+        bot.IMAGE_RETRY_TRANSIENT = True
+
+    def teardown_method(self):
+        bot.time.sleep = self._sleep
+        bot._get_session = self._session
+        bot.IMAGE_RETRY_TRANSIENT = self._flag
+
+    class _Resp:
+        def __init__(self, code, retry_after=None):
+            self.status_code = code
+            self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+    def _session_returning(self, codes):
+        """A session whose post() yields the given statuses in order."""
+        seq = list(codes)
+        calls = []
+
+        class _S:
+            def post(_self, url, **kw):
+                calls.append(url)
+                return TestImageRetryOnTransientStatus._Resp(seq[len(calls) - 1])
+            get = post
+
+        bot._get_session = lambda: _S()
+        return calls
+
+    def test_503_is_retried_then_succeeds(self):
+        calls = self._session_returning([503, 503, 200])
+        assert bot._post_with_retries("http://x").status_code == 200
+        assert len(calls) == 3
+
+    def test_a_persistent_503_returns_the_response_not_an_exception(self):
+        """raise_for_status() in the caller stays the single place HTTP becomes an error."""
+        calls = self._session_returning([503, 503, 503])
+        assert bot._post_with_retries("http://x").status_code == 503
+        assert len(calls) == bot._IMAGE_RETRIES
+
+    def test_400_is_not_retried(self):
+        """A bad prompt or bad key is ours; retrying only delays the real error."""
+        calls = self._session_returning([400, 200, 200])
+        assert bot._post_with_retries("http://x").status_code == 400
+        assert len(calls) == 1
+
+    def test_every_retryable_status_is_covered(self):
+        for code in (429, 500, 502, 503, 504):
+            calls = self._session_returning([code, 200])
+            assert bot._post_with_retries("http://x").status_code == 200, code
+            assert len(calls) == 2, code
+
+    def test_get_shares_the_same_loop(self):
+        calls = self._session_returning([502, 200])
+        assert bot._get_with_retries("http://x").status_code == 200
+        assert len(calls) == 2
+
+    def test_kill_switch_restores_transport_only_retries(self):
+        bot.IMAGE_RETRY_TRANSIENT = False
+        calls = self._session_returning([503, 200])
+        assert bot._post_with_retries("http://x").status_code == 503
+        assert len(calls) == 1
+
+    def test_retry_after_is_honored_within_the_cap(self):
+        assert bot._retry_delay(0, self._Resp(429, "5")) == 5.0
+
+    def test_absurd_retry_after_falls_back_to_the_ramp(self):
+        """A hostile or absurd header must not stall the handler."""
+        assert bot._retry_delay(0, self._Resp(429, "9999")) == 2.0
+        assert bot._retry_delay(0, self._Resp(429, "not-a-number")) == 2.0
+
+    def test_transient_error_gets_plain_words_not_a_url(self):
+        class _E(Exception):
+            response = TestImageRetryOnTransientStatus._Resp(503)
+        text = bot._media_error_text("📷", _E("503 Server Error: Service Unavailable for url: https://..."))
+        assert "busy right now (HTTP 503)" in text
+        assert "https://" not in text
+
+    def test_unfamiliar_errors_keep_their_details(self):
+        """An unrecognised failure is exactly when the raw text matters."""
+        assert "boom" in bot._media_error_text("📷", RuntimeError("boom"))
+
+
 class TestSelfieFaceLock:
     """v2026-08-03.2: Emily's selfies came back as a different, better-looking woman with
     her glasses gone, with the reference photo correctly attached. Two prompt shapes let an
