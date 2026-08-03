@@ -145,6 +145,22 @@ else
   ok "wsdot-key-not-logged: WSDOT fetch errors log a key-free reason, not the raw exception"
 fi
 
+# v2026-08-03.1: glm-5.1:thinking wrote its ENTIRE deliberation into ordinary content —
+# no <think> tags, non-empty, no bracket syntax — so _strip_thinking, the v2026-07-20.1
+# empty-content path, and _strip_directive_lines all passed it, and priya sent a
+# ~12k-char planning essay as four chunked Telegram messages. Third variant of the
+# chain-of-thought leak class. The guard must stay wired end to end: detector defined,
+# consulted on the completion inside call_nanogpt, kill switch present. (Behavior — the
+# re-roll, the fallback, generate_reply marking calls user-facing — is pinned by
+# TestReasoningLeakGuard in tests/test_pure.py.)
+if grep -q 'def _looks_like_reasoning_leak' "$BOT" \
+   && grep -q '_looks_like_reasoning_leak(result' "$BOT" \
+   && grep -q 'REASONING_LEAK_GUARD' "$BOT"; then
+  ok "reasoning-leak-guard: reasoning-shaped completions are refused and re-rolled"
+else
+  bad "reasoning-leak-guard" "the reasoning-leak guard is unwired (detector, call_nanogpt check, or REASONING_LEAK_GUARD kill switch missing) — a thinking model's deliberation will ship as the reply again (see v2026-08-03.1)"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do
