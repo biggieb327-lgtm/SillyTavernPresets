@@ -21,10 +21,35 @@ in `list_triggers` without an entry here and that is not drift.
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
   `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
 - **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. As of 2026-07-20 the environment's network policy
-  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
-  reddit.com in the environment's network settings, the step self-reports
-  SKIPPED.
+  against the public JSON API. **Diagnosis corrected 2026-08-03** (verified live,
+  superseding the 2026-07-20 note below): the CONNECT tunnel and TLS handshake to
+  `reddit.com` now succeed — the block is a plain HTTP 403 from Reddit's own
+  Cloudflare, returned *after* a completed connection, not a proxy-level CONNECT
+  failure. Also confirmed the same day: `WebFetch` refuses `reddit.com` outright,
+  and `WebSearch` with `allowed_domains: ["reddit.com"]` errors
+  `"reddit.com" not accessible to our user agent` — Anthropic's own crawler is
+  blocked from the domain (likely `robots.txt`), independent of this
+  environment's proxy. Unrestricted `WebSearch` returns zero actual
+  `reddit.com` URLs, only third-party pages describing Reddit content
+  secondhand — not citable per this Routine's "never fabricate sources" rule.
+  **No workaround exists for unauthenticated access from inside a fired
+  session.** The one credible fix is a Reddit API app (owner registers free at
+  `reddit.com/prefs/apps`, a "script" app, ~2 minutes) authenticating via OAuth
+  against `oauth.reddit.com` instead of `www.reddit.com` — a different endpoint
+  with materially different bot-detection, historically tolerant of API
+  clients. Untested here: no credentials exist yet, and whether a fired
+  session's environment can carry a client secret at all is unverified.
+  **Old note (2026-07-20), keep for history but do not trust as current:** "the
+  environment's network policy blocks reddit.com at the proxy (CONNECT 403)" —
+  that specific failure mode no longer reproduces; the corrected one above is
+  live as of 2026-08-03. **Not yet applied to the live trigger** (this session
+  has no `claude-code-remote` MCP tools to call `update_trigger`): the
+  verbatim prompt's self-skip condition below still reads "If curl fails with a
+  CONNECT/tunnel 403" — a plain HTTP 403 after a completed handshake will not
+  literally match that phrase. A session with `update_trigger` access should
+  reword it to recognize any non-2xx from `reddit.com` (CONNECT-tunnel failure
+  OR a completed-connection HTTP 403 alike) as the same SKIP condition, and
+  mirror the change here per this file's own sync rule.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -279,11 +304,11 @@ brief — do not claim anything is new or recurring. Fix nothing.
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
 - **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. As of 2026-07-20 the environment's network policy
-  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
-  reddit.com in the environment's network settings, the step self-reports
-  SKIPPED. Fired sessions also carry no MCP connectors (same as the other
-  Routines).
+  against the public JSON API. **See `improvement-loop-monthly`'s Reddit access
+  note above for the full 2026-08-03 diagnosis correction** (same mechanism,
+  same fix candidate, same not-yet-applied-to-the-live-trigger caveat) — not
+  restated here to avoid the two copies drifting. Fired sessions also carry no
+  MCP connectors (same as the other Routines).
 
 ### Verbatim prompt
 
