@@ -20,36 +20,25 @@ in `list_triggers` without an entry here and that is not drift.
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
   `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
-- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. **Diagnosis corrected 2026-08-03** (verified live,
-  superseding the 2026-07-20 note below): the CONNECT tunnel and TLS handshake to
-  `reddit.com` now succeed — the block is a plain HTTP 403 from Reddit's own
-  Cloudflare, returned *after* a completed connection, not a proxy-level CONNECT
-  failure. Also confirmed the same day: `WebFetch` refuses `reddit.com` outright,
-  and `WebSearch` with `allowed_domains: ["reddit.com"]` errors
-  `"reddit.com" not accessible to our user agent` — Anthropic's own crawler is
-  blocked from the domain (likely `robots.txt`), independent of this
-  environment's proxy. Unrestricted `WebSearch` returns zero actual
-  `reddit.com` URLs, only third-party pages describing Reddit content
-  secondhand — not citable per this Routine's "never fabricate sources" rule.
-  **No workaround exists for unauthenticated access from inside a fired
-  session.** The one credible fix is a Reddit API app (owner registers free at
-  `reddit.com/prefs/apps`, a "script" app, ~2 minutes) authenticating via OAuth
-  against `oauth.reddit.com` instead of `www.reddit.com` — a different endpoint
-  with materially different bot-detection, historically tolerant of API
-  clients. Untested here: no credentials exist yet, and whether a fired
-  session's environment can carry a client secret at all is unverified.
-  **Old note (2026-07-20), keep for history but do not trust as current:** "the
-  environment's network policy blocks reddit.com at the proxy (CONNECT 403)" —
-  that specific failure mode no longer reproduces; the corrected one above is
-  live as of 2026-08-03. **Not yet applied to the live trigger** (this session
-  has no `claude-code-remote` MCP tools to call `update_trigger`): the
-  verbatim prompt's self-skip condition below still reads "If curl fails with a
-  CONNECT/tunnel 403" — a plain HTTP 403 after a completed handshake will not
-  literally match that phrase. A session with `update_trigger` access should
-  reword it to recognize any non-2xx from `reddit.com` (CONNECT-tunnel failure
-  OR a completed-connection HTTP 403 alike) as the same SKIP condition, and
-  mirror the change here per this file's own sync rule.
+- **Reddit access — dropped 2026-08-03, owner decision.** Diagnosis (verified
+  live 2026-08-03, superseding the 2026-07-20 "proxy CONNECT 403" note): the
+  CONNECT tunnel and TLS handshake to `reddit.com` succeed fine — the block is
+  a plain HTTP 403 from Reddit's own Cloudflare, returned *after* a completed
+  connection. `WebFetch` refuses `reddit.com` outright; `WebSearch` with
+  `allowed_domains: ["reddit.com"]` errors `"reddit.com" not accessible to our
+  user agent` (Anthropic's own crawler is blocked from the domain, independent
+  of this environment's proxy); unrestricted `WebSearch` returns zero actual
+  `reddit.com` URLs. Reddit's current app-registration flow
+  (`reddit.com/prefs/apps`) also redirects to **Devvit**, a platform for
+  building apps that run *inside* Reddit (owner-confirmed by trying it) — not
+  obviously a source of portable API credentials for external read access, so
+  even the OAuth workaround floated earlier is unconfirmed and not worth
+  chasing for a best-effort, capped-at-3-ideas step. **Decision: drop Reddit
+  as a source for this step**; point it at sources a fired session can
+  actually reach (GitHub, technical blogs, Hacker News) via `WebSearch`
+  instead. See "Pending prompt update" below — **not yet applied to the live
+  trigger**, this session has no `claude-code-remote` MCP tools to call
+  `update_trigger`.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -104,6 +93,35 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
 5. Do NOT implement anything, and do NOT modify bot.py, hooks, evals, or any
    other file — implementation belongs to system-fixer in a reviewed session.
 ```
+
+### Pending prompt update (drafted 2026-08-03, owner-directed, NOT yet applied)
+
+Reddit dropped per the decision above. Once applied via `update_trigger`, replace
+step 3 of the live prompt with this text, and in the SAME session move it into the
+"### Verbatim prompt" block above (this file's own sync rule):
+
+```
+3. External ideas (runs whether or not a pattern qualified): bounded external scan
+   for ideas genuinely applicable to this companion-bot fleet (companion
+   features, python-telegram-bot pitfalls, model/API practices). Use WebSearch
+   (max ~5 queries), scoped to sources a fired session can actually reach —
+   GitHub (python-telegram-bot's own issues/discussions/wiki, comparable
+   companion-bot projects), technical blogs, Hacker News. Reddit is out of
+   scope as of 2026-08-03: no fetch tool available to a fired session can
+   reach reddit.com or developers.reddit.com (Cloudflare blocks direct HTTP
+   past the proxy tunnel; WebFetch and WebSearch both refuse the domain
+   outright), and Reddit's current app-registration flow redirects to Devvit,
+   a platform for apps that run inside Reddit rather than external read
+   access — see routines.md for the full diagnosis. Do not attempt
+   reddit.com. Never fabricate sources. If any ideas apply, add an
+   "External ideas (unvetted — owner approval required)" section to the same
+   <YYYY-MM>.md file: max 3 ideas, each with its source URL and one line on
+   why it fits this fleet. Ideas only — never implemented by this loop.
+```
+
+Also update the "What it does" bullet above: "runs a bounded Reddit scan" →
+"runs a bounded external-ideas scan (GitHub, blogs, Hacker News — Reddit
+dropped 2026-08-03, unreachable from a fired session)".
 
 ---
 
@@ -303,12 +321,11 @@ brief — do not claim anything is new or recurring. Fix nothing.
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
-- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. **See `improvement-loop-monthly`'s Reddit access
-  note above for the full 2026-08-03 diagnosis correction** (same mechanism,
-  same fix candidate, same not-yet-applied-to-the-live-trigger caveat) — not
-  restated here to avoid the two copies drifting. Fired sessions also carry no
-  MCP connectors (same as the other Routines).
+- **Reddit access — dropped 2026-08-03, owner decision.** Same diagnosis and
+  decision as `improvement-loop-monthly`'s "Reddit access" note above (not
+  restated here to avoid the two copies drifting) — see "Pending prompt
+  update" below. **Not yet applied to the live trigger.** Fired sessions also
+  carry no MCP connectors (same as the other Routines).
 
 ### Verbatim prompt
 
@@ -380,6 +397,30 @@ seed file, or preset, and never push to main.
 6. If nothing to propose: push NOTHING, create NO branch, and end with
    "character-pass: no proposals this month".
 ```
+
+### Pending prompt update (drafted 2026-08-03, owner-directed, NOT yet applied)
+
+Reddit dropped per the decision above. Once applied via `update_trigger`, replace
+step 4 of the live prompt with this text, and in the SAME session move it into the
+"### Verbatim prompt" block above (this file's own sync rule):
+
+```
+4. External ideas: bounded pass for card-writing techniques applicable to the
+   characters/presets reviewed above. Use WebSearch (max ~5 queries), scoped
+   to sources a fired session can actually reach — SillyTavern's own GitHub
+   (wiki, discussions, issues), character-card-writing blogs and guides,
+   HuggingFace discussions. Reddit is out of scope as of 2026-08-03: no fetch
+   tool available to a fired session can reach reddit.com or
+   developers.reddit.com — see routines.md for the full diagnosis. Do not
+   attempt reddit.com. Cite every external idea with its source URL; never
+   fabricate sources.
+```
+
+Also update step 5's tag list above: `[reddit idea]` → `[external idea]`, and
+the "What it does" bullet's "runs a bounded Reddit scan for card-writing
+techniques" → "runs a bounded external-ideas scan for card-writing techniques
+(GitHub, blogs, HuggingFace — Reddit dropped 2026-08-03, unreachable from a
+fired session)".
 
 ---
 
