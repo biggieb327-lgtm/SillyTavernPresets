@@ -5535,6 +5535,79 @@ class TestSelfieIdentityGuard:
                 assert trait not in text.lower(), trait
 
 
+class TestGeminiResponseModalities:
+    """v2026-08-03.5: GEMINI_IMAGE_MODEL was env-tunable but responseModalities was hardcoded
+    to ["IMAGE"], and gemini-3-pro-image-preview requires ["TEXT","IMAGE"] — so switching to
+    the Pro model by .env alone could not work. The knob existed for the model and not for
+    what the model demands."""
+
+    def setup_method(self):
+        self._mods = bot.GEMINI_RESPONSE_MODALITIES
+        self._post = bot._post_with_retries
+        self._has_base = bot._has_base_image
+        bot._has_base_image = lambda: False
+
+    def teardown_method(self):
+        bot.GEMINI_RESPONSE_MODALITIES = self._mods
+        bot._post_with_retries = self._post
+        bot._has_base_image = self._has_base
+
+    def test_default_is_image_only(self):
+        assert bot._parse_modalities("IMAGE") == ["IMAGE"]
+
+    def test_the_pro_pair_parses(self):
+        assert bot._parse_modalities("TEXT,IMAGE") == ["TEXT", "IMAGE"]
+
+    def test_whitespace_and_case_are_tolerated(self):
+        """.env values are hand-typed; ' text , image ' must not become a 400."""
+        assert bot._parse_modalities(" text , image ") == ["TEXT", "IMAGE"]
+
+    def test_empty_never_yields_an_empty_list(self):
+        """An empty responseModalities is a 400, so a blank env value must not produce one."""
+        for raw in ("", "   ", ",,", None):
+            assert bot._parse_modalities(raw) == ["IMAGE"], raw
+
+    def _capture_payload(self, parts):
+        sent = {}
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"candidates": [{"finishReason": "STOP", "content": {"parts": parts}}]}
+
+        def _fake_post(url, **kw):
+            sent.update(kw.get("json") or {})
+            return _R()
+
+        bot._post_with_retries = _fake_post
+        return sent
+
+    def test_configured_modalities_reach_the_payload(self):
+        """The regression that matters: the value is read at call time, not baked in."""
+        import base64
+        sent = self._capture_payload([{"inlineData": {"data": base64.b64encode(b"png").decode()}}])
+        bot.GEMINI_RESPONSE_MODALITIES = ["TEXT", "IMAGE"]
+        assert bot._generate_selfie_gemini("x") == b"png"
+        assert sent["generationConfig"]["responseModalities"] == ["TEXT", "IMAGE"]
+
+    def test_a_text_only_answer_surfaces_what_it_said(self):
+        """With TEXT enabled a refusal arrives as prose that says why; discarding it left
+        'no image data' as the only clue."""
+        self._capture_payload([{"text": "I can't create that image."}])
+        try:
+            bot._generate_selfie_gemini("x")
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "I can't create that image." in str(e)
+
+    def test_image_still_wins_when_text_accompanies_it(self):
+        import base64
+        self._capture_payload([{"text": "Here you go"},
+                               {"inlineData": {"data": base64.b64encode(b"png").decode()}}])
+        assert bot._generate_selfie_gemini("x") == b"png"
+
+
 class TestImageRetryOnTransientStatus:
     """v2026-08-03.4: a Gemini 503 was a failed selfie. `requests` does not raise on 5xx, so
     the response came back normally, sailed past the transport-only except clause, and only

@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.4"
+BOT_VERSION = "2026-08-03.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6181,6 +6181,21 @@ def _gemini_safe(prompt: str) -> str:
     return _GEMINI_STRIP.sub("", prompt).strip()
 
 
+def _parse_modalities(raw: str) -> list:
+    """`responseModalities` from a comma-separated env value, never empty.
+
+    Not sniffed from the model name: a model string is not a capability, and the next image
+    model will not be named after either of the two we know about (v2026-08-03.5)."""
+    out = [m.strip().upper() for m in (raw or "").split(",") if m.strip()]
+    return out or ["IMAGE"]
+
+
+# `gemini-2.5-flash-image` takes IMAGE alone. `gemini-3-pro-image-preview` requires TEXT
+# alongside it, so switching models by env var alone used to fail — the knob existed for the
+# model and not for the thing the model demands.
+GEMINI_RESPONSE_MODALITIES = _parse_modalities(os.getenv("GEMINI_RESPONSE_MODALITIES", "IMAGE"))
+
+
 def _generate_selfie_gemini(prompt: str) -> bytes:
     prompt = _gemini_safe(prompt)
     parts = []
@@ -6191,7 +6206,7 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
     url = f"{GEMINI_IMAGE_URL}/{GEMINI_IMAGE_MODEL}:generateContent"
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"responseModalities": ["IMAGE"]},
+        "generationConfig": {"responseModalities": GEMINI_RESPONSE_MODALITIES},
     }
     r = _post_with_retries(
         url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
@@ -6207,10 +6222,17 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
     if finish and finish not in ("STOP", "MAX_TOKENS"):
         raise RuntimeError(f"Gemini blocked the image (finishReason={finish}) — try again or "
                            f"rephrase what she's doing/wearing.")
+    said = []
     for part in cand.get("content", {}).get("parts", []):
         inline = part.get("inlineData") or part.get("inline_data")
         if inline and inline.get("data"):
             return base64.b64decode(inline["data"])
+        if part.get("text"):
+            said.append(part["text"])
+    # With TEXT in responseModalities a refusal comes back as prose instead of an image, and
+    # that prose says WHY. Discarding it left "no image data" as the only clue.
+    if said:
+        raise RuntimeError(f"Gemini returned text instead of an image: {' '.join(said)[:300]}")
     raise RuntimeError("Gemini response had no image data")
 
 

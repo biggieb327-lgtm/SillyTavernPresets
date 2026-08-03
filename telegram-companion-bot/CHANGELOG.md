@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.5 — The selfie model was tunable; what the model demands was not
+
+**Root cause: `GEMINI_IMAGE_MODEL` has been an env var since the Gemini backend landed, but
+`responseModalities` was hardcoded to `["IMAGE"]` in the payload.** `gemini-3-pro-image-preview`
+requires `["TEXT", "IMAGE"]` and rejects IMAGE alone, so "switch the selfie model in .env" —
+which every doc implied was a one-line change — could not work for the model most worth
+switching to. Asked how to move to Pro, the honest answer was that the knob was only half
+there.
+
+**Fix:** `GEMINI_RESPONSE_MODALITIES`, comma-separated, default `IMAGE` (unchanged behavior).
+`_parse_modalities` normalizes case and whitespace, because `.env` values are hand-typed and
+` text , image ` must not become a 400, and it never returns an empty list — an empty
+`responseModalities` is itself a 400.
+
+**Deliberately not sniffed from the model name.** A model string is not a capability, and the
+next image model will not be named after either of the two we know about. `.env.example`
+carries both working pairs instead.
+
+**A text-only answer now says what it said.** With TEXT enabled a refusal comes back as prose
+explaining why, and the parts loop discarded it — leaving `no image data`, which is the least
+informative thing the response contained. Non-refusal text alongside an image is still
+ignored; the image wins.
+
+**Two operational facts found while checking the model IDs, both dated 2026-08-03 and both
+worth re-verifying before acting on:**
+- **`gemini-2.5-flash-image` is scheduled to shut down 2026-10-02.** That is the fleet default
+  and what all seven instances run. When it goes, every instance loses selfies at once. This
+  is a deadline, not a preference, and it is bigger than the reason it was found.
+- Pro costs ~$0.134 per 1K/2K image against ~$0.039 for the current flash model — roughly
+  3.4x. A `gemini-3.1-flash-image-preview` sits between them at ~$0.067.
+
+**Verification:** `.claude/tools/verify.sh` green. 7 new tests, four assertions break-tested
+RED one injection at a time.
+
 ## v2026-08-03.4 — A one-second Gemini outage was a failed selfie
 
 **Root cause: `requests` does not raise on a 5xx, and the image retry loop only caught
