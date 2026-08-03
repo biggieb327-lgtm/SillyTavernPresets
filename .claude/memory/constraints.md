@@ -146,6 +146,22 @@ with further command lines after it), so it is a candidate for the same six-case
 but that is a hypothesis until someone runs it. Not asserting the guard is blind to it; that
 exact unchecked assertion is what occurrence 4 had to correct.
 
+**Occurrence 6 (2026-08-03) — a correctly labelled block still landed in the wrong shell.**
+Termux/proot advice: a block labelled `# host: phone (Termux)` wrote a `claude` alias into
+`~/.bashrc`, and the operator was still inside the Debian rootfs from the previous step, so it
+went to `/root/.bashrc`. Typing `claude` there re-entered proot from inside proot
+(`proot-distro should not be executed under PRoot`). The label was right; a comment cannot
+move someone between shells, and a multi-step session leaves the operator in whichever
+environment the *last* block put them.
+**Constraint:** when consecutive blocks target different shells, make each one **detect its
+own environment and refuse** rather than trusting the label — `if [ -n "$PREFIX" ]; then echo
+"STOP: this is Termux, run it in the rootfs"; else ... fi`. A block that damages the wrong
+environment when pasted there is not a handover, it is a trap. Cheap for shells with an
+unambiguous marker (`$PREFIX` for Termux, `/etc/os-release` for a rootfs, `uname -o` for
+phone-vs-workstation); prose warnings are the fallback where no marker exists.
+This is the operator's half that the C1 entry says no hook can reach — but the *agent* can
+make the block self-defending, which is a mechanism, not a reminder.
+
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
 stays the operator's, and it is why the C1 entry says what it says.
