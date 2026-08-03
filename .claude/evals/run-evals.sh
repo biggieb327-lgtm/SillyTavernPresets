@@ -161,6 +161,42 @@ else
   bad "reasoning-leak-guard" "the reasoning-leak guard is unwired (detector, call_nanogpt check, or REASONING_LEAK_GUARD kill switch missing) — a thinking model's deliberation will ship as the reply again (see v2026-08-03.1)"
 fi
 
+# Same release, the other half: pre-merge review found that an honest character-card
+# review — a flow the repo supports via character-review/ — trips every marker the
+# guard looks for, and the DOCUMENT_MODEL sites pass no fallback, so a trip surfaces
+# to the owner as "❌ something broke on my end". Every DOCUMENT_MODEL reply site must
+# therefore opt out. Counted, not grepped for presence: a fourth site added without
+# the opt-out is exactly the regression this pins.
+# Parsed, not grepped: the first version of this check counted a trailing-comma line
+# that only exists when the call is already wrapped, so deleting an opt-out collapsed
+# the call to one line and dropped BOTH counts — it passed on the very regression it
+# pins (C13, caught by the break-test). Walk the AST instead.
+doc_unguarded=$(python3 - "$BOT" <<'PYEOF'
+import ast, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+bad = []
+for node in ast.walk(ast.parse(src)):
+    if not isinstance(node, ast.Call):
+        continue
+    fn = node.func
+    if getattr(fn, "id", getattr(fn, "attr", None)) != "reply_with_typing":
+        continue
+    kw = {k.arg: k.value for k in node.keywords}
+    model = kw.get("model")
+    if not (isinstance(model, ast.Name) and model.id == "DOCUMENT_MODEL"):
+        continue
+    opt = kw.get("leak_guard")
+    if not (isinstance(opt, ast.Constant) and opt.value is False):
+        bad.append(str(node.lineno))
+print(",".join(bad))
+PYEOF
+)
+if [ -z "$doc_unguarded" ]; then
+  ok "document-reply-leak-guard-optout: every DOCUMENT_MODEL reply site opts out of the reasoning-leak guard"
+else
+  bad "document-reply-leak-guard-optout" "reply_with_typing(model=DOCUMENT_MODEL) without leak_guard=False at line(s) $doc_unguarded — a card review trips every reasoning-leak marker, and DOCUMENT_MODEL passes no fallback, so the owner gets '❌ something broke on my end' instead of the review (see v2026-08-03.1)"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do

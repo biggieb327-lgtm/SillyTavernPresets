@@ -5198,20 +5198,25 @@ _CALL_BUDGET = 150       # max wall-clock seconds on the primary before forcing 
 # meta-reasoning vocabulary — words a model uses deliberating ABOUT a reply and no
 # character on this fleet uses IN one. A category counts once no matter how often it
 # matches, so tripping the guard takes several independent kinds of evidence, never
-# one phrase repeated.
+# one phrase repeated. Kept deliberately narrow: review found "let me think",
+# "overthinking this", and "going back and forth" are ordinary texting vocabulary on
+# this fleet, so they are NOT markers — a long in-character reply weighing options
+# must never trip on phrasing alone.
 _REASONING_MARKERS = (
     re.compile(r"(?i)\bthe user\b"),
-    re.compile(r"(?i)\blet me (?:think|draft|try|re-?read|reconsider|work through|settle|look)"),
+    re.compile(r"(?i)\blet me (?:draft|re-?read|reconsider|work through)"),
     re.compile(r"(?i)\b(?:in|out of) character\b"),
     re.compile(r"(?i)\b(?:format contract|system prompt|scene mode|the instructions say)\b"),
     re.compile(r"(?i)\boption \d\b"),
-    re.compile(r"(?i)\b(?:final answer|overthinking this|going back and forth)\b"),
 )
 # Numbered analysis steps ("1. How does she feel about...") — one category, and only
 # when there are several lines of them: a real reply may contain a short numbered list.
 _NUMBERED_LINE_RE = re.compile(r"(?m)^\s*\d+\.\s")
-_REASONING_LEAK_MIN_CHARS = 2000   # far above any real texting-register reply
-_REASONING_LEAK_MIN_MARKERS = 3
+# Tunable without a redeploy: when the guard misfires or misses in production, the
+# remedies are raising/lowering these floors — REASONING_LEAK_GUARD=0 is the last
+# resort, not the only lever.
+_REASONING_LEAK_MIN_CHARS = _env_int("REASONING_LEAK_MIN_CHARS", "2000")
+_REASONING_LEAK_MIN_MARKERS = _env_int("REASONING_LEAK_MIN_MARKERS", "3")
 
 
 def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
@@ -5228,9 +5233,12 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     A conjunction of independent signals, so a false positive needs all of them at
     once: extreme length (real replies are texting-register, a few hundred chars;
     the floor sits above even long scene-mode turns) AND several distinct marker
-    categories. The character's own name counts as one category — a first-person
+    categories. The character's FIRST name counts as one category — a first-person
     persona almost never writes its own name, while leaked deliberation about the
-    character is saturated with it.
+    character is saturated with it. First token only, because the card `name`
+    field is the full name ("Emily Harper", "Bonnie (Libertarian)") and a leaked
+    deliberation writes "Emily", never "Emily Harper" — matching the full string
+    would leave this category inert on most of the fleet.
 
     Never salvages: the real reply usually IS in there at the end, but there is no
     reliable boundary, and a wrong guess ships a fragment of monologue as her. The
@@ -5241,19 +5249,23 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     categories = sum(1 for rx in _REASONING_MARKERS if rx.search(text))
     if len(_NUMBERED_LINE_RE.findall(text)) >= 3:
         categories += 1
-    if name and len(re.findall(rf"(?i)\b{re.escape(name)}\b", text)) >= 3:
+    first = name.split()[0] if name.split() else ""
+    if first and len(re.findall(rf"(?i)\b{re.escape(first)}\b", text)) >= 3:
         categories += 1
     return categories >= _REASONING_LEAK_MIN_MARKERS
 
 
 def call_nanogpt(messages: list, model: str = None, fallback: str = None,
-                 user_facing: bool = False) -> str:
+                 leak_guard: bool = False) -> str:
     """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors.
 
-    user_facing: the completion is reply text headed for a chat, so the
-    reasoning-leak guard applies. Analysis/extraction callers leave it off — the
-    guard must never judge their JSON (same isolation the directive-leak guard
-    keeps by living in generate_reply)."""
+    leak_guard: the completion is a persona reply headed for a chat, so the
+    reasoning-leak guard applies. Direct callers (analysis/summary/extraction)
+    leave it off, so their JSON is structurally outside the guard. The selfie/meme
+    caption helpers do pass through it via generate_reply — their outputs sit far
+    below the length floor, so the guard is inert there, but they are inside it.
+    generate_reply's document-analysis callers opt out explicitly: a card review
+    legitimately runs long and discusses prompts and characters."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
         models.append(fallback)
@@ -5279,15 +5291,22 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None,
                 reject = None
                 if not result.strip():
                     reject = "empty"
-                elif user_facing and REASONING_LEAK_GUARD and \
+                elif leak_guard and REASONING_LEAK_GUARD and \
                         _looks_like_reasoning_leak(result, NAME):
                     # Loud on purpose, like the directive-leak guard: re-rolling hides
                     # the symptom, and the cause is a model fault worth watching.
                     log.warning("[reasoning-leak] %s returned its deliberation as the "
                                 "reply (%d chars); refusing to deliver. head: %r",
                                 m, len(result), result[:120])
+                    # Own counter so /errors can tell "guard fired" from "API flaked";
+                    # the shared "api" count below still records the wasted call.
+                    _count_error("reasoning_leak")
                     reject = "reasoning-shaped"
                 if reject:
+                    # A rejected completion still cost real tokens — up to a full
+                    # thinking-budget's worth for a leak — so it must reach the
+                    # usage stats even though it never reaches the user.
+                    _track_llm_usage(messages, result)
                     _count_error("api")
                     last_err = last_err or RuntimeError(f"{reject} completion")
                     if attempt < _CHAT_RETRIES - 1:
@@ -5326,16 +5345,18 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None,
 
 _replies_in_flight = 0  # gates optional side calls (auto-react) off active replies
 
-async def generate_reply(messages: list, model: str = None, fallback: str = None) -> str:
+async def generate_reply(messages: list, model: str = None, fallback: str = None,
+                         leak_guard: bool = True) -> str:
     global _replies_in_flight
     loop = asyncio.get_running_loop()
     _replies_in_flight += 1
     try:
-        # Final True = user_facing (run_in_executor is positional-only): every reply
-        # headed for a chat gets the reasoning-leak guard; direct call_nanogpt
-        # callers (analysis/extraction JSON) stay outside it.
+        # leak_guard passes through positionally (run_in_executor takes no kwargs):
+        # persona replies get the reasoning-leak guard by default; document-analysis
+        # callers opt out, and direct call_nanogpt callers (analysis/extraction
+        # JSON) were never inside it.
         out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model,
-                                         fallback, True)
+                                         fallback, leak_guard)
     finally:
         _replies_in_flight -= 1
     # Directive-leak guard sits HERE, not in extract_tags (where v2026-07-29.1 first put
@@ -5370,10 +5391,11 @@ async def _keep_typing(bot, chat_id: int):
 
 
 async def reply_with_typing(context, chat_id: int, messages: list,
-                            model: str = None, fallback: str = None) -> str:
+                            model: str = None, fallback: str = None,
+                            leak_guard: bool = True) -> str:
     typing = asyncio.create_task(_keep_typing(context.bot, chat_id))
     try:
-        return await generate_reply(messages, model, fallback)
+        return await generate_reply(messages, model, fallback, leak_guard=leak_guard)
     finally:
         typing.cancel()
 
@@ -9522,7 +9544,10 @@ async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
         user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
         await ensure_weather()
         messages = await assemble_messages_async(chat_id, user_prompt)
-        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        # leak_guard off: a document response legitimately runs long and analytical,
+        # and DOCUMENT_MODEL has no fallback — a guard trip here would be a hard error.
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                              leak_guard=False)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -9657,7 +9682,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await ensure_weather()
                 messages = await assemble_messages_async(chat_id, user_prompt)
-                ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+                # leak_guard off: see the image-PDF branch.
+                ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                                      leak_guard=False)
                 ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                                  model=DOCUMENT_MODEL)
                 await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -9712,7 +9739,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await ensure_weather()
         messages = await assemble_messages_async(chat_id, user_prompt)
-        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        # leak_guard off: the card-review prompt above ASKS for a long critique that
+        # discusses prompts and characters — review proved a normal card review trips
+        # every meta-reasoning marker the guard looks for.
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                              leak_guard=False)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)

@@ -369,8 +369,21 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 4** (2026-07-27, 2026-07-28, 2026-07-29 ×2) — *promoted from the Minor log on the
-third occurrence, as that entry said it should be.*
+**seen: 6** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2) — *promoted from the
+Minor log on the third occurrence, as that entry said it should be.*
+
+**Fifth and sixth (2026-08-03), both in one release, both in *authored checks* rather
+than run commands — the new shape.** Writing the reasoning-leak guard I produced (a) a
+must-NOT-fire test fixture containing none of the signals it claimed were survivable, so
+it re-tested the length floor and could not fail for the reason a false positive occurs,
+and (b) an eval that counted `model=DOCUMENT_MODEL,$` sites against `leak_guard=False`
+opt-outs — deleting an opt-out collapsed the call to one line, dropping **both** counts,
+so the check passed on the exact regression it pins. The break-test caught (b); adversarial
+review caught (a). **The earlier four were commands run against the wrong tree or swallowed
+by a pipeline; these two were checks whose logic was structurally incapable of going red.**
+Ask of any check you write, not just any check you run: *what single edit should turn this
+red, and have I made that edit and watched it?* A ratio or a paired count is the hazard
+shape — if the numerator and denominator move together, the check is decorative.
 Three times a check was run against the wrong working directory, because this shell
 persists cwd across calls and an earlier `cd` had moved it: `find .env.example` read as
 repo-root when cwd was `telegram-companion-bot/`; `sed -n fleet-status.sh` failed on a file
@@ -617,6 +630,13 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-03 — Keyed a per-character signal on `NAME` (the card's `name` field) after checking it
+  against priya only, where it happens to be a bare first name. Five of seven instances carry full
+  names ("Emily Harper"), and bonnie's `Bonnie (Libertarian)` couldn't match at all — the signal
+  was silently inert on most of the fleet while all tests passed. → **when a rule reads a
+  per-instance config value, enumerate that value across all seven instances before trusting its
+  shape.** One `python3 -c` loop over the seven cards would have shown it; the tests only ever
+  passed `"Priya"`.
 - 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
   then reported the Portland→Olympia relocation shipped. Every instance that already had the file
   silently no-op'd, and Emily kept saying Burnside for a further two rounds. → **a placement block

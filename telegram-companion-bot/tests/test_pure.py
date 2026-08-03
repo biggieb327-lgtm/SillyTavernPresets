@@ -6765,10 +6765,34 @@ Done. Going with that"""
         assert not bot._looks_like_reasoning_leak("word " * 1000, "Priya")
 
     def test_two_categories_are_not_enough(self):
-        """Name saturation plus one phrase = 2 categories; the floor is 3."""
+        """Name saturation plus one marker = 2 categories; the floor is 3."""
         txt = ("Priya thought about it. Priya waited. Priya decided. "
-               "let me think. " + "filler " * 400)
+               "option 1 it is. " + "filler " * 400)
         assert not bot._looks_like_reasoning_leak(txt, "Priya")
+
+    def test_ordinary_deliberative_texting_passes(self):
+        """Review finding: 'let me think', 'overthinking this', 'going back and
+        forth', 'option 1/2' are ordinary texting vocabulary on this fleet. A long
+        in-character reply weighing options must never trip on phrasing alone —
+        only 'option N' is a marker, and one category is far under the floor."""
+        txt = ("ok so i keep going back and forth on the apartment thing. "
+               "option 1 is the studio, option 2 is splitting with asha. "
+               "let me think about what actually bothers me here. honestly i'm "
+               "overthinking this and i know it. " + "more rambling. " * 160)
+        assert len(txt) >= bot._REASONING_LEAK_MIN_CHARS
+        assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
+
+    def test_first_name_matches_full_card_names(self):
+        """Review finding: NAME is the card's full name — 'Emily Harper',
+        'Bonnie (Libertarian)' — but leaked deliberation writes 'Emily', 'Bonnie'.
+        The name category must key on the first token, and the parenthesized
+        bonnie name must not break the pattern. Proven by contrast: the same text
+        is 3 categories with the name mentions and 2 without."""
+        base = ("the user seems tired. let me draft a reply. " + "filler " * 400)
+        for full, first in (("Emily Harper", "Emily"), ("Bonnie (Libertarian)", "Bonnie")):
+            with_name = base + f" {first} would wait. {first} is dry. {first} again."
+            assert bot._looks_like_reasoning_leak(with_name, full)
+            assert not bot._looks_like_reasoning_leak(base, full)
 
     # -- wiring: rejection inside call_nanogpt, exactly like an empty completion --
 
@@ -6786,7 +6810,7 @@ Done. Going with that"""
     def test_leak_rerolls_then_falls_back(self, monkeypatch):
         calls = self._patch_calls(monkeypatch, [self.LEAK, self.LEAK, "hey. come here."])
         out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
-                               model="thinker", fallback="plain", user_facing=True)
+                               model="thinker", fallback="plain", leak_guard=True)
         assert out == "hey. come here."
         assert calls == ["thinker", "thinker", "plain"]
 
@@ -6796,26 +6820,44 @@ Done. Going with that"""
         self._patch_calls(monkeypatch, [self.LEAK] * 4)
         with pytest.raises(RuntimeError):
             bot.call_nanogpt([{"role": "user", "content": "hi"}],
-                             model="thinker", fallback="plain", user_facing=True)
+                             model="thinker", fallback="plain", leak_guard=True)
 
     def test_kill_switch_delivers_verbatim(self, monkeypatch):
         monkeypatch.setattr(bot, "REASONING_LEAK_GUARD", False)
         self._patch_calls(monkeypatch, [self.LEAK])
         out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
-                               model="thinker", user_facing=True)
+                               model="thinker", leak_guard=True)
         assert out == self.LEAK
 
     def test_analysis_paths_are_outside_the_guard(self, monkeypatch):
-        """user_facing defaults False: the analysis/summary JSON callers can never
+        """leak_guard defaults False: the analysis/summary JSON callers can never
         have a completion eaten by this guard, whatever it looks like."""
         self._patch_calls(monkeypatch, [self.LEAK])
         out = bot.call_nanogpt([{"role": "user", "content": "hi"}], model="thinker")
         assert out == self.LEAK
 
     def test_generate_reply_is_guarded_end_to_end(self, monkeypatch):
-        """The wiring, not the detector: generate_reply must pass user_facing, so a
+        """The wiring, not the detector: generate_reply must pass leak_guard, so a
         leak on the first attempt re-rolls and the user gets the second reply."""
         self._patch_calls(monkeypatch, [self.LEAK, "fine. stay."])
         out = asyncio.run(bot.generate_reply(
             [{"role": "user", "content": "hi"}], model="thinker"))
         assert out == "fine. stay."
+
+    def test_document_analysis_opt_out_delivers_meta_replies(self, monkeypatch):
+        """Review finding: a card review — which handle_document explicitly asks
+        for — legitimately runs long and discusses prompts and characters, and
+        DOCUMENT_MODEL has no fallback, so a guard trip there is a hard user-visible
+        error. Those call sites pass leak_guard=False; this proves the opt-out
+        delivers a reply the detector WOULD reject (so the exemption, not the
+        detector, is what this test can fail on)."""
+        review = ("honest take on this card: the system prompt is doing too much. "
+                  "1. the opening is generic\n2. the user is over-specified\n"
+                  "3. the voice section contradicts itself\n"
+                  "it reads out of character for what you say you want. "
+                  + "more detail. " * 200)
+        assert bot._looks_like_reasoning_leak(review, "Priya")
+        self._patch_calls(monkeypatch, [review])
+        out = asyncio.run(bot.generate_reply(
+            [{"role": "user", "content": "card"}], model="doc", leak_guard=False))
+        assert out == review

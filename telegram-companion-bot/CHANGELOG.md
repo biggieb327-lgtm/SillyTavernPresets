@@ -31,30 +31,51 @@ checks for exactly one signature:
 name)` detects a reasoning-shaped completion by a conjunction of independent signals —
 length ≥ 2000 chars (far above any real texting-register reply; a reply needing
 Telegram chunking at all is already abnormal) AND ≥ 3 distinct meta-reasoning marker
-categories ("the user", "let me draft/think/…", "in/out of character", prompt
+categories ("the user", "let me draft/work through/…", "in/out of character", prompt
 vocabulary like "format contract"/"scene mode", "option N", ≥3 numbered analysis
-lines, and the character's own name ≥3 times — a first-person persona almost never
-writes its own name; leaked deliberation is saturated with it). A tripped completion
-is treated exactly like an empty one in `call_nanogpt`: retry with backoff, then fall
-through to the non-thinking `FALLBACK_MODEL`. The tempting alternative — extracting
-the real reply from the tail of the leak — is deliberately rejected: there is no
-reliable boundary between deliberation and answer, and a wrong guess ships a fragment
-of monologue as her.
+lines, and the character's **first** name ≥3 times — a first-person persona almost
+never writes its own name; leaked deliberation is saturated with it. First token
+because the card `name` field is the full name — "Emily Harper", "Bonnie
+(Libertarian)" — and deliberation writes "Emily", never "Emily Harper"; the
+pre-review draft matched the full string, which left this category inert on five of
+seven instances). Both floors are env-tunable (`REASONING_LEAK_MIN_CHARS`,
+`REASONING_LEAK_MIN_MARKERS`) so a production misfire is fixed by raising a floor,
+not by turning the guard off. A tripped completion is treated exactly like an empty
+one in `call_nanogpt`: retry with backoff, then fall through to the non-thinking
+`FALLBACK_MODEL` where one is configured — the main chat path passes it; the
+selfie/meme caption helpers have none and degrade to no caption, as they already did
+for empty completions. The tempting alternative — extracting the real reply from the
+tail of the leak — is deliberately rejected: there is no reliable boundary between
+deliberation and answer, and a wrong guess ships a fragment of monologue as her.
 
-**Scope: user-facing replies only.** `call_nanogpt` grew a `user_facing` flag that
-only `generate_reply` sets, so all twelve `reply_with_typing` sites plus the
-selfie/meme caption helpers are guarded, while analysis/summary/extraction JSON
-callers are structurally outside the guard (same isolation the directive-leak guard
-keeps). Known deliberate exception: `recap_cmd` sends model output directly, but a
-recap is owner-invoked and legitimately long, third-person, and name-heavy — the
-guard would false-positive there, so it stays out.
+**What is deliberately NOT a marker.** Adversarial review of the first draft proved
+"let me think", "overthinking this", and "going back and forth" are ordinary texting
+vocabulary on this fleet — a long in-character reply weighing life options tripped
+the draft detector on phrasing alone. Those were removed; the shipped marker list is
+vocabulary about *the reply as an artifact*, not deliberation-flavored chat.
+
+**Scope: persona replies only.** `call_nanogpt` grew a `leak_guard` flag (default
+off) that `generate_reply` and `reply_with_typing` pass through (default on), so the
+persona reply sites and caption helpers are guarded while analysis/summary/extraction
+JSON callers are structurally outside (same isolation the directive-leak guard
+keeps). Two deliberate exemptions: the three `DOCUMENT_MODEL` sites in the document
+handlers pass `leak_guard=False`, because the card-review branch *asks* for a long
+critique that discusses prompts and characters — review showed a normal card review
+trips every marker the guard looks for, and with no fallback model the trip would
+surface as "❌ something broke" — and `recap_cmd`, which is owner-invoked and
+legitimately long, third-person, and name-heavy.
 
 Every refusal logs `[reasoning-leak]` at WARNING with the model, length, and head of
-the rejected text — stripping silently would turn a visible model fault into an
-undiagnosable one, and if glm-5.1:thinking does this weekly, the log is how the
-model-choice conversation starts. Kill switch `REASONING_LEAK_GUARD=0` (default ON,
-owner policy 2026-07-18). Pinned by `TestReasoningLeakGuard` (the real leaked
-transcript is the fixture) and the `reasoning-leak-guard` eval.
+the rejected text, and counts under its own `reasoning_leak` key in `/errors` (not
+just the shared `api` count, so "guard fired" is distinguishable from "API flaked") —
+stripping silently would turn a visible model fault into an undiagnosable one, and if
+glm-5.1:thinking does this weekly, that counter is how the model-choice conversation
+starts. Rejected completions still feed `_track_llm_usage`, so a 12k-char burned
+thinking budget shows up in `/audit`'s token figures instead of vanishing. Kill
+switch `REASONING_LEAK_GUARD=0` (default ON, owner policy 2026-07-18). Pinned by
+`TestReasoningLeakGuard` (15 tests; the real leaked transcript is the fixture, and
+the false-positive shapes review found are must-pass fixtures) and the
+`reasoning-leak-guard` eval.
 
 ## v2026-08-02.15 — /features told you less about features than /audit did
 
