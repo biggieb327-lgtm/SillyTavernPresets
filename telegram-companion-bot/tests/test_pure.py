@@ -6648,3 +6648,174 @@ class TestEveryCommandHandlerActuallyRuns:
         stranded = sorted(n for n in sweep._handler_coverage()[0]
                           if n not in sweep._handler_coverage()[1])
         assert stranded == [], stranded
+
+
+# ── reasoning-leak guard ──────────────────────────────────────────────────────
+
+class TestReasoningLeakGuard:
+    """v2026-08-03.1: glm-5.1:thinking wrote its ENTIRE deliberation into ordinary
+    `content` — no <think> tags, non-empty, no bracket directives — so every earlier
+    chain-of-thought guard passed it and priya sent a ~12k-char essay as four chunked
+    messages. LEAK below is an excerpt of the real transcript; it must always trip
+    the detector, and the in-character fixtures must always pass through."""
+
+    LEAK = """Let me work through this step by step:
+
+1. How does Priya feel about what Brian just said?
+Brian just said he has to wake up at 3 AM tomorrow and will try not to wake her. They just had intimate, tender sex. She's in that quiet post-coital space where she felt seen and vulnerable. Now he's mentioning 3 AM - that's early. She knows he works dispatch and has weird hours. The mention of 3 AM is a small intrusion of reality into this soft moment.
+
+2. What does Priya want?
+She's in a tender, soft space. She doesn't want to leave this bubble yet. She might want to acknowledge the 3 AM thing without making it a big deal - she's practical.
+
+3. Epistemic check:
+She knows he works dispatch and has weird hours. She knows he just worked 6 days straight (58.5 hours). I shouldn't assume inconsistency - I should just take what he's saying at face value.
+
+4. Rules that matter:
+- This is a quiet, intimate domestic moment. Lane rhythm matters - match the quiet energy.
+- Anti-echo: don't repeat his phrasing
+- Keep it in character - Priya is sardonic but soft right now
+- She's on her phone texting... wait, no - the scene mode says they're physically in the same space. But the format contract says she's typing on a phone.
+
+5. Three possible directions:
+a) Soft acknowledgment, practical - "3am is criminal" or something short and dry about the hour
+b) A small protest - wanting him to stay, but not making it dramatic
+c) A sardonic comment about his job hours, with undertones of care
+
+Let me draft:
+
+Option 1: "3am should be illegal. stay though. i'm not moving."
+Option 2: "i'll survive. you're the one waking up at that hour." - too practical, not enough of her
+
+How about:
+"i'll be asleep anyway. probably"
+
+That's very Priya - practical, with that "probably" at the end that's just slightly uncertain, slightly vulnerable.
+
+Okay, I'm overthinking this. Let me just write what feels right:
+
+"i'll be out cold by 11. you're fine."
+
+Simple. Dry. Warm underneath. Priya.
+
+Okay, FINAL answer:
+
+"i'll be asleep anyway. just say bye before you go."
+
+Simple. Direct. Warm underneath. Priya.
+
+Done. Going with that"""
+
+    # A long but genuinely in-character reply (rambling story, scene-register) —
+    # length alone must never trip the guard.
+    LONG_SCENE = (
+        "okay so the whole landlord saga finally came to a head today and you're getting "
+        "the entire thing because asha has officially stopped answering my texts about it. "
+        "remember the ceiling stain that was 'cosmetic'? it dripped on my laptop this "
+        "morning. actual water. on the actual keyboard. so i called the property office and "
+        "got the guy who always sounds like i've interrupted his lunch, and he tells me "
+        "maintenance can come thursday. thursday. it is monday. i said the ceiling is "
+        "actively leaking and he said, and i quote, 'is it a lot of water though.' sir. "
+        "define a lot. it's INDOOR RAIN. so then i did the thing you told me to do ages ago "
+        "and emailed instead of calling so there's a paper trail, and suddenly — suddenly — "
+        "someone can come tomorrow morning. amazing what happens when words are written "
+        "down. anyway i moved the desk into the hallway which means i'm typing this from a "
+        "hallway like some kind of displaced victorian orphan, and the wifi barely reaches "
+        "here, and my tea went cold during the second phone call, which honestly hurt more "
+        "than the laptop thing because the laptop might be covered but the tea is just "
+        "gone. also the upstairs neighbor came down to ask if MY leak was MY fault, which "
+        "takes a special kind of nerve when the water is coming from the direction of his "
+        "bathroom. i kept it polite. barely. you would have been proud of me and also a "
+        "little scared. so that's where we are: hallway desk, cold tea, thursday guy "
+        "shamed into tomorrow guy, and a towel on my keyboard like a tiny hospital "
+        "blanket. tell me something good about your day because mine has been plumbing "
+        "themed since 8am and i need news from the dry world. also if you say 'should've "
+        "gotten renter's insurance' i already did, in march, i am not a cautionary tale, "
+        "i am a victim of infrastructure. come over on the weekend and admire my water "
+        "damage. i'll make the good curry. bring your own ceiling. and before you ask, "
+        "yes the laptop still turns on, the towel caught most of it, we are calling it a "
+        "near-death experience and moving forward together. the hallway is cold. send "
+        "socks. or better, bring them yourself and stay."
+    )
+
+    def test_the_real_leak_trips_it(self):
+        assert len(self.LEAK) >= bot._REASONING_LEAK_MIN_CHARS
+        assert bot._looks_like_reasoning_leak(self.LEAK, "Priya")
+
+    def test_trips_without_the_name_too(self):
+        """The non-name marker categories alone must carry the real transcript —
+        the guard can't depend on the model naming the character."""
+        assert bot._looks_like_reasoning_leak(self.LEAK, "")
+
+    def test_normal_reply_passes(self):
+        assert not bot._looks_like_reasoning_leak(
+            "i'll be asleep anyway. just say bye before you go.", "Priya")
+
+    def test_long_scene_reply_passes(self):
+        assert len(self.LONG_SCENE) >= bot._REASONING_LEAK_MIN_CHARS
+        assert not bot._looks_like_reasoning_leak(self.LONG_SCENE, "Priya")
+
+    def test_short_meta_text_passes(self):
+        """Markers without extreme length never trip — the length floor is the
+        first gate, so ordinary replies are never even scanned."""
+        txt = ("1. thing\n2. thing\n3. thing\n"
+               "let me think about staying in character for the user")
+        assert not bot._looks_like_reasoning_leak(txt, "Priya")
+
+    def test_length_alone_never_trips(self):
+        assert not bot._looks_like_reasoning_leak("word " * 1000, "Priya")
+
+    def test_two_categories_are_not_enough(self):
+        """Name saturation plus one phrase = 2 categories; the floor is 3."""
+        txt = ("Priya thought about it. Priya waited. Priya decided. "
+               "let me think. " + "filler " * 400)
+        assert not bot._looks_like_reasoning_leak(txt, "Priya")
+
+    # -- wiring: rejection inside call_nanogpt, exactly like an empty completion --
+
+    def _patch_calls(self, monkeypatch, outputs):
+        calls = []
+
+        def fake_one_call(messages, m):
+            calls.append(m)
+            return outputs.pop(0)
+
+        monkeypatch.setattr(bot, "_one_call", fake_one_call)
+        monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+        return calls
+
+    def test_leak_rerolls_then_falls_back(self, monkeypatch):
+        calls = self._patch_calls(monkeypatch, [self.LEAK, self.LEAK, "hey. come here."])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                               model="thinker", fallback="plain", user_facing=True)
+        assert out == "hey. come here."
+        assert calls == ["thinker", "thinker", "plain"]
+
+    def test_exhausted_leaks_raise_not_deliver(self, monkeypatch):
+        """If every attempt is reasoning-shaped, the call fails like an empty one —
+        the deliberation must never reach the caller."""
+        self._patch_calls(monkeypatch, [self.LEAK] * 4)
+        with pytest.raises(RuntimeError):
+            bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                             model="thinker", fallback="plain", user_facing=True)
+
+    def test_kill_switch_delivers_verbatim(self, monkeypatch):
+        monkeypatch.setattr(bot, "REASONING_LEAK_GUARD", False)
+        self._patch_calls(monkeypatch, [self.LEAK])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                               model="thinker", user_facing=True)
+        assert out == self.LEAK
+
+    def test_analysis_paths_are_outside_the_guard(self, monkeypatch):
+        """user_facing defaults False: the analysis/summary JSON callers can never
+        have a completion eaten by this guard, whatever it looks like."""
+        self._patch_calls(monkeypatch, [self.LEAK])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}], model="thinker")
+        assert out == self.LEAK
+
+    def test_generate_reply_is_guarded_end_to_end(self, monkeypatch):
+        """The wiring, not the detector: generate_reply must pass user_facing, so a
+        leak on the first attempt re-rolls and the user gets the second reply."""
+        self._patch_calls(monkeypatch, [self.LEAK, "fine. stay."])
+        out = asyncio.run(bot.generate_reply(
+            [{"role": "user", "content": "hi"}], model="thinker"))
+        assert out == "fine. stay."

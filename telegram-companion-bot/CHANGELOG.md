@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-03.1 — Priya sent her whole deliberation as the reply, in four messages
+
+**Root cause: a thinking model can emit its ENTIRE chain-of-thought as ordinary
+`content`, and every existing chain-of-thought guard keys on a signature that variant
+doesn't have.** On 2026-08-03 priya (`zai-org/glm-5.1:thinking`) answered a quiet
+in-scene message with ~12k chars of her own deliberation — "Let me work through this
+step by step: 1. How does Priya feel about what Brian just said?... Let me draft...
+Option 1:..." — reasoning openly about her format contract, scene mode, and drafted
+replies, with the real reply buried at the end. It reached Telegram as four chunked
+messages (`send_bubbles` splits at 4096 chars and nothing upstream objected).
+
+This is the third variant of the chain-of-thought leak class, and each earlier guard
+checks for exactly one signature:
+- v2026-07-20.1 blocks `reasoning_content` delivered when `content` is **empty** —
+  here `content` was non-empty, so that path never fired (`/errors` showed no
+  `[model] … reasoning but no content` warning, which is what confirmed the variant).
+- `_strip_thinking` removes `<think>…</think>` — there were no tags.
+- v2026-07-29.1's `_strip_directive_lines` drops ALL-CAPS bracket lines — the leak
+  was plain prose.
+
+**Fix: refuse and re-roll, never salvage.** New `_looks_like_reasoning_leak(text,
+name)` detects a reasoning-shaped completion by a conjunction of independent signals —
+length ≥ 2000 chars (far above any real texting-register reply; a reply needing
+Telegram chunking at all is already abnormal) AND ≥ 3 distinct meta-reasoning marker
+categories ("the user", "let me draft/think/…", "in/out of character", prompt
+vocabulary like "format contract"/"scene mode", "option N", ≥3 numbered analysis
+lines, and the character's own name ≥3 times — a first-person persona almost never
+writes its own name; leaked deliberation is saturated with it). A tripped completion
+is treated exactly like an empty one in `call_nanogpt`: retry with backoff, then fall
+through to the non-thinking `FALLBACK_MODEL`. The tempting alternative — extracting
+the real reply from the tail of the leak — is deliberately rejected: there is no
+reliable boundary between deliberation and answer, and a wrong guess ships a fragment
+of monologue as her.
+
+**Scope: user-facing replies only.** `call_nanogpt` grew a `user_facing` flag that
+only `generate_reply` sets, so all twelve `reply_with_typing` sites plus the
+selfie/meme caption helpers are guarded, while analysis/summary/extraction JSON
+callers are structurally outside the guard (same isolation the directive-leak guard
+keeps). Known deliberate exception: `recap_cmd` sends model output directly, but a
+recap is owner-invoked and legitimately long, third-person, and name-heavy — the
+guard would false-positive there, so it stays out.
+
+Every refusal logs `[reasoning-leak]` at WARNING with the model, length, and head of
+the rejected text — stripping silently would turn a visible model fault into an
+undiagnosable one, and if glm-5.1:thinking does this weekly, the log is how the
+model-choice conversation starts. Kill switch `REASONING_LEAK_GUARD=0` (default ON,
+owner policy 2026-07-18). Pinned by `TestReasoningLeakGuard` (the real leaked
+transcript is the fixture) and the `reasoning-leak-guard` eval.
+
 ## v2026-08-02.15 — /features told you less about features than /audit did
 
 **Root cause: the detail suffix was written into `_features_summary()` — the `/audit`

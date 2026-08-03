@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-02.15"
+BOT_VERSION = "2026-08-03.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -335,6 +335,13 @@ STEP_INTENT = os.getenv("STEP_INTENT", "1").lower() not in ("0", "false", "no", 
 # switch (owner policy 2026-07-18: unset = active, 0/off disables).
 DIRECTIVE_LEAK_GUARD = os.getenv(
     "DIRECTIVE_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
+# Reasoning-leak guard (v2026-08-03.1). Third variant of the chain-of-thought leak:
+# a thinking model can emit its ENTIRE deliberation as ordinary `content` — no
+# <think> tags for _strip_thinking, no empty-content-plus-reasoning_content for the
+# v2026-07-20.1 path, no bracket syntax for _strip_directive_lines. Default ON with
+# a kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
+REASONING_LEAK_GUARD = os.getenv(
+    "REASONING_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -5187,8 +5194,66 @@ _CHAT_RETRIES = 2        # attempts per model before moving to the next
 _RETRY_BACKOFF = (2, 4)  # seconds to wait between retries
 _CALL_BUDGET = 150       # max wall-clock seconds on the primary before forcing fallback
 
-def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
-    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
+# Reasoning-leak detection (v2026-08-03.1). Each entry is one marker category of
+# meta-reasoning vocabulary — words a model uses deliberating ABOUT a reply and no
+# character on this fleet uses IN one. A category counts once no matter how often it
+# matches, so tripping the guard takes several independent kinds of evidence, never
+# one phrase repeated.
+_REASONING_MARKERS = (
+    re.compile(r"(?i)\bthe user\b"),
+    re.compile(r"(?i)\blet me (?:think|draft|try|re-?read|reconsider|work through|settle|look)"),
+    re.compile(r"(?i)\b(?:in|out of) character\b"),
+    re.compile(r"(?i)\b(?:format contract|system prompt|scene mode|the instructions say)\b"),
+    re.compile(r"(?i)\boption \d\b"),
+    re.compile(r"(?i)\b(?:final answer|overthinking this|going back and forth)\b"),
+)
+# Numbered analysis steps ("1. How does she feel about...") — one category, and only
+# when there are several lines of them: a real reply may contain a short numbered list.
+_NUMBERED_LINE_RE = re.compile(r"(?m)^\s*\d+\.\s")
+_REASONING_LEAK_MIN_CHARS = 2000   # far above any real texting-register reply
+_REASONING_LEAK_MIN_MARKERS = 3
+
+
+def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
+    """True when a completion is the model's deliberation rather than a reply.
+
+    Root cause it exists for (priya, 2026-08-03): glm-5.1:thinking put its whole
+    chain-of-thought INTO `content` — ~12k chars of "1. How does Priya feel...
+    Let me draft... Option 1..." ending in the actual reply — and every existing
+    guard keyed on a signature this had none of: no <think> tags for
+    _strip_thinking, content non-empty so the v2026-07-20.1 empty-content path
+    never fired, no bracket directives for _strip_directive_lines. It went out as
+    four chunked Telegram messages.
+
+    A conjunction of independent signals, so a false positive needs all of them at
+    once: extreme length (real replies are texting-register, a few hundred chars;
+    the floor sits above even long scene-mode turns) AND several distinct marker
+    categories. The character's own name counts as one category — a first-person
+    persona almost never writes its own name, while leaked deliberation about the
+    character is saturated with it.
+
+    Never salvages: the real reply usually IS in there at the end, but there is no
+    reliable boundary, and a wrong guess ships a fragment of monologue as her. The
+    caller re-rolls instead — same policy as the empty-completion path.
+    """
+    if len(text) < _REASONING_LEAK_MIN_CHARS:
+        return False
+    categories = sum(1 for rx in _REASONING_MARKERS if rx.search(text))
+    if len(_NUMBERED_LINE_RE.findall(text)) >= 3:
+        categories += 1
+    if name and len(re.findall(rf"(?i)\b{re.escape(name)}\b", text)) >= 3:
+        categories += 1
+    return categories >= _REASONING_LEAK_MIN_MARKERS
+
+
+def call_nanogpt(messages: list, model: str = None, fallback: str = None,
+                 user_facing: bool = False) -> str:
+    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors.
+
+    user_facing: the completion is reply text headed for a chat, so the
+    reasoning-leak guard applies. Analysis/extraction callers leave it off — the
+    guard must never judge their JSON (same isolation the directive-leak guard
+    keeps by living in generate_reply)."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
         models.append(fallback)
@@ -5204,22 +5269,36 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 break
             try:
                 result = _one_call(messages, m)
+                # A completion can be unusable two ways, handled identically — refuse
+                # to deliver, retry, then fall through to the non-thinking fallback
+                # model. "empty": a reasoning model burned its token budget thinking
+                # and returned no content (we refuse to deliver raw reasoning_content,
+                # v2026-07-20.1). "reasoning-shaped": the model wrote its deliberation
+                # INTO content (priya, 2026-08-03) — never salvage the answer out of
+                # it, re-roll.
+                reject = None
                 if not result.strip():
-                    # Empty completion — e.g. a reasoning model burned its token
-                    # budget thinking and returned no content (we refuse to deliver
-                    # raw reasoning_content). Treat like a transient miss: retry, then
-                    # fall through to the non-thinking fallback model.
+                    reject = "empty"
+                elif user_facing and REASONING_LEAK_GUARD and \
+                        _looks_like_reasoning_leak(result, NAME):
+                    # Loud on purpose, like the directive-leak guard: re-rolling hides
+                    # the symptom, and the cause is a model fault worth watching.
+                    log.warning("[reasoning-leak] %s returned its deliberation as the "
+                                "reply (%d chars); refusing to deliver. head: %r",
+                                m, len(result), result[:120])
+                    reject = "reasoning-shaped"
+                if reject:
                     _count_error("api")
-                    last_err = last_err or RuntimeError("empty completion")
+                    last_err = last_err or RuntimeError(f"{reject} completion")
                     if attempt < _CHAT_RETRIES - 1:
                         wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
-                        log.warning("[model] %s returned empty content, retry %d/%d in %ds...",
-                                   m, attempt + 1, _CHAT_RETRIES - 1, wait)
+                        log.warning("[model] %s returned %s content, retry %d/%d in %ds...",
+                                   m, reject, attempt + 1, _CHAT_RETRIES - 1, wait)
                         time.sleep(wait)
                         continue
                     if i < len(models) - 1:
-                        log.warning("[model] %s empty after %d attempts; falling back to %s",
-                                   m, _CHAT_RETRIES, models[i + 1])
+                        log.warning("[model] %s %s after %d attempts; falling back to %s",
+                                   m, reject, _CHAT_RETRIES, models[i + 1])
                         _count_error("fallback")
                     break
                 _track_llm_usage(messages, result)
@@ -5252,7 +5331,11 @@ async def generate_reply(messages: list, model: str = None, fallback: str = None
     loop = asyncio.get_running_loop()
     _replies_in_flight += 1
     try:
-        out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
+        # Final True = user_facing (run_in_executor is positional-only): every reply
+        # headed for a chat gets the reasoning-leak guard; direct call_nanogpt
+        # callers (analysis/extraction JSON) stay outside it.
+        out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model,
+                                         fallback, True)
     finally:
         _replies_in_flight -= 1
     # Directive-leak guard sits HERE, not in extract_tags (where v2026-07-29.1 first put
