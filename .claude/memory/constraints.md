@@ -161,6 +161,14 @@ unambiguous marker (`$PREFIX` for Termux, `/etc/os-release` for a rootfs, `uname
 phone-vs-workstation); prose warnings are the fallback where no marker exists.
 This is the operator's half that the C1 entry says no hook can reach — but the *agent* can
 make the block self-defending, which is a mechanism, not a reminder.
+**Follow-on the same day, from the fix for this very entry:** the self-guarding block removed
+the bad alias with `sed -i ~/.bashrc` and then ran `claude --version` — which still hit the
+alias, because **editing an rc file does not change the shell already running.** Aliases,
+functions and exported vars live in the process; the file only seeds future shells. Any block
+that repairs shell config and then exercises the repaired command must `unalias`/`unset`/
+re-`export` in the same breath, or tell the operator to open a fresh shell. Verified with
+`type <cmd>`, which names an alias outright and is the one-line check worth handing over
+alongside the fix.
 
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
