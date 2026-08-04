@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.2"
+BOT_VERSION = "2026-08-04.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -781,6 +781,18 @@ _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
 
+# Offline life: a couple times a day, invent ONE concrete event in her own world (grounded
+# in schedule/people/projects/arc) so unprompted news feels like real news instead of
+# generic small talk. Concrete past-tense events only -- opposite of the introspective
+# nightly reflection. No embeddings; cheap chat model. (Reimplemented from b0eb485,
+# 2026-06-29, never merged.)
+LIFE_SIM_ENABLED = os.getenv("LIFE_SIM_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+LIFE_MODEL = os.getenv("LIFE_MODEL", MOOD_MODEL)
+LIFE_EVENTS_MAX = _env_int("LIFE_EVENTS_MAX", "8")
+LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
+LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
+_life_events_cache: dict = {"text": None, "ts": 0.0}
+
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
@@ -1366,6 +1378,81 @@ def _read_projects() -> str:
 
 def _read_life_arc() -> str:
     return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
+
+
+def _read_life_events() -> list[str]:
+    text = _read_life_file(LIFE_EVENTS_FILE, _life_events_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _append_life_event(line: str):
+    line = line.strip().strip('"').strip()
+    if not line:
+        return
+    existing = []
+    if LIFE_EVENTS_FILE.exists():
+        existing = [l for l in LIFE_EVENTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
+    existing.append(f"[{stamp}] {line}")
+    if len(existing) > LIFE_EVENTS_MAX:
+        existing = existing[-LIFE_EVENTS_MAX:]
+    LIFE_EVENTS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    _life_events_cache["text"] = None
+
+
+def _generate_life_event() -> str:
+    """Invent ONE concrete thing that happened in her own life, grounded in her routine/people."""
+    parts = []
+    sched = _read_schedule_today()
+    if sched:
+        parts.append(f"Her routine today:\n{sched}")
+    people = _read_people()
+    if people:
+        parts.append(f"People in her life:\n{people[:700]}")
+    projects = _read_projects()
+    if projects:
+        parts.append(f"What she's working on:\n{projects[:400]}")
+    arc = _read_life_arc()
+    if arc:
+        parts.append(f"Her life right now:\n{arc[:400]}")
+    recent = _read_life_events()
+    if recent:
+        parts.append("Recent events (do NOT repeat these or rehash the same beat):\n"
+                     + "\n".join(recent[-LIFE_EVENTS_MAX:]))
+    if not parts:
+        return ""
+    sys = (
+        f"Invent ONE small, concrete thing that just happened in {NAME}'s own life while she was "
+        f"off living it — an actual event involving the people, places, work, or activities in her "
+        f"world: something a teammate or coworker did, a bit of news, a small win or mishap, a "
+        f"moment at practice or on a shift. Past tense, third person, ONE specific sentence under "
+        f"25 words. It must be an EVENT in her own day — NOT a feeling, NOT reflection, NOT about "
+        f"her phone or who she's texting. Make it fit her routine and the real people named. Vary "
+        f"it from the recent events. Reply with just the sentence, or the word none."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": "\n\n".join(parts)}],
+            model=LIFE_MODEL,
+        ).strip()
+        if raw and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        log.warning("[life] generation failed: %s", type(e).__name__)
+    return ""
+
+
+async def update_life_event():
+    if not LIFE_SIM_ENABLED:
+        return
+    try:
+        line = await asyncio.to_thread(_generate_life_event)
+        if line:
+            await asyncio.to_thread(_append_life_event, line)
+            print(f"[life] event: {line}")
+    except Exception as e:
+        log.warning("[life] update failed: %s", type(e).__name__)
 
 
 def _read_memories() -> list[str]:
@@ -4689,6 +4776,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"Draw on this naturally in conversation — it's the texture of her life right now."
         )})
 
+    if LIFE_SIM_ENABLED:
+        life_events = _read_life_events()
+        if life_events:
+            messages.append({"role": "system", "content": (
+                f"# What's been happening in {NAME}'s life\n"
+                + "\n".join("- " + e for e in life_events[-3:])
+                + f"\nReal things that happened to her while she was off living her life. Hers to "
+                  f"bring up if it fits — her news, not a checklist, and don't recite them all."
+            )})
+
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
         messages.append(_sys_opt(
@@ -7821,6 +7918,31 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"😶 {NAME}'s mood\n\n{state}\nScore: {s:+.1f}  [{bar}]\nLast updated: {age_str}"
     )
+
+
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    items = _read_life_events()
+    if not items:
+        await update.message.reply_text(
+            "Nothing's happened yet — her life fills in over the day (or use /newsnow).")
+        return
+    await update.message.reply_text(
+        f"🌅 What's been happening in {NAME}'s life:\n" + "\n".join("• " + e for e in items))
+
+
+async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not LIFE_SIM_ENABLED:
+        await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
+        return
+    await update.message.reply_text("🤔 Seeing what she got up to...")
+    await update_life_event()
+    items = _read_life_events()
+    await update.message.reply_text(("• " + items[-1]) if items else
+                                    "Nothing came of it that time — try again.")
 
 
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11008,6 +11130,10 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
     unotes = _read_user_notes()
     if unotes:
         parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    life_events = _read_life_events()
+    if life_events:
+        parts.append("Recent things that happened in her own life she might want to share:\n"
+                     + "\n".join(life_events[-3:]))
     recent = conversation_history.get(chat_id, [])[-4:]
     if recent:
         snippet = " / ".join(
@@ -12828,6 +12954,11 @@ async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
     await update_garmin()
 
 
+async def life_event_job(context: ContextTypes.DEFAULT_TYPE):
+    if LIFE_SIM_ENABLED:
+        await update_life_event()
+
+
 def _health_nudge_ok(owner: int) -> bool:
     """The same proactive gate note_followup_job uses — quiet flag, away, quiet hours,
     per-chat quiet windows, then the shared nudge budget. A health check-in is a nudge
@@ -14247,6 +14378,8 @@ _BASE_COMMANDS = [
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
+    BotCommand("news", "See what's been happening in her life"),
+    BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -14512,6 +14645,8 @@ def main():
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
@@ -14639,6 +14774,19 @@ def main():
             wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)
             app.job_queue.run_daily(wardrobe_rotate_job, time=wardrobe_time)
             log.info("Daily wardrobe rotation scheduled %02d:00.", _wr_h)
+        if LIFE_SIM_ENABLED:
+            for _lt in LIFE_EVENT_TIMES.split(","):
+                _lt = _lt.strip()
+                if not _lt:
+                    continue
+                try:
+                    _lh, _lm = (int(x) for x in _lt.split(":"))
+                except Exception:
+                    log.warning("[config] bad LIFE_EVENT_TIMES entry %r — skipped", _lt)
+                    continue
+                _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
+                app.job_queue.run_daily(life_event_job, time=_ltime)
+            log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
         # Scheduled on CAPABILITY, not on the switch: every one of these jobs re-checks its
         # own gate when it fires, so registering them whenever the credentials exist makes
         # `/features health off` → `on` live. Gating registration on the switch made "off"

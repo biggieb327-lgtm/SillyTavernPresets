@@ -7490,3 +7490,176 @@ Done. Going with that"""
         out = asyncio.run(bot.generate_reply(
             [{"role": "user", "content": "card"}], model="doc", leak_guard=False))
         assert out == review
+
+
+# ── Offline life events (2026-08-04, reimplemented from b0eb485, never merged) ─────
+
+class TestLifeEvents:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+    def test_read_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot._read_life_events() == []
+
+    def test_append_then_read_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("A teammate brought donuts to the morning standup.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == 1
+        assert "A teammate brought donuts" in events[0]
+        assert events[0].startswith("[")  # date stamp prefix
+
+    def test_blank_line_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("   ")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert bot._read_life_events() == []
+
+    def test_caps_at_life_events_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(bot.LIFE_EVENTS_MAX + 5):
+            bot._append_life_event(f"event {i}")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == bot.LIFE_EVENTS_MAX
+        assert "event " + str(bot.LIFE_EVENTS_MAX + 4) in events[-1]  # newest kept
+
+    def test_generate_returns_the_model_line(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6, work after")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Her coworker spilled coffee on the new carpet.")
+        assert bot._generate_life_event() == "Her coworker spilled coffee on the new carpet."
+
+    def test_generate_none_response_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "none")
+        assert bot._generate_life_event() == ""
+
+    def test_generate_with_no_context_is_empty(self, monkeypatch):
+        # No schedule/people/projects/arc/recent events at all -- nothing to ground it in.
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "")
+        monkeypatch.setattr(bot, "_read_people", lambda: "")
+        monkeypatch.setattr(bot, "_read_projects", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_arc", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_events", lambda: [])
+        assert bot._generate_life_event() == ""
+
+    def test_generate_broken_classifier_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._generate_life_event() == ""
+
+    def test_update_life_event_appends_when_enabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: "Something happened today.")
+        asyncio.run(bot.update_life_event())
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert "Something happened today." in bot._read_life_events()[0]
+
+    def test_update_life_event_noop_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        called = []
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: called.append(1) or "x")
+        asyncio.run(bot.update_life_event())
+        assert called == []
+        assert bot._read_life_events() == []
+
+
+class TestAssembleMessagesLifeEvents:
+    def test_includes_life_events_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9601] = []
+        bot.user_names[9601] = "Tester"
+        msgs = bot.assemble_messages(9601, "hello")
+        assert any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_life_events_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9602] = []
+        bot.user_names[9602] = "Tester"
+        msgs = bot.assemble_messages(9602, "hello")
+        assert not any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+
+class TestNewsCommands:
+    """Direct-call tests, matching TestTheSecondBacklogDriven's contract: a command
+    either answers or is deliberately silent because a gate rejected the caller."""
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 434242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def test_news_cmd_answers_with_events(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot._append_life_event("A coworker got a promotion.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "A coworker got a promotion" in m.sent[0]
+
+    def test_news_cmd_empty_state_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "newsnow" in m.sent[0]
+
+    def test_news_cmd_is_gated(self):
+        u, m = _cmd_update(self._outsider())
+        bot.ALLOWED_USERS.add(999999999)  # non-empty ALLOWED_USERS makes _is_allowed strict
+        try:
+            asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        finally:
+            bot.ALLOWED_USERS.discard(999999999)
+        assert m.sent == []
+
+    def test_newsnow_cmd_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        async def _fake_update():
+            bot._append_life_event("A generated event.")
+            bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        monkeypatch.setattr(bot, "update_life_event", _fake_update)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert any("A generated event" in s for s in m.sent)
+
+    def test_newsnow_cmd_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()

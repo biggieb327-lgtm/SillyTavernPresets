@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.3 — Offline life events, reimplemented from the same abandoned branch
+
+**Root cause: a third feature from the same lost branch.** `b0eb485` (2026-06-29,
+`claude/push-to-repo-7i2f3c`, same branch as the safety detector and style mirroring)
+built offline life events and it never merged either.
+
+**What it does:** `LIFE_SIM_ENABLED` generates ONE concrete event in her own world a
+couple times a day (`LIFE_EVENT_TIMES`, default 13:00/20:30) — grounded in her
+schedule/people/projects/life-arc, a cheap chat model call, no embeddings. Stored in
+`life_events.txt` (capped at `LIFE_EVENTS_MAX`), injected into `assemble_messages` as
+"What's been happening in NAME's life" and into `_generate_proactive_hook`'s context,
+so unprompted check-ins carry real news instead of generic small talk. `/news` shows
+recent events, `/newsnow` forces one. All helper functions (`_read_schedule_today`,
+`_read_people`, `_read_projects`, `_read_life_arc`) already existed on `main` —
+this port reused them rather than rebuilding anything.
+
+**Verification:** `TestLifeEvents` + `TestAssembleMessagesLifeEvents` +
+`TestNewsCommands` (17 tests) — file round-trip, cap enforcement, "none"-response
+filtering, broken-classifier fail-open, the on/off wiring into `assemble_messages`,
+and both new `*_cmd` handlers driven directly (matching the delivery gate's
+call-not-mention requirement). Break-tested RED three ways (cap enforcement removed,
+`assemble_messages` wiring removed, "none" filter removed). `bash
+.claude/tools/verify.sh` green: 995 passed, 38 evals, 45/45 gate-corpus.
+
 ## v2026-08-04.2 — Adaptive texting-style mirroring, reimplemented from the same abandoned branch
 
 **Root cause: another feature built once and lost.** `a485b1b` (2026-06-30, same
