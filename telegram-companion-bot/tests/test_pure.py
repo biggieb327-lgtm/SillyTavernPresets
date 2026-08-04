@@ -6993,6 +6993,160 @@ class TestEveryCommandHandlerActuallyRuns:
         assert stranded == [], stranded
 
 
+# ── 2026-08-03: the second source-assertion backlog, driven ────────────────────
+# `sweep.py`'s one-hop widening (operational-log 2026-08-03) found 7 more helpers
+# this suite MENTIONED -- via inspect.getsource or a monkeypatch-to-a-no-op -- but
+# never actually CALLED: save_feature_prefs, save_state, save_wardrobe, send_gif,
+# send_meme, send_selfie, update_garmin. Same shape TestEveryCommandHandlerActuallyRuns
+# closed for the original 12: drive each one for real with fakes for its I/O.
+
+class TestTheSecondBacklogDriven:
+    def test_save_state_writes_synchronously_with_no_running_loop(self, tmp_path, monkeypatch):
+        # The no-loop branch (startup/shutdown): _MAIN_LOOP is None, so save_state
+        # must fall straight through to a direct, synchronous write.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(bot, "_MAIN_LOOP", None)
+        bot.save_state()
+        data = json.loads((tmp_path / "state.json").read_text())
+        assert "conversation_history" in data and "llm_stats" in data
+
+    def test_save_state_debounces_on_the_event_loop(self, tmp_path, monkeypatch):
+        # The on-loop branch: a second call while one is already pending must be a
+        # no-op (_save_scheduled), and the deferred write must land ~0.5s later.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+
+        async def _run():
+            bot.save_state()
+            first_scheduled = bot._save_scheduled
+            bot.save_state()  # must be a no-op: already scheduled
+            await asyncio.sleep(0.8)
+            return first_scheduled
+
+        first_scheduled = asyncio.run(_run())
+        assert first_scheduled is True
+        assert bot._save_scheduled is False
+        assert (tmp_path / "state.json").exists()
+
+    def test_save_wardrobe_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "wardrobe.json"
+        monkeypatch.setattr(bot, "WARDROBE_FILE", target)
+        bot.save_wardrobe()
+        assert json.loads(target.read_text()) == bot.wardrobe
+
+    def test_save_feature_prefs_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "feature_prefs.json"
+        monkeypatch.setattr(bot, "FEATURE_PREFS_FILE", target)
+        bot.save_feature_prefs()
+        assert json.loads(target.read_text()) == bot.feature_prefs
+
+    def test_send_gif_sends_and_records_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", "fake-key")
+        monkeypatch.setattr(bot, "_giphy_search",
+                            lambda query, level, seen: ("http://x/cat.gif", "gid123", "a cat"))
+        bot._recent_gif_ids.pop(555, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_animation(self, chat_id, animation):
+                self.sent = (chat_id, animation)
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_gif(SimpleNamespace(bot=fb), 555, "cat waving"))
+        assert fb.sent == (555, "http://x/cat.gif")
+        assert bot._recent_gif_ids[555] == ["gid123"]
+
+    def test_send_meme_renders_and_sends_a_photo(self, monkeypatch):
+        monkeypatch.setattr(bot, "meme_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+
+        async def _fake_captions(hint, chat_id):
+            return "TOP", "BOTTOM"
+
+        monkeypatch.setattr(bot, "_generate_meme_captions", _fake_captions)
+        monkeypatch.setattr(bot, "_pick_meme_template", lambda chat_id: "fake.jpg")
+        monkeypatch.setattr(bot, "render_meme",
+                            lambda template, top, bottom: b"FAKEMEMEBYTES")
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo):
+                self.sent = (chat_id, photo.read())
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_meme(SimpleNamespace(bot=fb), 777, hint="lol"))
+        assert fb.sent == (777, b"FAKEMEMEBYTES")
+
+    def test_send_selfie_sends_a_photo_and_updates_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "selfie_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+        monkeypatch.setattr(bot, "generate_selfie_image", lambda prompt: b"FAKESELFIEBYTES")
+
+        async def _fake_caption(hint, chat_id):
+            return "cute"
+
+        monkeypatch.setattr(bot, "_selfie_caption", _fake_caption)
+        bot._recent_selfie_hints.pop(888, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo, caption=None):
+                self.sent = (chat_id, photo.read(), caption)
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_selfie(SimpleNamespace(bot=fb), 888, hint="park day"))
+        assert fb.sent == (888, b"FAKESELFIEBYTES", "cute")
+        assert bot._recent_selfie_hints[888] == ["park day"]
+
+    def test_update_garmin_writes_the_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", True)
+        monkeypatch.setattr(bot, "_Garmin", object)  # any non-None sentinel
+        monkeypatch.setattr(bot, "GARMIN_FILE", tmp_path / "snapshot.json")
+        monkeypatch.setattr(bot, "_fetch_garmin", lambda: ("7,412 steps", []))
+        asyncio.run(bot.update_garmin())
+        assert bot._garmin["text"] == "7,412 steps"
+        assert json.loads((tmp_path / "snapshot.json").read_text())["text"] == "7,412 steps"
+
+    def test_the_second_backlog_stays_empty(self):
+        """Same check as test_the_backlog_stays_empty -- run again after the direct
+        calls above, proving they register as CALLS to the scanner, not just
+        more mentions."""
+        import pathlib as _pl
+        import sys
+        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
+                               ".claude" / "tools"))
+        import sweep
+        stranded = sorted(n for n in sweep._handler_coverage()[0]
+                          if n not in sweep._handler_coverage()[1])
+        assert stranded == [], stranded
+
+
 # ── reasoning-leak guard ──────────────────────────────────────────────────────
 
 class TestReasoningLeakGuard:

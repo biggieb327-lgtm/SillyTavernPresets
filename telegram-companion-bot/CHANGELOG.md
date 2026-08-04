@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-04 — The second source-assertion backlog: 7 helpers with zero real test coverage (no bot.py change, no version bump)
+
+**Root cause:** `sweep.py`'s widened `_handler_coverage()` (2026-08-03) flagged
+`save_feature_prefs`, `save_state`, `save_wardrobe`, `send_gif`, `send_meme`,
+`send_selfie`, and `update_garmin` as mentioned-but-never-called by any test —
+`test_the_backlog_stays_empty` had been red on `main`, and CI failing on every push,
+since that scan landed. Three of the seven (`save_state`, `save_wardrobe`,
+`save_feature_prefs`) were deliberately monkeypatched to a no-op in every `*_cmd` test
+that calls them, for filesystem isolation — leaving their real write path itself with
+zero coverage. The other four had only `inspect.getsource` structural checks, never a
+real call — `send_selfie`, the function at the center of the entire multi-release
+face-drift investigation, had never once actually been invoked by a test.
+
+**Fix:** `TestTheSecondBacklogDriven` in `tests/test_pure.py` drives each of the 7
+directly, with fakes for its I/O (a fake Telegram `bot.*` object, monkeypatched
+Giphy/selfie-image/Garmin calls, `tmp_path`-redirected persistence files). No bot.py
+change — this closes a test gap, not a behavior bug; none of the 7 turned out to hide
+an actual defect.
+
+**Verification:** each of the 7 break-tested RED one at a time (an injected early
+`return`, confirmed the matching new test failed, then reverted before the next).
+`bash .claude/tools/verify.sh` green: 957 passed, 38 evals, 45/45 gate-corpus, sweep 0
+candidates.
+
 ## v2026-08-03.6 — /audit said "gemini" and stopped there
 
 **Root cause: only the NanoGPT branch named its model.** `selfie_provider` rendered
