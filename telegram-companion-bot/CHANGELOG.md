@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.7 — Model-version guard + cap backported to the memory/lore embedding caches
+
+**Root cause: episodic recall's design was more careful than the caches it sits next
+to.** Comparing episodic recall's (v2026-08-04.6) archive design against the
+pre-existing `_embeddings_cache`/`_lore_embeddings` (memory/lore semantic recall,
+shipped independently on `main` 2026-07-06 — a sibling design, not an ancestor of the
+episode code) surfaced a real, live gap: `_load_embeddings`/`_load_lore_embeddings`
+had no model-fingerprint check at all. Changing `EMBEDDING_MODEL` would silently mix
+vectors from different models into the same cosine comparison, producing meaningless
+similarity scores with no error — external research on this exact failure mode
+(embedding cache invalidation) confirms it's a well-documented pitfall: degradation is
+gradual and distributional, not a single wrong answer, so it goes unnoticed for days.
+`_embeddings_cache` also had no cap: unlike memories.txt/facts (already bounded and
+consolidated), it keeps every distinct text ever embedded, including lines later
+replaced during consolidation — genuinely unbounded growth over the bot's lifetime.
+
+**What shipped:** both caches now write a `.model` sidecar fingerprint file
+(`.embeddings.model`, `.lore_embeddings.model`) on save and check it on load, discarding
+and rebuilding from scratch on mismatch — same pattern episodic recall already used for
+`.episodes.model`. `EMBEDDINGS_MAX` (default 5000) caps `_embeddings_cache`, trimming
+to the newest entries by insertion order on both load and save. No cap added to
+`_lore_embeddings`: lore entries are bounded by the character card's lorebook size, not
+organically growing at runtime the way conversational facts are, so a cap there would
+guard against nothing.
+
+**Web research done before writing any code** (per the owner's request, to check for
+better patterns before building): confirmed model-version fingerprinting as the
+critical, well-documented fix; confirmed a flat-JSON cache with a version sidecar is
+itself a legitimate lightweight pattern for a personal-scale system, not something to
+replace with heavier machinery (Redis/LRU libraries, vector DBs) that this system's
+scale doesn't call for. Nothing else in the research suggested a change beyond what
+episodic recall's own design had already demonstrated.
+
+**Verification:** `TestEmbeddingsCacheGuard` + `TestLoreEmbeddingsCacheGuard`
+(12 tests) — round-trip, fingerprint discard on mismatch, fingerprint kept on match,
+cap trimming on both load and save, no-op when not dirty, no raw exception in the save
+log (structural check, matching the Garmin/WSDOT convention). Break-tested RED three
+ways (both model-mismatch guards disabled, the load-time cap removed). `bash
+.claude/tools/verify.sh` green: 1051 passed, 38 evals, 45/45 gate-corpus.
+
 ## v2026-08-04.6 — Episodic recall + on-this-day reminiscing, reimplemented from a deeper dependency chain
 
 **Root cause: the biggest thing on the lost branch, and not a simple port.**

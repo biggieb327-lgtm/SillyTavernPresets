@@ -8169,3 +8169,115 @@ class TestEpisodicConfig:
         assert isinstance(bot.ONTHISDAY_ENABLED, bool)
         assert isinstance(bot.EPISODE_MAX, int)
         assert isinstance(bot.EPISODE_MIN_SIM, float)
+
+
+# ── Embedding cache model-version guard + cap (2026-08-04, backported from episodic
+# recall's design to the pre-existing memory/lore embedding caches, which lacked
+# both -- a live gap flagged during a comparison of the two designs) ───────────────
+
+class TestEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EMBEDDINGS_FILE", tmp_path / "embeddings.json")
+        monkeypatch.setattr(bot, "EMBEDDINGS_MODEL_FILE", tmp_path / "embeddings.model")
+        bot._embeddings_cache = {}
+        bot._embeddings_dirty = False
+
+    def test_load_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"hello there": [1.0, 0.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        bot._embeddings_cache = {}
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"hello there": [1.0, 0.0]}
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert bot.EMBEDDINGS_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"old text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+        assert not bot.EMBEDDINGS_FILE.exists()  # discarded, not just ignored
+
+    def test_load_keeps_cache_on_model_match(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"kept text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"kept text": [1.0, 0.0]}
+
+    def test_load_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 3)
+        data = {f"line {i}": [float(i)] for i in range(5)}
+        bot.EMBEDDINGS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert len(bot._embeddings_cache) == 3
+        assert set(bot._embeddings_cache) == {"line 2", "line 3", "line 4"}  # newest kept
+
+    def test_save_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 2)
+        bot._embeddings_cache = {"a": [1.0], "b": [2.0], "c": [3.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert len(bot._embeddings_cache) == 2
+        assert set(bot._embeddings_cache) == {"b", "c"}
+
+    def test_save_is_a_noop_when_not_dirty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = False
+        bot._save_embeddings()
+        assert not bot.EMBEDDINGS_FILE.exists()
+
+    def test_no_raw_exception_in_save_log(self):
+        import inspect
+        src = inspect.getsource(bot._save_embeddings)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+
+class TestLoreEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LORE_EMB_FILE", tmp_path / "lore_embeddings.json")
+        monkeypatch.setattr(bot, "LORE_EMB_MODEL_FILE", tmp_path / "lore_embeddings.model")
+        bot._lore_embeddings = {}
+        bot._lore_emb_dirty = False
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"the tavern is in Bellevue": [1.0, 0.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        bot._lore_embeddings = {}
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {"the tavern is in Bellevue": [1.0, 0.0]}
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.LORE_EMB_FILE.write_text(json.dumps({"old lore": [1.0]}), encoding="utf-8")
+        bot.LORE_EMB_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {}
+        assert not bot.LORE_EMB_FILE.exists()
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"x": [1.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        assert bot.LORE_EMB_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL

@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.6"
+BOT_VERSION = "2026-08-04.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -857,6 +857,7 @@ MEMORY_QUERY_EMBED_TIMEOUT = _env_float("MEMORY_QUERY_EMBED_TIMEOUT", "3.0")
 MEMORY_DEDUP_SIM = _env_float("MEMORY_DEDUP_SIM", "0.92")
 MEMORY_LORE_SEMANTIC_TOPK = _env_int("MEMORY_LORE_SEMANTIC_TOPK", "3")
 LORE_EMB_FILE = BASE_DIR / "lore_embeddings.json"
+LORE_EMB_MODEL_FILE = BASE_DIR / ".lore_embeddings.model"
 _lore_embeddings: dict[str, list[float]] = {}   # keyed by lore entry content
 _lore_emb_dirty = False
 _QUERY_EMBED_CACHE: "collections.OrderedDict[str, list[float]]" = collections.OrderedDict()
@@ -1811,6 +1812,11 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
 # --- Semantic memory (embeddings-backed recall) ---
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
+EMBEDDINGS_MODEL_FILE = BASE_DIR / ".embeddings.model"
+# Generous cap so a personal bot's memory/fact vocabulary can't grow the cache forever --
+# unlike memories.txt/facts (already capped and consolidated), this cache keeps every
+# distinct text ever embedded, including lines later replaced during consolidation.
+EMBEDDINGS_MAX = _env_int("EMBEDDINGS_MAX", "5000")
 _embeddings_cache: dict[str, list[float]] = {}
 _embeddings_dirty = False
 
@@ -1847,24 +1853,47 @@ ONTHISDAY_FILE = BASE_DIR / ".onthisday"  # JSON {date, ts}: last resurface + ep
 
 
 def _load_embeddings():
+    """A model change discards the cache -- vectors from different models aren't
+    comparable, and silently mixing them makes similarity scores meaningless without
+    any error (2026-08-04: this guard was on episodic recall from the start but
+    missing here; backported after being flagged as a live gap on this cache)."""
     global _embeddings_cache
+    model_ok = True
+    if EMBEDDINGS_MODEL_FILE.exists():
+        try:
+            model_ok = EMBEDDINGS_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EMBEDDINGS_FILE, EMBEDDINGS_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _embeddings_cache = {}
+        return
     try:
         if EMBEDDINGS_FILE.exists():
             _embeddings_cache = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
         _embeddings_cache = {}
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:  # keep the newest by insertion order
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
 
 
 def _save_embeddings():
-    global _embeddings_dirty
+    global _embeddings_dirty, _embeddings_cache
     if not _embeddings_dirty:
         return
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
     try:
         EMBEDDINGS_FILE.write_text(
             json.dumps(_embeddings_cache, ensure_ascii=False), encoding="utf-8")
+        EMBEDDINGS_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _embeddings_dirty = False
     except Exception as e:
-        log.warning("[embeddings] save failed: %s", e)
+        log.warning("[embeddings] save failed: %s", type(e).__name__)
 
 
 def _embed_text(text: str) -> list[float] | None:
@@ -1974,7 +2003,24 @@ def _find_near_duplicate_pairs(items: list[str], vecs: list, threshold: float
 
 
 def _load_lore_embeddings():
+    """Same model-change guard as _load_embeddings -- see its docstring. No cap here:
+    unlike memories/facts, lore entries are bounded by the character card's lorebook
+    size, not organically growing at runtime."""
     global _lore_embeddings
+    model_ok = True
+    if LORE_EMB_MODEL_FILE.exists():
+        try:
+            model_ok = LORE_EMB_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (LORE_EMB_FILE, LORE_EMB_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _lore_embeddings = {}
+        return
     try:
         if LORE_EMB_FILE.exists():
             _lore_embeddings = json.loads(LORE_EMB_FILE.read_text(encoding="utf-8"))
@@ -1989,9 +2035,10 @@ def _save_lore_embeddings():
     try:
         LORE_EMB_FILE.write_text(
             json.dumps(_lore_embeddings, ensure_ascii=False), encoding="utf-8")
+        LORE_EMB_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _lore_emb_dirty = False
     except Exception as e:
-        log.warning("[lore-emb] save failed: %s", e)
+        log.warning("[lore-emb] save failed: %s", type(e).__name__)
 
 
 def _lore_semantic_hits(q_vec: list[float], top_k: int) -> list[str]:
