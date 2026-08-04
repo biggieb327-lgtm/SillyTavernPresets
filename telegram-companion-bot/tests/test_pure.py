@@ -7663,3 +7663,103 @@ class TestNewsCommands:
         u, m = _cmd_update()
         asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
         assert "off" in m.sent[0].lower()
+
+
+# ── Acoustic tone analysis on voice notes (2026-08-04, reimplemented from bae2dcb,
+# never merged; vendored acoustic_ears.py unmodified from menelly/AI_Ears, MIT) ────
+
+class TestAcousticEars:
+    @staticmethod
+    def _write_wav(path, freq=440.0, duration=1.0, sr=44100, amplitude=0.5):
+        import wave as _wave
+        import numpy as _np
+        t = _np.linspace(0, duration, int(sr * duration), endpoint=False)
+        samples = (amplitude * _np.sin(2 * _np.pi * freq * t) * 32767).astype(_np.int16)
+        with _wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(samples.tobytes())
+
+    def test_analyze_acoustic_on_a_tone(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "tone.wav"
+        self._write_wav(wav_path, freq=440.0, duration=1.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert "error" not in result
+        assert result["duration_s"] == pytest.approx(1.0, abs=0.05)
+        assert result["sample_rate"] == 44100
+        assert result["brightness_label"] in (
+            "very bright", "bright", "warm", "dark")
+
+    def test_analyze_acoustic_empty_audio_reports_error(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "empty.wav"
+        self._write_wav(wav_path, duration=0.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert result.get("error") == "empty audio"
+
+    def test_describe_acoustic_none_input_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic(None) is None
+
+    def test_describe_acoustic_error_dict_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic({"error": "empty audio"}) is None
+
+    def test_describe_acoustic_includes_wpm_when_word_count_given(self):
+        import acoustic_ears
+        a = {"duration_s": 10.0, "dynamics_label": "even", "brightness_label": "warm",
+             "pauses": []}
+        note = acoustic_ears.describe_acoustic(a, word_count=20)
+        assert "120 wpm" in note  # 20 words / (10s/60) = 120 wpm
+        assert "even volume" in note
+        assert "warm tone" in note
+
+    def test_describe_acoustic_mentions_pauses_when_present(self):
+        import acoustic_ears
+        a = {"duration_s": 5.0, "dynamics_label": "dynamic", "brightness_label": "bright",
+             "pauses": [(1.0, 1.5, 0.5), (2.0, 2.3, 0.3)]}
+        note = acoustic_ears.describe_acoustic(a)
+        assert "2 notable pause(s)" in note
+
+
+class TestAnalyzeVoiceTone:
+    def test_returns_none_when_ffmpeg_produces_no_wav(self, monkeypatch):
+        async def _fake_ffmpeg(*args):
+            return (b"", b"")  # never writes the output file
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"not real audio"))
+        assert result is None
+
+    def test_returns_the_analysis_on_success(self, monkeypatch, tmp_path):
+        import wave as _wave
+        import numpy as _np
+
+        async def _fake_ffmpeg(*args):
+            # args: -y -i <in> -ar 44100 -ac 1 -c:a pcm_s16le <out>
+            out_path = args[-1]
+            t = _np.linspace(0, 0.5, int(44100 * 0.5), endpoint=False)
+            samples = (0.3 * _np.sin(2 * _np.pi * 300 * t) * 32767).astype(_np.int16)
+            with _wave.open(out_path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes(samples.tobytes())
+            return (b"", b"")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"fake ogg bytes"))
+        assert result is not None
+        assert "error" not in result
+
+    def test_ffmpeg_failure_is_none_not_raised(self, monkeypatch):
+        async def _boom(*args):
+            raise RuntimeError("ffmpeg not found")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _boom)
+        assert asyncio.run(bot._analyze_voice_tone(b"x")) is None
+
+    def test_config_defaults(self):
+        assert isinstance(bot.VOICE_TONE_ENABLED, bool)

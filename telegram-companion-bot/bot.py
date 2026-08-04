@@ -45,6 +45,11 @@ try:
 except Exception:
     _Garmin = None
 
+try:
+    import acoustic_ears  # optional; needs numpy
+except Exception:
+    acoustic_ears = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -87,7 +92,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.3"
+BOT_VERSION = "2026-08-04.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -377,6 +382,11 @@ SAFETY_RESOURCES = os.getenv(
     "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
 )
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+# Voice tone: a short pace/volume/tone/pause note alongside the transcript -- local FFT
+# analysis via vendored acoustic_ears.py (MIT, menelly/AI_Ears), no network call, no
+# extra API key. Runs concurrently with transcription so it adds no latency.
+# (Reimplemented from bae2dcb, 2026-07-01, never merged.)
+VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
 DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
 # Separate model for document/card analysis — should be an instruction model,
@@ -9731,22 +9741,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    tone_task = None
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
+        if VOICE_TONE_ENABLED and acoustic_ears is not None:
+            # Kick this off now so it runs concurrently with the (blocking) transcription
+            # call below instead of adding serial latency.
+            tone_task = asyncio.create_task(_analyze_voice_tone(bytes(voice_bytes)))
         transcript = await asyncio.to_thread(
             _transcribe_audio, bytes(voice_bytes), "voice.ogg", "audio/ogg")
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
+        if tone_task:
+            tone_task.cancel()
         await context.bot.send_message(chat_id=chat_id,
                                        text="[couldn't make out that voice note]")
         return
 
     if not transcript:
+        if tone_task:
+            tone_task.cancel()
         return
 
     try:
+        acoustic = await tone_task if tone_task else None
+        tone_note = acoustic_ears.describe_acoustic(acoustic, len(transcript.split())) if acoustic else None
         content = f"[voice message]: {transcript}"
+        if tone_note:
+            content += f"\n[How it sounded: {tone_note}]"
         messages = await assemble_messages_async(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -9773,6 +9796,25 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
         stderr=asyncio.subprocess.PIPE,
     )
     return await proc.communicate()
+
+
+async def _analyze_voice_tone(voice_bytes: bytes):
+    """Best-effort acoustic read on a voice note (pace/pauses/tone) -- local FFT
+    analysis, no network. Returns the analyze_acoustic() dict, or None on any failure."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ogg_path = os.path.join(tmpdir, "voice.ogg")
+            wav_path = os.path.join(tmpdir, "voice.wav")
+            with open(ogg_path, "wb") as f:
+                f.write(voice_bytes)
+            await _run_ffmpeg("-y", "-i", ogg_path, "-ar", "44100", "-ac", "1",
+                               "-c:a", "pcm_s16le", wav_path)
+            if not os.path.exists(wav_path):
+                return None
+            return await asyncio.to_thread(acoustic_ears.analyze_acoustic, wav_path)
+    except Exception as e:
+        log.warning("[voice-tone] check failed: %s", type(e).__name__)
+        return None
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):

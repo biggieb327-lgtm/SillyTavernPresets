@@ -7,6 +7,34 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.4 — Voice-note acoustic tone analysis, reimplemented from the same abandoned branch
+
+**Root cause: a fourth feature from the same lost branch.** `bae2dcb` (2026-07-01,
+`claude/push-to-repo-7i2f3c`) vendored the offline half of `menelly/AI_Ears` (MIT) as
+`acoustic_ears.py` and it never merged either.
+
+**What it does:** `VOICE_TONE_ENABLED` runs a local FFT analysis on every voice note
+(pace, volume, pitch brightness, notable pauses) — pure NumPy, no network call, no
+extra API key — and folds a short note ("~140 wpm, dynamic volume, warm tone") alongside
+the transcript. `_analyze_voice_tone` kicks off concurrently with the existing NanoGPT
+transcription call in `handle_voice`, so it adds no serial latency; cancelled cleanly if
+transcription fails or comes back empty. `acoustic_ears.py` is vendored unmodified.
+
+**Two things beyond bot.py:** `numpy` added to `requirements.txt` as a real dependency
+(not commented-out-optional like `garminconnect` — no risky native build, every instance
+handles voice messages). `deploy/vps-sync.sh` only copies explicitly-named files, not a
+directory sync, so `acoustic_ears.py` needed an explicit sync line next to `bot.py`'s —
+without it the feature would have silently never reached any instance, same failure
+shape the abandoned branch's `update-all.sh` fix already worked around once.
+
+**Verification:** `TestAcousticEars` (vendored-module tests against a synthetic WAV:
+tone analysis, empty-audio error path, `describe_acoustic` formatting including wpm/
+pause counts) + `TestAnalyzeVoiceTone` (the bot.py wrapper: missing-output-file
+fail-safe, success path, ffmpeg-exception fail-safe) — 10 tests. Break-tested RED three
+ways (the missing-wav-file check removed, `describe_acoustic`'s None-guard removed, the
+pause-count line removed). `bash .claude/tools/verify.sh` green: 1005 passed, 38 evals,
+45/45 gate-corpus.
+
 ## v2026-08-04.3 — Offline life events, reimplemented from the same abandoned branch
 
 **Root cause: a third feature from the same lost branch.** `b0eb485` (2026-06-29,
