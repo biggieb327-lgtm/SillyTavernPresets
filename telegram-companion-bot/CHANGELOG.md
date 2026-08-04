@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.6 — Episodic recall + on-this-day reminiscing, reimplemented from a deeper dependency chain
+
+**Root cause: the biggest thing on the lost branch, and not a simple port.**
+`9fa21af` (2026-06-29) built episodic recall; `a485b1b` (2026-06-30) built on-this-day
+reminiscing on top of it. Both are from `claude/push-to-repo-7i2f3c` and never merged.
+Unlike the four earlier ports this session, this one could not be a straight
+reimplementation: the abandoned branch's episodic recall was built on that branch's
+OWN embedding infrastructure (`EMBED_MODEL`, a batch `_embed()` call, a numpy-matrix
+vector cache) — none of which exists on `main`. Current `main` has a completely
+different, simpler embedding subsystem (`EMBEDDING_MODEL`, single-text `_embed_text`,
+a flat `_embeddings_cache` dict, no numpy at all before this session). This is
+rewritten against `main`'s actual primitives, not ported.
+
+**What it does:** when conversation ages out of the verbatim window (`maintain_memory`
+scroll-off), the dropped turns are chunked (`EPISODE_CHUNK_MSGS`), embedded one at a
+time via the existing `_embed_text`, and archived to `.episodes.jsonl` — a numpy
+matrix in RAM for fast cosine similarity (numpy is a real dependency as of
+v2026-08-04.4, no longer a reason to skip this). Each turn, `triggered_episode` reuses
+the query vector already computed for live semantic recall (zero extra per-turn embed
+cost) to pull back the single most relevant past exchange above `EPISODE_MIN_SIM`,
+time-gated by `EPISODE_MIN_AGE_HOURS` so the live window is never echoed back to
+itself. `EPISODE_MAX` caps the archive (~4000 chunks); a model change discards and
+rebuilds it, since cross-model vectors aren't comparable. `/episodes` shows the
+archive size.
+
+On top of that, `onthisday_job` runs once daily: if an archived episode's anniversary
+(~1mo/6mo/1yr ago, `ONTHISDAY_INTERVALS`) lands today, she reaches out unprompted to
+reminisce about it ("hey, remember when...") — min-gap and per-episode dedup keep it
+feeling special, not chatty. `/diag` extended to report both toggles and the archive
+count, matching how the abandoned branch itself grew `/diag` incrementally as each
+feature landed.
+
+**Deliberately not ported in this pass:** the branch's two follow-on commits —
+`1054506` (archiving sent photos as episodes) and `767aab6` (an optional cross-encoder
+reranker) — are enhancements to this subsystem, not required for on-this-day
+reminiscing to work. Flagged as separate follow-ups rather than folded in, keeping
+this release to one theme.
+
+**Verification:** `TestEpisodesCore` + `TestTriggeredEpisode` + `TestOnThisDay` +
+`TestEpisodesCmd` + `TestMaintainMemoryArchivesOnScrollOff` +
+`TestAssembleMessagesEpisodicRecall` + `TestEpisodicConfig` (34 tests) — archive
+round-trip, model-change discard, cap trimming, similarity floor, age-gating,
+anniversary-window matching (including "prefers the longer interval" and exclude-ts
+dedup), the `maintain_memory` scroll-off wiring (a real call through `maintain_memory`
+itself, not a source-read), and the new `/episodes` command driven directly. Break-
+tested RED five ways (similarity floor, age gate, anniversary window, scroll-off
+wiring, model-mismatch discard — each removed, confirmed the matching test failed,
+reverted). Also fixed two things `verify.sh` caught that weren't part of the plan:
+an eval-pinned optional-block count needed bumping from 7 to 8 (a real new block, not
+a bug), and two hardcoded `pip install` strings needed to go through the existing
+`_pip_hint()` helper instead. `bash .claude/tools/verify.sh` green: 1039 passed, 38
+evals, 45/45 gate-corpus, sweep 0 candidates.
+
 ## v2026-08-04.5 — /diag: a compact behavior-toggle status command
 
 **Root cause: the fifth thing from the same lost branch, scoped down rather than

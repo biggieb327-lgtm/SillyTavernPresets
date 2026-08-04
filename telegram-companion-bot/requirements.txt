@@ -4,11 +4,12 @@ requests>=2.31,<3.0
 tzdata>=2024.1
 pypdf>=4.0,<5.0
 Pillow>=10.0,<11.0
-# Voice-note tone analysis (acoustic_ears.py, local FFT, VOICE_TONE_ENABLED) -- a real
-# dependency, not commented-out-optional like garminconnect below: no risky native build
-# (unlike curl_cffi/rust pydantic), and every instance handles voice messages. bot.py's
-# import is still wrapped in try/except, so a missing wheel degrades to no tone note
-# rather than a crash.
+# Voice-note tone analysis (acoustic_ears.py, local FFT, VOICE_TONE_ENABLED) and episodic
+# recall's cosine matrix (EPISODIC_RECALL) both need this -- a real dependency, not
+# commented-out-optional like garminconnect below: no risky native build (unlike
+# curl_cffi/rust pydantic), and every instance handles voice messages. Both bot.py
+# import sites are still wrapped in try/except, so a missing wheel degrades each
+# feature independently rather than crashing the bot.
 numpy>=1.26,<3.0
 
 # Optional — Garmin health feed only (GARMIN_EMAIL/GARMIN_PASSWORD). Deliberately NOT a

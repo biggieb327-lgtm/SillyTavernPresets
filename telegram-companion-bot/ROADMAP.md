@@ -519,6 +519,45 @@ constraints; check their assumptions before acting on them.
 - **Scope:** `handle_message` (private text) only, matching what the original branch
   actually shipped — not group/voice/photo paths.
 
+### 3.16 ~~Four more features from the same abandoned branch~~ ✅ (shipped v2026-08-04.2–.6)
+- **History:** same source as 3.15 — `claude/push-to-repo-7i2f3c`, built June 2026,
+  never merged. Found via a follow-up audit of the branch's full commit list after
+  3.15 turned up one feature; ROADMAP 3.10 had already flagged some of these by name
+  as unported ("on-this-day reminiscing, offline life events, adaptive texting-style
+  mirroring, `acoustic_ears`, `/diag`") without a session picking them up until now.
+- **Adaptive texting-style mirroring ✅ (v2026-08-04.2, `STYLE_MIRROR`):** passively
+  reads the user's recent texting habits (length, emoji, lowercase, textspeak) and
+  nudges her register to subtly match. Zero model calls — pure heuristics, no
+  rule-3 question.
+- **Offline life events ✅ (v2026-08-04.3, `LIFE_SIM_ENABLED`):** generates one
+  concrete event in her own world a couple times a day, grounded in schedule/people/
+  projects/life-arc via a cheap chat model call. `/news`, `/newsnow`. All helper
+  functions it depends on already existed on `main` — reused, not rebuilt.
+- **Voice-note acoustic tone analysis ✅ (v2026-08-04.4, `VOICE_TONE_ENABLED`):**
+  local FFT pace/volume/brightness/pause read via vendored `acoustic_ears.py`
+  (MIT, `menelly/AI_Ears`), no network call. First thing in the fleet to need numpy
+  as a real (not commented-optional) dependency — also required `vps-sync.sh` to
+  gain an explicit sync line, since it only copies named files, not a directory sync.
+- **`/diag` ✅ (v2026-08-04.5, extended in .6):** scoped down from the original,
+  not straight-ported — its log-error tail was redundant with `/errors`, its
+  log-rotation half was Termux-era (superseded by `RotatingFileHandler` since the
+  systemd migration), and its RHR monitor had already shipped separately. What
+  remained: a compact status line for this session's behavior toggles, a different
+  axis from `/audit`'s `_FEATURES` dict, not a duplicate of it.
+- **Episodic recall + on-this-day reminiscing ✅ (v2026-08-04.6, `EPISODIC_RECALL`/
+  `ONTHISDAY_ENABLED`):** the deepest one — rewritten against `main`'s actual
+  embedding primitives (`EMBEDDING_MODEL`/`_embed_text`), since the abandoned
+  branch's own embedding infrastructure doesn't exist here. Archives conversation
+  that ages out of the verbatim window as embedded chunks; reuses the per-turn query
+  vector for zero extra embed cost; surfaces the closest past exchange above a
+  similarity floor, time-gated so the live window never echoes itself. On top of
+  that, a once-daily job resurfaces an archived episode on its ~1mo/6mo/1yr
+  anniversary. `/episodes` shows the archive size.
+- **Deliberately not ported:** two further commits on the same branch —
+  archiving sent photos as episodes, and an optional cross-encoder reranker for
+  episodic recall — are enhancements to 3.16's episodic recall, not required for
+  on-this-day to work. Not requested; flagged here as known follow-ups if wanted.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)

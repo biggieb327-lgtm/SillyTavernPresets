@@ -3590,8 +3590,9 @@ class TestOptionalBlocksAreMarked:
         import inspect
         return inspect.getsource(bot.assemble_messages)
 
-    def test_seven_optional_blocks_marked(self):
-        assert self._assembled().count("_sys_opt(") == 7
+    def test_eight_optional_blocks_marked(self):
+        # 7 pre-existing + triggered_episode (2026-08-04, episodic recall).
+        assert self._assembled().count("_sys_opt(") == 8
 
     def test_lore_is_optional(self):
         src = self._assembled()
@@ -7814,3 +7815,357 @@ class TestDiagCmd:
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
         assert "Log errors" not in m.sent[0]
+
+
+# ── Episodic recall + on-this-day reminiscing (2026-08-04, reimplemented from
+# 9fa21af + a485b1b's on-this-day portion, never merged -- rewritten against this
+# file's actual embedding primitives, EMBEDDING_MODEL/_embed_text, not the abandoned
+# branch's own EMBED_MODEL/_embed) ──────────────────────────────────────────────
+
+class TestEpisodesCore:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def test_normalize_rows_unit_length(self):
+        import numpy as np
+        mat = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        norms = np.linalg.norm(out, axis=1)
+        assert norms == pytest.approx([1.0, 1.0], abs=1e-5)
+
+    def test_normalize_rows_handles_zero_vector(self):
+        import numpy as np
+        mat = np.array([[0.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        assert not np.isnan(out).any()
+
+    def test_episode_when_phrasing(self):
+        now = time.time()
+        assert bot._episode_when(now) == "earlier today"
+        assert bot._episode_when(now - 86400) == "yesterday"
+        assert bot._episode_when(now - 5 * 86400) == "about 5 days ago"
+        assert bot._episode_when(now - 21 * 86400) == "about 3 weeks ago"
+        assert "back around" in bot._episode_when(now - 200 * 86400)
+
+    def test_archive_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        fixed_vec = [1.0, 0.0, 0.0]
+        monkeypatch.setattr(bot, "_embed_text", lambda text: list(fixed_vec))
+        batch = [{"role": "user", "content": "hey remember the beach trip", "ts": time.time()},
+                 {"role": "assistant", "content": "of course, that was fun", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+    def test_archive_empty_batch_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._archive_episode_chunks([], "Tester")
+        assert bot._episodes["ts"] == []
+
+    def test_archive_skips_on_embed_failure(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "_embed_text", lambda text: None)
+        batch = [{"role": "user", "content": "hello there", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()
+
+    def test_load_discards_archive_on_model_change(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EPISODES_FILE.write_text(
+            json.dumps({"ts": time.time(), "text": "old memory", "vec": [1.0, 0.0]}) + "\n",
+            encoding="utf-8")
+        bot.EPISODES_MODEL_FILE.write_text("some-other-embedding-model", encoding="utf-8")
+        bot._load_episodes()
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()  # discarded, not just ignored
+
+    def test_load_trims_to_episode_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODE_MAX", 3)
+        with bot.EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for i in range(5):
+                f.write(json.dumps({"ts": float(i), "text": f"memory {i}", "vec": [1.0, 0.0]}) + "\n")
+        bot.EPISODES_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 3
+        assert bot._episodes["text"] == ["memory 2", "memory 3", "memory 4"]  # newest kept
+
+
+class TestTriggeredEpisode:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def _seed(self, ts, text, vec=(1.0, 0.0, 0.0)):
+        import numpy as np
+        bot._episodes["ts"].append(ts)
+        bot._episodes["text"].append(text)
+        row = bot._normalize_rows(np.array([list(vec)], dtype=np.float32))
+        bot._episodes["mat"] = row if bot._episodes["mat"] is None else np.vstack(
+            [bot._episodes["mat"], row])
+
+    def test_returns_empty_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_returns_empty_with_no_query_vec(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode(None) == ""
+
+    def test_returns_empty_when_archive_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_surfaces_a_similar_old_episode(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "the beach trip last month", vec=(1.0, 0.0, 0.0))
+        note = bot.triggered_episode([1.0, 0.0, 0.0])
+        assert "beach trip" in note
+        assert "specific moment you remember" in note
+
+    def test_below_similarity_floor_is_silent(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "unrelated topic", vec=(0.0, 1.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_too_recent_is_gated_out(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Inside the live window (EPISODE_MIN_AGE_HOURS default 24h) -- must not echo it back.
+        self._seed(time.time() - 3600, "something said an hour ago", vec=(1.0, 0.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+
+class TestOnThisDay:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "ONTHISDAY_FILE", tmp_path / "onthisday.json")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        monkeypatch.setattr(bot, "ONTHISDAY_ENABLED", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+
+    def test_finds_a_one_month_anniversary(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["the anniversary moment"]
+        result = bot._onthisday_episode()
+        assert result is not None
+        ts, text = result
+        assert text == "the anniversary moment"
+
+    def test_no_match_outside_any_window(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._episodes["ts"] = [time.time() - 10 * 86400]  # doesn't land near any interval
+        bot._episodes["text"] = ["a random tuesday"]
+        assert bot._onthisday_episode() is None
+
+    def test_excludes_the_given_timestamp(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["already used"]
+        assert bot._onthisday_episode(exclude_ts=target_ts) is None
+
+    def test_prefers_the_longer_interval(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Both a ~30-day and a ~365-day episode qualify; the year-old one should win.
+        bot._episodes["ts"] = [time.time() - 30 * 86400, time.time() - 365 * 86400]
+        bot._episodes["text"] = ["recent one", "the year-old one"]
+        ts, text = bot._onthisday_episode()
+        assert text == "the year-old one"
+
+    def test_job_is_a_noop_with_no_owner(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: None)
+        sent = []
+        monkeypatch.setattr(bot, "send_triggered", lambda ctx, cid, trig: sent.append(1))
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []
+
+    def test_job_respects_the_min_gap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        today = datetime.now(bot.TZ).date().isoformat() if bot.TZ else datetime.now().date().isoformat()
+        bot.ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": 0}), encoding="utf-8")
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []  # already reminisced today
+
+    def test_job_sends_and_records_when_a_match_exists(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        monkeypatch.setattr(bot, "in_quiet_hours", lambda: False)
+        monkeypatch.setattr(bot, "_is_quiet", lambda cid: False)
+        bot._episodes["ts"] = [time.time() - 30 * 86400]
+        bot._episodes["text"] = ["the moment that resurfaces"]
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert len(sent) == 1
+        assert "the moment that resurfaces" in sent[0]
+        assert json.loads(bot.ONTHISDAY_FILE.read_text())["date"]  # recorded
+
+
+class TestEpisodesCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 464242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()
+
+    def test_empty_archive_says_so(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "No episodes archived yet" in m.sent[0]
+
+    def test_reports_the_count(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [time.time()], "text": ["a stored moment"],
+                              "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "1 chunk" in m.sent[0]
+        assert "a stored moment" in m.sent[0]
+
+    def test_is_gated(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        u, m = _cmd_update(self._outsider())
+        bot.ALLOWED_USERS.add(999999997)
+        try:
+            asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        finally:
+            bot.ALLOWED_USERS.discard(999999997)
+        assert m.sent == []
+
+
+class TestMaintainMemoryArchivesOnScrollOff:
+    def test_scroll_off_triggers_archiving(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        chat_id = 9701
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        captured = {}
+
+        def _fake_archive(batch, uname):
+            captured["batch"] = batch
+            captured["uname"] = uname
+
+        monkeypatch.setattr(bot, "_archive_episode_chunks", _fake_archive)
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)  # let the fire-and-forget archive task run
+
+        asyncio.run(_run())
+        assert "batch" in captured
+        assert len(captured["batch"]) > 0
+        assert captured["uname"] == "Tester"
+
+    def test_scroll_off_skips_archiving_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        chat_id = 9702
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        called = []
+        monkeypatch.setattr(bot, "_archive_episode_chunks",
+                            lambda batch, uname: called.append(1))
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        assert called == []
+
+
+class TestAssembleMessagesEpisodicRecall:
+    def test_includes_triggered_episode_in_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9703] = []
+        bot.user_names[9703] = "Tester"
+        msgs = bot.assemble_messages(9703, "hello", query_vec=[1.0, 0.0, 0.0])
+        assert any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_episode_block_with_no_query_vec(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9704] = []
+        bot.user_names[9704] = "Tester"
+        msgs = bot.assemble_messages(9704, "hello")
+        assert not any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+
+class TestEpisodicConfig:
+    def test_config_types(self):
+        assert isinstance(bot.EPISODIC_RECALL, bool)
+        assert isinstance(bot.ONTHISDAY_ENABLED, bool)
+        assert isinstance(bot.EPISODE_MAX, int)
+        assert isinstance(bot.EPISODE_MIN_SIM, float)

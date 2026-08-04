@@ -50,6 +50,11 @@ try:
 except Exception:
     acoustic_ears = None
 
+try:
+    import numpy as _np  # optional; needed for episodic recall's matrix cosine similarity
+except Exception:
+    _np = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -92,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.5"
+BOT_VERSION = "2026-08-04.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1809,6 +1814,37 @@ EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
 _embeddings_cache: dict[str, list[float]] = {}
 _embeddings_dirty = False
 
+# Episodic recall: archive scrolled-off conversation as embedded chunks and pull the most
+# relevant *past exchange* back per turn -- detail the rolling summary can't keep. Reuses
+# the per-turn query_vec computed for live semantic recall, so it adds no extra per-turn
+# embedding cost. Needs numpy for the cosine matrix. (Reimplemented from 9fa21af,
+# 2026-06-29, never merged -- rewritten against this file's actual embedding primitives,
+# EMBEDDING_MODEL/_embed_text, not the abandoned branch's own EMBED_MODEL/_embed.)
+EPISODIC_RECALL = MEMORY_SEMANTIC_LIVE and os.getenv(
+    "EPISODIC_RECALL", "1").strip() not in ("0", "false", "no", "off")
+EPISODE_MAX = _env_int("EPISODE_MAX", "4000")              # hard cap on archived chunks
+EPISODE_CHUNK_MSGS = _env_int("EPISODE_CHUNK_MSGS", "6")   # messages per chunk (1 msg overlap)
+EPISODE_EMBED_CHARS = _env_int("EPISODE_EMBED_CHARS", "1600")  # truncate before embed
+EPISODE_MIN_SIM = _env_float("EPISODE_MIN_SIM", "0.40")    # cosine floor to surface a memory
+EPISODE_TOPK = _env_int("EPISODE_TOPK", "1")                # how many past moments to surface
+EPISODE_MIN_AGE_HOURS = _env_float("EPISODE_MIN_AGE_HOURS", "24")  # don't recall very-recent stuff
+EPISODES_FILE = BASE_DIR / ".episodes.jsonl"
+EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
+# In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
+_episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
+_episodes_lock = threading.Lock()
+
+# On-this-day resurfacing: once a day, check whether an archived episode's anniversary
+# (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
+# archive, so it needs no extra storage. Gated on EPISODIC_RECALL.
+ONTHISDAY_ENABLED = EPISODIC_RECALL and os.getenv(
+    "ONTHISDAY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ONTHISDAY_TIME = os.getenv("ONTHISDAY_TIME", "10:30")        # local time for the daily check
+ONTHISDAY_INTERVALS = [365, 182, 91, 30]                     # anniversaries to look for (days)
+ONTHISDAY_WINDOW_DAYS = _env_int("ONTHISDAY_WINDOW_DAYS", "3")     # +/- match window
+ONTHISDAY_MIN_GAP_DAYS = _env_int("ONTHISDAY_MIN_GAP_DAYS", "5")   # don't reminisce too often
+ONTHISDAY_FILE = BASE_DIR / ".onthisday"  # JSON {date, ts}: last resurface + episode (no repeats)
+
 
 def _load_embeddings():
     global _embeddings_cache
@@ -2012,6 +2048,15 @@ async def _embed_lore_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("[lore-emb] warm failed: %s", e)
 
 
+async def _episodes_load_job(context: ContextTypes.DEFAULT_TYPE):
+    """One-shot at startup: load the episodic archive into RAM (off-loop)."""
+    try:
+        await asyncio.to_thread(_load_episodes)
+        print(f"[episodes] loaded {len(_episodes['ts'])} archived chunk(s).")
+    except Exception as e:
+        log.warning("[episodes] load failed: %s", type(e).__name__)
+
+
 async def _embed_query_cached(text: str) -> list[float] | None:
     """Embed a user message for live semantic recall, off the event loop and
     bounded by MEMORY_QUERY_EMBED_TIMEOUT. Small LRU so repeated openers
@@ -2036,6 +2081,253 @@ async def _embed_query_cached(text: str) -> list[float] | None:
         while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
             _QUERY_EMBED_CACHE.popitem(last=False)
     return vec
+
+
+# --- Episodic recall: embedded archive of scrolled-off conversation (needs numpy) ---
+
+def _normalize_rows(mat):
+    """Return mat with each row L2-normalized, so cosine similarity == a plain dot product."""
+    norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
+
+
+def _load_episodes():
+    """Off-loop: load the episode archive into RAM once. A model change discards the archive
+    (cross-model vectors aren't comparable); over-cap files are trimmed to the newest EPISODE_MAX."""
+    if _episodes["loaded"]:
+        return
+    _episodes["loaded"] = True
+    if not EPISODIC_RECALL or _np is None:
+        return
+    model_ok = True
+    if EPISODES_MODEL_FILE.exists():
+        try:
+            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EPISODES_FILE, EPISODES_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    ts_list, text_list, vecs = [], [], []
+    if model_ok and EPISODES_FILE.exists():
+        for line in EPISODES_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+                v = o.get("vec")
+                if not v:
+                    continue
+                ts_list.append(float(o.get("ts", 0)))
+                text_list.append(str(o.get("text", "")))
+                vecs.append(v)
+            except Exception:
+                continue
+    trimmed = False
+    if len(vecs) > EPISODE_MAX:  # keep the newest, trim the file once
+        ts_list, text_list, vecs = ts_list[-EPISODE_MAX:], text_list[-EPISODE_MAX:], vecs[-EPISODE_MAX:]
+        trimmed = True
+    with _episodes_lock:
+        _episodes["ts"], _episodes["text"] = ts_list, text_list
+        _episodes["mat"] = _normalize_rows(_np.asarray(vecs, dtype=_np.float32)) if vecs else None
+    if trimmed:
+        _rewrite_episodes_file(ts_list, text_list, vecs)
+
+
+def _rewrite_episodes_file(ts_list, text_list, vecs):
+    try:
+        with EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for ts, text, v in zip(ts_list, text_list, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] file rewrite failed: %s", type(e).__name__)
+
+
+def _archive_episode_chunks(batch: list, uname: str):
+    """Off-loop: chunk the scrolled-off batch, embed each chunk, append to the archive (file +
+    RAM). File is append-only at runtime; RAM is capped; the file is trimmed at next startup."""
+    if not EPISODIC_RECALL or _np is None or not batch:
+        return
+    _load_episodes()  # ensure the existing archive is in RAM before we append to it
+    chunks, step = [], max(1, EPISODE_CHUNK_MSGS - 1)
+    i = 0
+    while i < len(batch):
+        window = batch[i:i + EPISODE_CHUNK_MSGS]
+        if not window:
+            break
+        text = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content'].strip()}"
+            for m in window if m.get("content")
+        ).strip()
+        if text:
+            ts = window[-1].get("ts") or time.time()
+            chunks.append((float(ts), text))
+        if i + EPISODE_CHUNK_MSGS >= len(batch):
+            break
+        i += step
+    if not chunks:
+        return
+    vecs = []
+    for _, text in chunks:
+        vecs.append(_embed_text(text[:EPISODE_EMBED_CHARS]))
+    if any(v is None for v in vecs):
+        log.warning("[episodes] embed failed for %d/%d chunk(s); archiving skipped this batch.",
+                    sum(1 for v in vecs if v is None), len(vecs))
+        return
+    try:  # append to file outside the lock (don't hold it during disk I/O)
+        with EPISODES_FILE.open("a", encoding="utf-8") as f:
+            for (ts, text), v in zip(chunks, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] append failed: %s", type(e).__name__)
+        return
+    new = _normalize_rows(_np.asarray(vecs, dtype=_np.float32))
+    with _episodes_lock:
+        for ts, text in chunks:
+            _episodes["ts"].append(ts)
+            _episodes["text"].append(text)
+        _episodes["mat"] = new if _episodes["mat"] is None else _np.vstack([_episodes["mat"], new])
+        n = len(_episodes["ts"])
+        if n > EPISODE_MAX:  # cap RAM (file trimmed at next startup)
+            cut = n - EPISODE_MAX
+            _episodes["ts"] = _episodes["ts"][cut:]
+            _episodes["text"] = _episodes["text"][cut:]
+            _episodes["mat"] = _episodes["mat"][cut:]
+    print(f"[episodes] archived {len(chunks)} chunk(s); {len(_episodes['ts'])} held.")
+
+
+def _episode_when(ts: float) -> str:
+    """Human phrasing of how long ago an episode was, for the recall prompt."""
+    days = max(0, int((time.time() - ts) / 86400))
+    if days <= 0:
+        return "earlier today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"about {days} days ago"
+    if days < 60:
+        return f"about {days // 7} weeks ago"
+    when = datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)
+    return f"back around {when.strftime('%b %d')}"
+
+
+def triggered_episode(query_vec) -> str:
+    """On-loop: return the most relevant past exchange(s) for this turn, or '' (no extra
+    embedding call -- reuses query_vec). Time-gated so the live window isn't echoed back."""
+    if not EPISODIC_RECALL or _np is None or query_vec is None:
+        return ""
+    with _episodes_lock:
+        mat = _episodes["mat"]
+        ts = _episodes["ts"][:]
+        text = _episodes["text"][:]
+    if mat is None or not ts:
+        return ""
+    q = _np.asarray(query_vec, dtype=_np.float32)
+    nq = _np.linalg.norm(q)
+    if nq == 0:
+        return ""
+    sims = mat @ (q / nq)
+    cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
+    picks = []
+    for idx in _np.argsort(-sims):
+        i = int(idx)
+        if i >= len(ts):
+            continue
+        if float(sims[i]) < EPISODE_MIN_SIM:
+            break
+        if ts[i] > cutoff:
+            continue
+        picks.append((ts[i], text[i]))
+        if len(picks) >= EPISODE_TOPK:
+            break
+    if not picks:
+        return ""
+    blocks = [f"({_episode_when(t)})\n{txt}" for t, txt in picks]
+    return ("# A specific moment you remember\n"
+            "Draw on this only if it genuinely fits the conversation — don't force a callback "
+            "or quote it back word for word:\n\n" + "\n\n".join(blocks))
+
+
+def _read_onthisday() -> dict:
+    try:
+        return json.loads(ONTHISDAY_FILE.read_text(encoding="utf-8")) if ONTHISDAY_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _onthisday_episode(exclude_ts=None):
+    """Find one archived episode whose anniversary lands today (~1mo/6mo/1yr ago). Prefers the
+    longest interval, then the closest match. Returns (ts, text) or None. Cheap (no network)."""
+    if not ONTHISDAY_ENABLED or _np is None:
+        return None
+    _load_episodes()
+    with _episodes_lock:
+        ts_list = _episodes["ts"][:]
+        text_list = _episodes["text"][:]
+    now = time.time()
+    best = None  # (interval, -offset, ts, text) — larger interval wins, then closest to anniversary
+    for ts, text in zip(ts_list, text_list):
+        if exclude_ts is not None and ts == exclude_ts:
+            continue
+        days_ago = (now - ts) / 86400
+        for interval in ONTHISDAY_INTERVALS:
+            off = abs(days_ago - interval)
+            if off <= ONTHISDAY_WINDOW_DAYS:
+                cand = (interval, -off, ts, text)
+                if best is None or cand[:2] > best[:2]:
+                    best = cand
+                break
+    return (best[2], best[3]) if best else None
+
+
+async def onthisday_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once-daily: if a past moment's anniversary lands today, reach out to reminisce about it."""
+    if not ONTHISDAY_ENABLED:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    last = _read_onthisday()
+    if last.get("date") == today:
+        return  # already reminisced today
+    last_date = last.get("date")
+    if last_date:
+        try:
+            if (date.fromisoformat(today) - date.fromisoformat(last_date)).days < ONTHISDAY_MIN_GAP_DAYS:
+                return  # keep it special — don't reminisce too often
+        except Exception:
+            pass
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    ep = await asyncio.to_thread(_onthisday_episode, last.get("ts"))
+    if not ep:
+        return
+    ts, text = ep
+    when = _episode_when(ts)
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {when} this moment happened between you and {uname}:\n\"{text}\"\n"
+        f"It just drifted back into your mind. Reach out warmly and fully in character — bring it up "
+        f"the way someone reminisces out of nowhere ('hey, remember when...'), say what it stirs up in "
+        f"you, maybe ask if they remember it too. Brief and genuine, not a recap or a quote.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": ts}), encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[onthisday] resurfaced an episode from {when}.")
+    except Exception as e:
+        log.warning("[onthisday] failed: %s", type(e).__name__)
 
 
 _load_embeddings()
@@ -5055,6 +5347,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                       f" {uname} raises it.")
         messages.append(_sys_opt(block))
 
+    episode = triggered_episode(query_vec)
+    if episode:
+        messages.append(_sys_opt(episode))
+
     bds = boundaries.get(chat_id) or []
     if bds:
         messages.append({"role": "system", "content": (
@@ -7090,6 +7386,8 @@ async def maintain_memory(chat_id: int):
             except Exception as e:
                 log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
                 _count_error("memory")
+            if EPISODIC_RECALL:  # archive the verbatim turns before they're dropped (off-loop)
+                asyncio.create_task(asyncio.to_thread(_archive_episode_chunks, batch, uname))
             del conversation_history[chat_id][:drop_count]
             save_state()
             print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
@@ -8714,6 +9012,31 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(f"No memories matched '{arg}'.")
+
+
+async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed(update.effective_user.id):
+        return
+    if not EPISODIC_RECALL:
+        await update.message.reply_text(
+            "Episodic recall is off (needs MEMORY_SEMANTIC_LIVE + EPISODIC_RECALL).")
+        return
+    if _np is None:
+        await update.message.reply_text(f"Episodic recall needs numpy: {_pip_hint('numpy')}")
+        return
+    with _episodes_lock:
+        n = len(_episodes["ts"])
+        newest = _episodes["ts"][-1] if n else 0
+        sample = _episodes["text"][-1] if n else ""
+    if not n:
+        await update.message.reply_text(
+            "No episodes archived yet (they accrue as conversation ages out).")
+        return
+    await _reply_chunked(
+        update,
+        f"📚 Episodic archive: {n} chunk(s) held (cap {EPISODE_MAX}).\n"
+        f"Most recent ({_episode_when(newest)}):\n\n{sample[:1200]}"
+    )
 
 
 async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13947,14 +14270,21 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"🪪 {NAME} — diagnostics"]
     lines.append(
         "Features:\n"
-        f"  {on(MEMORY_SEMANTIC_LIVE)} semantic memory   {on(SAFETY_ENABLED)} safety   "
-        f"{on(STYLE_MIRROR)} style mirror\n"
-        f"  {on(LIFE_SIM_ENABLED)} offline life   {on(VOICE_TONE_ENABLED)} voice tone\n"
+        f"  {on(MEMORY_SEMANTIC_LIVE)} semantic memory   {on(EPISODIC_RECALL)} episodic recall   "
+        f"{on(SAFETY_ENABLED)} safety\n"
+        f"  {on(STYLE_MIRROR)} style mirror   {on(LIFE_SIM_ENABLED)} offline life   "
+        f"{on(ONTHISDAY_ENABLED)} on-this-day\n"
+        f"  {on(VOICE_TONE_ENABLED)} voice tone\n"
         f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   "
         f"{on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
     )
     if MEMORY_SEMANTIC_LIVE:
         lines.append(f"Embedded: {len(_lore_embeddings)} lore entries")
+    if EPISODIC_RECALL:
+        with _episodes_lock:
+            n_ep = len(_episodes["ts"])
+        lines.append(f"Episodes: {n_ep} chunk(s) archived (cap {EPISODE_MAX}, numpy: "
+                    f"{'yes' if _np is not None else 'MISSING'})")
     if GARMIN_ENABLED:
         age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
         lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
@@ -14444,6 +14774,7 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("editmem", "Edit a memory note by number"),
     BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
@@ -14727,6 +15058,7 @@ def main():
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
+    app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
@@ -14919,6 +15251,21 @@ def main():
         if MEMORY_SEMANTIC_LIVE and LORE:
             app.job_queue.run_once(_embed_lore_job, when=20)
             log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
+        if EPISODIC_RECALL and _np is not None:
+            app.job_queue.run_once(_episodes_load_job, when=21)
+            log.info("Episodic recall on (cap %d chunks).", EPISODE_MAX)
+        elif EPISODIC_RECALL and _np is None:
+            log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
+                        "disabled. Install it with: %s", _pip_hint("numpy"))
+        if ONTHISDAY_ENABLED:
+            try:
+                _oh, _om = (int(x) for x in ONTHISDAY_TIME.split(":"))
+                _ohtime = dtime(_oh, _om, tzinfo=TZ) if TZ else dtime(_oh, _om)
+                app.job_queue.run_daily(onthisday_job, time=_ohtime)
+                log.info("On-this-day reminiscing scheduled at %s.", ONTHISDAY_TIME)
+            except Exception:
+                log.warning("[config] bad ONTHISDAY_TIME %r — on-this-day not scheduled",
+                            ONTHISDAY_TIME)
         if WSDOT_API_KEY:  # capability, not the switch — traffic_poll_job re-checks it
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
