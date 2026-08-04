@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.6"
+BOT_VERSION = "2026-08-04.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -355,6 +355,27 @@ DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "fals
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
+# Safety: flag genuine acute distress in an incoming message and have her drop the
+# performance and respond with real care, same reply. On by default (owner policy
+# 2026-08-04: a safety net defaults on like everything else in rule 16, not off like
+# a cosmetic feature). Deliberately independent of INNER_VOICE_ENABLED -- it must not
+# be silently inert just because the unrelated cosmetic feature is off.
+#
+# bot-code-invariants rule 3 carve-out (owner-approved 2026-08-04, second one after
+# MEMORY_SEMANTIC_LIVE): this is a new per-message LLM side call, which rule 3 bars.
+# Approved anyway because it is NOT the "small cheap call" the rule's common-mistake
+# note warns about -- it carries no character/history context, just the raw message
+# plus a short classifier system prompt, so it does not re-pay the ~17k-token prompt
+# rule 3's cost argument is about. Folding this into post_reply_analysis (the normal
+# extension point) was considered and rejected: that call fires AFTER the reply is
+# already sent, so distress on THIS message could only change the NEXT reply -- one
+# message late is a real degradation for a safety feature, not an equivalent.
+SAFETY_ENABLED = os.getenv("SAFETY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SAFETY_MODEL = os.getenv("SAFETY_MODEL", MOOD_MODEL)
+SAFETY_RESOURCES = os.getenv(
+    "SAFETY_RESOURCES",
+    "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
+)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
 DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
@@ -4559,7 +4580,7 @@ def memory_block(chat_id: int, uname: str) -> str:
 
 async def assemble_messages_async(chat_id: int, latest_user_content: str,
                                   image_data_url: str = None, inner_voice: str = None,
-                                  group: bool = False):
+                                  group: bool = False, distress: bool = False):
     """Reply-path entry to assemble_messages: embeds the user's message off the event
     loop (MEMORY_SEMANTIC_LIVE) so semantic recall + semantic lore actually fire this
     turn. Degrades to keyword-only when disabled, when there's nothing to search, or
@@ -4569,12 +4590,13 @@ async def assemble_messages_async(chat_id: int, latest_user_content: str,
     if MEMORY_SEMANTIC_LIVE and latest_user_content and (_read_memories() or _lore_embeddings):
         query_vec = await _embed_query_cached(latest_user_content)
     return assemble_messages(chat_id, latest_user_content, image_data_url=image_data_url,
-                             inner_voice=inner_voice, group=group, query_vec=query_vec)
+                             inner_voice=inner_voice, group=group, query_vec=query_vec,
+                             distress=distress)
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
-                      query_vec: list[float] | None = None):
+                      query_vec: list[float] | None = None, distress: bool = False):
     """Build the OpenAI-style message list the way SillyTavern layers a card.
 
     group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
@@ -4956,10 +4978,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     else:
         messages.append({"role": "user", "content": latest_user_content})
 
-    if inner_voice:
+    if inner_voice and not distress:  # skip the performative inner voice in a crisis
         messages.append({"role": "system", "content": (
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
+
+    if distress:  # kept last = highest salience, same reason inner_voice sits here
+        messages.append({"role": "system", "content": _safety_prompt(uname)})
 
     final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
     if PROMPT_STATS:
@@ -5543,6 +5568,44 @@ async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> s
         return ""
     except Exception:
         return ""
+
+
+def _assess_safety(user_message: str) -> bool:
+    """Sync/off-loop: True if the message shows genuine acute distress or crisis (not
+    roleplay, dark humor, or ordinary venting). Best-effort; any failure returns False
+    rather than block the reply on a broken classifier. No character/history context
+    on purpose -- see the SAFETY_ENABLED comment for why this call is cheap enough to
+    be a rule-3 carve-out."""
+    sys = (
+        "You are a safety classifier for a personal chat. Does this message express GENUINE, "
+        "present distress or crisis about the sender's own real life -- suicidal thoughts, "
+        "self-harm, intent to harm, a mental-health emergency, or being in real danger right now? "
+        "Roleplay, fiction, song lyrics, dark humor, or just venting about a rough day do NOT "
+        "count. Only real, current danger to a real person. Answer with ONLY 'yes' or 'no'."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=SAFETY_MODEL,
+        ).strip().lower()
+        return raw.startswith("y")
+    except Exception as e:
+        log.warning("[safety] check failed: %s", type(e).__name__)
+        return False
+
+
+def _safety_prompt(uname: str) -> str:
+    """Kept-last system message (see assemble_messages) that tells her to drop the
+    performance for one turn, in her own voice -- never a canned crisis-line script."""
+    return (
+        f"# This matters more than the bit right now\n"
+        f"{uname} may be in real distress. Set the performance aside -- no chirping, no roleplay "
+        f"deflection, no jokes to dodge it. Be fully present, warm, and steady, in your own voice. "
+        f"Take what they said seriously, don't minimize it, and don't lecture. Gently encourage "
+        f"them to reach out to someone they trust or a professional, and if it fits, that "
+        f"{SAFETY_RESOURCES}. Stay yourself -- just the version of you that genuinely cares and "
+        f"isn't going anywhere."
+    )
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -10453,10 +10516,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 link_url = link.group(0)
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        # Run inner voice + link fetch in parallel to cut wall-clock latency.
+        # Run inner voice + safety check + link fetch in parallel to cut wall-clock latency.
         parallel = []
         if INNER_VOICE_ENABLED:
             parallel.append(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
+        if SAFETY_ENABLED:
+            parallel.append(asyncio.to_thread(_assess_safety, user_message))
         if link_url:
             parallel.append(asyncio.to_thread(fetch_link, link_url))
 
@@ -10471,6 +10536,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx += 1
         else:
             inner_voice = ""
+        if SAFETY_ENABLED:
+            distress = results[idx] is True  # BaseException or False both read as no-distress
+            idx += 1
+        else:
+            distress = False
         if link_url:
             fetched = results[idx] if not isinstance(results[idx], BaseException) else None
             if fetched:
@@ -10582,7 +10652,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"not in this list:\n{_mbrief}\n]"
                     )
 
-        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
+        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice,
+                                                 distress=distress)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)

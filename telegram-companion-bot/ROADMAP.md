@@ -498,6 +498,27 @@ constraints; check their assumptions before acting on them.
   confirmed a right one. Still needs: `vps-sync.sh` re-run on the five instances that
   load `preset-rp.txt` to actually pick this up (see `deploy-and-verify-fleet`).
 
+### 3.15 ~~Safety: distress detection~~ ✅ (shipped v2026-08-04.1, `SAFETY_ENABLED`)
+- **History:** built once already (`d141e84`, 2026-06-29) on a branch that was never
+  merged (`claude/push-to-repo-7i2f3c`, 509 commits stale) and silently vanished from
+  institutional memory for over a month — see the operational-log 2026-08-04 entry.
+  Reimplemented against current `bot.py` rather than cherry-picked.
+- **What it does:** `_assess_safety` screens each incoming private-chat message
+  off-loop (cheap classifier call, no character/history context) for genuine acute
+  distress — suicidal thoughts, self-harm, real danger — as opposed to roleplay, dark
+  humor, or ordinary venting. On a positive read, the performative inner-voice step is
+  skipped and a high-salience system message (`_safety_prompt`) tells her to drop the
+  act and respond with real care, mentioning `SAFETY_RESOURCES` (988 Lifeline by
+  default) if it fits. On by default, independent of `INNER_VOICE_ENABLED`.
+- **bot-code-invariants rule 3 exception (owner-approved 2026-08-04):** a genuine new
+  per-message LLM call, justified because it carries no character/history context (a
+  small fraction of a normal reply's token cost) and because the sanctioned extension
+  point (`post_reply_analysis`) fires after the reply is already sent, which would make
+  a safety feature one message late. Documented in `bot-code-invariants` itself as a
+  second carve-out next to `MEMORY_SEMANTIC_LIVE`.
+- **Scope:** `handle_message` (private text) only, matching what the original branch
+  actually shipped — not group/voice/photo paths.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)

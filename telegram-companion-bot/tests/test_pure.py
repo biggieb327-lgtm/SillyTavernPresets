@@ -3338,6 +3338,73 @@ class TestStripTiers:
         assert all(set(m) <= {"role", "content"} for m in msgs)
 
 
+# ── Safety: distress detection (2026-08-04, reimplemented from the abandoned
+# claude/push-to-repo-7i2f3c branch's d141e84, never merged the first time) ──────
+
+class TestSafetyClassifier:
+    def test_yes_is_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Yes.")
+        assert bot._assess_safety("I want to end it all") is True
+
+    def test_no_is_not_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "No")
+        assert bot._assess_safety("just a rough day at work") is False
+
+    def test_a_broken_classifier_reads_as_no_distress(self, monkeypatch):
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._assess_safety("anything") is False
+
+    def test_no_raw_exception_in_safety_log(self):
+        # Only the exception's class name may reach a log line (cf. the Garmin/
+        # WSDOT key-leak convention).
+        import inspect
+        src = inspect.getsource(bot._assess_safety)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+    def test_prompt_carries_the_name_and_resource(self):
+        text = bot._safety_prompt("Tester")
+        assert "Tester" in text
+        assert bot.SAFETY_RESOURCES in text
+
+    def test_config_types(self):
+        assert isinstance(bot.SAFETY_ENABLED, bool)
+        assert isinstance(bot.SAFETY_MODEL, str) and bot.SAFETY_MODEL
+        assert isinstance(bot.SAFETY_RESOURCES, str) and bot.SAFETY_RESOURCES
+
+
+class TestAssembleMessagesDistress:
+    def test_distress_suppresses_inner_voice(self):
+        bot.conversation_history[9401] = []
+        bot.user_names[9401] = "Tester"
+        msgs = bot.assemble_messages(9401, "hello", inner_voice="she notices he sounds off",
+                                     distress=True)
+        assert not any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_no_distress_keeps_inner_voice(self):
+        bot.conversation_history[9402] = []
+        bot.user_names[9402] = "Tester"
+        msgs = bot.assemble_messages(9402, "hello", inner_voice="she notices he sounds off",
+                                     distress=False)
+        assert any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_distress_appends_the_safety_prompt_last(self):
+        bot.conversation_history[9403] = []
+        bot.user_names[9403] = "Tester"
+        msgs = bot.assemble_messages(9403, "hello", distress=True)
+        assert msgs[-1]["role"] == "system"
+        assert "distress" in msgs[-1]["content"]
+
+    def test_no_distress_by_default(self):
+        bot.conversation_history[9404] = []
+        bot.user_names[9404] = "Tester"
+        msgs = bot.assemble_messages(9404, "hello")
+        assert not any("distress" in (m.get("content") or "") for m in msgs)
+
+
 class TestTieredTrimOrder:
     @staticmethod
     def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):

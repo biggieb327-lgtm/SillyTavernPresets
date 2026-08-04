@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.1 — Safety: distress detection, reimplemented after being built once and never merged
+
+**Root cause: this feature already existed, once.** `d141e84` ("Add safety: detect
+genuine distress and respond with care", 2026-06-29) built `_assess_safety` and shipped
+it on `claude/push-to-repo-7i2f3c` — but that branch diverged from `main` on 2026-06-24
+and was never merged. `main` is 509 commits past that divergence point with no trace of
+it. Not removed after shipping — built once, on a branch that got abandoned in favor of
+continued work directly on `main`, and the feature never made the jump. Found via an
+external-improvement-ideas scan that proposed disclosure/dependency safeguards; the
+owner recognized the idea and asked to confirm it wasn't already live. It wasn't.
+
+**Fix:** `_assess_safety` (cheap off-loop classifier, no character/history context) and
+`_safety_prompt` reimplemented against current `bot.py`. `SAFETY_ENABLED` (default on),
+`SAFETY_MODEL`, `SAFETY_RESOURCES` (988 Suicide & Crisis Lifeline by default).
+`assemble_messages`/`assemble_messages_async` gained a `distress` param: when true, the
+performative inner-voice block is skipped and `_safety_prompt` is appended last (highest
+salience), same as the original design. Wired into `handle_message`'s existing
+`parallel` concurrency list alongside inner voice and link fetch, so it costs no serial
+latency. Deliberately independent of `INNER_VOICE_ENABLED` (default off) — a safety net
+must not be silently inert because an unrelated cosmetic feature is off. Scope matches
+what the abandoned branch actually shipped: `handle_message` (private text) only, not
+group/voice/photo paths — those never had it either.
+
+**bot-code-invariants rule 3 exception (owner-approved 2026-08-04, in the same
+session):** this adds a genuine new per-message LLM side call, which rule 3 bars.
+Approved because it is not the "small cheap call" the rule's common-mistake note warns
+against — no character/history context, so it doesn't re-pay the ~17k-token prompt
+rule 3's cost argument is about. Folding it into `post_reply_analysis` (the sanctioned
+extension point) was considered and rejected: that call fires after the reply is
+already sent, so distress on THIS message could only change the NEXT reply — one
+message late is a real degradation for a safety feature. Documented as a second
+carve-out in `bot-code-invariants` rule 3, next to the existing `MEMORY_SEMANTIC_LIVE`
+one, so a future session doesn't flag it as a violation.
+
+**Verification:** `TestSafetyClassifier` + `TestAssembleMessagesDistress` (10 tests) —
+classifier yes/no parsing, fail-open on a broken classifier, no raw exception in the
+safety log (structural check, matching the Garmin/WSDOT convention), distress
+suppresses inner voice and appends the safety prompt last, no distress by default. All
+break-tested RED (three separate injections: classifier forced False, the
+inner-voice-suppression gate removed, the safety-prompt append removed — each
+confirmed the matching test failed, then reverted). `bash .claude/tools/verify.sh`
+green: 967 passed, 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
 ## 2026-08-04 — The second source-assertion backlog: 7 helpers with zero real test coverage (no bot.py change, no version bump)
 
 **Root cause:** `sweep.py`'s widened `_handler_coverage()` (2026-08-03) flagged
