@@ -92,7 +92,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.4"
+BOT_VERSION = "2026-08-04.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -13934,6 +13934,37 @@ def tail_error_lines(n: int = 20) -> list[str]:
     return [l for l in lines if l.strip()][-n:]
 
 
+async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One-shot feature/health report for this bot — what's on, what's embedded, memory
+    counts. Reimplemented from 71dfa44 (2026-06-29, never merged), scoped down: the
+    original's log-error tail is dropped (redundant with /errors, which already does
+    that job better — admin-gated, paginated), and its flag list is trimmed to what
+    actually exists on this bot today rather than the abandoned branch's full set."""
+    if not _is_allowed(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    on = lambda b: "✅" if b else "—"
+    lines = [f"🪪 {NAME} — diagnostics"]
+    lines.append(
+        "Features:\n"
+        f"  {on(MEMORY_SEMANTIC_LIVE)} semantic memory   {on(SAFETY_ENABLED)} safety   "
+        f"{on(STYLE_MIRROR)} style mirror\n"
+        f"  {on(LIFE_SIM_ENABLED)} offline life   {on(VOICE_TONE_ENABLED)} voice tone\n"
+        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   "
+        f"{on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
+    )
+    if MEMORY_SEMANTIC_LIVE:
+        lines.append(f"Embedded: {len(_lore_embeddings)} lore entries")
+    if GARMIN_ENABLED:
+        age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
+        lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
+    lines.append(
+        f"Memory: {len(_read_memories())} NPC notes · {len(milestones.get(chat_id) or [])} "
+        f"milestones · {len([r for r in reminders if r['chat_id'] == chat_id])} reminders"
+    )
+    await _reply_chunked(update, "\n".join(lines))
+
+
 async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the tail of errors.log so bug reports carry evidence."""
     if not _is_admin(update.effective_user.id):
@@ -14474,6 +14505,7 @@ _BASE_COMMANDS = [
     BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
     BotCommand("audit", "Bot health and error report"),
+    BotCommand("diag", "Show this bot's behavior-toggle status"),
     BotCommand("errors", "Show recent errors.log lines (admin only)"),
     BotCommand("restart", "Clean restart via the supervisor (admin only)"),
     BotCommand("update", "Self-deploy from main — dead on the private repo, "
@@ -14750,6 +14782,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CommandHandler("fleet", fleet_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))

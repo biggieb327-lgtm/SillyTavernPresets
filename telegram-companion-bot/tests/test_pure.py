@@ -7763,3 +7763,54 @@ class TestAnalyzeVoiceTone:
 
     def test_config_defaults(self):
         assert isinstance(bot.VOICE_TONE_ENABLED, bool)
+
+
+# ── /diag (2026-08-04, reimplemented from 71dfa44, never merged; scoped down --
+# the log-error tail is dropped as redundant with /errors, and the flag list is
+# trimmed to what actually exists on this bot rather than the abandoned branch's
+# full set) ─────────────────────────────────────────────────────────────────────
+
+class TestDiagCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 444242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_diag_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "diagnostics" in m.sent[0]
+
+    def test_diag_cmd_reports_the_new_toggles(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        text = m.sent[0]
+        for label in ("safety", "style mirror", "offline life", "voice tone"):
+            assert label in text, label
+
+    def test_diag_cmd_is_gated(self):
+        u, m = _cmd_update(self._outsider())
+        bot.ALLOWED_USERS.add(999999998)  # non-empty ALLOWED_USERS makes _is_allowed strict
+        try:
+            asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        finally:
+            bot.ALLOWED_USERS.discard(999999998)
+        assert m.sent == []
+
+    def test_diag_cmd_omits_the_log_error_tail(self):
+        # Deliberately dropped as redundant with /errors -- must not resurface here.
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert "Log errors" not in m.sent[0]

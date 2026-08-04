@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.5 — /diag: a compact behavior-toggle status command
+
+**Root cause: the fifth thing from the same lost branch, scoped down rather than
+straight-ported.** `71dfa44` (2026-06-29) added `/diag` bundled with log rotation and
+an RHR monitor. The RHR monitor already shipped separately (`RHR_ALERTS` exists on
+`main`). Log rotation was Termux-era (`run-bot.sh` size-check-and-`mv`) — the fleet's
+been on systemd since 2026-07-26, and `errors.log` already rotates properly via
+Python's `RotatingFileHandler`, which is strictly better. `/diag`'s own design also
+doesn't fit as-is: its log-error tail duplicates the existing `/errors` command, and
+its flag list (`EPISODIC_RECALL`, `SCENE_CONTINUITY`, `EVENT_REMINDERS`,
+`READING_ENABLED`) names branch features not on `main`.
+
+**What shipped instead:** `/diag` as a compact status line for the toggles this
+session added — semantic memory, safety, style mirror, offline life, voice tone,
+garmin/stress/RHR/body-battery — a genuinely different axis from `/audit`'s
+`_FEATURES` dict (selfie/meme/gif/voice-backend/traffic/maps/health integrations),
+not a duplicate of it. `_is_allowed`-gated like the original, not admin-only.
+
+**Verification:** `TestDiagCmd` (4 tests) — answers, reports the new toggles by name,
+gated for non-allowed users, and an explicit check that the log-error tail stays
+dropped. Break-tested RED two ways (the gate check removed, two toggle lines
+removed). `bash .claude/tools/verify.sh` green: 1009 passed, 38 evals, 45/45
+gate-corpus.
+
 ## v2026-08-04.4 — Voice-note acoustic tone analysis, reimplemented from the same abandoned branch
 
 **Root cause: a fourth feature from the same lost branch.** `bae2dcb` (2026-07-01,
