@@ -87,7 +87,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.1"
+BOT_VERSION = "2026-08-04.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -396,6 +396,12 @@ LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+# Adaptive style mirroring: passively read the user's recent texting habits (length, emoji,
+# caps, enthusiasm, textspeak) and nudge her register to subtly match -- no model call, pure
+# heuristics off the in-RAM history (reimplemented from a485b1b, 2026-06-30, never merged).
+STYLE_MIRROR = os.getenv("STYLE_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+STYLE_SAMPLE = _env_int("STYLE_SAMPLE", "20")    # how many recent user messages to read
+STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many before adapting
 # Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
 # only blocks carrying an explicit "raise this" instruction, while her live context (her day,
 # her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
@@ -4594,6 +4600,57 @@ async def assemble_messages_async(chat_id: int, latest_user_content: str,
                              distress=distress)
 
 
+_TXT_ABBREVS = frozenset({
+    "lol", "lmao", "lmfao", "rofl", "u", "ur", "rn", "idk", "tbh", "ngl", "omg",
+    "fr", "imo", "btw", "ikr", "smh", "wyd", "hbu", "ty", "np", "ofc", "bc", "cuz", "ya",
+})
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF❤✨‼⁉]"
+)
+
+
+def _user_style_note(chat_id: int) -> str:
+    """Heuristic: read the user's recent texting habits and nudge her register to subtly
+    match (length, emoji, caps, enthusiasm, textspeak). No model call -- pure stats off
+    RAM history."""
+    if not STYLE_MIRROR:
+        return ""
+    msgs = [m["content"] for m in conversation_history.get(chat_id, [])
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and m["content"].strip() and not m["content"].startswith("[")]
+    msgs = msgs[-STYLE_SAMPLE:]
+    n = len(msgs)
+    if n < STYLE_MIN_MSGS:
+        return ""
+    avg_words = sum(len(m.split()) for m in msgs) / n
+    emoji = sum(1 for m in msgs if _EMOJI_RE.search(m)) / n
+    lower = sum(1 for m in msgs if any(c.isalpha() for c in m) and m == m.lower()) / n
+    excl = sum(1 for m in msgs if "!" in m) / n
+    abbr = sum(1 for m in msgs
+               if {w.strip(".,!?").lower() for w in m.split()} & _TXT_ABBREVS) / n
+    traits = []
+    if avg_words <= 6:
+        traits.append("they text in short, clipped messages — keep yours brief and punchy to match")
+    elif avg_words >= 25:
+        traits.append("they write longer, fuller messages — you have room to be a bit more expansive")
+    if emoji >= 0.4:
+        traits.append("they use emoji freely — an emoji here and there fits")
+    elif emoji <= 0.05:
+        traits.append("they rarely use emoji — go light on them")
+    if lower >= 0.6:
+        traits.append("they text in casual all-lowercase — you can loosen your capitalization a touch")
+    if excl >= 0.5:
+        traits.append("they're punchy and exclaim a lot — match that liveliness")
+    if abbr >= 0.3:
+        traits.append("they use casual textspeak (lol, rn, idk) — a little of that is natural with them")
+    if not traits:
+        return ""
+    uname = user_names.get(chat_id, "they")
+    return (f"# Matching {uname}'s texting style\n"
+            f"Subtly mirror how {uname} texts, without losing your own voice: "
+            + "; ".join(traits) + ".")
+
+
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
                       query_vec: list[float] | None = None, distress: bool = False):
@@ -4917,6 +4974,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         # fleet's voiceprint was addressing a placeholder instead of the character.
         for _lname, _ltext in PRESET_LAYERS:
             messages.append({"role": "system", "content": fill(_ltext, NAME, uname)})
+
+    if STYLE_MIRROR:
+        snote = _user_style_note(chat_id)
+        if snote:
+            messages.append({"role": "system", "content": snote})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})

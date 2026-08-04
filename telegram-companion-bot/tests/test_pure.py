@@ -3405,6 +3405,71 @@ class TestAssembleMessagesDistress:
         assert not any("distress" in (m.get("content") or "") for m in msgs)
 
 
+# ── Adaptive texting-style mirroring (2026-08-04, reimplemented from a485b1b,
+# never merged) ───────────────────────────────────────────────────────────────
+
+class TestUserStyleNote:
+    def _seed(self, chat_id, msgs):
+        bot.conversation_history[chat_id] = [{"role": "user", "content": m} for m in msgs]
+        bot.user_names[chat_id] = "Tester"
+
+    def test_too_few_messages_is_silent(self):
+        self._seed(9501, ["hi"] * (bot.STYLE_MIN_MSGS - 1))
+        assert bot._user_style_note(9501) == ""
+
+    def test_short_clipped_texter(self):
+        self._seed(9502, ["yo"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9502)
+        assert "short, clipped" in note
+
+    def test_long_texter(self):
+        long_msg = " ".join(["word"] * 30)
+        self._seed(9503, [long_msg] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9503)
+        assert "longer, fuller" in note
+
+    def test_heavy_emoji_user(self):
+        self._seed(9504, ["nice 😂🔥"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9504)
+        assert "emoji freely" in note
+
+    def test_no_emoji_user(self):
+        self._seed(9505, ["that sounds reasonable to me honestly"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9505)
+        assert "rarely use emoji" in note
+
+    def test_lowercase_texter(self):
+        self._seed(9506, ["hey what's up today"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9506)
+        assert "all-lowercase" in note
+
+    def test_textspeak_user(self):
+        self._seed(9507, ["lol idk rn tbh"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9507)
+        assert "textspeak" in note
+
+    def test_bracket_tagged_messages_excluded(self):
+        # [sent ...] / heartbeat-style synthetic entries aren't the user's own texting.
+        self._seed(9508, ["[sent 10:00]"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9508) == ""
+
+    def test_disabled_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9509, ["yo"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9509) == ""
+
+    def test_assemble_messages_includes_the_note_when_enabled(self):
+        self._seed(9510, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9510, "hello")
+        assert any("texting style" in (m.get("content") or "") for m in msgs)
+
+    def test_assemble_messages_omits_the_note_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9511, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9511, "hello")
+        assert not any("texting style" in (m.get("content") or "") for m in msgs)
+
+
 class TestTieredTrimOrder:
     @staticmethod
     def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):

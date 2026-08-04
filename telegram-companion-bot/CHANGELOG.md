@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-04.2 — Adaptive texting-style mirroring, reimplemented from the same abandoned branch
+
+**Root cause: another feature built once and lost.** `a485b1b` (2026-06-30, same
+`claude/push-to-repo-7i2f3c` branch as the safety detector) built `STYLE_MIRROR` and it
+never merged either. Found during a follow-up audit of that branch for other
+unreferenced work, prompted by the owner asking for the rest of what `ROADMAP.md` 3.10
+already flagged as unported.
+
+**What it does:** `_user_style_note` passively reads the user's last `STYLE_SAMPLE`
+messages (default 20, needs at least `STYLE_MIN_MSGS`=6) and nudges her register to
+subtly match — message length, emoji use, lowercase habits, exclamation frequency,
+casual textspeak (lol/idk/rn/tbh). **Zero model calls** — pure heuristics off the
+in-RAM `conversation_history`, so it adds no per-message LLM cost or latency at all
+(no rule-3 question here, unlike the safety detector). Bracket-tagged synthetic
+entries (`[sent ...]`, heartbeat messages) are excluded from the sample. Injected into
+`assemble_messages` right after the texting-style/preset-layer block. On by default,
+`STYLE_MIRROR=0` disables.
+
+**Verification:** `TestUserStyleNote` (11 tests) — each trait heuristic (short/long,
+emoji high/low, lowercase, textspeak), too-few-messages silence, bracket-tag exclusion,
+the on/off wiring into `assemble_messages`. Break-tested RED two ways (the disabled
+early-return skipped, the `assemble_messages` wiring removed). `bash
+.claude/tools/verify.sh` green: 978 passed, 38 evals, 45/45 gate-corpus.
+
 ## v2026-08-04.1 — Safety: distress detection, reimplemented after being built once and never merged
 
 **Root cause: this feature already existed, once.** `d141e84` ("Add safety: detect
