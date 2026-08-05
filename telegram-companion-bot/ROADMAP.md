@@ -842,6 +842,82 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
 
 ---
 
+## Track 6 — AI landscape research (sourced 2026-08-05)
+
+Not lateral-thinking (Track 5's method) — a web-research pass against current (2026)
+AI-industry developments, checked against this repo's actual code and open items
+before being recorded. Multi-agent LLM orchestration was researched and explicitly
+**not** carried forward: the shipped bot-to-bot design (`GROUP_CHAT_DESIGN.md`, 3.4,
+four adversarial review rounds) already covers the pattern, and the live-collaboration
+shape most 2026 frameworks assume runs straight into `bot-code-invariants` #3 (no new
+per-message LLM side calls) with no case strong enough to argue an exception.
+
+### 6.1 Prompt caching on the `assemble_messages` prefix — S (verification), size TBD after
+- **Evidence:** NanoGPT (this fleet's provider) documents automatic implicit prompt
+  caching — no request changes needed — for "OpenAI and Gemini model families plus
+  many open-source provider/model routes," with cache hits reported via
+  `cache_read_input_tokens` in the response usage block. This lands directly on 3.8's
+  own numbers: "instances run ~17k input tokens per call... cost is dominated by
+  context, not output" at 15-40 calls/day × 7 bots.
+  **Not yet confirmed:** NanoGPT's docs do not enumerate which open-source routes are
+  covered, and every default model here is one (`NANOGPT_MODEL=zai-org/glm-5:thinking`,
+  `REACTION_MODEL=zai-org/glm-4.7-flash`) — none are OpenAI/Gemini. Whether caching
+  applies to this fleet's actual models at all is unverified; treat it as a hypothesis,
+  not a fact, per C9.
+  **Also checked:** `assemble_messages` (bot.py:5090) currently defeats prefix caching
+  even if the models support it — `ATLAS` gets `random.sample()`'d (line 5139) and the
+  GIF capability line gets a `random.random() < GIF_CHANCE` roll (line 5162), both
+  before conversation history. NanoGPT's docs are explicit that cache hits require a
+  byte-identical prefix; either randomized block invalidates everything after it, on
+  every call.
+- **Idea, in verification order — do not skip step 1:**
+  1. Confirm whether `cache_read_input_tokens` is ever nonzero today for any live
+     instance's actual model, before assuming there's anything to fix.
+  2. If caching is available but defeated by assembly order: this is a candidate for
+     moving the randomized/conditional blocks (ATLAS sample, GIF roll) to *after*
+     conversation history, not a rewrite of `assemble_messages` itself. That function
+     is `repo-change-control`'s own Step 6 — "the riskiest code in the bot... only
+     move behind parity tests." A reordering is smaller than a rewrite but still
+     touches it directly; scope accordingly and get the parity-test treatment 3.8's
+     own precedent (640-prompt byte-identical diff, 2.4) sets for prompt-shape changes.
+  3. If step 1 shows caching is unavailable for these model routes: this item is
+     closed as "checked, not applicable," same disposition as 3.8's own "tried, not
+     worth it" clause — recorded either way, not left open.
+- **Unlocks on completion (if caching turns out to be live and gets fixed):** revisits
+  3.8 Phase 2's own cost argument against the pre-reply thinking call — its stated
+  blocker is that a naive call "re-pays that entire prompt every user message." A
+  working cache changes what "re-pay" costs.
+- **Risk:** low for step 1 (read-only, no code change). Medium if step 2 is picked up,
+  scoped to prompt-shape risk, not the invariant/concurrency risk classes.
+- **Done when:** step 1's answer is recorded either way; if pursued past that, a
+  before/after prompt capture (matching 2.4's methodology) proves the reorder is
+  behavior-identical and `cache_read_input_tokens` moves off zero.
+
+### 6.2 Deepen `nightly_maintenance` as deliberate sleep-time compute — S
+- **Evidence:** "Sleep-time compute" (Letta, 2025) names a pattern this repo already
+  half-built without naming it: agents that consolidate memory and pre-compute context
+  during idle time instead of only at query time, reported at up to 18% accuracy gains
+  and ~2.5x cost reduction on the calls that follow. `nightly_maintenance` (memory
+  promotion, `update_milestones`, `_overnight_mood_reset`) is this pattern today, just
+  not treated as a deliberate strategy to extend. Provider-agnostic — uses the same
+  chat-completion calls already made nightly, on whatever model each instance runs, so
+  none of 6.1's NanoGPT-support question applies here.
+- **Idea:** treat `nightly_maintenance` as the standing place to move work off the
+  live reply path, not just its current three jobs. Pairs directly with 5.9's
+  `/reviewlife`, sourced independently but the same shape. One concrete extension not
+  covered by 5.9: `_generate_proactive_hook` currently generates fresh at
+  `send_proactive` time; a nightly pass could pre-draft a candidate hook instead, so
+  the heartbeat tick consumes prepared context rather than generating cold.
+  **Invariant check:** adds zero new per-message LLM calls (`bot-code-invariants` #3)
+  — the nightly job already runs and already makes model calls; this redistributes
+  what those calls do, not how many fire live.
+- **Risk:** low — additive to an existing off-loop job, no new call-site class.
+- **Done when:** a named "what nightly consolidation can absorb" list exists (starting
+  with the proactive-hook pre-draft above) and at least one item ships behind the
+  existing nightly job with no new live-path call.
+
+---
+
 ## Sequencing
 
 | Phase | Items | Status |
@@ -857,6 +933,7 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
+| **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
