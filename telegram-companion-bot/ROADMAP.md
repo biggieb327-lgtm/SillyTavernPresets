@@ -662,6 +662,139 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
 ---
 
+## Track 5 — Proposed (lateral-thinking session, 2026-08-04, owner triage pending)
+
+**Status of this whole track: unreviewed.** These came out of a `random-stimulus`
+lateral-thinking pass run against this roadmap (fed the full shipped list and the
+"Rejected or already covered" sections above, specifically to avoid recombining what
+already exists). They are ideas, not specs — no evidence from a code survey, no
+owner sign-off, no effort/risk estimate beyond a rough guess. Track 3's items earned
+their numbers from a code survey or an owner request; these have not, which is why
+they're a separate track rather than appended to Track 3 as 3.17+. Promote an item to
+Track 3 (with a real spec) only once the owner picks it.
+
+### 5.1 Constancy override ("lighthouse")
+- **Idea:** every Track 3 state-modulation feature (`FATIGUE_STATE`, day-mood residue,
+  `SCHED_BUSY`, `STYLE_MIRROR`) is instance-authored — the user has no lever to ask for
+  the unmodulated baseline. A command or detected phrase ("just be normal for a sec")
+  temporarily suppresses all of them for one exchange.
+- **Why it's not already covered:** every existing modulation knob makes the character
+  *more* variable; none of them let the user dial back to flat on request. `/away` is
+  the closest existing thing and it's about the user's own status, not the character's
+  presentation.
+- **Rough shape:** a suppression flag read at the same injection points that already
+  check fatigue/busy/mirror state — no new state to compute, just a bypass. Effort: S.
+- **Open question:** does suppressing mirror/mood read as caring or as "turning off
+  personality on command" — needs a real exchange to judge, not just a design read.
+
+### 5.2 Vigil mode for anticipated hard events
+- **Idea:** when fact-extraction (already-shipped memory pipeline) picks up a scheduled
+  hard thing ("surgery Tuesday", "court date Friday"), enter a quieter, denser-but-not-
+  cheerful check-in register for that window — explicitly low-pressure, not demanding a
+  reply.
+- **Why it's not already covered:** `SAFETY_ENABLED` handles acute, emergent distress.
+  Ordinary proactive check-ins are generic and date-agnostic. Neither distinguishes
+  "she knows something hard is coming" from either of those.
+- **Rough shape:** reuses existing extraction + the proactive-send scheduler; needs a
+  register/tone change at the injection point plus a start/end window. Effort: M.
+- **Open question:** false-trigger risk on loosely worded "hard events" — needs the same
+  conservative-parse discipline 3.6 used for schedule blocks.
+
+### 5.3 Standing life-project with decay
+- **Idea:** a slow-arc thread in the character's own life (learning guitar, training for
+  a race) that persists and drifts on its own — decaying or changing direction if
+  neglected, growing if the user asks about it. Continuous state, not a discrete event.
+- **Why it's not already covered:** `LIFE_SIM_ENABLED` generates discrete daily events;
+  nothing has continuous, user-attention-responsive state. This is a genuinely different
+  primitive, not a variant of the offline-life-events generator.
+- **Rough shape:** new persisted state (project, momentum float, last-mentioned
+  timestamp), a decay function, narrative surfacing through the existing day-generation
+  or reply-injection path. Effort: M/L — the biggest new-state item in this batch.
+- **Considered and NOT included as part of this idea:** a "fork a character" reading of
+  the same stimulus (spin up a second instance from a memory snapshot that then
+  diverges) — adjacent to the already-rejected self-evolution class above. Flagged so it
+  doesn't come back framed as something new.
+
+### 5.4 In-character introspection query ("signal vs noise")
+- **Idea:** a user-facing, in-voice way to ask what the character currently thinks is
+  going on with the user — mood, recently salient memory, what she's noticed — surfaced
+  on request rather than only inferred from her replies.
+- **Why it's not already covered:** `/audit` exposes system state to the operator, not
+  the character's read on the user, and not in-voice. This is a different consumer.
+- **Rough shape:** template already-computed state (mood, fatigue, recent-memory
+  salience) into an in-voice answer; likely no new LLM call needed. Effort: S/M.
+- **Open question / risk:** could read as a settings panel rather than genuine
+  reflection and break immersion — depends entirely on execution, not the concept.
+
+### 5.5 Chronotype + user-clock noticing
+- **Idea:** a static per-character trait (night owl vs. early bird) shaping typing-delay
+  and tone by time of day, plus passive noticing when the *user's* message timestamps
+  repeatedly land at odd local hours ("you're up weird late again").
+- **Why it's not already covered:** `FATIGUE_STATE` is load-driven, `SCHED_BUSY` is
+  event-driven; neither tracks a body-clock axis, and nothing observes the user's own
+  timing patterns.
+- **Rough shape:** zero LLM calls — a fixed trait plus arithmetic on existing message
+  timestamps, same shape as `STYLE_MIRROR`. Effort: S.
+
+### 5.6 Invisible cross-instance query bridge
+- **Idea:** when a user asks one character about another ("what does Priya think of
+  you?"), the receiving instance does a one-shot, silent query to the peer instance to
+  answer in-voice, then the link closes — no visible transcript, unlike `GROUP_MODE`.
+- **Why it's not already covered:** `GROUP_MODE` banter is public and persistent by
+  design (`GROUP_CHAT_DESIGN.md`); this would be private and momentary — a different
+  mechanism, not a tuning of that one.
+- **Rough shape:** could reuse the admin-API/claim-file plumbing that already lets
+  instances see each other. Effort: M.
+- **Open question:** needs a real design pass against `GROUP_CHAT_DESIGN.md`'s
+  private/group memory boundary before being built — same class of risk that took four
+  review rounds last time.
+
+### 5.7 Authored-now, delivered-blind-later capsule ("message in a bottle")
+- **Idea:** the character writes something now, sealed, and an internal scheduler
+  (not the user, not a fixed date) decides when it resurfaces later, unpredictably —
+  "found this old thing I wrote you."
+- **Why it's not already covered:** `/remindme` is user-scheduled with a fixed date.
+  `EPISODIC_RECALL`/`ONTHISDAY` resurface things that actually happened. Nothing does
+  write-now/deliver-later-blind.
+- **Rough shape:** a queue of sealed entries plus a resurfacing-time distribution;
+  reuses the proactive-send path. Effort: M.
+- **Open question:** real gimmick risk if the resurfacing timing isn't tuned carefully —
+  the whole idea lives or dies on the "surprise" landing right, not on the mechanism.
+
+### 5.8 Near-miss recall as character behavior ("tip-of-the-tongue")
+- **Idea:** semantic recall currently either surfaces a memory or silently discards a
+  low-confidence match. Surface the *sensation* of almost-remembering instead ("I know I
+  told you about this, hang on—"), then follow up unprompted later if a stronger match
+  re-triggers.
+- **Why it's not already covered:** the memory auditor's job is being *right*; this
+  claims the discard band between "confident enough to use" and "no match," which is
+  currently silence.
+- **Rough shape:** nearly free — reuses existing embedding infra, gives the discard band
+  a behavior instead of dropping it. Effort: S.
+- **Open question:** could read as a bug (character "forgetting") rather than a realism
+  feature if the frequency isn't tuned low.
+
+### 5.9 User-named transition marking ("ferryman")
+- **Idea:** major life transitions (new job, move, breakup) currently flow into ordinary
+  memory extraction with no distinct ritual beat. Require the *user* to explicitly name
+  the crossing before the bot treats it as significant, avoiding false triggers on
+  mundane facts.
+- **Why it's not already covered, and why it's the weakest item here:** it overlaps
+  meaningfully with date-aware follow-ups and `EPISODIC_RECALL` — this is more a
+  refinement of existing infra than new territory. Kept because the "user must name it,
+  not auto-detect" property is genuinely absent elsewhere, not because the gap is large.
+- **Rough shape:** Effort: S. Lowest priority of the nine — consider folding into
+  existing date-aware follow-up machinery rather than building standalone.
+
+### Considered and not included
+- **Transition-smoothing overlap window for `SCHED_BUSY`/`FATIGUE_STATE` register
+  changes** (stimulus: relay baton handoff) — abandoned during the lateral-thinking
+  session itself. It only ever produced narrative polish on a state transition the
+  system already fully owns and auto-detects — tuning, not a new capability, and
+  therefore out of scope for what the session was asked to find.
+
+---
+
 ## Sequencing
 
 | Phase | Items | Status |
