@@ -779,6 +779,59 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
   owner should decide if this tension is worth resolving in either direction.
 - **Risk:** unassessed — direction only, not a spec.
 
+### 5.9 Nightly-suggested edits to the living files (`/reviewlife`) — M
+- **Evidence:** sourdough-starter domain (random-stimulus lateral-thinking pass,
+  2026-08-05) — same culture, different loaf depending on how it's fed. `life.txt` /
+  `people.txt` / `projects.txt` are already the intended drift surface (user-maintained,
+  sampled into every prompt via `_read_life_file`), and `update_milestones()` already
+  runs an LLM pass nightly against the day's conversation. Nothing today connects the two.
+- **Idea:** right after `update_milestones()` runs in `nightly_maintenance`, have the
+  same pass also draft (never apply) candidate one-line additions to the living files
+  from what it just extracted. Surface via a new `/reviewlife` command for per-line
+  accept/reject — explicit approval only, no silent drift. Store pending drafts the
+  same way `unsent_drafts` already does.
+- **Why not automatic:** silent personality drift is the wrong default on a companion
+  bot even opt-in; per-line approval keeps the owner in the loop the same way
+  `/reviewmem` already does for the memory auditor (4.1).
+- **Risk:** low-medium — additive, no existing behavior changes; main risk is
+  suggestion quality/noise if the nightly pass over-fires.
+- **Done when:** a day's conversation with a clear life-event produces a correct,
+  one-line `/reviewlife` suggestion; rejecting it changes nothing; accepting it appends
+  to the correct living file with a visible log line.
+
+### 5.10 `/mixtape` — composed highlight-reel send — S
+- **Evidence:** mixtape domain (random-stimulus lateral-thinking pass, 2026-08-05) — a
+  curated sequence says something the giver couldn't say directly. `milestones`
+  (nightly-extracted relationship firsts, already curated) and TTS/`/imagine` are both
+  shipped but never combined.
+- **Idea:** a `/mixtape` command pulling 3-5 entries from `milestones`, voicing one or
+  two via existing TTS, illustrating one via existing `/imagine`, sent as a short
+  sequenced burst rather than a flat `/milestones` text dump. Pure composition over
+  shipped pipelines — no new curation or generation mechanism needed.
+- **Risk:** low — reuses existing TTS/imagine/milestones paths; cost is per-invocation
+  (manual command), not proactive, so no budget interaction needed for a first version.
+- **Done when:** `/mixtape` reliably produces a sequenced 3-part send (voice + image +
+  text) from real milestone data on at least one live instance.
+
+### 5.11 Rhythm transparency — skip-reason on `/nudges` — S
+- **Evidence:** lighthouse domain (random-stimulus lateral-thinking pass, 2026-08-05) —
+  a fixed, predictable signal that doesn't chase. The restraint already exists
+  (`_check_nudge_budget`, mood-based `skip_chance`, quiet hours) and even carries a
+  reason forward via `unsent_drafts`, but that reason only surfaces if the 40%
+  weave-in roll hits a future proactive message. `/nudges` today shows only
+  `sent_today/limit`.
+- **Idea:** have `/nudges` also surface the most recent `unsent_drafts` reason (if
+  any), so the existing restraint is checkable on demand instead of only occasionally
+  narrated in-character.
+- **Open question, not yet a build item:** `skip_chance` rises as mood drops (0.6 at
+  ≤ -1.2, 0.25 at ≤ -0.4) — meaning she reaches out *less* when the owner's mood is
+  low. Worth an explicit owner decision on whether that's the intended emotional read
+  or the opposite risk, and recording the answer as a comment near `heartbeat()`
+  either way.
+- **Risk:** low — read-only addition to an existing command.
+- **Done when:** `/nudges` shows the last skip reason when one exists in the last 48h
+  window (matching `_pop_draft`'s existing freshness cutoff).
+
 ### Not carried forward
 - **Relay-post-system transplant ("reliability from designed handoffs, not one
   heroic actor")** — abandoned during the analogy session itself. The structural
@@ -802,7 +855,7 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
-| **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking pass, lowest-risk of that batch. |
+| **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
