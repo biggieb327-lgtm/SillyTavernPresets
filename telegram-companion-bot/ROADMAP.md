@@ -792,6 +792,326 @@ Track 3 (with a real spec) only once the owner picks it.
   session itself. It only ever produced narrative polish on a state transition the
   system already fully owns and auto-detects — tuning, not a new capability, and
   therefore out of scope for what the session was asked to find.
+## Track 5 — Lateral-thinking exploratory ideas (sourced 2026-08-05)
+
+Not a code-audit finding or an owner request — surfaced by a forced-analogy
+(Synectics) lateral-thinking pass run 2026-08-05 against the shipped feature set, to
+find directions outside the already-exhausted playbook (memory, proactivity,
+multi-modal I/O, group chat, health integration, safety, and cost engineering are all
+shipped and iterated multiple times over Tracks 1-4). Recorded per the Track 4
+"product direction, not audit debt; revisit deliberately" precedent: nothing here is
+scheduled. Items marked **🧪 Experimental** carry a real chance of being wrong about
+the *mechanism*, not just about priority — pilot one instance behind a default-off
+flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
+
+### 5.1 Shared proactive-message triage queue — M
+- **Evidence:** ER-triage domain. Proactive check-ins, `/remindme`/cron, Garmin health
+  alerts, and fatigue-driven silence-breaks each appear to gate themselves
+  independently (own quiet-hours + budget check). ER triage instead runs one shared,
+  continuously re-ranked queue — no department decides for itself.
+- **Idea:** route every candidate proactive message (health anomaly, due reminder, a
+  memory that just became newly relevant, a fatigue-driven check-in) through one
+  shared urgency score, send only the single highest-scored candidate, re-queue and
+  re-score the rest as new signals land. Targets a plausible failure mode of many
+  independently-shipped proactive features: same-day collision, or all deferring at
+  once and nothing gets said.
+- **Risk:** medium — touches the send path for every proactive feature at once; needs
+  its own soak before trusting it over today's independent gates.
+- **Done when:** a design note showing which existing gates fold into the shared
+  score, with the collision/silent-day failure mode reproduced against current
+  behavior first (prove the bug before building the fix).
+
+### 5.2 Weeks-long disengagement leading indicator — M
+- **Evidence:** coral-bleaching domain. Every shipped signal (fatigue, mood residue,
+  distress detection, `PROMPT_STATS`) operates per-message or per-day. Nothing tracks
+  a slower trend — reef bleaching is preceded by weeks of invisible accumulating heat
+  stress, tracked as a leading indicator well before visible collapse.
+- **Idea:** a rolling multi-week trend line on `/audit` — user reply latency, message
+  length, topic variety, user-initiated vs. bot-initiated ratio — as a distinct
+  long-horizon metric, separate from the existing fast signals.
+- **Risk:** low (additive, observability-only, no behavior change) — the risk is
+  building a metric nobody looks at.
+- **Done when:** the trend line exists on `/audit` and has been checked against at
+  least one instance's real multi-week history to confirm it moves before, not after,
+  a visible engagement drop.
+
+### 5.3 🧪 Experimental — response refinement on recurring topics — M
+- **Evidence:** immune-system domain (affinity maturation: immune memory sharpens its
+  response on each re-exposure to the same antigen, not just recalling it). Distinct
+  from the existing memory system, which stores facts but doesn't track whether the
+  *response* to a recurring situational pattern (user vents about the same stressor
+  again) is improving.
+- **Idea:** score how a reply to a recognized recurring pattern landed (reply length,
+  sentiment, whether the topic returns sooner/later) and let that reshape future
+  responses to that specific pattern.
+- **Why experimental:** the mapping is a real structural rhyme, but
+  pattern-recognition-plus-reinforcement over conversational history is new
+  mechanism, not new configuration — higher chance the first design is wrong. Pilot
+  one instance, default off.
+- **Risk:** medium-high — a personality-shaping feedback loop; same class of caution
+  as the already-rejected self-evolution ideas (closeness score, auto inside-jokes)
+  above, though the mechanism differs (recall shaping vs. a static score/flag).
+
+### 5.4 Rising urgency floor for neglected memories — S
+- **Evidence:** ER-triage domain (a stable case's priority rises automatically the
+  longer it waits, even without new information — the opposite of relevance decay).
+- **Idea:** a memory or observation that's been "worth mentioning" but never surfaced
+  should gain, not lose, priority the longer it goes unsaid. Pairs naturally with
+  5.1's shared queue if that gets built; stands alone otherwise.
+- **Risk:** low — bounded to the recall-scoring path.
+
+### 5.5 🧪 Experimental — comping mode for group chat — S
+- **Evidence:** jazz-ensemble domain. A non-soloing player doesn't go silent or
+  compete for the lead — they play sparse supportive chords ("comping").
+- **Idea:** in group chat, a non-primary-responder bot sends a minimal reactive
+  signal (reaction, one-word aside) instead of a full reply or nothing, so presence
+  doesn't require winning the floor.
+- **Why experimental:** `GROUP_CHAT_DESIGN.md` survived four adversarial review
+  rounds — this is a genuine behavior change to that design, not a bolt-on, and needs
+  the same scrutiny before it's more than an idea. Read that doc before prototyping.
+- **Risk:** medium — group-chat turn-taking is exactly what that design doc was
+  adversarially reviewed for.
+
+### 5.6 🧪 Experimental — trading-fours interaction mode — S
+- **Evidence:** jazz-ensemble domain (trading fours: soloists alternate strict short
+  bursts, forcing tight call-and-response).
+- **Idea:** an opt-in mode with a code-enforced (not prompt-hinted) hard reply-length
+  cap and explicit hand-back, for rapid-fire exchange distinct from normal texting
+  style.
+- **Why experimental:** novelty/product-flavor feature, unrequested, lowest priority
+  of this batch — recorded so it isn't re-invented, not because it's likely to be
+  picked up soon.
+- **Risk:** low — self-contained mode, opt-in.
+
+### 5.7 🧪 Experimental — inward drift detection — S
+- **Evidence:** immune-system domain (self/non-self tolerance — the same detector
+  that recognizes threats must also learn what's normal self-tissue, or it attacks
+  the host).
+- **Idea:** point the existing distress-detection machinery at the bot's own output
+  occasionally — repetitive phrasing, forgotten commitments — as a drift signal, not
+  just at the user's state.
+- **Why experimental:** the weakest-ranked transplant of the batch; may turn out to
+  duplicate observability Track 4 already built (`_CONFIG_WARNINGS`, prompt-size
+  stats) — check for duplication before building anything.
+- **Risk:** low to prototype, but likely low value.
+
+### 5.8 🧪 Experimental — banked variance as resilience — (unsized, direction only)
+- **Evidence:** coral-bleaching domain (reefs that survive bleaching events are ones
+  with pre-existing genetic diversity banked *before* the stress, not a response
+  mounted after).
+- **Idea:** deliberately bank variance in a character's register over time —
+  occasional structural surprises, willingness to break its own pattern — as a hedge
+  against staleness, rather than optimizing voiceprint consistency alone.
+- **Why experimental — flagged as friction, not a recommendation:** this sits in
+  direct tension with the project's heavy, multi-release investment in voiceprint
+  consistency (3.13, `preset-core.txt`, per-character format-contract layers).
+  Recorded because the analogy surfaced it honestly, not because it's endorsed — the
+  owner should decide if this tension is worth resolving in either direction.
+- **Risk:** unassessed — direction only, not a spec.
+
+### 5.9 Nightly-suggested edits to the living files (`/reviewlife`) — M
+- **Evidence:** sourdough-starter domain (random-stimulus lateral-thinking pass,
+  2026-08-05) — same culture, different loaf depending on how it's fed. `life.txt` /
+  `people.txt` / `projects.txt` are already the intended drift surface (user-maintained,
+  sampled into every prompt via `_read_life_file`), and `update_milestones()` already
+  runs an LLM pass nightly against the day's conversation. Nothing today connects the two.
+- **Idea:** right after `update_milestones()` runs in `nightly_maintenance`, have the
+  same pass also draft (never apply) candidate one-line additions to the living files
+  from what it just extracted. Surface via a new `/reviewlife` command for per-line
+  accept/reject — explicit approval only, no silent drift. Store pending drafts the
+  same way `unsent_drafts` already does.
+- **Why not automatic:** silent personality drift is the wrong default on a companion
+  bot even opt-in; per-line approval keeps the owner in the loop the same way
+  `/reviewmem` already does for the memory auditor (4.1).
+- **Risk:** low-medium — additive, no existing behavior changes; main risk is
+  suggestion quality/noise if the nightly pass over-fires.
+- **Done when:** a day's conversation with a clear life-event produces a correct,
+  one-line `/reviewlife` suggestion; rejecting it changes nothing; accepting it appends
+  to the correct living file with a visible log line.
+
+### 5.10 `/mixtape` — composed highlight-reel send — S
+- **Evidence:** mixtape domain (random-stimulus lateral-thinking pass, 2026-08-05) — a
+  curated sequence says something the giver couldn't say directly. `milestones`
+  (nightly-extracted relationship firsts, already curated) and TTS/`/imagine` are both
+  shipped but never combined.
+- **Idea:** a `/mixtape` command pulling 3-5 entries from `milestones`, voicing one or
+  two via existing TTS, illustrating one via existing `/imagine`, sent as a short
+  sequenced burst rather than a flat `/milestones` text dump. Pure composition over
+  shipped pipelines — no new curation or generation mechanism needed.
+- **Risk:** low — reuses existing TTS/imagine/milestones paths; cost is per-invocation
+  (manual command), not proactive, so no budget interaction needed for a first version.
+- **Done when:** `/mixtape` reliably produces a sequenced 3-part send (voice + image +
+  text) from real milestone data on at least one live instance.
+
+### 5.11 Rhythm transparency — skip-reason on `/nudges` — S
+- **Evidence:** lighthouse domain (random-stimulus lateral-thinking pass, 2026-08-05) —
+  a fixed, predictable signal that doesn't chase. The restraint already exists
+  (`_check_nudge_budget`, mood-based `skip_chance`, quiet hours) and even carries a
+  reason forward via `unsent_drafts`, but that reason only surfaces if the 40%
+  weave-in roll hits a future proactive message. `/nudges` today shows only
+  `sent_today/limit`.
+- **Idea:** have `/nudges` also surface the most recent `unsent_drafts` reason (if
+  any), so the existing restraint is checkable on demand instead of only occasionally
+  narrated in-character.
+- **Open question, not yet a build item:** `skip_chance` rises as mood drops (0.6 at
+  ≤ -1.2, 0.25 at ≤ -0.4) — meaning she reaches out *less* when the owner's mood is
+  low. Worth an explicit owner decision on whether that's the intended emotional read
+  or the opposite risk, and recording the answer as a comment near `heartbeat()`
+  either way.
+- **Risk:** low — read-only addition to an existing command.
+- **Done when:** `/nudges` shows the last skip reason when one exists in the last 48h
+  window (matching `_pop_draft`'s existing freshness cutoff).
+
+### Not carried forward
+- **Relay-post-system transplant ("reliability from designed handoffs, not one
+  heroic actor")** — abandoned during the analogy session itself. The structural
+  rhyme only held by giving "rider" a second forced role (either it means the
+  character, which breaks the product's single-persistent-identity premise, or it
+  means the engineering process, which the repo's own routines/evals/delivery gate
+  already embody). No new idea survived; recorded so it isn't re-drawn.
+
+---
+
+## Track 6 — AI landscape research (sourced 2026-08-05)
+
+Not lateral-thinking (Track 5's method) — a web-research pass against current (2026)
+AI-industry developments, checked against this repo's actual code and open items
+before being recorded. Multi-agent LLM orchestration was researched and explicitly
+**not** carried forward: the shipped bot-to-bot design (`GROUP_CHAT_DESIGN.md`, 3.4,
+four adversarial review rounds) already covers the pattern, and the live-collaboration
+shape most 2026 frameworks assume runs straight into `bot-code-invariants` #3 (no new
+per-message LLM side calls) with no case strong enough to argue an exception.
+
+### 6.1 Prompt caching on the `assemble_messages` prefix — S (verification), size TBD after
+- **Evidence:** NanoGPT (this fleet's provider) documents automatic implicit prompt
+  caching — no request changes needed — for "OpenAI and Gemini model families plus
+  many open-source provider/model routes," with cache hits reported via
+  `cache_read_input_tokens` in the response usage block. This lands directly on 3.8's
+  own numbers: "instances run ~17k input tokens per call... cost is dominated by
+  context, not output" at 15-40 calls/day × 7 bots.
+  **Not yet confirmed:** NanoGPT's docs do not enumerate which open-source routes are
+  covered, and every default model here is one (`NANOGPT_MODEL=zai-org/glm-5:thinking`,
+  `REACTION_MODEL=zai-org/glm-4.7-flash`) — none are OpenAI/Gemini. Whether caching
+  applies to this fleet's actual models at all is unverified; treat it as a hypothesis,
+  not a fact, per C9.
+  **Also checked:** `assemble_messages` (bot.py:5090) currently defeats prefix caching
+  even if the models support it — `ATLAS` gets `random.sample()`'d (line 5139) and the
+  GIF capability line gets a `random.random() < GIF_CHANCE` roll (line 5162), both
+  before conversation history. NanoGPT's docs are explicit that cache hits require a
+  byte-identical prefix; either randomized block invalidates everything after it, on
+  every call.
+- **Idea, in verification order — do not skip step 1:**
+  1. Confirm whether `cache_read_input_tokens` is ever nonzero today for any live
+     instance's actual model, before assuming there's anything to fix.
+  2. If caching is available but defeated by assembly order: this is a candidate for
+     moving the randomized/conditional blocks (ATLAS sample, GIF roll) to *after*
+     conversation history, not a rewrite of `assemble_messages` itself. That function
+     is `repo-change-control`'s own Step 6 — "the riskiest code in the bot... only
+     move behind parity tests." A reordering is smaller than a rewrite but still
+     touches it directly; scope accordingly and get the parity-test treatment 3.8's
+     own precedent (640-prompt byte-identical diff, 2.4) sets for prompt-shape changes.
+  3. If step 1 shows caching is unavailable for these model routes: this item is
+     closed as "checked, not applicable," same disposition as 3.8's own "tried, not
+     worth it" clause — recorded either way, not left open.
+- **Unlocks on completion (if caching turns out to be live and gets fixed):** revisits
+  3.8 Phase 2's own cost argument against the pre-reply thinking call — its stated
+  blocker is that a naive call "re-pays that entire prompt every user message." A
+  working cache changes what "re-pay" costs.
+- **Risk:** low for step 1 (read-only, no code change). Medium if step 2 is picked up,
+  scoped to prompt-shape risk, not the invariant/concurrency risk classes.
+- **Done when:** step 1's answer is recorded either way; if pursued past that, a
+  before/after prompt capture (matching 2.4's methodology) proves the reorder is
+  behavior-identical and `cache_read_input_tokens` moves off zero.
+
+### 6.2 Deepen `nightly_maintenance` as deliberate sleep-time compute — S
+- **Evidence:** "Sleep-time compute" (Letta, 2025) names a pattern this repo already
+  half-built without naming it: agents that consolidate memory and pre-compute context
+  during idle time instead of only at query time, reported at up to 18% accuracy gains
+  and ~2.5x cost reduction on the calls that follow. `nightly_maintenance` (memory
+  promotion, `update_milestones`, `_overnight_mood_reset`) is this pattern today, just
+  not treated as a deliberate strategy to extend. Provider-agnostic — uses the same
+  chat-completion calls already made nightly, on whatever model each instance runs, so
+  none of 6.1's NanoGPT-support question applies here.
+- **Idea:** treat `nightly_maintenance` as the standing place to move work off the
+  live reply path, not just its current three jobs. Pairs directly with 5.9's
+  `/reviewlife`, sourced independently but the same shape. One concrete extension not
+  covered by 5.9: `_generate_proactive_hook` currently generates fresh at
+  `send_proactive` time; a nightly pass could pre-draft a candidate hook instead, so
+  the heartbeat tick consumes prepared context rather than generating cold.
+  **Invariant check:** adds zero new per-message LLM calls (`bot-code-invariants` #3)
+  — the nightly job already runs and already makes model calls; this redistributes
+  what those calls do, not how many fire live.
+- **Risk:** low — additive to an existing off-loop job, no new call-site class.
+- **Done when:** a named "what nightly consolidation can absorb" list exists (starting
+  with the proactive-hook pre-draft above) and at least one item ships behind the
+  existing nightly job with no new live-path call.
+
+### 6.3 Reply advisor — a second call with veto power over the draft reply — L
+- **Evidence:** owner request 2026-08-05, following the pattern discussion prompted by
+  this session's own `advisor()` tool (a stronger reviewer seeing full context, able to
+  override before work is treated as done). Owner has explicitly waived `bot-code-
+  invariants` #3's cost argument (60M tokens/week via the NanoGPT subscription) for
+  this item specifically — **this does not waive the rule generally**, only for this
+  named feature, and latency is a separate, unwaived cost: an extra round-trip on every
+  reply regardless of token budget. Two existing partial precedents inform the design:
+  `_assess_safety` (`SAFETY_ENABLED`, 3.15) is already an off-loop advisor-with-veto,
+  scoped to no context specifically to avoid re-paying the ~17k-token prompt; here the
+  scoping reason changes to judge quality (a focused judge is a better judge — the
+  same principle that keeps 6.1's hypothetical cache-friendly reordering scoped small),
+  since the token-cost reason no longer applies for this item.
+- **What it checks (owner-selected, not the vaguest option):** in-character voice
+  consistency and factual/memory accuracy. Explicitly not "general quality" — too
+  vague to build a reliable judge for, highest risk of false rejects flattening replies.
+- **Idea — hooks between existing functions, no rewrite of either:**
+  1. `generate_reply()` (bot.py:5885) produces the draft via `_do_request` (the choke
+     point, line 5627) exactly as today. The gate is a new step between that draft and
+     `send_bubbles()` (line 6169) — the actual Telegram send. Neither function's
+     internals change.
+  2. **Memory-accuracy check:** run `triggered_memories()` (line 4093 — the same
+     semantic+keyword recall already used for prompt injection) *against the draft
+     reply text* instead of the incoming user message. Surfaces the specific stored
+     facts/milestones the draft actually touches, not the whole fact store — reuses
+     existing recall, doesn't invent new retrieval.
+  3. **Voice check:** the instance's own `PRESET_LAYERS` stack as judging criteria,
+     scoped down from full conversation history for judge-quality reasons (above).
+  4. **Verdict:** approve, or reject-with-reason. On reject, regenerate with the
+     reason fed back into the prompt, capped at **2 attempts** (matching the
+     "two honest attempts" shape already used elsewhere in this roadmap, e.g. 5.9's
+     honesty mechanic). After 2 failed attempts: **send the best-scored attempt
+     anyway, flagged in the log** — not silence. A companion bot going silent on a
+     direct reply is a worse failure than a mediocre one; `unsent_drafts` already
+     encodes that going quiet is a designed, deliberate act for *proactive* messages
+     only, never a fallback for a reactive one.
+  5. **Leak discipline:** the advisor's own verdict/reasoning must never reach the
+     user — same discipline `REASONING_LEAK_GUARD` already enforces on the
+     character's own hidden reasoning. It does not route through `generate_reply`.
+  6. **Optional follow-on, not required for v1:** a `/advisorlog`-style command
+     surfacing recent rejections, matching the transparency pattern `/reviewmem` /
+     `/dupefacts` already set for the memory auditor (4.1) — visibility into what got
+     caught, not just that something did.
+- **What this needs before it is code, not a design (per invariant #3's own text:
+  "a design conversation with the user before the code exists"):**
+  - A genuine new `bot-code-invariants` #3 carve-out, written into that file itself,
+    owner-approved — same treatment `SAFETY_ENABLED` and `MEMORY_SEMANTIC_LIVE` got.
+    This one is a bigger ask than either: it's a completion call carrying real
+    context (draft + relevant facts + preset), not an embedding or a context-free
+    classifier, so the carve-out's rationale has to say so plainly, not borrow their
+    wording.
+  - A kill switch per invariant #16. **Recommend default OFF to start** — not for
+    cost (waived), but because this changes what the user sees on *every* message,
+    a bigger blast radius than a silent infra change. Pilot one instance before
+    fleet-wide, same posture as the R6 experiments (`CLOSENESS_ENABLED` et al.).
+  - Latency measured and reported, not assumed maskable — same standard 3.8 Phase 2
+    already set for its own pre-reply call.
+- **Risk:** medium-high — first invariant #3 exception approved on cost grounds
+  alone; the mitigations above (scoped context, capped retries, non-silent fallback,
+  default-off pilot) are what stand in for the invariant's usual protection, per its
+  own "say what replaces its protection" requirement.
+- **Done when:** default-off, one-instance pilot; a same-bot before/after comparison
+  (own-baseline, not cross-character, matching 3.8's A/B protocol) shows the voice
+  and memory-accuracy checks catching real cases without materially flattening
+  replies; latency per reply visible on `/audit`; the `bot-code-invariants` #3
+  carve-out text written and merged in the same change that ships the feature flag.
 
 ---
 
@@ -808,6 +1128,10 @@ Track 3 (with a real spec) only once the owner picks it.
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
+| **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
+| **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
+| **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
+| **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
