@@ -916,6 +916,73 @@ per-message LLM side calls) with no case strong enough to argue an exception.
   with the proactive-hook pre-draft above) and at least one item ships behind the
   existing nightly job with no new live-path call.
 
+### 6.3 Reply advisor — a second call with veto power over the draft reply — L
+- **Evidence:** owner request 2026-08-05, following the pattern discussion prompted by
+  this session's own `advisor()` tool (a stronger reviewer seeing full context, able to
+  override before work is treated as done). Owner has explicitly waived `bot-code-
+  invariants` #3's cost argument (60M tokens/week via the NanoGPT subscription) for
+  this item specifically — **this does not waive the rule generally**, only for this
+  named feature, and latency is a separate, unwaived cost: an extra round-trip on every
+  reply regardless of token budget. Two existing partial precedents inform the design:
+  `_assess_safety` (`SAFETY_ENABLED`, 3.15) is already an off-loop advisor-with-veto,
+  scoped to no context specifically to avoid re-paying the ~17k-token prompt; here the
+  scoping reason changes to judge quality (a focused judge is a better judge — the
+  same principle that keeps 6.1's hypothetical cache-friendly reordering scoped small),
+  since the token-cost reason no longer applies for this item.
+- **What it checks (owner-selected, not the vaguest option):** in-character voice
+  consistency and factual/memory accuracy. Explicitly not "general quality" — too
+  vague to build a reliable judge for, highest risk of false rejects flattening replies.
+- **Idea — hooks between existing functions, no rewrite of either:**
+  1. `generate_reply()` (bot.py:5885) produces the draft via `_do_request` (the choke
+     point, line 5627) exactly as today. The gate is a new step between that draft and
+     `send_bubbles()` (line 6169) — the actual Telegram send. Neither function's
+     internals change.
+  2. **Memory-accuracy check:** run `triggered_memories()` (line 4093 — the same
+     semantic+keyword recall already used for prompt injection) *against the draft
+     reply text* instead of the incoming user message. Surfaces the specific stored
+     facts/milestones the draft actually touches, not the whole fact store — reuses
+     existing recall, doesn't invent new retrieval.
+  3. **Voice check:** the instance's own `PRESET_LAYERS` stack as judging criteria,
+     scoped down from full conversation history for judge-quality reasons (above).
+  4. **Verdict:** approve, or reject-with-reason. On reject, regenerate with the
+     reason fed back into the prompt, capped at **2 attempts** (matching the
+     "two honest attempts" shape already used elsewhere in this roadmap, e.g. 5.9's
+     honesty mechanic). After 2 failed attempts: **send the best-scored attempt
+     anyway, flagged in the log** — not silence. A companion bot going silent on a
+     direct reply is a worse failure than a mediocre one; `unsent_drafts` already
+     encodes that going quiet is a designed, deliberate act for *proactive* messages
+     only, never a fallback for a reactive one.
+  5. **Leak discipline:** the advisor's own verdict/reasoning must never reach the
+     user — same discipline `REASONING_LEAK_GUARD` already enforces on the
+     character's own hidden reasoning. It does not route through `generate_reply`.
+  6. **Optional follow-on, not required for v1:** a `/advisorlog`-style command
+     surfacing recent rejections, matching the transparency pattern `/reviewmem` /
+     `/dupefacts` already set for the memory auditor (4.1) — visibility into what got
+     caught, not just that something did.
+- **What this needs before it is code, not a design (per invariant #3's own text:
+  "a design conversation with the user before the code exists"):**
+  - A genuine new `bot-code-invariants` #3 carve-out, written into that file itself,
+    owner-approved — same treatment `SAFETY_ENABLED` and `MEMORY_SEMANTIC_LIVE` got.
+    This one is a bigger ask than either: it's a completion call carrying real
+    context (draft + relevant facts + preset), not an embedding or a context-free
+    classifier, so the carve-out's rationale has to say so plainly, not borrow their
+    wording.
+  - A kill switch per invariant #16. **Recommend default OFF to start** — not for
+    cost (waived), but because this changes what the user sees on *every* message,
+    a bigger blast radius than a silent infra change. Pilot one instance before
+    fleet-wide, same posture as the R6 experiments (`CLOSENESS_ENABLED` et al.).
+  - Latency measured and reported, not assumed maskable — same standard 3.8 Phase 2
+    already set for its own pre-reply call.
+- **Risk:** medium-high — first invariant #3 exception approved on cost grounds
+  alone; the mitigations above (scoped context, capped retries, non-silent fallback,
+  default-off pilot) are what stand in for the invariant's usual protection, per its
+  own "say what replaces its protection" requirement.
+- **Done when:** default-off, one-instance pilot; a same-bot before/after comparison
+  (own-baseline, not cross-character, matching 3.8's A/B protocol) shows the voice
+  and memory-accuracy checks catching real cases without materially flattening
+  replies; latency per reply visible on `/audit`; the `bot-code-invariants` #3
+  carve-out text written and merged in the same change that ships the feature flag.
+
 ---
 
 ## Sequencing
@@ -934,6 +1001,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
+| **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
