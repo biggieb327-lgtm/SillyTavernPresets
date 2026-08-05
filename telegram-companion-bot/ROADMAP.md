@@ -662,6 +662,133 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
 ---
 
+## Track 5 — Lateral-thinking exploratory ideas (sourced 2026-08-05)
+
+Not a code-audit finding or an owner request — surfaced by a forced-analogy
+(Synectics) lateral-thinking pass run 2026-08-05 against the shipped feature set, to
+find directions outside the already-exhausted playbook (memory, proactivity,
+multi-modal I/O, group chat, health integration, safety, and cost engineering are all
+shipped and iterated multiple times over Tracks 1-4). Recorded per the Track 4
+"product direction, not audit debt; revisit deliberately" precedent: nothing here is
+scheduled. Items marked **🧪 Experimental** carry a real chance of being wrong about
+the *mechanism*, not just about priority — pilot one instance behind a default-off
+flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
+
+### 5.1 Shared proactive-message triage queue — M
+- **Evidence:** ER-triage domain. Proactive check-ins, `/remindme`/cron, Garmin health
+  alerts, and fatigue-driven silence-breaks each appear to gate themselves
+  independently (own quiet-hours + budget check). ER triage instead runs one shared,
+  continuously re-ranked queue — no department decides for itself.
+- **Idea:** route every candidate proactive message (health anomaly, due reminder, a
+  memory that just became newly relevant, a fatigue-driven check-in) through one
+  shared urgency score, send only the single highest-scored candidate, re-queue and
+  re-score the rest as new signals land. Targets a plausible failure mode of many
+  independently-shipped proactive features: same-day collision, or all deferring at
+  once and nothing gets said.
+- **Risk:** medium — touches the send path for every proactive feature at once; needs
+  its own soak before trusting it over today's independent gates.
+- **Done when:** a design note showing which existing gates fold into the shared
+  score, with the collision/silent-day failure mode reproduced against current
+  behavior first (prove the bug before building the fix).
+
+### 5.2 Weeks-long disengagement leading indicator — M
+- **Evidence:** coral-bleaching domain. Every shipped signal (fatigue, mood residue,
+  distress detection, `PROMPT_STATS`) operates per-message or per-day. Nothing tracks
+  a slower trend — reef bleaching is preceded by weeks of invisible accumulating heat
+  stress, tracked as a leading indicator well before visible collapse.
+- **Idea:** a rolling multi-week trend line on `/audit` — user reply latency, message
+  length, topic variety, user-initiated vs. bot-initiated ratio — as a distinct
+  long-horizon metric, separate from the existing fast signals.
+- **Risk:** low (additive, observability-only, no behavior change) — the risk is
+  building a metric nobody looks at.
+- **Done when:** the trend line exists on `/audit` and has been checked against at
+  least one instance's real multi-week history to confirm it moves before, not after,
+  a visible engagement drop.
+
+### 5.3 🧪 Experimental — response refinement on recurring topics — M
+- **Evidence:** immune-system domain (affinity maturation: immune memory sharpens its
+  response on each re-exposure to the same antigen, not just recalling it). Distinct
+  from the existing memory system, which stores facts but doesn't track whether the
+  *response* to a recurring situational pattern (user vents about the same stressor
+  again) is improving.
+- **Idea:** score how a reply to a recognized recurring pattern landed (reply length,
+  sentiment, whether the topic returns sooner/later) and let that reshape future
+  responses to that specific pattern.
+- **Why experimental:** the mapping is a real structural rhyme, but
+  pattern-recognition-plus-reinforcement over conversational history is new
+  mechanism, not new configuration — higher chance the first design is wrong. Pilot
+  one instance, default off.
+- **Risk:** medium-high — a personality-shaping feedback loop; same class of caution
+  as the already-rejected self-evolution ideas (closeness score, auto inside-jokes)
+  above, though the mechanism differs (recall shaping vs. a static score/flag).
+
+### 5.4 Rising urgency floor for neglected memories — S
+- **Evidence:** ER-triage domain (a stable case's priority rises automatically the
+  longer it waits, even without new information — the opposite of relevance decay).
+- **Idea:** a memory or observation that's been "worth mentioning" but never surfaced
+  should gain, not lose, priority the longer it goes unsaid. Pairs naturally with
+  5.1's shared queue if that gets built; stands alone otherwise.
+- **Risk:** low — bounded to the recall-scoring path.
+
+### 5.5 🧪 Experimental — comping mode for group chat — S
+- **Evidence:** jazz-ensemble domain. A non-soloing player doesn't go silent or
+  compete for the lead — they play sparse supportive chords ("comping").
+- **Idea:** in group chat, a non-primary-responder bot sends a minimal reactive
+  signal (reaction, one-word aside) instead of a full reply or nothing, so presence
+  doesn't require winning the floor.
+- **Why experimental:** `GROUP_CHAT_DESIGN.md` survived four adversarial review
+  rounds — this is a genuine behavior change to that design, not a bolt-on, and needs
+  the same scrutiny before it's more than an idea. Read that doc before prototyping.
+- **Risk:** medium — group-chat turn-taking is exactly what that design doc was
+  adversarially reviewed for.
+
+### 5.6 🧪 Experimental — trading-fours interaction mode — S
+- **Evidence:** jazz-ensemble domain (trading fours: soloists alternate strict short
+  bursts, forcing tight call-and-response).
+- **Idea:** an opt-in mode with a code-enforced (not prompt-hinted) hard reply-length
+  cap and explicit hand-back, for rapid-fire exchange distinct from normal texting
+  style.
+- **Why experimental:** novelty/product-flavor feature, unrequested, lowest priority
+  of this batch — recorded so it isn't re-invented, not because it's likely to be
+  picked up soon.
+- **Risk:** low — self-contained mode, opt-in.
+
+### 5.7 🧪 Experimental — inward drift detection — S
+- **Evidence:** immune-system domain (self/non-self tolerance — the same detector
+  that recognizes threats must also learn what's normal self-tissue, or it attacks
+  the host).
+- **Idea:** point the existing distress-detection machinery at the bot's own output
+  occasionally — repetitive phrasing, forgotten commitments — as a drift signal, not
+  just at the user's state.
+- **Why experimental:** the weakest-ranked transplant of the batch; may turn out to
+  duplicate observability Track 4 already built (`_CONFIG_WARNINGS`, prompt-size
+  stats) — check for duplication before building anything.
+- **Risk:** low to prototype, but likely low value.
+
+### 5.8 🧪 Experimental — banked variance as resilience — (unsized, direction only)
+- **Evidence:** coral-bleaching domain (reefs that survive bleaching events are ones
+  with pre-existing genetic diversity banked *before* the stress, not a response
+  mounted after).
+- **Idea:** deliberately bank variance in a character's register over time —
+  occasional structural surprises, willingness to break its own pattern — as a hedge
+  against staleness, rather than optimizing voiceprint consistency alone.
+- **Why experimental — flagged as friction, not a recommendation:** this sits in
+  direct tension with the project's heavy, multi-release investment in voiceprint
+  consistency (3.13, `preset-core.txt`, per-character format-contract layers).
+  Recorded because the analogy surfaced it honestly, not because it's endorsed — the
+  owner should decide if this tension is worth resolving in either direction.
+- **Risk:** unassessed — direction only, not a spec.
+
+### Not carried forward
+- **Relay-post-system transplant ("reliability from designed handoffs, not one
+  heroic actor")** — abandoned during the analogy session itself. The structural
+  rhyme only held by giving "rider" a second forced role (either it means the
+  character, which breaks the product's single-persistent-identity premise, or it
+  means the engineering process, which the repo's own routines/evals/delivery gate
+  already embody). No new idea survived; recorded so it isn't re-drawn.
+
+---
+
 ## Sequencing
 
 | Phase | Items | Status |
@@ -675,6 +802,8 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
+| **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking pass, lowest-risk of that batch. |
+| **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
