@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-04.7"
+BOT_VERSION = "2026-08-06.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -123,6 +123,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NANOGPT_API_KEY = (os.getenv("NANOGPT_API_KEY") or "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
@@ -663,12 +664,15 @@ def _reddit_access_token() -> str:
 
 # --- Selfies (image-to-image off a base portrait) ---
 # SELFIE_PROVIDER picks the backend: "gemini" calls Google's Gemini API directly
-# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint.
+# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint,
+# "xai" calls xAI's Grok Imagine API directly.
 SELFIE_PROVIDER = os.getenv("SELFIE_PROVIDER", "gemini" if GEMINI_API_KEY else "nanogpt")
 NANOGPT_IMAGE_URL = os.getenv("NANOGPT_IMAGE_URL", "https://nano-gpt.com/v1/images/generations")
 SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
 GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+XAI_IMAGE_URL = os.getenv("XAI_IMAGE_URL", "https://api.x.ai/v1/images").rstrip("/")
+XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-quality")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
 # When SELFIE_BASE names a file that is not there, fall back to the single unambiguous
 # *_base.* image in the instance dir rather than silently generating from text alone.
@@ -681,6 +685,8 @@ IMAGE_TIMEOUT = _env_int("IMAGE_TIMEOUT", "180")
 
 if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
     raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
+if SELFIE_PROVIDER == "xai" and not XAI_API_KEY:
+    raise SystemExit("SELFIE_PROVIDER=xai but XAI_API_KEY not found in .env at " + str(env_path))
 
 # --- Memes (template + text overlay, not AI-generated -- AI image models render text
 # unreliably, and a meme lives or dies on legible captions) ---
@@ -6835,9 +6841,62 @@ def _generate_selfie_nanogpt(prompt: str) -> bytes:
     raise RuntimeError("image response had neither b64_json nor url")
 
 
+def _xai_aspect_ratio(size: str) -> str:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD rather than a hardcoded lookup so any
+    per-instance SELFIE_SIZE carries over, not just the handful nanogpt shipped with."""
+    try:
+        w, h = (int(x) for x in size.lower().split("x", 1))
+        if w <= 0 or h <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        return "1:1"
+    g = math.gcd(w, h)
+    return f"{w // g}:{h // g}"
+
+
+def _generate_selfie_xai(prompt: str) -> bytes:
+    """Generate via xAI's Grok Imagine API (OpenAI-shaped, but its own endpoint family).
+
+    Uses /images/edits when a reference photo exists (face consistency), else
+    /images/generations. XAI_IMAGE_URL is the .../v1/images base both endpoints hang off.
+    """
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": XAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": 1,
+        "response_format": "b64_json",
+        "aspect_ratio": _xai_aspect_ratio(SELFIE_SIZE),
+    }
+    if _has_base_image():
+        url = f"{XAI_IMAGE_URL}/edits"
+        payload["image"] = {"url": _base_data_url(), "type": "image_url"}
+    else:
+        url = f"{XAI_IMAGE_URL}/generations"
+
+    r = _post_with_retries(url, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
+    r.raise_for_status()
+    item = r.json()["data"][0]
+    b64 = item.get("b64_json")
+    if b64:
+        # Some xAI responses put the full data URI in b64_json instead of raw base64
+        # (undocumented, seen inconsistently) -- strip the prefix if it's there.
+        if b64.startswith("data:"):
+            b64 = b64.split(",", 1)[-1]
+        return base64.b64decode(b64)
+    if item.get("url"):
+        img = _get_with_retries(item["url"], timeout=IMAGE_TIMEOUT)
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError(f"xAI image response had neither b64_json nor url: {item}")
+
+
 def generate_selfie_image(prompt: str) -> bytes:
     if SELFIE_PROVIDER == "gemini":
         return _generate_selfie_gemini(prompt)
+    if SELFIE_PROVIDER == "xai":
+        return _generate_selfie_xai(prompt)
     return _generate_selfie_nanogpt(prompt)
 
 
@@ -13900,6 +13959,8 @@ def _selfie_provider_label() -> str:
     remedy each time: report it where the owner already looks (v2026-08-03.6)."""
     if SELFIE_PROVIDER == "gemini":
         return f"gemini ({GEMINI_IMAGE_MODEL}, modalities {'+'.join(GEMINI_RESPONSE_MODALITIES)})"
+    if SELFIE_PROVIDER == "xai":
+        return f"xai ({XAI_IMAGE_MODEL})"
     return f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
 
 

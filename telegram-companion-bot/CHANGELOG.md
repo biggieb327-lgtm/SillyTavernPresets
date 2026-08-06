@@ -7,6 +7,34 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-06.1 — Add xAI Grok Imagine as a third selfie provider
+
+**Root cause: not a bug fix — a requested provider option.** `SELFIE_PROVIDER` already
+switched between "gemini" (Google's Gemini API directly) and "nanogpt" (NanoGPT's image
+endpoint); the owner asked to add xAI's Grok Imagine as a third choice, called directly
+rather than through NanoGPT's proxy.
+
+**What shipped:** `SELFIE_PROVIDER=xai` routes through a new `_generate_selfie_xai`,
+mirroring the shape of the existing Gemini/NanoGPT functions. It calls
+`XAI_IMAGE_URL/edits` when a reference photo is set (`_has_base_image()`, same face-lock
+path the other two providers use) and `XAI_IMAGE_URL/generations` otherwise, defaulting
+to `grok-imagine-image-quality`. `XAI_API_KEY`, `XAI_IMAGE_MODEL`, `XAI_IMAGE_URL` are new
+env vars (all optional except the key, required only when `SELFIE_PROVIDER=xai` — same
+fail-fast-at-startup pattern the Gemini path already uses). `SELFIE_SIZE`'s "WxH" pixel
+string is converted to xAI's `aspect_ratio` ratio format via GCD reduction
+(`_xai_aspect_ratio`) rather than a hardcoded lookup table, since any per-instance
+`SELFIE_SIZE` value needs to carry over, not just the couple of sizes already in use.
+xAI's `b64_json` response field has been observed in the wild both as raw base64 and as a
+full `data:image/...;base64,...` URI (the two mirrors of xAI's own docs disagreed, and
+the docs page itself 403s to a plain fetch) — decoding strips the `data:` prefix if
+present rather than assuming one shape.
+
+**Verification:** `TestXaiAspectRatio` (4 tests) + `TestGenerateSelfieXai` (6 tests,
+covering both endpoints, the b64_json/data-URI ambiguity, the URL-fallback path, and the
+neither-field error) + `_selfie_provider_label`/`gather_audit_data` cases extended for
+"xai" the same way the existing gemini/nanogpt cases work. `python3 -m py_compile bot.py`
+clean. `bash .claude/tools/verify.sh` — see run output in the PR/session record.
+
 ## v2026-08-04.7 — Model-version guard + cap backported to the memory/lore embedding caches
 
 **Root cause: episodic recall's design was more careful than the caches it sits next

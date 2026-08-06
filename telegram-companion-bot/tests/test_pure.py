@@ -5675,11 +5675,11 @@ class TestSelfieProviderLabel:
 
     def setup_method(self):
         self._saved = (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
-                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL)
+                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL)
 
     def teardown_method(self):
         (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
-         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL) = self._saved
+         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL) = self._saved
 
     def test_gemini_names_its_model(self):
         bot.SELFIE_PROVIDER = "gemini"
@@ -5693,6 +5693,11 @@ class TestSelfieProviderLabel:
         bot.SELFIE_PROVIDER = "nanogpt"
         bot.SELFIE_MODEL = "flux-kontext"
         assert bot._selfie_provider_label() == "nanogpt (flux-kontext)"
+
+    def test_xai_names_its_model(self):
+        bot.SELFIE_PROVIDER = "xai"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+        assert bot._selfie_provider_label() == "xai (grok-imagine-image-quality)"
 
     def test_audit_payload_and_startup_line_use_the_same_label(self):
         """Two surfaces, one value -- they disagreed once already (v2026-08-02.1)."""
@@ -5773,6 +5778,120 @@ class TestGeminiResponseModalities:
         self._capture_payload([{"text": "Here you go"},
                                {"inlineData": {"data": base64.b64encode(b"png").decode()}}])
         assert bot._generate_selfie_gemini("x") == b"png"
+
+
+class TestXaiAspectRatio:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD so any per-instance SELFIE_SIZE carries over."""
+
+    def test_square_reduces_to_1_1(self):
+        assert bot._xai_aspect_ratio("1024x1024") == "1:1"
+
+    def test_portrait_reduces(self):
+        assert bot._xai_aspect_ratio("768x1024") == "3:4"
+
+    def test_landscape_reduces(self):
+        assert bot._xai_aspect_ratio("1024x768") == "4:3"
+
+    def test_garbage_falls_back_to_square(self):
+        for bad in ("", "not-a-size", "0x0", "1024", None):
+            assert bot._xai_aspect_ratio(bad) == "1:1", bad
+
+
+class TestGenerateSelfieXai:
+    """SELFIE_PROVIDER=xai calls xAI's Grok Imagine API directly. Mirrors the shape of
+    TestGeminiResponseModalities's payload/response tests for the other two providers."""
+
+    def setup_method(self):
+        self._post = bot._post_with_retries
+        self._get = bot._get_with_retries
+        self._has_base = bot._has_base_image
+        self._base_url = bot._base_data_url
+        self._key = bot.XAI_API_KEY
+        self._model = bot.XAI_IMAGE_MODEL
+        self._url = bot.XAI_IMAGE_URL
+        bot._has_base_image = lambda: False
+        bot.XAI_API_KEY = "test-key"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+
+    def teardown_method(self):
+        bot._post_with_retries = self._post
+        bot._get_with_retries = self._get
+        bot._has_base_image = self._has_base
+        bot._base_data_url = self._base_url
+        bot.XAI_API_KEY = self._key
+        bot.XAI_IMAGE_MODEL = self._model
+        bot.XAI_IMAGE_URL = self._url
+
+    def _capture_post(self, response_json):
+        sent = {}
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return response_json
+
+        def _fake_post(url, **kw):
+            sent["url"] = url
+            sent["json"] = kw.get("json") or {}
+            return _R()
+
+        bot._post_with_retries = _fake_post
+        return sent
+
+    def test_generations_endpoint_used_without_a_base_photo(self):
+        import base64
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/generations"
+        assert "image" not in sent["json"]
+        assert sent["json"]["model"] == "grok-imagine-image-quality"
+
+    def test_edits_endpoint_used_with_a_base_photo(self):
+        import base64
+        bot._has_base_image = lambda: True
+        bot._base_data_url = lambda: "data:image/png;base64,YWJj"
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/edits"
+        assert sent["json"]["image"] == {"url": "data:image/png;base64,YWJj", "type": "image_url"}
+
+    def test_b64_json_with_a_data_uri_prefix_is_still_decoded(self):
+        """Seen inconsistently in the wild: some responses put the full data URI in
+        b64_json instead of raw base64. Decoding must not choke on the prefix."""
+        import base64
+        raw_b64 = base64.b64encode(b"png").decode()
+        sent = self._capture_post({"data": [{"b64_json": f"data:image/png;base64,{raw_b64}"}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+
+    def test_falls_back_to_url_when_no_b64_json(self):
+        sent = self._capture_post({"data": [{"url": "https://example.com/img.png"}]})
+
+        class _Img:
+            content = b"fromurl"
+            def raise_for_status(self): pass
+
+        bot._get_with_retries = lambda *a, **kw: _Img()
+        assert bot._generate_selfie_xai("a selfie") == b"fromurl"
+
+    def test_neither_field_raises(self):
+        self._capture_post({"data": [{}]})
+        try:
+            bot._generate_selfie_xai("a selfie")
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "neither b64_json nor url" in str(e)
+
+    def test_dispatcher_routes_xai_to_xai(self):
+        import base64
+        saved = bot.SELFIE_PROVIDER
+        try:
+            bot.SELFIE_PROVIDER = "xai"
+            self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+            assert bot.generate_selfie_image("x") == b"png"
+        finally:
+            bot.SELFIE_PROVIDER = saved
 
 
 class TestImageRetryOnTransientStatus:
@@ -6273,6 +6392,14 @@ class TestAuditReportsSelfieProvider:
             assert bot.gather_audit_data()["selfie_provider"] == "nanogpt (flux-kontext)"
         finally:
             bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = saved
+
+    def test_xai_reports_the_model_too(self):
+        saved = (bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL)
+        try:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = "xai", "grok-imagine-image"
+            assert bot.gather_audit_data()["selfie_provider"] == "xai (grok-imagine-image)"
+        finally:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = saved
 
     def test_value_is_a_non_empty_string(self):
         v = bot.gather_audit_data()["selfie_provider"]
