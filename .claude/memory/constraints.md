@@ -383,6 +383,16 @@ promotes was still worth ten seconds to write.
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-07 — Edited both monthly Routines' Reddit-access steps in routines.md based
+  solely on the file's own (stale) content, without first calling `list_triggers` to
+  check the live prompts. The live triggers had already been updated via
+  `update_trigger` on 2026-08-03 — dropping Reddit for a WebSearch-only scan — without
+  that change ever being mirrored back to routines.md, so the file was describing a
+  step the live Routine had stopped running two weeks earlier. Caught before pushing,
+  by listing triggers to get the exact IDs for the actor integration. → **Before
+  editing a live Routine's prompt in routines.md, call `list_triggers` first and diff
+  its live prompt against the file** — the file's own header rule says drift can run
+  either direction, and it already had.
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —
