@@ -19,12 +19,21 @@ in `list_triggers` without an entry here and that is not drift.
   notifications, then the owner-approved Reddit-ideas step, then the curl-based
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
-  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
-- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. As of 2026-07-20 the environment's network policy
-  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
-  reddit.com in the environment's network settings, the step self-reports
-  SKIPPED.
+  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-07** (same
+  trigger id, via `update_trigger` — no recreate): the curl-to-reddit.com step,
+  permanently SKIPPED since 2026-07-20 (network policy blocks reddit.com at the
+  proxy), replaced with a call to the `idea-scraper-actor/` Apify actor (repo
+  root) — it wraps `trudax/reddit-scraper-lite` for Reddit and adds Substack via
+  public RSS feeds. See that actor's README for the field-name caveat (unverified
+  against a live run, since this environment had no path to `api.apify.com`
+  either at build time).
+- **Reddit + Substack access:** WebFetch cannot reach either; the prompt uses
+  Bash curl against `api.apify.com` to run `idea-scraper-actor/` synchronously.
+  Requires `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables
+  on the Claude Code Remote environment (owner-provisioned, see the actor's
+  README) — if either is unset, or `api.apify.com` itself returns a
+  CONNECT/tunnel 403 (same network-policy class that blocked reddit.com
+  directly), the step self-reports SKIPPED.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -34,7 +43,8 @@ in `list_triggers` without an entry here and that is not drift.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one evidence-based
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
-  runs a bounded Reddit scan (max ~5 searches) and may append up to 3 URL-cited
+  runs a bounded Reddit + Substack scan (max 25 items per source per run, via
+  `idea-scraper-actor/` since 2026-08-07) and may append up to 3 URL-cited
   "External ideas (unvetted — owner approval required)" to the same proposal file
   — ideas only, never implemented by the loop.
 
@@ -57,20 +67,28 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    eval that would prove it worked) to
    .claude/memory/improvement-proposals/<YYYY-MM>.md. If nothing qualifies, write
    no proposal — do not invent a pattern.
-3. Reddit ideas (runs whether or not a pattern qualified): bounded external scan
-   for ideas genuinely applicable to this companion-bot fleet (companion
-   features, python-telegram-bot pitfalls, model/API practices). Reddit access:
-   WebFetch cannot reach reddit — use Bash curl against the public JSON API, e.g.
-   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
-   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
-   for r/SillyTavernAI, r/LocalLLaMA, r/TelegramBots (max ~5 requests; WebSearch
-   may supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
-   environment's network policy blocks reddit.com — report this step as "SKIPPED
-   (network policy blocks reddit.com; owner can allow it in the environment's
-   network settings)". Never fabricate sources. If any ideas apply, add an
-   "External ideas (unvetted — owner approval required)" section to the same
-   <YYYY-MM>.md file: max 3 ideas, each with its thread URL and one line on why
-   it fits this fleet. Ideas only — never implemented by this loop.
+3. Reddit + Substack ideas (runs whether or not a pattern qualified): bounded
+   external scan for ideas genuinely applicable to this companion-bot fleet
+   (companion features, python-telegram-bot pitfalls, model/API practices).
+   WebFetch cannot reach reddit.com or api.apify.com. Source: the
+   `idea-scraper-actor/` Apify actor (repo root; see its README) — NOT direct
+   curl to reddit.com, which this environment's network policy blocks (CONNECT
+   403 as of 2026-07-20). Requires both APIFY_API_TOKEN and APIFY_ACTOR_ID set
+   as environment variables; if either is unset, or the call fails with a
+   CONNECT/tunnel 403 (api.apify.com itself blocked), report this step as
+   "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
+   and continue to step 4. Otherwise:
+   curl -sS -X POST \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"reddit_urls": ["https://www.reddit.com/r/SillyTavernAI/top/?t=month", "https://www.reddit.com/r/LocalLLaMA/top/?t=month", "https://www.reddit.com/r/TelegramBots/top/?t=month"], "substack_publications": [], "max_items_per_source": 25}'
+   (max_items_per_source bounds Apify's pay-per-result cost — do not raise it
+   without owner approval. substack_publications is empty by default; only add
+   entries the owner has named. WebSearch may supplement for discovery.) Never
+   fabricate sources. If any ideas apply, add an "External ideas (unvetted —
+   owner approval required)" section to the same <YYYY-MM>.md file: max 3
+   ideas, each with its source URL and one line on why it fits this fleet.
+   Ideas only — never implemented by this loop.
 4. If the <YYYY-MM>.md file has content: commit only that file to the branch
    claude/improvement-loop (reset it to origin/main first if it already exists)
    and push ONLY to claude/improvement-loop. NEVER push to main or any other
@@ -253,7 +271,11 @@ brief — do not claim anything is new or recurring. Fix nothing.
   `edit-cards-and-presets`, section "Respect per-character canon"), and the live
   prompt was missing this file's "don't be fooled by a leftover high V-number"
   clause, so the two disagreed and a literal reading of the drift rule would have
-  halted the pass.
+  halted the pass. **Prompt updated 2026-08-07** (same trigger id, via
+  `update_trigger` — no recreate): the curl-to-reddit.com step, permanently
+  SKIPPED since 2026-07-20, replaced with a call to `idea-scraper-actor/` (repo
+  root) — same actor the improvement-loop Routine now uses, also adding Substack
+  via RSS. See that actor's README for the field-name caveat.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -263,7 +285,7 @@ brief — do not claim anything is new or recurring. Fix nothing.
   same way the other Routines delegate to `improvement-analyst` and
   `context-librarian` — the contract owns the review method, the proposal-only
   posture, the per-character canon (via `edit-cards-and-presets`) and the evidence
-  bar; this prompt owns only the run scope, the Reddit step, and the output/branch
+  bar; this prompt owns only the run scope, the Reddit + Substack step, and the output/branch
   discipline. **Changing the review method means editing the agent file, not this
   prompt.** The contract's ≤25-line output limit binds the session's final report,
   not the PROPOSALS file. Concretely: reviews cards dropped in
@@ -271,19 +293,20 @@ brief — do not claim anything is new or recurring. Fix nothing.
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
-  fleet-wide texting voiceprint), and runs a bounded Reddit scan for card-writing
-  techniques (every idea URL-cited). Findings go to
+  fleet-wide texting voiceprint), and runs a bounded Reddit + Substack scan (via
+  `idea-scraper-actor/` since 2026-08-07) for card-writing techniques (every idea
+  URL-cited). Findings go to
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
-- **Reddit access:** WebFetch cannot reach reddit; the prompt uses Bash curl
-  against the public JSON API. As of 2026-07-20 the environment's network policy
-  blocks reddit.com at the proxy (CONNECT 403) — until the owner allows
-  reddit.com in the environment's network settings, the step self-reports
-  SKIPPED. Fired sessions also carry no MCP connectors (same as the other
-  Routines).
+- **Reddit + Substack access:** WebFetch cannot reach either. Same
+  `idea-scraper-actor/` path as `improvement-loop-monthly` — requires
+  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables; if
+  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
+  self-reports SKIPPED. Fired sessions also carry no MCP connectors (same as
+  the other Routines).
 
 ### Verbatim prompt
 
@@ -333,22 +356,29 @@ seed file, or preset, and never push to main.
       blast-radius rule applies here: every preset.txt proposal MUST include a
       before/after quote and an explicit note of the fleet-wide effect. Tag
       proposals [fleet preset].
-4. Reddit ideas: bounded pass for card-writing techniques applicable to the
-   characters/presets reviewed above. Reddit access: WebFetch cannot reach
-   reddit — use Bash curl against the public JSON API, e.g.
-   curl -sS -H "User-Agent: SillyTavernPresets-routine/1.0"
-   "https://www.reddit.com/r/SillyTavernAI/top.json?t=month&limit=25"
-   (and thread permalinks with .json appended) for r/SillyTavernAI and similar
-   character/roleplay-writing subreddits (max ~5 requests; WebSearch may
-   supplement for discovery). If curl fails with a CONNECT/tunnel 403, the
-   environment's network policy blocks reddit.com — report this step as "SKIPPED
-   (network policy blocks reddit.com; owner can allow it in the environment's
-   network settings)". Cite every external idea with its thread URL; never
-   fabricate sources.
+4. Reddit + Substack ideas: bounded pass for card-writing techniques applicable
+   to the characters/presets reviewed above. WebFetch cannot reach reddit.com or
+   api.apify.com. Source: the `idea-scraper-actor/` Apify actor (repo root; see
+   its README) — NOT direct curl to reddit.com, which this environment's
+   network policy blocks (CONNECT 403 as of 2026-07-20). Requires both
+   APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment variables; if either
+   is unset, or the call fails with a CONNECT/tunnel 403 (api.apify.com itself
+   blocked), report this step as "SKIPPED (Apify not configured/reachable; see
+   idea-scraper-actor/README.md)" and continue to step 5. Otherwise:
+   curl -sS -X POST \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"reddit_urls": ["https://www.reddit.com/r/SillyTavernAI/top/?t=month"], "substack_publications": [], "max_items_per_source": 25}'
+   (max_items_per_source bounds Apify's pay-per-result cost — do not raise it
+   without owner approval. substack_publications is empty by default; only add
+   entries the owner has named. WebSearch may supplement for discovery of
+   similar character/roleplay-writing subreddits or Substacks.) Cite every
+   external idea with its source URL; never fabricate sources.
 5. If there are findings or ideas: write ONE file
    character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
-   [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea]
-   with its evidence or URL, phrased as concrete edits the owner could apply.
+   [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea] /
+   [substack idea] with its evidence or URL, phrased as concrete edits the owner
+   could apply.
    NOTHING is applied without owner approval. Commit only that file to the branch
    claude/character-review (reset it to origin/main first if it already exists)
    and push ONLY to claude/character-review — NEVER to main or any other branch.

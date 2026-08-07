@@ -233,6 +233,11 @@ above. `ls` it for the rest. The non-obvious bits:
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
+- `idea-scraper-actor/` (root) is a separate project too — a custom Apify actor
+  the `improvement-loop-monthly` and `character-pass-monthly` Routines call for
+  their Reddit + Substack idea scans (see its README and
+  `.claude/operating/routines.md`). Not deployed by anything in this repo; the
+  owner deploys it to Apify by hand (`apify push`).
 
 Nothing else at the repo root deploys anywhere: the standalone SillyTavern presets and
 cards (`TheAtelier*`, `UnifiedWritersRoom*`, `Chimera*`, `WritersBlock*`,

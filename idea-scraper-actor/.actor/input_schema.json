@@ -1,0 +1,38 @@
+{
+    "title": "Idea scraper input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "reddit_urls": {
+            "title": "Reddit URLs",
+            "type": "array",
+            "editor": "stringList",
+            "description": "Subreddit or search URLs to scan, e.g. https://www.reddit.com/r/SillyTavernAI/top/?t=month. Passed through to trudax/reddit-scraper-lite as startUrls. Leave empty to skip Reddit.",
+            "default": []
+        },
+        "reddit_sort": {
+            "title": "Reddit sort",
+            "type": "string",
+            "editor": "select",
+            "enum": ["new", "top", "hot", "relevance", "comments"],
+            "default": "top",
+            "description": "Forwarded to trudax/reddit-scraper-lite's sort input."
+        },
+        "substack_publications": {
+            "title": "Substack publication URLs",
+            "type": "array",
+            "editor": "stringList",
+            "description": "Base URLs of Substack publications, e.g. https://example.substack.com. Read via each publication's public /feed RSS endpoint - no Apify cost. Leave empty to skip Substack.",
+            "default": []
+        },
+        "max_items_per_source": {
+            "title": "Max items per source",
+            "type": "integer",
+            "default": 25,
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Caps both the Reddit sub-actor's maxItems/maxPostCount and the number of Substack RSS entries read per publication. Keeps Apify pay-per-result cost bounded for unattended monthly runs - do not raise without owner approval."
+        }
+    },
+    "required": []
+}
