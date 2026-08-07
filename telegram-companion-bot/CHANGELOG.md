@@ -7,6 +7,68 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-07.1 — Ponytail-audit cleanup: dead code, duplicated logic, redundant gating
+
+**Root cause: not a bug fix — a requested code-simplification pass.** A subagent audit
+under this repo's new `ponytail` skill (lazy-senior-dev lens: unrequested abstractions,
+reinvented logic, dead code — see `.claude/skills/ponytail/`) found 6 candidates in
+bot.py. Each was independently verified before fixing; two were rejected after closer
+inspection rather than forced through (see below).
+
+**What shipped:**
+- `schedule_cmd` now reuses the `_context_file_cmd` factory that already backs
+  `people_cmd`/`projects_cmd`, instead of hand-rolling the same view/replace/append
+  shape. (Minor, stated: the replace-confirmation message now echoes the new text,
+  matching people/projects, instead of a bare "Schedule updated.")
+- `stress_monitor_job`/`bb_monitor_job` now share `_run_health_alert_job` (cooldown
+  gate → nudge gate → off-loop fetch+threshold → trigger → persist), collapsing two
+  near-identical ~30-line jobs into one. `rhr_monitor_job` stays separate — its
+  cooldown is once-per-calendar-day, not elapsed-hours, and it always records history
+  regardless of whether an alert fires, so it doesn't fit the shared shape without
+  bolting on cases the helper would only serve once.
+- Deleted 21 dead per-handler `if not _is_allowed(update.effective_user.id): return`
+  guards (news_cmd, addmem_cmd, handle_voice, handle_message, health_cmd, diag_cmd,
+  and 15 more). `_private_gate` (handler group -1, added specifically to replace this
+  exact per-handler pattern — its own docstring names the drift bug it fixed) already
+  stops a disallowed caller before any of these ever runs; confirmed by grep that none
+  of the 21 were ever called outside Telegram dispatch. 4 tests that called these
+  handlers directly to assert the now-removed guard (in `TestNewsCommands`,
+  `TestDiagCmd`, `TestEpisodesCmd`, `TestDupefactsCmd`) were retired with a comment
+  pointing at `TestPrivateGate`, which already covers the gating contract at the one
+  real choke point — deliberate widening, not a silent loosening.
+- `export_memory_cmd` and the menu button's `cmd:exportmemory` branch built the same
+  export text independently, ~25 duplicated lines each, with slightly different
+  section labels ("=== LONG-TERM ===" vs "=== LONG-TERM MEMORY ===", "Facts:" vs
+  "Recent facts:" for the recent-facts line). Now share `_memory_export_text`/
+  `_send_memory_export`; both paths use the command's original wording. New
+  `TestExportMemoryCmd` + `TestButtonCallbackExportMemory` — `button_callback` had
+  zero test coverage before this.
+- `_wsdot_err_reason`/`_tomtom_err_reason` shared their exception-type fallback
+  (timeout / connection-DNS / exception-class-name) into
+  `_classify_fetch_error_by_type`. Each keeps its own HTTP-status-code handling,
+  which genuinely differs (WSDOT just reports the code; TomTom adds key-rejected /
+  rate-limited / body-detail messages) — only the truly identical tail moved.
+
+**Rejected after closer inspection (surfaced, not forced):**
+- The audit flagged pin/boundary/joke/wardrobe/note add-list-remove-by-number as "the
+  same shape 5x." They aren't, underneath: per-chat dict-of-lists (pins, boundaries),
+  a flat list-of-dicts with a persistent id, not a list index (jokes), a flat dict
+  with extra metadata (wardrobe's current/auto/picked), and a flat text file (notes).
+  A shared helper would need more parameters/branches than the code it replaces —
+  an unrequested abstraction, not a simplification.
+- The audit also flagged `button_callback`'s other menu branches (pinned/boundaries/
+  jokes/wardrobe/selfimage) as re-deriving what their `_cmd` counterparts compute.
+  Checked: the "duplication" there is a single one-line list comprehension per
+  branch, and the surrounding message text is deliberately shorter for the button UI
+  than the full command's — not worth abstracting. Only `cmd:exportmemory` had real
+  (~25-line) duplicated logic, so only that one branch was touched.
+
+**Verification:** `bash .claude/tools/verify.sh` — py_compile clean; pytest 1062/1062
+(4 obsolete tests retired, 5 new: `TestExportMemoryCmd` ×2, `TestButtonCallbackExportMemory`,
+plus the 3 Garmin-source-inspection tests updated to check the composed source); eval
+suite green including `private-gate-registered`; gate-corpus green. `/code-review` run
+on the diff before merge.
+
 ## v2026-08-06.1 — Add xAI Grok Imagine as a third selfie provider
 
 **Root cause: not a bug fix — a requested provider option.** `SELFIE_PROVIDER` already

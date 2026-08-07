@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-06.1"
+BOT_VERSION = "2026-08-07.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8335,8 +8335,6 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     items = _read_life_events()
     if not items:
         await update.message.reply_text(
@@ -8347,8 +8345,6 @@ async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     if not LIFE_SIM_ENABLED:
         await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
         return
@@ -8372,8 +8368,10 @@ async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
-async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+def _memory_export_text(chat_id) -> str:
+    """Shared by /exportmemory and the menu button — both dumped the same fields
+    with slightly different section labels before this dedup; wording now follows
+    this, the command's original text."""
     now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
@@ -8406,17 +8404,31 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "=== RELATIONSHIP MILESTONES ===",
             "\n".join("- " + m["text"] for m in ms_list),
         ]
-    text = "\n".join(lines)
+    return "\n".join(lines)
+
+
+async def _send_memory_export(chat_id, send_document):
+    """send_document(fh) sends the open file handle — caller supplies reply_document
+    vs bot.send_document since the command and the menu-button paths use different
+    Telegram calls for the same file."""
     path = BASE_DIR / f"memory_export_{chat_id}.txt"
-    path.write_text(text, encoding="utf-8")
+    path.write_text(_memory_export_text(chat_id), encoding="utf-8")
     try:
         with path.open("rb") as fh:
-            await update.message.reply_document(
-                fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                caption=f"Memory dump for {NAME}.",
-            )
+            await send_document(fh)
     finally:
         path.unlink(missing_ok=True)
+
+
+async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await _send_memory_export(
+        chat_id,
+        lambda fh: update.message.reply_document(
+            fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+            caption=f"Memory dump for {NAME}.",
+        ),
+    )
 
 
 # --- Pinned memories ---
@@ -8885,38 +8897,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send("No boundaries set. Use /boundary <text>.")
 
     elif data == "cmd:exportmemory":
-        now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
-        summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        fts = facts.get(chat_id) or []
-        rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        rfts = recent_facts.get(chat_id) or []
-        ms_list = milestones.get(chat_id) or []
-        goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-        items = beliefs.get(chat_id, {}).get("items") or {}
-        lines = [
-            f"Memory export — {NAME} / {now_str}", "",
-            "=== LONG-TERM ===", f"Summary:\n{summ}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"), "",
-            "=== RECENT ===", f"Summary:\n{rsumm}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"), "",
-            "=== SELF-IMAGE ===",
-            "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)", "",
-            f"Next goal: {goal}",
-        ]
-        if ms_list:
-            lines += ["", "=== MILESTONES ===",
-                      "\n".join("- " + m["text"] for m in ms_list)]
-        path = BASE_DIR / f"memory_export_{chat_id}.txt"
-        path.write_text("\n".join(lines), encoding="utf-8")
-        try:
-            with path.open("rb") as fh:
-                await context.bot.send_document(
-                    chat_id=chat_id, document=fh,
-                    filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                    caption=f"Memory dump for {NAME}.",
-                )
-        finally:
-            path.unlink(missing_ok=True)
+        await _send_memory_export(
+            chat_id,
+            lambda fh: context.bot.send_document(
+                chat_id=chat_id, document=fh,
+                filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+                caption=f"Memory dump for {NAME}.",
+            ),
+        )
 
     elif data.startswith("vibe:"):
         name = data[5:]
@@ -9058,8 +9046,6 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         await update.message.reply_text("Usage: /addmem <memory text>")
@@ -9069,8 +9055,6 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     entries = _read_memories()
     if not entries:
         await update.message.reply_text("[no NPC memories yet]")
@@ -9090,8 +9074,6 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg:
         await update.message.reply_text("Usage: /delmem <keyword or line number>")
@@ -9121,8 +9103,6 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     if not EPISODIC_RECALL:
         await update.message.reply_text(
             "Episodic recall is off (needs MEMORY_SEMANTIC_LIVE + EPISODIC_RECALL).")
@@ -9146,8 +9126,6 @@ async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     args = " ".join(context.args).strip() if context.args else ""
     parts = args.split(None, 1)
     if len(parts) < 2 or not parts[0].isdigit():
@@ -9168,8 +9146,6 @@ async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg or not arg.isdigit():
         await update.message.reply_text("Usage: /sourcemem <number>")
@@ -9209,8 +9185,6 @@ async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     no data behind it risks flagging genuinely distinct facts (two different Costco
     trips, worded similarly) as duplicates, so this surfaces candidates for a human
     to judge rather than acting on them."""
-    if not _is_allowed(update.effective_user.id):
-        return
     chat_id = update.effective_chat.id
     await update.message.reply_text(
         "🔍 Checking for near-duplicate facts (embedding compare, may take a moment)...")
@@ -9241,8 +9215,6 @@ async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     args = context.args or []
     queue = _load_memory_review()
     if not args:
@@ -9920,32 +9892,13 @@ people_cmd = _context_file_cmd(PEOPLE_FILE, _people_cache, "People")
 projects_cmd = _context_file_cmd(PROJECTS_FILE, _projects_cache, "Projects")
 
 
-async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View or edit schedule.txt from Telegram.
-    /schedule          — show full schedule
-    /schedule <text>   — replace entire schedule
-    /schedule add <text> — append a line
-    """
-    args = context.args or []
-    if not args:
-        current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
-        await update.message.reply_text(
-            f"Schedule:\n{current}\n\n"
-            f"/schedule <text> — replace\n/schedule add <text> — append",
-        )
-        return
-    if args[0].lower() == "add":
-        text = " ".join(args[1:]).strip()
-        if not text:
-            await update.message.reply_text("Usage: /schedule add <text>")
-            return
-        with SCHEDULE_FILE.open("a", encoding="utf-8") as f:
-            f.write(f"\n{text}")
-        await update.message.reply_text(f"Schedule updated (added): {text}")
-    else:
-        text = " ".join(args).strip()
-        SCHEDULE_FILE.write_text(text, encoding="utf-8")
-        await update.message.reply_text(f"Schedule updated.")
+schedule_cmd = _context_file_cmd(SCHEDULE_FILE, {}, "Schedule")
+schedule_cmd.__doc__ = (
+    "View or edit schedule.txt from Telegram.\n"
+    "/schedule          — show full schedule\n"
+    "/schedule <text>   — replace entire schedule\n"
+    "/schedule add <text> — append a line"
+)
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10157,8 +10110,6 @@ def _transcribe_audio(data: bytes, filename: str, mime: str) -> str:
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -10248,8 +10199,6 @@ async def _analyze_voice_tone(voice_bytes: bytes):
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -10478,8 +10427,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_pdf and not is_json:
         return  # unsupported file type — let it fall through silently
 
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -11115,8 +11062,6 @@ async def _group_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     if chat_id < 0:
@@ -11370,8 +11315,6 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -11417,8 +11360,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """React in character to a sticker the user sent."""
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -12198,8 +12139,6 @@ async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     hint = " ".join(context.args).strip() if context.args else ""
@@ -12985,6 +12924,19 @@ def _tomtom_err_detail(resp) -> str:
     return detail[:200]
 
 
+def _classify_fetch_error_by_type(e) -> str:
+    """Exception-type fallback shared by _tomtom_err_reason/_wsdot_err_reason, used once
+    each caller has ruled out an HTTP status code (they classify codes differently —
+    TomTom adds key/rate-limit detail, WSDOT just reports the code — so only this
+    generic tail is common to both)."""
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "timed out"
+    if "Connect" in name or "Connection" in name or "DNS" in name:
+        return "network/DNS error"
+    return name
+
+
 def _tomtom_err_reason(e) -> str:
     """Classify a requests exception into a short reason that never contains the URL/key
     (requests puts the API key in the query string, so `str(e)` would leak it into logs).
@@ -12998,12 +12950,7 @@ def _tomtom_err_reason(e) -> str:
     if code:
         detail = _tomtom_err_detail(resp)
         return f"HTTP {code}" + (f" — {detail}" if detail else "")
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _tomtom_geocode(query: str):
@@ -13441,13 +13388,6 @@ def _health_nudge_ok(owner: int) -> bool:
     return _check_nudge_budget(owner)
 
 
-def _stress_alert_ts() -> float:
-    try:
-        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
-    except Exception:
-        return 0.0
-
-
 def _recent_stress_high():
     """Off-loop: has stress stayed high over the last STRESS_SUSTAINED_MIN minutes?"""
     if not _alerts_on(STRESS_ALERTS) or _Garmin is None:
@@ -13462,45 +13402,76 @@ def _recent_stress_high():
     return _stress_sustained(data.get("stressValuesArray") or [], cutoff_ms, STRESS_THRESHOLD)
 
 
-async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic: sustained high stress → one gentle in-character check-in."""
-    if not _alerts_on(STRESS_ALERTS):
+def _read_alert_ts(path: "Path") -> float:
+    try:
+        return float(path.read_text()) if path.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+async def _run_health_alert_job(
+    context: ContextTypes.DEFAULT_TYPE, *, alerts_on, alert_file: "Path",
+    cooldown_hours: float, fetch_check, trigger_text_fn, label: str,
+):
+    """Shared shape for stress_monitor_job/bb_monitor_job: cooldown gate → proactive
+    nudge gate → off-loop fetch+threshold → in-character trigger → persist cooldown.
+    rhr_monitor_job stays separate — its cooldown is once-per-calendar-day (not an
+    elapsed-hours window) and it always records history regardless of whether an
+    alert fires, so it doesn't fit this shape without bolting on cases this helper
+    would only serve once.
+
+    fetch_check() runs off-loop and returns (triggered: bool, value_for_logging).
+    trigger_text_fn(uname) returns the in-character system trigger text."""
+    if not alerts_on():
         return
     owner = get_owner()
     if owner is None:
         return
-    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
+    if time.time() - _read_alert_ts(alert_file) < cooldown_hours * 3600:
         return  # already checked in recently
     if not _health_nudge_ok(owner):
         return
-    high, avg = await asyncio.to_thread(_recent_stress_high)
-    if not high:
+    triggered, value = await asyncio.to_thread(fetch_check)
+    if not triggered:
         return
     uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
-        f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
-        f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
-        f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
-    )
     try:
-        await send_triggered(context, owner, trigger)
+        await send_triggered(context, owner, trigger_text_fn(uname))
         _consume_nudge(owner)
         try:
-            STRESS_ALERT_FILE.write_text(str(time.time()))
+            alert_file.write_text(str(time.time()))
         except Exception:
             pass
-        print(f"[stress] high-stress check-in sent (avg {avg}).")
+        print(f"[{label}] check-in sent ({value}).")
     except Exception as e:
-        log.warning("[stress] alert failed: %s", type(e).__name__)
+        log.warning("[%s] alert failed: %s", label, type(e).__name__)
         _count_error("garmin")
 
 
-def _bb_alert_ts() -> float:
-    try:
-        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
-    except Exception:
-        return 0.0
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: sustained high stress → one gentle in-character check-in."""
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(STRESS_ALERTS),
+        alert_file=STRESS_ALERT_FILE,
+        cooldown_hours=STRESS_ALERT_COOLDOWN_HOURS,
+        fetch_check=_recent_stress_high,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
+            f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
+            f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
+            f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+        ),
+        label="stress",
+    )
+
+
+def _bb_fetch_check():
+    """Off-loop: (triggered, body_battery) — triggered when Body Battery has bottomed out."""
+    bb = _body_battery_now()
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return (False, bb)
+    return (True, bb)
 
 
 def _body_battery_now():
@@ -13518,37 +13489,21 @@ def _body_battery_now():
 
 async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
-    if not _alerts_on(BB_ALERTS):
-        return
-    owner = get_owner()
-    if owner is None:
-        return
-    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
-        return
-    if not _health_nudge_ok(owner):
-        return
-    bb = await asyncio.to_thread(_body_battery_now)
-    if bb is None or bb > BB_LOW_THRESHOLD:
-        return
-    uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
-        f"right now — physically depleted, the kind of drained where pushing harder won't help. "
-        f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
-        f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
-        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(BB_ALERTS),
+        alert_file=BB_ALERT_FILE,
+        cooldown_hours=BB_ALERT_COOLDOWN_HOURS,
+        fetch_check=_bb_fetch_check,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
+            f"right now — physically depleted, the kind of drained where pushing harder won't help. "
+            f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
+            f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+            f"clinical. Don't cite numbers or mention a watch or battery.]"
+        ),
+        label="bb",
     )
-    try:
-        await send_triggered(context, owner, trigger)
-        _consume_nudge(owner)
-        try:
-            BB_ALERT_FILE.write_text(str(time.time()))
-        except Exception:
-            pass
-        print(f"[bb] low-energy check-in sent (body battery {bb}).")
-    except Exception as e:
-        log.warning("[bb] alert failed: %s", type(e).__name__)
-        _count_error("garmin")
 
 
 def _resting_hr_today():
@@ -13643,16 +13598,12 @@ def _wsdot_err_reason(e) -> str:
     """Key-free reason for a WSDOT fetch failure. WSDOT puts the AccessCode in the query
     string, so `str(e)`/`%s` on the raw exception leaks the key into errors.log — the
     full URL with AccessCode reached the log this way (observed 2026-07-20). Classify by
-    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason."""
+    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason,
+    and shares its exception-type fallback (_classify_fetch_error_by_type)."""
     code = getattr(getattr(e, "response", None), "status_code", None)
     if code:
         return f"HTTP {code}"
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _fetch_wsdot_alerts() -> list:
@@ -13807,8 +13758,6 @@ def _garmin_off_reason() -> str:
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -13833,8 +13782,6 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -13854,8 +13801,6 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _alerts_on(STRESS_ALERTS):
         reason = _garmin_off_reason()
         await update.message.reply_text(
@@ -14371,8 +14316,6 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     original's log-error tail is dropped (redundant with /errors, which already does
     that job better — admin-gated, paginated), and its flag list is trimmed to what
     actually exists on this bot today rather than the abandoned branch's full set."""
-    if not _is_allowed(update.effective_user.id):
-        return
     chat_id = update.effective_chat.id
     on = lambda b: "✅" if b else "—"
     lines = [f"🪪 {NAME} — diagnostics"]

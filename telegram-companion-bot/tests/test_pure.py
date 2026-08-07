@@ -3058,13 +3058,24 @@ class TestGarminConfig:
 class TestGarminInvariants:
     """Rules from bot-code-invariants that this feature could plausibly break."""
 
+    def _health_job_source(self, fn):
+        # stress_monitor_job/bb_monitor_job delegate their shared shape (cooldown
+        # gate, off-loop fetch, nudge gate, trigger) to _run_health_alert_job as of
+        # the ponytail-audit dedup (CHANGELOG) — check the composed source, since the
+        # invariant genuinely holds for both, just no longer inline in either wrapper.
+        # rhr_monitor_job kept its own body (different cooldown shape), so it's
+        # checked standalone.
+        import inspect
+        src = inspect.getsource(fn)
+        if fn in (bot.stress_monitor_job, bot.bb_monitor_job):
+            src += inspect.getsource(bot._run_health_alert_job)
+        return src
+
     def test_every_garmin_call_runs_off_the_event_loop(self):
         # Invariant #8: garminconnect is blocking requests underneath.
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job,
                    bot.rhr_monitor_job, bot.update_garmin):
-            src = inspect.getsource(fn)
-            assert "asyncio.to_thread" in src, fn.__name__
+            assert "asyncio.to_thread" in self._health_job_source(fn), fn.__name__
 
     def test_snapshot_never_enters_group_prompts(self):
         # GROUP_CHAT_DESIGN.md §5: watch metrics are private 1:1 state.
@@ -3087,14 +3098,12 @@ class TestGarminInvariants:
             assert ".__name__" in src, fn.__name__
 
     def test_check_ins_consume_the_nudge_budget(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_consume_nudge(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_consume_nudge(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_check_ins_respect_the_proactive_gate(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_health_nudge_ok(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_health_nudge_ok(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_health_nudge_gate_checks_every_condition(self):
         import inspect
@@ -5262,14 +5271,10 @@ class TestDupefactsCmd:
         assert bot.recent_facts[chat_id] == before_recent
         assert bot.facts[chat_id] == before_facts
 
-    def test_disallowed_user_gets_nothing(self):
-        chat_id = 555004
-        bot.ALLOWED_USERS.clear()
-        bot.ALLOWED_USERS.add(424242)  # non-empty and excludes the test user below
-        bot.recent_facts[chat_id] = ["a", "b"]
-        bot.facts[chat_id] = []
-        sent = self._run(chat_id, user_id=99999)
-        assert sent == []
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before dupefacts_cmd ever runs, and
+    # the per-handler `_is_allowed` check duplicated it as dead code. Gating is
+    # covered by TestPrivateGate now, not here.
 
 
 class TestSelfieWeatherMatching:
@@ -7110,10 +7115,14 @@ class TestSetbaseBackupClaim:
 class _CmdMsg:
     def __init__(self):
         self.sent = []
+        self.documents = []
 
     async def reply_text(self, text, **kwargs):
         self.sent.append(text)
         return SimpleNamespace(message_id=1)
+
+    async def reply_document(self, fh, **kwargs):
+        self.documents.append({"bytes": fh.read(), **kwargs})
 
     async def set_reaction(self, *a, **k):
         return None
@@ -7725,6 +7734,97 @@ class TestAssembleMessagesLifeEvents:
         assert not any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
 
 
+class TestExportMemoryCmd:
+    """v2026-08-07: /exportmemory and the menu button's cmd:exportmemory used to build
+    the export text twice, independently, with slightly different section labels —
+    now both call _send_memory_export/_memory_export_text. This drives the command
+    path; TestButtonCallbackExportMemory drives the button path."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+        self._orig_facts = dict(bot.facts)
+        self._orig_milestones = dict(bot.milestones)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+        bot.facts.clear()
+        bot.facts.update(self._orig_facts)
+        bot.milestones.clear()
+        bot.milestones.update(self._orig_milestones)
+
+    def test_sends_a_document_with_the_expected_sections(self):
+        chat_id = 9801
+        bot.summaries[chat_id] = "settling in well"
+        bot.facts[chat_id] = ["likes rainy days"]
+        bot.milestones[chat_id] = [{"text": "first inside joke", "ts": time.time()}]
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert len(m.documents) == 1
+        doc = m.documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "settling in well" in text
+        assert "likes rainy days" in text
+        assert "=== RELATIONSHIP MILESTONES ===" in text
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+
+    def test_cleans_up_the_temp_file(self):
+        chat_id = 9802
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
+class _CmdQuery:
+    def __init__(self, chat_id, data):
+        self.data = data
+        self.message = SimpleNamespace(chat_id=chat_id)
+
+    async def answer(self):
+        return None
+
+
+class _CmdBot:
+    def __init__(self):
+        self.sent_messages = []
+        self.sent_documents = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent_messages.append(text)
+
+    async def send_document(self, chat_id, document, **kwargs):
+        self.sent_documents.append({"bytes": document.read(), **kwargs})
+
+
+class TestButtonCallbackExportMemory:
+    """The menu button's cmd:exportmemory now shares _send_memory_export with
+    /exportmemory (see TestExportMemoryCmd) — this drives the button path directly,
+    since button_callback had zero test coverage before this dedup."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+
+    def test_sends_the_same_shaped_document_as_the_command(self):
+        chat_id = 9803
+        bot.summaries[chat_id] = "doing fine"
+        query = _CmdQuery(chat_id, "cmd:exportmemory")
+        update = SimpleNamespace(callback_query=query)
+        fake_bot = _CmdBot()
+        context = SimpleNamespace(bot=fake_bot)
+        asyncio.run(bot.button_callback(update, context))
+        assert len(fake_bot.sent_documents) == 1
+        doc = fake_bot.sent_documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "doing fine" in text
+        assert "=== LONG-TERM MEMORY ===" in text  # now matches the command's wording
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
 class TestNewsCommands:
     """Direct-call tests, matching TestTheSecondBacklogDriven's contract: a command
     either answers or is deliberately silent because a gate rejected the caller."""
@@ -7763,14 +7863,10 @@ class TestNewsCommands:
         assert m.sent
         assert "newsnow" in m.sent[0]
 
-    def test_news_cmd_is_gated(self):
-        u, m = _cmd_update(self._outsider())
-        bot.ALLOWED_USERS.add(999999999)  # non-empty ALLOWED_USERS makes _is_allowed strict
-        try:
-            asyncio.run(bot.news_cmd(u, _cmd_ctx()))
-        finally:
-            bot.ALLOWED_USERS.discard(999999999)
-        assert m.sent == []
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before news_cmd ever runs, and the
+    # per-handler `_is_allowed` check duplicated it as dead code. Gating is covered by
+    # TestPrivateGate now, not here.
 
     def test_newsnow_cmd_answers(self, tmp_path, monkeypatch):
         monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
@@ -7928,14 +8024,8 @@ class TestDiagCmd:
         for label in ("safety", "style mirror", "offline life", "voice tone"):
             assert label in text, label
 
-    def test_diag_cmd_is_gated(self):
-        u, m = _cmd_update(self._outsider())
-        bot.ALLOWED_USERS.add(999999998)  # non-empty ALLOWED_USERS makes _is_allowed strict
-        try:
-            asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
-        finally:
-            bot.ALLOWED_USERS.discard(999999998)
-        assert m.sent == []
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
 
     def test_diag_cmd_omits_the_log_error_tail(self):
         # Deliberately dropped as redundant with /errors -- must not resurface here.
@@ -8197,15 +8287,8 @@ class TestEpisodesCmd:
         assert "1 chunk" in m.sent[0]
         assert "a stored moment" in m.sent[0]
 
-    def test_is_gated(self, monkeypatch):
-        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
-        u, m = _cmd_update(self._outsider())
-        bot.ALLOWED_USERS.add(999999997)
-        try:
-            asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
-        finally:
-            bot.ALLOWED_USERS.discard(999999997)
-        assert m.sent == []
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
 
 
 class TestMaintainMemoryArchivesOnScrollOff:
