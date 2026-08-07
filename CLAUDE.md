@@ -262,6 +262,15 @@ each with a threshold and a test, so they are not restated here. What is project
    rounds of tests that asserted on source text instead of calling the handler — the
    delivery gate and evals are the repo's memory of past pain; satisfy them, don't
    argue with them.
+8. **Treat an explicit instruction — from a loaded skill, a doc, or the user — as a
+   literal constraint to check the actual diff against, not a stance to agree with and
+   move past.** C19/C20 (2026-08-07) shipped past ponytail's own explicit text —
+   "never lazy about understanding the problem... trace the whole thing first" and
+   "laziness that skips comprehension... is the dangerous kind" — while believing that
+   text was being followed. The caution was read and agreed with; it was never checked
+   against the specific diff being written. When wording is explicit, verify the work
+   against the words themselves before calling it done, the same way a delivery-gate
+   check is verified, not held in mind as a general attitude.
 
 ## Git workflow
 
