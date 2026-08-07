@@ -1,0 +1,38 @@
+{
+    "title": "Idea scraper input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "subreddits": {
+            "title": "Subreddits",
+            "type": "array",
+            "editor": "stringList",
+            "description": "Subreddit names, e.g. SillyTavernAI (no r/ prefix). Fetched via Reddit's own public {subreddit}/top.json listing, routed through Apify's proxy. Leave empty to skip Reddit.",
+            "default": []
+        },
+        "reddit_timeframe": {
+            "title": "Reddit timeframe",
+            "type": "string",
+            "editor": "select",
+            "enum": ["hour", "day", "week", "month", "year", "all"],
+            "default": "month",
+            "description": "Reddit's own 't' query param for the top listing."
+        },
+        "substack_publications": {
+            "title": "Substack publication URLs",
+            "type": "array",
+            "editor": "stringList",
+            "description": "Base URLs of Substack publications, e.g. https://example.substack.com. Read via each publication's public /feed RSS endpoint - no proxy needed. Leave empty to skip Substack.",
+            "default": []
+        },
+        "max_items_per_source": {
+            "title": "Max items per source",
+            "type": "integer",
+            "default": 25,
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Caps both the number of Reddit posts fetched per subreddit and the number of Substack RSS entries read per publication. Keeps run time and Apify usage bounded for unattended monthly runs - do not raise without owner approval."
+        }
+    },
+    "required": []
+}

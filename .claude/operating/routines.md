@@ -47,22 +47,31 @@ in `list_triggers` without an entry here and that is not drift.
   `update_trigger`): retired `idea-scraper-actor/` a few hours after deploying
   it — the owner pointed at Apify's hosted `trudax/reddit-scraper-lite` actor
   (id `oAuCIx3ItNrs2okjQ`, confirmed via a live Apify Console session, not
-  guessed) and asked to call it directly instead of wrapping it, which is
-  simpler (no actor to build/deploy/maintain) and removes the field-name-
-  guessing risk entirely — the fired session's own agent reads whatever JSON
-  keys the API returns when writing proposal entries, rather than a Python
-  normalizer that could raise on a schema it never saw a live run of. Substack
-  moved to a plain RSS `curl` alongside it, also no Apify actor needed.
+  guessed) and asked to call it directly instead of wrapping it. **Prompt
+  updated a fourth time the same day 2026-08-07** (same trigger id, via
+  `update_trigger`): the direct call was rejected — `"The Creator plan does
+  not include permission to run public Actors"` (owner-reported, verbatim
+  Apify error), confirmed independently by an on-demand fire of this Routine
+  finding nothing to propose. This is a billing-tier restriction on running
+  *any* public Actor, called *any* way — it would have blocked the retired
+  wrapper actor identically, since `Actor.call()` on a public Actor from
+  inside your own Actor is still running a public Actor. Rebuilt
+  `idea-scraper-actor/` v0.2 to depend on no other Actor at all: it fetches
+  Reddit's own public `{subreddit}/top.json` listing directly, routed through
+  Apify's own residential proxy (which the Creator plan does permit, since
+  it's the actor's own network egress, not another Actor's execution) —
+  unverified against a live run as of this update, see the actor's README.
+  Substack unchanged, direct RSS, no proxy needed.
 - **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
-  directly (see 2026-08-03 diagnosis above). Reddit: Bash curl directly against
-  Apify's `trudax/reddit-scraper-lite` actor (`oAuCIx3ItNrs2okjQ`) via
-  `run-sync-get-dataset-items`. Requires `APIFY_API_TOKEN` set as an
-  environment variable on the Claude Code Remote environment — if unset, or
-  `api.apify.com` itself returns a CONNECT/tunnel 403 (same network-policy
-  class that blocked reddit.com directly), the step self-reports SKIPPED and
-  falls back to the WebSearch-only scan. Substack: Bash curl directly against
-  each named publication's `/feed` RSS endpoint — public, no token, no Apify
-  involvement.
+  directly (see 2026-08-03 diagnosis above), and this Apify account's plan
+  cannot run `trudax/reddit-scraper-lite` or any other public Actor directly
+  (see 2026-08-07 history above). Bash curl against `api.apify.com` runs
+  `idea-scraper-actor/` (owner's own Actor) synchronously instead. Requires
+  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables on the
+  Claude Code Remote environment (owner-provisioned, see the actor's README)
+  — if either is unset, or `api.apify.com` itself returns a CONNECT/tunnel 403
+  (same network-policy class that blocked reddit.com directly), the step
+  self-reports SKIPPED and falls back to the WebSearch-only scan.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -72,8 +81,9 @@ in `list_triggers` without an entry here and that is not drift.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one evidence-based
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
-  runs a bounded external-ideas scan — Reddit (Apify's `trudax/reddit-scraper-lite`,
-  called directly) + Substack (direct RSS), max 25 items per source per run, plus a
+  runs a bounded external-ideas scan — Reddit + Substack via `idea-scraper-actor/`
+  (owner's own Apify Actor, fetching Reddit's public JSON directly through Apify's
+  proxy — no public Actor involved), max 25 items per source per run, plus a
   WebSearch fallback/supplement — and may append up to 3 URL-cited "External ideas
   (unvetted — owner approval required)" to the same proposal file — ideas only,
   never implemented by the loop.
@@ -100,29 +110,23 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
 3. External ideas (runs whether or not a pattern qualified): bounded external
    scan for ideas genuinely applicable to this companion-bot fleet (companion
    features, python-telegram-bot pitfalls, model/API practices).
-   Primary source, Reddit: Apify's hosted `trudax/reddit-scraper-lite` actor
-   (id `oAuCIx3ItNrs2okjQ`), called directly via Apify's REST API — no custom
-   actor. Sidesteps the fired session's own inability to reach reddit.com
-   directly (Cloudflare blocks it past the proxy tunnel; WebFetch and
-   WebSearch both refuse the domain; Reddit's app-registration flow now
-   redirects to Devvit rather than issuing OAuth app credentials — see this
-   Routine's history above). Requires APIFY_API_TOKEN set as an environment
-   variable; if unset, or the call fails with a CONNECT/tunnel 403
+   Primary source: `idea-scraper-actor/` (repo root; see its README) — the
+   owner's own Apify Actor, fetching Reddit's public JSON listing through
+   Apify's own proxy and Substack's public RSS directly. Not a public Actor
+   (this Apify account's plan cannot run one — see this Routine's history
+   above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment
+   variables; if either is unset, or the call fails with a CONNECT/tunnel 403
    (api.apify.com itself blocked), report this part as "SKIPPED (Apify not
-   configured/reachable)" and fall back to the WebSearch pass below only.
-   Otherwise:
+   configured/reachable; see idea-scraper-actor/README.md)" and fall back to
+   the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
-     "https://api.apify.com/v2/acts/oAuCIx3ItNrs2okjQ/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"startUrls": [{"url": "https://www.reddit.com/r/SillyTavernAI/top/?t=month"}, {"url": "https://www.reddit.com/r/LocalLLaMA/top/?t=month"}, {"url": "https://www.reddit.com/r/TelegramBots/top/?t=month"}], "sort": "top", "maxItems": 25, "maxPostCount": 25, "maxComments": 0, "skipComments": true, "skipCommunity": true, "skipUserPosts": true, "searchPosts": true, "searchComments": false, "searchCommunities": false, "searchUsers": false, "proxy": {"useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"]}}'
+     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 25}'
    Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has (maxItems/maxPostCount of 25 per subreddit bounds Apify's
-   pay-per-result cost — do not raise without owner approval).
-   Secondary source, Substack (only for publication URLs the owner has named
-   — none by default): fetch each one's public RSS feed directly, no Apify:
-   curl -sS "<publication-url>/feed" --max-time 30
-   Read title/link/description/pubDate out of each RSS <item>; cap at 25
-   entries per publication.
+   actually has (max_items_per_source of 25 per subreddit bounds Apify usage —
+   do not raise without owner approval. substack_publications is empty by
+   default; only add entries the owner has named.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — GitHub (python-telegram-bot's own issues/
    discussions/wiki, comparable companion-bot projects), technical blogs,
@@ -328,7 +332,13 @@ brief — do not claim anything is new or recurring. Fix nothing.
   id, via `update_trigger`): retired `idea-scraper-actor/` in favor of calling
   Apify's hosted `trudax/reddit-scraper-lite` actor (id `oAuCIx3ItNrs2okjQ`)
   directly — same pivot and same rationale as `improvement-loop-monthly`
-  above, same session. Substack moved to a direct RSS `curl`.
+  above, same session. Substack moved to a direct RSS `curl`. **Prompt
+  updated a fourth time the same day 2026-08-07** (same trigger id, via
+  `update_trigger`): the direct call was rejected by the owner's Apify plan
+  (Creator tier cannot run any public Actor) — same finding and same fix as
+  `improvement-loop-monthly` above, same session. Rebuilt `idea-scraper-actor/`
+  v0.2 to fetch Reddit's own public JSON directly through Apify's proxy
+  instead of calling another Actor, and reinstated as the primary source.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -346,22 +356,22 @@ brief — do not claim anything is new or recurring. Fix nothing.
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
-  fleet-wide texting voiceprint), and runs a bounded Reddit (Apify's
-  `trudax/reddit-scraper-lite`, called directly) + Substack (direct RSS) scan
-  for card-writing techniques (every idea URL-cited). Findings go to
+  fleet-wide texting voiceprint), and runs a bounded Reddit + Substack scan via
+  `idea-scraper-actor/` (owner's own Apify Actor) for card-writing techniques
+  (every idea URL-cited). Findings go to
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
 - **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
-  directly (see 2026-08-03 diagnosis above). Same direct-call path as
-  `improvement-loop-monthly` — Reddit via Apify's `trudax/reddit-scraper-lite`
-  (`oAuCIx3ItNrs2okjQ`), requires `APIFY_API_TOKEN` set as an environment
-  variable; if unset, or `api.apify.com` returns a CONNECT/tunnel 403, the
-  step self-reports SKIPPED and falls back to the WebSearch-only scan.
-  Substack via direct RSS `curl`, no token needed. Fired sessions also carry
-  no MCP connectors (same as the other Routines).
+  directly (see 2026-08-03 diagnosis above), and this Apify account's plan
+  cannot run a public Actor directly (see 2026-08-07 history above). Same
+  `idea-scraper-actor/` path as `improvement-loop-monthly` — requires
+  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables; if
+  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
+  self-reports SKIPPED and falls back to the WebSearch-only scan. Fired
+  sessions also carry no MCP connectors (same as the other Routines).
 
 ### Verbatim prompt
 
@@ -413,29 +423,23 @@ seed file, or preset, and never push to main.
       proposals [fleet preset].
 4. External ideas: bounded pass for card-writing techniques applicable to the
    characters/presets reviewed above.
-   Primary source, Reddit: Apify's hosted `trudax/reddit-scraper-lite` actor
-   (id `oAuCIx3ItNrs2okjQ`), called directly via Apify's REST API — no custom
-   actor. Sidesteps the fired session's own inability to reach reddit.com
-   directly (Cloudflare blocks it past the proxy tunnel; WebFetch and
-   WebSearch both refuse the domain; Reddit's app-registration flow now
-   redirects to Devvit rather than issuing OAuth app credentials — see this
-   Routine's history above). Requires APIFY_API_TOKEN set as an environment
-   variable; if unset, or the call fails with a CONNECT/tunnel 403
+   Primary source: `idea-scraper-actor/` (repo root; see its README) — the
+   owner's own Apify Actor, fetching Reddit's public JSON listing through
+   Apify's own proxy and Substack's public RSS directly. Not a public Actor
+   (this Apify account's plan cannot run one — see this Routine's history
+   above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment
+   variables; if either is unset, or the call fails with a CONNECT/tunnel 403
    (api.apify.com itself blocked), report this part as "SKIPPED (Apify not
-   configured/reachable)" and fall back to the WebSearch pass below only.
-   Otherwise:
+   configured/reachable; see idea-scraper-actor/README.md)" and fall back to
+   the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
-     "https://api.apify.com/v2/acts/oAuCIx3ItNrs2okjQ/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"startUrls": [{"url": "https://www.reddit.com/r/SillyTavernAI/top/?t=month"}], "sort": "top", "maxItems": 25, "maxPostCount": 25, "maxComments": 0, "skipComments": true, "skipCommunity": true, "skipUserPosts": true, "searchPosts": true, "searchComments": false, "searchCommunities": false, "searchUsers": false, "proxy": {"useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"]}}'
+     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 25}'
    Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has (maxItems/maxPostCount of 25 bounds Apify's pay-per-result
-   cost — do not raise without owner approval).
-   Secondary source, Substack (only for publication URLs the owner has named
-   — none by default): fetch each one's public RSS feed directly, no Apify:
-   curl -sS "<publication-url>/feed" --max-time 30
-   Read title/link/description/pubDate out of each RSS <item>; cap at 25
-   entries per publication.
+   actually has (max_items_per_source of 25 bounds Apify usage — do not raise
+   without owner approval. substack_publications is empty by default; only
+   add entries the owner has named.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — SillyTavern's own GitHub (wiki, discussions,
    issues), character-card-writing blogs and guides, HuggingFace discussions.
