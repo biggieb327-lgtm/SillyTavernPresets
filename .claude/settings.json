@@ -56,6 +56,11 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/budget-governor.sh\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py-syntax-guard.sh\"",
+            "timeout": 10
           }
         ]
       }
@@ -68,6 +73,18 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/host-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Host guard (C1)"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Handoff guard (C1 family)"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/claim-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Claim guard (C8 family)"
           },
           {
             "type": "command",

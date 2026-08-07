@@ -146,6 +146,10 @@ grep -c HEALTHCHECK_URL /opt/telegram-bots/*/.env   # dead-man's-switch coverage
 | `/addmem <text>` | Manually add an NPC/world memory (auto-collected too — see below) |
 | `/mems` | List all stored NPC/world memories |
 | `/delmem <keyword or #>` | Remove an NPC/world memory |
+| `/editmem <n> <new text>` | Edit a memory entry by number |
+| `/sourcemem <n>` | Show a memory entry's source/provenance |
+| `/reviewmem` | List memories pending review (low-confidence extractions); `/reviewmem ok <n>` or `/reviewmem no <n>` to resolve one |
+| `/dupefacts` | Diagnostic: flag near-duplicate facts in `facts`/`recent_facts` via embedding similarity (cosine ≥ `MEMORY_DEDUP_SIM`, same threshold `/addmem`'s auto-dedup uses). Reports candidate pairs only — never merges or deletes anything |
 
 ### Context Files
 These files shape what the character knows and references. All are editable from Telegram.
@@ -199,6 +203,11 @@ These files shape what the character knows and references. All are editable from
 | `/nudges` | Show today's proactive message budget |
 | `/quiet <h>` | Pause proactive messages for X hours (e.g. `/quiet 3`) |
 | `/quiet off` | Cancel quiet mode early |
+| `/quietwin add <day> <HH:MM-HH:MM>` | Add a recurring weekly quiet window (e.g. `/quietwin add Fri 23:00-08:00`) |
+| `/quietwin list` | List recurring quiet windows |
+| `/quietwin del <n>` | Remove a recurring quiet window by number |
+| `/away [reason]` | Suppress proactive messages until `/back` or your next message |
+| `/back` | Clear away mode |
 
 ### Voice
 | Command | What it does |
@@ -229,11 +238,12 @@ These files shape what the character knows and references. All are editable from
 | `/delpayment <n>` | Remove a bill |
 | `/editpayment <n> <field> <value>` | Edit a bill field |
 | `/week` | Payment summary for the current week |
+| `/remindpayments` | Trigger the payment-reminder check now, instead of waiting for its scheduled run |
 
 ### Settings & Info
 | Command | What it does |
 |---|---|
-| `/model` | Show active models |
+| `/model` | Show every model role and its current value (chat, summary, caption, reaction, mood, vision, fallback, visionfallback) — read-only, no API call |
 | `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `vision`, `reaction`, `mood`, `fallback`) |
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats (subscription limits from NanoGPT) |
@@ -248,11 +258,28 @@ These files shape what the character knows and references. All are editable from
 | `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health. Marks the preset line `(via /preset)` when an override is active |
 | `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
-| `/update` | Self-deploy: pull latest `bot.py` from `main`, verify it compiles, restart (`force` to reinstall the same version) |
-| `/restart` | Clean restart via the supervisor — picks up `.env` edits and a swapped `bot.py` |
+| `/update` | Dead as a deploy path on this private repo — downloads over a raw URL that 404s. Replies pointing at `vps-sync.sh` instead of silently failing. |
+| `/restart` | Clean restart via systemd — picks up `.env` edits and a swapped `bot.py` |
 
 If a bot never responds to any of these either, it's not an app-level problem — see
-Troubleshooting below (the tmux session or the process itself may be down).
+Troubleshooting below (the systemd unit or the process itself may be down).
+
+### Maps (needs `TOMTOM_API_KEY`)
+Handlers register unconditionally and reply "Maps aren't set up" without a key, so
+these are always in the Telegram command menu regardless of `TOMTOM_ENABLED`.
+| Command | What it does |
+|---|---|
+| `/route <from> to <destination>` | Travel time & directions, e.g. `/route Bellevue to SeaTac airport` |
+| `/nearby <thing>` | Places near your shared location, e.g. `/nearby coffee` |
+| `/place <name or address>` | Look up an address or business |
+| `/food` | Restaurants near your shared location |
+
+### Health (needs Garmin credentials — `GARMIN_EMAIL`/`GARMIN_PASSWORD`, see `.env.example`)
+| Command | What it does |
+|---|---|
+| `/health` | Latest cached metrics from your watch (sleep, resting HR, steps, Body Battery) |
+| `/healthnow` | Pull fresh watch data right now, bypassing the scheduled pull (rate-limited — see `GARMIN_LOGIN_COOLDOWN`) |
+| `/stress` | Recent sustained-stress reading (needs `STRESS_ALERTS=1`) |
 
 ### Western WA traffic (Emily only — needs `WSDOT_API_KEY`)
 | Command | What it does |
@@ -264,7 +291,7 @@ Troubleshooting below (the tmux session or the process itself may be down).
 
 ## Context Files
 
-The bot reads a set of plain-text files from the character's directory to build context for each message. All can be edited directly in Termux or managed via Telegram commands.
+The bot reads a set of plain-text files from the character's directory to build context for each message. All can be edited directly on the VPS or managed via Telegram commands.
 
 | File | Command | Purpose |
 |---|---|---|
@@ -288,10 +315,12 @@ notes) — it's plain text the bot reads verbatim, so nothing stops it from drif
 AI-drawn — AI image models render text unreliably, this doesn't). She can also send
 one unprompted via a `[meme: top | bottom]` tag when a moment calls for it, mirroring
 how the `[selfie: ...]` tag works. Templates live in the shared `meme_templates/`
-directory and the font in `fonts/Anton-Regular.ttf`, alongside `bot.py` — not
-per-instance, and not part of `update-all.sh`'s routine pull (see Setup Guide Step 8
-for the one-time fetch). Add your own templates by dropping a `.jpg` in
-`meme_templates/` — no code change needed.
+directory and the font in `fonts/Anton-Regular.ttf`, alongside `bot.py` — shared, not
+per-instance. Neither `install-vps.sh` nor `vps-sync.sh` currently copies
+`meme_templates/` or `fonts/`; add your own template by dropping a `.jpg` in
+`meme_templates/` **in the repo**, then copy it onto the VPS by hand (e.g. from the
+`/opt/telegram-bots/.repo` checkout) — no code change needed, but no automated sync
+path exists yet either.
 
 ### User notes (auto-collection)
 After each message you send, the bot runs a background pass to extract upcoming events, appointments, or things you mentioned (job interview Thursday, doctor on Friday, etc.) and appends them to `user_notes.txt`. She references these naturally in conversation when the moment fits.
@@ -317,29 +346,24 @@ Two tiers:
 
 All memory lives in `state.json` in the character's directory. Back it up:
 ```bash
-cp ~/nora-bot/state.json ~/nora-bot/state.backup.$(date +%Y%m%d).json
+cp /opt/telegram-bots/nora/state.json /opt/telegram-bots/nora/state.backup.$(date +%Y%m%d).json
 ```
 Or use `/backup` from the chat.
 
-### Automated fleet backup (recommended)
+### Automated fleet backup — no VPS equivalent shipped yet
 
-`backup-all.sh` archives every instance's state files (same list as `/backup`, `.env`
-always excluded) to Android shared storage, prunes archives older than 14 days, and can
-push off-phone via rclone. One-time setup and nightly cron instructions are in the
-script's header:
-```bash
-# DEAD: phone-era (Android shared storage, ~/telegram-bot), and the raw URL 404s now
-# that the repo is private. Kept for the rclone/cron notes in the script header only.
-curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/backup-all.sh -o ~/telegram-bot/backup-all.sh
-bash ~/telegram-bot/backup-all.sh    # run once to verify, then schedule via crontab
-```
-Like `watchdog.sh`, it is NOT updated by `update-all.sh` — re-curl it after changes.
-Shared storage survives a Termux uninstall but not a lost phone; set
-`BACKUP_RCLONE_REMOTE` (see script header) for real off-device safety.
+`backup-all.sh` (phone-era, kept only for its rclone/cron notes — DEAD as a runnable
+script: it targets Android shared storage at `~/telegram-bot`, and its curl-based fetch
+404s now that the repo is private) archived every instance's state files (same list as
+`/backup`, `.env` always excluded) and could push off-phone via rclone. Nothing on the
+VPS replaces it yet — the only current backup path is per-instance, either `/backup`
+from Telegram or manually copying each instance's `state.json` (see "Memory System"
+above). A cron'd fleet-backup script for `/opt/telegram-bots/` would be a reasonable
+follow-up, but does not exist today.
 
 ### Editing memory directly
 ```bash
-nano ~/nora-bot/state.json
+nano /opt/telegram-bots/nora/state.json
 ```
 Find your chat ID key and edit `facts`. Changes take effect on the next message.
 
@@ -416,21 +440,23 @@ the docs was measured in.
 
 Change the **voice** at runtime (no restart): `/preset core,rp` — see `PRESET_FILES` in
 `.env.example` for what each layer contains. `/preset` can only pick layers present in
-that instance's directory: phone instances have all of them (`sync-cards.sh` copies every
-`preset-*.txt`), while on the VPS `vps-sync.sh` pulls only what `PRESET_FILES` names, so
-cass and jules choose among those until their `.env` names more.
+that instance's directory — `vps-sync.sh` pulls only what `PRESET_FILES` names, so an
+instance can only switch among those until its `.env` names more (then re-run
+`vps-sync.sh` to fetch the newly named layer file before the next `/preset`).
 
 ---
 
 ## Character Configuration
 
-Each character lives in its own directory (e.g. `~/nora-bot/`) containing:
+Each character lives in its own directory (`/opt/telegram-bots/<instance>/` on the VPS)
+containing:
 - `.env` — bot token, API key, model settings
 - `nora.json` (or whatever `CHARACTER_CARD=` points to) — persona card
 - `state.json` — conversation history, memory, mood (auto-created)
 - Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `atlas.txt`
 
-The shared `~/telegram-bot/bot.py` is used by all instances — each instance just reads its own directory.
+The shared `/opt/telegram-bots/bot.py` is used by all instances — each instance just
+reads its own directory.
 
 To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use `/forget` for a clean memory slate.
 
@@ -438,9 +464,10 @@ To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use 
 
 ## Running Multiple Characters
 
-All 6 bots share one `bot.py` and launch from their own directories via `run-bot.sh` (see
-Starting & Stopping above) or `update-all.sh` for all of them at once. Sessions: `nora`,
-`bonnie`, `cass`, `emily`, `priya`, `jules`.
+All seven bots share one `/opt/telegram-bots/bot.py` and run from their own directories
+as systemd unit `bot@<instance>` (see "VPS operations" at the top for start/stop/restart
+and the whole-fleet loop). Instances: `nora`, `bonnie`, `cass`, `emily`, `priya`, `jules`,
+`marcus`.
 
 Each character is fully isolated — separate state, memory, context files, and bot token.
 They have no knowledge of each other (except instances opted into the group-chat pilot —
@@ -450,13 +477,18 @@ see the next section).
 
 ## Group chat (experimental)
 
-Two character bots + you in one Telegram group, behind `GROUP_MODE=1` on exactly the
-pilot instances (Priya + Jules). **Read `GROUP_CHAT_DESIGN.md` before touching this** —
-the mechanisms (shared ledger, atomic claims, chain cap) exist because Telegram never
-delivers one bot's messages to another bot, and the design survived four adversarial
-review rounds; don't casually "simplify" it.
+Two character bots + you in one Telegram group, behind `GROUP_MODE=1`. **Two pilot
+pairs are live**: Priya+Jules (the original pilot) and Emily+Marcus (planned since
+Marcus's onboarding 2026-07-28, co-location confirmed 2026-08-01). Every other
+instance stays fully isolated — being on the VPS doesn't put a bot in a group; only
+`GROUP_MODE=1` + `GROUP_PEERS` does. **Read `GROUP_CHAT_DESIGN.md` before touching
+this** — the mechanisms (shared ledger, atomic claims, chain cap) exist because
+Telegram never delivers one bot's messages to another bot, and the design survived
+four adversarial review rounds; don't casually "simplify" it.
 
-Setup, once per pilot bot:
+Setup, once per pilot pair — steps below use Priya+Jules as the worked example;
+substitute the pair's own names and directories for a new one (this is exactly what
+Emily+Marcus's setup did):
 
 1. BotFather → `/setprivacy` → **Disable** (or the bot never sees unaddressed group
    messages). Then remove and re-add the bot to the group — Telegram applies privacy
@@ -465,9 +497,9 @@ Setup, once per pilot bot:
    (negative number).
 3. **Precondition — both pilots must share one ledger directory** (`GROUP_CHAT_DESIGN.md`
    §0). Bot-to-bot flow is a shared *filesystem* side channel, not Telegram; split hosts
-   silently give each bot its own ledger and the loop caps stop being enforced. Since the
-   2026-07-26 migration all six run on the VPS under `/opt/telegram-bots/`, so
-   `GROUP_LEDGER_DIR` defaults to the shared code dir for both. Verify rather than assume:
+   silently give each bot its own ledger and the loop caps stop being enforced. All seven
+   instances run on the VPS under `/opt/telegram-bots/`, so `GROUP_LEDGER_DIR` defaults to
+   the shared code dir for both. Verify rather than assume:
    ```bash
    # host: VPS
    sudo -u bot test -w /opt/telegram-bots && echo "ledger dir writable" || echo "NOT WRITABLE"
@@ -526,16 +558,17 @@ Behavior notes:
 
 ---
 
-## Running on a VPS (Phase 1: installer + admin API)
+## Installing a new instance on the VPS
 
-Alternative to Termux for anyone who'd rather not keep a phone on and awake 24/7. On a
-VPS, systemd replaces the tmux+run-bot.sh+watchdog.sh stack (`Restart=always`) and this
-whole category of Android-specific bug (phantom process killer, Samsung battery
-management, the `.alive` heartbeat watchdog.sh needs) doesn't apply — Termux keeps its
-existing mechanism unchanged for anyone still running that way.
+All seven instances already run this way (migration complete 2026-07-26; marcus stood up
+directly here 2026-07-29) — this section is for adding an eighth, or rebuilding a host
+from scratch, not an alternative to a phone fleet that no longer exists. systemd
+(`Restart=always`) replaces what the Termux-era tmux+run-bot.sh+watchdog.sh stack did,
+and the whole category of Android-specific bug it existed for (phantom process killer,
+Samsung battery management, the `.alive` heartbeat watchdog.sh needed) doesn't apply here.
 
 **Install** (Ubuntu 24.04 recommended, e.g. Contabo's ~€4.50/mo 4 vCPU/6GB RAM tier —
-best RAM headroom per dollar for running all 6 bots comfortably as of mid-2026 pricing):
+best RAM headroom per dollar for running all seven bots comfortably as of mid-2026 pricing):
 ```bash
 # First install on a fresh box: the repo is private, so fetch install-vps.sh over
 # authenticated git rather than raw HTTP — clone once with the read-only deploy key
@@ -549,9 +582,11 @@ whose config changed. It prompts per instance for a Telegram token, NanoGPT key,
 character card filename, and generates an `ADMIN_API_TOKEN`.
 
 **Supervision**: `systemctl {status,restart,stop} bot@nora`, logs via
-`journalctl -u bot@nora -f` (the VPS equivalent of `tail -f bot.log`). `/update` and
-`/restart` from Telegram work exactly as they do on Termux — systemd's
-`Restart=always` picks the process back up.
+`journalctl -u bot@nora -f` (see "VPS operations" at the top). `/restart` from Telegram
+works as before — systemd's `Restart=always` picks the process back up. **`/update`
+does not**: it downloads over a raw GitHub URL, which 404s on this private repo; the
+handler detects that and replies pointing at `vps-sync.sh` instead. Deploy with
+`vps-sync.sh`, not `/update` (see "Deploying" above).
 
 **Admin HTTP API**: opt-in (`ADMIN_API_ENABLED=1`), mirrors `/audit /errors /backup
 /update /restart` over HTTP for a non-Telegram client (e.g. a future control-panel
@@ -570,12 +605,16 @@ the step-by-step runbook (pilot one bot, soak, then migrate the rest).
 
 ## Logs
 
+On the VPS (all seven instances): `journalctl -u bot@nora -f` — see "Logs" under
+"VPS operations" at the top of this file for the full set of commands.
+
+Termux (legacy — no instance runs this way anymore, kept for reference):
 ```bash
 tmux attach -t nora            # live output
 tail -f ~/nora-bot/bot.log      # everything the supervisor has seen (trimmed at 5 MB)
 tail -f ~/nora-bot/errors.log   # warnings/errors only (rotates at 2 MB)
 ```
-Or from Telegram, no shell needed: `/errors [N]` tails `errors.log` straight into chat.
+Either way, from Telegram, no shell needed: `/errors [N]` tails `errors.log` straight into chat.
 
 ---
 
@@ -616,26 +655,27 @@ after sending that bot `/audit` (`_self_audit` fires the ping inline with that j
 **Bot doesn't respond**
 - Try `/errors` and `/audit` first — if it answers those but not conversation, it's a
   feature-level bug, not a startup crash
-- If it answers nothing at all: `tmux ls` (is the session even up?), then
-  `tail -50 ~/nora-bot/bot.log` (the actual crash traceback, if any) — see
-  `CHANGELOG.md` before assuming a new cause; several past crashes here have known,
-  documented root causes
-- Attach and watch output live: `tmux attach -t nora`
+- If it answers nothing at all (all seven run on the VPS): `systemctl status bot@nora
+  --no-pager` (is the unit even up?), then `journalctl -u bot@nora -n 50 --no-pager`
+  (the actual crash traceback, if any) — see `CHANGELOG.md` before assuming a new
+  cause; several past crashes here have known, documented root causes
+- Watch output live: `journalctl -u bot@nora -f`
 
 **`TELEGRAM_BOT_TOKEN not found`**
 - Make sure `.env` exists in the character's directory (not just `.env.example`)
 - Check for typos in the key name
 
 **`ModuleNotFoundError: No module named 'requests'` (or similar)**
-- The shared venv (`~/telegram-bot/venv/`) is missing or was built against a different
-  Python than the one now installed. `run-bot.sh` always launches with
-  `~/telegram-bot/venv/bin/python` explicitly, so this means the venv itself needs
-  rebuilding, not that the launcher picked the wrong interpreter:
+- On the VPS: the shared venv (`/opt/telegram-bots/venv/`) is missing or was built
+  against a different Python. The unit's `ExecStart` launches with
+  `/opt/telegram-bots/venv/bin/python` explicitly, so this means the venv itself needs
+  rebuilding, not that the unit picked the wrong interpreter:
   ```bash
-  python -m venv --clear ~/telegram-bot/venv
-  ~/telegram-bot/venv/bin/pip install -r ~/telegram-bot/requirements.txt
+  python3 -m venv --clear /opt/telegram-bots/venv
+  /opt/telegram-bots/venv/bin/pip install -r /opt/telegram-bots/.repo/telegram-companion-bot/requirements.txt
   ```
-  Then `update-all.sh` to restart everything on the rebuilt venv.
+  Then restart every unit (see "Whole fleet" under "VPS operations") to pick up the
+  rebuilt venv.
 
 **Model errors / 5xx from the API**
 - Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically

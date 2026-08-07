@@ -19,17 +19,25 @@ in `list_triggers` without an entry here and that is not drift.
   notifications, then the owner-approved Reddit-ideas step, then the curl-based
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
-  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-03** (same
-  trigger id, via `update_trigger` — no recreate, and NOT mirrored to this file
-  at the time — caught and backfilled 2026-08-07, see below): the curl-based
-  Reddit step, permanently SKIPPED since creation, was replaced with a
-  WebSearch-only "External ideas" scan that dropped Reddit as a source
-  entirely — diagnosis was that no fetch tool available to a fired session
-  can reach `reddit.com` or `developers.reddit.com` (Cloudflare blocks direct
-  HTTP past the proxy tunnel; WebFetch and WebSearch both refuse the domain
-  outright), and Reddit's app-registration flow now redirects to Devvit (a
-  platform for apps that run inside Reddit, not external OAuth read access).
-  **Prompt updated again 2026-08-07** (same trigger id, via `update_trigger`):
+  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-03**, owner
+  decision (same trigger id, via `update_trigger`, applied to the live trigger
+  the same day — this file's own copy of that update was NOT written at the
+  time, and only caught/backfilled 2026-08-07, see below): dropped Reddit as an
+  external-ideas source entirely. Diagnosis (verified live 2026-08-03,
+  superseding the 2026-07-20 "proxy CONNECT 403" note): the CONNECT tunnel and
+  TLS handshake to `reddit.com` succeed fine — the block is a plain HTTP 403
+  from Reddit's own Cloudflare, returned *after* a completed connection.
+  `WebFetch` refuses `reddit.com` outright; `WebSearch` with
+  `allowed_domains: ["reddit.com"]` errors `"reddit.com" not accessible to our
+  user agent` (Anthropic's own crawler is blocked from the domain, independent
+  of this environment's proxy); unrestricted `WebSearch` returns zero actual
+  `reddit.com` URLs. Reddit's app-registration flow (`reddit.com/prefs/apps`)
+  also redirects to **Devvit**, a platform for building apps that run *inside*
+  Reddit (owner-confirmed by trying it) — not obviously a source of portable
+  API credentials for external read access. The curl-based Reddit step
+  (permanently SKIPPED since creation anyway — see 2026-07-20 note above) was
+  replaced with a WebSearch-only "External ideas" scan. **Prompt updated again
+  2026-08-07** (same trigger id, via `update_trigger`):
   restored Reddit — and added Substack — via a custom `idea-scraper-actor/`
   Apify actor (repo root), which reached both through Apify's own
   infrastructure instead of the fired session's own network path, so the

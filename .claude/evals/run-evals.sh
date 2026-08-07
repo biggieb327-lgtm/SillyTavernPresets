@@ -145,6 +145,58 @@ else
   ok "wsdot-key-not-logged: WSDOT fetch errors log a key-free reason, not the raw exception"
 fi
 
+# v2026-08-03.1: glm-5.1:thinking wrote its ENTIRE deliberation into ordinary content —
+# no <think> tags, non-empty, no bracket syntax — so _strip_thinking, the v2026-07-20.1
+# empty-content path, and _strip_directive_lines all passed it, and priya sent a
+# ~12k-char planning essay as four chunked Telegram messages. Third variant of the
+# chain-of-thought leak class. The guard must stay wired end to end: detector defined,
+# consulted on the completion inside call_nanogpt, kill switch present. (Behavior — the
+# re-roll, the fallback, generate_reply marking calls user-facing — is pinned by
+# TestReasoningLeakGuard in tests/test_pure.py.)
+if grep -q 'def _looks_like_reasoning_leak' "$BOT" \
+   && grep -q '_looks_like_reasoning_leak(result' "$BOT" \
+   && grep -q 'REASONING_LEAK_GUARD' "$BOT"; then
+  ok "reasoning-leak-guard: reasoning-shaped completions are refused and re-rolled"
+else
+  bad "reasoning-leak-guard" "the reasoning-leak guard is unwired (detector, call_nanogpt check, or REASONING_LEAK_GUARD kill switch missing) — a thinking model's deliberation will ship as the reply again (see v2026-08-03.1)"
+fi
+
+# Same release, the other half: pre-merge review found that an honest character-card
+# review — a flow the repo supports via character-review/ — trips every marker the
+# guard looks for, and the DOCUMENT_MODEL sites pass no fallback, so a trip surfaces
+# to the owner as "❌ something broke on my end". Every DOCUMENT_MODEL reply site must
+# therefore opt out. Counted, not grepped for presence: a fourth site added without
+# the opt-out is exactly the regression this pins.
+# Parsed, not grepped: the first version of this check counted a trailing-comma line
+# that only exists when the call is already wrapped, so deleting an opt-out collapsed
+# the call to one line and dropped BOTH counts — it passed on the very regression it
+# pins (C13, caught by the break-test). Walk the AST instead.
+doc_unguarded=$(python3 - "$BOT" <<'PYEOF'
+import ast, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+bad = []
+for node in ast.walk(ast.parse(src)):
+    if not isinstance(node, ast.Call):
+        continue
+    fn = node.func
+    if getattr(fn, "id", getattr(fn, "attr", None)) != "reply_with_typing":
+        continue
+    kw = {k.arg: k.value for k in node.keywords}
+    model = kw.get("model")
+    if not (isinstance(model, ast.Name) and model.id == "DOCUMENT_MODEL"):
+        continue
+    opt = kw.get("leak_guard")
+    if not (isinstance(opt, ast.Constant) and opt.value is False):
+        bad.append(str(node.lineno))
+print(",".join(bad))
+PYEOF
+)
+if [ -z "$doc_unguarded" ]; then
+  ok "document-reply-leak-guard-optout: every DOCUMENT_MODEL reply site opts out of the reasoning-leak guard"
+else
+  bad "document-reply-leak-guard-optout" "reply_with_typing(model=DOCUMENT_MODEL) without leak_guard=False at line(s) $doc_unguarded — a card review trips every reasoning-leak marker, and DOCUMENT_MODEL passes no fallback, so the owner gets '❌ something broke on my end' instead of the review (see v2026-08-03.1)"
+fi
+
 # The operating machinery itself: hooks must parse, settings.json must be valid JSON.
 hook_bad=""
 for h in .claude/hooks/*.sh telegram-companion-bot/*.sh; do
@@ -344,6 +396,35 @@ if [ "${audit_send:-0}" -eq 0 ]; then
   ok "audit-plain-text: /audit sends plain text (cannot be broken by what it reports)"
 else
   bad "audit-plain-text" "/audit uses parse_mode again — a card field name or prompt heading with '_' or '[' will make Telegram reject the message and /audit will silently stop working (see CHANGELOG v2026-07-25.7)"
+fi
+
+# 2026-08-02: the selfie-base status was added to gather_audit_data() and the STARTUP
+# AUDIT log line, and the owner was told /audit would show it. audit_cmd builds its own
+# lines and never rendered it. A key that reaches the data dict but no user-facing
+# surface is invisible in exactly the situation it was added for. Every key must be
+# either rendered by audit_cmd or listed as API-only below.
+api_only='away_users config_warnings llm_stats card_fields preset_override token_calibration memory_review_pending'
+unrendered=$(python3 - "$BOT" "$api_only" <<'PYEOF'
+import re, sys, pathlib
+src = pathlib.Path(sys.argv[1]).read_text()
+allowed = set(sys.argv[2].split())
+gather = re.search(r'def gather_audit_data.*?\n    return \{(.*?)\n    \}', src, re.S)
+cmd = re.search(r'async def audit_cmd.*?(?=\nasync def |\ndef )', src, re.S)
+if not gather or not cmd:
+    print("PARSE-FAIL")
+else:
+    keys = set(re.findall(r'^\s*"([a-z_]+)":', gather.group(1), re.M))
+    body = cmd.group(0)
+    missing = sorted(k for k in keys - allowed if k not in body)
+    print(" ".join(missing))
+PYEOF
+)
+if [ "$unrendered" = "PARSE-FAIL" ]; then
+  bad "audit-keys-rendered" "could not locate gather_audit_data/audit_cmd — the eval needs updating, not the code"
+elif [ -z "$unrendered" ]; then
+  ok "audit-keys-rendered: every /audit data key reaches the rendered output (or is API-only)"
+else
+  bad "audit-keys-rendered" "gather_audit_data keys never rendered by /audit:$unrendered — add a line to audit_cmd or list the key as API-only in this eval (2026-08-02: selfie_base was added to the data and the log line but not /audit, and the owner was told otherwise)"
 fi
 
 # 2026-07-25 config audit: .env.example had drifted badly from bot.py in BOTH directions
@@ -598,6 +679,105 @@ if [ -z "$md_refs" ]; then
   ok "claude-md-refs-resolve: every repo path CLAUDE.md names still exists"
 else
   bad "claude-md-refs-resolve" "$md_refs"
+fi
+
+# --- roadmap-claims-current ---------------------------------------------------------------
+# A skill saying "ROADMAP 1.6 (unshipped)" about an item ROADMAP.md marks ✅ is a stale
+# claim that reads as a live constraint. On 2026-08-02 that exact sentence — written before
+# the flock shipped on 2026-08-01 — was copied into three deploy handoffs as a current
+# hazard, and then into a NEW skill written the same day, propagating it further. C12's
+# second occurrence: prose about the system is a claim about when it was written.
+# Decidable half only: a doc naming a ROADMAP item AND a staleness word near it, where
+# ROADMAP.md's heading for that item is struck through or ticked.
+roadmap_stale=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+
+roadmap = Path("telegram-companion-bot/ROADMAP.md")
+if not roadmap.exists():
+    print("ROADMAP.md is missing — this check reads it as the source of truth")
+    raise SystemExit
+text = roadmap.read_text(encoding="utf-8")
+shipped = set()
+for m in re.finditer(r'^#{2,4}\s+(\d+\.\d+)(.*)$', text, re.M):
+    head = m.group(2)
+    if "✅" in head or "~~" in head or re.search(r'\b(shipped|done|closed)\b', head, re.I):
+        shipped.add(m.group(1))
+
+STALE = re.compile(r'unshipped|not yet shipped|no lock exists yet|no flock|yet —\s*ROADMAP'
+                   r'|until it ships|tracks adding', re.I)
+problems = []
+docs = [Path("CLAUDE.md")] + sorted(Path(".claude").rglob("*.md"))
+for f in docs:
+    body = f.read_text(encoding="utf-8")
+    for m in re.finditer(r'ROADMAP\s+(\d+\.\d+)', body):
+        item = m.group(1)
+        if item not in shipped:
+            continue
+        window = body[max(0, m.start() - 220):m.end() + 220]
+        # C14 escape hatch, made by hand and visible — same shape as `sweep-ok`. The
+        # constraints entry RECORDING this incident necessarily quotes the stale
+        # sentence, and this check cannot tell a live claim from its own post-mortem.
+        # Put `roadmap-ok:` plus the reason near the quote.
+        if "roadmap-ok" in window:
+            continue
+        if STALE.search(window):
+            problems.append(f"{f}: calls ROADMAP {item} unshipped, but ROADMAP.md marks it done")
+if problems:
+    print("\n".join(sorted(set(problems))) +
+          "\n  — the doc describes the system as it was when written; re-read the thing "
+          "that executes it and correct the claim")
+PYEOF
+)
+if [ -z "$roadmap_stale" ]; then
+  ok "roadmap-claims-current: no doc calls a shipped ROADMAP item unshipped"
+else
+  bad "roadmap-claims-current" "$roadmap_stale"
+fi
+
+# --- gate-corpus ------------------------------------------------------------------------
+# The guards are themselves guarded. Every scanner in sweep.py and the delivery gate's
+# handler-coverage check run against fixtures built to slip past a naive implementation —
+# anchor slips, line-window escapes, substring collisions, deletion-only diff hunks, and a
+# deliberately unparseable input that must make the gate fail CLOSED. 14 of the first 34
+# cases deviated when this was written (2026-08-02), including the gate silently passing
+# whenever sweep raised. It also fails if sweep.py stops parsing, which is how three
+# docstring-boundary slips in one session would have been caught.
+corpus=$(python3 .claude/tools/gate_corpus/run.py 2>&1)
+if [ $? -eq 0 ]; then
+  ok "gate-corpus: $(printf '%s' "$corpus" | tail -1)"
+else
+  bad "gate-corpus" "$(printf '%s' "$corpus" | tail -25)"
+fi
+
+# --- handlers-exercised -----------------------------------------------------------------
+# The handlers whose defects reached the fleet BECAUSE their only tests read their source.
+# `/features <name> on|off` raised ValueError on every invocation for four releases while
+# two tests "covering" it stayed green (v2026-08-02.14). The delivery gate enforces this for
+# handlers a diff touches; this pins the ones already paid for, so deleting the behavioural
+# tests reds CI instead of quietly restoring the blind spot.
+exercised=$(python3 - <<'PYEOF'
+import sys
+sys.path.insert(0, ".claude/tools")
+import sweep
+
+REQUIRED = {
+    "features_cmd": "v2026-08-02.14 — ValueError on every invocation, 4 releases, tests read the source",
+    "setbase_cmd":  "v2026-08-02.4 + .14 — dispatch never fired, then a false backup claim",
+    "dupefacts_cmd": "already driven end-to-end; keeps at least one worked example in the suite",
+}
+_, called = sweep._handler_coverage()
+missing = [f"{n} ({why})" for n, why in REQUIRED.items() if n not in called]
+if missing:
+    print("no test CALLS these handlers: " + "; ".join(missing) +
+          " — a test that reads a handler's source cannot fail for the reason the "
+          "handler exists; drive it with fake Telegram objects instead")
+PYEOF
+)
+if [ -z "$exercised" ]; then
+  ok "handlers-exercised: the handlers that shipped broken are driven by tests, not grepped"
+else
+  bad "handlers-exercised" "$exercised"
 fi
 
 echo

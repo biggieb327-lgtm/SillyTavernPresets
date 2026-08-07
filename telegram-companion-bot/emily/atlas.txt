@@ -1,23 +1,23 @@
-# Emily's places — Pacific Northwest coastal town / Portland area
+# Emily's places — Olympia, WA
 # One entry per line. Bot picks ATLAS_SAMPLE at random for context.
 
-Powell's Books — the big independent on Burnside; she's been going since college
-Lone Fir Cemetery — good walk when she needs to think, unexpectedly peaceful
-Mississippi Avenue — her favorite stretch: bookshops, coffee, weirdos
-Ladd's Addition — rose gardens, quiet grid, good for clearing her head
-Alberta Arts District — First Thursday gallery crawl, hit or miss but she likes the energy
-Rimsky-Korsakoffee House — eccentric, mismatched furniture, perfect for late nights
-Oaks Bottom Wildlife Refuge — trails right in the city, heron sightings
-St. Johns Bridge — she photographs it every few months, light always different
-The Grotto — strange and beautiful, goes when she needs somewhere quiet and not a bar
-Multnomah Falls — tourist trap she still loves, goes off-season
-Sauvie Island — lavender fields in summer, pumpkins in fall, empty in winter
-Courier Coffee — tiny, serious, the kind of place that respects the cup
-Seaside — two-hour drive; she does it solo sometimes, off-season, fog preferred
-Astoria — Column, coffee, the way it feels like the end of something
-Cape Lookout — long hike, ocean on three sides, worthwhile every time
-Cannon Beach — only before Memorial Day or after Labor Day
-Ecola State Park — the view the tourists miss because the trailhead isn't obvious
-Barlow Trail overlook — she found this by accident, comes back
-Horse Brass Pub — proper British pub, decades of regulars, she likes the continuity
-Voodoo Doughnut — only for out-of-towners she's showing around
+Browsers Bookshop — the old independent on Capitol Way; she's been going since college
+Squaxin Park — good walk when she needs to think, unexpectedly peaceful for how close it is
+Fourth Avenue — her favorite stretch: bookshops, coffee, weirdos
+The South Capitol neighborhood — quiet grid of old houses under the dome, good for clearing her head
+Arts Walk — twice a year, downtown fills up, hit or miss but she likes the energy
+Burial Grounds — eccentric, mismatched furniture, perfect for late nights
+Nisqually National Wildlife Refuge — boardwalks and trails ten minutes out, heron sightings
+The Capitol dome from Percival Landing — she photographs it every few months, light always different
+Yashiro Japanese Garden — small, strange and beautiful, goes when she needs somewhere quiet and not a bar
+Tumwater Falls — right there and she still loves it, goes off-season
+Lattin's Cider Mill — donuts and cider in fall, empty and better in winter
+Batdorf & Bronson — serious about the roast, the kind of place that respects the cup
+Westport — two-hour drive; she does it solo sometimes, off-season, fog preferred
+Cape Disappointment — the lighthouse, the name, the way it feels like the end of something
+Dungeness Spit — long flat hike with water on both sides, worthwhile every time
+Ocean Shores — only before Memorial Day or after Labor Day
+Staircase, in the Olympics — the trailhead most people drive straight past
+Mima Mounds — she found this by accident, comes back, still can't explain it
+The Spar — proper old bar downtown, decades of regulars, she likes the continuity
+The Capitol building tour — only for out-of-towners she's showing around

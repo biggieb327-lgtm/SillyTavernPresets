@@ -34,7 +34,10 @@ which is why this file no longer restates it. Project rules here override it.
 
 For complex work (multi-step, behavior-changing, or fleet-touching), read
 `.claude/operating/fable-to-opus.md` before acting — it carries owner-settled
-decisions and session-earned traps. For simple work, do not load it.
+decisions and session-earned traps. For simple work, do not load it. Its dated
+numbers (BOT_VERSION, test/eval counts) are a handoff-time snapshot, not live
+state — check `bot.py` and `CHANGELOG.md` for current figures; the decisions
+and traps still hold even as the numbers age.
 
 Detailed procedure lives in skills, not here. `.claude/skills/skill-router/SKILL.md`
 is the index — consult it and load on demand.
@@ -47,9 +50,15 @@ The machinery that enforces this is real, not advisory:
   presets were public via raw URLs for months — assume anything committed before then
   is exposed) and
   BOT_VERSION↔changelog sync.
+- **`.claude/tools/verify.sh`** — the standing verification block as one command
+  (compile, pytest, evals, gate corpus, then the advisory sweep). Run this rather than
+  four remembered invocations; `--quick` drops the sweep and is not enough for a release.
+- **`.claude/tools/gate_corpus/`** — the guards, guarded: fixtures built to slip past
+  each scanner and the delivery gate. 14 of the first 34 cases deviated, including the
+  gate passing silently whenever `sweep.py` raised. Run by the `gate-corpus` eval.
 - **Hooks** (`.claude/hooks/`) — including a **delivery gate** that blocks ending a
-  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, or compile
-  evidence.
+  turn with a modified bot.py lacking a BOT_VERSION bump, changelog entry, compile
+  evidence, or a test that *calls* any `*_cmd` the diff touched.
 - **CI** (`.github/workflows/evals.yml`) — same evals + pytest on `main`/`claude/**`.
   `vps-sync.sh` hard-resets the VPS checkout to `origin/main` before copying, so
   **a red run on main is a deploy blocker.**
@@ -59,6 +68,52 @@ The machinery that enforces this is real, not advisory:
 Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.
 Every completion must include the verification command actually run.
+
+## Vocabulary — use the repo's words, invent none
+
+Invented terms read as precision and carry none. A session coins a label, uses it as
+though it were shared, and the owner (or the next session) has to reverse-engineer what
+it meant. Four rules, each checkable from the transcript:
+
+1. **If a thing has a name in the code, use that name verbatim.** Env var, function,
+   file, command, systemd unit, `/audit` field. `GROUP_CHAIN_DECAY`, not "the dampening
+   factor"; `_handle_group_message`, not "the group entry point". A reader can grep an
+   identifier; nobody can grep a phrase you made up.
+2. **No name is a finding, not a licence to invent one.** Something load-bearing with no
+   identifier is a real gap — say so plainly ("the path from the claim to the gap check
+   has no name"), then either describe it in ordinary words every time it comes up, or
+   give it a name *in the code* in the same change. A term that lives only in prose is
+   not a name; it is private shorthand.
+3. **Plain words over coined ones** — in reports, commit messages, changelog rows, and
+   docs alike. One meaning per word, one idea per sentence, verbs instead of
+   nominalizations ("the gate blocks the turn", not "turn-blocking enforcement").
+   Metaphor may illustrate a mechanism, never replace it: if removing the metaphor
+   empties the sentence, the sentence was already empty. (These are the operative habits
+   of ASD-STE100 Simplified Technical English — you need the habits, not the standard.)
+4. **Never let a subagent's shorthand escape into the report or the diff.** Agents coin
+   terms freely and their reports compound each other's. Translate what an agent returns
+   into repo terms and code identifiers before relaying or acting on it. An agent's
+   coinage is not a finding.
+
+Naming is not banned — *silent* naming is. If a term genuinely earns existence, say so
+once and out loud ("calling this X for the rest of this report") and add it to the table
+below in the same change.
+
+**The sanctioned shorthand.** These are the repo terms with no single identifier to
+grep, and the only ones that need no introduction. Everything else comes from the code,
+or gets said in plain words.
+
+| Term | Means | Owned by |
+|---|---|---|
+| the fleet | all seven bot instances together | this file, Bot instances |
+| instance | one bot — a directory, `.env`, and card, sharing one `bot.py` | this file, Bot instances |
+| the voiceprint | `preset.txt`, the shared texting style feeding every bot | `edit-cards-and-presets` |
+| preset layer | the per-instance preset text layered onto the voiceprint | `edit-cards-and-presets` |
+| the delivery gate | the hook that blocks a turn shipping `bot.py` without version + changelog + compile evidence | `.claude/hooks/delivery-gate.sh` |
+| break-test | proving a check goes RED before trusting its GREEN | `add-regression-eval` |
+| the class | every other place the bug shape you just fixed occurs | `fix-the-class` |
+| kill switch | the env var that disables a default-on feature without a redeploy | `bot-code-invariants` #16 |
+| Routine | a scheduled session that fires with nobody watching | `.claude/operating/routines.md` |
 
 ## Where things live
 
@@ -130,6 +185,10 @@ ends **2026-08-09**; after that date this sentence is stale — confirm before r
 - Repo `biggieb327-lgtm/SillyTavernPresets` — **private since 2026-07-28**. Anonymous
   `raw.githubusercontent.com` URLs 404, so any doc or script still telling you to `curl`
   one is stale. Deploys read from the checkout at `/opt/telegram-bots/.repo`.
+- **Trained knowledge of these APIs drifts; the pins above don't.** Before relying on
+  undocumented `python-telegram-bot` or NanoGPT behavior, check current docs or a web
+  fetch rather than memory — this file only records traps already hit (the
+  `asyncio.get_event_loop()` line above); the next one won't be here yet.
 
 ## Deployment
 
@@ -195,6 +254,23 @@ each with a threshold and a test, so they are not restated here. What is project
    already loaded, or the budget-governor is live. This is the **durable** statement of
    the grant, paid once per session; `.claude/hooks/agent-authorization.py` re-asserts it
    only on the turns where a server-side instruction would otherwise override it.
+7. **Never edit a check, test, or eval to make it pass — fix what it's checking, or
+   state the exception.** The one legitimate exception is deliberately widening a
+   check's scope, in the same commit, with the rationale written down
+   (`add-regression-eval`, `group-chat-changes`). Silently loosening an assertion to
+   turn red green is how the `/features` `ValueError` (2026-08-02) shipped past two
+   rounds of tests that asserted on source text instead of calling the handler — the
+   delivery gate and evals are the repo's memory of past pain; satisfy them, don't
+   argue with them.
+8. **Treat an explicit instruction — from a loaded skill, a doc, or the user — as a
+   literal constraint to check the actual diff against, not a stance to agree with and
+   move past.** C19/C20 (2026-08-07) shipped past ponytail's own explicit text —
+   "never lazy about understanding the problem... trace the whole thing first" and
+   "laziness that skips comprehension... is the dangerous kind" — while believing that
+   text was being followed. The caution was read and agreed with; it was never checked
+   against the specific diff being written. When wording is explicit, verify the work
+   against the words themselves before calling it done, the same way a delivery-gate
+   check is verified, not held in mind as a general attitude.
 
 ## Git workflow
 

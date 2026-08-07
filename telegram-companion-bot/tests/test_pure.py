@@ -322,9 +322,14 @@ class TestIsAddressed:
         assert not bot._is_addressed("", "Priya", "priya_bot")
 
 
+def _chain(n: int) -> list:
+    """A ledger tail whose last n entries are bot messages (chain length n)."""
+    return [_human(1)] + [_bot(2 + i) for i in range(n)]
+
+
 class TestShouldReplyToBot:
     def test_cap_overrides_addressed(self):
-        entries = [_human(1), _bot(2), _bot(3)]  # chain == GROUP_BOT_CHAIN_MAX (2)
+        entries = _chain(bot.GROUP_BOT_CHAIN_MAX)
         assert not bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=True)
 
     def test_addressed_below_cap(self):
@@ -335,6 +340,53 @@ class TestShouldReplyToBot:
         entries = [_human(1), _bot(2)]
         assert bot._should_reply_to_bot(entries, prob_roll=0.0, addressed=False)
         assert not bot._should_reply_to_bot(entries, prob_roll=0.99, addressed=False)
+
+    def test_chain_longer_than_two_is_reachable(self):
+        # The v1 defaults ended every exchange at 2 bot messages, which read as "they
+        # only ever reply once". A third comeback must be possible at all.
+        assert bot.GROUP_BOT_CHAIN_MAX > 2
+        assert bot._should_reply_to_bot(_chain(2), prob_roll=0.0, addressed=False)
+
+    def test_probability_decays_with_depth(self):
+        # Same roll, deeper chain → the reply that passed at depth 0 fails later on.
+        roll = bot.GROUP_BOT_REPLY_PROB * 0.9
+        assert bot._should_reply_to_bot(_chain(1), roll, addressed=False)
+        assert not bot._should_reply_to_bot(
+            _chain(bot.GROUP_BOT_CHAIN_MAX - 1), roll, addressed=False)
+
+    def test_addressed_is_certain_at_depth_zero_only(self):
+        # Being named starts at 1.0 (v1 behaviour for the first comeback) but decays
+        # with everything else — otherwise name-dropping runs every chain to the cap.
+        assert bot._should_reply_to_bot(_chain(1), prob_roll=0.999, addressed=True)
+        assert not bot._should_reply_to_bot(_chain(2), prob_roll=0.999, addressed=True)
+
+    def test_decay_of_one_is_the_flat_v1_gate(self, monkeypatch):
+        monkeypatch.setattr(bot, "GROUP_CHAIN_DECAY", 1.0)
+        for depth in range(1, bot.GROUP_BOT_CHAIN_MAX):
+            assert bot._should_reply_to_bot(_chain(depth), prob_roll=0.999, addressed=True)
+
+    def test_cap_still_wins_over_decay_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "GROUP_CHAIN_DECAY", 1.0)
+        assert not bot._should_reply_to_bot(
+            _chain(bot.GROUP_BOT_CHAIN_MAX), prob_roll=0.0, addressed=True)
+
+
+class TestGroupBanterDefaults:
+    def test_kill_switch_present_and_on_by_default(self):
+        # Owner policy: new behaviour defaults ON with an env kill switch. The fixture
+        # sets no GROUP_* vars, so this is the shipped default.
+        assert bot.GROUP_BANTER is True
+
+    def test_send_throttle_allows_alternation(self):
+        # A bot's own messages land ~2 turns apart in a live exchange (poll ≤5s +
+        # claim delay ≤3s + generation, twice). A throttle at or above that window
+        # silently ends every exchange, which is what 20s did.
+        assert bot.GROUP_MIN_GAP_SECONDS <= 16
+
+    def test_budget_covers_a_full_chain_of_exchanges(self):
+        # Longer chains spend the daily bot-to-bot budget faster; a budget that runs
+        # out mid-evening reproduces the original complaint silently.
+        assert bot.GROUP_DAILY_BOT_BUDGET >= bot.GROUP_BOT_CHAIN_MAX * 8
 
 
 class TestClaimDelay:
@@ -2308,6 +2360,68 @@ class TestPrivateGate:
         self._run(_gate_update(10, None))
 
 
+class TestHandleMessageGroupGating:
+    """v2026-08-07.2: the ponytail-audit cleanup's deletion of handle_message's
+    per-handler _is_allowed check was reverted after /code-review caught it — that
+    check is the ONLY per-user allowlist enforcement for group text messages.
+    _private_gate (group -1) explicitly no-ops for chat_id < 0 ("group_guard's
+    jurisdiction"), and group_guard only checks chat-level GROUP_ALLOWED_CHATS
+    membership, never the sender's identity. GROUP_CHAT_DESIGN.md §6: "Human gating
+    unchanged... strangers in an allowed group are ignored unless ALLOWED_USERS is
+    empty." Pins that invariant directly against handle_message, not just _private_gate."""
+
+    GROUP_CHAT_ID = -100777001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        self._group_mode = bot.GROUP_MODE
+        self._group_chats = set(bot.GROUP_ALLOWED_CHATS)
+        self._last_request = dict(bot._last_request)
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.add(1)  # non-empty: strangers must be rejected
+        bot.GROUP_MODE = True
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.add(self.GROUP_CHAT_ID)
+        bot._last_request.clear()
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+        bot.GROUP_MODE = self._group_mode
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.update(self._group_chats)
+        bot._last_request.clear()
+        bot._last_request.update(self._last_request)
+
+    def _group_update(self, user_id):
+        msg = SimpleNamespace(text="hello", reply_to_message=None, message_id=1)
+        return SimpleNamespace(
+            message=msg,
+            effective_chat=SimpleNamespace(id=self.GROUP_CHAT_ID),
+            effective_user=SimpleNamespace(id=user_id, first_name="Someone"),
+        )
+
+    def test_non_allowlisted_group_member_never_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(999), _cmd_ctx()))
+        assert called == []
+
+    def test_allowlisted_group_member_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(1), _cmd_ctx()))
+        assert len(called) == 1
+
+
 class TestOnErrorHygiene:
     class _Bot:
         def __init__(self):
@@ -2976,9 +3090,14 @@ class TestGarminConfig:
         assert bot.GARMIN_ENABLED is False
 
     def test_monitors_require_the_feed(self):
-        assert bot.STRESS_ALERTS is False
-        assert bot.BB_ALERTS is False
-        assert bot.RHR_ALERTS is False
+        """Same contract as before v2026-08-02.14, different mechanism. The env flags are
+        now the static preference alone; _alerts_on() carries the "and the feed is live"
+        half, because folding GARMIN_ENABLED in at import froze it — /features health off
+        flipped the parent and the monitors kept firing off the stale copy."""
+        assert bot.GARMIN_ENABLED is False
+        assert bot._alerts_on(bot.STRESS_ALERTS) is False
+        assert bot._alerts_on(bot.BB_ALERTS) is False
+        assert bot._alerts_on(bot.RHR_ALERTS) is False
 
     def test_numeric_config_went_through_env_helpers(self):
         assert isinstance(bot.STRESS_THRESHOLD, int)
@@ -3001,13 +3120,24 @@ class TestGarminConfig:
 class TestGarminInvariants:
     """Rules from bot-code-invariants that this feature could plausibly break."""
 
+    def _health_job_source(self, fn):
+        # stress_monitor_job/bb_monitor_job delegate their shared shape (cooldown
+        # gate, off-loop fetch, nudge gate, trigger) to _run_health_alert_job as of
+        # the ponytail-audit dedup (CHANGELOG) — check the composed source, since the
+        # invariant genuinely holds for both, just no longer inline in either wrapper.
+        # rhr_monitor_job kept its own body (different cooldown shape), so it's
+        # checked standalone.
+        import inspect
+        src = inspect.getsource(fn)
+        if fn in (bot.stress_monitor_job, bot.bb_monitor_job):
+            src += inspect.getsource(bot._run_health_alert_job)
+        return src
+
     def test_every_garmin_call_runs_off_the_event_loop(self):
         # Invariant #8: garminconnect is blocking requests underneath.
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job,
                    bot.rhr_monitor_job, bot.update_garmin):
-            src = inspect.getsource(fn)
-            assert "asyncio.to_thread" in src, fn.__name__
+            assert "asyncio.to_thread" in self._health_job_source(fn), fn.__name__
 
     def test_snapshot_never_enters_group_prompts(self):
         # GROUP_CHAT_DESIGN.md §5: watch metrics are private 1:1 state.
@@ -3030,14 +3160,12 @@ class TestGarminInvariants:
             assert ".__name__" in src, fn.__name__
 
     def test_check_ins_consume_the_nudge_budget(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_consume_nudge(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_consume_nudge(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_check_ins_respect_the_proactive_gate(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_health_nudge_ok(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_health_nudge_ok(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_health_nudge_gate_checks_every_condition(self):
         import inspect
@@ -3281,6 +3409,138 @@ class TestStripTiers:
         assert all(set(m) <= {"role", "content"} for m in msgs)
 
 
+# ── Safety: distress detection (2026-08-04, reimplemented from the abandoned
+# claude/push-to-repo-7i2f3c branch's d141e84, never merged the first time) ──────
+
+class TestSafetyClassifier:
+    def test_yes_is_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Yes.")
+        assert bot._assess_safety("I want to end it all") is True
+
+    def test_no_is_not_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "No")
+        assert bot._assess_safety("just a rough day at work") is False
+
+    def test_a_broken_classifier_reads_as_no_distress(self, monkeypatch):
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._assess_safety("anything") is False
+
+    def test_no_raw_exception_in_safety_log(self):
+        # Only the exception's class name may reach a log line (cf. the Garmin/
+        # WSDOT key-leak convention).
+        import inspect
+        src = inspect.getsource(bot._assess_safety)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+    def test_prompt_carries_the_name_and_resource(self):
+        text = bot._safety_prompt("Tester")
+        assert "Tester" in text
+        assert bot.SAFETY_RESOURCES in text
+
+    def test_config_types(self):
+        assert isinstance(bot.SAFETY_ENABLED, bool)
+        assert isinstance(bot.SAFETY_MODEL, str) and bot.SAFETY_MODEL
+        assert isinstance(bot.SAFETY_RESOURCES, str) and bot.SAFETY_RESOURCES
+
+
+class TestAssembleMessagesDistress:
+    def test_distress_suppresses_inner_voice(self):
+        bot.conversation_history[9401] = []
+        bot.user_names[9401] = "Tester"
+        msgs = bot.assemble_messages(9401, "hello", inner_voice="she notices he sounds off",
+                                     distress=True)
+        assert not any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_no_distress_keeps_inner_voice(self):
+        bot.conversation_history[9402] = []
+        bot.user_names[9402] = "Tester"
+        msgs = bot.assemble_messages(9402, "hello", inner_voice="she notices he sounds off",
+                                     distress=False)
+        assert any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_distress_appends_the_safety_prompt_last(self):
+        bot.conversation_history[9403] = []
+        bot.user_names[9403] = "Tester"
+        msgs = bot.assemble_messages(9403, "hello", distress=True)
+        assert msgs[-1]["role"] == "system"
+        assert "distress" in msgs[-1]["content"]
+
+    def test_no_distress_by_default(self):
+        bot.conversation_history[9404] = []
+        bot.user_names[9404] = "Tester"
+        msgs = bot.assemble_messages(9404, "hello")
+        assert not any("distress" in (m.get("content") or "") for m in msgs)
+
+
+# ── Adaptive texting-style mirroring (2026-08-04, reimplemented from a485b1b,
+# never merged) ───────────────────────────────────────────────────────────────
+
+class TestUserStyleNote:
+    def _seed(self, chat_id, msgs):
+        bot.conversation_history[chat_id] = [{"role": "user", "content": m} for m in msgs]
+        bot.user_names[chat_id] = "Tester"
+
+    def test_too_few_messages_is_silent(self):
+        self._seed(9501, ["hi"] * (bot.STYLE_MIN_MSGS - 1))
+        assert bot._user_style_note(9501) == ""
+
+    def test_short_clipped_texter(self):
+        self._seed(9502, ["yo"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9502)
+        assert "short, clipped" in note
+
+    def test_long_texter(self):
+        long_msg = " ".join(["word"] * 30)
+        self._seed(9503, [long_msg] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9503)
+        assert "longer, fuller" in note
+
+    def test_heavy_emoji_user(self):
+        self._seed(9504, ["nice 😂🔥"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9504)
+        assert "emoji freely" in note
+
+    def test_no_emoji_user(self):
+        self._seed(9505, ["that sounds reasonable to me honestly"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9505)
+        assert "rarely use emoji" in note
+
+    def test_lowercase_texter(self):
+        self._seed(9506, ["hey what's up today"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9506)
+        assert "all-lowercase" in note
+
+    def test_textspeak_user(self):
+        self._seed(9507, ["lol idk rn tbh"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9507)
+        assert "textspeak" in note
+
+    def test_bracket_tagged_messages_excluded(self):
+        # [sent ...] / heartbeat-style synthetic entries aren't the user's own texting.
+        self._seed(9508, ["[sent 10:00]"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9508) == ""
+
+    def test_disabled_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9509, ["yo"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9509) == ""
+
+    def test_assemble_messages_includes_the_note_when_enabled(self):
+        self._seed(9510, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9510, "hello")
+        assert any("texting style" in (m.get("content") or "") for m in msgs)
+
+    def test_assemble_messages_omits_the_note_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9511, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9511, "hello")
+        assert not any("texting style" in (m.get("content") or "") for m in msgs)
+
+
 class TestTieredTrimOrder:
     @staticmethod
     def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):
@@ -3401,8 +3661,9 @@ class TestOptionalBlocksAreMarked:
         import inspect
         return inspect.getsource(bot.assemble_messages)
 
-    def test_seven_optional_blocks_marked(self):
-        assert self._assembled().count("_sys_opt(") == 7
+    def test_eight_optional_blocks_marked(self):
+        # 7 pre-existing + triggered_episode (2026-08-04, episodic recall).
+        assert self._assembled().count("_sys_opt(") == 8
 
     def test_lore_is_optional(self):
         src = self._assembled()
@@ -3602,17 +3863,18 @@ class TestCalibratedTokens:
         with _CalFixture(ratio=1.25, n=7, enabled=False):
             assert "TOKEN_CALIBRATION=0" in bot._token_confidence()
 
-    def test_memory_budget_stays_on_the_raw_unit(self):
-        # Calibrating it would change how much six live characters recall — a
-        # personality change shipped as an accounting fix.
+    def test_memory_budget_uses_calibrated_units(self):
+        # ROADMAP 4.4, owner-approved 2026-08-01: MEMORY_TOKEN_BUDGET switched from the
+        # raw len//4 estimate to _tokens() (calibrated). Safe only because every live
+        # instance's .env was multiplied by its own measured ratio at cutover first, so
+        # this line changing is not itself the personality change -- that already
+        # happened, deliberately, in each instance's .env before this shipped.
         import inspect
-        src = inspect.getsource(bot.select_memories) if hasattr(bot, "select_memories") else ""
-        if not src:
-            import re
-            whole = inspect.getsource(bot)
-            m = re.search(r"budget = MEMORY_TOKEN_BUDGET.*?cost = (\w+)\(line\)",
-                          whole, re.S)
-            assert m and m.group(1) == "_est_tokens", "memory budget must use the raw unit"
+        import re
+        whole = inspect.getsource(bot)
+        m = re.search(r"budget = MEMORY_TOKEN_BUDGET.*?cost = (\w+)\(line\)",
+                      whole, re.S)
+        assert m and m.group(1) == "_tokens", "memory budget must use the calibrated unit"
 
 
 class TestUsageAccounting:
@@ -4807,3 +5069,3487 @@ class TestCaptionModelSlot:
         """Uniform captions must not accidentally move summarisation too."""
         import inspect
         assert "SUMMARY_MODEL" in inspect.getsource(bot._summarize)
+
+
+class TestSelfiePromptFixedRules:
+    """The anatomy and realism rules are appended to every selfie prompt, unconditionally.
+    They were inline literals inside build_selfie_prompt until v2026-08-01.1; hoisting them
+    to module constants is only safe if they still reach every prompt."""
+
+    def test_both_rules_appear_in_every_variant(self):
+        import random
+        for chat_id in (None, 999):
+            for hint in ("", "on the fire escape"):
+                for seed in range(20):
+                    random.seed(seed)
+                    prompt = bot.build_selfie_prompt(hint, chat_id)
+                    assert bot._SELFIE_ANATOMY_RULE in prompt
+                    assert bot._SELFIE_REALISM_RULE in prompt
+
+    def test_rules_carry_the_constraints_the_image_models_need(self):
+        """Regression guards: extra limbs (Flux/Kontext) and Gemini's safety filter,
+        which returns blacked-out images without an explicit SFW/clothed signal."""
+        assert "No extra limbs." in bot._SELFIE_ANATOMY_RULE
+        assert "Fully clothed, SFW." in bot._SELFIE_REALISM_RULE
+
+
+class TestCommandMenuMirrorsHandlers:
+    """_build_command_menu is hand-kept alongside the CommandHandler registrations in
+    main() (its own docstring says so) -- nothing enforced that until now. Found by
+    audit 2026-08-01: 17 unconditionally-registered commands (card, errors, fleet, life,
+    meme, note, notes, people, projects, quiet, quietwin, recap, restart, schedule,
+    setcard, today, update) were missing from the menu the whole time -- they worked if
+    typed, but never appeared in Telegram's autocomplete popup."""
+
+    def _registered_command_names(self):
+        import inspect
+        import re
+        src = inspect.getsource(bot.main)
+        return set(re.findall(r'CommandHandler\("([a-z_]+)"', src))
+
+    def test_every_registered_command_is_in_the_full_menu(self):
+        names = self._registered_command_names()
+        assert len(names) > 50, "sanity check: extraction found suspiciously few commands"
+        menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
+        missing = names - menu
+        assert not missing, f"registered but not in any menu list: {sorted(missing)}"
+
+    def test_the_full_menu_has_no_entries_without_a_handler(self):
+        names = self._registered_command_names()
+        menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
+        dead = menu - names
+        assert not dead, f"in the menu but no CommandHandler registers it: {sorted(dead)}"
+
+
+class TestModelInfoShowsEveryRole:
+    """/model used to show only the chat model, so a background slot (SUMMARY_MODEL,
+    MOOD_MODEL, ...) silently running something unexpected had no quick way to check
+    without /setmodel's heavier no-args output (a live subscription-list API call plus
+    picker framing). Requested after a live memory-quality investigation where the
+    fix candidate was exactly "which model is actually running this slot?"."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def _run(self):
+        msg = self._Msg()
+        update = SimpleNamespace(message=msg)
+        asyncio.run(bot.model_info(update, None))
+        assert len(msg.sent) == 1
+        return msg.sent[0]
+
+    def test_every_model_role_appears(self):
+        text = self._run()
+        for role in bot.MODEL_ROLES:
+            assert f"{role}:" in text, role
+
+    def test_shows_the_actual_configured_value_not_a_placeholder(self):
+        text = self._run()
+        assert bot.NANOGPT_MODEL in text
+
+    def test_no_live_api_call(self):
+        """Unlike /setmodel's no-args path, /model must stay cheap enough to check
+        often -- inspect the source rather than trying to detect a network call."""
+        import inspect
+        src = inspect.getsource(bot.model_info)
+        assert "_nanogpt_subscription_models" not in src
+
+
+class TestFactAtomicity:
+    """Live incident, 2026-08-01: a strong reasoning model (Priya's own SUMMARY_MODEL,
+    unset -> her chat model) still produced a garbled recent_facts entry that fused an
+    event (a Costco trip) with unrelated meta-commentary (an argument about how Priya's
+    own line should be categorized) into one run-on sentence. Not a weak-model problem --
+    _summarize()'s prompt had no instruction against exactly this kind of fusion. Fixed
+    by requiring each fact to be one concrete, self-contained thing."""
+
+    def test_summarize_requires_one_concrete_thing_per_fact(self):
+        import inspect
+        src = inspect.getsource(bot._summarize)
+        assert "ONE" in src and "concrete thing" in src
+        assert "meta-commentary" in src
+
+    def test_consolidate_facts_forbids_fusing_on_merge(self):
+        import inspect
+        src = inspect.getsource(bot._consolidate_facts)
+        assert "ONE concrete thing" in src
+        assert "do not fuse" in src.lower()
+
+
+class TestFindNearDuplicatePairs:
+    """Diagnostic-only sibling of _is_semantic_dup: surfaces every near-duplicate pair
+    already sitting in a list, for /dupefacts to report -- built 2026-08-01 to gather
+    real evidence on whether facts/recent_facts accumulate reworded near-duplicates
+    (the exact-string dedup in _summarize()/_consolidate_facts() would miss), before
+    any auto-merge logic gets written."""
+
+    def test_finds_a_pair_above_threshold(self):
+        items = ["went to costco", "went to costco again"]
+        vecs = [[1.0, 0.0], [0.99, 0.01]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.92)
+        assert out == [(pytest.approx(bot._cosine_sim(vecs[0], vecs[1])), items[0], items[1])]
+
+    def test_distinct_items_not_flagged(self):
+        items = ["went to costco", "started a new job"]
+        vecs = [[1.0, 0.0], [0.0, 1.0]]
+        assert bot._find_near_duplicate_pairs(items, vecs, 0.92) == []
+
+    def test_missing_vector_skipped_not_flagged(self):
+        items = ["a", "b", "c"]
+        vecs = [[1.0, 0.0], None, [1.0, 0.0]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.92)
+        # only the a/c pair has both vectors present
+        assert out == [(1.0, "a", "c")]
+
+    def test_sorted_highest_similarity_first(self):
+        items = ["a", "b", "c"]
+        vecs = [[1.0, 0.0], [0.95, 0.05], [0.99, 0.01]]
+        out = bot._find_near_duplicate_pairs(items, vecs, 0.9)
+        sims = [s for s, _, _ in out]
+        assert sims == sorted(sims, reverse=True)
+
+    def test_single_item_no_pairs(self):
+        assert bot._find_near_duplicate_pairs(["only one"], [[1.0, 0.0]], 0.92) == []
+
+    def test_empty_list(self):
+        assert bot._find_near_duplicate_pairs([], [], 0.92) == []
+
+
+class TestEmbedAndCache:
+    def setup_method(self):
+        self._orig = dict(bot._embeddings_cache)
+        self._orig_embed_text = bot._embed_text
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig)
+        bot._embed_text = self._orig_embed_text
+
+    def test_returns_cached_vector_without_reembedding(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache["already known"] = [1.0, 0.0]
+        calls = []
+        bot._embed_text = lambda t: calls.append(t) or [0.0, 1.0]
+        out = bot._embed_and_cache("already known")
+        assert out == [1.0, 0.0]
+        assert calls == []
+
+    def test_embeds_and_caches_on_miss(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: [0.5, 0.5]
+        out = bot._embed_and_cache("new fact")
+        assert out == [0.5, 0.5]
+        assert bot._embeddings_cache["new fact"] == [0.5, 0.5]
+
+    def test_embed_failure_returns_none_and_does_not_cache(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: None
+        assert bot._embed_and_cache("unembeddable") is None
+        assert "unembeddable" not in bot._embeddings_cache
+
+    def test_strips_whitespace_for_the_cache_key(self):
+        bot._embeddings_cache.clear()
+        bot._embed_text = lambda t: [1.0, 0.0]
+        bot._embed_and_cache("  padded text  ")
+        assert "padded text" in bot._embeddings_cache
+        assert "  padded text  " not in bot._embeddings_cache
+
+
+class TestDupefactsCmd:
+    """Behavioral check that the command wires the pure pieces together correctly and
+    stays strictly read-only (facts/recent_facts must be byte-identical after)."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_embed_text = bot._embed_text
+        self._orig_facts = dict(bot.facts)
+        self._orig_recent = dict(bot.recent_facts)
+        self._orig_allowed = set(bot.ALLOWED_USERS)
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._embed_text = self._orig_embed_text
+        bot.facts.clear()
+        bot.facts.update(self._orig_facts)
+        bot.recent_facts.clear()
+        bot.recent_facts.update(self._orig_recent)
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._orig_allowed)
+
+    def _run(self, chat_id, user_id=1):
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=chat_id),
+            effective_user=SimpleNamespace(id=user_id))
+        asyncio.run(bot.dupefacts_cmd(update, None))
+        return msg.sent
+
+    def test_reports_a_near_duplicate_pair(self):
+        chat_id = 555001
+        bot.ALLOWED_USERS.clear()  # empty = _is_allowed opens the door to anyone
+        bot._embeddings_cache.clear()
+        bot.recent_facts[chat_id] = [
+            "Costco food court trip: a joke about it",
+            "Costco food court trip: basically the same joke reworded",
+        ]
+        bot.facts[chat_id] = []
+        bot._embed_text = lambda t: [1.0, 0.0] if "Costco" in t else [0.0, 1.0]
+        sent = self._run(chat_id)
+        assert any("near-duplicate" in s.lower() or "match" in s.lower() for s in sent)
+        assert any("%" in s for s in sent)
+
+    def test_no_duplicates_says_so_plainly(self):
+        chat_id = 555002
+        bot.ALLOWED_USERS.clear()
+        bot._embeddings_cache.clear()
+        bot.recent_facts[chat_id] = ["went to costco", "started a new job"]
+        bot.facts[chat_id] = []
+        bot._embed_text = lambda t: [1.0, 0.0] if "costco" in t else [0.0, 1.0]
+        sent = self._run(chat_id)
+        assert any("no near-duplicate" in s.lower() for s in sent)
+
+    def test_never_mutates_facts_or_recent_facts(self):
+        chat_id = 555003
+        bot.ALLOWED_USERS.clear()
+        bot._embeddings_cache.clear()
+        before_recent = ["a", "b"]
+        before_facts = ["c"]
+        bot.recent_facts[chat_id] = list(before_recent)
+        bot.facts[chat_id] = list(before_facts)
+        bot._embed_text = lambda t: [1.0, 0.0]
+        self._run(chat_id)
+        assert bot.recent_facts[chat_id] == before_recent
+        assert bot.facts[chat_id] == before_facts
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before dupefacts_cmd ever runs, and
+    # the per-handler `_is_allowed` check duplicated it as dead code. Gating is
+    # covered by TestPrivateGate now, not here.
+
+
+class TestSelfieWeatherMatching:
+    """v2026-08-01.7: the selfie prompt composed its scene from weather-blind random
+    pools, then appended the live reading as a trailing hint that also said "don't
+    describe the weather explicitly". On a 70°F clear day the draw could produce
+    "bundled up against the cold" + a canvas jacket + a hoodie, and the image model
+    followed the scene over the one temperature token -- a rainy selfie on a sunny day."""
+
+    def setup_method(self):
+        self._saved = dict(bot._weather_cache)
+        self._match = bot.SELFIE_WEATHER_MATCH
+        self._layer = bot.OUTDOOR_LAYER
+        self._wardrobe = dict(bot.wardrobe)
+        bot.SELFIE_WEATHER_MATCH = True
+        # OUTDOOR_LAYER defaults to "" since v2026-08-01.8, which would make the
+        # "courier jacket" half of _cold_markers unfalsifiable. Set it so the
+        # assertion still tests something (C13).
+        bot.OUTDOOR_LAYER = "Ingrid's oversized vintage canvas courier jacket"
+        bot.wardrobe.clear()
+        bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot._weather_cache.clear()
+        bot._weather_cache.update(self._saved)
+        bot.SELFIE_WEATHER_MATCH = self._match
+        bot.OUTDOOR_LAYER = self._layer
+        bot.wardrobe.clear()
+        bot.wardrobe.update(self._wardrobe)
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def test_temp_takes_air_temperature_not_feels_like(self):
+        """'feels like' is a second °F field; grabbing it would misjudge the threshold."""
+        self._set("70°F, feels like 65°F, light rain, wind 11mph")
+        assert bot._weather_temp_f() == 70.0
+
+    def test_temp_handles_negative_and_missing(self):
+        self._set("-4°F, snow, wind 9mph")
+        assert bot._weather_temp_f() == -4.0
+        self._set("")
+        assert bot._weather_temp_f() is None
+
+    def test_unknown_weather_is_not_warm(self):
+        """Absent data must not strip her jacket in January."""
+        self._set("")
+        assert bot._weather_is_warm() is False
+
+    def test_clear_is_distinct_from_merely_dry(self):
+        """Overcast is dry but grey -- the prompt must not claim 'no overcast' on it."""
+        self._set("55°F, overcast, wind 6mph")
+        assert bot._weather_outdoor_ok() and not bot._weather_is_clear()
+        self._set("70°F, clear, wind 11mph")
+        assert bot._weather_is_clear()
+
+    def test_scene_pool_never_returns_empty(self):
+        self._set("90°F, clear, wind 2mph")
+        assert bot._weather_scene_pool(["a", "b"], {"a", "b"}) == ["a", "b"]
+
+    def _cold_markers(self):
+        return (list(bot.SELFIE_COLD_ACTIVITIES) + list(bot.SELFIE_COLD_OUTFITS)
+                + ["courier jacket"])
+
+    def test_warm_clear_day_never_produces_cold_weather_content(self):
+        """The regression itself, across the whole random space."""
+        import random
+        self._set("70°F, clear, wind 11mph")
+        for seed in range(300):
+            random.seed(seed)
+            prompt = bot.build_selfie_prompt("", None)
+            for marker in self._cold_markers():
+                assert marker not in prompt, f"seed {seed}: {marker!r}"
+
+    def test_cold_day_still_allows_cold_content(self):
+        """The fix must not strip winter -- filtering is conditional, not global."""
+        import random
+        self._set("38°F, light snow, wind 12mph")
+        hits = 0
+        for seed in range(300):
+            random.seed(seed)
+            if any(m in bot.build_selfie_prompt("", None) for m in self._cold_markers()):
+                hits += 1
+        assert hits > 0
+
+    def test_dry_weather_carries_an_explicit_no_rain_negative(self):
+        import random
+        self._set("70°F, clear, wind 11mph")
+        random.seed(0)
+        assert "It is NOT raining" in bot.build_selfie_prompt("", None)
+
+    def test_rain_never_carries_the_no_rain_negative(self):
+        import random
+        self._set("52°F, rain, wind 14mph")
+        for seed in range(50):
+            random.seed(seed)
+            assert "It is NOT raining" not in bot.build_selfie_prompt("", seed and None)
+
+    def test_overcast_does_not_claim_clear_sky(self):
+        import random
+        self._set("55°F, overcast, wind 6mph")
+        random.seed(3)
+        prompt = bot.build_selfie_prompt("", None)
+        assert "It is NOT raining" in prompt
+        assert "no heavy grey overcast" not in prompt
+
+    def test_kill_switch_restores_previous_behavior(self):
+        """SELFIE_WEATHER_MATCH=0 must reproduce the pre-fix prompt exactly."""
+        import random
+        bot.SELFIE_WEATHER_MATCH = False
+        self._set("70°F, clear, wind 11mph")
+        hits = 0
+        for seed in range(300):
+            random.seed(seed)
+            prompt = bot.build_selfie_prompt("", None)
+            assert "It is NOT raining" not in prompt
+            assert "don't describe the weather explicitly" in prompt
+            if any(m in prompt for m in self._cold_markers()):
+                hits += 1
+        assert hits > 0
+
+
+class TestDailyWardrobeRotation:
+    """v2026-08-01.8: she dresses once a day, for that day's weather, instead of drawing a
+    fresh random outfit per photo. Rotation runs in the MORNING and re-reads the weather --
+    picking a day's clothes from midnight's reading would rebuild the frozen-snapshot
+    contradiction v2026-08-01.7 removed."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._wardrobe = dict(bot.wardrobe)
+        self._daily, self._match = bot.WARDROBE_DAILY, bot.SELFIE_WEATHER_MATCH
+        self._save = bot.save_wardrobe
+        bot.save_wardrobe = lambda: None          # keep tests off the instance dir
+        bot.WARDROBE_DAILY = bot.SELFIE_WEATHER_MATCH = True
+        bot.wardrobe.clear()
+        bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.save_wardrobe = self._save
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+        bot.WARDROBE_DAILY, bot.SELFIE_WEATHER_MATCH = self._daily, self._match
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def _today(self):
+        from datetime import datetime
+        return (datetime.now(bot.TZ) if bot.TZ else datetime.now()).date().isoformat()
+
+    def _rotate(self):
+        import asyncio
+        asyncio.run(bot.wardrobe_rotate_job(None))
+
+    # --- classification ---
+    def test_warm_day_rejects_warm_clothing(self):
+        self._set("78°F, clear, wind 4mph")
+        assert not bot._outfit_suits_weather("an oversized hoodie")
+        assert bot._outfit_suits_weather("a tank top")
+
+    def test_cold_day_rejects_bare_skin(self):
+        self._set("38°F, light snow, wind 12mph")
+        assert not bot._outfit_suits_weather("shorts and sandals")
+        assert bot._outfit_suits_weather("a wool coat")
+
+    def test_unknown_weather_suits_everything(self):
+        """Absent data must never narrow the wardrobe to nothing."""
+        self._set("")
+        assert bot._outfit_suits_weather("an oversized hoodie")
+        assert bot._outfit_suits_weather("a tank top")
+
+    # --- picking ---
+    def test_prefers_owner_wardrobe_over_builtin_pool(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe["outfits"] = ["a linen shirt she stole"]
+        assert bot._pick_daily_outfit() == "a linen shirt she stole"
+
+    def test_falls_back_to_builtin_pool_when_wardrobe_empty(self):
+        """An instance with no /addoutfit history still changes clothes daily."""
+        self._set("75°F, clear, wind 5mph")
+        assert bot._pick_daily_outfit() in bot.SELFIE_OUTFITS
+
+    def test_falls_back_when_every_owner_outfit_is_wrong_for_the_weather(self):
+        self._set("85°F, clear, wind 2mph")
+        bot.wardrobe["outfits"] = ["a parka", "a wool coat"]
+        pick = bot._pick_daily_outfit()
+        assert pick in bot.SELFIE_OUTFITS and bot._outfit_suits_weather(pick)
+
+    def test_avoids_recent_picks(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe["outfits"] = ["a tank top", "a loose t-shirt"]
+        bot.wardrobe["recent"] = ["a tank top"]
+        assert bot._pick_daily_outfit() == "a loose t-shirt"
+
+    def test_picked_outfit_always_suits_the_weather(self):
+        import random
+        self._set("82°F, clear, wind 3mph")
+        for seed in range(80):
+            random.seed(seed)
+            assert bot._outfit_suits_weather(bot._pick_daily_outfit())
+
+    # --- the job ---
+    def test_rotation_sets_current_and_stamps_today(self):
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        assert bot.wardrobe["current"]
+        assert bot.wardrobe["auto"] is True
+        assert bot.wardrobe["picked"] == self._today()
+
+    def test_rotation_is_idempotent_within_a_day(self):
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        first = bot.wardrobe["current"]
+        self._rotate()
+        assert bot.wardrobe["current"] == first
+
+    def test_manual_outfit_holds_for_the_rest_of_the_day(self):
+        """Owner decision 2026-08-01: /outfit wins today, rotation resumes tomorrow."""
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe.update({"current": "a parka", "auto": False, "picked": self._today()})
+        self._rotate()
+        assert bot.wardrobe["current"] == "a parka"
+        assert bot.wardrobe["auto"] is False
+
+    def test_rotation_resumes_the_next_day(self):
+        self._set("75°F, clear, wind 5mph")
+        bot.wardrobe.update({"current": "a parka", "auto": False, "picked": "2020-01-01"})
+        self._rotate()
+        assert bot.wardrobe["current"] != "a parka"
+        assert bot.wardrobe["auto"] is True
+
+    def test_kill_switch_disables_rotation(self):
+        bot.WARDROBE_DAILY = False
+        self._set("75°F, clear, wind 5mph")
+        self._rotate()
+        assert bot.wardrobe.get("current") is None
+
+    # --- the loop back into the selfie prompt ---
+    def test_stale_auto_outfit_is_dropped_when_the_afternoon_outruns_it(self):
+        import random
+        self._set("84°F, clear, wind 3mph")
+        bot.wardrobe.update({"current": "a heavy wool coat", "auto": True})
+        for seed in range(40):
+            random.seed(seed)
+            assert "heavy wool coat" not in bot.build_selfie_prompt("", None)
+
+    def test_hand_picked_outfit_is_honored_even_against_the_weather(self):
+        """Owner intent is not second-guessed -- only rotation's own pick is re-checked."""
+        import random
+        self._set("84°F, clear, wind 3mph")
+        bot.wardrobe.update({"current": "a heavy wool coat", "auto": False})
+        random.seed(0)
+        assert "a heavy wool coat" in bot.build_selfie_prompt("", None)
+
+
+class TestOutdoorLayer:
+    """v2026-08-01.8: outerwear is per-instance config. It was gated on
+    `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, which is only true for an unnamed run --
+    every live instance passes its directory as argv[1], so the line was unreachable."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._layer = bot.OUTDOOR_LAYER
+        self._wardrobe = dict(bot.wardrobe)
+        bot.OUTDOOR_LAYER = "Ingrid's oversized vintage canvas courier jacket"
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.OUTDOOR_LAYER = self._layer
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _set(self, text):
+        bot._weather_cache["text"] = text
+        bot._weather_cache["ts"] = 9e9
+
+    def _prompts(self, n=300):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", None))
+        return out
+
+    def test_layer_appears_outdoors_in_cool_weather(self):
+        self._set("47°F, overcast, wind 8mph")
+        assert any("courier jacket" in p for p in self._prompts())
+
+    def test_layer_never_appears_on_a_warm_day(self):
+        self._set("78°F, clear, wind 4mph")
+        assert not any("courier jacket" in p for p in self._prompts())
+
+    def test_unset_layer_adds_nothing(self):
+        bot.OUTDOOR_LAYER = ""
+        self._set("47°F, overcast, wind 8mph")
+        assert not any("Over that" in p for p in self._prompts())
+
+    def test_appearance_default_names_no_character(self):
+        """The old default described a discarded tattoo-artist Priya card (owner, 2026-08-01)."""
+        low = bot._APPEARANCE_DEFAULT.lower()
+        for relic in ("tattoo", "septum", "half-shaved", "ink-stained", "sleeved"):
+            assert relic not in low
+
+
+class TestSelfieIdentityGuard:
+    """v2026-08-01.9: selfies intermittently came back not looking like her. The identity
+    instruction is bits[0], and two releases of appended scene/weather/camera text pushed
+    ~1000 characters after it; meanwhile 30% of random draws stacked a face-obscuring
+    framing on a face-degrading camera, leaving an edit model room to drift the face."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._guard = bot.SELFIE_IDENTITY_GUARD
+        self._lock = bot.SELFIE_FACE_LOCK
+        self._has_base = bot._has_base_image
+        self._wardrobe = dict(bot.wardrobe)
+        bot.SELFIE_IDENTITY_GUARD = True
+        bot.SELFIE_FACE_LOCK = True
+        bot._has_base_image = lambda: True
+        bot._weather_cache["text"] = "55°F, overcast, wind 6mph"
+        bot._weather_cache["ts"] = 9e9
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot.SELFIE_FACE_LOCK = self._lock
+        bot._has_base_image = self._has_base
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _prompts(self, n=400, chat_id=None):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", chat_id))
+        return out
+
+    def test_soft_framing_never_pairs_with_soft_camera(self):
+        for p in self._prompts():
+            soft_f = any(f in p for f in bot.SELFIE_SOFT_FRAMINGS)
+            soft_c = any(c in p for c in bot.SELFIE_SOFT_CAMERA)
+            assert not (soft_f and soft_c), p
+
+    def test_stacking_still_happens_with_the_guard_off(self):
+        """Proves the previous test measures the guard, not an accident of the pools."""
+        bot.SELFIE_IDENTITY_GUARD = False
+        assert any(
+            any(f in p for f in bot.SELFIE_SOFT_FRAMINGS)
+            and any(c in p for c in bot.SELFIE_SOFT_CAMERA)
+            for p in self._prompts()
+        )
+
+    def test_identity_is_restated_as_the_final_instruction(self):
+        """Last word, after the scene-dedup list -- that block names other setups."""
+        for p in self._prompts(n=60):
+            assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+
+    def test_identity_tail_still_last_when_dedup_list_is_present(self):
+        bot._recent_selfie_hints[777] = ["on the fire escape", "at the counter"]
+        try:
+            for p in self._prompts(n=40, chat_id=777):
+                assert "avoid recreating these recent setups" in p
+                assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+        finally:
+            bot._recent_selfie_hints.pop(777, None)
+
+    def test_no_identity_tail_without_a_reference_photo(self):
+        """Nothing to be 'the same as' -- the tail would be an instruction to copy nothing."""
+        bot._has_base_image = lambda: False
+        assert not any(bot._SELFIE_IDENTITY_TAIL in p for p in self._prompts(n=40))
+
+    def test_kill_switch_removes_the_guard(self):
+        bot.SELFIE_IDENTITY_GUARD = False
+        assert not any(bot._SELFIE_IDENTITY_TAIL in p for p in self._prompts(n=40))
+
+    def test_shared_prompt_hardcodes_no_character_specific_feature(self):
+        """'freckles' was baked into the shared identity line -- Nora's trait, applied to
+        all seven. Same character-bleed family as the courier jacket (v2026-08-01.8).
+
+        WIDENED v2026-08-03.2: this read build_selfie_prompt's source and nothing else, so
+        a trait living in one of the appended _SELFIE_*_RULE constants escaped it entirely
+        -- and .2 adds two more such constants. Scans their VALUES (not their source), so
+        the surrounding comments, which have to name the traits to explain them, are out of
+        scope for the same reason as C14."""
+        import inspect
+        shared = [inspect.getsource(bot.build_selfie_prompt)] + [
+            bot._SELFIE_ANATOMY_RULE, bot._SELFIE_REALISM_RULE, bot._SELFIE_IDENTITY_TAIL,
+            bot._SELFIE_PRESERVE_RULE, bot._SELFIE_FACE_CLARITY_RULE, bot._SELFIE_CHANGE_SCOPE,
+        ]
+        for trait in ("freckles", "septum", "tattoo", "blonde", "half-shaved"):
+            for text in shared:
+                assert trait not in text.lower(), trait
+
+
+class TestSelfieProviderLabel:
+    """v2026-08-03.6: /audit said 'gemini' and nothing else, while the NanoGPT branch named
+    its model. GEMINI_IMAGE_MODEL is per-instance and changes without a code deploy, so the
+    one field you check after changing it was the one field not reported."""
+
+    def setup_method(self):
+        self._saved = (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
+                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL)
+
+    def teardown_method(self):
+        (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
+         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL) = self._saved
+
+    def test_gemini_names_its_model(self):
+        bot.SELFIE_PROVIDER = "gemini"
+        bot.GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
+        bot.GEMINI_RESPONSE_MODALITIES = ["TEXT", "IMAGE"]
+        label = bot._selfie_provider_label()
+        assert "gemini-3-pro-image-preview" in label
+        assert "TEXT+IMAGE" in label
+
+    def test_nanogpt_still_names_its_model(self):
+        bot.SELFIE_PROVIDER = "nanogpt"
+        bot.SELFIE_MODEL = "flux-kontext"
+        assert bot._selfie_provider_label() == "nanogpt (flux-kontext)"
+
+    def test_xai_names_its_model(self):
+        bot.SELFIE_PROVIDER = "xai"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+        assert bot._selfie_provider_label() == "xai (grok-imagine-image-quality)"
+
+    def test_audit_payload_and_startup_line_use_the_same_label(self):
+        """Two surfaces, one value -- they disagreed once already (v2026-08-02.1)."""
+        import inspect
+        src = inspect.getsource(bot._log_startup_diagnostic)
+        assert "_selfie_provider_label()" in src
+        assert "Selfie model: %s" in src
+
+
+class TestGeminiResponseModalities:
+    """v2026-08-03.5: GEMINI_IMAGE_MODEL was env-tunable but responseModalities was hardcoded
+    to ["IMAGE"], and gemini-3-pro-image-preview requires ["TEXT","IMAGE"] — so switching to
+    the Pro model by .env alone could not work. The knob existed for the model and not for
+    what the model demands."""
+
+    def setup_method(self):
+        self._mods = bot.GEMINI_RESPONSE_MODALITIES
+        self._post = bot._post_with_retries
+        self._has_base = bot._has_base_image
+        bot._has_base_image = lambda: False
+
+    def teardown_method(self):
+        bot.GEMINI_RESPONSE_MODALITIES = self._mods
+        bot._post_with_retries = self._post
+        bot._has_base_image = self._has_base
+
+    def test_default_is_image_only(self):
+        assert bot._parse_modalities("IMAGE") == ["IMAGE"]
+
+    def test_the_pro_pair_parses(self):
+        assert bot._parse_modalities("TEXT,IMAGE") == ["TEXT", "IMAGE"]
+
+    def test_whitespace_and_case_are_tolerated(self):
+        """.env values are hand-typed; ' text , image ' must not become a 400."""
+        assert bot._parse_modalities(" text , image ") == ["TEXT", "IMAGE"]
+
+    def test_empty_never_yields_an_empty_list(self):
+        """An empty responseModalities is a 400, so a blank env value must not produce one."""
+        for raw in ("", "   ", ",,", None):
+            assert bot._parse_modalities(raw) == ["IMAGE"], raw
+
+    def _capture_payload(self, parts):
+        sent = {}
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"candidates": [{"finishReason": "STOP", "content": {"parts": parts}}]}
+
+        def _fake_post(url, **kw):
+            sent.update(kw.get("json") or {})
+            return _R()
+
+        bot._post_with_retries = _fake_post
+        return sent
+
+    def test_configured_modalities_reach_the_payload(self):
+        """The regression that matters: the value is read at call time, not baked in."""
+        import base64
+        sent = self._capture_payload([{"inlineData": {"data": base64.b64encode(b"png").decode()}}])
+        bot.GEMINI_RESPONSE_MODALITIES = ["TEXT", "IMAGE"]
+        assert bot._generate_selfie_gemini("x") == b"png"
+        assert sent["generationConfig"]["responseModalities"] == ["TEXT", "IMAGE"]
+
+    def test_a_text_only_answer_surfaces_what_it_said(self):
+        """With TEXT enabled a refusal arrives as prose that says why; discarding it left
+        'no image data' as the only clue."""
+        self._capture_payload([{"text": "I can't create that image."}])
+        try:
+            bot._generate_selfie_gemini("x")
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "I can't create that image." in str(e)
+
+    def test_image_still_wins_when_text_accompanies_it(self):
+        import base64
+        self._capture_payload([{"text": "Here you go"},
+                               {"inlineData": {"data": base64.b64encode(b"png").decode()}}])
+        assert bot._generate_selfie_gemini("x") == b"png"
+
+
+class TestXaiAspectRatio:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD so any per-instance SELFIE_SIZE carries over."""
+
+    def test_square_reduces_to_1_1(self):
+        assert bot._xai_aspect_ratio("1024x1024") == "1:1"
+
+    def test_portrait_reduces(self):
+        assert bot._xai_aspect_ratio("768x1024") == "3:4"
+
+    def test_landscape_reduces(self):
+        assert bot._xai_aspect_ratio("1024x768") == "4:3"
+
+    def test_garbage_falls_back_to_square(self):
+        for bad in ("", "not-a-size", "0x0", "1024", None):
+            assert bot._xai_aspect_ratio(bad) == "1:1", bad
+
+
+class TestGenerateSelfieXai:
+    """SELFIE_PROVIDER=xai calls xAI's Grok Imagine API directly. Mirrors the shape of
+    TestGeminiResponseModalities's payload/response tests for the other two providers."""
+
+    def setup_method(self):
+        self._post = bot._post_with_retries
+        self._get = bot._get_with_retries
+        self._has_base = bot._has_base_image
+        self._base_url = bot._base_data_url
+        self._key = bot.XAI_API_KEY
+        self._model = bot.XAI_IMAGE_MODEL
+        self._url = bot.XAI_IMAGE_URL
+        bot._has_base_image = lambda: False
+        bot.XAI_API_KEY = "test-key"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+
+    def teardown_method(self):
+        bot._post_with_retries = self._post
+        bot._get_with_retries = self._get
+        bot._has_base_image = self._has_base
+        bot._base_data_url = self._base_url
+        bot.XAI_API_KEY = self._key
+        bot.XAI_IMAGE_MODEL = self._model
+        bot.XAI_IMAGE_URL = self._url
+
+    def _capture_post(self, response_json):
+        sent = {}
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return response_json
+
+        def _fake_post(url, **kw):
+            sent["url"] = url
+            sent["json"] = kw.get("json") or {}
+            return _R()
+
+        bot._post_with_retries = _fake_post
+        return sent
+
+    def test_generations_endpoint_used_without_a_base_photo(self):
+        import base64
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/generations"
+        assert "image" not in sent["json"]
+        assert sent["json"]["model"] == "grok-imagine-image-quality"
+
+    def test_edits_endpoint_used_with_a_base_photo(self):
+        import base64
+        bot._has_base_image = lambda: True
+        bot._base_data_url = lambda: "data:image/png;base64,YWJj"
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/edits"
+        assert sent["json"]["image"] == {"url": "data:image/png;base64,YWJj", "type": "image_url"}
+
+    def test_b64_json_with_a_data_uri_prefix_is_still_decoded(self):
+        """Seen inconsistently in the wild: some responses put the full data URI in
+        b64_json instead of raw base64. Decoding must not choke on the prefix."""
+        import base64
+        raw_b64 = base64.b64encode(b"png").decode()
+        sent = self._capture_post({"data": [{"b64_json": f"data:image/png;base64,{raw_b64}"}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+
+    def test_falls_back_to_url_when_no_b64_json(self):
+        sent = self._capture_post({"data": [{"url": "https://example.com/img.png"}]})
+
+        class _Img:
+            content = b"fromurl"
+            def raise_for_status(self): pass
+
+        bot._get_with_retries = lambda *a, **kw: _Img()
+        assert bot._generate_selfie_xai("a selfie") == b"fromurl"
+
+    def test_neither_field_raises(self):
+        self._capture_post({"data": [{}]})
+        try:
+            bot._generate_selfie_xai("a selfie")
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "neither b64_json nor url" in str(e)
+
+    def test_dispatcher_routes_xai_to_xai(self):
+        import base64
+        saved = bot.SELFIE_PROVIDER
+        try:
+            bot.SELFIE_PROVIDER = "xai"
+            self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+            assert bot.generate_selfie_image("x") == b"png"
+        finally:
+            bot.SELFIE_PROVIDER = saved
+
+
+class TestImageRetryOnTransientStatus:
+    """v2026-08-03.4: a Gemini 503 was a failed selfie. `requests` does not raise on 5xx, so
+    the response came back normally, sailed past the transport-only except clause, and only
+    became an error at raise_for_status() one frame up — where nothing retried it."""
+
+    def setup_method(self):
+        self._sleep = bot.time.sleep
+        self._session = bot._get_session
+        self._flag = bot.IMAGE_RETRY_TRANSIENT
+        self.slept = []
+        bot.time.sleep = self.slept.append
+        bot.IMAGE_RETRY_TRANSIENT = True
+
+    def teardown_method(self):
+        bot.time.sleep = self._sleep
+        bot._get_session = self._session
+        bot.IMAGE_RETRY_TRANSIENT = self._flag
+
+    class _Resp:
+        def __init__(self, code, retry_after=None):
+            self.status_code = code
+            self.headers = {"Retry-After": retry_after} if retry_after else {}
+
+    def _session_returning(self, codes):
+        """A session whose post() yields the given statuses in order."""
+        seq = list(codes)
+        calls = []
+
+        class _S:
+            def post(_self, url, **kw):
+                calls.append(url)
+                return TestImageRetryOnTransientStatus._Resp(seq[len(calls) - 1])
+            get = post
+
+        bot._get_session = lambda: _S()
+        return calls
+
+    def test_503_is_retried_then_succeeds(self):
+        calls = self._session_returning([503, 503, 200])
+        assert bot._post_with_retries("http://x").status_code == 200
+        assert len(calls) == 3
+
+    def test_a_persistent_503_returns_the_response_not_an_exception(self):
+        """raise_for_status() in the caller stays the single place HTTP becomes an error."""
+        calls = self._session_returning([503, 503, 503])
+        assert bot._post_with_retries("http://x").status_code == 503
+        assert len(calls) == bot._IMAGE_RETRIES
+
+    def test_400_is_not_retried(self):
+        """A bad prompt or bad key is ours; retrying only delays the real error."""
+        calls = self._session_returning([400, 200, 200])
+        assert bot._post_with_retries("http://x").status_code == 400
+        assert len(calls) == 1
+
+    def test_every_retryable_status_is_covered(self):
+        for code in (429, 500, 502, 503, 504):
+            calls = self._session_returning([code, 200])
+            assert bot._post_with_retries("http://x").status_code == 200, code
+            assert len(calls) == 2, code
+
+    def test_get_shares_the_same_loop(self):
+        calls = self._session_returning([502, 200])
+        assert bot._get_with_retries("http://x").status_code == 200
+        assert len(calls) == 2
+
+    def test_kill_switch_restores_transport_only_retries(self):
+        bot.IMAGE_RETRY_TRANSIENT = False
+        calls = self._session_returning([503, 200])
+        assert bot._post_with_retries("http://x").status_code == 503
+        assert len(calls) == 1
+
+    def test_retry_after_is_honored_within_the_cap(self):
+        assert bot._retry_delay(0, self._Resp(429, "5")) == 5.0
+
+    def test_absurd_retry_after_falls_back_to_the_ramp(self):
+        """A hostile or absurd header must not stall the handler."""
+        assert bot._retry_delay(0, self._Resp(429, "9999")) == 2.0
+        assert bot._retry_delay(0, self._Resp(429, "not-a-number")) == 2.0
+
+    def test_transient_error_gets_plain_words_not_a_url(self):
+        class _E(Exception):
+            response = TestImageRetryOnTransientStatus._Resp(503)
+        text = bot._media_error_text("📷", _E("503 Server Error: Service Unavailable for url: https://..."))
+        assert "busy right now (HTTP 503)" in text
+        assert "https://" not in text
+
+    def test_unfamiliar_errors_keep_their_details(self):
+        """An unrecognised failure is exactly when the raw text matters."""
+        assert "boom" in bot._media_error_text("📷", RuntimeError("boom"))
+
+
+class TestSelfieFaceLock:
+    """v2026-08-03.2: Emily's selfies came back as a different, better-looking woman with
+    her glasses gone, with the reference photo correctly attached. Two prompt shapes let an
+    edit model rebuild the face rather than copy it -- the appearance paragraph sat inside
+    the identity sentence as a spec it could satisfy with an invented face, and 'keep her
+    face identical' never said which parts of a face."""
+
+    def setup_method(self):
+        self._weather = dict(bot._weather_cache)
+        self._lock = bot.SELFIE_FACE_LOCK
+        self._guard = bot.SELFIE_IDENTITY_GUARD
+        self._has_base = bot._has_base_image
+        self._wardrobe = dict(bot.wardrobe)
+        self._mood_vibe = bot._mood_vibe
+        bot.SELFIE_FACE_LOCK = True
+        bot.SELFIE_IDENTITY_GUARD = True
+        bot._has_base_image = lambda: True
+        bot._weather_cache["text"] = "55°F, overcast, wind 6mph"
+        bot._weather_cache["ts"] = 9e9
+        bot.wardrobe.clear(); bot.wardrobe.update({"outfits": [], "current": None})
+
+    def teardown_method(self):
+        bot.SELFIE_FACE_LOCK = self._lock
+        bot.SELFIE_IDENTITY_GUARD = self._guard
+        bot._mood_vibe = self._mood_vibe
+        bot._recent_selfie_hints.pop(901, None)
+        bot._has_base_image = self._has_base
+        bot._weather_cache.clear(); bot._weather_cache.update(self._weather)
+        bot.wardrobe.clear(); bot.wardrobe.update(self._wardrobe)
+
+    def _prompts(self, n=60, chat_id=None):
+        import random
+        out = []
+        for seed in range(n):
+            random.seed(seed)
+            out.append(bot.build_selfie_prompt("", chat_id))
+        return out
+
+    def test_appearance_text_is_ranked_below_the_photo(self):
+        """The regression that matters: appearance.txt back inside the identity sentence,
+        where it reads as a person to draw rather than context about one to copy."""
+        for p in self._prompts():
+            assert "the photo outranks every word of it" in p
+            assert f"new pose/setting. She's {bot.NAME}" not in p
+
+    def test_the_face_rules_are_appended_when_a_reference_is_attached(self):
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE in p
+            assert bot._SELFIE_FACE_CLARITY_RULE in p
+            assert bot._SELFIE_CHANGE_SCOPE in p
+
+    def test_identity_tail_still_has_the_last_word(self):
+        """The face rules are appended in the same region as the tail; the tail stays last
+        because it is the shortest, most direct statement of the constraint."""
+        bot._recent_selfie_hints[778] = ["on the fire escape", "at the counter"]
+        try:
+            for p in self._prompts(chat_id=778):
+                assert p.rstrip().endswith(bot._SELFIE_IDENTITY_TAIL)
+                assert p.index(bot._SELFIE_PRESERVE_RULE) > p.index("avoid recreating")
+        finally:
+            bot._recent_selfie_hints.pop(778, None)
+
+    def test_nothing_is_added_without_a_reference_photo(self):
+        """'Copy her face out of the reference photo' with no photo attached is an
+        instruction to copy nothing -- the same reason the identity tail is gated."""
+        bot._has_base_image = lambda: False
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE not in p
+            assert bot._SELFIE_FACE_CLARITY_RULE not in p
+            assert bot._SELFIE_CHANGE_SCOPE not in p
+            assert "the photo outranks" not in p
+
+    def test_kill_switch_restores_the_previous_prompt(self):
+        bot.SELFIE_FACE_LOCK = False
+        for p in self._prompts():
+            assert bot._SELFIE_PRESERVE_RULE not in p
+            assert bot._SELFIE_FACE_CLARITY_RULE not in p
+            assert "the photo outranks" not in p
+            assert f"new pose/setting. She's {bot.NAME}" in p
+            assert "New shot:" in p
+
+    def test_mood_line_stops_instructing_a_face_edit(self):
+        """v2026-08-03.3: `let it read in her face` was the only instruction in the prompt
+        telling the model to modify her face, ~1500 chars ahead of the rules saying copy it.
+        Production always passes a chat_id, so it was in every live selfie -- and in none of
+        the 22 A/B images, because the preview tool passed chat_id=None."""
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" not in p
+            assert "how she's holding herself" in p
+
+    def test_mood_itself_is_not_lost(self):
+        """The mood still has to reach the image -- the fix is the verb, not the feature."""
+        bot._mood_vibe = lambda _cid: "wistful [vibe: nostalgic]"
+        for p in self._prompts(chat_id=901):
+            assert "Her mood right now: wistful [vibe: nostalgic]" in p
+
+    def test_text_only_instances_keep_the_old_mood_wording(self):
+        """With no reference photo there is no preserved face for it to contradict."""
+        bot._has_base_image = lambda: False
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" in p
+
+    def test_mood_kill_switch_restores_the_old_wording(self):
+        bot.SELFIE_FACE_LOCK = False
+        for p in self._prompts(chat_id=901):
+            assert "let it read in her face" in p
+
+    def test_eyewear_is_stated_both_ways_never_asserted(self):
+        """The rule is shared by all seven. Asserting glasses would put them on characters
+        who do not wear any -- the character-bleed trap, one release after the last one."""
+        rule = bot._SELFIE_PRESERVE_RULE.lower()
+        assert "if she is wearing glasses" in rule
+        assert "if she is wearing none, add none" in rule
+
+    def test_clarity_rule_does_not_contradict_the_framing_pools(self):
+        """A face-size demand would fight the half-in-frame and wider draws, and a prompt
+        that contradicts itself hands back the latitude this is removing."""
+        low = bot._SELFIE_FACE_CLARITY_RULE.lower()
+        for demand in ("large in frame", "fills the frame", "close-up", "centred", "centered"):
+            assert demand not in low, demand
+
+
+class TestBaseImageResolution:
+    """v2026-08-01.10: SELFIE_BASE defaults to a filename inherited from the home instance.
+    Nora's .env never set it, so her bot looked for priya_base.png, did not find it, and
+    generated every selfie from text alone -- with nora_base.jpg sitting in her own
+    directory. selfie_ready() never complained because it also accepts an appearance.txt."""
+
+    def setup_method(self):
+        import tempfile
+        from pathlib import Path
+        self._dir = Path(tempfile.mkdtemp(prefix="base_img_"))
+        self._saved = (bot.BASE_DIR, bot.SELFIE_BASE, bot.SELFIE_BASE_AUTODETECT)
+        bot.BASE_DIR = self._dir
+        bot.SELFIE_BASE = "priya_base.png"
+        bot.SELFIE_BASE_AUTODETECT = True
+
+    def teardown_method(self):
+        import shutil
+        bot.BASE_DIR, bot.SELFIE_BASE, bot.SELFIE_BASE_AUTODETECT = self._saved
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def _touch(self, name, data=b"\x89PNG fake"):
+        (self._dir / name).write_bytes(data)
+
+    def test_exact_configured_name_wins(self):
+        self._touch("priya_base.png")
+        self._touch("nora_base.jpg")
+        assert bot._resolve_base_image().name == "priya_base.png"
+
+    def test_the_nora_case_wrong_name_and_extension(self):
+        """The reported bug: one candidate, different name AND suffix from the default."""
+        self._touch("nora_base.jpg")
+        assert bot._has_base_image()
+        assert bot._resolve_base_image().name == "nora_base.jpg"
+
+    def test_ambiguous_candidates_are_not_guessed(self):
+        """Two faces on disk is a real choice -- picking one is how you ship the wrong woman."""
+        self._touch("nora_base.jpg")
+        self._touch("priya_base.jpg")
+        assert bot._resolve_base_image() is None
+        assert not bot._has_base_image()
+
+    def test_no_candidates_is_text_only(self):
+        assert bot._resolve_base_image() is None
+
+    def test_non_image_files_are_not_candidates(self):
+        self._touch("nora_base.txt", b"not an image")
+        assert bot._resolve_base_image() is None
+
+    def test_kill_switch_requires_an_exact_match(self):
+        bot.SELFIE_BASE_AUTODETECT = False
+        self._touch("nora_base.jpg")
+        assert bot._resolve_base_image() is None
+
+    def test_mime_follows_the_resolved_file_not_the_configured_one(self):
+        """Configured name says .png; the real file is .jpg. Sending the wrong mime to
+        Gemini's inline_data is how a working photo still gets rejected."""
+        self._touch("nora_base.jpg")
+        _, mime = bot._base_image()
+        assert mime == "image/jpeg"
+
+    def test_status_line_names_the_autodetected_file_and_says_to_fix_the_env(self):
+        self._touch("nora_base.jpg")
+        status = bot._base_image_status()
+        assert "nora_base.jpg" in status and "AUTODETECTED" in status and ".env" in status
+
+    def test_status_line_flags_text_only_and_lists_what_it_saw(self):
+        bot.SELFIE_BASE_AUTODETECT = False
+        self._touch("nora_base.jpg")
+        status = bot._base_image_status()
+        assert "TEXT-ONLY" in status and "nora_base.jpg" in status
+
+    def test_status_line_is_quiet_when_correctly_configured(self):
+        self._touch("priya_base.png")
+        assert bot._base_image_status() == "priya_base.png"
+
+
+class TestSharedPromptIsCharacterNeutral:
+    """v2026-08-01.11: marcus (31, 6'2", a man) shares bot.py with six women. The
+    no-appearance.txt fallback asserted "an adult woman in her late 20s", so an instance
+    with no appearance.txt and no reference photo generated the wrong person outright.
+    Third instance of this class after the courier jacket (.8) and freckles (.9)."""
+
+    def test_appearance_fallbacks_assert_no_sex(self):
+        """Comments are stripped first: the block explains the old wording, and a scanner
+        that cannot tell describing-the-bug from doing-it flags its own changelog (C14)."""
+        import inspect, re
+        src = inspect.getsource(bot)
+        block = src[src.find("_APPEARANCE_DEFAULT ="):src.find("CARD_NAME =")]
+        code = "\n".join(ln.split("#")[0] for ln in block.splitlines())
+        # Word boundaries, not substrings: "he " lives inside "the ", which made the first
+        # version of this test fail on an innocent comment.
+        hits = re.findall(r"\b(?:wom[ae]n|her|hers|she|m[ae]n|his|him|he)\b", code.lower())
+        assert not hits, f"sexed wording in the shared appearance fallback: {hits}"
+
+    def test_fallbacks_still_state_an_adult_age(self):
+        """Gemini returns blacked-out frames when no age is stated (see SELFIE_APPEARANCE)."""
+        import re
+        assert re.search(r"\b(20s|30s|\d{2}-year-old)\b", bot._APPEARANCE_DEFAULT)
+
+    def test_status_line_calls_out_the_worst_case(self):
+        """No photo AND no appearance.txt is not 'text-only', it is 'nobody in particular'."""
+        import tempfile, shutil
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp(prefix="neutral_"))
+        saved = (bot.BASE_DIR, bot._APPEARANCE_FILE, bot.SELFIE_BASE)
+        try:
+            bot.BASE_DIR = d
+            bot._APPEARANCE_FILE = d / "appearance.txt"
+            bot.SELFIE_BASE = "priya_base.png"
+            assert "NO APPEARANCE.TXT" in bot._base_image_status()
+            bot._APPEARANCE_FILE.write_text("a tall man in his 30s.")
+            assert "NO APPEARANCE.TXT" not in bot._base_image_status()
+        finally:
+            bot.BASE_DIR, bot._APPEARANCE_FILE, bot.SELFIE_BASE = saved
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestAuditReportsSelfieBase:
+    """v2026-08-02.1: v2026-08-01.10 put the selfie-base status in the STARTUP AUDIT log
+    line only, and I told the owner /audit would show it. Different code paths -- it did
+    not. /audit is the one surface reachable from Telegram, which is the whole point when
+    the question is 'is this bot being sent its own face?'."""
+
+    def test_gathered_data_carries_the_field(self):
+        assert "selfie_base" in bot.gather_audit_data()
+
+    def test_it_reaches_the_rendered_audit_text(self):
+        """The HTTP API and /audit share gather_audit_data, but only /audit renders lines;
+        a key in the dict that no line prints is exactly the gap this closes."""
+        import inspect
+        src = inspect.getsource(bot.audit_cmd)
+        assert "selfie_base" in src and "Selfie base:" in src
+
+    def test_field_matches_the_startup_audit_source(self):
+        """Both surfaces must report the same thing, or they disagree under a real fault."""
+        assert bot.gather_audit_data()["selfie_base"] == bot._base_image_status()
+
+
+class TestBaseImageMimeSniffing:
+    """v2026-08-02.2: the mime type came from the filename extension. Renaming a PNG to
+    .jpg -- routine when swapping reference photos around -- declared PNG bytes as
+    image/jpeg, and a rejected reference means the face falls back to the text."""
+
+    def test_png_bytes_named_jpg_are_still_png(self):
+        assert bot._sniff_mime(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00", ".jpg") == "image/png"
+
+    def test_jpeg_bytes_named_png_are_still_jpeg(self):
+        assert bot._sniff_mime(b"\xff\xd8\xff\xe0\x00\x10JFIF", ".png") == "image/jpeg"
+
+    def test_webp_is_recognised(self):
+        assert bot._sniff_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 ", ".png") == "image/webp"
+
+    def test_unrecognised_bytes_fall_back_to_the_extension(self):
+        """Never worse than the old behaviour on a format we don't know."""
+        assert bot._sniff_mime(b"garbagegarb", ".png") == "image/png"
+        assert bot._sniff_mime(b"garbagegarb", ".jpg") == "image/jpeg"
+
+    def test_end_to_end_through_base_image(self):
+        import tempfile, shutil
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp(prefix="mime_"))
+        saved = (bot.BASE_DIR, bot.SELFIE_BASE)
+        try:
+            bot.BASE_DIR, bot.SELFIE_BASE = d, "nora_base.jpg"
+            (d / "nora_base.jpg").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+            assert bot._base_image()[1] == "image/png"
+        finally:
+            bot.BASE_DIR, bot.SELFIE_BASE = saved
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestSetBaseCommand:
+    """v2026-08-02.3: /setbase installs the selfie reference photo over Telegram.
+
+    Built because the scp route failed three times in one session -- those commands are
+    phone-local while the owner's shell is on the VPS. That is C1's operator half, which
+    no hook can catch, so the transfer was removed rather than re-explained."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot.setbase_cmd)
+
+    def test_admin_gated(self):
+        """It overwrites a file in the instance directory -- not for arbitrary users."""
+        assert "_is_admin" in self._src()
+
+    def test_registered_as_a_handler_and_in_the_menu(self):
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert 'CommandHandler("setbase"' in main_src
+        assert any(c.command == "setbase"
+                   for c in bot._build_command_menu(False, False))
+
+    def test_rejects_non_image_bytes(self):
+        """Magic-byte check, not a trusted mime header or filename."""
+        src = self._src()
+        assert "_BASE_IMAGE_MAGIC" in src and "refusing to install" in src
+
+    def test_recognises_the_three_formats_it_claims(self):
+        names = {name for _, name in bot._BASE_IMAGE_MAGIC}
+        assert names == {"PNG", "JPEG"}
+        assert "WEBP" in self._src()
+
+    def test_backs_up_the_previous_photo(self):
+        """A bad swap must be recoverable without another transfer."""
+        assert ".prev" in self._src()
+
+    def test_writes_atomically(self):
+        """A half-written reference photo is worse than an old one."""
+        src = self._src()
+        assert ".tmp" in src and "tmp.replace(dest)" in src
+
+    def test_targets_selfie_base_so_no_env_edit_is_needed(self):
+        assert "BASE_DIR / SELFIE_BASE" in self._src()
+
+    def test_warns_when_telegram_compressed_the_image(self):
+        src = self._src()
+        assert "compressed" in src and "Resend as a file" in src
+
+
+class TestSetBaseCaptionDispatch:
+    """v2026-08-02.4: /setbase was documented as working as a photo caption. It could not.
+
+    PTB's CommandHandler.check_update requires message.text AND message.entities; a caption
+    populates message.caption/caption_entities instead, so the update fell through to normal
+    chat and the model answered it conversationally. v2026-08-02.3's tests all asserted on
+    handler SOURCE -- registration, admin gate, atomic write -- and never exercised dispatch,
+    which is why they were green on a path that could not run."""
+
+    def test_command_handler_really_does_ignore_captions(self):
+        """Pins the library behaviour this fix exists for, by exercising it rather than
+        asserting it. If a future PTB matches captions, this fails and the extra handler
+        can be reconsidered."""
+        import inspect
+        from telegram.ext import CommandHandler
+        src = inspect.getsource(CommandHandler.check_update)
+        assert "message.text" in src
+        assert "caption" not in src.lower()
+
+    def test_caption_handler_is_registered(self):
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert "CaptionRegex" in main_src and "setbase" in main_src
+
+    def test_caption_handler_precedes_the_photo_handler(self):
+        """handle_photo would otherwise swallow the update and reply conversationally."""
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        assert main_src.index("CaptionRegex") < main_src.index("filters.PHOTO, handle_photo")
+
+    def test_it_accepts_documents_too(self):
+        """Sending as a file is the recommended path -- Telegram recompresses photos."""
+        import inspect
+        main_src = inspect.getsource(bot.main)
+        i = main_src.index("CaptionRegex")
+        window = main_src[i - 200:i + 100]
+        assert "Document.IMAGE" in window and "filters.PHOTO" in window
+
+
+class TestAuditReportsSelfieProvider:
+    """v2026-08-02.5: three instances were silently on NanoGPT's flux-kontext because their
+    .env had no GEMINI_API_KEY, and flux-kontext preserves identity far worse than Gemini on
+    an edit. /audit reported which reference photo was in play but never which backend
+    consumed it, so the split was invisible from Telegram."""
+
+    def test_provider_is_gathered_and_rendered(self):
+        import inspect
+        assert "selfie_provider" in bot.gather_audit_data()
+        assert "selfie_provider" in inspect.getsource(bot.audit_cmd)
+
+    def test_nanogpt_reports_the_model_too(self):
+        """'nanogpt' alone doesn't say flux-kontext, which is the part that matters.
+
+        REWRITTEN v2026-08-03.6, not loosened: this read `gather_audit_data`'s SOURCE for the
+        strings "SELFIE_MODEL" and "nanogpt", so it went red the moment that logic moved into
+        `_selfie_provider_label()` — while the behavior it is named for was still correct. A
+        source assertion cannot fail for the reason the test exists; that is the family that
+        shipped the `/features` ValueError past twelve green tests (v2026-08-02.4). It now
+        calls the function and checks the rendered value."""
+        saved = (bot.SELFIE_PROVIDER, bot.SELFIE_MODEL)
+        try:
+            bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = "nanogpt", "flux-kontext"
+            assert bot.gather_audit_data()["selfie_provider"] == "nanogpt (flux-kontext)"
+        finally:
+            bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = saved
+
+    def test_xai_reports_the_model_too(self):
+        saved = (bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL)
+        try:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = "xai", "grok-imagine-image"
+            assert bot.gather_audit_data()["selfie_provider"] == "xai (grok-imagine-image)"
+        finally:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = saved
+
+    def test_value_is_a_non_empty_string(self):
+        v = bot.gather_audit_data()["selfie_provider"]
+        assert isinstance(v, str) and v
+
+
+class TestGifTagAndFiltering:
+    """v2026-08-02.6: [gif: query] search via Giphy. Tenor was the original plan until
+    research showed Google terminated its API on 2026-06-30. Giphy's `rating` is
+    cumulative and its own issue tracker reports it returning mixed ratings, so the local
+    deny-list is load-bearing rather than a backstop."""
+
+    def setup_method(self):
+        self._saved = dict(bot.gif_prefs)
+        self._cache = dict(bot._gif_taste_cache)
+        bot._gif_taste_cache.update({"mtime": None, "likes": (), "bans": ()})
+
+    def teardown_method(self):
+        bot.gif_prefs.clear(); bot.gif_prefs.update(self._saved)
+        bot._gif_taste_cache.clear(); bot._gif_taste_cache.update(self._cache)
+
+    # --- the leak trap ---
+    def test_gif_tag_is_stripped_from_user_facing_text(self):
+        """An unregistered tag reaches the user verbatim -- v2026-07-29.1, and the
+        [setbase: 60F, clear...] leak on 2026-08-02."""
+        clean, *_ = bot.extract_tags("that's the worst thing i've heard [gif: disgusted recoil]")
+        assert "[gif:" not in clean and "disgusted" not in clean
+        assert clean == "that's the worst thing i've heard"
+
+    def test_query_is_readable_before_stripping(self):
+        assert bot._gif_query("ha [gif: derby wipeout] classic") == "derby wipeout"
+        assert bot._gif_query("no tag here") is None
+
+    def test_extract_tags_still_returns_four_values(self):
+        """The 4-tuple contract is pinned; [gif:] rides alongside like [search:] does."""
+        out = bot.extract_tags("hi [gif: x]")
+        assert len(out) == 4
+
+    # --- safety ---
+    def test_rating_map_offers_only_three_levels_and_never_r(self):
+        assert set(bot._GIF_RATING) == {"high", "medium", "low"}
+        assert "r" not in set(bot._GIF_RATING.values())
+        assert bot._GIF_RATING["high"] == "g"
+
+    def test_denylist_blocks_regardless_of_safety_level(self):
+        for term in ("nsfw", "porn", "nude", "hentai", "gore"):
+            assert bot._gif_blocked(f"funny {term} reaction", ()), term
+
+    def test_denylist_does_not_eat_ordinary_phrases(self):
+        """A false positive costs one GIF; the list still has to be usable."""
+        for ok in ("killing it at work", "shooting hoops", "class dismissed",
+                   "blood orange juice", "passing the ball"):
+            assert not bot._gif_blocked(ok, ()), ok
+
+    def test_instance_ban_terms_are_honoured(self):
+        assert bot._gif_blocked("a clown car", ("clown",))
+        assert not bot._gif_blocked("a clown car", ("mime",))
+
+    def test_empty_ban_term_does_not_block_everything(self):
+        """A blank line in gifs.txt must not ban every GIF."""
+        assert not bot._gif_blocked("anything at all", ("",))
+
+    # --- degradation ---
+    def test_not_ready_without_an_api_key(self):
+        saved = bot.GIPHY_API_KEY
+        try:
+            bot.GIPHY_API_KEY = ""
+            assert bot.gif_ready() is False
+        finally:
+            bot.GIPHY_API_KEY = saved
+
+    def test_kill_switch_disables_it(self):
+        saved = (bot.GIF_ENABLED, bot.GIPHY_API_KEY)
+        try:
+            bot.GIF_ENABLED, bot.GIPHY_API_KEY = False, "k"
+            assert bot.gif_ready() is False
+        finally:
+            bot.GIF_ENABLED, bot.GIPHY_API_KEY = saved
+
+    def test_unknown_persisted_safety_falls_back_to_high(self):
+        """An unrecognised value must fail safe, never open."""
+        bot.gif_prefs["safety"] = "off"
+        bot.load_gif_prefs()
+        assert bot.gif_prefs["safety"] == "high"
+
+    def test_command_is_registered_and_in_the_menu(self):
+        import inspect
+        assert 'CommandHandler("gifsafety"' in inspect.getsource(bot.main)
+        assert any(c.command == "gifsafety" for c in bot._build_command_menu(False, False))
+
+    def test_no_new_llm_call_in_the_gif_path(self):
+        """Invariant #3: it rides the reply that already happened."""
+        import inspect
+        src = inspect.getsource(bot.send_gif) + inspect.getsource(bot._giphy_search)
+        for banned in ("call_nanogpt", "generate_reply", "_do_request"):
+            assert banned not in src, banned
+
+    def test_search_runs_off_the_event_loop(self):
+        """Invariant #8: no bare requests in an async handler."""
+        import inspect
+        assert "asyncio.to_thread" in inspect.getsource(bot.send_gif)
+
+
+class TestGifCommandAndRedaction:
+    """v2026-08-02.7: /gif is the parity command for /selfie and /meme, and the only way
+    to distinguish a working Giphy path from a silent one. Adding it surfaced a real leak:
+    Giphy takes api_key as a QUERY PARAMETER, so a requests exception carries it in the
+    URL, and /errors echoes errors.log into Telegram."""
+
+    def test_api_key_is_redacted_from_exception_text(self):
+        raw = "HTTPError: 401 for https://api.giphy.com/v1/gifs/search?api_key=sk_live_SECRET123&q=hi"
+        out = bot._redact_key(raw)
+        assert "sk_live_SECRET123" not in out
+        assert "api_key=<redacted>" in out
+        assert "q=hi" in out          # the useful part survives
+
+    def test_redaction_handles_bare_key_param_too(self):
+        assert "SECRET" not in bot._redact_key("https://x/api?key=SECRET&b=1")
+
+    def test_both_failure_paths_redact(self):
+        import inspect
+        src = inspect.getsource(bot.send_gif)
+        assert src.count("_redact_key") >= 2, "search and send paths must both redact"
+
+    def test_user_facing_errors_carry_no_exception_text(self):
+        """no-exception-leak: details stay in the log, the chat gets a generic line."""
+        import inspect
+        src = inspect.getsource(bot.send_gif)
+        for line in src.splitlines():
+            if "_say(" in line:
+                assert "{e}" not in line and "str(e)" not in line, line
+
+    def test_auto_path_stays_silent_by_default(self):
+        import inspect
+        sig = inspect.signature(bot.send_gif)
+        assert sig.parameters["announce_errors"].default is False
+
+    def test_gif_command_announces_errors(self):
+        """A manual command that silently does nothing is indistinguishable from broken."""
+        import inspect
+        assert "announce_errors=True" in inspect.getsource(bot.gif_cmd)
+
+    def test_gif_command_is_admin_gated_registered_and_in_menu(self):
+        import inspect
+        assert "_is_admin" in inspect.getsource(bot.gif_cmd)
+        assert 'CommandHandler("gif", gif_cmd)' in inspect.getsource(bot.main)
+        assert any(c.command == "gif" for c in bot._build_command_menu(False, False))
+
+    def test_distinguishes_no_key_from_no_results(self):
+        """The two failures need different fixes, so they must not read the same."""
+        src = inspect.getsource(bot.send_gif) if (inspect := __import__("inspect")) else ""
+        assert "GIPHY_API_KEY set" in src and "got past the" in src
+
+
+class TestMediaOfferChances:
+    """v2026-08-02.8: GIF_CHANCE/MEME_CHANCE gate whether she is OFFERED the option in a
+    given reply, never whether an emitted tag is honoured. Dropping a tag after the fact
+    would leave her text referring to an image that never arrives."""
+
+    def test_the_gate_is_on_the_offer_not_the_send(self):
+        """send_gif/send_meme must contain no probability roll -- only the prompt does."""
+        import inspect
+        for fn in (bot.send_gif, bot.send_meme):
+            src = inspect.getsource(fn)
+            assert "GIF_CHANCE" not in src and "MEME_CHANCE" not in src, fn.__name__
+
+    def test_chances_are_read_from_env_with_defaults(self):
+        assert 0.0 <= bot.GIF_CHANCE <= 1.0
+        assert 0.0 <= bot.MEME_CHANCE <= 1.0
+
+    def test_asking_for_one_bypasses_the_dice(self):
+        """Asking and being told no because of a coin flip is the worst outcome."""
+        for msg in ("send me a gif", "got a GIF for that?", "jif please"):
+            assert bot._ASKED_GIF.search(msg), msg
+        for msg in ("make me a meme", "MEMES please"):
+            assert bot._ASKED_MEME.search(msg), msg
+
+    def test_ask_patterns_do_not_fire_on_unrelated_words(self):
+        for msg in ("gifted me a book", "memento mori", "gifts for christmas"):
+            assert not bot._ASKED_GIF.search(msg) or "gif" == msg, msg
+            assert not bot._ASKED_MEME.search(msg), msg
+
+    def test_both_offers_are_gated_in_the_prompt(self):
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "GIF_CHANCE" in src and "MEME_CHANCE" in src
+        assert "_ASKED_GIF" in src and "_ASKED_MEME" in src
+
+    def test_audit_reports_feature_readiness(self):
+        """Third time this blind spot cost a round trip: selfie base, then the image
+        backend, now whether meme/gif are live at all. v2026-08-02.9 widened the single
+        media line into the full feature roster."""
+        import inspect
+        d = bot.gather_audit_data()
+        assert "features" in d
+        for name in ("meme=", "gif=", "selfie=", "voice="):
+            assert name in d["features"], name
+        assert "features" in inspect.getsource(bot.audit_cmd)
+
+    def test_memes_are_fleet_wide_not_per_instance(self):
+        """MEME_TEMPLATES_DIR resolves against bot.py, not the instance dir -- so meme
+        support is all-or-nothing across all seven, not something one bot can have."""
+        assert "__file__" in inspect.getsource(bot).split("MEME_TEMPLATES_DIR =")[1][:120] \
+            if (inspect := __import__("inspect")) else False
+
+
+class TestFeatureSwitches:
+    """v2026-08-02.9: /features flips integrations at runtime without an SSH session.
+    Each target is a plain module global read at call time, so flipping it reaches every
+    call site untouched -- the mechanism /setmodel already uses."""
+
+    def setup_method(self):
+        self._flags = {n: getattr(bot, spec[0]) for n, spec in bot._FEATURES.items()}
+        self._prefs = dict(bot.feature_prefs)
+        self._save = bot.save_feature_prefs
+        bot.save_feature_prefs = lambda: None
+
+    def teardown_method(self):
+        for n, v in self._flags.items():
+            setattr(bot, bot._FEATURES[n][0], v)
+        bot.feature_prefs.clear(); bot.feature_prefs.update(self._prefs)
+        bot.save_feature_prefs = self._save
+
+    def test_capability_and_switch_are_separate(self):
+        """'off' and 'never configured' need different fixes -- conflating them is what
+        made three blind spots this week cost a round trip each."""
+        for name in bot._FEATURES:
+            on, capable = bot._feature_state(name)
+            assert isinstance(on, bool) and isinstance(capable, bool)
+            if not capable:
+                assert on is False, f"{name} cannot be on while incapable"
+
+    def test_flipping_the_global_reaches_the_ready_function(self):
+        """Capability is forced True: the test fixture has no selfie assets, so without
+        this the assertion passes whether or not the switch is wired (caught by
+        break-test, 2026-08-02 -- the same masking as C13)."""
+        saved, cap = bot.SELFIE_ENABLED, bot.selfie_capable
+        try:
+            bot.selfie_capable = lambda: True
+            bot.SELFIE_ENABLED = False
+            assert bot.selfie_ready() is False
+            bot.SELFIE_ENABLED = True
+            assert bot.selfie_ready() is True
+        finally:
+            bot.SELFIE_ENABLED, bot.selfie_capable = saved, cap
+
+    def test_meme_switch_is_independent_of_meme_assets(self):
+        saved = bot.MEME_ENABLED
+        try:
+            bot.MEME_ENABLED = False
+            assert bot.meme_ready() is False
+            assert isinstance(bot.meme_capable(), bool)   # assets unchanged by the switch
+        finally:
+            bot.MEME_ENABLED = saved
+
+    def test_voice_gate_is_at_the_send_choke_point(self):
+        import inspect
+        assert "VOICE_ENABLED" in inspect.getsource(bot._send_voice_reply)
+
+    def test_persisted_prefs_are_applied_not_just_written(self):
+        """A prefs file that is written and never read is worse than no file."""
+        import inspect
+        src = inspect.getsource(bot)
+        assert "\nload_feature_prefs()\n" in src, "must be applied at module level"
+
+    def test_prefs_cannot_enable_something_incapable(self):
+        bot.feature_prefs["traffic"] = True
+        bot.load_feature_prefs()
+        on, capable = bot._feature_state("traffic")
+        assert on is capable or on is False
+
+    def test_summary_reports_na_for_unconfigured(self):
+        out = bot._features_summary()
+        assert all(f"{n}=" in out for n in bot._FEATURES)
+        assert any(x in out for x in ("=on", "=off", "=n/a"))
+
+    def test_seed_summary_names_only_what_is_missing(self):
+        out = bot._seed_summary()
+        assert out == "all present" or out.startswith("MISSING: ")
+
+    def test_seed_check_follows_atlas_file_override(self, tmp_path, monkeypatch):
+        """v2026-08-02.12: the check hardcoded "atlas.txt" while the loader honours
+        ATLAS_FILE, so an instance pointing at another name (emily's places.txt) would
+        be reported MISSING an atlas it in fact loads fine."""
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "ATLAS_FILE", tmp_path / "places.txt")
+        for f in bot._SEED_FILES:
+            (tmp_path / f).write_text("x", encoding="utf-8")
+        assert bot._seed_summary().startswith("MISSING: places.txt")
+        (tmp_path / "places.txt").write_text("x", encoding="utf-8")
+        assert bot._seed_summary() == "all present"
+        assert "atlas.txt" not in bot._SEED_FILES, "atlas is resolved, never assumed"
+
+    def test_audit_carries_the_tier2_fields(self):
+        d = bot.gather_audit_data()
+        for k in ("features", "seeds", "owner", "timezone"):
+            assert k in d, k
+
+    def test_command_registered_gated_and_in_menu(self):
+        import inspect
+        src = inspect.getsource(bot.features_cmd)
+        assert "_is_admin" in src
+        assert 'CommandHandler("features"' in inspect.getsource(bot.main)
+        assert any(c.command == "features" for c in bot._build_command_menu(False, False))
+
+
+class TestFeatureDetailAndLocation:
+    """v2026-08-02.10: "voice=on" was true on all seven and said nothing -- NanoGPT TTS
+    works without Inworld, so the capability probe can only return True. Which backend is
+    the actual question. Also adds Location, conspicuously absent given this whole session
+    started with a weather bug and location is what drives weather."""
+
+    def test_every_feature_spec_is_a_three_tuple(self):
+        for name, spec in bot._FEATURES.items():
+            assert len(spec) == 3, name
+            assert isinstance(spec[0], str)
+            assert callable(spec[1])
+            assert spec[2] is None or callable(spec[2])
+
+    def test_voice_reports_which_backend(self):
+        saved = bot.INWORLD_API_KEY
+        try:
+            bot.INWORLD_API_KEY = "k"
+            assert "voice=on(inworld)" in bot._features_summary()
+            bot.INWORLD_API_KEY = ""
+            assert "voice=on(nanogpt)" in bot._features_summary()
+        finally:
+            bot.INWORLD_API_KEY = saved
+
+    def test_detail_is_omitted_when_the_feature_is_off(self):
+        saved = bot.VOICE_ENABLED
+        try:
+            bot.VOICE_ENABLED = False
+            out = bot._features_summary()
+            assert "voice=off" in out and "voice=off(" not in out
+        finally:
+            bot.VOICE_ENABLED = saved
+
+    def test_a_raising_detail_probe_does_not_break_the_summary(self):
+        """The summary is diagnostic output -- it must never be the thing that fails."""
+        saved = bot._FEATURES["meme"]
+        try:
+            bot._FEATURES["meme"] = (saved[0], saved[1], lambda: 1 / 0)
+            assert "meme=" in bot._features_summary()
+        finally:
+            bot._FEATURES["meme"] = saved
+
+    def test_location_is_reported(self):
+        import inspect
+        d = bot.gather_audit_data()
+        assert d["location"] == bot.WEATHER_LOCATION
+        assert "location" in inspect.getsource(bot.audit_cmd)
+
+
+class TestLifeArcRotation:
+    """v2026-08-02.11: life.txt was commented 'user-maintained' and nothing ever wrote it,
+    so a hand-seeded arc stayed frozen forever -- the owner noticed Bonnie's had not moved.
+    day.txt already answers 'what happened today'; this is the slower thing underneath."""
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(bot._maybe_rotate_life_arc)
+
+    def test_it_evolves_rather_than_replaces(self):
+        """The current arc must be IN the prompt, or each rotation is a fresh invention."""
+        src = self._src()
+        assert "current" in src
+        assert "EVOLUTION, not a replacement" in src
+        assert "carry over" in src
+
+    def test_only_one_thread_may_move(self):
+        """An arc that turns over completely every week is not an arc."""
+        assert "exactly ONE thing move" in self._src()
+
+    def test_it_keeps_the_form(self):
+        src = self._src()
+        assert "present tense" in src and "40-60 words" in src
+
+    def test_it_forbids_vague_filler(self):
+        """'She has been reflecting on things' is the failure mode for this kind of prompt."""
+        assert "reflecting" in self._src() and "concrete" in self._src().lower()
+
+    def test_cadence_uses_a_stamp_not_a_weekday(self):
+        """A weekday check skips the week entirely if the bot is down that night;
+        a stamp just delays it."""
+        src = self._src()
+        assert "LIFE_STAMP_FILE" in src and "LIFE_ROTATE_DAYS" in src
+
+    def test_first_run_stamps_and_waits(self):
+        """Otherwise a fresh instance rewrites its seeded arc on the very first midnight."""
+        assert "first run: stamp and wait" in self._src()
+
+    def test_a_short_or_empty_result_keeps_the_existing_arc(self):
+        """Never destroy a good arc because the model returned nothing useful."""
+        src = self._src()
+        assert "len(new) < 40" in src and "keeping the current arc" in src
+
+    def test_the_old_arc_is_archived(self):
+        assert 'life_{stamp}.txt' in self._src()
+
+    def test_cache_is_invalidated_so_it_takes_effect(self):
+        """_life_arc_cache has a 5-minute TTL; without this the new arc is invisible."""
+        assert "_life_arc_cache" in self._src()
+
+    def test_kill_switch_and_missing_file_both_short_circuit(self):
+        assert "LIFE_ROTATE and LIFE_ARC_FILE.exists()" in self._src()
+
+    def test_it_runs_off_the_event_loop(self):
+        """Invariant #8 -- and invariant #3 is satisfied because this is weekly, not
+        per-message."""
+        assert "asyncio.to_thread" in self._src()
+
+    def test_it_is_actually_called_from_the_midnight_job(self):
+        """A rotation nothing invokes is the same bug as a life.txt nothing writes."""
+        import inspect
+        assert "_maybe_rotate_life_arc()" in inspect.getsource(bot._rotate_day_context)
+
+
+# --- v2026-08-02.14: the /code-review batch -------------------------------------------
+# Every test here EXERCISES the handler. The defects below all survived a green suite
+# because the tests read the handler's source instead of calling it (C8, and the fourth
+# time this family reached the fleet -- see v2026-08-02.4).
+
+def _async_ret(value):
+    async def _f(*a, **k):
+        return value
+    return _f
+
+
+class TestFeaturesCmdActuallyFlips:
+    """v2026-08-02.14: `_, probe = _FEATURES[name]` unpacked a 3-tuple into two names, so
+    EVERY `/features <name> on|off` raised ValueError before reaching the flip. The switch
+    never moved and the owner got silence. The suite was green: one test asserted the specs
+    are 3-tuples, another read the handler's source for "_is_admin". Nothing called it."""
+
+    def _run(self, args, uid=4242, feature_file=None):
+        msg = SimpleNamespace(sent=[])
+
+        async def reply_text(text, **k):
+            msg.sent.append(text)
+
+        msg.reply_text = reply_text
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        asyncio.run(bot.features_cmd(update, SimpleNamespace(args=args)))
+        return msg.sent
+
+    def setup_method(self):
+        self._orig_allowed = set(bot.ALLOWED_USERS)
+        self._orig_prefs = dict(bot.feature_prefs)
+        self._orig_voice = bot.VOICE_ENABLED
+        self._orig_file = bot.FEATURE_PREFS_FILE
+        bot.ALLOWED_USERS.add(4242)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._orig_allowed)
+        bot.feature_prefs.clear()
+        bot.feature_prefs.update(self._orig_prefs)
+        bot.VOICE_ENABLED = self._orig_voice
+        bot.FEATURE_PREFS_FILE = self._orig_file
+
+    def test_switching_off_moves_the_global_and_persists(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = True
+        sent = self._run(["voice", "off"])
+        assert bot.VOICE_ENABLED is False, "the whole point of the command"
+        assert bot.feature_prefs["voice"] is False
+        assert json.loads(bot.FEATURE_PREFS_FILE.read_text())["voice"] is False
+        assert "switched off" in sent[0]
+
+    def test_switching_back_on_moves_it_back(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = False
+        self._run(["voice", "on"])
+        assert bot.VOICE_ENABLED is True
+
+    def test_it_still_refuses_what_the_instance_cannot_do(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        sent = self._run(["health", "on"])  # no Garmin credentials in the fixture
+        assert "isn't configured" in sent[0]
+        assert bot.GARMIN_ENABLED is False
+
+    def test_bare_listing_and_a_bare_name_both_answer(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        assert self._run([])[0].startswith("\U0001F39B Features")
+        assert "voice" in self._run(["voice"])[0]
+
+    def test_the_listing_carries_the_same_detail_audit_does(self, tmp_path):
+        """v2026-08-02.15: the command dedicated to features said less about them than
+        /audit's one-line summary — `voice: on` against `voice=on(inworld)`. Which TTS
+        backend is live is the actual question (v2026-08-02.10), and it was answerable
+        only from the general audit."""
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = True
+        saved = bot.INWORLD_API_KEY
+        try:
+            bot.INWORLD_API_KEY = "k"
+            assert "voice: on (inworld)" in self._run([])[0]
+            assert "voice=on(inworld)" in bot._features_summary(), "audit keeps its packing"
+            bot.INWORLD_API_KEY = ""
+            assert "voice: on (nanogpt)" in self._run([])[0]
+        finally:
+            bot.INWORLD_API_KEY = saved
+
+    def test_a_switched_off_feature_shows_no_detail(self, tmp_path):
+        """The detail describes what is running. Printing a backend beside `off` would
+        claim something is live that isn't."""
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.VOICE_ENABLED = False
+        out = self._run([])[0]
+        assert "voice: off" in out and "voice: off (" not in out
+
+    def test_non_admin_gets_nothing(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.ALLOWED_USERS.discard(4242)
+        bot.set_owner(999999) if bot.get_owner() is None else None
+        assert self._run(["voice", "off"], uid=4243) == []
+
+
+class TestHealthAlertsFollowTheLiveSwitch:
+    """v2026-08-02.14: STRESS/BB/RHR_ALERTS were computed as `GARMIN_ENABLED and <env>` at
+    import. `/features health off` flips GARMIN_ENABLED, so the monitors kept firing off a
+    frozen copy while /features and /audit both said health=off."""
+
+    def setup_method(self):
+        self._orig = bot.GARMIN_ENABLED
+
+    def teardown_method(self):
+        bot.GARMIN_ENABLED = self._orig
+
+    def test_alerts_need_both_the_pref_and_the_live_feed(self):
+        bot.GARMIN_ENABLED = True
+        assert bot._alerts_on(True) is True
+        assert bot._alerts_on(False) is False
+        bot.GARMIN_ENABLED = False
+        assert bot._alerts_on(True) is False
+
+    def test_the_env_flags_no_longer_bake_in_the_parent(self):
+        """If these fold GARMIN_ENABLED back in at import, the runtime switch is dead
+        again and this whole class regresses silently."""
+        import inspect
+        src = inspect.getsource(bot).split("STRESS_ALERTS = ")[1].split("\n")[0]
+        assert "GARMIN_ENABLED" not in src
+
+    def test_every_monitor_gate_goes_through_the_helper(self):
+        """A bare `if not STRESS_ALERTS` anywhere is the bug returning."""
+        import inspect
+        for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job,
+                   bot._recent_stress_high, bot.stress_cmd):
+            src = inspect.getsource(fn)
+            for flag in ("STRESS_ALERTS", "BB_ALERTS", "RHR_ALERTS"):
+                if flag in src:
+                    assert f"_alerts_on({flag})" in src, fn.__name__
+
+    def test_off_reason_names_the_runtime_switch(self):
+        saved = (bot.GARMIN_EMAIL, bot.GARMIN_PASSWORD, bot._Garmin, bot.GARMIN_ENABLED)
+        try:
+            bot.GARMIN_EMAIL, bot.GARMIN_PASSWORD = "a@b.c", "pw"
+            bot._Garmin = object()
+            bot.GARMIN_ENABLED = False
+            assert "/features health on" in bot._garmin_off_reason()
+            bot.GARMIN_ENABLED = True
+            assert bot._garmin_off_reason() == ""
+        finally:
+            (bot.GARMIN_EMAIL, bot.GARMIN_PASSWORD, bot._Garmin, bot.GARMIN_ENABLED) = saved
+
+    def test_monitors_are_scheduled_on_capability_not_on_the_switch(self):
+        """Registering under GARMIN_ENABLED made `off` a one-way trip until restart."""
+        import inspect
+        src = inspect.getsource(bot.main)
+        assert "if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:" in src
+        assert "if WSDOT_API_KEY:" in src
+
+
+class TestOffVersusNeverConfigured:
+    """v2026-08-02.9 split *_capable from *_ready precisely so these two states could be
+    told apart; six commands still printed the credential sentence for both."""
+
+    def test_helper_distinguishes_the_two(self):
+        saved = bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED
+        try:
+            bot.TOMTOM_API_KEY = ""
+            assert bot._feature_off_reason("maps", "MISSING", "Maps are") == "MISSING"
+            bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED = "k", False
+            out = bot._feature_off_reason("maps", "MISSING", "Maps are")
+            assert "/features maps on" in out and "MISSING" not in out
+        finally:
+            bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED = saved
+
+    def test_selfie_and_meme_report_the_switch_not_a_missing_file(self):
+        import inspect
+        for fn, cap in ((bot.send_selfie, "selfie_capable"), (bot.send_meme, "meme_capable")):
+            src = inspect.getsource(fn)
+            assert f"not {cap}()" in src, fn.__name__
+            assert "switched off" in src, fn.__name__
+
+    def test_no_command_still_hardcodes_the_credential_sentence(self):
+        """The class check: every "isn't set up"/"aren't set up" string must now come from
+        _feature_off_reason, not from a bare reply_text."""
+        import inspect
+        import re as _re
+        src = inspect.getsource(bot)
+        direct = _re.findall(r"reply_text\(\s*\"[^\"]*(?:aren't|isn't) set up[^\"]*\"", src)
+        assert direct == [], direct
+
+
+class TestTriggeredMessageDeliversTheGif:
+    """v2026-08-02.14: send_triggered computed gif_query and never used it. A proactive
+    message with a [gif:] tag dropped the GIF; a tag-only one sent nothing at all and
+    stored an empty assistant turn, so the history gained a blank."""
+
+    def _run(self, monkeypatch, reply_text):
+        seen = {"bubbles": [], "gif": [], "remember": []}
+        monkeypatch.setattr(bot, "ensure_weather", _async_ret(None))
+        monkeypatch.setattr(bot, "assemble_messages", lambda cid, trig: [])
+        monkeypatch.setattr(bot, "reply_with_typing", _async_ret(reply_text))
+
+        async def _maybe_search(context, chat_id, messages, text, uname):
+            return text
+
+        monkeypatch.setattr(bot, "maybe_search", _maybe_search)
+
+        async def _bubbles(context, chat_id, text, **k):
+            seen["bubbles"].append(text)
+
+        async def _gif(context, chat_id, query):
+            seen["gif"].append(query)
+
+        monkeypatch.setattr(bot, "send_bubbles", _bubbles)
+        monkeypatch.setattr(bot, "send_gif", _gif)
+        monkeypatch.setattr(bot, "maintain_memory", _async_ret(None))
+        monkeypatch.setattr(bot, "remember",
+                            lambda cid, role, text: seen["remember"].append((role, text)))
+        asyncio.run(bot.send_triggered(None, 7788, "[SYSTEM: say hi]"))
+        return seen
+
+    def test_the_gif_is_actually_sent(self, monkeypatch):
+        seen = self._run(monkeypatch, "look at this [gif: cat waving]")
+        assert seen["gif"] == ["cat waving"]
+        assert seen["bubbles"] == ["look at this"]
+
+    def test_a_tag_only_message_is_not_an_empty_turn(self, monkeypatch):
+        seen = self._run(monkeypatch, "[gif: raccoon panic]")
+        assert seen["gif"] == ["raccoon panic"]
+        assert ("assistant", "[sent a gif]") in seen["remember"]
+
+    def test_a_plain_message_still_sends_no_gif(self, monkeypatch):
+        seen = self._run(monkeypatch, "just a normal thought")
+        assert seen["gif"] == []
+
+
+class TestSetbaseBackupClaim:
+    """v2026-08-02.14: the reply decided "previous kept as .prev" by stat-ing the path
+    AFTER the write, so a leftover .prev from an earlier /setbase made a first-time
+    install claim a backup of a file that was never there."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 9000
+
+    def _run(self, tmp_path, monkeypatch, uid=4242):
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "x_base.png")
+        bot.ALLOWED_USERS.add(uid)
+
+        class _File:
+            async def download_as_bytearray(self):
+                return bytearray(TestSetbaseBackupClaim.PNG)
+
+        class _Doc:
+            mime_type = "image/png"
+
+            async def get_file(self):
+                return _File()
+
+        sent = []
+
+        async def reply_text(text, **k):
+            sent.append(text)
+
+        msg = SimpleNamespace(document=_Doc(), photo=None, reply_to_message=None,
+                              reply_text=reply_text)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        try:
+            asyncio.run(bot.setbase_cmd(update, SimpleNamespace(args=[])))
+        finally:
+            bot.ALLOWED_USERS.discard(uid)
+        return sent
+
+    def test_a_stale_prev_does_not_fake_a_backup(self, tmp_path, monkeypatch):
+        (tmp_path / "x_base.png.prev").write_bytes(b"leftover from last time")
+        sent = self._run(tmp_path, monkeypatch)
+        assert "previous kept" not in sent[0], sent[0]
+        assert (tmp_path / "x_base.png").read_bytes() == self.PNG
+
+    def test_a_real_replacement_still_reports_the_backup(self, tmp_path, monkeypatch):
+        (tmp_path / "x_base.png").write_bytes(b"the old reference photo")
+        sent = self._run(tmp_path, monkeypatch)
+        assert "previous kept as x_base.png.prev" in sent[0]
+        assert (tmp_path / "x_base.png.prev").read_bytes() == b"the old reference photo"
+
+
+# --- v2026-08-02: the source-assertion backlog, driven ---------------------------------
+# `sweep.py source-assertion` listed 12 handlers the suite MENTIONED but never CALLED —
+# the state that reads as covered while proving nothing about dispatch. /features sat in
+# that list and raised ValueError on every invocation for four releases. These drive each
+# one with fake Telegram objects. The uniform contract: a command either ANSWERS or is
+# deliberately silent because a gate rejected the caller. Nothing here reads source.
+
+class _CmdMsg:
+    def __init__(self):
+        self.sent = []
+        self.documents = []
+
+    async def reply_text(self, text, **kwargs):
+        self.sent.append(text)
+        return SimpleNamespace(message_id=1)
+
+    async def reply_document(self, fh, **kwargs):
+        self.documents.append({"bytes": fh.read(), **kwargs})
+
+    async def set_reaction(self, *a, **k):
+        return None
+
+
+def _cmd_update(uid=7001, chat_id=9001):
+    msg = _CmdMsg()
+    return SimpleNamespace(
+        message=msg,
+        effective_chat=SimpleNamespace(id=chat_id),
+        effective_user=SimpleNamespace(id=uid, first_name="Tester"),
+    ), msg
+
+
+def _cmd_ctx(*args):
+    return SimpleNamespace(args=list(args), bot=SimpleNamespace())
+
+
+class TestEveryCommandHandlerActuallyRuns:
+    """One DIRECT call per handler. Deliberately not routed through a helper that takes
+    the handler as an argument: `self._run(bot.vibe_cmd)` passes a reference, and
+    `source-assertion` counts that as a mention, not a call — correctly, since a
+    reference proves nothing ran. The first draft of this class did exactly that and the
+    scanner still reported all twelve."""
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        """An id that is neither allow-listed nor the owner. A fixed literal is unsafe:
+        another test in this file claims ownership of 999999 when none is set, so a
+        hardcoded outsider silently became an admin depending on test order."""
+        owner, uid = bot.get_owner(), 424242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    # ── admin-gated ───────────────────────────────────────────────────────────
+    def test_audit_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_audit_cmd_is_admin_gated(self):
+        u, m = _cmd_update(self._outsider())
+        asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
+        assert m.sent == [], "a non-admin must get silence, not a partial audit"
+
+    def test_preset_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.preset_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_gif_cmd_answers_without_a_query(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.gif_cmd(u, _cmd_ctx()))
+        assert m.sent and "Usage" in m.sent[0]
+
+    def test_update_cmd_reports_the_dead_deploy_path(self, monkeypatch):
+        """/update downloads over raw URLs, which 404 on the private repo. It must SAY
+        so — the handler is kept for exactly that reply."""
+        monkeypatch.setattr(bot, "perform_self_update",
+                            lambda force: {"ok": False, "reason": "repo_not_readable",
+                                           "detail": "404"})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.update_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    # ── allowed-user gated ────────────────────────────────────────────────────
+    def test_stress_cmd_explains_why_it_is_off(self):
+        """No Garmin credentials in the fixture, so it must explain rather than pretend
+        to check — the distinction v2026-08-02.14 restored."""
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.stress_cmd(u, _cmd_ctx()))
+        assert m.sent and ("off" in m.sent[0].lower() or "set up" in m.sent[0].lower())
+
+    # ── ungated ───────────────────────────────────────────────────────────────
+    def test_card_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.card_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_setcard_cmd_usage(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.setcard_cmd(u, _cmd_ctx()))
+        assert "Usage" in m.sent[0]
+
+    def test_setcard_cmd_rejects_an_unknown_field(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.setcard_cmd(u, _cmd_ctx("nosuchfield", "x")))
+        assert "Unknown field" in m.sent[0]
+
+    def test_status_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.status_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_vibe_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.vibe_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_energy_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.energy_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_schedule_cmd_shows_the_schedule(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.schedule_cmd(u, _cmd_ctx()))
+        assert "Schedule" in m.sent[0]
+
+    def test_notes_cmd_handles_an_empty_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "USER_NOTES_FILE", tmp_path / "user_notes.txt")
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.notes_cmd(u, _cmd_ctx()))
+        assert "No notes yet" in m.sent[0]
+
+    def test_the_backlog_stays_empty(self):
+        """The check that keeps it at zero: sweep's own coverage query must report no
+        handler this suite mentions but never calls."""
+        import pathlib as _pl
+        import sys
+        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
+                               ".claude" / "tools"))
+        import sweep
+        stranded = sorted(n for n in sweep._handler_coverage()[0]
+                          if n not in sweep._handler_coverage()[1])
+        assert stranded == [], stranded
+
+
+# ── 2026-08-03: the second source-assertion backlog, driven ────────────────────
+# `sweep.py`'s one-hop widening (operational-log 2026-08-03) found 7 more helpers
+# this suite MENTIONED -- via inspect.getsource or a monkeypatch-to-a-no-op -- but
+# never actually CALLED: save_feature_prefs, save_state, save_wardrobe, send_gif,
+# send_meme, send_selfie, update_garmin. Same shape TestEveryCommandHandlerActuallyRuns
+# closed for the original 12: drive each one for real with fakes for its I/O.
+
+class TestTheSecondBacklogDriven:
+    def test_save_state_writes_synchronously_with_no_running_loop(self, tmp_path, monkeypatch):
+        # The no-loop branch (startup/shutdown): _MAIN_LOOP is None, so save_state
+        # must fall straight through to a direct, synchronous write.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(bot, "_MAIN_LOOP", None)
+        bot.save_state()
+        data = json.loads((tmp_path / "state.json").read_text())
+        assert "conversation_history" in data and "llm_stats" in data
+
+    def test_save_state_debounces_on_the_event_loop(self, tmp_path, monkeypatch):
+        # The on-loop branch: a second call while one is already pending must be a
+        # no-op (_save_scheduled), and the deferred write must land ~0.5s later.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+
+        async def _run():
+            bot.save_state()
+            first_scheduled = bot._save_scheduled
+            bot.save_state()  # must be a no-op: already scheduled
+            await asyncio.sleep(0.8)
+            return first_scheduled
+
+        first_scheduled = asyncio.run(_run())
+        assert first_scheduled is True
+        assert bot._save_scheduled is False
+        assert (tmp_path / "state.json").exists()
+
+    def test_save_wardrobe_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "wardrobe.json"
+        monkeypatch.setattr(bot, "WARDROBE_FILE", target)
+        bot.save_wardrobe()
+        assert json.loads(target.read_text()) == bot.wardrobe
+
+    def test_save_feature_prefs_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "feature_prefs.json"
+        monkeypatch.setattr(bot, "FEATURE_PREFS_FILE", target)
+        bot.save_feature_prefs()
+        assert json.loads(target.read_text()) == bot.feature_prefs
+
+    def test_send_gif_sends_and_records_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", "fake-key")
+        monkeypatch.setattr(bot, "_giphy_search",
+                            lambda query, level, seen: ("http://x/cat.gif", "gid123", "a cat"))
+        bot._recent_gif_ids.pop(555, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_animation(self, chat_id, animation):
+                self.sent = (chat_id, animation)
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_gif(SimpleNamespace(bot=fb), 555, "cat waving"))
+        assert fb.sent == (555, "http://x/cat.gif")
+        assert bot._recent_gif_ids[555] == ["gid123"]
+
+    def test_send_meme_renders_and_sends_a_photo(self, monkeypatch):
+        monkeypatch.setattr(bot, "meme_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+
+        async def _fake_captions(hint, chat_id):
+            return "TOP", "BOTTOM"
+
+        monkeypatch.setattr(bot, "_generate_meme_captions", _fake_captions)
+        monkeypatch.setattr(bot, "_pick_meme_template", lambda chat_id: "fake.jpg")
+        monkeypatch.setattr(bot, "render_meme",
+                            lambda template, top, bottom: b"FAKEMEMEBYTES")
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo):
+                self.sent = (chat_id, photo.read())
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_meme(SimpleNamespace(bot=fb), 777, hint="lol"))
+        assert fb.sent == (777, b"FAKEMEMEBYTES")
+
+    def test_send_selfie_sends_a_photo_and_updates_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "selfie_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+        monkeypatch.setattr(bot, "generate_selfie_image", lambda prompt: b"FAKESELFIEBYTES")
+
+        async def _fake_caption(hint, chat_id):
+            return "cute"
+
+        monkeypatch.setattr(bot, "_selfie_caption", _fake_caption)
+        bot._recent_selfie_hints.pop(888, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo, caption=None):
+                self.sent = (chat_id, photo.read(), caption)
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_selfie(SimpleNamespace(bot=fb), 888, hint="park day"))
+        assert fb.sent == (888, b"FAKESELFIEBYTES", "cute")
+        assert bot._recent_selfie_hints[888] == ["park day"]
+
+    def test_update_garmin_writes_the_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", True)
+        monkeypatch.setattr(bot, "_Garmin", object)  # any non-None sentinel
+        monkeypatch.setattr(bot, "GARMIN_FILE", tmp_path / "snapshot.json")
+        monkeypatch.setattr(bot, "_fetch_garmin", lambda: ("7,412 steps", []))
+        asyncio.run(bot.update_garmin())
+        assert bot._garmin["text"] == "7,412 steps"
+        assert json.loads((tmp_path / "snapshot.json").read_text())["text"] == "7,412 steps"
+
+    def test_the_second_backlog_stays_empty(self):
+        """Same check as test_the_backlog_stays_empty -- run again after the direct
+        calls above, proving they register as CALLS to the scanner, not just
+        more mentions."""
+        import pathlib as _pl
+        import sys
+        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
+                               ".claude" / "tools"))
+        import sweep
+        stranded = sorted(n for n in sweep._handler_coverage()[0]
+                          if n not in sweep._handler_coverage()[1])
+        assert stranded == [], stranded
+
+
+# ── reasoning-leak guard ──────────────────────────────────────────────────────
+
+class TestReasoningLeakGuard:
+    """v2026-08-03.1: glm-5.1:thinking wrote its ENTIRE deliberation into ordinary
+    `content` — no <think> tags, non-empty, no bracket directives — so every earlier
+    chain-of-thought guard passed it and priya sent a ~12k-char essay as four chunked
+    messages. LEAK below is an excerpt of the real transcript; it must always trip
+    the detector, and the in-character fixtures must always pass through."""
+
+    LEAK = """Let me work through this step by step:
+
+1. How does Priya feel about what Brian just said?
+Brian just said he has to wake up at 3 AM tomorrow and will try not to wake her. They just had intimate, tender sex. She's in that quiet post-coital space where she felt seen and vulnerable. Now he's mentioning 3 AM - that's early. She knows he works dispatch and has weird hours. The mention of 3 AM is a small intrusion of reality into this soft moment.
+
+2. What does Priya want?
+She's in a tender, soft space. She doesn't want to leave this bubble yet. She might want to acknowledge the 3 AM thing without making it a big deal - she's practical.
+
+3. Epistemic check:
+She knows he works dispatch and has weird hours. She knows he just worked 6 days straight (58.5 hours). I shouldn't assume inconsistency - I should just take what he's saying at face value.
+
+4. Rules that matter:
+- This is a quiet, intimate domestic moment. Lane rhythm matters - match the quiet energy.
+- Anti-echo: don't repeat his phrasing
+- Keep it in character - Priya is sardonic but soft right now
+- She's on her phone texting... wait, no - the scene mode says they're physically in the same space. But the format contract says she's typing on a phone.
+
+5. Three possible directions:
+a) Soft acknowledgment, practical - "3am is criminal" or something short and dry about the hour
+b) A small protest - wanting him to stay, but not making it dramatic
+c) A sardonic comment about his job hours, with undertones of care
+
+Let me draft:
+
+Option 1: "3am should be illegal. stay though. i'm not moving."
+Option 2: "i'll survive. you're the one waking up at that hour." - too practical, not enough of her
+
+How about:
+"i'll be asleep anyway. probably"
+
+That's very Priya - practical, with that "probably" at the end that's just slightly uncertain, slightly vulnerable.
+
+Okay, I'm overthinking this. Let me just write what feels right:
+
+"i'll be out cold by 11. you're fine."
+
+Simple. Dry. Warm underneath. Priya.
+
+Okay, FINAL answer:
+
+"i'll be asleep anyway. just say bye before you go."
+
+Simple. Direct. Warm underneath. Priya.
+
+Done. Going with that"""
+
+    # A long but genuinely in-character reply (rambling story, scene-register) —
+    # length alone must never trip the guard.
+    LONG_SCENE = (
+        "okay so the whole landlord saga finally came to a head today and you're getting "
+        "the entire thing because asha has officially stopped answering my texts about it. "
+        "remember the ceiling stain that was 'cosmetic'? it dripped on my laptop this "
+        "morning. actual water. on the actual keyboard. so i called the property office and "
+        "got the guy who always sounds like i've interrupted his lunch, and he tells me "
+        "maintenance can come thursday. thursday. it is monday. i said the ceiling is "
+        "actively leaking and he said, and i quote, 'is it a lot of water though.' sir. "
+        "define a lot. it's INDOOR RAIN. so then i did the thing you told me to do ages ago "
+        "and emailed instead of calling so there's a paper trail, and suddenly — suddenly — "
+        "someone can come tomorrow morning. amazing what happens when words are written "
+        "down. anyway i moved the desk into the hallway which means i'm typing this from a "
+        "hallway like some kind of displaced victorian orphan, and the wifi barely reaches "
+        "here, and my tea went cold during the second phone call, which honestly hurt more "
+        "than the laptop thing because the laptop might be covered but the tea is just "
+        "gone. also the upstairs neighbor came down to ask if MY leak was MY fault, which "
+        "takes a special kind of nerve when the water is coming from the direction of his "
+        "bathroom. i kept it polite. barely. you would have been proud of me and also a "
+        "little scared. so that's where we are: hallway desk, cold tea, thursday guy "
+        "shamed into tomorrow guy, and a towel on my keyboard like a tiny hospital "
+        "blanket. tell me something good about your day because mine has been plumbing "
+        "themed since 8am and i need news from the dry world. also if you say 'should've "
+        "gotten renter's insurance' i already did, in march, i am not a cautionary tale, "
+        "i am a victim of infrastructure. come over on the weekend and admire my water "
+        "damage. i'll make the good curry. bring your own ceiling. and before you ask, "
+        "yes the laptop still turns on, the towel caught most of it, we are calling it a "
+        "near-death experience and moving forward together. the hallway is cold. send "
+        "socks. or better, bring them yourself and stay."
+    )
+
+    def test_the_real_leak_trips_it(self):
+        assert len(self.LEAK) >= bot._REASONING_LEAK_MIN_CHARS
+        assert bot._looks_like_reasoning_leak(self.LEAK, "Priya")
+
+    def test_trips_without_the_name_too(self):
+        """The non-name marker categories alone must carry the real transcript —
+        the guard can't depend on the model naming the character."""
+        assert bot._looks_like_reasoning_leak(self.LEAK, "")
+
+    def test_normal_reply_passes(self):
+        assert not bot._looks_like_reasoning_leak(
+            "i'll be asleep anyway. just say bye before you go.", "Priya")
+
+    def test_long_scene_reply_passes(self):
+        assert len(self.LONG_SCENE) >= bot._REASONING_LEAK_MIN_CHARS
+        assert not bot._looks_like_reasoning_leak(self.LONG_SCENE, "Priya")
+
+    def test_short_meta_text_passes(self):
+        """Markers without extreme length never trip — the length floor is the
+        first gate, so ordinary replies are never even scanned."""
+        txt = ("1. thing\n2. thing\n3. thing\n"
+               "let me think about staying in character for the user")
+        assert not bot._looks_like_reasoning_leak(txt, "Priya")
+
+    def test_length_alone_never_trips(self):
+        assert not bot._looks_like_reasoning_leak("word " * 1000, "Priya")
+
+    def test_two_categories_are_not_enough(self):
+        """Name saturation plus one marker = 2 categories; the floor is 3."""
+        txt = ("Priya thought about it. Priya waited. Priya decided. "
+               "option 1 it is. " + "filler " * 400)
+        assert not bot._looks_like_reasoning_leak(txt, "Priya")
+
+    def test_ordinary_deliberative_texting_passes(self):
+        """Review finding: 'let me think', 'overthinking this', 'going back and
+        forth', 'option 1/2' are ordinary texting vocabulary on this fleet. A long
+        in-character reply weighing options must never trip on phrasing alone —
+        only 'option N' is a marker, and one category is far under the floor."""
+        txt = ("ok so i keep going back and forth on the apartment thing. "
+               "option 1 is the studio, option 2 is splitting with asha. "
+               "let me think about what actually bothers me here. honestly i'm "
+               "overthinking this and i know it. " + "more rambling. " * 160)
+        assert len(txt) >= bot._REASONING_LEAK_MIN_CHARS
+        assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
+
+    def test_first_name_matches_full_card_names(self):
+        """Review finding: NAME is the card's full name — 'Emily Harper',
+        'Bonnie (Libertarian)' — but leaked deliberation writes 'Emily', 'Bonnie'.
+        The name category must key on the first token, and the parenthesized
+        bonnie name must not break the pattern. Proven by contrast: the same text
+        is 3 categories with the name mentions and 2 without."""
+        base = ("the user seems tired. let me draft a reply. " + "filler " * 400)
+        for full, first in (("Emily Harper", "Emily"), ("Bonnie (Libertarian)", "Bonnie")):
+            with_name = base + f" {first} would wait. {first} is dry. {first} again."
+            assert bot._looks_like_reasoning_leak(with_name, full)
+            assert not bot._looks_like_reasoning_leak(base, full)
+
+    # -- wiring: rejection inside call_nanogpt, exactly like an empty completion --
+
+    def _patch_calls(self, monkeypatch, outputs):
+        calls = []
+
+        def fake_one_call(messages, m):
+            calls.append(m)
+            return outputs.pop(0)
+
+        monkeypatch.setattr(bot, "_one_call", fake_one_call)
+        monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+        return calls
+
+    def test_leak_rerolls_then_falls_back(self, monkeypatch):
+        calls = self._patch_calls(monkeypatch, [self.LEAK, self.LEAK, "hey. come here."])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                               model="thinker", fallback="plain", leak_guard=True)
+        assert out == "hey. come here."
+        assert calls == ["thinker", "thinker", "plain"]
+
+    def test_exhausted_leaks_raise_not_deliver(self, monkeypatch):
+        """If every attempt is reasoning-shaped, the call fails like an empty one —
+        the deliberation must never reach the caller."""
+        self._patch_calls(monkeypatch, [self.LEAK] * 4)
+        with pytest.raises(RuntimeError):
+            bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                             model="thinker", fallback="plain", leak_guard=True)
+
+    def test_kill_switch_delivers_verbatim(self, monkeypatch):
+        monkeypatch.setattr(bot, "REASONING_LEAK_GUARD", False)
+        self._patch_calls(monkeypatch, [self.LEAK])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                               model="thinker", leak_guard=True)
+        assert out == self.LEAK
+
+    def test_analysis_paths_are_outside_the_guard(self, monkeypatch):
+        """leak_guard defaults False: the analysis/summary JSON callers can never
+        have a completion eaten by this guard, whatever it looks like."""
+        self._patch_calls(monkeypatch, [self.LEAK])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}], model="thinker")
+        assert out == self.LEAK
+
+    def test_generate_reply_is_guarded_end_to_end(self, monkeypatch):
+        """The wiring, not the detector: generate_reply must pass leak_guard, so a
+        leak on the first attempt re-rolls and the user gets the second reply."""
+        self._patch_calls(monkeypatch, [self.LEAK, "fine. stay."])
+        out = asyncio.run(bot.generate_reply(
+            [{"role": "user", "content": "hi"}], model="thinker"))
+        assert out == "fine. stay."
+
+    def test_document_analysis_opt_out_delivers_meta_replies(self, monkeypatch):
+        """Review finding: a card review — which handle_document explicitly asks
+        for — legitimately runs long and discusses prompts and characters, and
+        DOCUMENT_MODEL has no fallback, so a guard trip there is a hard user-visible
+        error. Those call sites pass leak_guard=False; this proves the opt-out
+        delivers a reply the detector WOULD reject (so the exemption, not the
+        detector, is what this test can fail on)."""
+        review = ("honest take on this card: the system prompt is doing too much. "
+                  "1. the opening is generic\n2. the user is over-specified\n"
+                  "3. the voice section contradicts itself\n"
+                  "it reads out of character for what you say you want. "
+                  + "more detail. " * 200)
+        assert bot._looks_like_reasoning_leak(review, "Priya")
+        self._patch_calls(monkeypatch, [review])
+        out = asyncio.run(bot.generate_reply(
+            [{"role": "user", "content": "card"}], model="doc", leak_guard=False))
+        assert out == review
+
+
+# ── Offline life events (2026-08-04, reimplemented from b0eb485, never merged) ─────
+
+class TestLifeEvents:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+    def test_read_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot._read_life_events() == []
+
+    def test_append_then_read_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("A teammate brought donuts to the morning standup.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == 1
+        assert "A teammate brought donuts" in events[0]
+        assert events[0].startswith("[")  # date stamp prefix
+
+    def test_blank_line_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("   ")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert bot._read_life_events() == []
+
+    def test_caps_at_life_events_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(bot.LIFE_EVENTS_MAX + 5):
+            bot._append_life_event(f"event {i}")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == bot.LIFE_EVENTS_MAX
+        assert "event " + str(bot.LIFE_EVENTS_MAX + 4) in events[-1]  # newest kept
+
+    def test_generate_returns_the_model_line(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6, work after")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Her coworker spilled coffee on the new carpet.")
+        assert bot._generate_life_event() == "Her coworker spilled coffee on the new carpet."
+
+    def test_generate_none_response_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "none")
+        assert bot._generate_life_event() == ""
+
+    def test_generate_with_no_context_is_empty(self, monkeypatch):
+        # No schedule/people/projects/arc/recent events at all -- nothing to ground it in.
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "")
+        monkeypatch.setattr(bot, "_read_people", lambda: "")
+        monkeypatch.setattr(bot, "_read_projects", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_arc", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_events", lambda: [])
+        assert bot._generate_life_event() == ""
+
+    def test_generate_broken_classifier_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._generate_life_event() == ""
+
+    def test_update_life_event_appends_when_enabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: "Something happened today.")
+        asyncio.run(bot.update_life_event())
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert "Something happened today." in bot._read_life_events()[0]
+
+    def test_update_life_event_noop_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        called = []
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: called.append(1) or "x")
+        asyncio.run(bot.update_life_event())
+        assert called == []
+        assert bot._read_life_events() == []
+
+
+class TestAssembleMessagesLifeEvents:
+    def test_includes_life_events_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9601] = []
+        bot.user_names[9601] = "Tester"
+        msgs = bot.assemble_messages(9601, "hello")
+        assert any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_life_events_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9602] = []
+        bot.user_names[9602] = "Tester"
+        msgs = bot.assemble_messages(9602, "hello")
+        assert not any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+
+class TestExportMemoryCmd:
+    """v2026-08-07: /exportmemory and the menu button's cmd:exportmemory used to build
+    the export text twice, independently, with slightly different section labels —
+    now both call _send_memory_export/_memory_export_text. This drives the command
+    path; TestButtonCallbackExportMemory drives the button path."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+        self._orig_facts = dict(bot.facts)
+        self._orig_milestones = dict(bot.milestones)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+        bot.facts.clear()
+        bot.facts.update(self._orig_facts)
+        bot.milestones.clear()
+        bot.milestones.update(self._orig_milestones)
+
+    def test_sends_a_document_with_the_expected_sections(self):
+        chat_id = 9801
+        bot.summaries[chat_id] = "settling in well"
+        bot.facts[chat_id] = ["likes rainy days"]
+        bot.milestones[chat_id] = [{"text": "first inside joke", "ts": time.time()}]
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert len(m.documents) == 1
+        doc = m.documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "settling in well" in text
+        assert "likes rainy days" in text
+        assert "=== RELATIONSHIP MILESTONES ===" in text
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+
+    def test_cleans_up_the_temp_file(self):
+        chat_id = 9802
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
+class _CmdQuery:
+    def __init__(self, chat_id, data):
+        self.data = data
+        self.message = SimpleNamespace(chat_id=chat_id)
+
+    async def answer(self):
+        return None
+
+
+class _CmdBot:
+    def __init__(self):
+        self.sent_messages = []
+        self.sent_documents = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent_messages.append(text)
+
+    async def send_document(self, chat_id, document, **kwargs):
+        self.sent_documents.append({"bytes": document.read(), **kwargs})
+
+
+class TestButtonCallbackExportMemory:
+    """The menu button's cmd:exportmemory now shares _send_memory_export with
+    /exportmemory (see TestExportMemoryCmd) — this drives the button path directly,
+    since button_callback had zero test coverage before this dedup."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+
+    def test_sends_the_same_shaped_document_as_the_command(self):
+        chat_id = 9803
+        bot.summaries[chat_id] = "doing fine"
+        query = _CmdQuery(chat_id, "cmd:exportmemory")
+        update = SimpleNamespace(callback_query=query)
+        fake_bot = _CmdBot()
+        context = SimpleNamespace(bot=fake_bot)
+        asyncio.run(bot.button_callback(update, context))
+        assert len(fake_bot.sent_documents) == 1
+        doc = fake_bot.sent_documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "doing fine" in text
+        assert "=== LONG-TERM MEMORY ===" in text  # now matches the command's wording
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
+class TestNewsCommands:
+    """Direct-call tests, matching TestTheSecondBacklogDriven's contract: a command
+    either answers or is deliberately silent because a gate rejected the caller."""
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 434242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def test_news_cmd_answers_with_events(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot._append_life_event("A coworker got a promotion.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "A coworker got a promotion" in m.sent[0]
+
+    def test_news_cmd_empty_state_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "newsnow" in m.sent[0]
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before news_cmd ever runs, and the
+    # per-handler `_is_allowed` check duplicated it as dead code. Gating is covered by
+    # TestPrivateGate now, not here.
+
+    def test_newsnow_cmd_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        async def _fake_update():
+            bot._append_life_event("A generated event.")
+            bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        monkeypatch.setattr(bot, "update_life_event", _fake_update)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert any("A generated event" in s for s in m.sent)
+
+    def test_newsnow_cmd_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()
+
+
+# ── Acoustic tone analysis on voice notes (2026-08-04, reimplemented from bae2dcb,
+# never merged; vendored acoustic_ears.py unmodified from menelly/AI_Ears, MIT) ────
+
+class TestAcousticEars:
+    @staticmethod
+    def _write_wav(path, freq=440.0, duration=1.0, sr=44100, amplitude=0.5):
+        import wave as _wave
+        import numpy as _np
+        t = _np.linspace(0, duration, int(sr * duration), endpoint=False)
+        samples = (amplitude * _np.sin(2 * _np.pi * freq * t) * 32767).astype(_np.int16)
+        with _wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(samples.tobytes())
+
+    def test_analyze_acoustic_on_a_tone(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "tone.wav"
+        self._write_wav(wav_path, freq=440.0, duration=1.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert "error" not in result
+        assert result["duration_s"] == pytest.approx(1.0, abs=0.05)
+        assert result["sample_rate"] == 44100
+        assert result["brightness_label"] in (
+            "very bright", "bright", "warm", "dark")
+
+    def test_analyze_acoustic_empty_audio_reports_error(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "empty.wav"
+        self._write_wav(wav_path, duration=0.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert result.get("error") == "empty audio"
+
+    def test_describe_acoustic_none_input_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic(None) is None
+
+    def test_describe_acoustic_error_dict_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic({"error": "empty audio"}) is None
+
+    def test_describe_acoustic_includes_wpm_when_word_count_given(self):
+        import acoustic_ears
+        a = {"duration_s": 10.0, "dynamics_label": "even", "brightness_label": "warm",
+             "pauses": []}
+        note = acoustic_ears.describe_acoustic(a, word_count=20)
+        assert "120 wpm" in note  # 20 words / (10s/60) = 120 wpm
+        assert "even volume" in note
+        assert "warm tone" in note
+
+    def test_describe_acoustic_mentions_pauses_when_present(self):
+        import acoustic_ears
+        a = {"duration_s": 5.0, "dynamics_label": "dynamic", "brightness_label": "bright",
+             "pauses": [(1.0, 1.5, 0.5), (2.0, 2.3, 0.3)]}
+        note = acoustic_ears.describe_acoustic(a)
+        assert "2 notable pause(s)" in note
+
+
+class TestAnalyzeVoiceTone:
+    def test_returns_none_when_ffmpeg_produces_no_wav(self, monkeypatch):
+        async def _fake_ffmpeg(*args):
+            return (b"", b"")  # never writes the output file
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"not real audio"))
+        assert result is None
+
+    def test_returns_the_analysis_on_success(self, monkeypatch, tmp_path):
+        import wave as _wave
+        import numpy as _np
+
+        async def _fake_ffmpeg(*args):
+            # args: -y -i <in> -ar 44100 -ac 1 -c:a pcm_s16le <out>
+            out_path = args[-1]
+            t = _np.linspace(0, 0.5, int(44100 * 0.5), endpoint=False)
+            samples = (0.3 * _np.sin(2 * _np.pi * 300 * t) * 32767).astype(_np.int16)
+            with _wave.open(out_path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes(samples.tobytes())
+            return (b"", b"")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"fake ogg bytes"))
+        assert result is not None
+        assert "error" not in result
+
+    def test_ffmpeg_failure_is_none_not_raised(self, monkeypatch):
+        async def _boom(*args):
+            raise RuntimeError("ffmpeg not found")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _boom)
+        assert asyncio.run(bot._analyze_voice_tone(b"x")) is None
+
+    def test_config_defaults(self):
+        assert isinstance(bot.VOICE_TONE_ENABLED, bool)
+
+
+# ── /diag (2026-08-04, reimplemented from 71dfa44, never merged; scoped down --
+# the log-error tail is dropped as redundant with /errors, and the flag list is
+# trimmed to what actually exists on this bot rather than the abandoned branch's
+# full set) ─────────────────────────────────────────────────────────────────────
+
+class TestDiagCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 444242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_diag_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "diagnostics" in m.sent[0]
+
+    def test_diag_cmd_reports_the_new_toggles(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        text = m.sent[0]
+        for label in ("safety", "style mirror", "offline life", "voice tone"):
+            assert label in text, label
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
+
+    def test_diag_cmd_omits_the_log_error_tail(self):
+        # Deliberately dropped as redundant with /errors -- must not resurface here.
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert "Log errors" not in m.sent[0]
+
+
+# ── Episodic recall + on-this-day reminiscing (2026-08-04, reimplemented from
+# 9fa21af + a485b1b's on-this-day portion, never merged -- rewritten against this
+# file's actual embedding primitives, EMBEDDING_MODEL/_embed_text, not the abandoned
+# branch's own EMBED_MODEL/_embed) ──────────────────────────────────────────────
+
+class TestEpisodesCore:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def test_normalize_rows_unit_length(self):
+        import numpy as np
+        mat = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        norms = np.linalg.norm(out, axis=1)
+        assert norms == pytest.approx([1.0, 1.0], abs=1e-5)
+
+    def test_normalize_rows_handles_zero_vector(self):
+        import numpy as np
+        mat = np.array([[0.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        assert not np.isnan(out).any()
+
+    def test_episode_when_phrasing(self):
+        now = time.time()
+        assert bot._episode_when(now) == "earlier today"
+        assert bot._episode_when(now - 86400) == "yesterday"
+        assert bot._episode_when(now - 5 * 86400) == "about 5 days ago"
+        assert bot._episode_when(now - 21 * 86400) == "about 3 weeks ago"
+        assert "back around" in bot._episode_when(now - 200 * 86400)
+
+    def test_archive_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        fixed_vec = [1.0, 0.0, 0.0]
+        monkeypatch.setattr(bot, "_embed_text", lambda text: list(fixed_vec))
+        batch = [{"role": "user", "content": "hey remember the beach trip", "ts": time.time()},
+                 {"role": "assistant", "content": "of course, that was fun", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+    def test_archive_empty_batch_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._archive_episode_chunks([], "Tester")
+        assert bot._episodes["ts"] == []
+
+    def test_archive_skips_on_embed_failure(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "_embed_text", lambda text: None)
+        batch = [{"role": "user", "content": "hello there", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()
+
+    def test_load_discards_archive_on_model_change(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EPISODES_FILE.write_text(
+            json.dumps({"ts": time.time(), "text": "old memory", "vec": [1.0, 0.0]}) + "\n",
+            encoding="utf-8")
+        bot.EPISODES_MODEL_FILE.write_text("some-other-embedding-model", encoding="utf-8")
+        bot._load_episodes()
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()  # discarded, not just ignored
+
+    def test_load_trims_to_episode_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODE_MAX", 3)
+        with bot.EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for i in range(5):
+                f.write(json.dumps({"ts": float(i), "text": f"memory {i}", "vec": [1.0, 0.0]}) + "\n")
+        bot.EPISODES_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 3
+        assert bot._episodes["text"] == ["memory 2", "memory 3", "memory 4"]  # newest kept
+
+
+class TestTriggeredEpisode:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def _seed(self, ts, text, vec=(1.0, 0.0, 0.0)):
+        import numpy as np
+        bot._episodes["ts"].append(ts)
+        bot._episodes["text"].append(text)
+        row = bot._normalize_rows(np.array([list(vec)], dtype=np.float32))
+        bot._episodes["mat"] = row if bot._episodes["mat"] is None else np.vstack(
+            [bot._episodes["mat"], row])
+
+    def test_returns_empty_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_returns_empty_with_no_query_vec(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode(None) == ""
+
+    def test_returns_empty_when_archive_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_surfaces_a_similar_old_episode(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "the beach trip last month", vec=(1.0, 0.0, 0.0))
+        note = bot.triggered_episode([1.0, 0.0, 0.0])
+        assert "beach trip" in note
+        assert "specific moment you remember" in note
+
+    def test_below_similarity_floor_is_silent(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "unrelated topic", vec=(0.0, 1.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_too_recent_is_gated_out(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Inside the live window (EPISODE_MIN_AGE_HOURS default 24h) -- must not echo it back.
+        self._seed(time.time() - 3600, "something said an hour ago", vec=(1.0, 0.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+
+class TestOnThisDay:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "ONTHISDAY_FILE", tmp_path / "onthisday.json")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        monkeypatch.setattr(bot, "ONTHISDAY_ENABLED", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+
+    def test_finds_a_one_month_anniversary(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["the anniversary moment"]
+        result = bot._onthisday_episode()
+        assert result is not None
+        ts, text = result
+        assert text == "the anniversary moment"
+
+    def test_no_match_outside_any_window(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._episodes["ts"] = [time.time() - 10 * 86400]  # doesn't land near any interval
+        bot._episodes["text"] = ["a random tuesday"]
+        assert bot._onthisday_episode() is None
+
+    def test_excludes_the_given_timestamp(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["already used"]
+        assert bot._onthisday_episode(exclude_ts=target_ts) is None
+
+    def test_prefers_the_longer_interval(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Both a ~30-day and a ~365-day episode qualify; the year-old one should win.
+        bot._episodes["ts"] = [time.time() - 30 * 86400, time.time() - 365 * 86400]
+        bot._episodes["text"] = ["recent one", "the year-old one"]
+        ts, text = bot._onthisday_episode()
+        assert text == "the year-old one"
+
+    def test_job_is_a_noop_with_no_owner(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: None)
+        sent = []
+        monkeypatch.setattr(bot, "send_triggered", lambda ctx, cid, trig: sent.append(1))
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []
+
+    def test_job_respects_the_min_gap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        today = datetime.now(bot.TZ).date().isoformat() if bot.TZ else datetime.now().date().isoformat()
+        bot.ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": 0}), encoding="utf-8")
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []  # already reminisced today
+
+    def test_job_sends_and_records_when_a_match_exists(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        monkeypatch.setattr(bot, "in_quiet_hours", lambda: False)
+        monkeypatch.setattr(bot, "_is_quiet", lambda cid: False)
+        bot._episodes["ts"] = [time.time() - 30 * 86400]
+        bot._episodes["text"] = ["the moment that resurfaces"]
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert len(sent) == 1
+        assert "the moment that resurfaces" in sent[0]
+        assert json.loads(bot.ONTHISDAY_FILE.read_text())["date"]  # recorded
+
+
+class TestEpisodesCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 464242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()
+
+    def test_empty_archive_says_so(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "No episodes archived yet" in m.sent[0]
+
+    def test_reports_the_count(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [time.time()], "text": ["a stored moment"],
+                              "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "1 chunk" in m.sent[0]
+        assert "a stored moment" in m.sent[0]
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
+
+
+class TestMaintainMemoryArchivesOnScrollOff:
+    def test_scroll_off_triggers_archiving(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        chat_id = 9701
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        captured = {}
+
+        def _fake_archive(batch, uname):
+            captured["batch"] = batch
+            captured["uname"] = uname
+
+        monkeypatch.setattr(bot, "_archive_episode_chunks", _fake_archive)
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)  # let the fire-and-forget archive task run
+
+        asyncio.run(_run())
+        assert "batch" in captured
+        assert len(captured["batch"]) > 0
+        assert captured["uname"] == "Tester"
+
+    def test_scroll_off_skips_archiving_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        chat_id = 9702
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        called = []
+        monkeypatch.setattr(bot, "_archive_episode_chunks",
+                            lambda batch, uname: called.append(1))
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        assert called == []
+
+
+class TestAssembleMessagesEpisodicRecall:
+    def test_includes_triggered_episode_in_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9703] = []
+        bot.user_names[9703] = "Tester"
+        msgs = bot.assemble_messages(9703, "hello", query_vec=[1.0, 0.0, 0.0])
+        assert any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_episode_block_with_no_query_vec(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9704] = []
+        bot.user_names[9704] = "Tester"
+        msgs = bot.assemble_messages(9704, "hello")
+        assert not any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+
+class TestEpisodicConfig:
+    def test_config_types(self):
+        assert isinstance(bot.EPISODIC_RECALL, bool)
+        assert isinstance(bot.ONTHISDAY_ENABLED, bool)
+        assert isinstance(bot.EPISODE_MAX, int)
+        assert isinstance(bot.EPISODE_MIN_SIM, float)
+
+
+# ── Embedding cache model-version guard + cap (2026-08-04, backported from episodic
+# recall's design to the pre-existing memory/lore embedding caches, which lacked
+# both -- a live gap flagged during a comparison of the two designs) ───────────────
+
+class TestEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EMBEDDINGS_FILE", tmp_path / "embeddings.json")
+        monkeypatch.setattr(bot, "EMBEDDINGS_MODEL_FILE", tmp_path / "embeddings.model")
+        bot._embeddings_cache = {}
+        bot._embeddings_dirty = False
+
+    def test_load_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"hello there": [1.0, 0.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        bot._embeddings_cache = {}
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"hello there": [1.0, 0.0]}
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert bot.EMBEDDINGS_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"old text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+        assert not bot.EMBEDDINGS_FILE.exists()  # discarded, not just ignored
+
+    def test_load_keeps_cache_on_model_match(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"kept text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"kept text": [1.0, 0.0]}
+
+    def test_load_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 3)
+        data = {f"line {i}": [float(i)] for i in range(5)}
+        bot.EMBEDDINGS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert len(bot._embeddings_cache) == 3
+        assert set(bot._embeddings_cache) == {"line 2", "line 3", "line 4"}  # newest kept
+
+    def test_save_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 2)
+        bot._embeddings_cache = {"a": [1.0], "b": [2.0], "c": [3.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert len(bot._embeddings_cache) == 2
+        assert set(bot._embeddings_cache) == {"b", "c"}
+
+    def test_save_is_a_noop_when_not_dirty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = False
+        bot._save_embeddings()
+        assert not bot.EMBEDDINGS_FILE.exists()
+
+    def test_no_raw_exception_in_save_log(self):
+        import inspect
+        src = inspect.getsource(bot._save_embeddings)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+
+class TestLoreEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LORE_EMB_FILE", tmp_path / "lore_embeddings.json")
+        monkeypatch.setattr(bot, "LORE_EMB_MODEL_FILE", tmp_path / "lore_embeddings.model")
+        bot._lore_embeddings = {}
+        bot._lore_emb_dirty = False
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"the tavern is in Bellevue": [1.0, 0.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        bot._lore_embeddings = {}
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {"the tavern is in Bellevue": [1.0, 0.0]}
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.LORE_EMB_FILE.write_text(json.dumps({"old lore": [1.0]}), encoding="utf-8")
+        bot.LORE_EMB_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {}
+        assert not bot.LORE_EMB_FILE.exists()
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"x": [1.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        assert bot.LORE_EMB_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL

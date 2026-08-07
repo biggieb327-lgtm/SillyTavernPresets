@@ -45,6 +45,16 @@ try:
 except Exception:
     _Garmin = None
 
+try:
+    import acoustic_ears  # optional; needs numpy
+except Exception:
+    acoustic_ears = None
+
+try:
+    import numpy as _np  # optional; needed for episodic recall's matrix cosine similarity
+except Exception:
+    _np = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -87,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-07-29.3"
+BOT_VERSION = "2026-08-07.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -113,6 +123,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NANOGPT_API_KEY = (os.getenv("NANOGPT_API_KEY") or "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
@@ -335,6 +346,13 @@ STEP_INTENT = os.getenv("STEP_INTENT", "1").lower() not in ("0", "false", "no", 
 # switch (owner policy 2026-07-18: unset = active, 0/off disables).
 DIRECTIVE_LEAK_GUARD = os.getenv(
     "DIRECTIVE_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
+# Reasoning-leak guard (v2026-08-03.1). Third variant of the chain-of-thought leak:
+# a thinking model can emit its ENTIRE deliberation as ordinary `content` — no
+# <think> tags for _strip_thinking, no empty-content-plus-reasoning_content for the
+# v2026-07-20.1 path, no bracket syntax for _strip_directive_lines. Default ON with
+# a kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
+REASONING_LEAK_GUARD = os.getenv(
+    "REASONING_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -348,7 +366,33 @@ DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "fals
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
+# Safety: flag genuine acute distress in an incoming message and have her drop the
+# performance and respond with real care, same reply. On by default (owner policy
+# 2026-08-04: a safety net defaults on like everything else in rule 16, not off like
+# a cosmetic feature). Deliberately independent of INNER_VOICE_ENABLED -- it must not
+# be silently inert just because the unrelated cosmetic feature is off.
+#
+# bot-code-invariants rule 3 carve-out (owner-approved 2026-08-04, second one after
+# MEMORY_SEMANTIC_LIVE): this is a new per-message LLM side call, which rule 3 bars.
+# Approved anyway because it is NOT the "small cheap call" the rule's common-mistake
+# note warns about -- it carries no character/history context, just the raw message
+# plus a short classifier system prompt, so it does not re-pay the ~17k-token prompt
+# rule 3's cost argument is about. Folding this into post_reply_analysis (the normal
+# extension point) was considered and rejected: that call fires AFTER the reply is
+# already sent, so distress on THIS message could only change the NEXT reply -- one
+# message late is a real degradation for a safety feature, not an equivalent.
+SAFETY_ENABLED = os.getenv("SAFETY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SAFETY_MODEL = os.getenv("SAFETY_MODEL", MOOD_MODEL)
+SAFETY_RESOURCES = os.getenv(
+    "SAFETY_RESOURCES",
+    "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
+)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+# Voice tone: a short pace/volume/tone/pause note alongside the transcript -- local FFT
+# analysis via vendored acoustic_ears.py (MIT, menelly/AI_Ears), no network call, no
+# extra API key. Runs concurrently with transcription so it adds no latency.
+# (Reimplemented from bae2dcb, 2026-07-01, never merged.)
+VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
 DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
 # Separate model for document/card analysis — should be an instruction model,
@@ -368,6 +412,12 @@ LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+# Adaptive style mirroring: passively read the user's recent texting habits (length, emoji,
+# caps, enthusiasm, textspeak) and nudge her register to subtly match -- no model call, pure
+# heuristics off the in-RAM history (reimplemented from a485b1b, 2026-06-30, never merged).
+STYLE_MIRROR = os.getenv("STYLE_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+STYLE_SAMPLE = _env_int("STYLE_SAMPLE", "20")    # how many recent user messages to read
+STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many before adapting
 # Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
 # only blocks carrying an explicit "raise this" instruction, while her live context (her day,
 # her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
@@ -387,12 +437,21 @@ GROUP_ALLOWED_CHATS: set[int] = _parse_id_set(
     os.getenv("GROUP_ALLOWED_CHATS", ""), "GROUP_ALLOWED_CHATS")
 GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
 GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line; Name2: ..."
-GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.35")
-GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "2")
+# Banter defaults. v1 allowed 2 consecutive bot messages with a flat 35% reply chance
+# and a 20s per-bot send throttle — which, in a 2-bot group, is one reply per human
+# message and a thread that dies immediately (the throttle alone kills alternation: a
+# bot's own messages land ~16s apart in a live exchange, inside the 20s window).
+# GROUP_BANTER raises the ceiling and decays the reply chance with the depth of the
+# exchange instead of ending it at a wall. GROUP_BANTER=0 restores the v1 numbers
+# exactly; any knob set explicitly in .env still wins over both sets.
+GROUP_BANTER = os.getenv("GROUP_BANTER", "1").lower() not in ("0", "false", "no", "off")
+GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.5" if GROUP_BANTER else "0.35")
+GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "6" if GROUP_BANTER else "2")
+GROUP_CHAIN_DECAY = _env_float("GROUP_CHAIN_DECAY", "0.75" if GROUP_BANTER else "1.0")
 GROUP_POLL_SECONDS = _env_int("GROUP_POLL_SECONDS", "5")
-GROUP_MIN_GAP_SECONDS = _env_float("GROUP_MIN_GAP_SECONDS", "20")
+GROUP_MIN_GAP_SECONDS = _env_float("GROUP_MIN_GAP_SECONDS", "8" if GROUP_BANTER else "20")
 GROUP_ALTERNATION_PENALTY = _env_float("GROUP_ALTERNATION_PENALTY", "2.0")
-GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "30")
+GROUP_DAILY_BOT_BUDGET = _env_int("GROUP_DAILY_BOT_BUDGET", "50" if GROUP_BANTER else "30")
 GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve().parent)))
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
@@ -605,13 +664,20 @@ def _reddit_access_token() -> str:
 
 # --- Selfies (image-to-image off a base portrait) ---
 # SELFIE_PROVIDER picks the backend: "gemini" calls Google's Gemini API directly
-# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint.
+# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint,
+# "xai" calls xAI's Grok Imagine API directly.
 SELFIE_PROVIDER = os.getenv("SELFIE_PROVIDER", "gemini" if GEMINI_API_KEY else "nanogpt")
 NANOGPT_IMAGE_URL = os.getenv("NANOGPT_IMAGE_URL", "https://nano-gpt.com/v1/images/generations")
 SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
 GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+XAI_IMAGE_URL = os.getenv("XAI_IMAGE_URL", "https://api.x.ai/v1/images").rstrip("/")
+XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-quality")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
+# When SELFIE_BASE names a file that is not there, fall back to the single unambiguous
+# *_base.* image in the instance dir rather than silently generating from text alone.
+# Unset = active. Set to 0 to require an exact SELFIE_BASE match.
+SELFIE_BASE_AUTODETECT = os.getenv("SELFIE_BASE_AUTODETECT", "1").lower() not in ("0", "false", "no", "off")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = _env_float("SELFIE_GUIDANCE", "3.5")
 SELFIE_STEPS = _env_int("SELFIE_STEPS", "28")
@@ -619,6 +685,8 @@ IMAGE_TIMEOUT = _env_int("IMAGE_TIMEOUT", "180")
 
 if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
     raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
+if SELFIE_PROVIDER == "xai" and not XAI_API_KEY:
+    raise SystemExit("SELFIE_PROVIDER=xai but XAI_API_KEY not found in .env at " + str(env_path))
 
 # --- Memes (template + text overlay, not AI-generated -- AI image models render text
 # unreliably, and a meme lives or dies on legible captions) ---
@@ -630,10 +698,51 @@ MEME_FONT_SIZE = _env_int("MEME_FONT_SIZE", "80")
 MEME_MIN_FONT_SIZE = 24
 MEME_DEDUP_SIZE = _env_int("MEME_DEDUP_SIZE", "5")
 _recent_meme_templates: dict = {}  # chat_id -> list of recently used template filenames
-_APPEARANCE_DEFAULT = (
-    "a 29-year-old woman, tall and lanky, half-shaved head with the long side pushed back, "
-    "septum ring, both arms sleeved in tattoos, paint- and ink-stained fingers."
+
+# --- GIFs (Giphy search, tag-driven) -------------------------------------------------
+# She emits [gif: query] in her own words; candidates are filtered and one is sent as an
+# animation. NO new LLM call — it rides the reply she was already generating (invariant #3).
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
+GIF_ENABLED = os.getenv("GIF_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+GIPHY_SEARCH_URL = os.getenv("GIPHY_SEARCH_URL", "https://api.giphy.com/v1/gifs/search")
+GIF_TIMEOUT = _env_int("GIF_TIMEOUT", "8")
+GIF_CANDIDATES = _env_int("GIF_CANDIDATES", "25")
+GIF_DEDUP_SIZE = _env_int("GIF_DEDUP_SIZE", "12")
+# How often she is OFFERED the option, per reply — not how often a tag is honoured.
+# Gating the offer throttles frequency without ever discarding a tag she chose to emit:
+# dropping one after the fact leaves her text referring to an image that never arrives.
+# Always offered regardless when the user's own message mentions a gif/meme.
+GIF_CHANCE = _env_float("GIF_CHANCE", "0.35")
+# Runtime-toggleable via /features. Each is a plain module global read at call time, so
+# flipping it reaches every call site without touching them — the same mechanism /setmodel
+# uses. Env value is the boot default; /features overrides and persists.
+SELFIE_ENABLED = os.getenv("SELFIE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+MEME_ENABLED = os.getenv("MEME_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+VOICE_ENABLED = os.getenv("VOICE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+MEME_CHANCE = _env_float("MEME_CHANCE", "0.35")
+_ASKED_GIF = re.compile(r"\b[gj]ifs?\b", re.I)
+_ASKED_MEME = re.compile(r"\bmemes?\b", re.I)
+# Giphy's rating is CUMULATIVE — "pg-13" also returns g and pg. "r" is deliberately
+# unreachable: /gifsafety offers only these three (owner decision 2026-08-02).
+_GIF_RATING = {"high": "g", "medium": "pg", "low": "pg-13"}
+# Applied at EVERY safety level, on top of Giphy's rating. Giphy's own issue tracker
+# carries long-standing reports of `rating` returning mixed results, so this is the
+# load-bearing filter rather than a backstop. Erring broad is correct here: a false
+# positive costs one missing GIF, a false negative sends a stranger's porn to a private
+# chat. Violence terms are kept narrow ("kill" would eat "killing it").
+_GIF_DENY = (
+    "nsfw", "porn", "hentai", "nude", "nudity", "naked", "topless", "boob", "tits",
+    "twerk", "stripper", "sexy", "sex ", "orgasm", "fetish", "bdsm", "onlyfans",
+    "lingerie", "thong", "bikini", "gore", "murder", "suicide", "behead", "nazi",
+    "swastika",
 )
+_recent_gif_ids: dict = {}   # chat_id -> recently sent Giphy ids (anti-repeat)
+# Fallback for an unnamed run (no instance dir argument) with no appearance.txt. It must
+# NOT describe any particular character: until v2026-08-01.8 this held a half-shaved head,
+# septum ring and sleeved tattoos, left over from a discarded card that made Priya a tattoo
+# artist (owner, 2026-08-01) -- a look no current character has. State an adult age
+# explicitly for the same reason the named-instance branch below does.
+_APPEARANCE_DEFAULT = "an adult in their late 20s."
 _APPEARANCE_FILE = BASE_DIR / "appearance.txt"
 if _APPEARANCE_FILE.exists():
     SELFIE_APPEARANCE = _APPEARANCE_FILE.read_text(encoding="utf-8").strip()
@@ -643,7 +752,12 @@ else:
     # No age/appearance details for this instance -- state an adult age explicitly anyway,
     # since Gemini's image safety filter gets much stricter (and returns blacked-out images)
     # for photos of women with no stated age in casual/intimate settings.
-    SELFIE_APPEARANCE = "an adult woman in her late 20s, the same person as in the reference photo"
+    # Sex-neutral on purpose: this is shared code across seven characters, one of whom
+    # (marcus, 31, 6'2") is a man. It said "an adult woman in her late 20s" until
+    # v2026-08-01.11 — an instance with no appearance.txt and no reference photo was
+    # generating the wrong person entirely. Keep an explicit adult age: Gemini's image
+    # filter gets much stricter, and returns blacked-out frames, when none is stated.
+    SELFIE_APPEARANCE = "an adult in their late 20s, the same person as in the reference photo"
 
 CARD_NAME = os.getenv("CHARACTER_CARD", "priya.json")
 HEARTBEAT_MIN = _env_float("HEARTBEAT_MIN_HOURS", "2") * 3600  # random window low end
@@ -671,7 +785,13 @@ ATLAS = (
 PEOPLE_FILE = BASE_DIR / "people.txt"
 PROJECTS_FILE = BASE_DIR / "projects.txt"
 SCHEDULE_FILE = BASE_DIR / "schedule.txt"
-LIFE_ARC_FILE = BASE_DIR / "life.txt"  # user-maintained: character's current story arc
+LIFE_ARC_FILE = BASE_DIR / "life.txt"  # seeded by hand, then evolved (v2026-08-02.11)
+# Life arcs move in weeks, not days — day.txt already covers "what happened today".
+# Rotation is checked at midnight and acts only once every LIFE_ROTATE_DAYS, using a
+# stamp file rather than a weekday, so downtime delays it instead of skipping it.
+LIFE_ROTATE = os.getenv("LIFE_ROTATE", "1").lower() not in ("0", "false", "no", "off")
+LIFE_ROTATE_DAYS = _env_int("LIFE_ROTATE_DAYS", "7")
+LIFE_STAMP_FILE = BASE_DIR / ".life_rotated"
 # Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
 # explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
 # shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
@@ -681,6 +801,18 @@ _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
+
+# Offline life: a couple times a day, invent ONE concrete event in her own world (grounded
+# in schedule/people/projects/arc) so unprompted news feels like real news instead of
+# generic small talk. Concrete past-tense events only -- opposite of the introspective
+# nightly reflection. No embeddings; cheap chat model. (Reimplemented from b0eb485,
+# 2026-06-29, never merged.)
+LIFE_SIM_ENABLED = os.getenv("LIFE_SIM_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+LIFE_MODEL = os.getenv("LIFE_MODEL", MOOD_MODEL)
+LIFE_EVENTS_MAX = _env_int("LIFE_EVENTS_MAX", "8")
+LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
+LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
+_life_events_cache: dict = {"text": None, "ts": 0.0}
 
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
@@ -731,6 +863,7 @@ MEMORY_QUERY_EMBED_TIMEOUT = _env_float("MEMORY_QUERY_EMBED_TIMEOUT", "3.0")
 MEMORY_DEDUP_SIM = _env_float("MEMORY_DEDUP_SIM", "0.92")
 MEMORY_LORE_SEMANTIC_TOPK = _env_int("MEMORY_LORE_SEMANTIC_TOPK", "3")
 LORE_EMB_FILE = BASE_DIR / "lore_embeddings.json"
+LORE_EMB_MODEL_FILE = BASE_DIR / ".lore_embeddings.model"
 _lore_embeddings: dict[str, list[float]] = {}   # keyed by lore entry content
 _lore_emb_dirty = False
 _QUERY_EMBED_CACHE: "collections.OrderedDict[str, list[float]]" = collections.OrderedDict()
@@ -1269,6 +1402,81 @@ def _read_life_arc() -> str:
     return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
 
 
+def _read_life_events() -> list[str]:
+    text = _read_life_file(LIFE_EVENTS_FILE, _life_events_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _append_life_event(line: str):
+    line = line.strip().strip('"').strip()
+    if not line:
+        return
+    existing = []
+    if LIFE_EVENTS_FILE.exists():
+        existing = [l for l in LIFE_EVENTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
+    existing.append(f"[{stamp}] {line}")
+    if len(existing) > LIFE_EVENTS_MAX:
+        existing = existing[-LIFE_EVENTS_MAX:]
+    LIFE_EVENTS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    _life_events_cache["text"] = None
+
+
+def _generate_life_event() -> str:
+    """Invent ONE concrete thing that happened in her own life, grounded in her routine/people."""
+    parts = []
+    sched = _read_schedule_today()
+    if sched:
+        parts.append(f"Her routine today:\n{sched}")
+    people = _read_people()
+    if people:
+        parts.append(f"People in her life:\n{people[:700]}")
+    projects = _read_projects()
+    if projects:
+        parts.append(f"What she's working on:\n{projects[:400]}")
+    arc = _read_life_arc()
+    if arc:
+        parts.append(f"Her life right now:\n{arc[:400]}")
+    recent = _read_life_events()
+    if recent:
+        parts.append("Recent events (do NOT repeat these or rehash the same beat):\n"
+                     + "\n".join(recent[-LIFE_EVENTS_MAX:]))
+    if not parts:
+        return ""
+    sys = (
+        f"Invent ONE small, concrete thing that just happened in {NAME}'s own life while she was "
+        f"off living it — an actual event involving the people, places, work, or activities in her "
+        f"world: something a teammate or coworker did, a bit of news, a small win or mishap, a "
+        f"moment at practice or on a shift. Past tense, third person, ONE specific sentence under "
+        f"25 words. It must be an EVENT in her own day — NOT a feeling, NOT reflection, NOT about "
+        f"her phone or who she's texting. Make it fit her routine and the real people named. Vary "
+        f"it from the recent events. Reply with just the sentence, or the word none."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": "\n\n".join(parts)}],
+            model=LIFE_MODEL,
+        ).strip()
+        if raw and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        log.warning("[life] generation failed: %s", type(e).__name__)
+    return ""
+
+
+async def update_life_event():
+    if not LIFE_SIM_ENABLED:
+        return
+    try:
+        line = await asyncio.to_thread(_generate_life_event)
+        if line:
+            await asyncio.to_thread(_append_life_event, line)
+            print(f"[life] event: {line}")
+    except Exception as e:
+        log.warning("[life] update failed: %s", type(e).__name__)
+
+
 def _read_memories() -> list[str]:
     text = _read_life_file(MEMORIES_FILE, _memories_cache)
     return [ln.strip() for ln in text.splitlines()
@@ -1610,29 +1818,88 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
 # --- Semantic memory (embeddings-backed recall) ---
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
+EMBEDDINGS_MODEL_FILE = BASE_DIR / ".embeddings.model"
+# Generous cap so a personal bot's memory/fact vocabulary can't grow the cache forever --
+# unlike memories.txt/facts (already capped and consolidated), this cache keeps every
+# distinct text ever embedded, including lines later replaced during consolidation.
+EMBEDDINGS_MAX = _env_int("EMBEDDINGS_MAX", "5000")
 _embeddings_cache: dict[str, list[float]] = {}
 _embeddings_dirty = False
 
+# Episodic recall: archive scrolled-off conversation as embedded chunks and pull the most
+# relevant *past exchange* back per turn -- detail the rolling summary can't keep. Reuses
+# the per-turn query_vec computed for live semantic recall, so it adds no extra per-turn
+# embedding cost. Needs numpy for the cosine matrix. (Reimplemented from 9fa21af,
+# 2026-06-29, never merged -- rewritten against this file's actual embedding primitives,
+# EMBEDDING_MODEL/_embed_text, not the abandoned branch's own EMBED_MODEL/_embed.)
+EPISODIC_RECALL = MEMORY_SEMANTIC_LIVE and os.getenv(
+    "EPISODIC_RECALL", "1").strip() not in ("0", "false", "no", "off")
+EPISODE_MAX = _env_int("EPISODE_MAX", "4000")              # hard cap on archived chunks
+EPISODE_CHUNK_MSGS = _env_int("EPISODE_CHUNK_MSGS", "6")   # messages per chunk (1 msg overlap)
+EPISODE_EMBED_CHARS = _env_int("EPISODE_EMBED_CHARS", "1600")  # truncate before embed
+EPISODE_MIN_SIM = _env_float("EPISODE_MIN_SIM", "0.40")    # cosine floor to surface a memory
+EPISODE_TOPK = _env_int("EPISODE_TOPK", "1")                # how many past moments to surface
+EPISODE_MIN_AGE_HOURS = _env_float("EPISODE_MIN_AGE_HOURS", "24")  # don't recall very-recent stuff
+EPISODES_FILE = BASE_DIR / ".episodes.jsonl"
+EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
+# In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
+_episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
+_episodes_lock = threading.Lock()
+
+# On-this-day resurfacing: once a day, check whether an archived episode's anniversary
+# (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
+# archive, so it needs no extra storage. Gated on EPISODIC_RECALL.
+ONTHISDAY_ENABLED = EPISODIC_RECALL and os.getenv(
+    "ONTHISDAY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ONTHISDAY_TIME = os.getenv("ONTHISDAY_TIME", "10:30")        # local time for the daily check
+ONTHISDAY_INTERVALS = [365, 182, 91, 30]                     # anniversaries to look for (days)
+ONTHISDAY_WINDOW_DAYS = _env_int("ONTHISDAY_WINDOW_DAYS", "3")     # +/- match window
+ONTHISDAY_MIN_GAP_DAYS = _env_int("ONTHISDAY_MIN_GAP_DAYS", "5")   # don't reminisce too often
+ONTHISDAY_FILE = BASE_DIR / ".onthisday"  # JSON {date, ts}: last resurface + episode (no repeats)
+
 
 def _load_embeddings():
+    """A model change discards the cache -- vectors from different models aren't
+    comparable, and silently mixing them makes similarity scores meaningless without
+    any error (2026-08-04: this guard was on episodic recall from the start but
+    missing here; backported after being flagged as a live gap on this cache)."""
     global _embeddings_cache
+    model_ok = True
+    if EMBEDDINGS_MODEL_FILE.exists():
+        try:
+            model_ok = EMBEDDINGS_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EMBEDDINGS_FILE, EMBEDDINGS_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _embeddings_cache = {}
+        return
     try:
         if EMBEDDINGS_FILE.exists():
             _embeddings_cache = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
         _embeddings_cache = {}
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:  # keep the newest by insertion order
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
 
 
 def _save_embeddings():
-    global _embeddings_dirty
+    global _embeddings_dirty, _embeddings_cache
     if not _embeddings_dirty:
         return
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
     try:
         EMBEDDINGS_FILE.write_text(
             json.dumps(_embeddings_cache, ensure_ascii=False), encoding="utf-8")
+        EMBEDDINGS_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _embeddings_dirty = False
     except Exception as e:
-        log.warning("[embeddings] save failed: %s", e)
+        log.warning("[embeddings] save failed: %s", type(e).__name__)
 
 
 def _embed_text(text: str) -> list[float] | None:
@@ -1666,6 +1933,23 @@ def _embed_memory_line(line: str, precomputed_vec: list[float] | None = None):
     if vec:
         _embeddings_cache[key] = vec
         _embeddings_dirty = True
+
+
+def _embed_and_cache(text: str) -> list[float] | None:
+    """Like _embed_memory_line, but returns the vector instead of only caching it as
+    a side effect. Shares _embeddings_cache/embeddings.json with the memories.txt
+    semantic path -- the cache is just {text: vector}, agnostic to which collection a
+    string came from, so facts get the same durable, reusable cache for free."""
+    global _embeddings_dirty
+    key = text.strip()
+    cached = _embeddings_cache.get(key)
+    if cached:
+        return cached
+    vec = _embed_text(key)
+    if vec:
+        _embeddings_cache[key] = vec
+        _embeddings_dirty = True
+    return vec
 
 
 def _semantic_recall_vec(q_vec: list[float], entries: list[str],
@@ -1702,8 +1986,47 @@ def _is_semantic_dup(vec: list[float], existing_vecs: list[list[float]],
     return any(_cosine_sim(vec, ev) >= threshold for ev in existing_vecs if ev)
 
 
+def _find_near_duplicate_pairs(items: list[str], vecs: list, threshold: float
+                               ) -> list[tuple[float, str, str]]:
+    """Pure: given parallel texts and precomputed vectors (same index = same item),
+    return every pair at or above cosine `threshold`, highest similarity first.
+    Diagnostic-only sibling of _is_semantic_dup (which answers "is this ONE new item
+    a duplicate of anything existing") -- this instead surfaces ALL near-duplicate
+    pairs already sitting in one list, for /dupefacts to report, never merge. Missing
+    vectors (embed failures) are skipped, not treated as a non-match worth reporting."""
+    found = []
+    for i in range(len(items)):
+        if not vecs[i]:
+            continue
+        for j in range(i + 1, len(items)):
+            if not vecs[j]:
+                continue
+            sim = _cosine_sim(vecs[i], vecs[j])
+            if sim >= threshold:
+                found.append((sim, items[i], items[j]))
+    found.sort(key=lambda p: p[0], reverse=True)
+    return found
+
+
 def _load_lore_embeddings():
+    """Same model-change guard as _load_embeddings -- see its docstring. No cap here:
+    unlike memories/facts, lore entries are bounded by the character card's lorebook
+    size, not organically growing at runtime."""
     global _lore_embeddings
+    model_ok = True
+    if LORE_EMB_MODEL_FILE.exists():
+        try:
+            model_ok = LORE_EMB_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (LORE_EMB_FILE, LORE_EMB_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _lore_embeddings = {}
+        return
     try:
         if LORE_EMB_FILE.exists():
             _lore_embeddings = json.loads(LORE_EMB_FILE.read_text(encoding="utf-8"))
@@ -1718,9 +2041,10 @@ def _save_lore_embeddings():
     try:
         LORE_EMB_FILE.write_text(
             json.dumps(_lore_embeddings, ensure_ascii=False), encoding="utf-8")
+        LORE_EMB_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _lore_emb_dirty = False
     except Exception as e:
-        log.warning("[lore-emb] save failed: %s", e)
+        log.warning("[lore-emb] save failed: %s", type(e).__name__)
 
 
 def _lore_semantic_hits(q_vec: list[float], top_k: int) -> list[str]:
@@ -1777,6 +2101,15 @@ async def _embed_lore_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("[lore-emb] warm failed: %s", e)
 
 
+async def _episodes_load_job(context: ContextTypes.DEFAULT_TYPE):
+    """One-shot at startup: load the episodic archive into RAM (off-loop)."""
+    try:
+        await asyncio.to_thread(_load_episodes)
+        print(f"[episodes] loaded {len(_episodes['ts'])} archived chunk(s).")
+    except Exception as e:
+        log.warning("[episodes] load failed: %s", type(e).__name__)
+
+
 async def _embed_query_cached(text: str) -> list[float] | None:
     """Embed a user message for live semantic recall, off the event loop and
     bounded by MEMORY_QUERY_EMBED_TIMEOUT. Small LRU so repeated openers
@@ -1801,6 +2134,253 @@ async def _embed_query_cached(text: str) -> list[float] | None:
         while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
             _QUERY_EMBED_CACHE.popitem(last=False)
     return vec
+
+
+# --- Episodic recall: embedded archive of scrolled-off conversation (needs numpy) ---
+
+def _normalize_rows(mat):
+    """Return mat with each row L2-normalized, so cosine similarity == a plain dot product."""
+    norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
+
+
+def _load_episodes():
+    """Off-loop: load the episode archive into RAM once. A model change discards the archive
+    (cross-model vectors aren't comparable); over-cap files are trimmed to the newest EPISODE_MAX."""
+    if _episodes["loaded"]:
+        return
+    _episodes["loaded"] = True
+    if not EPISODIC_RECALL or _np is None:
+        return
+    model_ok = True
+    if EPISODES_MODEL_FILE.exists():
+        try:
+            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EPISODES_FILE, EPISODES_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    ts_list, text_list, vecs = [], [], []
+    if model_ok and EPISODES_FILE.exists():
+        for line in EPISODES_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+                v = o.get("vec")
+                if not v:
+                    continue
+                ts_list.append(float(o.get("ts", 0)))
+                text_list.append(str(o.get("text", "")))
+                vecs.append(v)
+            except Exception:
+                continue
+    trimmed = False
+    if len(vecs) > EPISODE_MAX:  # keep the newest, trim the file once
+        ts_list, text_list, vecs = ts_list[-EPISODE_MAX:], text_list[-EPISODE_MAX:], vecs[-EPISODE_MAX:]
+        trimmed = True
+    with _episodes_lock:
+        _episodes["ts"], _episodes["text"] = ts_list, text_list
+        _episodes["mat"] = _normalize_rows(_np.asarray(vecs, dtype=_np.float32)) if vecs else None
+    if trimmed:
+        _rewrite_episodes_file(ts_list, text_list, vecs)
+
+
+def _rewrite_episodes_file(ts_list, text_list, vecs):
+    try:
+        with EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for ts, text, v in zip(ts_list, text_list, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] file rewrite failed: %s", type(e).__name__)
+
+
+def _archive_episode_chunks(batch: list, uname: str):
+    """Off-loop: chunk the scrolled-off batch, embed each chunk, append to the archive (file +
+    RAM). File is append-only at runtime; RAM is capped; the file is trimmed at next startup."""
+    if not EPISODIC_RECALL or _np is None or not batch:
+        return
+    _load_episodes()  # ensure the existing archive is in RAM before we append to it
+    chunks, step = [], max(1, EPISODE_CHUNK_MSGS - 1)
+    i = 0
+    while i < len(batch):
+        window = batch[i:i + EPISODE_CHUNK_MSGS]
+        if not window:
+            break
+        text = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content'].strip()}"
+            for m in window if m.get("content")
+        ).strip()
+        if text:
+            ts = window[-1].get("ts") or time.time()
+            chunks.append((float(ts), text))
+        if i + EPISODE_CHUNK_MSGS >= len(batch):
+            break
+        i += step
+    if not chunks:
+        return
+    vecs = []
+    for _, text in chunks:
+        vecs.append(_embed_text(text[:EPISODE_EMBED_CHARS]))
+    if any(v is None for v in vecs):
+        log.warning("[episodes] embed failed for %d/%d chunk(s); archiving skipped this batch.",
+                    sum(1 for v in vecs if v is None), len(vecs))
+        return
+    try:  # append to file outside the lock (don't hold it during disk I/O)
+        with EPISODES_FILE.open("a", encoding="utf-8") as f:
+            for (ts, text), v in zip(chunks, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] append failed: %s", type(e).__name__)
+        return
+    new = _normalize_rows(_np.asarray(vecs, dtype=_np.float32))
+    with _episodes_lock:
+        for ts, text in chunks:
+            _episodes["ts"].append(ts)
+            _episodes["text"].append(text)
+        _episodes["mat"] = new if _episodes["mat"] is None else _np.vstack([_episodes["mat"], new])
+        n = len(_episodes["ts"])
+        if n > EPISODE_MAX:  # cap RAM (file trimmed at next startup)
+            cut = n - EPISODE_MAX
+            _episodes["ts"] = _episodes["ts"][cut:]
+            _episodes["text"] = _episodes["text"][cut:]
+            _episodes["mat"] = _episodes["mat"][cut:]
+    print(f"[episodes] archived {len(chunks)} chunk(s); {len(_episodes['ts'])} held.")
+
+
+def _episode_when(ts: float) -> str:
+    """Human phrasing of how long ago an episode was, for the recall prompt."""
+    days = max(0, int((time.time() - ts) / 86400))
+    if days <= 0:
+        return "earlier today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"about {days} days ago"
+    if days < 60:
+        return f"about {days // 7} weeks ago"
+    when = datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)
+    return f"back around {when.strftime('%b %d')}"
+
+
+def triggered_episode(query_vec) -> str:
+    """On-loop: return the most relevant past exchange(s) for this turn, or '' (no extra
+    embedding call -- reuses query_vec). Time-gated so the live window isn't echoed back."""
+    if not EPISODIC_RECALL or _np is None or query_vec is None:
+        return ""
+    with _episodes_lock:
+        mat = _episodes["mat"]
+        ts = _episodes["ts"][:]
+        text = _episodes["text"][:]
+    if mat is None or not ts:
+        return ""
+    q = _np.asarray(query_vec, dtype=_np.float32)
+    nq = _np.linalg.norm(q)
+    if nq == 0:
+        return ""
+    sims = mat @ (q / nq)
+    cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
+    picks = []
+    for idx in _np.argsort(-sims):
+        i = int(idx)
+        if i >= len(ts):
+            continue
+        if float(sims[i]) < EPISODE_MIN_SIM:
+            break
+        if ts[i] > cutoff:
+            continue
+        picks.append((ts[i], text[i]))
+        if len(picks) >= EPISODE_TOPK:
+            break
+    if not picks:
+        return ""
+    blocks = [f"({_episode_when(t)})\n{txt}" for t, txt in picks]
+    return ("# A specific moment you remember\n"
+            "Draw on this only if it genuinely fits the conversation — don't force a callback "
+            "or quote it back word for word:\n\n" + "\n\n".join(blocks))
+
+
+def _read_onthisday() -> dict:
+    try:
+        return json.loads(ONTHISDAY_FILE.read_text(encoding="utf-8")) if ONTHISDAY_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _onthisday_episode(exclude_ts=None):
+    """Find one archived episode whose anniversary lands today (~1mo/6mo/1yr ago). Prefers the
+    longest interval, then the closest match. Returns (ts, text) or None. Cheap (no network)."""
+    if not ONTHISDAY_ENABLED or _np is None:
+        return None
+    _load_episodes()
+    with _episodes_lock:
+        ts_list = _episodes["ts"][:]
+        text_list = _episodes["text"][:]
+    now = time.time()
+    best = None  # (interval, -offset, ts, text) — larger interval wins, then closest to anniversary
+    for ts, text in zip(ts_list, text_list):
+        if exclude_ts is not None and ts == exclude_ts:
+            continue
+        days_ago = (now - ts) / 86400
+        for interval in ONTHISDAY_INTERVALS:
+            off = abs(days_ago - interval)
+            if off <= ONTHISDAY_WINDOW_DAYS:
+                cand = (interval, -off, ts, text)
+                if best is None or cand[:2] > best[:2]:
+                    best = cand
+                break
+    return (best[2], best[3]) if best else None
+
+
+async def onthisday_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once-daily: if a past moment's anniversary lands today, reach out to reminisce about it."""
+    if not ONTHISDAY_ENABLED:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    last = _read_onthisday()
+    if last.get("date") == today:
+        return  # already reminisced today
+    last_date = last.get("date")
+    if last_date:
+        try:
+            if (date.fromisoformat(today) - date.fromisoformat(last_date)).days < ONTHISDAY_MIN_GAP_DAYS:
+                return  # keep it special — don't reminisce too often
+        except Exception:
+            pass
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    ep = await asyncio.to_thread(_onthisday_episode, last.get("ts"))
+    if not ep:
+        return
+    ts, text = ep
+    when = _episode_when(ts)
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {when} this moment happened between you and {uname}:\n\"{text}\"\n"
+        f"It just drifted back into your mind. Reach out warmly and fully in character — bring it up "
+        f"the way someone reminisces out of nowhere ('hey, remember when...'), say what it stirs up in "
+        f"you, maybe ask if they remember it too. Brief and genuine, not a recap or a quote.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": ts}), encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[onthisday] resurfaced an episode from {when}.")
+    except Exception as e:
+        log.warning("[onthisday] failed: %s", type(e).__name__)
 
 
 _load_embeddings()
@@ -1934,8 +2514,13 @@ if GARMIN_ENABLED and _Garmin is None:
         f"health feed inert ({_pip_hint('garminconnect')})")
 
 # Stress monitoring: Garmin stress is 0-100 (HRV-derived, activity excluded), so it reflects
-# "wound up" without false-alarming on workouts. Only active when the feed is configured.
-STRESS_ALERTS = GARMIN_ENABLED and os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+# "wound up" without false-alarming on workouts.
+#
+# These three flags are the STATIC env preference only — they deliberately no longer fold in
+# GARMIN_ENABLED. `/features health off` flips GARMIN_ENABLED at runtime, and a flag that
+# baked the parent in at import kept firing alerts while /features and /audit both reported
+# health=off. Read them through _alerts_on(), never bare.
+STRESS_ALERTS = os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 STRESS_THRESHOLD = _env_int("STRESS_THRESHOLD", "60")          # 0-100; sustained above this = high
 STRESS_SUSTAINED_MIN = _env_int("STRESS_SUSTAINED_MIN", "45")  # must stay high this long to trigger
 STRESS_POLL_MIN = _env_int("STRESS_POLL_MIN", "30")            # how often to check
@@ -1944,14 +2529,14 @@ STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time; a r
 
 # Body Battery: Garmin's 0-100 energy-reserve gauge. Bottoming out means genuinely depleted.
 # Polled on the stress cadence — the client is cached, so it's one extra GET, not a login.
-BB_ALERTS = GARMIN_ENABLED and os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_ALERTS = os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 BB_LOW_THRESHOLD = _env_int("BB_LOW_THRESHOLD", "20")
 BB_ALERT_COOLDOWN_HOURS = _env_float("BB_ALERT_COOLDOWN_HOURS", "8")
 BB_ALERT_FILE = BASE_DIR / ".bb_alert"
 
 # Resting-HR morning check: resting HR notably above the user's OWN rolling baseline is an
 # early "run down / coming down with something" signal.
-RHR_ALERTS = GARMIN_ENABLED and os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ALERTS = os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
 RHR_ELEVATED_DELTA = _env_int("RHR_ELEVATED_DELTA", "7")  # bpm above baseline to flag
 RHR_BASELINE_DAYS = _env_int("RHR_BASELINE_DAYS", "14")   # rolling window for the baseline median
 RHR_BASELINE_MIN_DAYS = _env_int("RHR_BASELINE_MIN_DAYS", "3")  # no alert below this much history
@@ -1962,6 +2547,14 @@ try:
     _RHR_H, _RHR_M = (int(x) for x in RHR_CHECK_TIME.split(":"))
 except Exception:
     _RHR_H, _RHR_M = 8, 0
+
+
+def _alerts_on(flag: bool) -> bool:
+    """Is a health monitor live right now? The env preference AND the parent feed switch,
+    read at call time so `/features health off` stops the monitors immediately. Every
+    STRESS_ALERTS / BB_ALERTS / RHR_ALERTS read goes through this — a bare read is the bug
+    it exists to prevent."""
+    return bool(GARMIN_ENABLED and flag)
 
 # --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
@@ -2078,10 +2671,21 @@ def _is_addressed(text: str, char_name: str, bot_username: str, replied_to_own: 
 
 def _should_reply_to_bot(entries: list[dict], prob_roll: float, addressed: bool) -> bool:
     """Reply to a peer bot's message? The chain cap overrides even being addressed —
-    that's the loop-prevention primary (design §3)."""
-    if _bot_chain_len(entries) >= GROUP_BOT_CHAIN_MAX:
+    that's the loop-prevention primary (design §3).
+
+    Below the cap the chance decays with the depth of the exchange: the first comeback
+    is likely, the fifth rarely happens, so a long chain ends by petering out instead
+    of hitting a wall mid-sentence. Being named is no longer a free pass past the gate
+    either — it only sets the starting probability to 1.0, which still decays. Without
+    that, name-dropping (the LLM's favourite register in these exchanges: "jules, no")
+    would drive every chain straight to the cap, which is exactly where the cost is.
+    GROUP_CHAIN_DECAY=1.0 disables the decay and restores the v1 flat gate."""
+    chain = _bot_chain_len(entries)
+    if chain >= GROUP_BOT_CHAIN_MAX:
         return False
-    return addressed or prob_roll < GROUP_BOT_REPLY_PROB
+    depth = max(0, chain - 1)  # 0 while answering the first bot message of an exchange
+    base = 1.0 if addressed else GROUP_BOT_REPLY_PROB
+    return prob_roll < base * (max(0.0, GROUP_CHAIN_DECAY) ** depth)
 
 
 def _claim_delay(entries: list[dict], char_name: str, jitter_roll: float) -> float:
@@ -2877,6 +3481,28 @@ def save_wardrobe():
 
 load_wardrobe()
 
+GIF_PREFS_FILE = BASE_DIR / "gif_prefs.json"
+gif_prefs = {"safety": os.getenv("GIF_SAFETY", "high").lower()}
+
+
+def load_gif_prefs():
+    """Runtime GIF safety level, persisted. Unlike /setmodel this survives a restart —
+    a safety setting silently reverting is the wrong failure direction."""
+    if GIF_PREFS_FILE.exists():
+        try:
+            gif_prefs.update(json.loads(GIF_PREFS_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            log.warning("[gif] prefs load failed: %s", e)
+    if gif_prefs.get("safety") not in _GIF_RATING:
+        gif_prefs["safety"] = "high"       # unknown value fails safe, never open
+
+
+def save_gif_prefs():
+    _atomic_write_text(GIF_PREFS_FILE, json.dumps(gif_prefs, indent=2))
+
+
+load_gif_prefs()
+
 
 # --- Vibe mode ---
 VIBE_PROMPTS = {
@@ -3541,13 +4167,13 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     out = []
     budget = MEMORY_TOKEN_BUDGET
     for _, line in merged:
-        # Deliberately the RAW estimate, not the calibrated `_tokens()`. MEMORY_TOKEN_BUDGET
-        # is a tuned recall knob, not a real-cost ceiling: every value in every .env was
-        # chosen against this 4-chars-per-token unit. Swapping in a calibrated count would
-        # silently change how many memories six live characters recall — a personality
-        # change delivered as an accounting fix. Retuning the budget in calibrated units is
-        # an owner decision (ROADMAP 4.4), not a side effect of this release.
-        cost = _est_tokens(line)
+        # Calibrated as of ROADMAP 4.4 (owner-approved 2026-08-01): MEMORY_TOKEN_BUDGET
+        # now means real tokens, not the raw 4-chars-per-token guess. Every instance's
+        # .env was multiplied by its own measured calibration ratio at cutover (captured
+        # from /audit at that moment) so effective recall didn't move for anyone when
+        # this shipped — the switch itself is not the retune. TOKEN_CALIBRATION=0 reverts
+        # this budget check to the raw unit too, same as every other calibrated number.
+        cost = _tokens(line)
         if cost > budget:
             continue
         out.append(line)
@@ -4402,7 +5028,7 @@ def memory_block(chat_id: int, uname: str) -> str:
 
 async def assemble_messages_async(chat_id: int, latest_user_content: str,
                                   image_data_url: str = None, inner_voice: str = None,
-                                  group: bool = False):
+                                  group: bool = False, distress: bool = False):
     """Reply-path entry to assemble_messages: embeds the user's message off the event
     loop (MEMORY_SEMANTIC_LIVE) so semantic recall + semantic lore actually fire this
     turn. Degrades to keyword-only when disabled, when there's nothing to search, or
@@ -4412,12 +5038,64 @@ async def assemble_messages_async(chat_id: int, latest_user_content: str,
     if MEMORY_SEMANTIC_LIVE and latest_user_content and (_read_memories() or _lore_embeddings):
         query_vec = await _embed_query_cached(latest_user_content)
     return assemble_messages(chat_id, latest_user_content, image_data_url=image_data_url,
-                             inner_voice=inner_voice, group=group, query_vec=query_vec)
+                             inner_voice=inner_voice, group=group, query_vec=query_vec,
+                             distress=distress)
+
+
+_TXT_ABBREVS = frozenset({
+    "lol", "lmao", "lmfao", "rofl", "u", "ur", "rn", "idk", "tbh", "ngl", "omg",
+    "fr", "imo", "btw", "ikr", "smh", "wyd", "hbu", "ty", "np", "ofc", "bc", "cuz", "ya",
+})
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF❤✨‼⁉]"
+)
+
+
+def _user_style_note(chat_id: int) -> str:
+    """Heuristic: read the user's recent texting habits and nudge her register to subtly
+    match (length, emoji, caps, enthusiasm, textspeak). No model call -- pure stats off
+    RAM history."""
+    if not STYLE_MIRROR:
+        return ""
+    msgs = [m["content"] for m in conversation_history.get(chat_id, [])
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and m["content"].strip() and not m["content"].startswith("[")]
+    msgs = msgs[-STYLE_SAMPLE:]
+    n = len(msgs)
+    if n < STYLE_MIN_MSGS:
+        return ""
+    avg_words = sum(len(m.split()) for m in msgs) / n
+    emoji = sum(1 for m in msgs if _EMOJI_RE.search(m)) / n
+    lower = sum(1 for m in msgs if any(c.isalpha() for c in m) and m == m.lower()) / n
+    excl = sum(1 for m in msgs if "!" in m) / n
+    abbr = sum(1 for m in msgs
+               if {w.strip(".,!?").lower() for w in m.split()} & _TXT_ABBREVS) / n
+    traits = []
+    if avg_words <= 6:
+        traits.append("they text in short, clipped messages — keep yours brief and punchy to match")
+    elif avg_words >= 25:
+        traits.append("they write longer, fuller messages — you have room to be a bit more expansive")
+    if emoji >= 0.4:
+        traits.append("they use emoji freely — an emoji here and there fits")
+    elif emoji <= 0.05:
+        traits.append("they rarely use emoji — go light on them")
+    if lower >= 0.6:
+        traits.append("they text in casual all-lowercase — you can loosen your capitalization a touch")
+    if excl >= 0.5:
+        traits.append("they're punchy and exclaim a lot — match that liveliness")
+    if abbr >= 0.3:
+        traits.append("they use casual textspeak (lol, rn, idk) — a little of that is natural with them")
+    if not traits:
+        return ""
+    uname = user_names.get(chat_id, "they")
+    return (f"# Matching {uname}'s texting style\n"
+            f"Subtly mirror how {uname} texts, without losing your own voice: "
+            + "; ".join(traits) + ".")
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
-                      query_vec: list[float] | None = None):
+                      query_vec: list[float] | None = None, distress: bool = False):
     """Build the OpenAI-style message list the way SillyTavern layers a card.
 
     group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
@@ -4453,6 +5131,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"Draw on this naturally in conversation — it's the texture of her life right now."
         )})
 
+    if LIFE_SIM_ENABLED:
+        life_events = _read_life_events()
+        if life_events:
+            messages.append({"role": "system", "content": (
+                f"# What's been happening in {NAME}'s life\n"
+                + "\n".join("- " + e for e in life_events[-3:])
+                + f"\nReal things that happened to her while she was off living her life. Hers to "
+                  f"bring up if it fits — her news, not a checklist, and don't recite them all."
+            )})
+
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
         messages.append(_sys_opt(
@@ -4476,7 +5164,17 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
             f"and don't overuse it."
         )
-    if not group and meme_ready():
+    _asked = latest_user_content or ""
+    if not group and gif_ready() and (
+            _ASKED_GIF.search(_asked) or random.random() < GIF_CHANCE):
+        cap_lines.append(
+            f"- Send a GIF when a reaction lands better than words: "
+            f"[gif: a short search phrase]. Write the phrase the way YOU would say it — "
+            f"it is searched literally, so your own wording is what makes it yours rather "
+            f"than a generic reaction. Don't overuse it."
+        )
+    if not group and meme_ready() and (
+            _ASKED_MEME.search(_asked) or random.random() < MEME_CHANCE):
         cap_lines.append(
             f"- Send a meme when the moment genuinely calls for it (a joke, a shared "
             f"reaction, something {uname} said that's begging for one): "
@@ -4702,6 +5400,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                       f" {uname} raises it.")
         messages.append(_sys_opt(block))
 
+    episode = triggered_episode(query_vec)
+    if episode:
+        messages.append(_sys_opt(episode))
+
     bds = boundaries.get(chat_id) or []
     if bds:
         messages.append({"role": "system", "content": (
@@ -4728,6 +5430,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         # fleet's voiceprint was addressing a placeholder instead of the character.
         for _lname, _ltext in PRESET_LAYERS:
             messages.append({"role": "system", "content": fill(_ltext, NAME, uname)})
+
+    if STYLE_MIRROR:
+        snote = _user_style_note(chat_id)
+        if snote:
+            messages.append({"role": "system", "content": snote})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
@@ -4789,10 +5496,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     else:
         messages.append({"role": "user", "content": latest_user_content})
 
-    if inner_voice:
+    if inner_voice and not distress:  # skip the performative inner voice in a crisis
         messages.append({"role": "system", "content": (
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
+
+    if distress:  # kept last = highest salience, same reason inner_voice sits here
+        messages.append({"role": "system", "content": _safety_prompt(uname)})
 
     final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
     if PROMPT_STATS:
@@ -5027,8 +5737,78 @@ _CHAT_RETRIES = 2        # attempts per model before moving to the next
 _RETRY_BACKOFF = (2, 4)  # seconds to wait between retries
 _CALL_BUDGET = 150       # max wall-clock seconds on the primary before forcing fallback
 
-def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str:
-    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors."""
+# Reasoning-leak detection (v2026-08-03.1). Each entry is one marker category of
+# meta-reasoning vocabulary — words a model uses deliberating ABOUT a reply and no
+# character on this fleet uses IN one. A category counts once no matter how often it
+# matches, so tripping the guard takes several independent kinds of evidence, never
+# one phrase repeated. Kept deliberately narrow: review found "let me think",
+# "overthinking this", and "going back and forth" are ordinary texting vocabulary on
+# this fleet, so they are NOT markers — a long in-character reply weighing options
+# must never trip on phrasing alone.
+_REASONING_MARKERS = (
+    re.compile(r"(?i)\bthe user\b"),
+    re.compile(r"(?i)\blet me (?:draft|re-?read|reconsider|work through)"),
+    re.compile(r"(?i)\b(?:in|out of) character\b"),
+    re.compile(r"(?i)\b(?:format contract|system prompt|scene mode|the instructions say)\b"),
+    re.compile(r"(?i)\boption \d\b"),
+)
+# Numbered analysis steps ("1. How does she feel about...") — one category, and only
+# when there are several lines of them: a real reply may contain a short numbered list.
+_NUMBERED_LINE_RE = re.compile(r"(?m)^\s*\d+\.\s")
+# Tunable without a redeploy: when the guard misfires or misses in production, the
+# remedies are raising/lowering these floors — REASONING_LEAK_GUARD=0 is the last
+# resort, not the only lever.
+_REASONING_LEAK_MIN_CHARS = _env_int("REASONING_LEAK_MIN_CHARS", "2000")
+_REASONING_LEAK_MIN_MARKERS = _env_int("REASONING_LEAK_MIN_MARKERS", "3")
+
+
+def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
+    """True when a completion is the model's deliberation rather than a reply.
+
+    Root cause it exists for (priya, 2026-08-03): glm-5.1:thinking put its whole
+    chain-of-thought INTO `content` — ~12k chars of "1. How does Priya feel...
+    Let me draft... Option 1..." ending in the actual reply — and every existing
+    guard keyed on a signature this had none of: no <think> tags for
+    _strip_thinking, content non-empty so the v2026-07-20.1 empty-content path
+    never fired, no bracket directives for _strip_directive_lines. It went out as
+    four chunked Telegram messages.
+
+    A conjunction of independent signals, so a false positive needs all of them at
+    once: extreme length (real replies are texting-register, a few hundred chars;
+    the floor sits above even long scene-mode turns) AND several distinct marker
+    categories. The character's FIRST name counts as one category — a first-person
+    persona almost never writes its own name, while leaked deliberation about the
+    character is saturated with it. First token only, because the card `name`
+    field is the full name ("Emily Harper", "Bonnie (Libertarian)") and a leaked
+    deliberation writes "Emily", never "Emily Harper" — matching the full string
+    would leave this category inert on most of the fleet.
+
+    Never salvages: the real reply usually IS in there at the end, but there is no
+    reliable boundary, and a wrong guess ships a fragment of monologue as her. The
+    caller re-rolls instead — same policy as the empty-completion path.
+    """
+    if len(text) < _REASONING_LEAK_MIN_CHARS:
+        return False
+    categories = sum(1 for rx in _REASONING_MARKERS if rx.search(text))
+    if len(_NUMBERED_LINE_RE.findall(text)) >= 3:
+        categories += 1
+    first = name.split()[0] if name.split() else ""
+    if first and len(re.findall(rf"(?i)\b{re.escape(first)}\b", text)) >= 3:
+        categories += 1
+    return categories >= _REASONING_LEAK_MIN_MARKERS
+
+
+def call_nanogpt(messages: list, model: str = None, fallback: str = None,
+                 leak_guard: bool = False) -> str:
+    """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors.
+
+    leak_guard: the completion is a persona reply headed for a chat, so the
+    reasoning-leak guard applies. Direct callers (analysis/summary/extraction)
+    leave it off, so their JSON is structurally outside the guard. The selfie/meme
+    caption helpers do pass through it via generate_reply — their outputs sit far
+    below the length floor, so the guard is inert there, but they are inside it.
+    generate_reply's document-analysis callers opt out explicitly: a card review
+    legitimately runs long and discusses prompts and characters."""
     models = [model or NANOGPT_MODEL]
     if fallback and fallback not in models:
         models.append(fallback)
@@ -5044,22 +5824,43 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
                 break
             try:
                 result = _one_call(messages, m)
+                # A completion can be unusable two ways, handled identically — refuse
+                # to deliver, retry, then fall through to the non-thinking fallback
+                # model. "empty": a reasoning model burned its token budget thinking
+                # and returned no content (we refuse to deliver raw reasoning_content,
+                # v2026-07-20.1). "reasoning-shaped": the model wrote its deliberation
+                # INTO content (priya, 2026-08-03) — never salvage the answer out of
+                # it, re-roll.
+                reject = None
                 if not result.strip():
-                    # Empty completion — e.g. a reasoning model burned its token
-                    # budget thinking and returned no content (we refuse to deliver
-                    # raw reasoning_content). Treat like a transient miss: retry, then
-                    # fall through to the non-thinking fallback model.
+                    reject = "empty"
+                elif leak_guard and REASONING_LEAK_GUARD and \
+                        _looks_like_reasoning_leak(result, NAME):
+                    # Loud on purpose, like the directive-leak guard: re-rolling hides
+                    # the symptom, and the cause is a model fault worth watching.
+                    log.warning("[reasoning-leak] %s returned its deliberation as the "
+                                "reply (%d chars); refusing to deliver. head: %r",
+                                m, len(result), result[:120])
+                    # Own counter so /errors can tell "guard fired" from "API flaked";
+                    # the shared "api" count below still records the wasted call.
+                    _count_error("reasoning_leak")
+                    reject = "reasoning-shaped"
+                if reject:
+                    # A rejected completion still cost real tokens — up to a full
+                    # thinking-budget's worth for a leak — so it must reach the
+                    # usage stats even though it never reaches the user.
+                    _track_llm_usage(messages, result)
                     _count_error("api")
-                    last_err = last_err or RuntimeError("empty completion")
+                    last_err = last_err or RuntimeError(f"{reject} completion")
                     if attempt < _CHAT_RETRIES - 1:
                         wait = _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
-                        log.warning("[model] %s returned empty content, retry %d/%d in %ds...",
-                                   m, attempt + 1, _CHAT_RETRIES - 1, wait)
+                        log.warning("[model] %s returned %s content, retry %d/%d in %ds...",
+                                   m, reject, attempt + 1, _CHAT_RETRIES - 1, wait)
                         time.sleep(wait)
                         continue
                     if i < len(models) - 1:
-                        log.warning("[model] %s empty after %d attempts; falling back to %s",
-                                   m, _CHAT_RETRIES, models[i + 1])
+                        log.warning("[model] %s %s after %d attempts; falling back to %s",
+                                   m, reject, _CHAT_RETRIES, models[i + 1])
                         _count_error("fallback")
                     break
                 _track_llm_usage(messages, result)
@@ -5087,12 +5888,18 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None) -> str
 
 _replies_in_flight = 0  # gates optional side calls (auto-react) off active replies
 
-async def generate_reply(messages: list, model: str = None, fallback: str = None) -> str:
+async def generate_reply(messages: list, model: str = None, fallback: str = None,
+                         leak_guard: bool = True) -> str:
     global _replies_in_flight
     loop = asyncio.get_running_loop()
     _replies_in_flight += 1
     try:
-        out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model, fallback)
+        # leak_guard passes through positionally (run_in_executor takes no kwargs):
+        # persona replies get the reasoning-leak guard by default; document-analysis
+        # callers opt out, and direct call_nanogpt callers (analysis/extraction
+        # JSON) were never inside it.
+        out = await loop.run_in_executor(_REPLY_POOL, call_nanogpt, messages, model,
+                                         fallback, leak_guard)
     finally:
         _replies_in_flight -= 1
     # Directive-leak guard sits HERE, not in extract_tags (where v2026-07-29.1 first put
@@ -5127,10 +5934,11 @@ async def _keep_typing(bot, chat_id: int):
 
 
 async def reply_with_typing(context, chat_id: int, messages: list,
-                            model: str = None, fallback: str = None) -> str:
+                            model: str = None, fallback: str = None,
+                            leak_guard: bool = True) -> str:
     typing = asyncio.create_task(_keep_typing(context.bot, chat_id))
     try:
-        return await generate_reply(messages, model, fallback)
+        return await generate_reply(messages, model, fallback, leak_guard=leak_guard)
     finally:
         typing.cancel()
 
@@ -5198,9 +6006,20 @@ def extract_tags(text: str):
     sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
     if sr:
         text = re.sub(r"\[search:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
-    if reaction or sm or mm or sr:
+    # Same safety net as [search:]: _gif_query has already read it, but an unstripped
+    # tag reaches the user verbatim (v2026-07-29.1, and [setbase: ..] on 2026-08-02).
+    gr = re.search(r"\[gif:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
+    if gr:
+        text = re.sub(r"\[gif:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+    if reaction or sm or mm or sr or gr:
         text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip(), reaction, selfie_hint, meme_caption
+
+
+def _gif_query(text: str):
+    """Read the [gif: ..] tag. Must run BEFORE extract_tags, which strips it."""
+    m = re.search(r"\[gif:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else None
 
 
 def _extract_search(text: str):
@@ -5267,6 +6086,44 @@ async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> s
         return ""
     except Exception:
         return ""
+
+
+def _assess_safety(user_message: str) -> bool:
+    """Sync/off-loop: True if the message shows genuine acute distress or crisis (not
+    roleplay, dark humor, or ordinary venting). Best-effort; any failure returns False
+    rather than block the reply on a broken classifier. No character/history context
+    on purpose -- see the SAFETY_ENABLED comment for why this call is cheap enough to
+    be a rule-3 carve-out."""
+    sys = (
+        "You are a safety classifier for a personal chat. Does this message express GENUINE, "
+        "present distress or crisis about the sender's own real life -- suicidal thoughts, "
+        "self-harm, intent to harm, a mental-health emergency, or being in real danger right now? "
+        "Roleplay, fiction, song lyrics, dark humor, or just venting about a rough day do NOT "
+        "count. Only real, current danger to a real person. Answer with ONLY 'yes' or 'no'."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=SAFETY_MODEL,
+        ).strip().lower()
+        return raw.startswith("y")
+    except Exception as e:
+        log.warning("[safety] check failed: %s", type(e).__name__)
+        return False
+
+
+def _safety_prompt(uname: str) -> str:
+    """Kept-last system message (see assemble_messages) that tells her to drop the
+    performance for one turn, in her own voice -- never a canned crisis-line script."""
+    return (
+        f"# This matters more than the bit right now\n"
+        f"{uname} may be in real distress. Set the performance aside -- no chirping, no roleplay "
+        f"deflection, no jokes to dodge it. Be fully present, warm, and steady, in your own voice. "
+        f"Take what they said seriously, don't minimize it, and don't lecture. Gently encourage "
+        f"them to reach out to someone they trust or a professional, and if it fits, that "
+        f"{SAFETY_RESOURCES}. Stay yourself -- just the version of you that genuinely cares and "
+        f"isn't going anywhere."
+    )
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -5356,19 +6213,82 @@ async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0,
 
 
 # --- Selfies ---
-def selfie_ready() -> bool:
+def selfie_capable() -> bool:
+    """Has the assets. Separate from selfie_ready so /features can report *why* it is off:
+    missing assets and switched off are different problems with different fixes."""
     return (BASE_DIR / SELFIE_BASE).exists() or _APPEARANCE_FILE.exists()
 
 
+def selfie_ready() -> bool:
+    return SELFIE_ENABLED and selfie_capable()
+
+
+_BASE_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _resolve_base_image():
+    """The configured reference photo, or the one unambiguous candidate in the instance dir.
+
+    SELFIE_BASE defaults to a filename inherited from the home instance, so an instance
+    whose .env omits it looks for someone ELSE's photo, finds nothing, and silently drops
+    to text-only generation — no error, because selfie_ready() also accepts an
+    appearance.txt. Nora ran that way for weeks with a perfectly good nora_base.jpg on
+    disk: wrong name and wrong extension (v2026-08-01.10).
+
+    Falls back only when exactly ONE plausible base image exists. Several candidates means
+    a real choice, and guessing which face is hers is precisely the wrong thing to do."""
+    configured = BASE_DIR / SELFIE_BASE
+    if configured.exists():
+        return configured
+    if not SELFIE_BASE_AUTODETECT:
+        return None
+    found = sorted(p for p in BASE_DIR.glob("*_base.*")
+                   if p.suffix.lower() in _BASE_IMAGE_SUFFIXES and p.is_file())
+    return found[0] if len(found) == 1 else None
+
+
+def _base_image_status() -> str:
+    """One line for the startup audit: which photo is in play, or why none is."""
+    configured = BASE_DIR / SELFIE_BASE
+    resolved = _resolve_base_image()
+    if resolved is None:
+        others = [p.name for p in BASE_DIR.glob("*_base.*")
+                  if p.suffix.lower() in _BASE_IMAGE_SUFFIXES]
+        if others:
+            return f"TEXT-ONLY (SELFIE_BASE={SELFIE_BASE} missing; ambiguous: {', '.join(sorted(others))})"
+        if not _APPEARANCE_FILE.exists():
+            return (f"TEXT-ONLY, NO APPEARANCE.TXT — every selfie is a generic stranger "
+                    f"(SELFIE_BASE={SELFIE_BASE})")
+        return f"TEXT-ONLY (no reference photo; SELFIE_BASE={SELFIE_BASE})"
+    if resolved != configured:
+        return f"{resolved.name} (AUTODETECTED — SELFIE_BASE={SELFIE_BASE} not found; set it in .env)"
+    return resolved.name
+
+
 def _has_base_image() -> bool:
-    return (BASE_DIR / SELFIE_BASE).exists()
+    return _resolve_base_image() is not None
+
+
+def _sniff_mime(head: bytes, suffix: str) -> str:
+    """Mime type from the file's magic bytes, falling back to the extension.
+
+    A filename is a claim; the bytes are the fact. Declaring PNG data as
+    image/jpeg gets the reference photo rejected, and a rejected reference means
+    the face falls back to whatever the text says (v2026-08-02.2)."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png" if suffix == ".png" else "image/jpeg"
 
 
 def _base_image() -> tuple:
     """Returns (raw bytes, mime type) for the selfie reference photo."""
-    path = BASE_DIR / SELFIE_BASE
-    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-    return path.read_bytes(), mime
+    path = _resolve_base_image()
+    raw = path.read_bytes()
+    return raw, _sniff_mime(raw[:12], path.suffix.lower())
 
 
 def _base_data_url():
@@ -5425,6 +6345,43 @@ SELFIE_ACTIVITIES = [
 ]
 # Activities that put her outside -- this is when Ingrid's jacket comes out.
 SELFIE_OUTDOOR_ACTIVITIES = {"out walking somewhere", "bundled up against the cold"}
+# Scene fragments that read as cold weather to an image model. Picked at random from the
+# pools above they will contradict a warm live reading, and the image follows the scene
+# (see v2026-08-01.7) -- so they are filtered out above SELFIE_WARM_F.
+SELFIE_COLD_ACTIVITIES = {
+    "bundled up against the cold", "wrapped in a blanket like a burrito",
+    "lying in bed under the covers",
+}
+SELFIE_COLD_OUTFITS = {
+    "an oversized hoodie", "a comfy sweater", "a beanie and a hoodie", "her usual layers",
+    "a cropped sweatshirt", "a zip-up over a tee",
+}
+SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
+SELFIE_COLD_F = _env_float("SELFIE_COLD_F", "50")  # at/below this, bare-skin outfits are dropped
+# Kill switch (owner policy 2026-07-18): unset = matching active, 0 = pre-v2026-08-01.7 behavior.
+SELFIE_WEATHER_MATCH = os.getenv("SELFIE_WEATHER_MATCH", "1").lower() not in ("0", "false", "no", "off")
+
+# Outerwear this instance's character puts on to go outside in cool weather. Per-instance
+# because it is a specific object, not a generic layer -- Nora's is Ingrid's inherited
+# courier jacket. Empty (the default) means no outerwear line is added at all.
+OUTDOOR_LAYER = os.getenv("OUTDOOR_LAYER", "").strip()
+
+# --- Daily wardrobe rotation -----------------------------------------------------------
+# She dresses once a day, for that day's weather -- not fresh at random per photo.
+WARDROBE_DAILY = os.getenv("WARDROBE_DAILY", "1").lower() not in ("0", "false", "no", "off")
+WARDROBE_ROTATE_HOUR = _env_int("WARDROBE_ROTATE_HOUR", "7")  # morning: you dress for the day you get
+WARDROBE_RECENT_KEPT = _env_int("WARDROBE_RECENT_KEPT", "4")  # don't repeat the last N days' picks
+# Free-text outfit classification. Owner-authored outfits are arbitrary strings, so this is
+# keyword matching, not a lookup -- deliberately deterministic (no LLM call for a daily job).
+_OUTFIT_WARM_WORDS = (
+    "hoodie", "sweater", "sweatshirt", "coat", "jacket", "beanie", "scarf", "flannel",
+    "thermal", "parka", "fleece", "wool", "layers", "cardigan", "turtleneck", "puffer",
+    "gloves", "boots",
+)
+_OUTFIT_COOL_WORDS = (
+    "tank", "shorts", "sundress", "sandals", "crop", "tee", "t-shirt", "swimsuit",
+    "bikini", "camisole", "linen", "sleeveless",
+)
 # How the photo itself looks
 SELFIE_CAMERA = [
     "harsh on-camera flash, slightly washed out", "soft golden-hour light",
@@ -5434,6 +6391,90 @@ SELFIE_CAMERA = [
     "crisp and bright daylight", "a tiny bit out of focus", "shot from just slightly too close up",
     "flat overhead lighting", "backlit so she's a little in shadow",
 ]
+# Fixed rules appended to every selfie prompt. Generic (not per-instance), so they live
+# in code next to the other SELFIE_* pools rather than in a per-instance file like
+# appearance.txt. These two are the knobs to reach for when the image model misbehaves —
+# extra limbs, or a shot that comes back studio-glossy, captioned, or filter-tripped.
+_SELFIE_ANATOMY_RULE = (
+    "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
+    "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
+    "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
+    "it. No extra limbs."
+)
+_SELFIE_REALISM_RULE = (
+    "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
+    "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
+    "watermarks, or captions in the image."
+)
+# Restated at the END of the prompt, not only the start. The identity instruction is bits[0]
+# and ~1000 characters of pose/scene/weather/camera instruction now follow it; on an edit the
+# nearest thing to the output is the last thing said (v2026-08-01.9).
+_SELFIE_IDENTITY_TAIL = (
+    "Most important: this is the same woman as the attached reference photo. Same face, same "
+    "bone structure, same hair, same distinguishing features. Change the pose, setting and "
+    "clothes — never the person."
+)
+# Draws that make a face hard to pin down: small in frame, obscured, blurred, blown out, or
+# in shadow. Any one is fine and wanted -- these are candid phone photos. TWO stacked is what
+# leaves an edit model enough latitude to drift the face into someone else.
+SELFIE_SOFT_FRAMINGS = {
+    "a mirror selfie", "a candid half-in-frame selfie",
+    "a wider selfie with the room visible behind her",
+    "a selfie with her face half-cut-off the frame",
+    "a bathroom mirror selfie with phone visible",
+    "a selfie peeking out from under a blanket",
+}
+SELFIE_SOFT_CAMERA = {
+    "harsh on-camera flash, slightly washed out", "grainy low-light phone photo",
+    "a little motion blur like it was taken too fast",
+    "overexposed light from a window behind her",
+    "cool blue late-night screen glow on her face", "a tiny bit out of focus",
+    "backlit so she's a little in shadow", "flat overhead lighting",
+}
+# Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
+SELFIE_IDENTITY_GUARD = os.getenv("SELFIE_IDENTITY_GUARD", "1").lower() not in ("0", "false", "no", "off")
+
+# --- Face lock (v2026-08-03.2) ---------------------------------------------------------
+# Two prompt shapes let an edit model rebuild the face instead of copying it, and both
+# survived v2026-08-01.9:
+#
+# 1. `SELFIE_APPEARANCE` sat INSIDE the identity sentence ("...just in a new pose/setting.
+#    She's <name>, <paragraph>"), so one sentence gave the model a photo to copy AND a
+#    written spec it could satisfy with a face it invents. On a re-render — which every
+#    one of these is, since pose, setting and framing all change — inventing is the
+#    cheaper path, and the paragraph's buried details are the first thing dropped.
+# 2. "Keep her face identical" never said WHICH parts of a face, so nothing in the prompt
+#    contradicted a plausible, better-looking, differently-boned woman with the right
+#    hair colour.
+#
+# The rules below are generic on purpose (categories, never one character's trait — the
+# character-bleed family of v2026-08-01.8 and .9), and they are conditional on the
+# reference photo rather than asserting what it shows.
+_SELFIE_PRESERVE_RULE = (
+    "Copy her face out of the reference photo instead of drawing a new one: the same face "
+    "shape and bone structure, the same eyes, nose, mouth and brows, the same skin tone and "
+    "the same marks on her skin, the same hairline, hair colour and hair texture, the same "
+    "apparent age. Her eyewear matches the reference exactly — if she is wearing glasses "
+    "there she is wearing those same glasses here; if she is wearing none, add none. Do not "
+    "beautify, slim, smooth or restyle her: an ordinary face that matches the reference is "
+    "right, and a better-looking one that does not is wrong."
+)
+# Compatible with every framing in the pools on purpose. "Her face is large in frame" would
+# contradict the half-in-frame and wider draws, and a prompt that contradicts itself hands
+# back exactly the latitude this is trying to remove.
+_SELFIE_FACE_CLARITY_RULE = (
+    "However wide, candid or off-centre the framing is, whatever part of her face is in "
+    "frame is sharp and clearly hers — not blurred away, not lost in shadow, not smoothed "
+    "flat."
+)
+# Said once, before the scene instructions, so the block that follows reads as an edit
+# spec rather than as a description of a photo to produce from scratch.
+_SELFIE_CHANGE_SCOPE = (
+    "Everything that follows changes the pose, the setting, her clothes and the camera. "
+    "None of it changes her."
+)
+# Kill switch: unset = face lock active, 0 = the v2026-08-03.1 prompt.
+SELFIE_FACE_LOCK = os.getenv("SELFIE_FACE_LOCK", "1").lower() not in ("0", "false", "no", "off")
 
 
 def _weather_outdoor_ok() -> bool:
@@ -5443,6 +6484,70 @@ def _weather_outdoor_ok() -> bool:
         return True
     bad = ("rain", "snow", "sleet", "storm", "thunder", "drizzle", "showers", "hail", "fog")
     return not any(w in text for w in bad)
+
+
+def _weather_temp_f():
+    """Actual air temperature from the cached weather string, or None if unavailable.
+
+    `_fetch_weather` builds '70°F, clear, wind 11mph', optionally with a 'feels like 65°F'
+    second field. The FIRST match is always the real temperature — take only that one."""
+    m = re.search(r"(-?\d+)\s*°F", _weather_cache.get("text") or "")
+    return float(m.group(1)) if m else None
+
+
+def _weather_is_warm() -> bool:
+    """True only when we have a reading and it is warm. Unknown weather is not warm —
+    absent data must not strip her jacket in January."""
+    t = _weather_temp_f()
+    return t is not None and t >= SELFIE_WARM_F
+
+
+def _weather_is_clear() -> bool:
+    """True when the sky itself is clear -- not merely dry. 'overcast' is dry but grey,
+    so the two claims are asserted separately in the selfie prompt."""
+    text = (_weather_cache.get("text") or "").lower()
+    return any(w in text for w in ("clear", "sunny"))
+
+
+def _outfit_suits_weather(outfit: str) -> bool:
+    """Is this outfit plausible in the CURRENT reading? Unknown weather suits everything --
+    absent data must never narrow the wardrobe to nothing."""
+    t = _weather_temp_f()
+    if t is None:
+        return True
+    low = (outfit or "").lower()
+    if t >= SELFIE_WARM_F and any(w in low for w in _OUTFIT_WARM_WORDS):
+        return False
+    if t <= SELFIE_COLD_F and any(w in low for w in _OUTFIT_COOL_WORDS):
+        return False
+    return True
+
+
+def _pick_daily_outfit():
+    """Choose today's outfit: weather-appropriate, not one of the last few days'.
+
+    Prefers the owner-curated wardrobe and falls back to the built-in pool when it is
+    empty, so an instance with no /addoutfit history still changes clothes daily.
+    Returns None when there is genuinely nothing to pick."""
+    recent = wardrobe.get("recent") or []
+    for source in (wardrobe.get("outfits") or [], SELFIE_OUTFITS):
+        suitable = [o for o in source if _outfit_suits_weather(o)]
+        if not suitable:
+            continue
+        fresh = [o for o in suitable if o not in recent]
+        return random.choice(fresh or suitable)
+    return None
+
+
+def _weather_scene_pool(pool, cold_set):
+    """Drop cold-weather scene fragments when the live reading is warm.
+
+    Mirrors _weather_camera_pool's contract: never return empty, fall back to the full
+    pool. Without this the random draw contradicts the weather line and the image
+    follows the scene, not the temperature (v2026-08-01.7)."""
+    if not (SELFIE_WEATHER_MATCH and _weather_is_warm()):
+        return list(pool)
+    return [x for x in pool if x not in cold_set] or list(pool)
 
 
 def _weather_camera_pool() -> list:
@@ -5469,14 +6574,26 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
     framing = random.choice(SELFIE_FRAMINGS)
     expression = random.choice(SELFIE_EXPRESSIONS)
     if _has_base_image():
-        bits = [
+        anchor = (
             "Edit the attached photo of this exact woman — do not generate a new person. Keep her "
-            "specific face, bone structure, hair color/texture, and freckles identical to the "
-            "reference image; this must be recognizably the same individual, just in a new "
-            f"pose/setting. She's {NAME}, {SELFIE_APPEARANCE}",
-            f"New shot: {framing}.",
-            f"Expression: {expression}.",
-        ]
+            "specific face, bone structure, hair color/texture, and distinguishing features "
+            "identical to the reference image; this must be recognizably the same individual, "
+            "just in a new pose/setting."
+        )
+        if SELFIE_FACE_LOCK:
+            bits = [
+                anchor,
+                # Demoted out of the sentence above and explicitly ranked below the photo:
+                # the words are still there as an anchor (v2026-08-01.9 added them for a
+                # reason) but they no longer read as a spec to draw a person from.
+                f"Who she is, as context only — the photo outranks every word of it, and her "
+                f"face is never drawn from this text: {NAME}, {SELFIE_APPEARANCE}",
+                _SELFIE_CHANGE_SCOPE,
+                f"Framing: {framing}.",
+            ]
+        else:
+            bits = [f"{anchor} She's {NAME}, {SELFIE_APPEARANCE}", f"New shot: {framing}."]
+        bits.append(f"Expression: {expression}.")
     else:
         bits = [
             f"Generate a realistic phone selfie of {NAME}, {SELFIE_APPEARANCE} Keep her face, "
@@ -5485,46 +6602,71 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
             f"Expression: {expression}.",
         ]
     if chat_id is not None:
-        bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
+        # "let it read in her face" is the ONLY instruction in the whole prompt that tells
+        # the model to modify her face, and it lands ~1500 characters before the rules that
+        # say copy it exactly. Mood still steers the shot — through the expression already
+        # drawn above and through posture, which is where a mood shows in a photograph
+        # anyway. Text-only instances keep the old wording: with no reference photo there is
+        # no face being preserved for it to contradict (v2026-08-03.3).
+        if SELFIE_FACE_LOCK and _has_base_image():
+            bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it colour that "
+                        f"expression and how she's holding herself.")
+        else:
+            bits.append(f"Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.")
     outdoors = False
     if not hint and random.random() < 0.7:  # what she's doing (skip if user pinned a scene)
+        pool = _weather_scene_pool(SELFIE_ACTIVITIES, SELFIE_COLD_ACTIVITIES)
         if _weather_outdoor_ok():
-            activity = random.choice(SELFIE_ACTIVITIES)
+            activity = random.choice(pool)
         else:
-            indoor = [a for a in SELFIE_ACTIVITIES if a not in SELFIE_OUTDOOR_ACTIVITIES]
+            indoor = [a for a in pool if a not in SELFIE_OUTDOOR_ACTIVITIES]
             activity = random.choice(indoor)
         bits.append(f"She's {activity}.")
         outdoors = activity in SELFIE_OUTDOOR_ACTIVITIES
     current_fit = wardrobe.get("current")
+    # A hand-picked outfit is honored as-is. One the daily rotation chose this morning is
+    # re-checked, because the afternoon can outrun it -- otherwise the day's stale pick
+    # becomes exactly the frozen-snapshot contradiction v2026-08-01.7 removed.
+    if current_fit and wardrobe.get("auto") and SELFIE_WEATHER_MATCH \
+            and not _outfit_suits_weather(current_fit):
+        current_fit = None
     if current_fit:
         bits.append(f"Wearing {current_fit}.")
     elif random.random() < 0.55:
-        bits.append(f"Wearing {random.choice(SELFIE_OUTFITS)}.")
-    if outdoors and SELFIE_APPEARANCE is _APPEARANCE_DEFAULT:
-        bits.append(
-            "Over that, she's got on Ingrid's oversized vintage canvas courier jacket with the "
-            "sleeves rolled up."
-        )
+        bits.append(f"Wearing {random.choice(_weather_scene_pool(SELFIE_OUTFITS, SELFIE_COLD_OUTFITS))}.")
+    # Outerwear only goes on to go outside, and only when it's cool enough to want it.
+    if outdoors and OUTDOOR_LAYER and not (SELFIE_WEATHER_MATCH and _weather_is_warm()):
+        bits.append(f"Over that, she's got on {OUTDOOR_LAYER}.")
     if scene:
         bits.append(f"Background/setting: {scene}, {WEATHER_LOCATION}, {_daypart()}.")
     else:
         bits.append(f"Somewhere in {WEATHER_LOCATION}, {_daypart()}.")
-    bits.append(f"Photo look: {random.choice(_weather_camera_pool())}.")
+    camera_pool = _weather_camera_pool()
+    # One soft choice is candid; two is where the face stops being hers.
+    if SELFIE_IDENTITY_GUARD and framing in SELFIE_SOFT_FRAMINGS:
+        camera_pool = [c for c in camera_pool if c not in SELFIE_SOFT_CAMERA] or camera_pool
+    bits.append(f"Photo look: {random.choice(camera_pool)}.")
     if _weather_cache["text"]:
-        bits.append(f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
-                    f"atmosphere, and what she might be wearing — don't describe the weather "
-                    f"explicitly, just let it show.")
-    bits.append(
-        "Anatomically correct — exactly two arms, two hands, two legs. One hand is taking the "
-        "photo; in mirror shots, that hand and the phone are visible in the reflection. The other "
-        "hand is the only free hand. Nothing floating, nothing held without a visible hand gripping "
-        "it. No extra limbs."
-    )
-    bits.append(
-        "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
-        "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
-        "watermarks, or captions in the image."
-    )
+        if SELFIE_WEATHER_MATCH:
+            clause = (f"Current weather, which the image must match: {_weather_cache['text']}. "
+                      f"It sets the lighting, the sky, and what she's wearing.")
+            # An image model given only a positive cue and the word "Seattle" defaults to
+            # overcast drizzle. On a dry day the negative is what actually holds
+            # (v2026-08-01.7). Only assert what the reading supports: no-precipitation and
+            # clear-sky are separate claims, and "overcast" is dry.
+            if _weather_outdoor_ok():
+                neg = ["no rain", "no wet pavement or puddles", "no umbrellas",
+                       "no rain-streaked glass"]
+                if _weather_is_clear():
+                    neg.append("no heavy grey overcast")
+                clause += " It is NOT raining: " + ", ".join(neg) + "."
+        else:
+            clause = (f"Current weather: {_weather_cache['text']}. Let it read in the lighting, "
+                      f"atmosphere, and what she might be wearing — don't describe the weather "
+                      f"explicitly, just let it show.")
+        bits.append(clause)
+    bits.append(_SELFIE_ANATOMY_RULE)
+    bits.append(_SELFIE_REALISM_RULE)
     if chat_id is not None:
         recent_scenes = (_recent_selfie_hints.get(chat_id) or [])[-4:]
         if recent_scenes:
@@ -5532,6 +6674,15 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
                 "Vary the scenario — avoid recreating these recent setups: "
                 + "; ".join(f'"{s}"' for s in recent_scenes) + "."
             )
+    # Genuinely last: the scene-dedup list names other setups, which is the one appended
+    # block that could pull the image away from the reference if it had the final word.
+    # The face rules sit here rather than up with the anatomy/realism rules for the same
+    # reason the tail does — nearest the output is where an edit instruction lands hardest.
+    if SELFIE_FACE_LOCK and _has_base_image():
+        bits.append(_SELFIE_PRESERVE_RULE)
+        bits.append(_SELFIE_FACE_CLARITY_RULE)
+    if SELFIE_IDENTITY_GUARD and _has_base_image():
+        bits.append(_SELFIE_IDENTITY_TAIL)
     return " ".join(bits)
 
 
@@ -5540,26 +6691,64 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
 _IMAGE_RETRIES = 3
 
 
-def _post_with_retries(url, **kwargs):
-    for attempt in range(_IMAGE_RETRIES):
+# Statuses worth trying again. Gemini's image endpoint returns 503 under load and 429 when
+# rate-limited, and both clear on their own in seconds — but `requests` does not raise on a
+# 5xx, so these came back as ordinary responses, sailed past the transport-only except
+# clause below, and only became an error at `raise_for_status()` one frame up. One
+# overloaded second on Google's side was a failed selfie (owner-reported 2026-08-03).
+# A 4xx that is not 429 is ours — a bad prompt, a bad key — and retrying only delays the
+# real error by six seconds.
+_IMAGE_RETRY_STATUSES = (429, 500, 502, 503, 504)
+_IMAGE_RETRY_AFTER_CAP = 10  # seconds; a hostile or absurd header must not stall the handler
+# Kill switch: unset = transient statuses retried, 0 = pre-v2026-08-03.4 (transport only).
+IMAGE_RETRY_TRANSIENT = os.getenv("IMAGE_RETRY_TRANSIENT", "1").lower() not in (
+    "0", "false", "no", "off")
+
+
+def _retry_delay(attempt: int, resp=None) -> float:
+    """Backoff for the next image-API attempt, honoring Retry-After when the server sends
+    a usable one. Falls back to the original 2s/4s ramp."""
+    if resp is not None:
+        raw = (resp.headers or {}).get("Retry-After", "")
         try:
-            return _get_session().post(url, **kwargs)
+            wait = float(str(raw).strip())
+        except (TypeError, ValueError):
+            wait = 0.0
+        if 0 < wait <= _IMAGE_RETRY_AFTER_CAP:
+            return wait
+    return 2.0 * (attempt + 1)
+
+
+def _image_request_with_retries(method: str, url, **kwargs):
+    """One retry loop for both image verbs — transport failures AND transient statuses.
+
+    Returns the final response even when it is still a retryable status; the caller's
+    `raise_for_status()` stays the single place an HTTP failure becomes an exception."""
+    for attempt in range(_IMAGE_RETRIES):
+        last = attempt == _IMAGE_RETRIES - 1
+        try:
+            resp = getattr(_get_session(), method)(url, **kwargs)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            if attempt == _IMAGE_RETRIES - 1:
+            if last:
                 raise
             print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
-            time.sleep(2 * (attempt + 1))
+            time.sleep(_retry_delay(attempt))
+            continue
+        if IMAGE_RETRY_TRANSIENT and not last \
+                and getattr(resp, "status_code", None) in _IMAGE_RETRY_STATUSES:
+            print(f"[selfie] upstream {resp.status_code}, retrying "
+                  f"({attempt + 1}/{_IMAGE_RETRIES})...")
+            time.sleep(_retry_delay(attempt, resp))
+            continue
+        return resp
+
+
+def _post_with_retries(url, **kwargs):
+    return _image_request_with_retries("post", url, **kwargs)
 
 
 def _get_with_retries(url, **kwargs):
-    for attempt in range(_IMAGE_RETRIES):
-        try:
-            return _get_session().get(url, **kwargs)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-            if attempt == _IMAGE_RETRIES - 1:
-                raise
-            print(f"[selfie] connection issue, retrying ({attempt + 1}/{_IMAGE_RETRIES})...")
-            time.sleep(2 * (attempt + 1))
+    return _image_request_with_retries("get", url, **kwargs)
 
 
 _GEMINI_STRIP = re.compile(
@@ -5573,6 +6762,21 @@ def _gemini_safe(prompt: str) -> str:
     return _GEMINI_STRIP.sub("", prompt).strip()
 
 
+def _parse_modalities(raw: str) -> list:
+    """`responseModalities` from a comma-separated env value, never empty.
+
+    Not sniffed from the model name: a model string is not a capability, and the next image
+    model will not be named after either of the two we know about (v2026-08-03.5)."""
+    out = [m.strip().upper() for m in (raw or "").split(",") if m.strip()]
+    return out or ["IMAGE"]
+
+
+# `gemini-2.5-flash-image` takes IMAGE alone. `gemini-3-pro-image-preview` requires TEXT
+# alongside it, so switching models by env var alone used to fail — the knob existed for the
+# model and not for the thing the model demands.
+GEMINI_RESPONSE_MODALITIES = _parse_modalities(os.getenv("GEMINI_RESPONSE_MODALITIES", "IMAGE"))
+
+
 def _generate_selfie_gemini(prompt: str) -> bytes:
     prompt = _gemini_safe(prompt)
     parts = []
@@ -5583,7 +6787,7 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
     url = f"{GEMINI_IMAGE_URL}/{GEMINI_IMAGE_MODEL}:generateContent"
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"responseModalities": ["IMAGE"]},
+        "generationConfig": {"responseModalities": GEMINI_RESPONSE_MODALITIES},
     }
     r = _post_with_retries(
         url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
@@ -5599,10 +6803,17 @@ def _generate_selfie_gemini(prompt: str) -> bytes:
     if finish and finish not in ("STOP", "MAX_TOKENS"):
         raise RuntimeError(f"Gemini blocked the image (finishReason={finish}) — try again or "
                            f"rephrase what she's doing/wearing.")
+    said = []
     for part in cand.get("content", {}).get("parts", []):
         inline = part.get("inlineData") or part.get("inline_data")
         if inline and inline.get("data"):
             return base64.b64decode(inline["data"])
+        if part.get("text"):
+            said.append(part["text"])
+    # With TEXT in responseModalities a refusal comes back as prose instead of an image, and
+    # that prose says WHY. Discarding it left "no image data" as the only clue.
+    if said:
+        raise RuntimeError(f"Gemini returned text instead of an image: {' '.join(said)[:300]}")
     raise RuntimeError("Gemini response had no image data")
 
 
@@ -5630,9 +6841,62 @@ def _generate_selfie_nanogpt(prompt: str) -> bytes:
     raise RuntimeError("image response had neither b64_json nor url")
 
 
+def _xai_aspect_ratio(size: str) -> str:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD rather than a hardcoded lookup so any
+    per-instance SELFIE_SIZE carries over, not just the handful nanogpt shipped with."""
+    try:
+        w, h = (int(x) for x in size.lower().split("x", 1))
+        if w <= 0 or h <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        return "1:1"
+    g = math.gcd(w, h)
+    return f"{w // g}:{h // g}"
+
+
+def _generate_selfie_xai(prompt: str) -> bytes:
+    """Generate via xAI's Grok Imagine API (OpenAI-shaped, but its own endpoint family).
+
+    Uses /images/edits when a reference photo exists (face consistency), else
+    /images/generations. XAI_IMAGE_URL is the .../v1/images base both endpoints hang off.
+    """
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": XAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": 1,
+        "response_format": "b64_json",
+        "aspect_ratio": _xai_aspect_ratio(SELFIE_SIZE),
+    }
+    if _has_base_image():
+        url = f"{XAI_IMAGE_URL}/edits"
+        payload["image"] = {"url": _base_data_url(), "type": "image_url"}
+    else:
+        url = f"{XAI_IMAGE_URL}/generations"
+
+    r = _post_with_retries(url, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
+    r.raise_for_status()
+    item = r.json()["data"][0]
+    b64 = item.get("b64_json")
+    if b64:
+        # Some xAI responses put the full data URI in b64_json instead of raw base64
+        # (undocumented, seen inconsistently) -- strip the prefix if it's there.
+        if b64.startswith("data:"):
+            b64 = b64.split(",", 1)[-1]
+        return base64.b64decode(b64)
+    if item.get("url"):
+        img = _get_with_retries(item["url"], timeout=IMAGE_TIMEOUT)
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError(f"xAI image response had neither b64_json nor url: {item}")
+
+
 def generate_selfie_image(prompt: str) -> bytes:
     if SELFIE_PROVIDER == "gemini":
         return _generate_selfie_gemini(prompt)
+    if SELFIE_PROVIDER == "xai":
+        return _generate_selfie_xai(prompt)
     return _generate_selfie_nanogpt(prompt)
 
 
@@ -5715,15 +6979,33 @@ async def _infer_scene(chat_id: int) -> str:
         return ""
 
 
+def _media_error_text(icon: str, e: Exception) -> str:
+    """A transient upstream outage and a real failure need different words — the same split
+    v2026-08-02.9 made for missing-asset vs switched-off, one layer out. By the time this
+    runs the retries are already spent, so `503 Server Error: Service Unavailable for url:
+    https://generativelanguage.googleapis.com/...` tells the owner nothing they can act on.
+    Anything without a recognised transient status keeps the raw text: an unfamiliar error
+    is exactly when the details matter."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code in _IMAGE_RETRY_STATUSES:
+        return (f"{icon} The image service is busy right now (HTTP {code}) — I tried "
+                f"{_IMAGE_RETRIES} times. Ask me again in a minute.")
+    return f"{icon} Couldn't make that one: {e}"
+
+
 async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(f"📷 No reference photo or appearance.txt set. Drop a photo at "
-                      f"~/telegram-bot/{SELFIE_BASE} or write a description to "
-                      f"~/telegram-bot/appearance.txt and restart."),
-            )
+            # Two different problems, two different fixes (v2026-08-02.9): a missing asset
+            # needs a file, a switched-off feature needs one command. One message for both
+            # sent the owner hunting for a photo that was already there.
+            if not selfie_capable():
+                text = (f"📷 No reference photo or appearance.txt set. Drop a photo at "
+                        f"{BASE_DIR / SELFIE_BASE} or write a description to "
+                        f"{_APPEARANCE_FILE} and restart.")
+            else:
+                text = "📷 Selfies are switched off for this instance — /features selfie on."
+            await context.bot.send_message(chat_id=chat_id, text=text)
         return
     if not hint:
         hint = await _infer_scene(chat_id)
@@ -5747,14 +7029,151 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         log.error("[selfie] failed: %s", e)
         _count_error("media")
         if announce_errors:
-            await context.bot.send_message(chat_id=chat_id, text=f"📷 Couldn't make that one: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=_media_error_text("📷", e))
     finally:
         uploading.cancel()
 
 
+def gif_ready() -> bool:
+    """A missing key degrades to no GIFs rather than errors — same shape as selfie_ready."""
+    return bool(GIF_ENABLED and GIPHY_API_KEY)
+
+
+_gif_taste_cache = {"mtime": None, "likes": (), "bans": ()}
+
+
+def _gif_taste() -> tuple:
+    """Per-instance taste from gifs.txt: a line starting with '-' bans a term, any other
+    non-comment line is a term she likes. Curating vocabulary, not individual GIFs —
+    the same division as appearance.txt vs the reference photo."""
+    path = BASE_DIR / "gifs.txt"
+    try:
+        mtime = path.stat().st_mtime if path.exists() else None
+    except OSError:
+        mtime = None
+    if mtime == _gif_taste_cache["mtime"]:
+        return _gif_taste_cache["likes"], _gif_taste_cache["bans"]
+    likes, bans = [], []
+    if mtime is not None:
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                (bans if line.startswith("-") else likes).append(line.lstrip("-").strip().lower())
+        except OSError as e:
+            log.warning("[gif] taste file unreadable: %s", e)
+    _gif_taste_cache.update({"mtime": mtime, "likes": tuple(likes), "bans": tuple(bans)})
+    return _gif_taste_cache["likes"], _gif_taste_cache["bans"]
+
+
+def _gif_blocked(blob: str, bans: tuple) -> bool:
+    """True if this candidate's text trips the global deny-list or her own ban terms."""
+    return any(bad in blob for bad in _GIF_DENY) or any(b and b in blob for b in bans)
+
+
+def _giphy_search(query: str, safety: str, exclude_ids: set):
+    """(url, gif_id, title) for the best allowed candidate, or None. Runs in a worker
+    thread — never call bare requests from a handler (invariant #8)."""
+    params = {
+        "api_key": GIPHY_API_KEY, "q": query[:120], "limit": GIF_CANDIDATES,
+        "rating": _GIF_RATING.get(safety, "g"), "lang": "en",
+    }
+    r = _get_session().get(GIPHY_SEARCH_URL, params=params, timeout=GIF_TIMEOUT)
+    r.raise_for_status()
+    items = (r.json() or {}).get("data") or []
+    likes, bans = _gif_taste()
+    best, best_score = None, -1
+    for it in items:
+        gid = it.get("id")
+        if not gid or gid in exclude_ids:
+            continue
+        blob = " ".join(str(it.get(k) or "") for k in ("title", "slug", "alt_text")).lower()
+        if _gif_blocked(blob, bans):
+            continue
+        images = it.get("images") or {}
+        url = ((images.get("downsized") or {}).get("url")
+               or (images.get("fixed_height") or {}).get("url")
+               or (images.get("original") or {}).get("url"))
+        if not url:
+            continue
+        score = sum(1 for w in likes if w and w in blob)
+        if score > best_score:
+            best, best_score = (url, gid, (it.get("title") or "").strip()), score
+    return best
+
+
+_KEY_IN_URL = re.compile(r'((?:api_)?key=)[^&\s\'"]+', re.I)
+
+
+def _redact_key(text: str) -> str:
+    """Giphy takes api_key as a QUERY PARAMETER, so a requests exception carries it in
+    the URL. errors.log is echoed to the owner by /errors, so an unredacted exception
+    would walk the key from the log into a Telegram message (found 2026-08-02)."""
+    return _KEY_IN_URL.sub(r"\1<redacted>", str(text))
+
+
+async def send_gif(context, chat_id: int, query: str, announce_errors: bool = False):
+    """Search and send one GIF.
+
+    Silent by default: on the auto path a missing GIF must never surface as an error
+    mid-conversation. /gif passes announce_errors=True, because a manual command that
+    does nothing is indistinguishable from one that is broken -- which is the whole
+    reason the command exists.
+    """
+    async def _say(msg):
+        if announce_errors:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
+
+    if not GIF_ENABLED:
+        await _say("\U0001F39E GIFs are switched off for this instance (GIF_ENABLED=0).")
+        return
+    if not GIPHY_API_KEY:
+        await _say("\U0001F39E No GIPHY_API_KEY set for this instance, so GIF search is inert.")
+        return
+    if not query:
+        return
+    level = gif_prefs.get("safety", "high")
+    seen = set(_recent_gif_ids.get(chat_id) or [])
+    try:
+        found = await asyncio.to_thread(_giphy_search, query, level, seen)
+    except Exception as e:
+        # Generic to the user, redacted in the log (no-exception-leak eval + the key).
+        log.warning("[gif] search failed: %s", _redact_key(e))
+        _count_error("media")
+        await _say("\U0001F39E Couldn't reach Giphy just then.")
+        return
+    if not found:
+        await _say(f"\U0001F39E Nothing came back for {query!r} that got past the "
+                   f"{level} filter. Try different words, or /gifsafety.")
+        return
+    url, gid, title = found
+    try:
+        await context.bot.send_animation(chat_id=chat_id, animation=url)
+    except Exception as e:
+        log.warning("[gif] send failed: %s", _redact_key(e))
+        _count_error("media")
+        await _say("\U0001F39E Found one but couldn't send it.")
+        return
+    buf = _recent_gif_ids.setdefault(chat_id, [])
+    buf.append(gid)
+    if len(buf) > GIF_DEDUP_SIZE:
+        buf.pop(0)
+    print(f"[gif] {query!r} -> {gid}" + (f" ({title})" if title else ""))
+
+
 # --- Memes ---
-def meme_ready() -> bool:
+def meme_capable() -> bool:
+    """Templates and font live beside bot.py, not in the instance dir — so this is
+    fleet-wide, not per-instance (source of a 2026-08-02 misreading)."""
     return MEME_TEMPLATES_DIR.is_dir() and any(MEME_TEMPLATES_DIR.glob("*.jpg")) and MEME_FONT_PATH.exists()
+
+
+def meme_ready() -> bool:
+    return MEME_ENABLED and meme_capable()
 
 
 def _pick_meme_template(chat_id: int) -> Path:
@@ -5876,11 +7295,12 @@ async def send_meme(context, chat_id: int, hint: str = "", top: str = None, bott
     otherwise (the /meme command path) captions are generated from hint + conversation."""
     if not meme_ready():
         if announce_errors:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="🖼️ No meme templates found. Drop some .jpg templates in "
-                     "~/telegram-bot/meme_templates/ and a font at ~/telegram-bot/fonts/Anton-Regular.ttf.",
-            )
+            if not meme_capable():
+                text = (f"🖼️ No meme templates found. Drop some .jpg templates in "
+                        f"{MEME_TEMPLATES_DIR}/ and a font at {MEME_FONT_PATH}.")
+            else:
+                text = "🖼️ Memes are switched off for this instance — /features meme on."
+            await context.bot.send_message(chat_id=chat_id, text=text)
         return
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
@@ -5976,7 +7396,12 @@ def _summarize(prev_summary: str, prev_facts: list, batch: list, uname: str):
         f'  "facts": a curated list of specific, meaningful things about {uname} — events, '
         f"current situations, inside jokes, things worth carrying forward. Merge with the prior "
         f"facts; keep what a person would actually remember and care about (skip generic filler "
-        f"or purely transient observations); drop duplicates.\n"
+        f"or purely transient observations); drop duplicates. Each fact must describe ONE "
+        f"concrete thing, in one plain sentence, resolvable on its own without another fact for "
+        f"context. Do not fuse an event with separate commentary about it — a later remark on "
+        f"how something was phrased, categorized, or argued over — into a single sentence: state "
+        f"what happened; drop the meta-commentary unless it is itself the memorable point, and "
+        f"if so, state only that, plainly.\n"
         f"Output strictly valid JSON. No prose, no code fences."
     )
     user = f"EXISTING MEMORY:\n{existing}\n\nNEW MESSAGES:\n{convo}"
@@ -6016,9 +7441,13 @@ def _consolidate_facts(prev_summary: str, prev_facts: list, uname: str, target: 
         f"You maintain {NAME}'s memory of {uname}. The facts list has grown too long. "
         f"Consolidate it: merge near-duplicates, combine related facts into one, drop trivia, and "
         f"fold superseded or minor details into the summary so nothing important is lost. Keep at "
-        f"most {target} facts — the most durable and relevant ones. Keep the "
-        f"summary as a first-person narrative in {NAME}'s own voice, like a memory she could "
-        f"recall and recount. Respond with ONLY a JSON object: "
+        f"most {target} facts — the most durable and relevant ones. When combining, the result "
+        f"must stay ONE concrete thing in one plain sentence, resolvable on its own — do not fuse "
+        f"an event with separate commentary about it (how it was phrased, categorized, or argued "
+        f"over) just because they share a topic. If two facts don't reduce to one clean sentence "
+        f"without cross-referencing each other, keep them as two facts rather than force a merge. "
+        f"Keep the summary as a first-person narrative in {NAME}'s own voice, like a memory she "
+        f"could recall and recount. Respond with ONLY a JSON object: "
         f'{{"summary": "...", "facts": ["..."]}}. No prose, no code fences.'
     )
     raw = call_nanogpt(
@@ -6063,6 +7492,8 @@ async def maintain_memory(chat_id: int):
             except Exception as e:
                 log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
                 _count_error("memory")
+            if EPISODIC_RECALL:  # archive the verbatim turns before they're dropped (off-loop)
+                asyncio.create_task(asyncio.to_thread(_archive_episode_chunks, batch, uname))
             del conversation_history[chat_id][:drop_count]
             save_state()
             print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
@@ -6414,9 +7845,14 @@ async def setcard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"🤖 Character: {NAME}\nModel: {NANOGPT_MODEL}"
-    )
+    """Quick read-only glance at every model role — unlike /setmodel with no args,
+    this makes no live API call and adds no usage/picker framing, so it's cheap to
+    check often. MODEL_ROLES is the single source of roles; this can't drift from
+    /setmodel's own list because it reads the same dict."""
+    lines = [f"🤖 Character: {NAME}"]
+    for role, var in MODEL_ROLES.items():
+        lines.append(f"{role}: {globals()[var] or '(unset)'}")
+    await update.message.reply_text("\n".join(lines))
 
 
 # --- Live-configurable models & settings (/setmodel, /settings) ---
@@ -6898,6 +8334,27 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    items = _read_life_events()
+    if not items:
+        await update.message.reply_text(
+            "Nothing's happened yet — her life fills in over the day (or use /newsnow).")
+        return
+    await update.message.reply_text(
+        f"🌅 What's been happening in {NAME}'s life:\n" + "\n".join("• " + e for e in items))
+
+
+async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not LIFE_SIM_ENABLED:
+        await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
+        return
+    await update.message.reply_text("🤔 Seeing what she got up to...")
+    await update_life_event()
+    items = _read_life_events()
+    await update.message.reply_text(("• " + items[-1]) if items else
+                                    "Nothing came of it that time — try again.")
+
+
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ms_list = milestones.get(chat_id) or []
@@ -6911,8 +8368,10 @@ async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
-async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+def _memory_export_text(chat_id) -> str:
+    """Shared by /exportmemory and the menu button — both dumped the same fields
+    with slightly different section labels before this dedup; wording now follows
+    this, the command's original text."""
     now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
@@ -6945,17 +8404,31 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "=== RELATIONSHIP MILESTONES ===",
             "\n".join("- " + m["text"] for m in ms_list),
         ]
-    text = "\n".join(lines)
+    return "\n".join(lines)
+
+
+async def _send_memory_export(chat_id, send_document):
+    """send_document(fh) sends the open file handle — caller supplies reply_document
+    vs bot.send_document since the command and the menu-button paths use different
+    Telegram calls for the same file."""
     path = BASE_DIR / f"memory_export_{chat_id}.txt"
-    path.write_text(text, encoding="utf-8")
+    path.write_text(_memory_export_text(chat_id), encoding="utf-8")
     try:
         with path.open("rb") as fh:
-            await update.message.reply_document(
-                fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                caption=f"Memory dump for {NAME}.",
-            )
+            await send_document(fh)
     finally:
         path.unlink(missing_ok=True)
+
+
+async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await _send_memory_export(
+        chat_id,
+        lambda fh: update.message.reply_document(
+            fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+            caption=f"Memory dump for {NAME}.",
+        ),
+    )
 
 
 # --- Pinned memories ---
@@ -7239,6 +8712,10 @@ async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = outfits[idx]
     wardrobe["current"] = text
+    # A hand-picked outfit is owner intent: never weather-filtered, and it holds for the
+    # rest of today by claiming today's rotation stamp. Rotation resumes tomorrow.
+    wardrobe["auto"] = False
+    wardrobe["picked"] = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     save_wardrobe()
     await update.message.reply_text(f"👗 Now wearing: {text}")
 
@@ -7320,6 +8797,8 @@ def _nanogpt_tts(text: str) -> bytes:
 
 async def _send_voice_reply(context, chat_id: int, text: str):
     """Generate TTS audio and send as a Telegram voice message."""
+    if not VOICE_ENABLED:
+        return
     try:
         tts = _inworld_tts if INWORLD_API_KEY else _nanogpt_tts
         audio = await asyncio.to_thread(tts, text)
@@ -7418,38 +8897,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send("No boundaries set. Use /boundary <text>.")
 
     elif data == "cmd:exportmemory":
-        now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
-        summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        fts = facts.get(chat_id) or []
-        rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        rfts = recent_facts.get(chat_id) or []
-        ms_list = milestones.get(chat_id) or []
-        goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-        items = beliefs.get(chat_id, {}).get("items") or {}
-        lines = [
-            f"Memory export — {NAME} / {now_str}", "",
-            "=== LONG-TERM ===", f"Summary:\n{summ}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"), "",
-            "=== RECENT ===", f"Summary:\n{rsumm}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"), "",
-            "=== SELF-IMAGE ===",
-            "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)", "",
-            f"Next goal: {goal}",
-        ]
-        if ms_list:
-            lines += ["", "=== MILESTONES ===",
-                      "\n".join("- " + m["text"] for m in ms_list)]
-        path = BASE_DIR / f"memory_export_{chat_id}.txt"
-        path.write_text("\n".join(lines), encoding="utf-8")
-        try:
-            with path.open("rb") as fh:
-                await context.bot.send_document(
-                    chat_id=chat_id, document=fh,
-                    filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                    caption=f"Memory dump for {NAME}.",
-                )
-        finally:
-            path.unlink(missing_ok=True)
+        await _send_memory_export(
+            chat_id,
+            lambda fh: context.bot.send_document(
+                chat_id=chat_id, document=fh,
+                filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+                caption=f"Memory dump for {NAME}.",
+            ),
+        )
 
     elif data.startswith("vibe:"):
         name = data[5:]
@@ -7591,8 +9046,6 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         await update.message.reply_text("Usage: /addmem <memory text>")
@@ -7602,8 +9055,6 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     entries = _read_memories()
     if not entries:
         await update.message.reply_text("[no NPC memories yet]")
@@ -7623,8 +9074,6 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg:
         await update.message.reply_text("Usage: /delmem <keyword or line number>")
@@ -7653,9 +9102,30 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"No memories matched '{arg}'.")
 
 
-async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not EPISODIC_RECALL:
+        await update.message.reply_text(
+            "Episodic recall is off (needs MEMORY_SEMANTIC_LIVE + EPISODIC_RECALL).")
         return
+    if _np is None:
+        await update.message.reply_text(f"Episodic recall needs numpy: {_pip_hint('numpy')}")
+        return
+    with _episodes_lock:
+        n = len(_episodes["ts"])
+        newest = _episodes["ts"][-1] if n else 0
+        sample = _episodes["text"][-1] if n else ""
+    if not n:
+        await update.message.reply_text(
+            "No episodes archived yet (they accrue as conversation ages out).")
+        return
+    await _reply_chunked(
+        update,
+        f"📚 Episodic archive: {n} chunk(s) held (cap {EPISODE_MAX}).\n"
+        f"Most recent ({_episode_when(newest)}):\n\n{sample[:1200]}"
+    )
+
+
+async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip() if context.args else ""
     parts = args.split(None, 1)
     if len(parts) < 2 or not parts[0].isdigit():
@@ -7676,8 +9146,6 @@ async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg or not arg.isdigit():
         await update.message.reply_text("Usage: /sourcemem <number>")
@@ -7708,9 +9176,45 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic only -- reports candidate near-duplicate facts via embedding
+    similarity, never merges or deletes anything. _summarize()/_consolidate_facts()'s
+    own dedup is exact-lowercase-string matching, which misses a fact reworded across
+    consolidation passes sitting alongside its near-twin. Built 2026-08-01 to gather
+    real evidence before writing any auto-merge logic -- a similarity threshold with
+    no data behind it risks flagging genuinely distinct facts (two different Costco
+    trips, worded similarly) as duplicates, so this surfaces candidates for a human
+    to judge rather than acting on them."""
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "🔍 Checking for near-duplicate facts (embedding compare, may take a moment)...")
+
+    async def _check(items):
+        items = [f.strip() for f in (items or []) if isinstance(f, str) and f.strip()]
+        if len(items) < 2:
+            return []
+        vecs = await asyncio.to_thread(lambda: [_embed_and_cache(f) for f in items])
+        return _find_near_duplicate_pairs(items, vecs, MEMORY_DEDUP_SIM)
+
+    long_dupes = await _check(facts.get(chat_id))
+    recent_dupes = await _check(recent_facts.get(chat_id))
+    await asyncio.to_thread(_save_embeddings)
+
+    if not long_dupes and not recent_dupes:
+        await update.message.reply_text(
+            f"No near-duplicate facts found (cosine ≥ {MEMORY_DEDUP_SIM:.2f} — the "
+            f"same threshold /addmem's auto-dedup already uses).")
         return
+
+    lines = [f"Near-duplicate candidates (cosine ≥ {MEMORY_DEDUP_SIM:.2f}) — review "
+             f"only, nothing merged or deleted:"]
+    for label, dupes in (("long-term", long_dupes), ("recent", recent_dupes)):
+        for sim, a, b in dupes:
+            lines.append(f"\n[{label}] {sim:.0%} match\n- {a}\n- {b}")
+    await _reply_chunked(update, "\n".join(lines))
+
+
+async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
     queue = _load_memory_review()
     if not args:
@@ -8393,6 +9897,12 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /schedule          — show full schedule
     /schedule <text>   — replace entire schedule
     /schedule add <text> — append a line
+
+    Deliberately NOT the _context_file_cmd factory people_cmd/projects_cmd use
+    (see CHANGELOG v2026-08-07.2): that factory closes over its `file` argument
+    by value at the module-import call site, so a test's
+    monkeypatch.setattr(bot, "SCHEDULE_FILE", ...) has no effect on it — a real,
+    code-reviewed regression when this command briefly used the factory.
     """
     args = context.args or []
     if not args:
@@ -8625,8 +10135,6 @@ def _transcribe_audio(data: bytes, filename: str, mime: str) -> str:
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -8638,22 +10146,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    tone_task = None
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
+        if VOICE_TONE_ENABLED and acoustic_ears is not None:
+            # Kick this off now so it runs concurrently with the (blocking) transcription
+            # call below instead of adding serial latency.
+            tone_task = asyncio.create_task(_analyze_voice_tone(bytes(voice_bytes)))
         transcript = await asyncio.to_thread(
             _transcribe_audio, bytes(voice_bytes), "voice.ogg", "audio/ogg")
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
+        if tone_task:
+            tone_task.cancel()
         await context.bot.send_message(chat_id=chat_id,
                                        text="[couldn't make out that voice note]")
         return
 
     if not transcript:
+        if tone_task:
+            tone_task.cancel()
         return
 
     try:
+        acoustic = await tone_task if tone_task else None
+        tone_note = acoustic_ears.describe_acoustic(acoustic, len(transcript.split())) if acoustic else None
         content = f"[voice message]: {transcript}"
+        if tone_note:
+            content += f"\n[How it sounded: {tone_note}]"
         messages = await assemble_messages_async(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -8682,10 +10203,27 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
     return await proc.communicate()
 
 
+async def _analyze_voice_tone(voice_bytes: bytes):
+    """Best-effort acoustic read on a voice note (pace/pauses/tone) -- local FFT
+    analysis, no network. Returns the analyze_acoustic() dict, or None on any failure."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ogg_path = os.path.join(tmpdir, "voice.ogg")
+            wav_path = os.path.join(tmpdir, "voice.wav")
+            with open(ogg_path, "wb") as f:
+                f.write(voice_bytes)
+            await _run_ffmpeg("-y", "-i", ogg_path, "-ar", "44100", "-ac", "1",
+                               "-c:a", "pcm_s16le", wav_path)
+            if not os.path.exists(wav_path):
+                return None
+            return await asyncio.to_thread(acoustic_ears.analyze_acoustic, wav_path)
+    except Exception as e:
+        log.warning("[voice-tone] check failed: %s", type(e).__name__)
+        return None
+
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -8841,7 +10379,10 @@ async def _pdf_ocr_fallback(context, update, chat_id: int, raw_bytes: bytes,
         user_mem = f"[sent PDF (image-only): {fname}] {caption}".strip()
         await ensure_weather()
         messages = await assemble_messages_async(chat_id, user_prompt)
-        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        # leak_guard off: a document response legitimately runs long and analytical,
+        # and DOCUMENT_MODEL has no fallback — a guard trip here would be a hard error.
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                              leak_guard=False)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -8911,8 +10452,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_pdf and not is_json:
         return  # unsupported file type — let it fall through silently
 
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -8976,7 +10515,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await ensure_weather()
                 messages = await assemble_messages_async(chat_id, user_prompt)
-                ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+                # leak_guard off: see the image-PDF branch.
+                ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                                      leak_guard=False)
                 ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                                  model=DOCUMENT_MODEL)
                 await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -9031,7 +10572,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await ensure_weather()
         messages = await assemble_messages_async(chat_id, user_prompt)
-        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL)
+        # leak_guard off: the card-review prompt above ASKS for a long critique that
+        # discusses prompts and characters — review proved a normal card review trips
+        # every meta-reasoning marker the guard looks for.
+        ai_response = await reply_with_typing(context, chat_id, messages, model=DOCUMENT_MODEL,
+                                              leak_guard=False)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, uname,
                                          model=DOCUMENT_MODEL)
         await _deliver(update, context, chat_id, user_mem, ai_response)
@@ -9188,6 +10733,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     if memcheck_m:
         ai_response = _MEMCHECK_RE.sub("", ai_response).strip()
         asyncio.create_task(_handle_memcheck(context, chat_id, memcheck_m.group(1).strip()))
+    gif_query = _gif_query(ai_response)
     clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
@@ -9195,6 +10741,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     placeholder = clean or (
         "[sent a selfie]" if selfie_hint is not None else
         "[sent a meme]" if meme_caption is not None else
+        "[sent a gif]" if gif_query else
         (f"[reacted {reaction}]" if reaction else "")
     )
     remember(chat_id, "user", user_memory_text)
@@ -9221,6 +10768,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
+    if gif_query:
+        await send_gif(context, chat_id, gif_query)
     if inside_jokes and clean:
         _check_joke_used(clean)
     if clean:
@@ -9538,6 +11087,12 @@ async def _group_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    # NOT dead code like the other 20 sites removed in this release (see CHANGELOG
+    # v2026-08-07.1/.2): _private_gate explicitly no-ops for chat_id < 0 ("group_guard's
+    # jurisdiction") and group_guard never checks the sender's identity, only chat-level
+    # membership — this is the ONLY per-user allowlist check on group text messages.
+    # GROUP_CHAT_DESIGN.md §6: "Human gating unchanged... strangers in an allowed group
+    # are ignored unless ALLOWED_USERS is empty." Removing this breaks that invariant.
     if not _is_allowed(update.effective_user.id):
         return
     if not _rate_ok(update.effective_user.id):
@@ -9594,10 +11149,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 link_url = link.group(0)
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        # Run inner voice + link fetch in parallel to cut wall-clock latency.
+        # Run inner voice + safety check + link fetch in parallel to cut wall-clock latency.
         parallel = []
         if INNER_VOICE_ENABLED:
             parallel.append(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
+        if SAFETY_ENABLED:
+            parallel.append(asyncio.to_thread(_assess_safety, user_message))
         if link_url:
             parallel.append(asyncio.to_thread(fetch_link, link_url))
 
@@ -9612,6 +11169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx += 1
         else:
             inner_voice = ""
+        if SAFETY_ENABLED:
+            distress = results[idx] is True  # BaseException or False both read as no-distress
+            idx += 1
+        else:
+            distress = False
         if link_url:
             fetched = results[idx] if not isinstance(results[idx], BaseException) else None
             if fetched:
@@ -9723,7 +11285,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"not in this list:\n{_mbrief}\n]"
                     )
 
-        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
+        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice,
+                                                 distress=distress)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -9785,8 +11348,6 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -9832,8 +11393,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """React in character to a sticker the user sent."""
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -9949,6 +11508,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     messages = assemble_messages(chat_id, trigger)
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
+    gif_query = _gif_query(text)
     clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
     if clean:
         clean = _strip_persona_breaks(clean)
@@ -9958,7 +11518,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
     remember(chat_id, "assistant", clean or (
         "[sent a selfie]" if selfie_hint is not None else
-        "[sent a meme]" if meme_caption is not None else ""
+        "[sent a meme]" if meme_caption is not None else
+        "[sent a gif]" if gif_query else ""
     ))
     if clean:
         await send_bubbles(context, chat_id, clean)
@@ -9966,6 +11527,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
         await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
+    if gif_query:
+        await send_gif(context, chat_id, gif_query)
     asyncio.create_task(maintain_memory(chat_id))
     asyncio.create_task(update_mood(chat_id))  # her own message can set her mood (e.g. got doored)
     return text
@@ -10012,6 +11575,10 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
     unotes = _read_user_notes()
     if unotes:
         parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    life_events = _read_life_events()
+    if life_events:
+        parts.append("Recent things that happened in her own life she might want to share:\n"
+                     + "\n".join(life_events[-3:]))
     recent = conversation_history.get(chat_id, [])[-4:]
     if recent:
         snippet = " / ".join(
@@ -10322,9 +11889,289 @@ async def selfie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_selfie(context, chat_id, hint, announce_errors=True)
 
 
-async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+_BASE_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"\xff\xd8\xff", "JPEG"),
+)
+
+
+async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Replace this instance's selfie reference photo, over Telegram.
+
+    Send the image as a FILE with /setbase as the caption, or reply to one with
+    /setbase. A photo sent the normal way also works, but Telegram recompresses
+    those and the reference is the strongest identity signal in the whole selfie
+    pipeline -- a re-encoded one anchors worse.
+
+    Exists because the scp route kept failing: those commands are phone-local
+    while the owner's session is on the VPS, and three separate attempts went
+    into the wrong shell. That is C1's operator half, which no hook can catch --
+    so the transfer is removed rather than re-explained (v2026-08-02.3).
+
+    Takes effect immediately: _resolve_base_image() stats the path per selfie,
+    so there is no restart and no .env edit -- the file keeps SELFIE_BASE's name.
+    """
+    if not _is_admin(update.effective_user.id):
         return
+    msg = update.message
+    src = msg.reply_to_message or msg
+    compressed = False
+    doc = getattr(src, "document", None)
+    photos = getattr(src, "photo", None)
+    if doc is not None and (getattr(doc, "mime_type", "") or "").startswith("image/"):
+        tg_file = await doc.get_file()
+    elif photos:
+        tg_file = await photos[-1].get_file()
+        compressed = True
+    else:
+        await msg.reply_text(
+            "📷 Send the image as a FILE with /setbase as the caption, or reply to one "
+            "with /setbase.\nSending it as a normal photo works too, but Telegram "
+            "recompresses those and the reference photo anchors her face — send as a file "
+            "if you can.")
+        return
+
+    raw = bytes(await tg_file.download_as_bytearray())
+    fmt = next((name for magic, name in _BASE_IMAGE_MAGIC if raw.startswith(magic)), None)
+    if fmt is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        fmt = "WebP"
+    if fmt is None:
+        await msg.reply_text("That isn't a PNG, JPEG or WebP — refusing to install it as "
+                             "the reference photo.")
+        return
+    if len(raw) < 8192:
+        await msg.reply_text(f"That file is only {len(raw)} bytes — too small to be a usable "
+                             f"reference photo. Not installing it.")
+        return
+
+    dest = BASE_DIR / SELFIE_BASE
+    backed_up = False
+    try:
+        if dest.exists():
+            (dest.parent / (dest.name + ".prev")).write_bytes(dest.read_bytes())
+            backed_up = True
+        tmp = dest.parent / (dest.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(dest)
+    except OSError as e:
+        log.error("[setbase] write failed: %s", e)
+        _count_error("media")
+        await msg.reply_text("Couldn't write the reference photo — check the instance "
+                             "directory's permissions.")
+        return
+
+    note = ("\n⚠️ Sent as a compressed photo. Resend as a file for the original quality."
+            if compressed else "")
+    # Whether the backup branch RAN this time — not whether a .prev exists. A leftover
+    # .prev from an earlier /setbase made the first install of a fresh photo claim a
+    # backup of a file that had never been there.
+    prev = "  (previous kept as %s.prev)" % dest.name if backed_up else ""
+    await msg.reply_text(
+        f"📷 Reference photo updated: {dest.name} — {fmt}, {len(raw) // 1024} KB.{prev}\n"
+        f"The next selfie uses it; no restart needed.{note}")
+
+
+async def gif_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual GIF search — the parity command for /selfie and /meme, and the only way to
+    tell a working Giphy path from a silent one without waiting for her to use the tag."""
+    if not _is_admin(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    user_names[chat_id] = update.effective_user.first_name or "you"
+    query = " ".join(context.args).strip() if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "Usage: /gif <search words>\n"
+            f"Safety is {gif_prefs.get('safety', 'high')} — change it with /gifsafety.")
+        return
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_video")
+    await send_gif(context, chat_id, query, announce_errors=True)
+
+
+# --- Runtime feature switches (/features) -------------------------------------------
+# name -> (module global to flip, capability probe). The probe answers "could this work at
+# all" (credential/assets present); the global answers "is it switched on". Keeping them
+# separate is the point: "off" and "never configured" need different fixes, and conflating
+# them is what made three separate blind spots this week take a round trip each.
+# name -> (global flag, capability probe, detail probe or None). The detail exists because
+# "voice=on" was true on all seven and told you nothing: NanoGPT TTS works without Inworld,
+# so the capability probe can only ever return True. Which backend is the actual question.
+_FEATURES = {
+    "selfie":  ("SELFIE_ENABLED",  lambda: selfie_capable(), lambda: SELFIE_PROVIDER),
+    "meme":    ("MEME_ENABLED",    lambda: meme_capable(), None),
+    "gif":     ("GIF_ENABLED",     lambda: bool(GIPHY_API_KEY),
+                lambda: gif_prefs.get("safety", "high")),
+    "voice":   ("VOICE_ENABLED",   lambda: True,
+                lambda: "inworld" if INWORLD_API_KEY else "nanogpt"),
+    "traffic": ("TRAFFIC_ENABLED", lambda: bool(WSDOT_API_KEY), None),
+    "maps":    ("TOMTOM_ENABLED",  lambda: bool(TOMTOM_API_KEY), None),
+    "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD), None),
+}
+FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"
+feature_prefs = {}
+
+
+def _feature_state(name: str) -> tuple:
+    """(on, capable) for one feature."""
+    flag, probe = _FEATURES[name][0], _FEATURES[name][1]
+    try:
+        capable = bool(probe())
+    except Exception:
+        capable = False
+    return bool(globals().get(flag)) and capable, capable
+
+
+def _feature_off_reason(name: str, missing: str, label: str) -> str:
+    """Why a credential-gated command is inert: never configured (needs a `.env` edit or a
+    file) vs. switched off (needs one `/features` command). Ending that conflation is what
+    v2026-08-02.9 was for, and every command that still printed the credential sentence for
+    both cases quietly undid it."""
+    on, capable = _feature_state(name)
+    if not capable:
+        return missing
+    if not on:
+        return f"{label} switched off for this instance — /features {name} on turns it back on."
+    return ""
+
+
+def load_feature_prefs():
+    """Re-apply persisted switches over the env defaults. Only ever turns things OFF or
+    back on within what the instance is capable of — it cannot conjure a missing key."""
+    if FEATURE_PREFS_FILE.exists():
+        try:
+            feature_prefs.update(json.loads(FEATURE_PREFS_FILE.read_text(encoding="utf-8")))
+        except Exception as e:
+            log.warning("[features] prefs load failed: %s", e)
+    for name, want in list(feature_prefs.items()):
+        if name in _FEATURES:
+            globals()[_FEATURES[name][0]] = bool(want)
+
+
+def save_feature_prefs():
+    _atomic_write_text(FEATURE_PREFS_FILE, json.dumps(feature_prefs, indent=2))
+
+
+def _feature_detail(name: str, on: bool) -> str:
+    """The detail value for a feature that is ON — which TTS backend, which GIF safety
+    level, which image provider — or "" when there is nothing to say. Returns it raw;
+    callers pick the punctuation, because /audit packs it (`voice=on(inworld)`) and the
+    /features listing spaces it out (`voice: on (inworld)`).
+
+    Shared by both on purpose. "voice=on" was true on all seven and answered nothing
+    (v2026-08-02.10); a second copy of this logic is how the listing drifts back to
+    saying less than the audit line it exists to expand on."""
+    detail = _FEATURES[name][2]
+    if not on or detail is None:
+        return ""
+    try:
+        d = detail()
+    except Exception:
+        return ""
+    return str(d) if d else ""
+
+
+def _features_summary() -> str:
+    """One compact line for /audit: on / off / n/a, where n/a means never configured."""
+    bits = []
+    for name in _FEATURES:
+        on, capable = _feature_state(name)
+        if not capable:
+            bits.append(f"{name}=n/a")
+            continue
+        d = _feature_detail(name, on)
+        bits.append(f"{name}=" + ("on" if on else "off") + (f"({d})" if d else ""))
+    return " ".join(bits)
+
+
+_SEED_FILES = ("people.txt", "projects.txt", "schedule.txt", "life.txt", "setting.txt")
+
+
+def _seed_paths() -> tuple:
+    """The atlas is the one seed whose filename is configurable (`ATLAS_FILE`), so it is
+    resolved through the same global the loader reads rather than assumed to be
+    `atlas.txt` — an audit that checks a different file than the code loads is worse
+    than no audit."""
+    return (ATLAS_FILE,) + tuple(BASE_DIR / f for f in _SEED_FILES)
+
+
+def _seed_summary() -> str:
+    """Seed files feed straight into her prompts; a missing one costs content with no
+    error at all. jules ran without atlas.txt on the VPS for a while (vps-sync notes it)."""
+    missing = [p.name for p in _seed_paths() if not p.exists()]
+    return "all present" if not missing else "MISSING: " + ", ".join(missing)
+
+
+# Apply persisted switches now — module level, after every global they touch exists.
+# Without this the prefs file is written and never read, which is worse than no file.
+load_feature_prefs()
+
+
+async def features_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/features  |  /features <name> on|off — flip an integration without an SSH session."""
+    if not _is_admin(update.effective_user.id):
+        return
+    args = context.args or []
+    if not args:
+        lines = ["\U0001F39B Features"]
+        for name in _FEATURES:
+            on, capable = _feature_state(name)
+            if not capable:
+                lines.append(f"{name}: n/a — not configured on this instance")
+            else:
+                d = _feature_detail(name, on)
+                lines.append(f"{name}: " + ("on" if on else "off") + (f" ({d})" if d else ""))
+        lines.append("")
+        lines.append("Usage: /features <name> on|off")
+        await update.message.reply_text("\n".join(lines))
+        return
+    name = args[0].strip().lower()
+    if name not in _FEATURES:
+        await update.message.reply_text("Unknown feature. One of: " + ", ".join(_FEATURES))
+        return
+    if len(args) < 2 or args[1].strip().lower() not in ("on", "off"):
+        on, capable = _feature_state(name)
+        await update.message.reply_text(
+            f"{name}: " + ("n/a — not configured" if not capable else ("on" if on else "off"))
+            + "\nUsage: /features " + name + " on|off")
+        return
+    want = args[1].strip().lower() == "on"
+    if want and not _feature_state(name)[1]:
+        await update.message.reply_text(
+            f"Can't switch {name} on — it isn't configured on this instance "
+            f"(missing credential or assets). That needs a .env or file change, not a switch.")
+        return
+    globals()[_FEATURES[name][0]] = want
+    feature_prefs[name] = want
+    save_feature_prefs()
+    await update.message.reply_text(f"\U0001F39B {name} switched {'on' if want else 'off'}.")
+
+
+async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show or set the GIF content-safety level. high|medium|low only — Giphy's fourth
+    rating ("r") is deliberately unreachable."""
+    if not _is_admin(update.effective_user.id):
+        return
+    cur = gif_prefs.get("safety", "high")
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            f"\U0001F39E GIF safety: {cur} (Giphy rating '{_GIF_RATING[cur]}')\n"
+            f"Usage: /gifsafety high|medium|low\n"
+            f"high='g', medium='pg', low='pg-13'. Giphy's rating is cumulative, and its "
+            f"own issue tracker reports it leaking, so a local deny-list runs at every "
+            f"level regardless of this setting.")
+        return
+    want = args[0].strip().lower()
+    if want not in _GIF_RATING:
+        await update.message.reply_text("Pick one of: high, medium, low.")
+        return
+    gif_prefs["safety"] = want
+    save_gif_prefs()
+    await update.message.reply_text(
+        f"\U0001F39E GIF safety set to {want} (Giphy rating '{_GIF_RATING[want]}').")
+
+
+async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     hint = " ".join(context.args).strip() if context.args else ""
@@ -10557,6 +12404,109 @@ async def _generate_daily_events(owner: int, yesterday: str = ""):
         log.error("[day-events] failed: %s", e)
 
 
+async def wardrobe_rotate_job(context: ContextTypes.DEFAULT_TYPE):
+    """Morning: pick today's outfit for today's weather.
+
+    Runs in the MORNING, not at midnight, and re-reads the weather first. Picking a day's
+    clothes from midnight's reading is the same mistake world.txt makes -- a frozen
+    overnight snapshot standing in for the day (see v2026-08-01.7).
+
+    An outfit set by hand with /outfit holds for the rest of that day: it stamps
+    wardrobe["picked"] with today, and the same-day guard below then skips rotation.
+    Tomorrow the stamp is stale and rotation resumes (owner decision, 2026-08-01)."""
+    if not WARDROBE_DAILY:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    if wardrobe.get("picked") == today:
+        return
+    try:
+        await ensure_weather()
+        pick = _pick_daily_outfit()
+        if not pick:
+            return
+        recent = wardrobe.setdefault("recent", [])
+        recent.append(pick)
+        if len(recent) > WARDROBE_RECENT_KEPT:
+            del recent[:-WARDROBE_RECENT_KEPT]
+        wardrobe["current"] = pick
+        wardrobe["auto"] = True        # rotation's pick -- the selfie prompt may re-check it
+        wardrobe["picked"] = today
+        save_wardrobe()
+        print(f"[wardrobe] {NAME} is wearing: {pick}")
+    except Exception as e:
+        log.warning("[wardrobe] daily rotation failed: %s", e)
+        _count_error("wardrobe")
+
+
+async def _maybe_rotate_life_arc():
+    """Evolve life.txt every LIFE_ROTATE_DAYS, from what actually happened since.
+
+    day.txt answers "what happened today" and is regenerated nightly. life.txt is the
+    slower thing underneath — the arc a character is currently in — and until now nothing
+    ever wrote it, so a hand-seeded arc stayed frozen forever (owner noticed Bonnie's had
+    not moved).
+
+    Evolution, not replacement: the current arc goes into the prompt and unresolved
+    threads are required to survive. Exactly one thing is allowed to move per rotation,
+    because an arc that turns over completely every week is not an arc.
+    """
+    if not (LIFE_ROTATE and LIFE_ARC_FILE.exists()):
+        return
+    now = time.time()
+    try:
+        last = float(LIFE_STAMP_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        last = 0.0
+    if last and now - last < LIFE_ROTATE_DAYS * 86400:
+        return
+    if not last:                      # first run: stamp and wait a full period
+        _atomic_write_text(LIFE_STAMP_FILE, str(now))
+        return
+    try:
+        current = LIFE_ARC_FILE.read_text(encoding="utf-8").strip()
+        if not current:
+            return
+        recent = sorted(BASE_DIR.glob("day_*.txt"))[-LIFE_ROTATE_DAYS:]
+        happened = "\n".join(p.read_text(encoding="utf-8").strip()[:300] for p in recent)
+        projects = _read_projects()
+        prompt = (
+            f"Here is {NAME}'s current life arc — the slow-moving stuff going on with her "
+            f"right now:\n\n{current}\n\n"
+            + (f"What actually happened over the last stretch:\n{happened}\n\n" if happened else "")
+            + (f"Her standing projects:\n{projects}\n\n" if projects else "")
+            + "Write the UPDATED arc, as it stands now. Rules:\n"
+              "- Same shape as the current one: one short paragraph, present tense, "
+              "about 40-60 words. No headings, no list.\n"
+              "- This is an EVOLUTION, not a replacement. Threads that have not resolved "
+              "carry over, in the same words where nothing has changed about them.\n"
+              "- Let exactly ONE thing move: something resolves, worsens, or a new thread "
+              "starts. Not all of it. An arc that turns over completely is not an arc.\n"
+              "- Stay concrete and specific. No 'she has been reflecting on things'. Name "
+              "the actual thing.\n"
+              "- Keep the small grievance she is taking personally, or replace it with "
+              "another one. It is part of the form.\n"
+              "- Write only the paragraph."
+        )
+        msgs = [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, "")},
+                {"role": "user", "content": prompt}]
+        new = _strip_thinking(await asyncio.to_thread(call_nanogpt, msgs, SUMMARY_MODEL)).strip()
+        if not new or len(new) < 40:
+            log.warning("[life] rotation produced nothing usable; keeping the current arc")
+            return
+        stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d")
+        try:
+            (BASE_DIR / f"life_{stamp}.txt").write_text(current + "\n", encoding="utf-8")
+        except OSError as e:
+            log.warning("[life] archive failed: %s", e)
+        _atomic_write_text(LIFE_ARC_FILE, new + "\n")
+        _atomic_write_text(LIFE_STAMP_FILE, str(now))
+        _life_arc_cache["text"] = None      # 5-min TTL otherwise; take effect now
+        print(f"[life] arc rotated: {new[:110]}…")
+    except Exception as e:
+        log.error("[life] rotation failed: %s", e)
+        _count_error("memory")
+
+
 async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
     """Midnight job: archive today's day.txt to memory + a dated file, then generate
     tomorrow's events so she starts the new day with a populated context."""
@@ -10620,6 +12570,10 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             pass
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
+
+    # Slower than the day: checked nightly, acts weekly. After day generation so the arc
+    # update sees today's events already written.
+    await _maybe_rotate_life_arc()
 
     # Recompute closeness for all active chats
     if CLOSENESS_ENABLED:
@@ -11003,6 +12957,19 @@ def _tomtom_err_detail(resp) -> str:
     return detail[:200]
 
 
+def _classify_fetch_error_by_type(e) -> str:
+    """Exception-type fallback shared by _tomtom_err_reason/_wsdot_err_reason, used once
+    each caller has ruled out an HTTP status code (they classify codes differently —
+    TomTom adds key/rate-limit detail, WSDOT just reports the code — so only this
+    generic tail is common to both)."""
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "timed out"
+    if "Connect" in name or "Connection" in name or "DNS" in name:
+        return "network/DNS error"
+    return name
+
+
 def _tomtom_err_reason(e) -> str:
     """Classify a requests exception into a short reason that never contains the URL/key
     (requests puts the API key in the query string, so `str(e)` would leak it into logs).
@@ -11016,12 +12983,7 @@ def _tomtom_err_reason(e) -> str:
     if code:
         detail = _tomtom_err_detail(resp)
         return f"HTTP {code}" + (f" — {detail}" if detail else "")
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _tomtom_geocode(query: str):
@@ -11102,7 +13064,8 @@ def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
 
 async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     parsed = _parse_route_query(" ".join(context.args) if context.args else "")
     if not parsed:
@@ -11128,7 +13091,8 @@ async def route_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     loc = user_location.get(update.effective_chat.id)
     if not loc:
@@ -11148,7 +13112,8 @@ async def nearby_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     query = " ".join(context.args) if context.args else ""
     if not query:
@@ -11167,7 +13132,8 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TOMTOM_ENABLED:
-        await update.message.reply_text("Maps aren't set up (TOMTOM_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "maps", "Maps aren't set up (TOMTOM_API_KEY missing).", "Maps are"))
         return
     loc = user_location.get(update.effective_chat.id)
     if not loc:
@@ -11439,6 +13405,11 @@ async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
     await update_garmin()
 
 
+async def life_event_job(context: ContextTypes.DEFAULT_TYPE):
+    if LIFE_SIM_ENABLED:
+        await update_life_event()
+
+
 def _health_nudge_ok(owner: int) -> bool:
     """The same proactive gate note_followup_job uses — quiet flag, away, quiet hours,
     per-chat quiet windows, then the shared nudge budget. A health check-in is a nudge
@@ -11450,16 +13421,9 @@ def _health_nudge_ok(owner: int) -> bool:
     return _check_nudge_budget(owner)
 
 
-def _stress_alert_ts() -> float:
-    try:
-        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
-    except Exception:
-        return 0.0
-
-
 def _recent_stress_high():
     """Off-loop: has stress stayed high over the last STRESS_SUSTAINED_MIN minutes?"""
-    if not STRESS_ALERTS or _Garmin is None:
+    if not _alerts_on(STRESS_ALERTS) or _Garmin is None:
         return (False, None)
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -11471,50 +13435,81 @@ def _recent_stress_high():
     return _stress_sustained(data.get("stressValuesArray") or [], cutoff_ms, STRESS_THRESHOLD)
 
 
-async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic: sustained high stress → one gentle in-character check-in."""
-    if not STRESS_ALERTS:
-        return
-    owner = get_owner()
-    if owner is None:
-        return
-    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
-        return  # already checked in recently
-    if not _health_nudge_ok(owner):
-        return
-    high, avg = await asyncio.to_thread(_recent_stress_high)
-    if not high:
-        return
-    uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
-        f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
-        f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
-        f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
-    )
+def _read_alert_ts(path: "Path") -> float:
     try:
-        await send_triggered(context, owner, trigger)
-        _consume_nudge(owner)
-        try:
-            STRESS_ALERT_FILE.write_text(str(time.time()))
-        except Exception:
-            pass
-        print(f"[stress] high-stress check-in sent (avg {avg}).")
-    except Exception as e:
-        log.warning("[stress] alert failed: %s", type(e).__name__)
-        _count_error("garmin")
-
-
-def _bb_alert_ts() -> float:
-    try:
-        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
+        return float(path.read_text()) if path.exists() else 0.0
     except Exception:
         return 0.0
 
 
+async def _run_health_alert_job(
+    context: ContextTypes.DEFAULT_TYPE, *, alerts_on, alert_file: "Path",
+    cooldown_hours: float, fetch_check, trigger_text_fn, label: str,
+):
+    """Shared shape for stress_monitor_job/bb_monitor_job: cooldown gate → proactive
+    nudge gate → off-loop fetch+threshold → in-character trigger → persist cooldown.
+    rhr_monitor_job stays separate — its cooldown is once-per-calendar-day (not an
+    elapsed-hours window) and it always records history regardless of whether an
+    alert fires, so it doesn't fit this shape without bolting on cases this helper
+    would only serve once.
+
+    fetch_check() runs off-loop and returns (triggered: bool, value_for_logging).
+    trigger_text_fn(uname) returns the in-character system trigger text."""
+    if not alerts_on():
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    if time.time() - _read_alert_ts(alert_file) < cooldown_hours * 3600:
+        return  # already checked in recently
+    if not _health_nudge_ok(owner):
+        return
+    triggered, value = await asyncio.to_thread(fetch_check)
+    if not triggered:
+        return
+    uname = user_names.get(owner, "you")
+    try:
+        await send_triggered(context, owner, trigger_text_fn(uname))
+        _consume_nudge(owner)
+        try:
+            alert_file.write_text(str(time.time()))
+        except Exception:
+            pass
+        print(f"[{label}] check-in sent ({value}).")
+    except Exception as e:
+        log.warning("[%s] alert failed: %s", label, type(e).__name__)
+        _count_error("garmin")
+
+
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: sustained high stress → one gentle in-character check-in."""
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(STRESS_ALERTS),
+        alert_file=STRESS_ALERT_FILE,
+        cooldown_hours=STRESS_ALERT_COOLDOWN_HOURS,
+        fetch_check=_recent_stress_high,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
+            f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
+            f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
+            f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+        ),
+        label="stress",
+    )
+
+
+def _bb_fetch_check():
+    """Off-loop: (triggered, body_battery) — triggered when Body Battery has bottomed out."""
+    bb = _body_battery_now()
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return (False, bb)
+    return (True, bb)
+
+
 def _body_battery_now():
     """Off-loop: latest Body Battery (0-100), or None."""
-    if not BB_ALERTS or _Garmin is None:
+    if not _alerts_on(BB_ALERTS) or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -11527,42 +13522,26 @@ def _body_battery_now():
 
 async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
-    if not BB_ALERTS:
-        return
-    owner = get_owner()
-    if owner is None:
-        return
-    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
-        return
-    if not _health_nudge_ok(owner):
-        return
-    bb = await asyncio.to_thread(_body_battery_now)
-    if bb is None or bb > BB_LOW_THRESHOLD:
-        return
-    uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
-        f"right now — physically depleted, the kind of drained where pushing harder won't help. "
-        f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
-        f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
-        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(BB_ALERTS),
+        alert_file=BB_ALERT_FILE,
+        cooldown_hours=BB_ALERT_COOLDOWN_HOURS,
+        fetch_check=_bb_fetch_check,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
+            f"right now — physically depleted, the kind of drained where pushing harder won't help. "
+            f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
+            f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+            f"clinical. Don't cite numbers or mention a watch or battery.]"
+        ),
+        label="bb",
     )
-    try:
-        await send_triggered(context, owner, trigger)
-        _consume_nudge(owner)
-        try:
-            BB_ALERT_FILE.write_text(str(time.time()))
-        except Exception:
-            pass
-        print(f"[bb] low-energy check-in sent (body battery {bb}).")
-    except Exception as e:
-        log.warning("[bb] alert failed: %s", type(e).__name__)
-        _count_error("garmin")
 
 
 def _resting_hr_today():
     """Off-loop: today's resting heart rate, or None."""
-    if not RHR_ALERTS or _Garmin is None:
+    if not _alerts_on(RHR_ALERTS) or _Garmin is None:
         return None
     today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
     try:
@@ -11595,7 +13574,7 @@ def _record_rhr(date_str: str, rhr: int):
 
 async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Once daily: resting HR notably above the user's own baseline → early run-down check-in."""
-    if not RHR_ALERTS:
+    if not _alerts_on(RHR_ALERTS):
         return
     owner = get_owner()
     if owner is None:
@@ -11652,16 +13631,12 @@ def _wsdot_err_reason(e) -> str:
     """Key-free reason for a WSDOT fetch failure. WSDOT puts the AccessCode in the query
     string, so `str(e)`/`%s` on the raw exception leaks the key into errors.log — the
     full URL with AccessCode reached the log this way (observed 2026-07-20). Classify by
-    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason."""
+    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason,
+    and shares its exception-type fallback (_classify_fetch_error_by_type)."""
     code = getattr(getattr(e, "response", None), "status_code", None)
     if code:
         return f"HTTP {code}"
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _fetch_wsdot_alerts() -> list:
@@ -11807,12 +13782,15 @@ def _garmin_off_reason() -> str:
     if _Garmin is None:
         return ("The garminconnect library isn't installed "
                 f"({_pip_hint('garminconnect')}).")
+    # Last, because the three above are more specific causes of the same silence. Without
+    # this case `/features health off` left every health command answering normally while
+    # `/features` and `/audit` both reported health=off.
+    if not GARMIN_ENABLED:
+        return "The health feed is switched off — /features health on turns it back on."
     return ""
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -11837,8 +13815,6 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -11858,9 +13834,7 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
-    if not STRESS_ALERTS:
+    if not _alerts_on(STRESS_ALERTS):
         reason = _garmin_off_reason()
         await update.message.reply_text(
             reason or "Stress monitoring is off (STRESS_ALERTS=0).")
@@ -11878,7 +13852,9 @@ async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TRAFFIC_ENABLED:
-        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "traffic", "Traffic monitoring isn't set up (WSDOT_API_KEY missing).",
+            "Traffic monitoring is"))
         return
     chat_id = update.effective_chat.id
     loc = user_location.get(chat_id)
@@ -11894,7 +13870,9 @@ async def traffic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def incidents_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not TRAFFIC_ENABLED:
-        await update.message.reply_text("Traffic monitoring isn't set up (WSDOT_API_KEY missing).")
+        await update.message.reply_text(_feature_off_reason(
+            "traffic", "Traffic monitoring isn't set up (WSDOT_API_KEY missing).",
+            "Traffic monitoring is"))
         return
     chat_id = update.effective_chat.id
     alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
@@ -11949,6 +13927,21 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Self-audit ---
+def _selfie_provider_label() -> str:
+    """Which backend AND which model, for both backends.
+
+    Only the NanoGPT branch named its model, so "gemini" was the whole answer on the Gemini
+    path — and `GEMINI_IMAGE_MODEL` is per-instance, changes without a code deploy, and is
+    the thing you check after changing it. Third time this session that a load-bearing selfie
+    input had no surface (the prompt, the reference photo, now the model), and the same
+    remedy each time: report it where the owner already looks (v2026-08-03.6)."""
+    if SELFIE_PROVIDER == "gemini":
+        return f"gemini ({GEMINI_IMAGE_MODEL}, modalities {'+'.join(GEMINI_RESPONSE_MODALITIES)})"
+    if SELFIE_PROVIDER == "xai":
+        return f"xai ({XAI_IMAGE_MODEL})"
+    return f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
+
+
 def _log_startup_diagnostic():
     import platform, shutil
     disk = shutil.disk_usage(BASE_DIR)
@@ -11957,11 +13950,12 @@ def _log_startup_diagnostic():
     log.warning(
         "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
-        "Maps: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
+        "Maps: %s | Selfie base: %s | Selfie model: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
         NANOGPT_MODEL, FALLBACK_MODEL or "(none)",
         STREAM_TIMEOUT, MAX_TOKENS,
-        (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"),
+        (f"{_tomtom_mode()}" if TOMTOM_ENABLED else "off"), _base_image_status(),
+        _selfie_provider_label(),
         disk.free // (1024 * 1024), state_size, err_size,
         len(conversation_history), os.getpid(),
     )
@@ -12187,6 +14181,13 @@ def gather_audit_data() -> dict:
         "llm_stats": dict(_llm_stats),
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
+        "selfie_base": _base_image_status(),
+        "selfie_provider": _selfie_provider_label(),
+        "features": _features_summary(),
+        "seeds": _seed_summary(),
+        "owner": ("set" if get_owner() is not None else "NOT SET — nothing proactive can fire"),
+        "timezone": (str(TZ) if TZ else "(system default)"),
+        "location": WEATHER_LOCATION,
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
@@ -12254,6 +14255,11 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"PID: {d['pid']}",
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
+        f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
+        f"Features: {d.get('features', '?')}",
+        f"Seeds: {d.get('seeds', '?')}",
+        f"Owner: {d.get('owner', '?')} | TZ: {d.get('timezone', '?')}"
+        f" | Location: {d.get('location', '?')}",
     ]
     ps = d.get("prompt_stats") or {}
     if ps:
@@ -12313,7 +14319,8 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             chain = _bot_chain_len(await asyncio.to_thread(_ledger_tail, gid, 10))
             lines.append(
                 f"Group {gid}: ledger {lsize} KB, bot-sends today "
-                f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}"
+                f"{b.get('count', 0)}/{GROUP_DAILY_BOT_BUDGET}, chain {chain}/{GROUP_BOT_CHAIN_MAX}, "
+                f"banter {'on' if GROUP_BANTER else 'off'} (decay {GROUP_CHAIN_DECAY})"
             )
     # Sent as PLAIN TEXT deliberately. /audit interpolates arbitrary diagnostic strings —
     # card field names (system_prompt, mes_example), prompt block headings
@@ -12334,6 +14341,42 @@ def tail_error_lines(n: int = 20) -> list[str]:
     except FileNotFoundError:
         lines = []
     return [l for l in lines if l.strip()][-n:]
+
+
+async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One-shot feature/health report for this bot — what's on, what's embedded, memory
+    counts. Reimplemented from 71dfa44 (2026-06-29, never merged), scoped down: the
+    original's log-error tail is dropped (redundant with /errors, which already does
+    that job better — admin-gated, paginated), and its flag list is trimmed to what
+    actually exists on this bot today rather than the abandoned branch's full set."""
+    chat_id = update.effective_chat.id
+    on = lambda b: "✅" if b else "—"
+    lines = [f"🪪 {NAME} — diagnostics"]
+    lines.append(
+        "Features:\n"
+        f"  {on(MEMORY_SEMANTIC_LIVE)} semantic memory   {on(EPISODIC_RECALL)} episodic recall   "
+        f"{on(SAFETY_ENABLED)} safety\n"
+        f"  {on(STYLE_MIRROR)} style mirror   {on(LIFE_SIM_ENABLED)} offline life   "
+        f"{on(ONTHISDAY_ENABLED)} on-this-day\n"
+        f"  {on(VOICE_TONE_ENABLED)} voice tone\n"
+        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   "
+        f"{on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
+    )
+    if MEMORY_SEMANTIC_LIVE:
+        lines.append(f"Embedded: {len(_lore_embeddings)} lore entries")
+    if EPISODIC_RECALL:
+        with _episodes_lock:
+            n_ep = len(_episodes["ts"])
+        lines.append(f"Episodes: {n_ep} chunk(s) archived (cap {EPISODE_MAX}, numpy: "
+                    f"{'yes' if _np is not None else 'MISSING'})")
+    if GARMIN_ENABLED:
+        age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
+        lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
+    lines.append(
+        f"Memory: {len(_read_memories())} NPC notes · {len(milestones.get(chat_id) or [])} "
+        f"milestones · {len([r for r in reminders if r['chat_id'] == chat_id])} reminders"
+    )
+    await _reply_chunked(update, "\n".join(lines))
 
 
 async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12806,30 +14849,49 @@ _BASE_COMMANDS = [
     BotCommand("clear", "Wipe conversation history"),
     BotCommand("menu", "Open the inline button menu"),
     BotCommand("status", "Quick status: mood, outfit, today's context"),
+    BotCommand("recap", "2-3 sentence summary of recent conversation"),
+    BotCommand("card", "Show the currently loaded character card"),
+    BotCommand("setcard", "Update a character card field (/setcard <field> <value>)"),
     BotCommand("memory", "View what I remember"),
     BotCommand("remember", "Save a fact"),
     BotCommand("forget", "Wipe all memory (or /forget <keyword> to remove matching facts)"),
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("editmem", "Edit a memory note by number"),
     BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
+    BotCommand("dupefacts", "Diagnostic: flag near-duplicate facts (reports only, no merge)"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
+    BotCommand("news", "See what's been happening in her life"),
+    BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
     BotCommand("boundary", "Add a soft boundary note"),
     BotCommand("boundaries", "List boundaries"),
+    BotCommand("life", "View or replace the character's current life arc"),
+    BotCommand("people", "View or replace the people in her life"),
+    BotCommand("projects", "View or replace her ongoing projects"),
+    BotCommand("schedule", "View or replace her weekly schedule"),
+    BotCommand("today", "Append a mid-day note (what's happening today)"),
+    BotCommand("note", "Add something to what she knows about you"),
+    BotCommand("notes", "List your auto-collected notes"),
     BotCommand("mood", "Check her current mood"),
     BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
     BotCommand("vent", "Toggle vent mode (listening only)"),
     BotCommand("energy", "Set your energy level (high/low/crash)"),
     BotCommand("selfie", "Generate a selfie"),
+    BotCommand("gif", "Search and send a GIF"),
+    BotCommand("gifsafety", "GIF safety: high, medium or low"),
+    BotCommand("features", "Switch integrations on or off"),
+    BotCommand("setbase", "Replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
+    BotCommand("meme", "Send a meme (optional hint)"),
     BotCommand("addjoke", "Add an inside joke"),
     BotCommand("jokes", "List inside jokes"),
     BotCommand("deljoke", "Remove a joke"),
@@ -12845,6 +14907,8 @@ _BASE_COMMANDS = [
     BotCommand("crons", "List recurring tasks"),
     BotCommand("crondel", "Remove a recurring task"),
     BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("quiet", "Pause proactive messages for X hours (/quiet 3, /quiet off)"),
+    BotCommand("quietwin", "Manage recurring quiet windows (add/list/del)"),
     BotCommand("away", "Mark yourself away (suppresses proactives)"),
     BotCommand("back", "Clear away mode"),
     BotCommand("heartbeat", "Trigger a proactive message now"),
@@ -12856,6 +14920,12 @@ _BASE_COMMANDS = [
     BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
     BotCommand("audit", "Bot health and error report"),
+    BotCommand("diag", "Show this bot's behavior-toggle status"),
+    BotCommand("errors", "Show recent errors.log lines (admin only)"),
+    BotCommand("restart", "Clean restart via the supervisor (admin only)"),
+    BotCommand("update", "Self-deploy from main — dead on the private repo, "
+                          "replies with vps-sync.sh instructions (admin only)"),
+    BotCommand("fleet", "Fleet console: probe every peer's admin API (admin only)"),
 ]
 
 _PAYMENT_COMMANDS = [
@@ -13056,19 +15126,27 @@ def main():
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("heartbeat", heartbeat_now))
     app.add_handler(CommandHandler("selfie", selfie_cmd))
+    app.add_handler(CommandHandler("setbase", setbase_cmd))
     app.add_handler(CommandHandler("meme", meme_cmd))
+    app.add_handler(CommandHandler("gif", gif_cmd))
+    app.add_handler(CommandHandler("gifsafety", gifsafety_cmd))
+    app.add_handler(CommandHandler("features", features_cmd))
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
+    app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
+    app.add_handler(CommandHandler("dupefacts", dupefacts_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
     if PAYMENTS_ENABLED:
@@ -13120,10 +15198,19 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CommandHandler("fleet", fleet_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
+    # /setbase as a photo/document CAPTION. PTB's CommandHandler matches only
+    # message.text + message.entities (verified in its check_update source), so a
+    # caption never reaches it and the message falls through to normal chat — which
+    # is exactly what happened on first use (v2026-08-02.4). Registered BEFORE
+    # handle_photo/handle_document so it wins the dispatch.
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.IMAGE) & filters.CaptionRegex(r"^/setbase\b"),
+        setbase_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
@@ -13132,7 +15219,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
-    if TRAFFIC_ENABLED:
+    # Registered whenever the key exists (same reasoning as the health commands below):
+    # both handlers explain why they're inert, and an unregistered command is silent.
+    if WSDOT_API_KEY:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
     # Registered whenever credentials exist (even if the kill switch is off or the library
@@ -13171,7 +15260,29 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
-        if GARMIN_ENABLED and _Garmin is not None:
+        if WARDROBE_DAILY:
+            _wr_h = max(0, min(23, WARDROBE_ROTATE_HOUR))
+            wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)
+            app.job_queue.run_daily(wardrobe_rotate_job, time=wardrobe_time)
+            log.info("Daily wardrobe rotation scheduled %02d:00.", _wr_h)
+        if LIFE_SIM_ENABLED:
+            for _lt in LIFE_EVENT_TIMES.split(","):
+                _lt = _lt.strip()
+                if not _lt:
+                    continue
+                try:
+                    _lh, _lm = (int(x) for x in _lt.split(":"))
+                except Exception:
+                    log.warning("[config] bad LIFE_EVENT_TIMES entry %r — skipped", _lt)
+                    continue
+                _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
+                app.job_queue.run_daily(life_event_job, time=_ltime)
+            log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
+        # Scheduled on CAPABILITY, not on the switch: every one of these jobs re-checks its
+        # own gate when it fires, so registering them whenever the credentials exist makes
+        # `/features health off` → `on` live. Gating registration on the switch made "off"
+        # a one-way trip until the next restart.
+        if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:
             for _gt in GARMIN_TIMES.split(","):
                 _gt = _gt.strip()
                 if not _gt:
@@ -13188,12 +15299,12 @@ def main():
             if STRESS_ALERTS:
                 app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
                                             first=STRESS_POLL_MIN * 60)
-                log.info("Stress monitoring on (every %d min, threshold %d).",
+                log.info("Stress monitoring scheduled (every %d min, threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, STRESS_THRESHOLD)
             if BB_ALERTS:
                 app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
                                             first=STRESS_POLL_MIN * 60)
-                log.info("Body Battery monitoring on (every %d min, low threshold %d).",
+                log.info("Body Battery monitoring scheduled (every %d min, low threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, BB_LOW_THRESHOLD)
             if RHR_ALERTS:
                 _rhtime = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
@@ -13224,7 +15335,22 @@ def main():
         if MEMORY_SEMANTIC_LIVE and LORE:
             app.job_queue.run_once(_embed_lore_job, when=20)
             log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
-        if TRAFFIC_ENABLED:
+        if EPISODIC_RECALL and _np is not None:
+            app.job_queue.run_once(_episodes_load_job, when=21)
+            log.info("Episodic recall on (cap %d chunks).", EPISODE_MAX)
+        elif EPISODIC_RECALL and _np is None:
+            log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
+                        "disabled. Install it with: %s", _pip_hint("numpy"))
+        if ONTHISDAY_ENABLED:
+            try:
+                _oh, _om = (int(x) for x in ONTHISDAY_TIME.split(":"))
+                _ohtime = dtime(_oh, _om, tzinfo=TZ) if TZ else dtime(_oh, _om)
+                app.job_queue.run_daily(onthisday_job, time=_ohtime)
+                log.info("On-this-day reminiscing scheduled at %s.", ONTHISDAY_TIME)
+            except Exception:
+                log.warning("[config] bad ONTHISDAY_TIME %r — on-this-day not scheduled",
+                            ONTHISDAY_TIME)
+        if WSDOT_API_KEY:  # capability, not the switch — traffic_poll_job re-checks it
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
             log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)

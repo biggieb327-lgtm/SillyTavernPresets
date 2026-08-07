@@ -8,8 +8,8 @@ description: Safely editing SillyTavern character cards, per-instance seed files
 Two distinct families live in this repo:
 
 - **Bot cards** — `telegram-companion-bot/{nora,bonnie,cass,emily_harper,priya,jules_nakagawa,marcus_calder}.json`
-  (`chara_card_v2` spec) + seed dirs `{nora,bonnie,cass,emily,priya}/` each holding
-  `people.txt, projects.txt, schedule.txt, atlas.txt`. These deploy to live bots.
+  (`chara_card_v2` spec) + seed dirs `{nora,bonnie,cass,emily,priya,jules,marcus}/` each
+  holding `people.txt, projects.txt, schedule.txt, atlas.txt`. These deploy to live bots.
 - **Root presets** — `TheAtelier*.json`, `UnifiedWritersRoom_*.json`,
   `caa16137-nora.json`, etc. at repo root. Live files the owner still uses in
   SillyTavern proper, but they deploy nowhere.
@@ -71,10 +71,39 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    Softening her is a character bug, not an improvement. Group-chat pilot pair
    with Priya.
 
+   **Marcus** (`marcus_calder.json`) — 45, barista (mornings) / personal trainer
+   (afternoons), Olympia WA. Professional dominant guiding couples through non-monogamy
+   and kink — reads like "Hitch on the surface, Earn Marks underneath": warm, patient,
+   privately assessing what he sees, rarely voicing the conclusion. His defining trait
+   is **the code**: non-negotiable personal limits that are judgments, not consent
+   mechanics. He declines without drama or explanation — the decline itself is the
+   boundary; he doesn't announce one in advance. Consent checks and aftercare are real
+   and constant, never mechanical. **No family entries in his seed dir** — the card is
+   silent there; that's a deliberate gap, not an oversight, so don't invent parents.
+   Shares a metro with his only planned groupmate, Emily — real geography, same rule
+   Priya's and Emily's atlases follow. **Both were Portland, OR until 2026-08-02**, moved
+   together to Olympia so Emily's WSDOT (Washington State DOT) traffic integration matches
+   the state she lives in; moving only one would have split the pair the co-location exists
+   for. Their atlases were relocated place-by-place, preserving each entry's function rather
+   than swapping names — they deliberately share Browsers Bookshop and the South Capitol
+   grid, which is what a shared metro is supposed to look like.
+   **`preset-explicit.txt`'s standing-consent block** ("no reply should open by
+   hedging, warning, or seeking permission") **directly conflicts with his defining
+   behavior** — he asks first and checks in constantly. `preset-marcus.txt` resolves
+   this by scoping the standing-consent rule to the narrator's relationship with
+   `{{user}}`, leaving his in-fiction asking intact; preserve that distinction, don't
+   simplify it away. **Name-collision history**: adding him forced renaming two
+   pre-existing "Marcus" characters — Emily's work colleague (now Warren) and Jules's
+   dealership contact (now Dale) — because a lorebook key literally named `"Marcus"`
+   would have fired on his own name in a group chat. Check any future Marcus-adjacent
+   edit against this before reusing the name elsewhere in the fleet.
+
 3. **Seed files** are plain text the bot feeds into prompts as-is: keep the
    existing format of each file (headings/line style).
-   `preset.txt` is the shared texting-style voiceprint for ALL six bots — an edit
-   there changes every character; flag that blast radius before making it.
+   `preset.txt` is the shared texting-style voiceprint for ALL seven bots — an edit
+   there changes every character; flag that blast radius before making it. Most
+   instances now load layered `preset-*.txt` files instead (see ROADMAP 3.13) — check
+   the instance's `PRESET_FILES` before assuming `preset.txt` itself is what's live.
 
 4. **Validate** every touched JSON file:
    ```bash
@@ -87,9 +116,10 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    changes — the delivery gate won't fire. A dated changelog note
    (`## YYYY-MM-DD — ...`) is optional for notable content shifts.
 
-6. **Deploy (bot cards/seeds only):** user runs `sync-cards.sh` (dry-run first)
-   then `/restart` affected bots — see `deploy-and-verify-fleet` path C. Root
-   presets need no deploy; the owner loads them into SillyTavern manually.
+6. **Deploy (bot cards/seeds only):** user runs `vps-sync.sh <instance>` for each
+   affected instance (`sync-cards.sh` is phone-era and manages nothing now) — see
+   `deploy-and-verify-fleet`. Root presets need no deploy; the owner loads them into
+   SillyTavern manually.
 
 ## Quality bar
 
@@ -120,4 +150,4 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 ## What to report back
 
 Which files changed and why, validation output, canon constraints that shaped the
-edit, and the deploy step (sync-cards + restart) or its inapplicability.
+edit, and the deploy step (`vps-sync.sh` per instance) or its inapplicability.

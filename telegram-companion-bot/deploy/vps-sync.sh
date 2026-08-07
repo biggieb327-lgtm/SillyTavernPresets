@@ -25,6 +25,20 @@
 #
 # Mirrors /update's safety: bot.py is compile-checked before the swap and the
 # previous copy is kept at bot.py.bak.
+#
+# LOCKED (ROADMAP 1.6, 2026-08-01): bot.py's own concurrent-update bug (v2026-07-25.11,
+# a host-wide flock in perform_self_update) was only half the fix — this script performs
+# the identical swap on the identical shared paths (bot.py, bot.py.bak) with no guard,
+# and the documented deploy is two back-to-back invocations against instances that share
+# a host. Race: fetch -> py_compile -> cp bot.py.bak -> mv bot.py.new -> bot.py. The loud
+# failure is one run's mv deleting the other's bot.py.new. The silent one is worse: if
+# instance B's backup lands after instance A's mv, bot.py.bak becomes a copy of the *new*
+# code, and nothing reports it — the rollback point is gone and looks fine. flock is
+# util-linux, present by default on Ubuntu 24.04 (unlike Termux, which is why bot.py's
+# phone-side guard and watchdog.sh's PID-file guard use different mechanisms — do not
+# unify the three). Only the code swap strictly needs the lock; locking the whole run is
+# simpler and equally correct, since per-instance card/preset/`.env`/unit work never
+# races across instances anyway.
 set -euo pipefail
 
 INST="${1:?usage: vps-sync.sh <instance>}"
@@ -32,6 +46,9 @@ BASE=/opt/telegram-bots
 REPO="${STPRESETS_REPO:-$BASE/.repo}"
 SRC="$REPO/telegram-companion-bot"
 GIT_SSH_KEY="${STPRESETS_DEPLOY_KEY:-/root/.ssh/stpresets_ro}"
+
+exec 9>"$BASE/.vps-sync.lock"
+flock -n 9 || { echo "[vps-sync] another sync is swapping bot.py on this host; retry" >&2; exit 1; }
 
 # Card mapping mirrors sync-cards.sh (the authoritative list).
 case "$INST" in
@@ -84,6 +101,12 @@ cp "$SRC/preset.txt" "$BASE/$INST/preset.txt"
 cp "$SRC/$CARD"      "$BASE/$INST/$CARD"
 cp "$SRC/bot.py"     "$BASE/bot.py.new"
 
+# acoustic_ears.py is a vendored module bot.py imports directly (voice-note tone
+# analysis) -- keep it in lockstep with bot.py, same as the main file itself. Shared
+# across instances at $BASE, same as bot.py (not per-instance).
+need acoustic_ears.py
+cp "$SRC/acoustic_ears.py" "$BASE/acoustic_ears.py"
+
 # Preset LAYERS (v2026-07-25.5): copy exactly the layers THIS instance names in its own
 # PRESET_FILES. Self-maintaining — no layer list to keep in sync here.
 LAYERS=$(sed -n 's/^[[:space:]]*PRESET_FILES[[:space:]]*=[[:space:]]*//p' \
@@ -96,7 +119,11 @@ for pl in $LAYERS; do
 done
 
 "$BASE/venv/bin/python" -m py_compile "$BASE/bot.py.new"
-cp "$BASE/bot.py" "$BASE/bot.py.bak" 2>/dev/null || true
+# Fatal, not `|| true`: this backup IS the rollback path (see OPS_MANUAL.md), so a
+# silently failed backup is a silently gone rollback — the exact failure this script
+# exists to prevent. install-vps.sh seeds bot.py at $BASE before this script ever runs,
+# so bot.py existing here is not an assumption, it's a precondition already established.
+cp "$BASE/bot.py" "$BASE/bot.py.bak"
 mv "$BASE/bot.py.new" "$BASE/bot.py"
 
 # Normalize CHARACTER_CARD to the repo filename — a renamed on-device card copy

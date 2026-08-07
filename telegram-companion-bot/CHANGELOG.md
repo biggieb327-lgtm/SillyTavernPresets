@@ -7,6 +7,1966 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-07.2 — /code-review caught a group-chat gating regression in v2026-08-07.1
+
+**Root cause: `handle_message` does double duty and the audit treated all 21 sites as
+uniform.** v2026-08-07.1 deleted 21 per-handler `_is_allowed` guards on the theory that
+`_private_gate` (handler group -1) already covers every one of them. True for 20. Not
+true for `handle_message`: it's registered for both private AND group chats and
+branches internally on `chat_id < 0`. `_private_gate` explicitly no-ops for `chat_id <
+0` ("group_guard's jurisdiction — untouched here", per its own docstring), and
+`group_guard` only checks chat-level `GROUP_ALLOWED_CHATS` membership, never the
+sender's identity. Deleting the guard removed the ONLY per-user allowlist enforcement
+for group text messages, breaking `GROUP_CHAT_DESIGN.md` §6's documented invariant:
+"Human gating unchanged... strangers in an allowed group are ignored unless
+`ALLOWED_USERS` is empty." Caught by two independent `/code-review` finder agents
+(cross-file tracer + line-by-line diff scan) before merge; never reached main.
+
+**Fix:** restored `handle_message`'s `_is_allowed` check exactly where it was, with a
+comment distinguishing it from the other 20 (genuinely dead) sites so it isn't
+re-deleted by a future pass over the same class of finding. New
+`TestHandleMessageGroupGating` (2 tests) pins the invariant directly against
+`handle_message`, not just `_private_gate` — the gap existed pre-diff too (no test
+anywhere exercised "a non-allowlisted user's text in an allowed group"), so this
+closes a real, previously-untested hole, not just a regression from this release.
+
+**Also reverted:** `schedule_cmd`'s reuse of the `_context_file_cmd` factory (also
+from v2026-08-07.1). Two more `/code-review` findings: the factory closure binds its
+`file` argument by value at the module-import call site, so
+`monkeypatch.setattr(bot, "SCHEDULE_FILE", ...)` silently has no effect — confirmed
+against the existing `test_schedule_cmd_shows_the_schedule`, which was passing only
+because its assertion is loose enough not to notice; and turning `schedule_cmd` from
+a `FunctionDef` into a plain assignment drops it out of `sweep.py`'s AST-based
+handler-coverage scan, silently narrowing the delivery gate's future reach for this
+one handler. `schedule_cmd` is back to its original hand-rolled body (same one
+`people_cmd`/`projects_cmd` already accept this tradeoff for, pre-existing and out of
+scope here). This also moots a third, lower-severity finding (the factory's unchunked
+reply could raise on a near-4096-char replacement schedule) since the original body
+never had that shape.
+
+**Verification:** `bash .claude/tools/verify.sh` green: 1064/1064 tests (2 new:
+`TestHandleMessageGroupGating`), 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## v2026-08-07.1 — Ponytail-audit cleanup: dead code, duplicated logic, redundant gating
+
+**Root cause: not a bug fix — a requested code-simplification pass.** A subagent audit
+under this repo's new `ponytail` skill (lazy-senior-dev lens: unrequested abstractions,
+reinvented logic, dead code — see `.claude/skills/ponytail/`) found 6 candidates in
+bot.py. Each was independently verified before fixing; two were rejected after closer
+inspection rather than forced through (see below).
+
+**What shipped:**
+- `schedule_cmd` now reuses the `_context_file_cmd` factory that already backs
+  `people_cmd`/`projects_cmd`, instead of hand-rolling the same view/replace/append
+  shape. (Minor, stated: the replace-confirmation message now echoes the new text,
+  matching people/projects, instead of a bare "Schedule updated.")
+- `stress_monitor_job`/`bb_monitor_job` now share `_run_health_alert_job` (cooldown
+  gate → nudge gate → off-loop fetch+threshold → trigger → persist), collapsing two
+  near-identical ~30-line jobs into one. `rhr_monitor_job` stays separate — its
+  cooldown is once-per-calendar-day, not elapsed-hours, and it always records history
+  regardless of whether an alert fires, so it doesn't fit the shared shape without
+  bolting on cases the helper would only serve once.
+- Deleted 21 dead per-handler `if not _is_allowed(update.effective_user.id): return`
+  guards (news_cmd, addmem_cmd, handle_voice, handle_message, health_cmd, diag_cmd,
+  and 15 more). `_private_gate` (handler group -1, added specifically to replace this
+  exact per-handler pattern — its own docstring names the drift bug it fixed) already
+  stops a disallowed caller before any of these ever runs; confirmed by grep that none
+  of the 21 were ever called outside Telegram dispatch. 4 tests that called these
+  handlers directly to assert the now-removed guard (in `TestNewsCommands`,
+  `TestDiagCmd`, `TestEpisodesCmd`, `TestDupefactsCmd`) were retired with a comment
+  pointing at `TestPrivateGate`, which already covers the gating contract at the one
+  real choke point — deliberate widening, not a silent loosening.
+- `export_memory_cmd` and the menu button's `cmd:exportmemory` branch built the same
+  export text independently, ~25 duplicated lines each, with slightly different
+  section labels ("=== LONG-TERM ===" vs "=== LONG-TERM MEMORY ===", "Facts:" vs
+  "Recent facts:" for the recent-facts line). Now share `_memory_export_text`/
+  `_send_memory_export`; both paths use the command's original wording. New
+  `TestExportMemoryCmd` + `TestButtonCallbackExportMemory` — `button_callback` had
+  zero test coverage before this.
+- `_wsdot_err_reason`/`_tomtom_err_reason` shared their exception-type fallback
+  (timeout / connection-DNS / exception-class-name) into
+  `_classify_fetch_error_by_type`. Each keeps its own HTTP-status-code handling,
+  which genuinely differs (WSDOT just reports the code; TomTom adds key-rejected /
+  rate-limited / body-detail messages) — only the truly identical tail moved.
+
+**Rejected after closer inspection (surfaced, not forced):**
+- The audit flagged pin/boundary/joke/wardrobe/note add-list-remove-by-number as "the
+  same shape 5x." They aren't, underneath: per-chat dict-of-lists (pins, boundaries),
+  a flat list-of-dicts with a persistent id, not a list index (jokes), a flat dict
+  with extra metadata (wardrobe's current/auto/picked), and a flat text file (notes).
+  A shared helper would need more parameters/branches than the code it replaces —
+  an unrequested abstraction, not a simplification.
+- The audit also flagged `button_callback`'s other menu branches (pinned/boundaries/
+  jokes/wardrobe/selfimage) as re-deriving what their `_cmd` counterparts compute.
+  Checked: the "duplication" there is a single one-line list comprehension per
+  branch, and the surrounding message text is deliberately shorter for the button UI
+  than the full command's — not worth abstracting. Only `cmd:exportmemory` had real
+  (~25-line) duplicated logic, so only that one branch was touched.
+
+**Verification:** `bash .claude/tools/verify.sh` — py_compile clean; pytest 1062/1062
+(4 obsolete tests retired, 5 new: `TestExportMemoryCmd` ×2, `TestButtonCallbackExportMemory`,
+plus the 3 Garmin-source-inspection tests updated to check the composed source); eval
+suite green including `private-gate-registered`; gate-corpus green. `/code-review` run
+on the diff before merge.
+
+## v2026-08-06.1 — Add xAI Grok Imagine as a third selfie provider
+
+**Root cause: not a bug fix — a requested provider option.** `SELFIE_PROVIDER` already
+switched between "gemini" (Google's Gemini API directly) and "nanogpt" (NanoGPT's image
+endpoint); the owner asked to add xAI's Grok Imagine as a third choice, called directly
+rather than through NanoGPT's proxy.
+
+**What shipped:** `SELFIE_PROVIDER=xai` routes through a new `_generate_selfie_xai`,
+mirroring the shape of the existing Gemini/NanoGPT functions. It calls
+`XAI_IMAGE_URL/edits` when a reference photo is set (`_has_base_image()`, same face-lock
+path the other two providers use) and `XAI_IMAGE_URL/generations` otherwise, defaulting
+to `grok-imagine-image-quality`. `XAI_API_KEY`, `XAI_IMAGE_MODEL`, `XAI_IMAGE_URL` are new
+env vars (all optional except the key, required only when `SELFIE_PROVIDER=xai` — same
+fail-fast-at-startup pattern the Gemini path already uses). `SELFIE_SIZE`'s "WxH" pixel
+string is converted to xAI's `aspect_ratio` ratio format via GCD reduction
+(`_xai_aspect_ratio`) rather than a hardcoded lookup table, since any per-instance
+`SELFIE_SIZE` value needs to carry over, not just the couple of sizes already in use.
+xAI's `b64_json` response field has been observed in the wild both as raw base64 and as a
+full `data:image/...;base64,...` URI (the two mirrors of xAI's own docs disagreed, and
+the docs page itself 403s to a plain fetch) — decoding strips the `data:` prefix if
+present rather than assuming one shape.
+
+**Verification:** `TestXaiAspectRatio` (4 tests) + `TestGenerateSelfieXai` (6 tests,
+covering both endpoints, the b64_json/data-URI ambiguity, the URL-fallback path, and the
+neither-field error) + `_selfie_provider_label`/`gather_audit_data` cases extended for
+"xai" the same way the existing gemini/nanogpt cases work. `python3 -m py_compile bot.py`
+clean. `bash .claude/tools/verify.sh` — see run output in the PR/session record.
+
+## v2026-08-04.7 — Model-version guard + cap backported to the memory/lore embedding caches
+
+**Root cause: episodic recall's design was more careful than the caches it sits next
+to.** Comparing episodic recall's (v2026-08-04.6) archive design against the
+pre-existing `_embeddings_cache`/`_lore_embeddings` (memory/lore semantic recall,
+shipped independently on `main` 2026-07-06 — a sibling design, not an ancestor of the
+episode code) surfaced a real, live gap: `_load_embeddings`/`_load_lore_embeddings`
+had no model-fingerprint check at all. Changing `EMBEDDING_MODEL` would silently mix
+vectors from different models into the same cosine comparison, producing meaningless
+similarity scores with no error — external research on this exact failure mode
+(embedding cache invalidation) confirms it's a well-documented pitfall: degradation is
+gradual and distributional, not a single wrong answer, so it goes unnoticed for days.
+`_embeddings_cache` also had no cap: unlike memories.txt/facts (already bounded and
+consolidated), it keeps every distinct text ever embedded, including lines later
+replaced during consolidation — genuinely unbounded growth over the bot's lifetime.
+
+**What shipped:** both caches now write a `.model` sidecar fingerprint file
+(`.embeddings.model`, `.lore_embeddings.model`) on save and check it on load, discarding
+and rebuilding from scratch on mismatch — same pattern episodic recall already used for
+`.episodes.model`. `EMBEDDINGS_MAX` (default 5000) caps `_embeddings_cache`, trimming
+to the newest entries by insertion order on both load and save. No cap added to
+`_lore_embeddings`: lore entries are bounded by the character card's lorebook size, not
+organically growing at runtime the way conversational facts are, so a cap there would
+guard against nothing.
+
+**Web research done before writing any code** (per the owner's request, to check for
+better patterns before building): confirmed model-version fingerprinting as the
+critical, well-documented fix; confirmed a flat-JSON cache with a version sidecar is
+itself a legitimate lightweight pattern for a personal-scale system, not something to
+replace with heavier machinery (Redis/LRU libraries, vector DBs) that this system's
+scale doesn't call for. Nothing else in the research suggested a change beyond what
+episodic recall's own design had already demonstrated.
+
+**Verification:** `TestEmbeddingsCacheGuard` + `TestLoreEmbeddingsCacheGuard`
+(12 tests) — round-trip, fingerprint discard on mismatch, fingerprint kept on match,
+cap trimming on both load and save, no-op when not dirty, no raw exception in the save
+log (structural check, matching the Garmin/WSDOT convention). Break-tested RED three
+ways (both model-mismatch guards disabled, the load-time cap removed). `bash
+.claude/tools/verify.sh` green: 1051 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.6 — Episodic recall + on-this-day reminiscing, reimplemented from a deeper dependency chain
+
+**Root cause: the biggest thing on the lost branch, and not a simple port.**
+`9fa21af` (2026-06-29) built episodic recall; `a485b1b` (2026-06-30) built on-this-day
+reminiscing on top of it. Both are from `claude/push-to-repo-7i2f3c` and never merged.
+Unlike the four earlier ports this session, this one could not be a straight
+reimplementation: the abandoned branch's episodic recall was built on that branch's
+OWN embedding infrastructure (`EMBED_MODEL`, a batch `_embed()` call, a numpy-matrix
+vector cache) — none of which exists on `main`. Current `main` has a completely
+different, simpler embedding subsystem (`EMBEDDING_MODEL`, single-text `_embed_text`,
+a flat `_embeddings_cache` dict, no numpy at all before this session). This is
+rewritten against `main`'s actual primitives, not ported.
+
+**What it does:** when conversation ages out of the verbatim window (`maintain_memory`
+scroll-off), the dropped turns are chunked (`EPISODE_CHUNK_MSGS`), embedded one at a
+time via the existing `_embed_text`, and archived to `.episodes.jsonl` — a numpy
+matrix in RAM for fast cosine similarity (numpy is a real dependency as of
+v2026-08-04.4, no longer a reason to skip this). Each turn, `triggered_episode` reuses
+the query vector already computed for live semantic recall (zero extra per-turn embed
+cost) to pull back the single most relevant past exchange above `EPISODE_MIN_SIM`,
+time-gated by `EPISODE_MIN_AGE_HOURS` so the live window is never echoed back to
+itself. `EPISODE_MAX` caps the archive (~4000 chunks); a model change discards and
+rebuilds it, since cross-model vectors aren't comparable. `/episodes` shows the
+archive size.
+
+On top of that, `onthisday_job` runs once daily: if an archived episode's anniversary
+(~1mo/6mo/1yr ago, `ONTHISDAY_INTERVALS`) lands today, she reaches out unprompted to
+reminisce about it ("hey, remember when...") — min-gap and per-episode dedup keep it
+feeling special, not chatty. `/diag` extended to report both toggles and the archive
+count, matching how the abandoned branch itself grew `/diag` incrementally as each
+feature landed.
+
+**Deliberately not ported in this pass:** the branch's two follow-on commits —
+`1054506` (archiving sent photos as episodes) and `767aab6` (an optional cross-encoder
+reranker) — are enhancements to this subsystem, not required for on-this-day
+reminiscing to work. Flagged as separate follow-ups rather than folded in, keeping
+this release to one theme.
+
+**Verification:** `TestEpisodesCore` + `TestTriggeredEpisode` + `TestOnThisDay` +
+`TestEpisodesCmd` + `TestMaintainMemoryArchivesOnScrollOff` +
+`TestAssembleMessagesEpisodicRecall` + `TestEpisodicConfig` (34 tests) — archive
+round-trip, model-change discard, cap trimming, similarity floor, age-gating,
+anniversary-window matching (including "prefers the longer interval" and exclude-ts
+dedup), the `maintain_memory` scroll-off wiring (a real call through `maintain_memory`
+itself, not a source-read), and the new `/episodes` command driven directly. Break-
+tested RED five ways (similarity floor, age gate, anniversary window, scroll-off
+wiring, model-mismatch discard — each removed, confirmed the matching test failed,
+reverted). Also fixed two things `verify.sh` caught that weren't part of the plan:
+an eval-pinned optional-block count needed bumping from 7 to 8 (a real new block, not
+a bug), and two hardcoded `pip install` strings needed to go through the existing
+`_pip_hint()` helper instead. `bash .claude/tools/verify.sh` green: 1039 passed, 38
+evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## v2026-08-04.5 — /diag: a compact behavior-toggle status command
+
+**Root cause: the fifth thing from the same lost branch, scoped down rather than
+straight-ported.** `71dfa44` (2026-06-29) added `/diag` bundled with log rotation and
+an RHR monitor. The RHR monitor already shipped separately (`RHR_ALERTS` exists on
+`main`). Log rotation was Termux-era (`run-bot.sh` size-check-and-`mv`) — the fleet's
+been on systemd since 2026-07-26, and `errors.log` already rotates properly via
+Python's `RotatingFileHandler`, which is strictly better. `/diag`'s own design also
+doesn't fit as-is: its log-error tail duplicates the existing `/errors` command, and
+its flag list (`EPISODIC_RECALL`, `SCENE_CONTINUITY`, `EVENT_REMINDERS`,
+`READING_ENABLED`) names branch features not on `main`.
+
+**What shipped instead:** `/diag` as a compact status line for the toggles this
+session added — semantic memory, safety, style mirror, offline life, voice tone,
+garmin/stress/RHR/body-battery — a genuinely different axis from `/audit`'s
+`_FEATURES` dict (selfie/meme/gif/voice-backend/traffic/maps/health integrations),
+not a duplicate of it. `_is_allowed`-gated like the original, not admin-only.
+
+**Verification:** `TestDiagCmd` (4 tests) — answers, reports the new toggles by name,
+gated for non-allowed users, and an explicit check that the log-error tail stays
+dropped. Break-tested RED two ways (the gate check removed, two toggle lines
+removed). `bash .claude/tools/verify.sh` green: 1009 passed, 38 evals, 45/45
+gate-corpus.
+
+## v2026-08-04.4 — Voice-note acoustic tone analysis, reimplemented from the same abandoned branch
+
+**Root cause: a fourth feature from the same lost branch.** `bae2dcb` (2026-07-01,
+`claude/push-to-repo-7i2f3c`) vendored the offline half of `menelly/AI_Ears` (MIT) as
+`acoustic_ears.py` and it never merged either.
+
+**What it does:** `VOICE_TONE_ENABLED` runs a local FFT analysis on every voice note
+(pace, volume, pitch brightness, notable pauses) — pure NumPy, no network call, no
+extra API key — and folds a short note ("~140 wpm, dynamic volume, warm tone") alongside
+the transcript. `_analyze_voice_tone` kicks off concurrently with the existing NanoGPT
+transcription call in `handle_voice`, so it adds no serial latency; cancelled cleanly if
+transcription fails or comes back empty. `acoustic_ears.py` is vendored unmodified.
+
+**Two things beyond bot.py:** `numpy` added to `requirements.txt` as a real dependency
+(not commented-out-optional like `garminconnect` — no risky native build, every instance
+handles voice messages). `deploy/vps-sync.sh` only copies explicitly-named files, not a
+directory sync, so `acoustic_ears.py` needed an explicit sync line next to `bot.py`'s —
+without it the feature would have silently never reached any instance, same failure
+shape the abandoned branch's `update-all.sh` fix already worked around once.
+
+**Verification:** `TestAcousticEars` (vendored-module tests against a synthetic WAV:
+tone analysis, empty-audio error path, `describe_acoustic` formatting including wpm/
+pause counts) + `TestAnalyzeVoiceTone` (the bot.py wrapper: missing-output-file
+fail-safe, success path, ffmpeg-exception fail-safe) — 10 tests. Break-tested RED three
+ways (the missing-wav-file check removed, `describe_acoustic`'s None-guard removed, the
+pause-count line removed). `bash .claude/tools/verify.sh` green: 1005 passed, 38 evals,
+45/45 gate-corpus.
+
+## v2026-08-04.3 — Offline life events, reimplemented from the same abandoned branch
+
+**Root cause: a third feature from the same lost branch.** `b0eb485` (2026-06-29,
+`claude/push-to-repo-7i2f3c`, same branch as the safety detector and style mirroring)
+built offline life events and it never merged either.
+
+**What it does:** `LIFE_SIM_ENABLED` generates ONE concrete event in her own world a
+couple times a day (`LIFE_EVENT_TIMES`, default 13:00/20:30) — grounded in her
+schedule/people/projects/life-arc, a cheap chat model call, no embeddings. Stored in
+`life_events.txt` (capped at `LIFE_EVENTS_MAX`), injected into `assemble_messages` as
+"What's been happening in NAME's life" and into `_generate_proactive_hook`'s context,
+so unprompted check-ins carry real news instead of generic small talk. `/news` shows
+recent events, `/newsnow` forces one. All helper functions (`_read_schedule_today`,
+`_read_people`, `_read_projects`, `_read_life_arc`) already existed on `main` —
+this port reused them rather than rebuilding anything.
+
+**Verification:** `TestLifeEvents` + `TestAssembleMessagesLifeEvents` +
+`TestNewsCommands` (17 tests) — file round-trip, cap enforcement, "none"-response
+filtering, broken-classifier fail-open, the on/off wiring into `assemble_messages`,
+and both new `*_cmd` handlers driven directly (matching the delivery gate's
+call-not-mention requirement). Break-tested RED three ways (cap enforcement removed,
+`assemble_messages` wiring removed, "none" filter removed). `bash
+.claude/tools/verify.sh` green: 995 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.2 — Adaptive texting-style mirroring, reimplemented from the same abandoned branch
+
+**Root cause: another feature built once and lost.** `a485b1b` (2026-06-30, same
+`claude/push-to-repo-7i2f3c` branch as the safety detector) built `STYLE_MIRROR` and it
+never merged either. Found during a follow-up audit of that branch for other
+unreferenced work, prompted by the owner asking for the rest of what `ROADMAP.md` 3.10
+already flagged as unported.
+
+**What it does:** `_user_style_note` passively reads the user's last `STYLE_SAMPLE`
+messages (default 20, needs at least `STYLE_MIN_MSGS`=6) and nudges her register to
+subtly match — message length, emoji use, lowercase habits, exclamation frequency,
+casual textspeak (lol/idk/rn/tbh). **Zero model calls** — pure heuristics off the
+in-RAM `conversation_history`, so it adds no per-message LLM cost or latency at all
+(no rule-3 question here, unlike the safety detector). Bracket-tagged synthetic
+entries (`[sent ...]`, heartbeat messages) are excluded from the sample. Injected into
+`assemble_messages` right after the texting-style/preset-layer block. On by default,
+`STYLE_MIRROR=0` disables.
+
+**Verification:** `TestUserStyleNote` (11 tests) — each trait heuristic (short/long,
+emoji high/low, lowercase, textspeak), too-few-messages silence, bracket-tag exclusion,
+the on/off wiring into `assemble_messages`. Break-tested RED two ways (the disabled
+early-return skipped, the `assemble_messages` wiring removed). `bash
+.claude/tools/verify.sh` green: 978 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.1 — Safety: distress detection, reimplemented after being built once and never merged
+
+**Root cause: this feature already existed, once.** `d141e84` ("Add safety: detect
+genuine distress and respond with care", 2026-06-29) built `_assess_safety` and shipped
+it on `claude/push-to-repo-7i2f3c` — but that branch diverged from `main` on 2026-06-24
+and was never merged. `main` is 509 commits past that divergence point with no trace of
+it. Not removed after shipping — built once, on a branch that got abandoned in favor of
+continued work directly on `main`, and the feature never made the jump. Found via an
+external-improvement-ideas scan that proposed disclosure/dependency safeguards; the
+owner recognized the idea and asked to confirm it wasn't already live. It wasn't.
+
+**Fix:** `_assess_safety` (cheap off-loop classifier, no character/history context) and
+`_safety_prompt` reimplemented against current `bot.py`. `SAFETY_ENABLED` (default on),
+`SAFETY_MODEL`, `SAFETY_RESOURCES` (988 Suicide & Crisis Lifeline by default).
+`assemble_messages`/`assemble_messages_async` gained a `distress` param: when true, the
+performative inner-voice block is skipped and `_safety_prompt` is appended last (highest
+salience), same as the original design. Wired into `handle_message`'s existing
+`parallel` concurrency list alongside inner voice and link fetch, so it costs no serial
+latency. Deliberately independent of `INNER_VOICE_ENABLED` (default off) — a safety net
+must not be silently inert because an unrelated cosmetic feature is off. Scope matches
+what the abandoned branch actually shipped: `handle_message` (private text) only, not
+group/voice/photo paths — those never had it either.
+
+**bot-code-invariants rule 3 exception (owner-approved 2026-08-04, in the same
+session):** this adds a genuine new per-message LLM side call, which rule 3 bars.
+Approved because it is not the "small cheap call" the rule's common-mistake note warns
+against — no character/history context, so it doesn't re-pay the ~17k-token prompt
+rule 3's cost argument is about. Folding it into `post_reply_analysis` (the sanctioned
+extension point) was considered and rejected: that call fires after the reply is
+already sent, so distress on THIS message could only change the NEXT reply — one
+message late is a real degradation for a safety feature. Documented as a second
+carve-out in `bot-code-invariants` rule 3, next to the existing `MEMORY_SEMANTIC_LIVE`
+one, so a future session doesn't flag it as a violation.
+
+**Verification:** `TestSafetyClassifier` + `TestAssembleMessagesDistress` (10 tests) —
+classifier yes/no parsing, fail-open on a broken classifier, no raw exception in the
+safety log (structural check, matching the Garmin/WSDOT convention), distress
+suppresses inner voice and appends the safety prompt last, no distress by default. All
+break-tested RED (three separate injections: classifier forced False, the
+inner-voice-suppression gate removed, the safety-prompt append removed — each
+confirmed the matching test failed, then reverted). `bash .claude/tools/verify.sh`
+green: 967 passed, 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## 2026-08-04 — The second source-assertion backlog: 7 helpers with zero real test coverage (no bot.py change, no version bump)
+
+**Root cause:** `sweep.py`'s widened `_handler_coverage()` (2026-08-03) flagged
+`save_feature_prefs`, `save_state`, `save_wardrobe`, `send_gif`, `send_meme`,
+`send_selfie`, and `update_garmin` as mentioned-but-never-called by any test —
+`test_the_backlog_stays_empty` had been red on `main`, and CI failing on every push,
+since that scan landed. Three of the seven (`save_state`, `save_wardrobe`,
+`save_feature_prefs`) were deliberately monkeypatched to a no-op in every `*_cmd` test
+that calls them, for filesystem isolation — leaving their real write path itself with
+zero coverage. The other four had only `inspect.getsource` structural checks, never a
+real call — `send_selfie`, the function at the center of the entire multi-release
+face-drift investigation, had never once actually been invoked by a test.
+
+**Fix:** `TestTheSecondBacklogDriven` in `tests/test_pure.py` drives each of the 7
+directly, with fakes for its I/O (a fake Telegram `bot.*` object, monkeypatched
+Giphy/selfie-image/Garmin calls, `tmp_path`-redirected persistence files). No bot.py
+change — this closes a test gap, not a behavior bug; none of the 7 turned out to hide
+an actual defect.
+
+**Verification:** each of the 7 break-tested RED one at a time (an injected early
+`return`, confirmed the matching new test failed, then reverted before the next).
+`bash .claude/tools/verify.sh` green: 957 passed, 38 evals, 45/45 gate-corpus, sweep 0
+candidates.
+
+## v2026-08-03.6 — /audit said "gemini" and stopped there
+
+**Root cause: only the NanoGPT branch named its model.** `selfie_provider` rendered
+`nanogpt (flux-kontext)` but plain `gemini` — and `GEMINI_IMAGE_MODEL` is per-instance,
+changes with an `.env` edit and a restart rather than a deploy, and is exactly the field you
+check after changing it. With the fleet about to move to `gemini-3-pro-image-preview`, the
+one value worth verifying was the one value not reported.
+
+`_selfie_provider_label()` now renders
+`gemini (gemini-3-pro-image-preview, modalities TEXT+IMAGE)` and keeps
+`nanogpt (flux-kontext)` unchanged. Both `/audit` and the `=== STARTUP AUDIT ===` line call
+it — the same function, because those two surfaces disagreed once already (v2026-08-02.1,
+where the startup line had the selfie base and `/audit` did not). The startup line gains a
+`Selfie model:` field it never had.
+
+**Third instance of one class in a single session**, and worth naming as such: the selfie
+prompt had no surface (fixed by `tools/selfie_prompt_preview.py`), the reference photo had no
+surface (still open — `/audit` names the file, never what is in it), and the image model had
+no surface. Each was found only when someone needed to check it and could not. The standing
+question for this subsystem is not "does it work" but "can the owner see what it is using".
+
+**One pre-existing test rewritten, not loosened.**
+`test_nanogpt_reports_the_model_too` read `gather_audit_data`'s *source* for the strings
+`SELFIE_MODEL` and `nanogpt`, so it went red the moment that logic moved into the shared
+helper — while the behavior it is named for was still correct. Rather than repoint the grep
+at the new function, it now calls `gather_audit_data()` and asserts the rendered value is
+`nanogpt (flux-kontext)`. A source assertion cannot fail for the reason the test exists; that
+is the family that shipped the `/features` `ValueError` past twelve green tests
+(v2026-08-02.4). Break-tested RED against a stubbed-out NanoGPT branch.
+
+**Verification:** `.claude/tools/verify.sh` green. 3 new tests plus one rewritten, all four
+break-tested RED one injection at a time.
+
+## v2026-08-03.5 — The selfie model was tunable; what the model demands was not
+
+**Root cause: `GEMINI_IMAGE_MODEL` has been an env var since the Gemini backend landed, but
+`responseModalities` was hardcoded to `["IMAGE"]` in the payload.** `gemini-3-pro-image-preview`
+requires `["TEXT", "IMAGE"]` and rejects IMAGE alone, so "switch the selfie model in .env" —
+which every doc implied was a one-line change — could not work for the model most worth
+switching to. Asked how to move to Pro, the honest answer was that the knob was only half
+there.
+
+**Fix:** `GEMINI_RESPONSE_MODALITIES`, comma-separated, default `IMAGE` (unchanged behavior).
+`_parse_modalities` normalizes case and whitespace, because `.env` values are hand-typed and
+` text , image ` must not become a 400, and it never returns an empty list — an empty
+`responseModalities` is itself a 400.
+
+**Deliberately not sniffed from the model name.** A model string is not a capability, and the
+next image model will not be named after either of the two we know about. `.env.example`
+carries both working pairs instead.
+
+**A text-only answer now says what it said.** With TEXT enabled a refusal comes back as prose
+explaining why, and the parts loop discarded it — leaving `no image data`, which is the least
+informative thing the response contained. Non-refusal text alongside an image is still
+ignored; the image wins.
+
+**Two operational facts found while checking the model IDs, both dated 2026-08-03 and both
+worth re-verifying before acting on:**
+- **`gemini-2.5-flash-image` is scheduled to shut down 2026-10-02.** That is the fleet default
+  and what all seven instances run. When it goes, every instance loses selfies at once. This
+  is a deadline, not a preference, and it is bigger than the reason it was found.
+- Pro costs ~$0.134 per 1K/2K image against ~$0.039 for the current flash model — roughly
+  3.4x. A `gemini-3.1-flash-image-preview` sits between them at ~$0.067.
+
+**Verification:** `.claude/tools/verify.sh` green. 7 new tests, four assertions break-tested
+RED one injection at a time.
+
+## v2026-08-03.4 — A one-second Gemini outage was a failed selfie
+
+**Root cause: `requests` does not raise on a 5xx, and the image retry loop only caught
+transport exceptions.** A 503 came back as an ordinary response object, went straight past
+`except (ConnectionError, Timeout)`, was returned to the caller, and became an error one
+frame later at `raise_for_status()` — where nothing retried it. Owner-reported live:
+
+    📷 Couldn't make that one: 503 Server Error: Service Unavailable for url:
+    https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent
+
+Gemini's image endpoint returns 503 under load and 429 when rate-limited, and both clear on
+their own within seconds. The retry loop had been in place since the Termux days and read as
+though it covered this; it never did. Same family as v2026-07-26's finding that
+`requests` does not raise on 4xx/5xx, in the one place that lesson had not been applied.
+
+**Fix:**
+- `_image_request_with_retries` — one loop for both verbs, retrying transport failures **and**
+  `_IMAGE_RETRY_STATUSES` (429, 500, 502, 503, 504). `_post_with_retries` and
+  `_get_with_retries` are now thin wrappers, so the NanoGPT URL fetch gets the same treatment
+  as the generate call rather than a copy that would drift.
+- **A 4xx that is not 429 is never retried.** A bad prompt or a bad key is ours; retrying only
+  delays the real error by six seconds.
+- `Retry-After` is honored when the server sends a usable one, **capped at 10s** so an absurd
+  or hostile header cannot stall the handler; otherwise the original 2s/4s ramp.
+- The final response is **returned, not raised**, even when it is still a retryable status —
+  the caller's `raise_for_status()` stays the single place an HTTP failure becomes an
+  exception.
+- `_media_error_text` gives a transient outage plain words instead of a status line and a
+  URL: *"The image service is busy right now (HTTP 503) — I tried 3 times. Ask me again in a
+  minute."* Anything without a recognised transient status keeps the raw text, because an
+  unfamiliar error is exactly when the details matter. Same split as v2026-08-02.9's
+  missing-asset vs switched-off, one layer out.
+
+Kill switch `IMAGE_RETRY_TRANSIENT=0` restores transport-only retries. Runs inside the
+existing `asyncio.to_thread` hop, so the added sleeps do not touch the event loop.
+
+**Verification:** `.claude/tools/verify.sh` green. 10 new tests; five assertions break-tested
+RED one injection at a time, including one that widens `_IMAGE_RETRY_STATUSES` to include 400
+and proves the not-retried test would catch it.
+
+## v2026-08-03.3 — The prompt told the model to change her face
+
+**Root cause: `Her mood right now: {mood} — let it read in her face.` is the only
+instruction in the entire selfie prompt that tells the model to modify her face, and it sits
+~1500 characters ahead of every rule that says copy it exactly.** It is gated on
+`chat_id is not None`, which production always satisfies, so it has been in every live
+selfie — and in none of the 22 A/B images v2026-08-03.2 was judged on, because the preview
+tool passed `chat_id=None`. The owner noticed the gap from the other end: *"the selfies
+seemed better in the test than the actual ones."* The mood line and the scene-dedup block
+are the two things the test prompt was missing.
+
+This is the same shape as the rest of v2026-08-03.2 — a contradiction hands an edit model
+latitude — except this one is not implicit. `_SELFIE_PRESERVE_RULE` says copy her face out
+of the reference; the mood line says make her face show wistfulness. Both cannot hold.
+
+**Fix:** when a reference photo is attached, the mood reaches the image through the
+expression already drawn above it and through posture, which is where a mood shows in a
+photograph anyway:
+
+    Her mood right now: {mood} — let it colour that expression and how she's holding herself.
+
+The mood itself is untouched; the fix is the verb, not the feature, and a test pins that the
+value still reaches the prompt. **Text-only instances keep the old wording** — with no
+reference photo there is no preserved face for it to contradict. Reuses the
+`SELFIE_FACE_LOCK` kill switch rather than adding a second one: it is the same feature
+(stop the prompt inviting face edits), and `SELFIE_FACE_LOCK=0` now restores the whole
+v2026-08-03.1 prompt including this line.
+
+**Sequencing, stated plainly:** the reference photo is still the bigger lever. Emily's is a
+full-body beach shot with her face at ~8% of frame height (see v2026-08-03.2 above), and no
+prompt wording recovers identity from ~100px of face. This change is justified on internal
+consistency alone — an instruction to alter the face contradicts four appended rules to
+preserve it — but if the reference is swapped and this deploys together, neither will be
+attributable. Swap the photo first, watch a few selfies, then deploy.
+
+**Verification:** `.claude/tools/verify.sh` green. 4 new tests, all four break-tested RED one
+injection at a time.
+
+## v2026-08-03.2 — Emily's selfie was a better-looking stranger with no glasses
+
+**Root cause: the prompt asked the model to keep her face without ever saying what a face
+is made of, and handed it a written description of her in the same breath as the photo.**
+Owner-reported with a before/after pair: the reference is a freckled woman in oversized
+round glasses; the selfie came back with different bone structure, no freckles and no
+glasses — recognisably a different, more conventionally attractive person with the right
+hair colour. The reference photo was attached and correct, so this is none of the earlier
+causes (v2026-08-01.10's missing photo, v2026-08-02.2's rejected mime type,
+v2026-08-02.5's weaker `flux-kontext` — Emily is on Gemini).
+
+Two shapes in the prompt, both of which survived v2026-08-01.9:
+
+**1. `SELFIE_APPEARANCE` sat INSIDE the identity sentence.** `bits[0]` ended
+`"...just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}"`, so one sentence gave
+the model a face to copy *and* a written spec — "auburn waves, hazel eyes, oversized round
+glasses" — that it can satisfy with a face it invents. Every one of these is a full
+re-render (pose, framing, setting and clothes all change), and on a re-render synthesising
+from the words is the cheaper path than copying from the pixels. The paragraph's later
+clauses go first, which is exactly where Emily's glasses are.
+
+This is **not** a reversal of v2026-08-01.9, which added `appearance.txt` files precisely
+so a face had a verbal anchor and not only a photo pointer. The words stay. What changed is
+their rank: they are now introduced as *"Who she is, as context only — the photo outranks
+every word of it, and her face is never drawn from this text"*, ahead of the scene block
+rather than fused into the identity claim.
+
+**2. "Keep her face identical" never said which parts of a face.** Nothing in the prompt
+contradicted a plausible, better-boned woman with the right hair. `_SELFIE_PRESERVE_RULE`
+now enumerates what gets copied — face shape and bone structure, eyes, nose, mouth, brows,
+skin tone and skin marks, hairline, hair colour and texture, apparent age — and names the
+failure directly: *"an ordinary face that matches the reference is right, and a
+better-looking one that does not is wrong."* Image models regress faces toward an
+attractive mean unless told not to.
+
+**Eyewear is stated both ways, never asserted** (*"if she is wearing glasses there she is
+wearing those same glasses here; if she is wearing none, add none"*). Asserting glasses in
+a rule shared by all seven instances is the character-bleed trap of v2026-08-01.8's courier
+jacket and .9's hardcoded freckles, one release later; a test pins it.
+
+**Fix:**
+- `_SELFIE_PRESERVE_RULE` and `_SELFIE_FACE_CLARITY_RULE`, appended next to
+  `_SELFIE_IDENTITY_TAIL` — nearest the output is where an edit instruction lands hardest
+  (v2026-08-01.9's finding). The tail keeps the last word; it is the shortest statement of
+  the same constraint.
+- `_SELFIE_CHANGE_SCOPE` ("Everything that follows changes the pose, the setting, her
+  clothes and the camera. None of it changes her.") before the scene block, so ~1000 characters of
+  pose/weather/camera read as an edit spec instead of a description of a photo to produce.
+- `"New shot:"` → `"Framing:"` on the edit branch. "New shot" is a generate cue in the one
+  place the model must not generate.
+- The clarity rule is deliberately compatible with every framing in the pools. "Her face is
+  large in frame" would contradict the half-in-frame and wider draws, and a prompt that
+  contradicts itself hands back the latitude this removes — a test pins that too.
+- All of it is gated on `_has_base_image()`. "Copy her face out of the reference photo"
+  with no photo attached is an instruction to copy nothing.
+
+Kill switch `SELFIE_FACE_LOCK=0` restores the v2026-08-03.1 prompt. Separate from
+`SELFIE_IDENTITY_GUARD` on purpose: that one also owns the de-stacking and the tail, both
+of which should survive turning this off. Prompt assembly only, no new LLM calls.
+
+**The cost, stated plainly:** the prompt grows 1785 → 2734 characters for Emily, +53%.
+More text is itself a dilution risk, and the honest position is that this trades a general
+dilution for a specific, named constraint. It is worth A/B-ing before it is believed.
+
+**New: `tools/selfie_prompt_preview.py`.** Every face-drift release so far has been argued
+from generated images and inference, because nothing could show the prompt itself.
+`python3 tools/selfie_prompt_preview.py emily --diff` renders what an instance would send,
+with the face lock off and on, ready to paste into Gemini with the reference photo. Repo-only
+— `vps-sync.sh` does not copy `tools/`. It reads the *committed* seed files, so where a live
+instance has diverged the live instance is authoritative (v2026-08-01.10).
+
+**One test widened, with the reason:** `test_shared_prompt_hardcodes_no_character_specific_feature`
+scanned `build_selfie_prompt`'s source only, so a character trait living in one of the
+appended `_SELFIE_*_RULE` constants escaped it — and this release adds two more of those.
+It now scans their values alongside the function source. Break-tested by putting "freckles"
+into `_SELFIE_PRESERVE_RULE`: RED.
+
+**Not proven when shipped:** the mechanisms are real and the before/after prompts are
+readable, but no image had been generated from either — this container has no
+`GEMINI_API_KEY`. Same caveat v2026-08-01.9 carried, and the preview tool exists so the next
+person does not have to guess.
+
+**A/B result, 2026-08-03 (owner-run, 4 seeds × off/on, Gemini + Emily's reference photo).**
+The face lock is closer to the reference in 3 pairs of 4 and worse in 1 — a real signal, not
+a settled one. Where it wins it wins in the predicted direction: fuller cheeks, a softer jaw,
+and freckles at the reference's density and distribution instead of a smoother, narrower,
+more conventionally attractive face. The loss (seed 2, `a mirror selfie` + `shot from just
+slightly too close up`) produced a longer, more angular face with the freckles nearly gone,
+so no structural story separates it from the wins — that pair drew a soft framing, and so did
+a pair the lock won.
+
+**What the A/B did NOT test, and this is the important part.** Seeds 0–3 drew
+`a bathroom mirror selfie`, `a selfie with her face half-cut-off the frame`, `a mirror
+selfie` and `a selfie with her face half-cut-off the frame` — every one a close or
+partial-face shot. The reported failure was a **wide** shot with the room behind her and the
+face small in frame, and none of the four seeds drew a wide framing at all. Both arms kept
+her glasses in all 8 images, so **the original bug did not reproduce in either arm** — this
+test measured the lock's effect on draws that were not failing, not its effect on the draw
+that was. Contiguous seeds sample the pools evenly, which is the wrong sample when hunting
+one draw; `--seeds 4,16,22,26,44` covers the five wide framings, one seed each.
+
+**Round 2 (owner-run, the five wide framings, off/on) — the win does not survive it.** The
+lock is clearly closer on 2 pairs (seeds 22 and 44), clearly worse on 1 (seed 4), roughly
+level on 2. Seed 44 is the most informative: it is the wide-with-the-room-behind-her draw
+that most resembles the report, and the unlocked arm came back near-freckleless and
+smoothed — the exact regression `_SELFIE_PRESERVE_RULE` names — while the locked arm kept
+freckles at the reference's density. Combined across both rounds the lock leads roughly 5–3
+with 1 level over 9 pairs. That is a mild preference, not a fix, and it should be described
+that way.
+
+**The wide framings never rendered.** Seed 16 asked for `a low-angle selfie from below` and
+came back at eye level; seed 22 asked for `a high-angle selfie looking up at the camera` and
+came back at eye level; seed 26 asked for `a selfie held up high looking down` and came back
+as a third-person kitchen shot with both her hands occupied (the anatomy rule did not hold
+either); seed 44 asked for `a wider selfie with the room visible behind her` and came back
+outdoors at the Capitol. **Gemini is largely ignoring `Framing:`.** So round 2 did not test
+what it was built to test — the framing pool was selected on the prompt's text, and the text
+is not what the model drew. Second-order C8, one layer under the first: the sample was
+chosen by a directive the model does not obey.
+
+**Where this points instead.** If framing directives do not render, the "face small in frame"
+condition in the reported image did not come from a random framing draw. That image showed a
+specific narrative moment — polaroids spread over the floor — which is the shape of a
+`[selfie: …]` hint written by the model mid-conversation, not of anything in `SELFIE_FRAMINGS`.
+A hint replaces the atlas scene and lands in `Background/setting:`, and it can be far more
+elaborate than any pooled draw. **Reproducing with `--hint` is the next test, and nothing
+before it has actually reproduced the bug.**
+
+**Found while building that test, not fixed here:** `_daypart()` is appended after the hint,
+so a `[selfie: … at dusk]` produces `Background/setting: … showing dusk, Olympia, WA, in the
+morning.` A user- or model-pinned time of day is silently contradicted by the clock — the
+same contradiction-equals-latitude shape this release is about, in a different clause.
+`--location` was added to the preview tool in the same pass: the fake instance has no
+`WEATHER_LOCATION`, so every previewed prompt said "Seattle", which is wrong for all seven
+instances and was landing in the pasted text.
+
+**Round 3 (owner-run, the reported scene via `--hint`, off/on, 2 seeds) — clean again, and
+the tool was the reason.** The hint reproduced the scene faithfully: cross-legged on the
+floor, polaroids spread around her, window behind. All four images kept her glasses,
+freckles and hair colour, and the locked arm on seed 44 is the closest match to the
+reference of the 22 images generated so far — hair up in the reference's own messy curly
+style. **The bug has now failed to reproduce 22 times out of 22.**
+
+**Root cause of the non-reproduction: `selfie_prompt_preview.py` was not previewing
+production.** It called `build_selfie_prompt(hint, None)`, and `chat_id is None` gates off
+two blocks that every live selfie carries:
+
+1. `Her mood right now: {_mood_vibe(chat_id)} — let it read in her face.` — an explicit
+   instruction to make her face reflect something, sitting immediately after `Expression:`
+   and ~1500 characters before the identity tail. Nothing else in the prompt tells the model
+   to change her face.
+2. The scene-dedup list, which names other setups — the block v2026-08-01.9 already
+   identified as the one appended text that could pull the image away from the reference,
+   and deliberately put the identity tail after.
+
+Three rounds of A/B therefore compared two variants of a prompt **no instance has ever
+sent**, and the one instruction in the live prompt that targets her face was absent from all
+22 images. This is the third C8 recurrence in the same investigation and the worst of them:
+the first two picked the wrong sample, this one used the wrong prompt.
+
+`--mood` and `--recent` render the production shape; `--mood ""` restores the old
+`chat_id=None` behavior and the header now says so explicitly. The live prompt is 1905/2861
+characters, not 1721/2677.
+
+**Not yet tested:** whether the mood line is a drift lever. It is a plausible mechanism, not
+a demonstrated one — no image has been generated with it present. Round 4 is that A/B; do
+not treat it as diagnosed before it runs.
+
+### The reference photo is a full-body beach shot, and the "baseline" was never the reference
+
+Asked for `emily_base.png` itself, the owner sent a file that is **a standing full-body
+photo on a beach** — sea and sand behind her, half-up curly hair, round glasses, crop top
+and denim shorts. Her face occupies roughly **8% of the frame height**, on the order of a
+hundred pixels tall.
+
+That is very likely the whole story, and it makes every earlier diagnosis secondary:
+
+- **An edit model cannot copy a face it cannot see.** Given a reference with ~100px of face,
+  there is almost no identity information to carry into a close phone selfie, so the model
+  synthesises one. Glasses survive because they are large and high-contrast; bone structure,
+  freckle pattern and jawline do not. That matches every symptom in the original report
+  exactly, and it explains the intermittency the prompt-side theories never did.
+- **The transformation distance is enormous.** Every prompt asks for a close, indoor,
+  handheld phone selfie; the reference is a standing full-body outdoor shot in summer
+  clothes. Pose, distance, lens, lighting and wardrobe all change at once.
+- **The 22 A/B images were scored against the wrong image.** The grey-hoodie portrait the
+  owner has been sending as "the baseline" is itself a *generated selfie* — it carries the
+  same Gemini watermark as the outputs. So the comparisons measured drift from one
+  generation to another, not from the reference. Every "closer to baseline" verdict in the
+  three rounds above is weaker than it reads.
+
+**Fix is content, not code:** replace the reference with a close, front-facing portrait crop
+where the face fills much of the frame — `/setbase` sent as a **file**, not a photo, so
+Telegram does not recompress it (v2026-08-02.3). The grey-hoodie image is, ironically, a far
+better reference than the actual reference.
+
+**Not established, and it needs one command.** The uploaded copy hashes
+`026711a0…` against the VPS's `27ff3293…`, and arrives with JPEG magic bytes (`ff d8 ff e0`)
+under a `.png` name while the VPS file has genuine PNG magic (`89 50 4e 47`) — consistent
+with the upload path transcoding it, but that is an inference, and a hash of a re-encoded
+copy settles nothing. `sha256sum` on the owner's local file, compared against `27ff3293…`,
+is what confirms this beach photo is the one the fleet sends.
+
+**The observability gap this exposes is the same one twice.** Nothing in the system ever
+showed anyone what the reference photo *is*. `/audit` reports the filename and provider —
+enough to prove a file is in play, never enough to see that the face in it is unusably
+small. Two releases were spent tuning prompt text against an image nobody had looked at.
+
+**Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
+muted greens and greys — oversized sweaters, soft and worn-in"*, and the prompt separately
+appends `"Wearing {outfit}."` — two clothing instructions in one prompt, which is the
+contradiction-equals-latitude problem in the content layer. Appearance files should describe
+a body and a face, not a wardrobe; the wardrobe rotation owns clothes. Left alone here
+because the repo seed and the live instance can differ and the live one is authoritative.
+
+**Verification:** see the report — `.claude/tools/verify.sh`, 8 new tests, five assertions
+break-tested RED one injection at a time.
+
+## v2026-08-03.1 — Priya sent her whole deliberation as the reply, in four messages
+
+**Root cause: a thinking model can emit its ENTIRE chain-of-thought as ordinary
+`content`, and every existing chain-of-thought guard keys on a signature that variant
+doesn't have.** On 2026-08-03 priya (`zai-org/glm-5.1:thinking`) answered a quiet
+in-scene message with ~12k chars of her own deliberation — "Let me work through this
+step by step: 1. How does Priya feel about what Brian just said?... Let me draft...
+Option 1:..." — reasoning openly about her format contract, scene mode, and drafted
+replies, with the real reply buried at the end. It reached Telegram as four chunked
+messages (`send_bubbles` splits at 4096 chars and nothing upstream objected).
+
+This is the third variant of the chain-of-thought leak class, and each earlier guard
+checks for exactly one signature:
+- v2026-07-20.1 blocks `reasoning_content` delivered when `content` is **empty** —
+  here `content` was non-empty, so that path never fired (`/errors` showed no
+  `[model] … reasoning but no content` warning, which is what confirmed the variant).
+- `_strip_thinking` removes `<think>…</think>` — there were no tags.
+- v2026-07-29.1's `_strip_directive_lines` drops ALL-CAPS bracket lines — the leak
+  was plain prose.
+
+**Fix: refuse and re-roll, never salvage.** New `_looks_like_reasoning_leak(text,
+name)` detects a reasoning-shaped completion by a conjunction of independent signals —
+length ≥ 2000 chars (far above any real texting-register reply; a reply needing
+Telegram chunking at all is already abnormal) AND ≥ 3 distinct meta-reasoning marker
+categories ("the user", "let me draft/work through/…", "in/out of character", prompt
+vocabulary like "format contract"/"scene mode", "option N", ≥3 numbered analysis
+lines, and the character's **first** name ≥3 times — a first-person persona almost
+never writes its own name; leaked deliberation is saturated with it. First token
+because the card `name` field is the full name — "Emily Harper", "Bonnie
+(Libertarian)" — and deliberation writes "Emily", never "Emily Harper"; the
+pre-review draft matched the full string, which left this category inert on five of
+seven instances). Both floors are env-tunable (`REASONING_LEAK_MIN_CHARS`,
+`REASONING_LEAK_MIN_MARKERS`) so a production misfire is fixed by raising a floor,
+not by turning the guard off. A tripped completion is treated exactly like an empty
+one in `call_nanogpt`: retry with backoff, then fall through to the non-thinking
+`FALLBACK_MODEL` where one is configured — the main chat path passes it; the
+selfie/meme caption helpers have none and degrade to no caption, as they already did
+for empty completions. The tempting alternative — extracting the real reply from the
+tail of the leak — is deliberately rejected: there is no reliable boundary between
+deliberation and answer, and a wrong guess ships a fragment of monologue as her.
+
+**What is deliberately NOT a marker.** Adversarial review of the first draft proved
+"let me think", "overthinking this", and "going back and forth" are ordinary texting
+vocabulary on this fleet — a long in-character reply weighing life options tripped
+the draft detector on phrasing alone. Those were removed; the shipped marker list is
+vocabulary about *the reply as an artifact*, not deliberation-flavored chat.
+
+**Scope: persona replies only.** `call_nanogpt` grew a `leak_guard` flag (default
+off) that `generate_reply` and `reply_with_typing` pass through (default on), so the
+persona reply sites and caption helpers are guarded while analysis/summary/extraction
+JSON callers are structurally outside (same isolation the directive-leak guard
+keeps). Two deliberate exemptions: the three `DOCUMENT_MODEL` sites in the document
+handlers pass `leak_guard=False`, because the card-review branch *asks* for a long
+critique that discusses prompts and characters — review showed a normal card review
+trips every marker the guard looks for, and with no fallback model the trip would
+surface as "❌ something broke" — and `recap_cmd`, which is owner-invoked and
+legitimately long, third-person, and name-heavy.
+
+Every refusal logs `[reasoning-leak]` at WARNING with the model, length, and head of
+the rejected text, and counts under its own `reasoning_leak` key in `/errors` (not
+just the shared `api` count, so "guard fired" is distinguishable from "API flaked") —
+stripping silently would turn a visible model fault into an undiagnosable one, and if
+glm-5.1:thinking does this weekly, that counter is how the model-choice conversation
+starts. Rejected completions still feed `_track_llm_usage`, so a 12k-char burned
+thinking budget shows up in `/audit`'s token figures instead of vanishing. Kill
+switch `REASONING_LEAK_GUARD=0` (default ON, owner policy 2026-07-18). Pinned by
+`TestReasoningLeakGuard` (15 tests; the real leaked transcript is the fixture, and
+the false-positive shapes review found are must-pass fixtures) and the
+`reasoning-leak-guard` eval.
+
+## v2026-08-02.15 — /features told you less about features than /audit did
+
+**Root cause: the detail suffix was written into `_features_summary()` — the `/audit`
+line — and never into the listing.** `/features` showed `voice: on`; `/audit` showed
+`voice=on(inworld)`. So the command *dedicated* to features answered less about them than
+the general audit line, and the question v2026-08-02.10 added those suffixes to answer —
+which TTS backend is actually live, since NanoGPT TTS works without Inworld and the
+capability probe can only ever return `True` — was reachable only from the other command.
+
+The listing now carries the same three details: the voice backend, the GIF safety level,
+and the selfie provider. Both call sites go through one new `_feature_detail()` rather
+than a second copy of the logic, because a second copy is exactly how the listing drifts
+back to saying less than the line it exists to expand on. `/audit` keeps its packed form
+(`voice=on(inworld)`); the listing spaces it (`voice: on (inworld)`).
+
+**A switched-off feature shows no detail at all** — naming a backend beside `off` claims
+something is running that isn't.
+
+**Verification:** 887/887 pytest (2 new), 34/34 evals, `py_compile` clean. Both new tests
+break-tested RED. They drive `features_cmd` with fake Telegram objects rather than reading
+its source — the rule v2026-08-02.14 established, and the delivery gate now enforces it
+for any `*_cmd` a diff touches.
+
+## v2026-08-02.14 — /features never actually flipped anything, and five more from one review
+
+**Root cause of the batch: the tests for this week's features asserted on handler
+*source* instead of calling the handler.** `features_cmd` ended with
+`_, probe = _FEATURES[name]` — a 3-tuple unpacked into two names — so **every**
+`/features <name> on|off` raised `ValueError` before reaching the flip. The switch never
+moved, nothing persisted, and the owner got silence, because an exception inside a PTB
+handler is logged and swallowed. The suite was green throughout: one test asserted the
+specs *are* 3-tuples, another read the handler's source for `_is_admin`, and the
+`probe` name the unpack bound was never used, so no linter cared either. This is the fifth
+member of the family v2026-08-02.4 named (C8: reading a function's source proves the code
+exists, never that it runs), and the second to reach the fleet. **Every test added in this
+release exercises the handler.**
+
+The rest of the batch, all from the same review:
+
+- **Proactive messages dropped their GIFs.** `send_triggered` computed `gif_query` and
+  never used it — `_deliver` grew the GIF path and this second caller was missed. A
+  tag-only proactive message sent *nothing* and stored an empty assistant turn, putting a
+  blank into history.
+- **`/features health off` didn't stop the health monitors.** `STRESS_ALERTS`,
+  `BB_ALERTS` and `RHR_ALERTS` were computed as `GARMIN_ENABLED and <env>` **at import**,
+  so flipping `GARMIN_ENABLED` at runtime left the monitors reading a frozen copy: alerts
+  kept firing while `/features` and `/audit` both reported `health=off`. They are now the
+  static env preference alone, read through **`_alerts_on()`**, which ANDs the live parent
+  at call time. `_garmin_off_reason()` gained the runtime-switch case for the same reason —
+  `/health` and `/healthnow` were answering normally with the feature switched off.
+- **Switching a feature off was a one-way trip until restart.** The Garmin jobs and the
+  traffic poll were *registered* under their switches, so `/features health on` (or
+  `traffic on`) could not start anything that startup had skipped. Both now register on
+  **capability** — every one of those jobs already re-checks its own gate when it fires.
+- **"Off" was still being reported as "never configured"** in `send_selfie`, `send_meme`,
+  `/route`, `/nearby`, `/place`, `/food`, `/traffic` and `/incidents` — the exact
+  conflation v2026-08-02.9 split `*_capable` from `*_ready` to end. They need different
+  fixes (a `.env` edit or a file, versus one `/features` command), and the old message sent
+  the owner hunting for a reference photo that was already there. New helper
+  **`_feature_off_reason()`**; `send_gif` already did this correctly and was the template.
+  The paths in those messages were phone-era (`~/telegram-bot/…`) and now render from
+  `BASE_DIR` / `MEME_TEMPLATES_DIR`, so they name the file the instance actually reads.
+- **`/setbase` could claim a backup it didn't make.** It decided the
+  "previous kept as `.prev`" suffix by stat-ing the path *after* the write, so a leftover
+  `.prev` from an earlier run made a first-ever install report a backup of a file that had
+  never been there. It now tracks whether the backup branch ran.
+- **`GROUP_CHAT_DESIGN.md` §3 contradicted itself.** The throttle and budget bullets still
+  said `GROUP_MIN_GAP_SECONDS=20` / `GROUP_DAILY_BOT_BUDGET=30` after v2026-08-02.13 moved
+  them to 8 / 50 — the same doc's own table and the code both said the new values. §3 is
+  the section `group-chat-changes` makes you read before touching any `GROUP_*` code.
+
+**Verification:** 885/885 pytest (18 new), 33/33 evals, `py_compile` clean. Five defects
+break-tested RED by re-injecting the original code; the two that could not be (both
+docs) are covered by the eval suite's own consistency checks. The `/features`,
+`send_triggered` and `/setbase` tests drive the real handlers with fake Telegram objects,
+so they fail on a broken dispatch path rather than on a changed string.
+
+**Not changed, deliberately:** the review also flagged the traffic *poll job* as ignoring
+the switch. It does not — `traffic_poll_job` re-checks `TRAFFIC_ENABLED` on every firing
+(the registration asymmetry above was the real defect there, in the opposite direction).
+
+## v2026-08-02.13 — the group bots could only ever answer once, and three separate limits said so
+
+**Root cause: the v1 group-chat tuning made a real back-and-forth arithmetically
+impossible, not merely unlikely.** Owner report: "they only reply once per my reply."
+Three defaults compound, and fixing any one alone would have changed nothing:
+
+1. **`GROUP_BOT_CHAIN_MAX=2`** is a hard ceiling on consecutive bot messages since the
+   last human one. Two bots means the best case was always `human → A → B → silence` —
+   the third message was never reachable, whatever anyone said.
+2. **`GROUP_BOT_REPLY_PROB=0.35`** flat. So the *second* message only happened about a
+   third of the time when the first bot didn't name the second — which is why the
+   observed behaviour was usually one reply, not two.
+3. **`GROUP_MIN_GAP_SECONDS=20`** throttles a bot's own consecutive group messages, and
+   in a live exchange a bot's turns land **~16s apart** (poll ≤5s + claim delay 0.5–3s +
+   generation, twice). The throttle is *inside* that window, so it silently kills
+   alternation. This is the one that matters most: raising the chain cap alone would
+   have hit the throttle instead and produced the same single reply.
+
+None of this was a bug — §3 of `GROUP_CHAT_DESIGN.md` chose these numbers to bound loop
+risk and cost on an unproven pilot. The pilot has now run since 2026-07-28 without a
+runaway, so the trade is being re-struck deliberately.
+
+**Fix — `GROUP_BANTER` (default on, `GROUP_BANTER=0` reverts every number below):**
+
+| Knob | v1 | now | why |
+|---|---|---|---|
+| `GROUP_BOT_CHAIN_MAX` | 2 | **6** | a chain of 3+ is reachable at all |
+| `GROUP_BOT_REPLY_PROB` | 0.35 | **0.5** | first comeback is a coin flip, not a third |
+| `GROUP_MIN_GAP_SECONDS` | 20 | **8** | below the ~16s exchange round-trip, so alternation survives |
+| `GROUP_DAILY_BOT_BUDGET` | 30 | **50** | longer chains spend it faster; running dry mid-evening reproduces the original complaint silently |
+| `GROUP_CHAIN_DECAY` | — | **0.75** | new |
+
+**The decay is what makes the higher cap safe.** `_should_reply_to_bot` no longer uses a
+flat probability: the chance is multiplied by `GROUP_CHAIN_DECAY ** depth`, where depth
+is how many bot messages deep the exchange already is. A chain typically runs 3–4
+messages and reaches the 6 cap rarely, so exchanges end by petering out rather than
+stopping mid-sentence at a wall. Expected cost per human beat is a geometric series
+(≈3.3 model calls), not the cap (6).
+
+**Being named no longer bypasses the gate** — it sets the starting probability to 1.0
+(v1 behaviour for the first comeback) and then decays with everything else. This is a
+*tightening*, and it is load-bearing: naming the peer is the LLM's favourite register in
+these exchanges ("jules, no" / "priya, wrong"), so under the old free pass a higher cap
+would have driven **every** chain to the ceiling — precisely where the cost is. The
+claim, the under-lock pre-send cap re-check, the throttle and the daily budget are all
+untouched; §3's defence-in-depth argument still holds with one more layer.
+
+`/audit`'s group line now reports `banter on|off (decay N)` alongside the existing
+chain/budget counters, so "why did they stop?" stays answerable from Telegram.
+
+**Not changed:** the human-facing path. An addressed human message is still answered
+deterministically by whoever was addressed; an unaddressed one still goes to exactly one
+bot via the claim. `_group_deliver`'s allowlist and `GROUP_ALLOWED_COMMANDS` are
+untouched, so the group↔DM memory boundary is exactly where it was.
+
+**Tests:** 8 new (867 total), break-tested red — with the decay reverted to a flat gate
+the depth tests fail, and with the v1 cap the reachability test fails. Both group evals
+(`group-deliver-clean`, `group-cmd-allowlist`) green and untouched.
+
+## v2026-08-02.12 — the seed check looked at a different file than the loader
+
+**Root cause: `_SEED_FILES` hardcoded `"atlas.txt"` while `ATLAS_FILE` makes that name
+configurable.** Any instance pointing the atlas somewhere else would get
+`Seeds: MISSING: atlas.txt` from `/audit` while loading its atlas perfectly well — a
+false alarm from the exact line added in v2026-08-02.9 to stop false silence.
+
+Emily was that instance: she had `places.txt` alongside an `ATLAS_FILE` override, which
+is why her Portland→Olympia relocation appeared to land in `atlas.txt` and change nothing
+live. The `Seeds:` line could not have caught it, because it was checking a filename
+nobody had told it about. (Her override and the stale `places.txt` are both retired now —
+`grep -c 'Portland\|Burnside\|Powell' /opt/telegram-bots/emily/*.txt` returns 0 across
+every file.)
+
+`_seed_paths()` now resolves the atlas through the same global the loader reads, and
+reports whatever filename that turns out to be. The general rule this is an instance of:
+**an audit that checks a different path than the code loads is worse than no audit**, because
+it answers confidently about the wrong thing.
+
+Also removes a duplicated orphan comment block left above `features_cmd` in v2026-08-02.9.
+
+**Verification:** 859/859 pytest, 33/33 evals. 1 new test, break-tested RED (it reported
+`MISSING: atlas.txt` for a present `places.txt` — the live failure exactly).
+
+## v2026-08-02.11 — life.txt evolves instead of sitting there
+
+**Root cause: nothing ever wrote `life.txt`.** `LIFE_ARC_FILE` was even commented
+`# user-maintained`, `_read_life_arc()` only reads, and `/life` edits by hand — so a seeded
+arc stayed frozen indefinitely. The owner noticed Bonnie's hadn't moved in a while; it was
+never going to.
+
+`day.txt` already answers "what happened today" and regenerates nightly. The arc underneath
+— what she is currently *in* — had no equivalent. `_maybe_rotate_life_arc()` now runs from
+the midnight job and acts once every `LIFE_ROTATE_DAYS` (7).
+
+**It evolves rather than regenerates**, which is the whole design:
+- the current arc goes **into** the prompt, so unresolved threads carry over in the same
+  words where nothing about them has changed
+- **exactly one thing** may move per rotation — resolve, worsen, or a new thread starts. An
+  arc that turns over completely every week is not an arc, it is a new character weekly
+- the form is pinned: one paragraph, present tense, 40-60 words, and the small grievance she
+  is taking personally is explicitly part of it
+- vague filler is forbidden by name — "she has been reflecting on things" is the exact
+  failure mode for this kind of prompt
+- it is fed the last week of `day_*.txt` archives, so the arc moves because of what actually
+  happened rather than drifting on its own
+
+**Cadence uses a stamp file, not a weekday.** A weekday check skips the whole week if the
+bot is down that night; a stamp delays it instead. First run stamps and waits a full period,
+so a freshly seeded arc is not rewritten on its very first midnight.
+
+**Failure is always toward keeping what exists**: a short or empty result leaves the arc
+untouched, the previous version is archived as `life_YYYY-MM-DD.txt`, and `_life_arc_cache`
+is invalidated so the new text takes effect immediately rather than after its 5-minute TTL.
+
+One extra LLM call per week per instance. Invariant #3 governs per-message calls; this is
+weekly, and it runs off the loop.
+
+**Verification:** 858/858 pytest, 33/33 evals. 12 new tests, three break-tested RED —
+first-run guard, short-result guard, and whether the midnight job actually calls it. That
+last one matters: a rotation nothing invokes is the same bug as a `life.txt` nothing writes.
+
+## v2026-08-02.10 — voice=on told you nothing, and Location was missing
+
+**A fleet-wide `/audit` sweep across all seven exposed two flaws in the audit itself,
+shipped an hour earlier.**
+
+`voice=on` was true on every instance, because the capability probe I wrote was
+`lambda: True` — NanoGPT TTS works without an Inworld key, so it could never say anything
+else. It didn't distinguish Emily, the Inworld instance, from the six on the fallback. The
+feature registry now carries an optional **detail probe**, so it reads `voice=on(inworld)`
+or `voice=on(nanogpt)`, `gif=on(high)`, `selfie=on(gemini)`. Details are omitted when a
+feature is off, and a raising probe can't take the summary down with it — diagnostic output
+must never be the thing that fails.
+
+`Location:` joins the Owner/TZ line. Its absence was conspicuous: this entire session began
+with a weather bug, `WEATHER_LOCATION` is what drives weather, and nothing reported it.
+
+**What the sweep found in the fleet** (config, not code):
+- **Marcus runs `America/New_York`** while his atlas says Portland, OR and every other
+  instance is Pacific. Three hours off across schedule busy-blocks, midnight rotation, the
+  07:00 wardrobe pick and quiet windows — and he shares a group with Emily on Pacific. The
+  `TZ:` line added in v2026-08-02.9 found this on first use.
+- **`setting.txt` is missing on all seven** and exists in no repo seed. `SETTING` has never
+  been populated for anyone.
+- **`life.txt` is missing on priya, marcus and jules**; the other four have one, live-only.
+- **Four instances still load the monolithic `preset.txt`** while marcus/jules/cass are
+  layered. Every per-character layer already exists, and core+rp+explicit+stepped is 33,610
+  bytes against the monolith's 34,241 — so this is a `.env` line, not a rewrite.
+- **`DEFAULT_SETTING` is Nora's setting text**, the same home-instance character bleed as
+  `_APPEARANCE_DEFAULT` before v2026-08-01.11. Unreachable on named instances, wrong in the
+  file.
+
+**All five closed 2026-08-02** — recorded here because a findings list with no resolution
+reads as current state to the next session. Marcus moved to `America/Los_Angeles` (and to
+Olympia, with Emily, so her WSDOT traffic matches her state); `setting.txt` authored for all
+seven and `life.txt` for the four that lacked one, then made self-evolving in
+v2026-08-02.11; bonnie/emily switched to layered presets in this pass, nora/priya with the
+v2026-08-02.12 deploy, so all seven are layered; `DEFAULT_SETTING` neutralized in code.
+Config remedies are owner-applied and owner-reported verified — `.env` files are not in
+this repo, so a per-instance `/audit` is the only reading that settles any of them.
+
+**Verification:** 846/846 pytest, 33/33 evals. 5 new tests, both fixes break-tested RED.
+
+## v2026-08-02.9 — /features, and an audit that answers the questions we kept asking
+
+**A systematic pass over what `/audit` could not see**, prompted by three separate blind
+spots in one week that each cost a round trip: four bots with no reference photo, three on
+a weaker image backend, and "I'm not sure if memes are turned on for anyone besides
+Bonnie". The common shape is **per-instance things that fail silently**, so the audit went
+looking for the rest of them rather than waiting for the next one.
+
+**Three new lines:**
+- `Features:` — every integration as `on` / `off` / `n/a`, where `n/a` means never
+  configured. **`off` and `never configured` are different problems with different fixes**,
+  and conflating them is precisely what made those three incidents slow.
+- `Seeds:` — `all present`, or `MISSING: <files>`. Six files (`atlas` — under whatever
+  name `ATLAS_FILE` resolves to, since v2026-08-02.12 — `people`,
+  `projects`, `schedule`, `life`, `setting`) are read straight into her prompts, and a
+  missing one costs content with no error whatsoever. jules ran without `atlas.txt` on the
+  VPS for a stretch; `vps-sync.sh` still carries the comment about it.
+- `Owner:` / `TZ:` — no owner means nothing proactive can ever fire, and a wrong timezone
+  quietly breaks busy-blocks, midnight rotation and the 07:00 wardrobe pick. Both look like
+  healthy silence.
+
+Voice and traffic were the two credential-gated integrations reporting nothing at all,
+despite maps and health already being covered — half the traffic stack was visible and half
+wasn't, which is worse than neither.
+
+**`/features <name> on|off`** flips selfie, meme, gif, voice, traffic, maps or health at
+runtime and persists to `feature_prefs.json`. Each target is a plain module global read at
+call time, so flipping it reaches all 8-10 call sites without touching any of them — the
+same mechanism `/setmodel` already uses. It refuses to switch on anything the instance
+isn't capable of, and says why. `selfie_ready`/`meme_ready` split into `*_capable` (assets
+present) and `*_ready` (capable **and** switched on).
+
+**Verification:** 841/841 pytest, 33/33 evals. 10 new tests, three break-tested RED. A
+fourth injection — unwiring the switch from `selfie_ready` — **passed** its test, because
+the fixture has no selfie assets so `selfie_capable()` was False either way and the
+assertion held for the wrong reason. Hardened to force capability True, then confirmed RED.
+Same masking C13 describes, caught only because the injection was run.
+
+## v2026-08-02.8 — How often she reaches for a GIF or a meme
+
+**`GIF_CHANCE` and `MEME_CHANCE` (both 0.35) gate whether she is OFFERED the option in a
+given reply — not whether a tag she emitted is honoured.** That distinction is the whole
+design. Dropping a tag after the fact would leave her text referring to an image that never
+arrives ("this is you →" with nothing following), so the roll happens when the prompt is
+assembled: some replies simply don't mention that GIFs exist, and she writes normally.
+
+**Asking always works.** If your own message contains "gif"/"jif" or "meme", the option is
+offered regardless of the dice. Being told no because of a coin flip you can't see is the
+worst version of this feature.
+
+**Also: `/audit` gained a `Media:` line** — `meme=on/off gif=on/off (safety)`. This is the
+third time the same blind spot has cost a round trip. `Selfie base:` was added when four
+bots turned out to have no reference photo; `via <provider>` when three were silently on a
+weaker backend; and this release began with "I'm not sure if memes are turned on for anyone
+besides Bonnie" — a question the bot could not answer about itself.
+
+**Worth recording, since it caused that uncertainty:** `MEME_TEMPLATES_DIR` resolves
+against `bot.py`, not the instance directory, so it is `/opt/telegram-bots/meme_templates/`
+and **shared by all seven**. Meme support is all-or-nothing across the fleet; no single bot
+can have it while others don't. `gifs.txt`, `appearance.txt` and the rest are per-instance —
+this one is not, and the asymmetry is easy to misread.
+
+**Verification:** 831/831 pytest, 33/33 evals. 7 new tests; the offer gating and the audit
+line break-tested RED. A test pins that neither send path contains a probability roll, so
+the gate cannot migrate from the offer to the send later.
+
+## v2026-08-02.7 — /gif, and the API key that would have leaked into a chat
+
+**`/gif <words>` is the parity command for `/selfie` and `/meme`**, and the reason it
+matters is that every failure on the GIF path is deliberately silent — so without it, "she
+never sends GIFs" and "the Giphy call is broken" look identical and you'd wait days to tell
+them apart. Same blind spot as `/audit` not naming the image backend, which cost several
+rounds a day earlier.
+
+It announces what went wrong, and the messages distinguish the cases that need different
+fixes: no `GIPHY_API_KEY`, `GIF_ENABLED=0`, Giphy unreachable, or nothing surviving the
+filter at the current level. The auto path keeps `announce_errors=False` — mid-conversation
+a missing GIF must stay invisible.
+
+**Building it surfaced a real leak in v2026-08-02.6.** Giphy takes `api_key` as a **query
+parameter**, so a `requests` exception carries the full URL — key included — and
+`log.warning("[gif] search failed: %s", e)` wrote that into `errors.log`. `/errors` echoes
+recent errors to the owner in Telegram, so the key had a path from the log into a chat
+message. `_redact_key()` now scrubs `api_key=`/`key=` values from both the search and send
+failure paths before anything is logged, keeping the rest of the URL for diagnosis.
+
+That is a hazard of every key-in-query-string API, not just this one: the secret ends up in
+exception text that error handling then treats as safe to log.
+
+**Verification:** 824/824 pytest, 33/33 evals. 8 new tests; the redaction break-tested RED
+on both paths.
+
+## v2026-08-02.6 — GIFs, via Giphy, chosen in her own words
+
+**Tenor was the plan until research killed it.** Google stopped issuing Tenor API keys on
+2026-01-13 and terminated the API entirely on **2026-06-30** — a month before this was
+written. Existing keys return errors; Discord, X, Bluesky and WhatsApp all migrated. The
+integration was never started. KLIPY was evaluated next: its content filter is a better
+fit (`high`/`medium`/`low`/`off`, matching the requested knobs exactly) and it is free
+forever, but it **inserts advertisements into search results** and its endpoint takes a
+`CUSTOMER_ID` — a per-user identifier handed to an ad network from private chats. Its docs
+were unreadable from this container (403), so the field marking an ad could not be
+identified, and an integration was not built on guesses. Giphy by elimination.
+
+**How it works:** she emits `[gif: a short search phrase]` in her own wording, the phrase
+is searched, candidates are filtered, and one is sent with `send_animation`. **No new LLM
+call** — it rides the reply she was already generating, which is what invariant #3
+requires.
+
+**Safety is layered, because Giphy's own filter cannot be trusted alone.** `/gifsafety
+high|medium|low` maps to Giphy's `rating` (`g` / `pg` / `pg-13`) and persists to
+`gif_prefs.json` — unlike `/setmodel`, since a safety level silently reverting on restart
+is the wrong failure direction, and an unrecognised persisted value falls back to `high`
+rather than open. Giphy's rating is **cumulative** (`pg-13` also returns `g` and `pg`) and
+its issue tracker carries long-standing reports of mixed ratings coming back regardless,
+so a local deny-list runs at **every** level on each candidate's title and slug. Its
+fourth rating, `r`, is unreachable by construction. The deny-list errs broad on sexual and
+graphic terms — a false positive costs one missing GIF — but stays narrow on violence,
+since "kill" would eat "killing it".
+
+**In-character selection** comes from two places: her own query wording, and a per-instance
+`gifs.txt` where a leading `-` bans a term and any other line is a term she is scored
+toward. You curate the vocabulary, not the GIFs — the same division as `appearance.txt`
+versus the reference photo. Plus a recent-id ring buffer so she doesn't repeat herself.
+
+**The tag is stripped in the same commit that teaches her to emit it.** `extract_tags`
+removes tags by name, so an unregistered one reaches the user verbatim — that is
+v2026-07-29.1, and you watched `[setbase: 60°F, clear…]` do it on 2026-08-02. `[gif:]`
+rides alongside `[search:]` rather than extending the pinned 4-tuple contract.
+
+Every failure is silent: no API key, a search timeout, nothing passing the filter, a send
+error. A missing GIF must never surface as an error mid-conversation, and never delays the
+reply it follows.
+
+**Verification:** 816/816 pytest, 33/33 evals. 14 new tests; four break-tested RED — the
+tag leak, the deny-list, per-instance bans, and the unknown-value fail-safe. The
+`env-vars-documented` eval caught `GIPHY_SEARCH_URL` undocumented before this shipped.
+
+## v2026-08-02.5 — /audit names the image backend
+
+**Root cause of a fleet split nobody could see: `SELFIE_PROVIDER` defaults to `nanogpt`
+unless `GEMINI_API_KEY` is set, and three instances have no key.** `grep -H
+'GEMINI_API_KEY' /opt/telegram-bots/*/.env` returns nothing at all for jules and only
+commented lines for priya and marcus. Those three run NanoGPT's `flux-kontext`; bonnie,
+cass, emily and nora run Gemini.
+
+That maps exactly onto the complaints. Jules's selfie came back as a visibly older,
+differently-boned woman while her reference was correctly attached and correctly cropped —
+`/audit` confirmed `Selfie base: jules_base.png`, and the file was 752x1085, one clean
+crop. Priya, also on NanoGPT, was "a bit different". Every bot reported as fine is on
+Gemini. (Nora was the earlier exception and had a separate, established cause: no
+reference photo attached at all until v2026-08-01.10.)
+
+**`/audit` reported which photo was in play but never which backend consumed it**, so a
+three-instance split in image quality was invisible from Telegram — the same observability
+gap as the selfie-base one, one layer further down. The `Selfie base:` line now reads
+`<file> via <provider>`, and names the model on NanoGPT since "nanogpt" alone doesn't say
+`flux-kontext`.
+
+**Not a code fix.** `flux-kontext` preserving identity worse than Gemini on an edit is a
+model difference, not a bug — the remedy is a `GEMINI_API_KEY` in those three `.env` files,
+which is the owner's to apply.
+
+**Verification:** 802/802 pytest, 33/33 evals. 3 new tests; the render assertion
+break-tested RED, and `audit-keys-rendered` caught the same injection independently, which
+is the eval doing exactly the job it was added for one release ago.
+
+## v2026-08-02.4 — /setbase never worked as a caption
+
+**Root cause: PTB's `CommandHandler` matches `message.text` + `message.entities` only.**
+A photo or document caption populates `message.caption` / `caption_entities`, so a
+`/setbase` caption never reached the handler — the update fell through to `handle_photo`
+and the model answered it as conversation, inventing a `[setbase: 60°F, clear, wind 3mph,
+summer]` tag by analogy with `[selfie: …]`. Verified by reading `check_update` in the
+installed wheel, not assumed.
+
+v2026-08-02.3 shipped that path *and documented it as the recommended one* the same day.
+
+**Why the tests were green on a path that could not run:** all eight asserted on the
+handler's **source** — that `_is_admin` appears in it, that `CommandHandler("setbase"` is
+in `main()`, that the write is atomic. Not one exercised dispatch. Reading a function's
+source proves the code exists; it proves nothing about whether the framework will ever
+call it. Fourth occurrence of the assert-without-exercising family (C8), and the first to
+reach the fleet.
+
+**Fix:** a `MessageHandler` on `(PHOTO | Document.IMAGE) & CaptionRegex(r"^/setbase\b")`,
+registered **before** `handle_photo` so it wins dispatch. The `CommandHandler` stays for
+the reply-to-a-photo path, which was always fine since that is a text message.
+
+**Verification:** 799/799 pytest, 33/33 evals. 4 new tests, three break-tested RED. One of
+them exercises PTB's `check_update` rather than describing it, so if a future PTB starts
+matching captions the test fails and the extra handler can be reconsidered.
+
+## v2026-08-02.3 — /setbase: install a reference photo over Telegram
+
+**Root cause: the only route for getting a reference photo onto an instance was
+phone-local `scp`, and the owner's shell is on the VPS.** Three separate attempts in one
+session went into the wrong shell — `termux-setup-storage: command not found`, then two
+`ls /sdcard/...` that matched nothing. That is C1's operator half: the agent can label a
+block, but nothing stops a paste landing in the wrong terminal.
+
+Re-explaining it a fourth time was not going to work, so the transfer is gone instead.
+`/setbase` takes the image over Telegram — send it as a **file** with `/setbase` as the
+caption, or reply to one with `/setbase`. A normal photo works too but Telegram
+recompresses those, and the reference is the strongest identity signal in the selfie
+pipeline, so the reply says so explicitly.
+
+Details that matter:
+- **Format checked by magic bytes**, not the filename or Telegram's mime header — PNG,
+  JPEG, WebP. Anything else is refused rather than installed.
+- **Writes to `SELFIE_BASE`'s existing name**, so no `.env` edit. Combined with
+  v2026-08-02.2's byte-sniffed mime, a PNG landing at `nora_base.jpg` is now harmless.
+- **Previous photo kept as `<name>.prev`**, because a bad swap should be recoverable
+  without another transfer.
+- **Atomic**: written to `.tmp` and renamed. A half-written reference is worse than a
+  stale one.
+- **Takes effect immediately** — `_resolve_base_image()` stats the path per selfie, so
+  there is no restart and no deploy.
+- Admin-gated; it overwrites a file in the instance directory.
+
+**Verification:** 795/795 pytest, 33/33 evals. 8 new tests; the admin gate, handler
+registration and atomic write break-tested RED.
+
+## v2026-08-02.2 — The mime type comes from the bytes, not the filename
+
+**Root cause: `_base_image()` derived the mime type from the file extension.** Renaming a
+PNG to `.jpg` — routine when swapping reference photos between instances — declared PNG
+data as `image/jpeg` to Gemini's `inline_data`. A rejected reference means the face falls
+back to whatever the text says, silently.
+
+Investigated and cleared as the cause of Nora's drift (`ffd8 ffe0`, a genuine JFIF JPEG),
+and deliberately **not** shipped at that point: it fixed nothing observed. Shipping now
+because the owner is about to replace several base photos, which is exactly the operation
+that produces an extension/format mismatch.
+
+`_sniff_mime()` reads the magic bytes — PNG signature, JPEG SOI, RIFF/WEBP — and falls
+back to the extension for anything unrecognised, so it is never worse than before.
+
+**Verification:** 787/787 pytest, 33/33 evals. 5 new tests including PNG-named-`.jpg`,
+JPEG-named-`.png`, WebP, unrecognised-bytes fallback, and an end-to-end pass through
+`_base_image()`.
+
+**Also, a new eval — `audit-keys-rendered`.** v2026-08-02.1 added `selfie_base` to
+`gather_audit_data()` and the startup log line, and the owner was told `/audit` would show
+it; `audit_cmd` builds its own lines and never rendered it. The eval now fails if any key
+in the audit data reaches no user-facing surface, unless listed as API-only. Break-tested
+RED by removing the `Selfie base:` line.
+
+## v2026-08-02.1 — /audit reports which reference photo is in play
+
+**Root cause: v2026-08-01.10 added the selfie-base status to the `=== STARTUP AUDIT ===`
+log line, and I told the owner `/audit` would show it. Those are different code paths.**
+Owner checked and it was not there.
+
+`/audit` is the only surface for this that is reachable from Telegram, which matters
+because the question it answers — "is this bot actually being sent its own face?" — is
+otherwise a `journalctl` away, on a host the owner has to SSH into.
+
+`gather_audit_data()` gained `selfie_base` (shared with the admin HTTP API) and `audit_cmd`
+renders it as a `Selfie base:` line. Same `_base_image_status()` source as the startup line,
+so the two surfaces cannot disagree — a test pins that equality.
+
+Also adds `cass/appearance.txt` and `marcus/appearance.txt`, written from the reference
+photos the owner supplied rather than from the cards. Neither instance had one, and with no
+base image either, both were generating from the bare fallback string.
+
+**Two card/photo discrepancies, deliberately resolved toward the photo** — the photo is what
+an image edit actually anchors on, so a description that fights it recreates the
+contradiction class this week's releases have been removing:
+- Marcus's card says *"close-cropped hair"* and age **31**. His photo shows a clean-shaven
+  scalp, a full beard going grey, and reads mid-40s. `appearance.txt` describes the photo.
+- Cass's card has no physical block at all, so the photo is the only source for her.
+
+Neither card was edited — that is a content decision for the owner, and `edit-cards-and-presets`
+is the right path if the cards should move instead.
+
+**Verification:** 782/782 pytest, 32/32 evals, 3 new tests, the rendered-line assertion
+break-tested RED.
+
+## v2026-08-01.11 — Marcus was being drawn as a woman
+
+**Root cause: the shared no-`appearance.txt` fallback hardcoded a sex.** `SELFIE_APPEARANCE`
+read `"an adult woman in her late 20s, the same person as in the reference photo"` for any
+named instance without an `appearance.txt`. Marcus Calder is 31, 6'2", a man — and has no
+reference photo on disk, so whatever describes him in an image prompt is that string alone.
+
+Found while auditing `SELFIE_BASE` across the fleet after v2026-08-01.10, which turned up
+how many instances fall back rather than configure. **Third instance of one class**, after
+Ingrid's courier jacket (v2026-08-01.8) and hardcoded "freckles" (v2026-08-01.9): shared
+code asserting one character's traits across all seven. The first two were cosmetic on a
+character who happened not to match. This one changes the person.
+
+**Fix:** both fallbacks are sex-neutral (`"an adult in their late 20s"`), keeping the
+explicit adult age that Gemini's image filter needs to avoid returning blacked-out frames.
+The startup-audit `Selfie base:` field now distinguishes the worst case — no reference
+photo *and* no `appearance.txt` reads `TEXT-ONLY, NO APPEARANCE.TXT — every selfie is a
+generic stranger`, because that state has nothing describing the character at all.
+
+The real fix for cass and marcus is content, not code: both have no base image on disk, so
+v2026-08-01.10's autodetect cannot help them. They need a reference photo, an
+`appearance.txt`, or both.
+
+**Verification:** 779/779 pytest, 32/32 evals, 3 new tests, the neutrality assertion
+break-tested RED. That test also failed twice before it was right: first it flagged its own
+explanatory comment (C14 — a scanner cannot tell doing-the-bad-thing from describing it),
+then `"he "` matched inside `"the "`. Word boundaries and comment stripping, both needed.
+
+## v2026-08-01.10 — Nora's reference photo was never being sent
+
+**Root cause: `SELFIE_BASE` defaults to `priya_base.png`, nora's `.env` never set it, and
+her photo is `nora_base.jpg` — wrong name and wrong extension.** `_has_base_image()`
+returned False, so every one of her selfies took the text-only branch and no reference
+photo was ever attached to the Gemini call. The file has been sitting in
+`/opt/telegram-bots/nora/` since 27 June.
+
+**Nothing reported it**, which is the part worth fixing. `selfie_ready()` returns True if
+the base image **or** `appearance.txt` exists; she has had an `appearance.txt` since 26
+June, so the check passed and the degradation from image-edit to text-only was completely
+silent. `[observed]` `grep -L SELFIE_BASE /opt/telegram-bots/*/.env` returned exactly one
+instance — hers.
+
+This supersedes v2026-08-01.9's diagnosis as the primary cause. That release measured two
+real problems (the identity anchor sat ~1000 characters from the end of the prompt; 29.9%
+of draws stacked a face-obscuring framing on a face-degrading camera) and both fixes stand
+on their own — but they were tuning an *edit* prompt for a call that was not editing
+anything. The v2026-08-01.9 analysis assumed a reference photo was attached. It was not.
+
+**Fix:**
+- `_resolve_base_image()` falls back to the single unambiguous `*_base.(png|jpg|jpeg|webp)`
+  in the instance directory when `SELFIE_BASE` names a file that is not there. With two or
+  more candidates it returns None rather than guessing — picking between two faces is how
+  you ship the wrong woman.
+- `_base_image()` now takes its mime type from the **resolved** file, not the configured
+  name. A `.jpg` announced as `image/png` is a working photo that still gets rejected.
+- The `=== STARTUP AUDIT ===` line gained `Selfie base:`, reporting the filename in play,
+  `AUTODETECTED (… set it in .env)`, or `TEXT-ONLY` with the candidates it saw. `/audit`
+  now answers "is she actually being sent her own face?" without a shell.
+- Kill switch `SELFIE_BASE_AUTODETECT=0`.
+
+**Reverted from v2026-08-01.9:** `telegram-companion-bot/nora/appearance.txt`, which that
+release added. Nora already had a real one on the instance, 381 bytes, dated 26 June — the
+repo copy was written from her card by this session and had never been compared against it.
+`vps-sync.sh` only copies seed files that are *missing*, so nothing was overwritten, but
+leaving an invented file in the seed directory is the exact divergence trap that script
+warns about (the jules atlas.txt case, 2026-07-29). The live instance is authoritative;
+the fabricated seed and its three tests are removed.
+
+**Verification:** 776/776 pytest, 32/32 evals, 10 new tests. Three assertions break-tested
+RED. The first attempt broke all three at once and the ambiguity test still passed — the
+autodetect-off injection masked the guess-the-first-candidate injection, so it was passing
+for the wrong reason. Re-run in isolation, it failed correctly. Break-tests need one
+injection at a time.
+
+**Still open:** the `SELFIE_BASE` values across the fleet were read with `grep -h`, which
+strips filenames, so two instances showing `SELFIE_BASE=nora_base.png` cannot be attributed
+to an instance. If a non-nora instance points at `nora_base.png` and has no such file, it
+is text-only too — the new startup audit line will say so on next restart.
+
+## v2026-08-01.9 — Sometimes the selfie wasn't her
+
+**Root cause: the identity instruction is the FIRST thing in the image prompt, and two
+releases of appended scene text pushed ~1000 characters after it — while 30% of random
+draws stacked a face-obscuring framing on a face-degrading camera.** Owner-reported:
+selfies that don't look like Nora, intermittently. (Same report confirmed v2026-08-01.7's
+weather fix is working.)
+
+`build_selfie_prompt` opens with "Edit the attached photo of this exact woman — do not
+generate a new person…" as `bits[0]`, then appends 17 more instructions: pose, expression,
+activity, outfit, outerwear, scene, camera look, the weather clause (which v2026-08-01.7
+made longer), the anatomy rule, the realism rule, and a scene-dedup list naming *other
+setups*. On an image edit the last thing said sits nearest the output; the identity anchor
+was as far from it as it could be.
+
+Compounding that, the framing and camera pools are full of choices that legitimately make
+a candid phone photo — mirror shots, half-in-frame crops, motion blur, harsh flash, grainy
+low light, backlit shadow — and they were drawn independently. Measured over 2000 seeds:
+**29.9% of prompts drew a face-obscuring framing AND a face-degrading camera**, and only
+16.7% were clean. One soft choice is candid; two leave an edit model enough latitude to
+drift the face into a different woman. ~30% matches "on occasion" well.
+
+A third contributor, specific to Nora: she had **no `appearance.txt`**, so
+`SELFIE_APPEARANCE` fell back to `"an adult woman in her late 20s, the same person as in
+the reference photo"` — a *pointer*, not a description. Every verbal identity signal in
+her prompt was a reference to an image. Any draw that weakened the photo's influence left
+nothing behind it.
+
+**Fix:**
+- `_SELFIE_IDENTITY_TAIL` restates the identity constraint as the genuinely last line —
+  after the dedup list, deliberately, since that block names other setups.
+- A soft framing now filters soft camera looks out of the pool: stacked draws **29.9% → 0%**,
+  with one soft choice still freely available.
+- `telegram-companion-bot/nora/appearance.txt` written from her card's `<physicality>`
+  block, so her face has a verbal anchor and not just a photo pointer.
+- The shared identity line hardcoded **"freckles"** — Nora's trait, applied to all seven
+  characters. Now "distinguishing features". Same character-bleed family as the courier
+  jacket in v2026-08-01.8; a test pins the shared prompt against five such traits.
+
+Kill switch `SELFIE_IDENTITY_GUARD=0`. Prompt assembly only, no new LLM calls.
+
+**Verification:** 769/769 pytest, 32/32 evals, 10 new tests. Three load-bearing assertions
+break-tested RED (de-stacking, tail position, trait hardcoding). The tail-position case
+needed *two* tests: with `chat_id=None` there is no dedup block, so the simple "ends with"
+assertion still passed when the tail was moved back above it — only the dedup-present test
+caught the regression.
+
+**Not proven:** that this fixes what the owner saw. The mechanisms are real and measured,
+but nothing here confirms which draw produced any particular bad image — that needs
+selfies watched over time. Also unconfirmed: whether `SELFIE_BASE` is correctly set for
+each instance. It defaults to `priya_base.png`, so an instance whose `.env` omits it has
+**no** reference photo attached at all and generates from text alone.
+
+## v2026-08-01.8 — She dresses once a day, and her jacket exists again
+
+**Three owner-reported items, one subsystem.**
+
+**1. The wardrobe never changed on its own.** `wardrobe["current"]` was only ever set by
+hand via `/outfit`; with nothing set, `build_selfie_prompt` drew a fresh random outfit per
+photo, so she could wear three different things in an hour and nothing in particular on
+any given day. Now `wardrobe_rotate_job` picks one weather-appropriate outfit each morning
+and she wears it all day.
+
+It runs at `WARDROBE_ROTATE_HOUR` (default 07:00 local), **not** at midnight, and re-reads
+the weather first. Picking a day's clothes from midnight's reading is precisely the
+frozen-overnight-snapshot mistake `world.txt` makes and v2026-08-01.7 was written to
+remove — rebuilding it one release later in a new place would have been the joke of the
+week. For the same reason, an outfit the *rotation* chose is re-checked against live
+weather at selfie time and dropped if the afternoon outran it; an outfit set *by hand* is
+never second-guessed.
+
+Selection prefers the `/addoutfit` wardrobe and falls back to the built-in pool when it's
+empty, so an instance with no wardrobe history still changes clothes daily. Free-text
+outfits are classified by keyword (`_OUTFIT_WARM_WORDS`/`_OUTFIT_COOL_WORDS`) against
+`SELFIE_WARM_F`/`SELFIE_COLD_F` — deterministic, and **no LLM call**. Unknown weather
+suits everything: absent data must never narrow the wardrobe to nothing.
+
+`/outfit` holds for the rest of that day and rotation resumes the next morning (owner
+decision, 2026-08-01) — implemented by having `/outfit` claim the day's `picked` stamp,
+which the job's same-day guard then honors without needing a second rule.
+
+**2. Ingrid's courier jacket had never once appeared.** It was gated on
+`SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, which holds only when `not IS_NAMED_INSTANCE`
+— an unnamed run from the code directory. `deploy/bot@.service` is
+`ExecStart=… bot.py /opt/telegram-bots/%i`, so every live instance is named and the branch
+was dead on all seven. It is now `OUTDOOR_LAYER`, per-instance env config: a specific
+object, unset by default, added only outdoors and only when it isn't warm. **Nora's
+instance needs `OUTDOOR_LAYER` set in her `.env` for the jacket to come back** — this
+release makes it possible, not automatic.
+
+**3. `_APPEARANCE_DEFAULT` described nobody.** A half-shaved head, septum ring and sleeved
+tattoos — a relic of a discarded card that made Priya a tattoo artist (owner, 2026-08-01).
+Unreachable on the fleet for the same argv reason, but wrong in the file. Now a neutral
+`"an adult woman in her late 20s."`, keeping the explicit adult age that Gemini's safety
+filter needs.
+
+**Verification:** 19 new tests; four load-bearing assertions break-tested RED
+independently (same-day guard, stale-auto-outfit re-check, warmth gate on outerwear,
+unknown-weather default). 759/759 pytest, 32/32 evals. One existing v2026-08-01.7
+assertion had been silently defanged by `OUTDOOR_LAYER` defaulting to empty — its
+"courier jacket" check could no longer fail — and was repaired to set the layer explicitly
+(C13).
+
+## v2026-08-01.7 — Nora sent a rainy selfie on a sunny day
+
+**Root cause: `build_selfie_prompt` composed the scene from weather-blind random pools,
+then appended the real weather as a trailing hint that told the image model not to render
+it.** Owner-reported: a rainy selfie while Seattle was sunny all day.
+
+The weather data was never wrong, and this is worth stating because it is where the
+investigation would naturally start. `/status` on nora showed `Weather: 70°F, clear,
+wind 11mph`, her day context was the Eastlake bike lane with no rain in it, and she was
+texting about the sun on her neck. Three plausible mechanisms were ruled out by that one
+command: the Open-Meteo fetch had not failed, the cache was not stale, and `world.txt`
+had not seeded a rainy day narrative.
+
+The defect is in prompt assembly. `_weather_outdoor_ok` screens for *precipitation* and
+`_weather_camera_pool` screens *camera presets*, but nothing screened the scene itself
+for **temperature**. `SELFIE_ACTIVITIES` contains "bundled up against the cold",
+`SELFIE_OUTFITS` contains "a beanie and a hoodie", and Ingrid's canvas courier jacket was
+appended to every outdoor shot unconditionally. A rendered prompt at 70°F clear:
+
+> ...She's **bundled up against the cold**. Over that, she's got on Ingrid's **oversized
+> vintage canvas courier jacket**... Somewhere in **Seattle**, in the afternoon...
+> Current weather: 70°F, clear, wind 11mph. Let it read in the lighting, atmosphere, and
+> what she might be wearing — **don't describe the weather explicitly, just let it show.**
+
+Four signals say cold-and-grey Seattle; one token says 70°F clear — and the final clause,
+phrased for a text model, reads to an image model as *suppress the weather*. The image
+followed the scene. 137 of 300 seeds produced contradictory content at that reading, which
+is why this was intermittent rather than constant.
+
+**Fix:** `_weather_temp_f` parses the air temperature (taking the first `°F` field, never
+"feels like"), and `_weather_scene_pool` drops cold-weather activities and outfits — and
+the jacket — at or above `SELFIE_WARM_F` (68°F). The weather clause is now directive
+("which the image must match") and a dry reading appends an explicit negative: *no rain,
+wet pavement, puddles, umbrellas, rain-streaked glass*. Clear-sky and no-precipitation are
+asserted separately, so an overcast day never claims "no heavy grey overcast".
+
+Unknown weather is deliberately **not** treated as warm — absent data must not strip her
+jacket in January. Kill switch `SELFIE_WEATHER_MATCH=0` restores the previous prompt
+byte-for-byte, pinned by a test. No new LLM calls; prompt assembly only.
+
+**Verification:** at 70°F clear, contradictory content across 300 seeds went 137 → 0, and
+the no-rain negative appears in 300/300. Cold and rainy readings are unchanged (winter
+content still appears; the negative never does). 11 new tests; the three load-bearing
+assertions were break-tested RED before being trusted (C3).
+
+**Left open deliberately:** Ingrid's courier jacket — a Nora-specific inheritance — is
+gated on `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, and that default describes a
+half-shaved head, septum ring and sleeved tattoos, which is Priya's look, not Nora's. Any
+instance falling through to the default gets both. Not touched here (out of scope for a
+weather fix), and not yet confirmed against the live instance dirs.
+
+> **Correction (v2026-08-01.8):** the paragraph above is wrong, and the flagged
+> uncertainty is what was wrong. `_APPEARANCE_DEFAULT` is reachable only when
+> `not IS_NAMED_INSTANCE`, i.e. when bot.py runs with no instance-directory argument.
+> `deploy/bot@.service` is `ExecStart=… bot.py /opt/telegram-bots/%i`, so all seven live
+> instances are named, and neither the tattoo-artist description nor the jacket has ever
+> reached a live selfie. The description was a relic of a discarded card (owner,
+> 2026-08-01); the jacket was unreachable code. Both are fixed in v2026-08-01.8.
+
+## v2026-08-01.6 — /dupefacts: a read-only diagnostic for near-duplicate facts
+
+**Not a fix — a deliberately narrow tool to gather evidence before writing one.**
+Follow-up to `v2026-08-01.5`'s fusion fix: asked whether embeddings could improve
+memory quality further. They can't fix the fusion bug (that was a generation-quality
+problem; embeddings solve retrieval, and `facts`/`recent_facts` are injected into every
+prompt unconditionally — there's no retrieval step for embeddings to improve). But
+`_summarize()`/`_consolidate_facts()`'s own dedup is exact-lowercase-string matching
+only, which would miss a fact reworded across consolidation passes sitting alongside
+its near-twin — and semantic dedup already exists for the *other* memory tier
+(`_is_semantic_dup`, gating `/addmem`'s auto path at `MEMORY_DEDUP_SIM`, default 0.92)
+but was never extended to facts.
+
+**Deliberately not auto-merge.** A similarity threshold with no real data behind it
+risks flagging genuinely distinct facts (two different Costco trips, worded
+similarly) as duplicates and silently discarding one — a new failure mode introduced
+speculatively rather than fixing an observed one. `/dupefacts` only reports candidate
+pairs for a human to judge; nothing is merged or deleted.
+
+**Shipped:**
+- `_embed_and_cache(text)` — like `_embed_memory_line` but returns the vector; shares
+  `_embeddings_cache`/`embeddings.json` with the memories.txt path, so facts get a
+  durable, reusable embedding cache for free.
+- `_find_near_duplicate_pairs(items, vecs, threshold)` — pure, the diagnostic sibling
+  of `_is_semantic_dup`: instead of "is this one new item a duplicate of anything,"
+  surfaces every near-duplicate pair already sitting in one list.
+- `/dupefacts` command (`_is_allowed`-gated, same as `/reviewmem`/`/editmem`/
+  `/sourcemem` — not admin-only): checks `facts` and `recent_facts` independently,
+  reports pairs at cosine ≥ `MEMORY_DEDUP_SIM` with their similarity score, or says
+  plainly that none were found. Reuses `MEMORY_DEDUP_SIM` rather than adding a new env
+  var — this is explicitly a temporary evidence-gathering tool, not a permanent
+  feature needing its own tunable.
+
+**Tests:** `TestFindNearDuplicatePairs` (pure, synthetic vectors, no network),
+`TestEmbedAndCache` (cache hit/miss/failure via a monkeypatched `_embed_text`), and
+`TestDupefactsCmd` (reports a real pair, says "none" plainly when there are none,
+never mutates `facts`/`recent_facts`, and a disallowed user gets nothing). The
+disallowed-user gate was break-tested RED (temporarily removed the `_is_allowed`
+check, confirmed the test caught it) before being trusted, restored via the Edit tool.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 729/729, `run-evals.sh`
+32/32 green.
+
+## v2026-08-01.5 — recent-memory facts stopped fusing events with commentary about them
+
+**Root cause: `_summarize()`'s prompt had no instruction against conflating two
+different things into one fact.** Owner reported Priya re-surfacing a two-day-old topic
+as if she'd never been told — `/recall costco` turned up the actual culprit: *"Costco
+food court trip: 'in and out like a bad lover'—Priya called it self-reporting; Brian
+corrected it was a simile."* That's not one memory, it's three folded into a run-on
+sentence — the trip itself, a line Priya said about it, and a separate argument over
+how to categorize her own phrasing.
+
+**Ruled out first, not assumed:** checked whether a weak background model was the
+cause (`v2026-07-29.3`'s `SUMMARY_MODEL`-doing-caption-work bug was the obvious prior).
+It wasn't — `priya/.env` has no `SUMMARY_MODEL` override, so `_summarize()` was running
+on her own chat model, `zai-org/glm-5.1:thinking`, a strong reasoning model. A capable
+model still produced this, because nothing in the prompt told it not to: "a curated
+list of specific, meaningful things... a continuous recollection, not a list of events"
+is a compression instruction with no constraint keeping each fact resolvable on its
+own. `bot-code-invariants` #17 already mandates exactly this kind of discipline for
+`user_notes.txt` extraction (confidence gating, quote grounding, null-over-guess) — the
+`recent_facts`/summary pipeline had none of it.
+
+**Fix:** both `_summarize()` (writes new facts from scrolled-off messages) and
+`_consolidate_facts()` (merges the list when it passes `RECENT_FACTS_MAX`) now require
+each fact to describe ONE concrete thing, in one plain sentence, resolvable without
+cross-referencing another fact — and explicitly forbid fusing an event with separate
+commentary about it (a remark on how something was phrased, categorized, or argued
+over) just because they share a topic. `_consolidate_facts` additionally: if two facts
+don't reduce to one clean sentence without cross-referencing each other, keep them as
+two rather than force a merge — since repeated consolidation passes compound this exact
+error over time with no way to re-check against the original messages once they've
+scrolled out of context.
+
+**Prompt-only change, both functions still route through `SUMMARY_MODEL`** — no new
+call, no new env var, no kill switch needed (this fixes a defect, it doesn't add
+optional behavior).
+
+**Tests:** `TestFactAtomicity` pins the new constraint text in both function sources.
+Both assertions break-tested RED (temporarily removed each constraint independently,
+confirmed the corresponding test fails) before being trusted, restored via the Edit
+tool directly rather than the fragile string-replace-in-a-heredoc approach tried first,
+which left a syntactically mangled (though still-compiling) intermediate state — caught
+by re-reading the diff before trusting it, not shipped.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 715/715, `run-evals.sh`
+32/32 green.
+
+**Not yet confirmed:** whether this actually stops the re-surfacing behavior in
+practice — the fix targets the mechanism that produced the one bad example we have,
+but there's no way to verify "does Priya stop doing this" without watching her memory
+over the next several days of real conversation.
+
+## v2026-08-01.4 — /model shows every model role, not just chat
+
+**Root cause of the request:** while investigating a live memory-quality complaint
+(Priya re-surfacing a two-day-old topic as if it were new), the diagnosis needed to
+know which model was actually running `SUMMARY_MODEL`/`MOOD_MODEL` on that instance —
+and there was no cheap way to check. `/model` showed only the chat model.
+`/setmodel` with no args already lists every `MODEL_ROLES` entry, but it also fetches
+the live subscription model list and adds picker/usage framing, so it's not the
+quick glance a live-ops question needs.
+
+**Shipped:** `/model` now lists every role in `MODEL_ROLES` (chat, summary, caption,
+reaction, mood, vision, fallback, visionfallback) with its current effective value,
+reading straight off `globals()[var]` — the same mechanism `/setmodel` already writes
+through, so a live override shows up here too, not just the `.env`-loaded default.
+No live API call added; still cheap enough to check on every incident. Can't drift
+from `/setmodel`'s own role list because both read the same `MODEL_ROLES` dict.
+
+**Tests:** `TestModelInfoShowsEveryRole` — every role appears in the reply, the actual
+configured value shows (not a placeholder), and a source-level check that no
+subscription-list call was added. Break-tested RED (reverted to the single-model
+version, confirmed the role-coverage assertion fails with the missing role named)
+before being trusted, restored by re-editing per constraints C15.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 713/713, `run-evals.sh`
+32/32 green.
+
+## v2026-08-01.3 — MEMORY_TOKEN_BUDGET now means real tokens (ROADMAP 4.4, owner-approved)
+
+**What this closes:** since v2026-07-26.2 made every other reported token figure real
+(`usage.prompt_tokens`, per-instance calibration ratio), `MEMORY_TOKEN_BUDGET` was
+deliberately left on the raw `len//4` unit — a regression test
+(`test_memory_budget_stays_on_the_raw_unit`) pinned it there specifically so the switch
+couldn't ship as a side effect of some other release. Recalibrating this knob changes how
+much a character actually recalls per reply, which is a product decision, not an
+accounting fix — hence owner-gated rather than done the day 4.4 was filed.
+
+**Owner approved 2026-08-01** and supplied each instance's current calibration ratio
+straight from `/audit` (all well past the ~15-call EMA reconvergence point, 46-235
+measured calls each):
+
+| instance | ratio | 300 (old default) × ratio |
+|---|---|---|
+| bonnie | 0.91 | 273 |
+| emily | 0.90 | 270 |
+| nora | 0.92 | 276 |
+| priya | 0.92 | 276 |
+| cass | 0.91 | 273 |
+| marcus | 0.91 | 273 |
+| jules | 0.93 | 279 |
+
+**The fleet's ratios cluster tightly (0.90-0.93)** — worth recording because it changes
+how much this migration actually matters in practice: no character is far enough off
+from the others for the unit switch to meaningfully redistribute recall between them.
+The risk this item was gated against was real in principle, small in this instance.
+
+**Shipped:** `triggered_memories()`'s budget loop now costs each candidate line with
+`_tokens()` (calibrated) instead of `_est_tokens()` (raw) — one line changed, per the
+ROADMAP plan. `TOKEN_CALIBRATION=0` reverts this budget check to the raw unit too,
+same kill switch as every other calibrated figure; no new kill switch needed. The
+regression test was updated in place (renamed, not deleted) to assert the new intended
+behavior, `test_memory_budget_uses_calibrated_units` — same guard, opposite direction,
+so a future accidental revert back to raw units gets caught the same way this one
+protected against a future accidental *forward* switch.
+
+**Not yet done — this is the step that actually preserves recall volume:** the table
+above assumes every instance is still on the shared 300 default, which was not
+independently confirmed (`/audit` doesn't surface `MEMORY_TOKEN_BUDGET`, and this
+session has no VPS access to grep `.env` directly). **Check each instance's `.env` for
+an existing override before using these numbers** — multiply *that* value by the
+instance's ratio instead of 300 if one exists. Assuming the default and being wrong
+would undershoot or overshoot recall by whatever the real prior value was, not just the
+~8-10% the ratio itself accounts for. Once confirmed, set each instance's `.env`:
+```bash
+# host: VPS (as root)
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/bonnie/.env
+echo "MEMORY_TOKEN_BUDGET=270" >> /opt/telegram-bots/emily/.env
+echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/nora/.env
+echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/priya/.env
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/cass/.env
+echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/marcus/.env
+echo "MEMORY_TOKEN_BUDGET=279" >> /opt/telegram-bots/jules/.env
+```
+then `vps-sync.sh` (or just `/restart`, since these are `.env`-only edits and the code
+is already merged) per instance.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710, `run-evals.sh`
+32/32 green. The updated regression test was break-tested RED (reverted to
+`_est_tokens`, confirmed it fails with the expected message) before being trusted, then
+restored by re-editing — not `git checkout`, per constraints C15.
+
+## v2026-08-01.2 — 17 commands worked if typed but never appeared in Telegram's menu
+
+**Root cause: `_build_command_menu` is hand-kept alongside the `CommandHandler`
+registrations — its own docstring says so — and nothing enforced that until now.** An
+audit comparing every `app.add_handler(CommandHandler(...))` in `main()` against the
+menu builder's output found 17 unconditionally-registered commands missing from every
+menu list: `card`, `errors`, `fleet`, `life`, `meme`, `note`, `notes`, `people`,
+`projects`, `quiet`, `quietwin`, `recap`, `restart`, `schedule`, `setcard`, `today`,
+`update`. All 17 worked fine if a user typed them manually — the handlers were real —
+they simply never showed up in Telegram's autocomplete popup, so a user would only find
+them by already knowing they existed (from `OPS_MANUAL.md`, or trial and error).
+
+No dead entries in the other direction — nothing in the menu lacked a working handler.
+
+**Fix:** added all 17 to `_BASE_COMMANDS`, grouped near their thematic neighbors
+(`recap`/`card`/`setcard` near `status`; `life`/`people`/`projects`/`schedule`/`today`/
+`note`/`notes` — the Context Files group — near the memory commands; `quiet`/`quietwin`
+near `nudges`; `meme` near `selfie`; `errors`/`restart`/`update`/`fleet` alongside
+`audit`/`backup`, which were already unconditionally listed). This matches the existing
+convention exactly: `_MAPS_COMMANDS`'s own comment says unconditionally-registered
+handlers belong unconditionally in the menu, same as conditionally-registered ones
+(`traffic`, `payments`, `garmin`, `preset`) already mirror their own kill switches.
+`/update`'s description was written to match its actual current behavior (dead as a
+deploy path on the private repo, replies pointing at `vps-sync.sh`) rather than the
+stale "pull latest bot.py" description it would otherwise have inherited.
+
+**New regression test, `TestCommandMenuMirrorsHandlers`**, extracts every
+`CommandHandler("...")` name from `main()`'s source via `inspect.getsource` + regex and
+asserts it's a two-way match against `_build_command_menu(True, True, True, True)`'s
+full command set — both directions (registered-but-missing, and menu-but-dead), so this
+exact class can't recur silently again. Both assertions break-tested RED before being
+trusted: removing one menu entry and adding one fake unregistered entry each failed the
+correct assertion with the correct missing/dead name.
+
+**Self-inflicted near-miss while writing that break-test, logged as constraints C15:**
+reverted one break-test edit with `git checkout -- bot.py`, which restores the file to
+its last *committed* state, not "current minus my last edit" — and at that moment
+bot.py held this same commit's uncommitted menu-fix work. All 17 additions were
+silently wiped in one command. Caught immediately by `git diff --stat` showing zero
+changes where 18 lines were expected; the earlier edits were redone from memory rather
+than lost. No broken code shipped, but this is the second time this exact command has
+destroyed real uncommitted work in this repo (the first is `repo-change-control`'s own
+"Common mistakes" entry, "this destroyed ~700 lines once") — promoted straight to a
+numbered constraint rather than waiting for a third occurrence.
+
+**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710 passed, `run-evals.sh`
+32/32 green, and the registered/menu name sets diffed programmatically both
+directions (empty both ways) independent of the new pytest coverage.
+
+## 2026-08-01 — Chimera's banned-rhetoric block ported to preset-rp.txt, not preset-core.txt (content only, no bot.py change, no version bump)
+
+**ROADMAP 3.14 shipped, but to a different file than the item specified** — a roleplay
+simulation before shipping caught that the original plan was wrong, which is the part
+worth recording. `Chimera_v2.json` names four prose constructions as "the loudest
+machine tells" and forbids them outright: contrastive negation (`not X but Y`),
+false-correction/epanorthosis (`It was X. No — Y.`), negation-as-atmosphere (`it wasn't
+the wind`), and litotes (`not unkind`). 3.14 planned to port these into
+`preset-core.txt`, reasoned as universal prose hygiene reaching all seven instances via
+3.13's layering.
+
+**The plan was tested, not just reviewed, before anything shipped.** Same message run
+against Priya's actual stack (`core+stepped+priya`, no narration) and Jules's
+(`core+rp+explicit+stepped+jules`, narrates in third person):
+- **Priya:** her natural reply included *"not mad or anything, just tired"* — an
+  ordinary first-person texting hedge that happens to share contrastive-negation's
+  surface shape. Under the rule as drafted for `preset-core.txt`, zero tolerance would
+  have forced cutting it — sanding a real human speech habit to fix a problem that only
+  exists in narrated prose. Priya never narrates; the rule doesn't apply to her at all,
+  and shipping it to `preset-core.txt` would have applied it anyway, fleet-wide.
+- **Jules:** narration reaching for *"It wasn't nothing, though"* in a restraint beat —
+  the actual tell. Rewritten as *"It mattered."* — tighter, and more in-character per
+  `preset-jules.txt` (her resolution is never a soft line).
+
+**Root cause of the near-miss:** Chimera's bans describe third-person narrated prose,
+not first-person conversational hedging, and `preset-core.txt` is loaded by narrating
+and non-narrating instances alike. `preset-rp.txt` (the narration layer that 3.13 already
+built) is loaded only by instances that actually narrate — nora, bonnie, emily, jules,
+marcus — never cass or priya. Targeting `preset-rp.txt` instead gets the correct scoping
+for free from the layer boundary, with no carve-out text needed for the two instances
+where the rule doesn't belong.
+
+**Shipped:** the four-ban paragraph added to `preset-rp.txt`'s `[NARRATION]` section,
+right after the opening paragraph, in the file's existing Bad/Good example style (~60
+tokens). `git diff` confirmed the change is isolated to exactly that insertion.
+Verified: `bash .claude/evals/run-evals.sh` 32/32 green.
+
+**Not yet done:** `vps-sync.sh` re-run on the five instances that load `preset-rp.txt`
+to actually pick this up (see `deploy-and-verify-fleet`) — content changes don't bump
+`BOT_VERSION`, so there's no version number to confirm against; the register itself
+(via `/audit`'s `Preset layers:` line, or just talking to the character) is the
+verification.
+
+## 2026-08-01 — vps-sync.sh's bot.py swap is now locked (no bot.py change, no version bump)
+
+**Root cause: bot.py's own concurrent-update fix (v2026-07-25.11) covered only one of
+the two places that perform the swap.** `perform_self_update`'s host-wide `flock` fixed
+`/update` racing itself, but `deploy/vps-sync.sh` performs the identical
+fetch→compile→backup→swap sequence on the identical shared paths
+(`/opt/telegram-bots/bot.py`, `bot.py.bak`) with no guard at all — and the documented
+fleet deploy is exactly two-or-more back-to-back invocations against instances that
+share a host (every instance does, since the 2026-07-26 migration). ROADMAP 1.6 named
+this the other half of the class.
+
+**The race, unfixed:** two concurrent runs share the fetch, the compile target, the
+backup, and the final file. The loud failure is one run's `mv` deleting the other's
+`bot.py.new` mid-copy. The silent one is worse and is the real reason this ranked above
+cosmetic work: if instance B's `cp bot.py bot.py.bak` lands *after* instance A's `mv`,
+`bot.py.bak` becomes a copy of the **new** code, not the old — the rollback path looks
+intact and is not. Nothing would have reported it; the owner would only find out at the
+moment they actually needed to roll back.
+
+**Fix:** `flock -n` around the whole run, released automatically on exit. `flock` is
+util-linux and present by default on Ubuntu 24.04 — Termux's absence of it is exactly
+why bot.py's own phone-side guard and `watchdog.sh`'s PID-file guard already use
+different mechanisms; this is a fourth, VPS-specific one, not a unification of the
+other three. Only the code swap strictly needs covering (card/preset/`.env`/systemd-unit
+work is per-instance and never races across instances), but locking the entire script is
+simpler and equally correct, per the ROADMAP item's own note.
+
+**Also folded in:** the backup `cp` was `2>/dev/null || true` — a failed backup died
+silently, which is the same silent-rollback-loss failure mode as the race itself, just
+via a different door. Now unguarded and fatal like every other step. `install-vps.sh`
+seeds `bot.py` at `$BASE` before `vps-sync.sh` can ever run (step 2/8 of the installer),
+so the backup source existing is a precondition already established, not a new
+assumption this fix introduces.
+
+**Verified — break-tested, not inspected, per the ROADMAP item's own "done when," in
+two passes.** First, the locking mechanism was extracted and raced in isolation from
+this session (no VPS access here): a held lock's second concurrent `flock -n` attempt
+exits non-zero with the intended message while the first holds it, and a fresh solo run
+acquires the lock normally after release. `bash -n deploy/vps-sync.sh` clean.
+
+Second — the real thing, owner-run on the VPS. Round one raced `nora` against `bonnie`
+as the first invocation after merging: both started from the *pre-fix* script (a
+sync's checkout-reset is its own first action, so the very first call after a merge
+necessarily runs from whatever was already on disk), and instead surfaced a genuine
+git-level race — `bonnie`'s `git fetch` hit `error: cannot lock ref
+'refs/remotes/origin/main'` against `nora`'s concurrent fetch+reset, and `set -e`
+killed `bonnie`'s run right there, before it touched anything `bonnie`-specific.
+`nora` completed normally. Useful evidence (unguarded concurrent syncs on a shared
+checkout really do collide) but not a test of the fix itself, since neither run had it
+loaded yet.
+
+Round two, now that `nora`'s successful run had pulled the checkout — and the script
+that reads it — to the fix: raced `bonnie` against `cass`, baseline `bot.py` md5
+captured first. `cass` hit the flock and exited 1 with the intended retry message
+*before its own `git fetch` ever ran*. `bonnie` completed end-to-end — fetch, compile,
+backup, swap, restart, full hash + `STARTUP AUDIT` verification. `bot.py.bak`'s md5
+after the race matched the pre-race baseline exactly: the rollback point held the
+genuinely-previous code, not a corrupted copy of the new. ROADMAP 1.6's done-when is
+satisfied and closed.
+
+## v2026-08-01.1 — Selfie prompt's fixed rules are findable (refactor, no behavior change)
+
+**Root cause: the two prompt fragments most likely to need editing were the two hardest
+to find.** `build_selfie_prompt` is a ~70-line conditional builder, and every generic
+selfie fragment — `SELFIE_EXPRESSIONS`, `SELFIE_FRAMINGS`, `SELFIE_OUTFITS`,
+`SELFIE_ACTIVITIES`, `SELFIE_CAMERA` — is hoisted to a module constant with its peers.
+Two were not: the anatomy rule ("exactly two arms... no extra limbs") and the realism/SFW
+rule, appended unconditionally from inline literals mid-function.
+
+Those two are precisely what you reach for when the image model misbehaves — extra limbs
+from Flux/Kontext, or Gemini's safety filter returning a blacked-out frame when the SFW
+signal is weak (the same filter that already forced the explicit-adult-age workaround at
+`SELFIE_APPEARANCE`). Image-prompt tuning is recurring work here, and it was starting
+from a code read instead of a grep.
+
+Now `_SELFIE_ANATOMY_RULE` and `_SELFIE_REALISM_RULE`, next to the other `SELFIE_*`
+pools. The conditional appends (weather, wardrobe, mood, scene dedup) are untouched —
+conditional assembly is correct and was never the problem.
+
+**No behavior change, proven not assumed:** 640 prompts across 40 seeds × both hint
+modes × both `chat_id` modes × weather present/absent × wardrobe set/unset, captured
+before and after — byte-for-byte identical. Two new tests pin that both rules reach every
+prompt and that the two constraint phrases survive; both were break-tested RED before
+being trusted (C3).
+
+Prompted by an external commit (`ShopDevX/adeptlydev` b6d7437) that replaced ~30-call
+`lines.push()` chains with template literals. That codebase's problem does not exist
+here — static prompt text lives in `preset.txt`, cards, and preset layers — so only the
+narrow real instance was taken. **Deliberately not turned into an invariant:** the class
+has zero occurrences in this repo, and `bot-code-invariants` rules are earned by
+incidents, not imported from other people's refactors.
+
+**Built to ride along, not to deploy alone.** No user-visible change, so this is not
+worth a seven-instance deploy on its own; it was parked on
+`claude/github-commit-workflow-integration-ak6ql6` to merge with the next functional
+release. If it reaches `main` under a later `BOT_VERSION`, that is expected.
+
 ## 2026-07-29 — install-vps.sh could not authenticate to the private repo (no bot.py change)
 
 **Root cause: the private-repo migration was applied to one script and not the other.**

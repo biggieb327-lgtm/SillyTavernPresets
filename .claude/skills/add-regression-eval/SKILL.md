@@ -28,7 +28,22 @@ deleted, guards nothing) or silently passes forever (worse than nothing).
    of bot.py once (operational-log 2026-07-10). The rule: commit first; revert
    injections by re-editing the line back, never by `git checkout`/`git restore`.
 
-2. **Write the check** in `.claude/evals/run-evals.sh`, matching house style:
+2. **For a PATTERN-matching check, write the inputs before the check.** A regex or
+   parser check is not done when it passes; it is done when it fails on inputs built to
+   slip past it. Write those first — the ones that SHOULD trip it and the ones that must
+   NOT — then write the checker against them. On 2026-08-02 the reverse order shipped
+   three guards with anchor bugs in one session, and a fourth that passed silently
+   whenever the thing it called raised.
+   - Fixtures and a runner live in `.claude/tools/gate_corpus/`; add cases there and the
+     `gate-corpus` eval runs them in CI. Its README has the case format.
+   - **Watch for a case that cannot fail.** Two of the first batch passed against the
+     UNFIXED scanner because their fixtures produced the finding either way — C13 in
+     corpus form. Run every new case against the current code and watch it go red before
+     you fix anything.
+   - The `adversarial-critic` agent is worth a pass here specifically: it did not write
+     the checker, so it is not anchored to what the author meant it to match.
+
+3. **Write the check** in `.claude/evals/run-evals.sh`, matching house style:
    - A comment naming the incident it pins (date/version + one-line story).
    - `ok "name: what passed"` / `bad "name" "what broke and what it costs"` —
      the failure message must tell a future session what to DO, not just what
@@ -39,7 +54,7 @@ deleted, guards nothing) or silently passes forever (worse than nothing).
    - Keep it fast and dependency-light: CI gives the whole suite 5 minutes, and
      the suite must run on a bare container *plus* pip-installed requirements.
 
-3. **Break-test it:**
+4. **Break-test it:**
    ```bash
    bash .claude/evals/run-evals.sh          # green baseline
    # inject the old bug with a minimal edit
@@ -49,11 +64,11 @@ deleted, guards nothing) or silently passes forever (worse than nothing).
    git diff                                  # MUST be exactly your eval addition
    ```
 
-4. **Document:** add the eval's name to the relevant operational-log row's "Eval"
+5. **Document:** add the eval's name to the relevant operational-log row's "Eval"
    column, and if it enforces a rule stated in CLAUDE.md or a design doc, note
    there that it's now eval-pinned.
 
-5. **Ship:** commit, merge to main (CI now enforces it on every future push).
+6. **Ship:** commit, merge to main (CI now enforces it on every future push).
 
 ## Quality bar
 

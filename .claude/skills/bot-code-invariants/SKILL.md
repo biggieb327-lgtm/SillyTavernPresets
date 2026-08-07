@@ -34,6 +34,19 @@ Check the final diff against every rule. These are pass/fail, not suggestions.
    (owner-approved v2026-07-12.2). It is off-loop, cached, timeout-bounded, and
    has a default-on kill switch. An embedding call is not a completion call; this
    rule does not prohibit it, and removing it as a violation is a regression.
+   **Second documented carve-out — do not "fix" it:** `SAFETY_ENABLED`'s
+   `_assess_safety` (owner-approved 2026-08-04, `d141e84` reimplemented after being
+   built once on an abandoned branch and never merged) is a genuine per-message
+   completion call, run concurrently with inner voice / link fetch. Approved
+   despite being a completion call, not an embedding, because it is NOT the "small
+   cheap call" this rule's common-mistake note warns about: it carries no
+   character/history context, just the raw message and a short classifier system
+   prompt, so it does not re-pay the ~17k-token prompt this rule's cost argument is
+   about. Folding it into `post_reply_analysis` was considered and rejected: that
+   call fires after the reply is already sent, so distress on THIS message could
+   only change the NEXT reply — one message late is a real degradation for a
+   safety feature, not an equivalent. Off-loop, best-effort (any failure reads as
+   no-distress rather than blocking the reply), default-on kill switch.
 4. New model-response paths MUST route through the `_do_request` choke point so
    output passes `_strip_thinking` + `_strip_native_tool_calls` + `_fix_mojibake`.
    A path that bypasses it will eventually send raw `<tool_call>` XML or mojibake

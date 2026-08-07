@@ -34,7 +34,7 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 4** (2026-07-19 ×1, 2026-07-26 ×3)
+**seen: 7** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1)
 Phone tooling (`update-all.sh`, `tmux kill-session`, `pkg`) was run on the VPS, and
 VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looked like
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
@@ -50,6 +50,129 @@ cannot reach and the owner runs these commands by hand, so nothing here can stop
 paste into the wrong shell. The hook enforces only the agent's half — that every block
 handed over is attributable to exactly one host. The operator's half stays prose
 (`CHEATSHEET.md`: `uname -o` before anything host-specific).
+**Occurrence 5 (2026-08-01) — the hook worked.** A `vps-sync.sh` deploy loop went out in
+a message that never named its host; host-guard blocked the turn and the block was
+relabelled before the session ended. Notable because the *preceding* deploy handoff in
+the same session carried `# host: VPS (as root)` correctly — the lapse came with a
+second, longer message where the commands were a follow-up rather than the main point.
+The failure mode to watch is not "forgot the rule", it is **"the command block was
+incidental to the message"**. No further mechanism needed; graduation is holding.
+**Occurrence 6 (2026-08-02) — a shape the guard cannot resolve alone.** A block labelled
+`# host: phone (Termux)` held `scp /sdcard/... root@vps:/opt/telegram-bots/...`. That is
+correct: scp *runs* on the phone and *writes* to the VPS. But the block contains a VPS-only
+path, so the guard read it as mixed and blocked — correctly, since it cannot distinguish a
+remote destination argument from a local path, and guessing would defeat the check. The
+resolution is the `# host: both` pragma the hook already offers, plus splitting the purely
+local commands out. **Cross-host transfer commands (`scp`, `rsync`, `ssh <host> <cmd>`) are
+inherently two-host and must be labelled `# host: both` up front** — not discovered at the
+Stop hook. Both occurrences this session were labelling, never a wrong-host command.
+
+**Occurrence 7 (2026-08-03) — two userlands, one machine.** Termux install instructions ran
+`pkg install proot-distro` and then, after `proot-distro login debian`, `apt install` and a
+`curl | bash`. One physical device, but two environments with different package managers, and
+the block's only marker for the switch was a `# now inside Debian` comment. host-guard read
+`pkg` + `apt` as a phone/VPS mix and blocked — the right call for the wrong reason, and the
+block was genuinely confusing regardless. **A host label answers "which machine"; it does not
+answer "which userland on that machine."** Nested environments — proot-distro, a container, a
+VM, a venv shell — need their own block and their own heading, not a comment inside someone
+else's. Off-fleet advice is still handover: the guard does not care that the topic was not
+the bots, and neither should the labelling.
+**The relabelled block then tripped the guard a second time, and that one was the guard's
+gap.** `# host: phone (Debian rootfs)` is a correct, single-host label, but `apt install` is
+on the VPS token list, so it read as a contradiction. Every label that satisfied the checker
+was false — `vps` (wrong machine) or `both` (one machine, not two) — and satisfying a check
+with a false claim is the one thing CLAUDE.md working principle 7 bans outright. Fixed the
+vocabulary instead: **`# host: other` for a machine that is neither fleet host**, which skips
+the VPS/PHONE token checks because those lists describe the fleet and nothing else. It does
+not weaken the contract — the guard has never verified a label against reality and cannot,
+having seen neither machine; it forces an *explicit* claim, and `other` is one. Five-case
+matrix: the mislabelled block RED, the `other` label green, and a mixed fleet block, a
+contradicting `# host: vps`, and an unlabelled fleet block all still RED.
+
+### C16 — A handed-over command block must work on someone else's machine
+**seen: 2** (2026-08-02 ×2) — *promoted straight to a mechanism the day both occurred;
+rule 4's bar is two, and both had already cost a round trip.*
+Two shapes, one session, both in the **handoff** rather than the work:
+- A "full sequence" block did `cd /opt/telegram-bots` and then used relative paths. The
+  owner's shell was in `~`; seven `vps-sync.sh` calls resolved against the wrong directory
+  and failed at once. Every earlier message that session had used absolute paths — the
+  regression came from compressing them into one block.
+- An `scp` target was taken from the owner's shell prompt (`root@vmi3420780`). A prompt
+  hostname is what a box calls itself locally, not an address another machine can route to.
+**Constraint:** write every path absolute, even when longer, and take ssh/scp targets from
+something that routes — never from a prompt, `hostname`, or a window title. Assume the
+operator pastes a *subset* of the block, in a shell you did not set up.
+**Graduated 2026-08-02:** `.claude/hooks/handoff-guard.sh` + `handoff_guard.py`, a Stop
+hook. Scoped to operator-facing blocks (a `# host:` pragma, or fleet host-specific
+commands), so illustrative snippets are untouched. Escape hatches `# handoff-ok: relative`
+and `# handoff-ok: hostname`. Ten-case matrix — three defect shapes RED, seven legitimate
+blocks green including quoted regexes, IP and FQDN targets, and a `cd` with absolute paths
+after it — plus end-to-end checks that it blocks in situ, honours `stop_hook_active`, and
+fails open on a malformed payload.
+**Occurrence 3 (2026-08-02) — invented filenames that read as real ones.** An `scp` block
+used `nora_aspiration.jpg` as a stand-in for a path only the owner knew; it looked like a
+filename rather than a blank, so it was pasted verbatim and failed with `No such file`.
+**Placeholders must be unmistakable** — `<PATH-TO-NORA-IMAGE>` in angle brackets, never a
+plausible-looking name — and any block referencing files on the operator's machine should
+be preceded by the command that finds them. Not a new mechanism: handoff-guard reads
+argument tokens, and cannot know which filenames exist on a machine it has never seen.
+
+**Occurrence 4 (2026-08-02) — an interactive `read` inside a pasted block.** A block began
+`read -r -s -p "Giphy API key: " GIPHY_KEY` and continued with the loop that used it. Pasting
+buffers every line on the terminal's stdin, so `read` consumed the *next line of the block*
+(`for i in nora bonnie priya; do`) as the key; the loop header vanished, the body ran with an
+empty `$i`, and a stray `/opt/telegram-bots/.env` was created. **Never put a command that
+reads stdin — `read`, `passwd`, anything interactive — in a block intended to be pasted.**
+Either split it into its own block with an explicit "run this alone" instruction, or avoid
+stdin entirely. Same family as the `cd`-then-relative-paths case: the block was correct when
+executed line by line and wrong when used the way operators actually use it.
+**Correction, same day:** the first draft of this entry claimed handoff-guard "cannot see
+this one — the paste semantics are in the terminal, not the text". That was itself an
+unchecked assertion (C8). The signature is perfectly mechanical: a stdin-reading command
+with further command lines after it in the same block. handoff-guard now checks it — six-case
+matrix, RED on the real block, green on a lone `read`, a trailing `read`, comment-only
+`read`, and the `# handoff-ok: interactive` hatch.
+
+**Occurrence 5 (2026-08-03) — a command that starts a nested interactive shell, mid-block.**
+Termux instructions put `proot-distro login debian` in the middle of a block and continued
+with the commands meant to run inside it. Pasted whole, the trailing lines land in whatever
+stdin the new shell inherits — the same hazard as occurrence 4's `read`, from a different
+cause: there the command *consumed* the following lines, here it *changes who executes* them.
+The family is one line down: **any command that hands the terminal to a nested shell
+(`proot-distro login`, `su`, `ssh <host>` with no command, `docker exec -it`, `chroot`) must
+end its block.** Whether handoff-guard already flags this shape was not checked before
+writing this entry — the signature looks as mechanical as `read`'s (a shell-switching command
+with further command lines after it), so it is a candidate for the same six-case treatment,
+but that is a hypothesis until someone runs it. Not asserting the guard is blind to it; that
+exact unchecked assertion is what occurrence 4 had to correct.
+
+**Occurrence 6 (2026-08-03) — a correctly labelled block still landed in the wrong shell.**
+Termux/proot advice: a block labelled `# host: phone (Termux)` wrote a `claude` alias into
+`~/.bashrc`, and the operator was still inside the Debian rootfs from the previous step, so it
+went to `/root/.bashrc`. Typing `claude` there re-entered proot from inside proot
+(`proot-distro should not be executed under PRoot`). The label was right; a comment cannot
+move someone between shells, and a multi-step session leaves the operator in whichever
+environment the *last* block put them.
+**Constraint:** when consecutive blocks target different shells, make each one **detect its
+own environment and refuse** rather than trusting the label — `if [ -n "$PREFIX" ]; then echo
+"STOP: this is Termux, run it in the rootfs"; else ... fi`. A block that damages the wrong
+environment when pasted there is not a handover, it is a trap. Cheap for shells with an
+unambiguous marker (`$PREFIX` for Termux, `/etc/os-release` for a rootfs, `uname -o` for
+phone-vs-workstation); prose warnings are the fallback where no marker exists.
+This is the operator's half that the C1 entry says no hook can reach — but the *agent* can
+make the block self-defending, which is a mechanism, not a reminder.
+**Follow-on the same day, from the fix for this very entry:** the self-guarding block removed
+the bad alias with `sed -i ~/.bashrc` and then ran `claude --version` — which still hit the
+alias, because **editing an rc file does not change the shell already running.** Aliases,
+functions and exported vars live in the process; the file only seeds future shells. Any block
+that repairs shell config and then exercises the repaired command must `unalias`/`unset`/
+re-`export` in the same breath, or tell the operator to open a fresh shell. Verified with
+`type <cmd>`, which names an alias outright and is the one-line check worth handing over
+alongside the fix.
+
+**Division of labour:** `host-guard` answers *which machine is this for?*; this answers
+*will it actually work there?* Neither can stop a paste into the wrong shell — that half
+stays the operator's, and it is why the C1 entry says what it says.
 
 ### C2 — Name the class before calling a fix done
 **seen: 2** (2026-07-26 ×2)
@@ -111,7 +234,7 @@ phantom killer. Three stale assumptions in one function.
 only documentation. An assertion is a claim about the world too.
 
 ### C7 — Anchor edits on content, not position
-**seen: 2** (2026-07-26, 2026-07-27) — *promoted from the Minor log by
+**seen: 5** (2026-07-26, 2026-07-27, 2026-08-02 ×3) — *promoted from the Minor log by
 `sweep.py constraints-drift`, its first real find.*
 Two edits went wrong the same way: **the surrounding structure was not confirmed before
 writing.** A paragraph was added to a function anchored on `n = 0` — a content anchor,
@@ -133,6 +256,20 @@ which matches on a unique surrounding string and cannot drift.
 line address against anything outside `/tmp`/scratchpad. Nine-case matrix; the four
 must-not-fire cases (content-anchored substitution, read-only `sed -n`, throwaway
 paths, `# anchor-ok`) all pass.
+**Occurrences 3-5 (2026-08-02) — the docstring failure again, three times in one hour.**
+Rewriting three `sweep.py` scanners, each edit anchored on the first line of the function
+BODY and prepended explanatory prose. In all three the docstring had already closed above
+that line, so the prose landed in executable position and the module stopped parsing. The
+anchor matched exactly what it was meant to match, every time; what was never checked was
+what sat immediately above it — which is this constraint, verbatim, five years of
+sessions notwithstanding. **The tell is specific and worth naming: prepending prose to a
+function body is almost always an edit to its DOCSTRING, so the anchor should include the
+docstring's closing `\"\"\"`, not the code line after it.**
+**Graduated further 2026-08-02:** the `gate-corpus` eval imports `sweep.py`, so an
+unparseable version now fails CI and the corpus run alike — the first mechanism that can
+see this failure mode at all. It catches the *consequence*, not the edit; the edit itself
+still needs the rule above.
+
 **What it does NOT cover:** the docstring failure. That was an Edit-tool call whose
 anchor matched correctly — no hook can see that the *assumption above the anchor* was
 wrong. Detecting line-index splicing inside a Python heredoc was also rejected:
@@ -141,9 +278,9 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 3** (2026-07-26 ×2, 2026-07-27) — *promoted by check 6 of the weekly hygiene
-Routine, from three Minor entries sharing one cause.*
-Three conclusions were drawn from readings that did not mean what they appeared to:
+**seen: 4** (2026-07-26 ×2, 2026-07-27, 2026-08-03) — *promoted by check 6 of the weekly
+hygiene Routine, from three Minor entries sharing one cause.*
+Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
   changed since, and a test recommendation was built on it — **stale**
 - `grep '^MODEL='` returned nothing across six instances, read as "no model set"; the
@@ -152,12 +289,27 @@ Three conclusions were drawn from readings that did not mean what they appeared 
 - `/errors` output full of `Conflict` tracebacks was read as a live fight; `errors.log`
   is historical, persists across restarts, and travels inside migration tars — **wrong
   currency**
-Two of these sent a live diagnosis down the wrong path for several rounds.
+- **2026-08-03** — an A/B pack for the selfie face lock was built from contiguous seeds
+  0-3 and handed to the owner to generate. All four drew close or partial-face framings;
+  the reported failure was a *wide* shot with the face small in frame, and no seed drew a
+  wide framing at all. Both arms kept her glasses in all eight images, so the bug never
+  reproduced — **wrong sample**: the test could not fail for the reason the bug occurs.
+  Caught only when the returned images were compared against the prompts that made them.
+  **The retry repeated the mistake one layer down**: round 2 selected seeds by the
+  `Framing:` line in the prompt text, and Gemini largely ignores `Framing:` — a low-angle
+  draw came back at eye level, a wider-with-room-behind draw came back outdoors. The sample
+  was chosen by a directive the model does not obey, so round 2 did not test what it was
+  built to test either — **wrong instrument**.
+Two of the first three sent a live diagnosis down the wrong path for several rounds; the
+fourth would have turned "the lock wins 3 of 4" into a claim about a failure the run
+never contained.
 **Constraint:** before concluding from any output, state what it actually covers — how
 current is it, what scope does it span, and what would absence of a result mean? A grep
 that finds nothing is only evidence if the pattern was right. A log tail proves what was
 written, never what is happening now. A reading from earlier in the session is a
-historical claim, not a live one.
+historical claim, not a live one. When the reading is a *sample* — seeds, fixtures,
+test inputs — check that the sample can exhibit the failure before running it; an even
+sample is the wrong sample when you are hunting one draw.
 **Graduated 2026-07-27 — prose, deliberately.** No hook, scanner, or eval can see
 "trusted a reading that did not mean what it appeared to": there is no code shape and no
 tool call to intercept. Extended
@@ -165,6 +317,37 @@ tool call to intercept. Extended
 which already carries the same family of lesson (`BOT_TIMEZONE` was *referenced*
 everywhere and still did nothing). This is the case that forced rule 4 above to admit
 skills as a graduation target.
+
+**Graduated 2026-08-02, after a third occurrence (the owner's stated trigger).** Three
+instances, one family — a claim stated as settled on evidence that was merely compatible
+with it:
+1. `_APPEARANCE_DEFAULT` asserted as reachable on live instances without checking the
+   launch path (`bot@.service` passes the instance dir, so it never was).
+2. `/audit` asserted to show the selfie-base field, which had only been added to the
+   startup log line — a different code path.
+3. An uploaded image called "confirmed" to be `priya_base.jpg` because `file` reported the
+   same 1024x1024 progressive JPEG. Matching size is consistent with sameness and
+   establishes nothing; they were different images, and three appearance.txt files were
+   written on that footing.
+**Sharpened constraint:** state what a reading *excludes*, not only what it is compatible
+with. Dimensions exclude almost nothing; a hash excludes everything but the file itself.
+**Mechanisms:** `.claude/hooks/claim-guard.sh` + `claim_guard.py` (Stop hook) blocks
+identity/sameness claims resting on metadata with no hash — nine-case matrix, RED on the
+exact sentence from #3, green on hedged wording, hashed comparisons, tables, and metadata
+without a claim. Escape hatch `# claim-ok`. The `audit-keys-rendered` eval pins #2's shape:
+any key in `gather_audit_data()` that no user-facing surface renders fails the suite.
+**Occurrence 4 (2026-08-02) — and it shipped.** `/setbase` was documented as working as a
+photo caption. PTB's `CommandHandler` matches `message.text` only, so it never could. All
+eight tests were green because every one asserted on the handler's *source* — `_is_admin`
+present, `CommandHandler("setbase"` registered, write atomic — and none exercised dispatch.
+**Sharpened further: reading a function's source is not exercising it.** A test that greps
+code proves the code exists; whether the framework ever calls it is a different claim
+needing a different test. The fix's own test now runs PTB's `check_update` rather than
+describing it.
+
+**What stays prose, deliberately:** #1's shape — asserting a code path behaves some way
+without exercising it. The text reads identically whether or not the path was run, so no
+scanner can see it; rule 4 permits prose exactly here.
 
 ### C9 — Verify a load-bearing hypothesis before shipping, not after
 **seen: 1** (2026-07-27)
@@ -260,8 +443,21 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 4** (2026-07-27, 2026-07-28, 2026-07-29 ×2) — *promoted from the Minor log on the
-third occurrence, as that entry said it should be.*
+**seen: 6** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2) — *promoted from the
+Minor log on the third occurrence, as that entry said it should be.*
+
+**Fifth and sixth (2026-08-03), both in one release, both in *authored checks* rather
+than run commands — the new shape.** Writing the reasoning-leak guard I produced (a) a
+must-NOT-fire test fixture containing none of the signals it claimed were survivable, so
+it re-tested the length floor and could not fail for the reason a false positive occurs,
+and (b) an eval that counted `model=DOCUMENT_MODEL,$` sites against `leak_guard=False`
+opt-outs — deleting an opt-out collapsed the call to one line, dropping **both** counts,
+so the check passed on the exact regression it pins. The break-test caught (b); adversarial
+review caught (a). **The earlier four were commands run against the wrong tree or swallowed
+by a pipeline; these two were checks whose logic was structurally incapable of going red.**
+Ask of any check you write, not just any check you run: *what single edit should turn this
+red, and have I made that edit and watched it?* A ratio or a paired count is the hazard
+shape — if the numerator and denominator move together, the check is decorative.
 Three times a check was run against the wrong working directory, because this shell
 persists cwd across calls and an earlier `cd` had moved it: `find .env.example` read as
 repo-root when cwd was `telegram-companion-bot/`; `sed -n fleet-status.sh` failed on a file
@@ -303,7 +499,7 @@ No new hook is owed. The reporting half — claiming a green you did not observe
 code shape to intercept and stays prose, per rule 4.
 
 ### C12 — A command copied out of documentation is a claim about the past
-**seen: 1** (2026-07-29)
+**seen: 2** (2026-07-29, 2026-08-02)
 I handed the owner `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily`, lifted
 from CLAUDE.md's Deployment block. It failed twice over: `<raw-base>` was a literal
 placeholder I never substituted, and the URL is dead regardless — **the repo went private
@@ -316,6 +512,31 @@ The doc was not lying; it was *stale*. CLAUDE.md described a deploy path that wa
 until 2026-07-28. A command in documentation is a historical claim about how the system
 worked when someone last wrote it down — exactly the C8 problem, applied to instructions
 rather than to readings.
+
+**Occurrence 2 (2026-08-02) — a constraint, not a command, and I propagated it.**
+`deploy-and-verify-fleet` said "ROADMAP 1.6 (unshipped as of this writing) tracks adding a
+`flock` … until it ships, don't launch two syncs concurrently."
+<!-- roadmap-ok: this entry quotes the stale sentence as the incident record; the eval
+     cannot tell a live claim from its own post-mortem (C14). -->
+The flock shipped
+2026-08-01 and was race-confirmed on the real VPS; the sentence was one day stale. I
+repeated it as a live hazard in **three** deploy handoffs, and then wrote it into a
+**new** skill the same day — turning one stale sentence into two. The deploy advice it
+produced (run sequentially) stayed correct by luck; the stated reason was wrong, and the
+real reason is the opposite shape — a concurrent run is now *refused*, so it deploys
+nothing and leaves that instance on the old version.
+
+**The generalisation from occurrence 1:** it is not only *commands* that are historical
+claims. Any doc sentence describing what the system currently lacks — a missing guard, an
+unshipped item, a known hazard — is a claim about the day it was written. Read the thing
+that executes it: `grep flock deploy/vps-sync.sh` was five seconds and settled it.
+
+**Graduated 2026-08-02:** the `roadmap-claims-current` eval. It fails when any doc under
+`.claude/` or `CLAUDE.md` names a ROADMAP item AND carries a staleness word near it while
+`ROADMAP.md` marks that item shipped. Break-tested by re-injecting the exact sentence
+above. **What it does NOT cover:** staleness with no ROADMAP number to key on — the
+general "prose describes a system that moved" class stays prose, because deciding it
+needs the system, not a regex (C14).
 
 **Constraint:** before handing over any operational command, take it from the thing that
 executes it — the script's own usage header, the unit file, `--help` — not from prose
@@ -362,6 +583,176 @@ on all three branches with the surrounding prose left intact.
 
 ---
 
+### C15 — Never `git checkout -- <file>` to revert a break-test edit; re-edit instead
+**seen: 2** — documented once already, in `repo-change-control`'s own "Common mistakes"
+("this destroyed ~700 lines once"), and repeated 2026-08-01 mid-session on bot.py's
+uncommitted command-menu fix. *Promoted directly on the repeat rather than waiting for a
+third occurrence — the first was already written down as exactly this trap, which makes
+repeating it the more damning of the two, not the more forgivable.*
+
+While break-testing a new regression eval (proving it fails RED before trusting it
+GREEN — the correct instinct), a single deliberately-broken line was stripped out of
+bot.py with `git checkout -- bot.py` to revert the break-test. `git checkout -- <path>`
+restores the file to its last **committed** state, not to "current minus my last edit"
+— and bot.py held ~18 lines of real, uncommitted work (17 command-menu additions from
+earlier in the same task) at that moment. All of it was silently discarded in one
+command, with no error or warning; git checkout succeeds identically whether it's
+discarding a scratch edit or a task's worth of real work. Caught immediately by
+`git diff --stat` showing zero changes where 18 lines were expected, so nothing shipped
+broken — the cost was a full redo of the earlier edits from memory, not a real defect.
+
+**Constraint:** revert a break-test change by **re-editing back to the original text**
+— the method every other break-test in this same session used correctly, before and
+after this one. Never `git checkout -- <file>` as the undo step, regardless of how
+small the intended revert looks or how confident the belief that nothing else changed.
+If a checkout-style revert ever seems like the only option, `git status`/`git diff
+--stat` first — but the safer default is to just not reach for checkout on a file that
+might hold uncommitted work. This class has now cost real content twice; there should
+not be a third.
+
+**Graduated 2026-08-01 — `risk-guard.sh` (PreToolUse/Bash).** Blocks `git checkout <path>`
+/ `git restore <path>` only when `<path>` is a real file with a live `git diff` right
+now — a branch checkout or a checkout of an already-clean file is not what C15 is about,
+so those still pass through untouched. Break-tested in an isolated throwaway repo (not
+this one): checkout/restore on a dirty tracked file blocked (rc=2) in both `--`-prefixed
+and bare forms; the same commands on a clean file, a branch name, and `checkout -b`
+allowed (rc=0); the three pre-existing risk-guard checks (force-push to main, root `rm
+-rf`, staging `.env`) re-verified unaffected by the addition.
+
+---
+
+
+### C17 — Count an anchor's matches before writing through it
+**seen: 2** (2026-07-31, 2026-08-02) — *promoted from the Minor log; both entries deleted.*
+Two edits assumed a string named exactly one place and wrote through it without asking how
+many it matched. `replace_all` on the fragment `principle 8` landed mid-sentence in two
+different grammatical positions and needed two repair edits. A break-test script whose
+*revert* anchor (`asyncio.create_task(maintain_memory(chat_id))`) occurred three times
+would have rewritten two unrelated call sites; only an `assert count == 1` stopped it, and
+it stopped mid-run with the injection still applied.
+**This is not C7.** C7 is about what sits *above* an anchor — the structure you did not
+read. This is about how many places the anchor *is*. An anchor can be perfectly
+content-addressed, sit in exactly the structure you expect, and still match six times.
+**Constraint:** before any programmatic write keyed on a string — `replace_all`, an
+in-place `sed`, a `.replace()` in a helper script — count the matches first and require
+the count you intend. In a script that is a literal `assert s.count(old) == 1`. Check the
+*revert* anchor too: a script that injects and then reverts has two anchors, and only one
+of them is usually thought about.
+**Graduated 2026-08-02 (partially — the gap is stated):** `.claude/hooks/anchor-guard.sh`
+already blocks the positional half (numeric in-place `sed` addresses). The multiplicity
+half is not hookable: a hook cannot know whether three matches were intended, and one that
+guessed would fire on every legitimate `replace_all` and get disabled. What is mechanical
+is the assertion inside the script, now the documented shape in `add-regression-eval`.
+
+### C18 — A break-test proves one assertion, not the check
+**seen: 4** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01) — *promoted from the Minor
+log; all four entries deleted.*
+Four checks passed their break-test and were still dead in ways the break-test could not
+see. Three faults injected **at once**: two tests failed correctly, the third passed for
+the wrong reason (the injection made the function return `None` for every input, and the
+test asserted `None`). A backtick-pairing scanner **desynchronized below a fence** and
+reported PASS on a clean tree and on an injected bad reference alike — caught only because
+one break-test mode refused to go red. A `sweep-ok` pragma matched with a colon the real
+markers did not have, so the helper self-reported forever. The first `no-live-raw-urls`
+draft let a **whole file** opt out via one exemption.
+**The cause is one thing:** an injection exercises the single path it touches. Everything
+else in the check — the other assertions, the tokenizer, the exemption logic, the corpus
+it will actually run against — stays unproven, and a green break-test reads as if it had
+covered all of it.
+**Constraint:** inject **one fault at a time**, and re-run the whole check after each.
+Break-test against the *real* corpus (the file with the fences, the tree with the
+pragmas), never a minimal fixture that omits the structure the check must survive. **A
+break-test that will not go red is a bug in the check, not a clean tree** — that is the
+signal, and it has now paid out twice.
+**Graduated 2026-08-02 (deliberately prose, and here is why):** nothing can observe from
+outside whether two injections were applied together — the run looks identical either way.
+The mechanical descendants are the products this forced: `sweep.py`'s `SWEEP_BOT` /
+`SWEEP_TESTS` / `SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a
+deliberately broken corpus, and the `source-assertion` scanner was itself break-tested by
+running it against the test suite as it stood *before* the bug it describes shipped.
+
+### C19 — Verifying "not reachable outside dispatch" proves reachability, not which jurisdiction covers the call
+**seen: 1** (2026-08-07)
+Deleted 21 per-handler `_is_allowed(update.effective_user.id)` guards as dead code,
+reasoning that `_private_gate` (handler group -1) already blocks a disallowed caller
+before any of them run. Verified this two ways: read `_private_gate`'s own docstring
+(explicitly names the per-handler pattern it replaced), and grepped every one of the
+21 function names for a call site outside `add_handler`/its own `def` — none existed,
+so none could be reached except through normal Telegram dispatch. Ran the full test
+suite (1062 passed), the eval suite (`private-gate-registered` included), and
+`gate_corpus` — all green.
+
+Missed that `handle_message` is dual-purpose: one `MessageHandler` serves both private
+and group chats, branching internally on `chat_id < 0`. `_private_gate`'s docstring
+says group updates are "`group_guard`'s jurisdiction — untouched here" and its code
+returns immediately for `chat_id < 0`; `group_guard` checks chat-level
+`GROUP_ALLOWED_CHATS` membership only, never the sender's identity. Deleting
+`handle_message`'s guard left group text messages from a non-allowlisted user gated
+by nothing, breaking `GROUP_CHAT_DESIGN.md` §6's documented invariant ("Human gating
+unchanged... strangers in an allowed group are ignored unless `ALLOWED_USERS` is
+empty"). None of my own verification caught it — no test anywhere, before or after
+this change, exercised "a non-allowlisted user's text in an allowed group", so a
+fully green suite shipped past the exact gap. Caught only by two of four `/code-review`
+finder agents (independently, via cross-file tracing and a line-by-line diff scan)
+before the branch was merged to main — it never shipped.
+
+**Constraint:** before deleting a guard as "covered by a different choke point,"
+check not just *whether* the handler is reachable outside that choke point, but
+*whether every context the handler serves* is covered by it. A handler that
+internally branches on the same condition a security mechanism partitions on
+(here, `chat_id < 0`) is by construction straddling two jurisdictions — grep for
+that branch, not just for external callers, before trusting one mechanism's
+coverage claim. This is what `group-chat-changes` calls loading the skill "even
+when the change looks private-chat-only" — the miss here was not recognizing
+`handle_message` as group-chat code at all, because nothing about its name says so.
+
+**Graduated 2026-08-07 (the specific instance):** `TestHandleMessageGroupGating`
+(2 tests) pins the invariant directly against `handle_message`, not just against
+`_private_gate` — closing a gap that existed even before this release, not only
+the regression from it. `group-chat-changes`'s description and "Common mistakes"
+now name this exact shape (any handler branching on `chat_id < 0` or calling
+`_handle_group_message`) as a trigger, so a future session touching `handle_message`
+has a cue to load the skill even when the handler's name gives no hint.
+**Not further mechanized:** no eval generalizes "does this diff delete a guard from
+a dual-jurisdiction handler" — that requires reading what the handler does, which
+is exactly what C8's un-mechanizable class already covers. The concrete instance is
+pinned; the general check stays a read-it-yourself judgment call.
+
+### C20 — A green test suite is not proof a reused pattern is safe for the new call site
+**seen: 1** (2026-08-07)
+Replaced `schedule_cmd`'s hand-written body with a call to the existing
+`_context_file_cmd` factory, the same one already backing `people_cmd`/`projects_cmd`
+— matching output confirmed, `python3 -m py_compile` clean, full pytest suite green
+(including the existing `test_schedule_cmd_shows_the_schedule`). Missed that the
+factory closes over its `file: Path` argument **by value at the factory-call site**
+(module import time), not as a live global lookup — unlike the original `schedule_cmd`,
+which read `SCHEDULE_FILE` fresh on every call. `test_schedule_cmd_shows_the_schedule`
+does `monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")`, which the
+new closure can no longer see: the test kept passing only because its assertion
+(`"Schedule" in m.sent[0]`) is loose enough not to notice it was reading/writing the
+real fixture-directory file instead of the isolated `tmp_path` one. Separately, turning
+`schedule_cmd` from a `FunctionDef` into a plain module-level assignment silently
+dropped it out of `sweep.py`'s AST-based handler-coverage scan, narrowing the delivery
+gate's future reach for that one handler specifically. Caught by a third `/code-review`
+finder agent (line-by-line diff scan) before merge; reverted to the original hand-rolled
+body rather than patching the factory, since the factory's already-accepted tradeoff
+(`people_cmd`/`projects_cmd` carry the same property) wasn't worth extending to a third
+caller for a ~15-line saving.
+
+**Constraint:** before reusing an existing factory/wrapper pattern for a new call site,
+check the pattern's known capture semantics (does it bind arguments by value at
+definition time, or read live?) against what the *target's own existing tests* assume
+— specifically, anything the tests `monkeypatch`. A green re-run of those tests is not
+evidence the reuse is safe if the test's own assertion is too loose to distinguish
+"read the patched value" from "silently read the original."
+
+**Not graduated.** No mechanism generalizes "does this refactor change a function from
+a live-global reader to an import-time-bound closure" — the concrete fix was simply
+not to extend the tradeoff to `schedule_cmd`. `people_cmd`/`projects_cmd` already carry
+the same property, pre-existing and out of scope here; if a monkeypatch-based test is
+ever written against either of them expecting isolation, it will fail the same silent
+way, which is worth knowing before writing one, not a debt to pay down now.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
@@ -381,6 +772,18 @@ show up first. A section with nothing in it means under-reporting, not a clean r
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
 promotes was still worth ten seconds to write.
 
+**Last promotion pass: 2026-08-02** — `sweep.py constraints-drift` reads this line and
+counts only what has arrived *since* it, which is what "is another pass worth running"
+actually asks. **Update the date whenever you run a pass**, including one that promotes
+nothing. Counting the *total* instead is what made the check useless: the 2026-08-02 pass
+promoted six entries into C17/C18 and left 19 with no shared causes, and a total-based
+threshold would have demanded a seventh pass that could only invent clusters.
+
+**Archiving:** an entry earns its place by being available to pair with a *future* one.
+After 30 days nothing has, so move it under `## Minor — archived` at the bottom — kept
+verbatim and searchable, just out of the promotion count. The scanner names the entries
+that are due. Archiving is not deletion and needs no judgement call; promotion does.
+
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
 - 2026-08-07 — Edited both monthly Routines' Reddit-access steps in routines.md based
@@ -393,6 +796,17 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   editing a live Routine's prompt in routines.md, call `list_triggers` first and diff
   its live prompt against the file** — the file's own header rule says drift can run
   either direction, and it already had.
+- 2026-08-07 — Built four commits of Reddit/Apify integration work on a branch whose
+  merge-base with `origin/main` (`dee2058`) was ~150 commits behind by the time of
+  push — including two 2026-08-03 commits that had already correctly diagnosed and
+  applied the exact "Reddit dropped, WebSearch-only" state the entry above rediscovered
+  independently, from the live trigger, without checking `origin/main` first. The
+  non-fast-forward push rejection caught it before anything was overwritten, but the
+  session had already spent effort re-deriving history the repo already had correctly
+  recorded. → **Before extended work on docs/config files likely to be touched
+  elsewhere (routines.md, CLAUDE.md, constraints.md, operational-log.md), `git fetch
+  origin main` and diff against it, not just against the branch's own stale local
+  copy** — a merge-base existing is not the same as it being recent enough to trust.
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —
@@ -405,6 +819,52 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
   had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
   match sits inside a sentence, edit each site individually.**
+- 2026-08-03 — Keyed a per-character signal on `NAME` (the card's `name` field) after checking it
+  against priya only, where it happens to be a bare first name. Five of seven instances carry full
+  names ("Emily Harper"), and bonnie's `Bonnie (Libertarian)` couldn't match at all — the signal
+  was silently inert on most of the fleet while all tests passed. → **when a rule reads a
+  per-instance config value, enumerate that value across all seven instances before trusting its
+  shape.** One `python3 -c` loop over the seven cards would have shown it; the tests only ever
+  passed `"Priya"`.
+- 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
+  then reported the Portland→Olympia relocation shipped. Every instance that already had the file
+  silently no-op'd, and Emily kept saying Burnside for a further two rounds. → **a placement block
+  is a write, and a write that silently declines is not a write.** When the intent is "this file
+  should now contain this", the block must overwrite (with a timestamped `.bak`) and the
+  verification must read the file back, not check that the command exited 0. Skip-if-exists is
+  correct only for *seeding something absent*, and then the report must say "seeded where missing",
+  never "updated". C13 family — the exit status could not fail.
+- 2026-08-02 — Read seven `/audit` outputs and reported "life.txt missing on priya, marcus,
+  jules". Nora's line said `MISSING: life.txt, setting.txt` too, so it was four. Then handed over
+  `cat /opt/telegram-bots/nora/life.txt` as the way to see the file format — naming the one bot in
+  that group guaranteed not to have one. → when summarising several structured outputs, extract
+  the field from each into a list and read the list, rather than forming an impression while
+  scrolling. Seven near-identical blocks is exactly where the eye fills in what it expects.
+  C8 family: the reading was there, I just did not actually perform it.
+- 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
+  flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
+  and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the
+  substring `"he "` matched inside `"the "` in an innocent inline comment. → a scanner over source
+  needs BOTH: strip comments (describing a defect is not committing it) and match on word
+  boundaries, never bare substrings. Two failed runs is cheap; a scanner that greens on the wrong
+  thing is not.
+- 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
+  — leftover scaffolding from two half-finished versions of the same line, committed to the file
+  in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on
+  re-reading my own diff before running anything, and rewritten as a plain `if` with the two
+  claims separated. The cause was editing *while* still deciding the logic → settle the condition
+  in full before writing the Edit; an `if` that needs a ternary escape hatch to express is a sign
+  the branch isn't decided yet, not a sign it needs clever syntax.
+- 2026-08-01 — Recommended a durable guardrail (a `bot-code-invariants` rule) for an
+  external commit's lesson *before* reading how the target code was organised. One grep
+  later — `SELFIE_EXPRESSIONS/FRAMINGS/OUTFITS/ACTIVITIES/CAMERA` are all already hoisted
+  module constants — showed the refactor itself removes the wrong-pattern example, making
+  the rule redundant, and that the class has zero occurrences here against a standing bar
+  of two. Self-caught and reversed in the next turn, but the first answer would have added
+  a speculative rule 18 to a file whose 17 rules were each earned by an incident → read the
+  code's existing organisation before proposing machinery to protect it; "is this already
+  solved structurally?" comes before "what rule would prevent this?" (C2 family: name the
+  class — and check it exists — before building for it).
 - 2026-07-31 — Grepped `routines.md` for Routine headings with `| head -20`, saw no
   `character-pass-monthly`, and started writing it up as doc drift; the heading was at
   line 242, past the cut. → **A `head`-truncated grep proves presence, never absence.
@@ -465,15 +925,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   handed to an operator reads as a failed deploy → when stating the expected output of a
   verification command, **measure it against the repo copy first**, don't recall it. (C3's
   neighbour: a check with a wrong expected value is as misleading as one that cannot fire.)
-- 2026-07-29 — The first draft of the `no-live-raw-urls` eval let a whole file opt out if
-  any marker word (`404`, `historical`, `DEAD`) appeared in its first 25 lines. CHEATSHEET.md's
-  header *explains* that raw URLs 404, so the entire file was exempt and a re-injected
-  defect passed — in the file the check most needed to guard. Caught only because I
-  break-tested against a second file → **an opt-out matched loosely is an opt-out for
-  everything.** Use a literal pragma for exemptions, and break-test in a file that is
-  *not* the one you developed against. (C3 family, and the reason the 26→27 eval is
-  trustworthy.) — **promoted 2026-07-29 into C14** as its third and only silent-failing
-  instance; kept here because the pragma lesson is narrower than C14's region-scoping rule.
 - 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
   conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
   Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length
@@ -502,10 +953,18 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   guard looked dead. The *test* was broken, not the code → when a break-test shows
   nothing firing, suspect the harness before the check. Build fixtures in Python, not
   shell quoting.
-- 2026-07-27 — Wrote a `sweep-ok` pragma check for `install-hint` that matched
-  `"sweep-ok:"` with a colon, while the inline markers had none, so the helper kept
-  self-reporting → match pragmas loosely; make the scanner fit the annotation, not the
-  other way round.
 - 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
+- 2026-08-02 — `risk-guard.sh` blocked a script because the script *quoted* a constraint's title, which contains the command pattern the guard forbids. Nothing was being run; the words were an anchor string. C14 exactly, in a hook rather than a scanner, and the second time this week a guard fired on prose about the thing it guards → when a helper script must mention a forbidden pattern, put the script in a file and run the file; do not inline it where a PreToolUse hook reads the command text.
+- 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
+- 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
+- 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
+
+## Minor — archived
+
+Entries that sat 30 days without pairing with anything. Kept verbatim — they are still
+searchable evidence, and a shape that reappears after two months is worth finding — but
+out of the promotion count, per the archiving rule above. Newest first.
+
+*(empty as of 2026-08-02: the whole active log is 8 days old, so nothing is due yet.)*

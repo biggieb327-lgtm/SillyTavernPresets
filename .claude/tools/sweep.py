@@ -25,8 +25,10 @@ every site, not to decide.
 from __future__ import annotations
 
 import ast
+import math as _math
 import re
 import sys
+from datetime import date as _date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -38,12 +40,26 @@ import os as _os
 BOT = Path(_os.getenv("SWEEP_BOT") or REPO / "telegram-companion-bot" / "bot.py")
 ENV = Path(_os.getenv("SWEEP_ENV") or REPO / "telegram-companion-bot" / ".env.example")
 CONSTRAINTS = Path(_os.getenv("SWEEP_CONSTRAINTS") or REPO / ".claude" / "memory" / "constraints.md")
+TESTS = Path(_os.getenv("SWEEP_TESTS") or REPO / "telegram-companion-bot" / "tests" / "test_pure.py")
+# Overridable for the same reason as the paths above: the archive rule is time-dependent,
+# and a rule that cannot be run against a chosen date cannot be proved to fire at all.
+_TODAY = _os.getenv("SWEEP_TODAY") or _date.today().isoformat()
 
 # Sites reviewed and justified. Keep the reason — an allowlist without one rots into
 # "this was noisy once".
 ALLOW_MARKDOWN = {
     "quietwin_cmd": "int index, fixed Mon-Sun names, HH:MM strings — no metachars possible",
     "fleet_cmd": "an int, inside a ``` fence where metachars are literal",
+}
+
+ALLOW_SHARED_WRITES = {
+    "_maybe_rotate_life_arc": (
+        "writes BASE_DIR, the INSTANCE dir. Flagged only because BASE_DIR's *fallback* "
+        "(line 97) is __file__'s parent, which applies when no instance dir is passed — "
+        "the dev case, one process, no race. Every deployed instance sets it."),
+    "_perform_self_update_locked": (
+        "genuinely writes the shared code dir, and is correctly serialized: the caller "
+        "holds the host-wide update lock, which is what the _locked suffix means."),
 }
 
 
@@ -58,28 +74,105 @@ def _enclosing_def(lines: list[str], lineno: int) -> str:
     return "?"
 
 
+def _owner_at(tree: ast.AST, lineno: int) -> str:
+    """Innermost function owning this line, by AST range.
+
+    `_enclosing_def` scans backwards for a `def` at column 0, so a hit inside a nested
+    helper is credited to the top-level function containing it, and the allowlists —
+    which are keyed by function name — then miss or over-match. Structure decides this,
+    not indentation."""
+    best, best_span = "?", None
+    for n in ast.walk(tree):
+        if not isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        end = n.end_lineno or n.lineno
+        if n.lineno <= lineno <= end and (best_span is None or end - n.lineno < best_span):
+            best, best_span = n.name, end - n.lineno
+    return best
+
+
+def _scope_assigns(tree: ast.AST, src: str) -> list[tuple[int, int, dict]]:
+    """[(start, end, {name: value_node})] per function scope, innermost-first.
+
+    Needed because an f-string is often built into a local and passed by name one line
+    later; a scanner that only inspects the call's own arguments sees a bare Name.
+
+    Built from ONE walk. Walking each function separately is O(functions x nodes), which
+    on bot.py's ~400 functions took ten seconds of the sweep's runtime for a result only
+    a handful of call sites ever consult."""
+    funcs, assigns = [], []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            funcs.append((n.lineno, n.end_lineno or n.lineno))
+        elif isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], ast.Name):
+            assigns.append((n.lineno, n.targets[0].id, n.value))
+    scopes = []
+    for start, end in funcs:
+        scopes.append((start, end, {name: val for ln, name, val in assigns
+                                    if start <= ln <= end}))
+    scopes.sort(key=lambda s: s[1] - s[0])
+    return scopes
+
+
 # ── 1. Arbitrary content rendered through Telegram Markdown ───────────────────
 def markdown_interp() -> list[str]:
     """Telegram rejects the WHOLE message on a stray '_' or unmatched '[', and the
     command then replies with silence — indistinguishable from a dead bot. Backticks
     are NOT a safe wrapper when the value is user input: a backtick in the data closes
-    the span early."""
-    lines, out = _src_lines(), []
-    for i, line in enumerate(lines, 1):
-        if 'parse_mode="Markdown"' not in line or line.strip().startswith("#"):
+    the span early.
+
+    Structural, not line-based. Three things escaped the old text scan, each proven by
+    a fixture: `parse_mode='Markdown'` in single quotes; an f-string built more than
+    seven lines above the call; and any placeholder carrying a format spec or
+    conversion, since `{n:>3}` did not match the placeholder regex."""
+    src = BOT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    out = []
+    scopes = None       # built lazily: only if a parse_mode call is actually found
+
+    def placeholders(node, assigns) -> list[tuple[str, bool]]:
+        """(expression source, wrapped in backticks) for every f-string placeholder
+        reachable from this argument, following one level of local assignment."""
+        if isinstance(node, ast.Name) and node.id in assigns:
+            node = assigns[node.id]
+        found = []
+        for js in ast.walk(node):
+            if not isinstance(js, ast.JoinedStr):
+                continue
+            for i, v in enumerate(js.values):
+                if not isinstance(v, ast.FormattedValue):
+                    continue
+                prev = js.values[i - 1] if i else None
+                nxt = js.values[i + 1] if i + 1 < len(js.values) else None
+                wrapped = (isinstance(prev, ast.Constant)
+                           and str(prev.value).endswith("`")
+                           and isinstance(nxt, ast.Constant)
+                           and str(nxt.value).startswith("`"))
+                found.append((ast.get_source_segment(src, v.value) or "?", wrapped))
+        return found
+
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
             continue
-        stmt = " ".join(x.strip() for x in lines[max(0, i - 7):i]
-                        if not x.strip().startswith("#"))
-        risky = [m.group(1) for m in re.finditer(r'\{([a-zA-Z_][\w\[\]\'\".]*)\}', stmt)
-                 if not (stmt[max(0, m.start() - 1):m.start()] == "`"
-                         and stmt[m.end():m.end() + 1] == "`")]
+        pm = next((k for k in call.keywords if k.arg == "parse_mode"), None)
+        if pm is None:
+            continue
+        if "markdown" not in (ast.get_source_segment(src, pm.value) or "").lower():
+            continue
+        if scopes is None:
+            scopes = _scope_assigns(tree, src)
+        assigns = next((a for s, e, a in scopes if s <= call.lineno <= e), {})
+        args = list(call.args) + [k.value for k in call.keywords if k.arg != "parse_mode"]
+        risky = sorted({expr for a in args for expr, wrapped in placeholders(a, assigns)
+                        if not wrapped})
         if not risky:
             continue
-        fn = _enclosing_def(lines, i)
+        fn = _owner_at(tree, call.lineno)
         if fn in ALLOW_MARKDOWN:
             continue
-        out.append(f"{BOT.name}:{i} {fn}() interpolates {sorted(set(risky))}")
-    return out
+        out.append(f"{BOT.name}:{call.lineno} {fn}() interpolates {risky}")
+    return sorted(set(out))
 
 
 # ── 2. Writes to the code dir, which every instance on a host shares ──────────
@@ -87,23 +180,63 @@ def shared_writes() -> list[str]:
     """Instance dirs are per-bot; the CODE dir is shared (~/telegram-bot for the four
     phone bots, /opt/telegram-bots for cass+jules). An unsynchronised write there races
     between instances. The loud failure is a crash; the silent one corrupts a rollback
-    point and reports success."""
-    lines, out = _src_lines(), []
-    shared = set()
-    for i, line in enumerate(lines, 1):
-        m = re.match(r'\s*([A-Za-z_][\w]*)\s*=.*__file__', line)
-        if m:
-            shared.add(m.group(1))
-    shared |= {"code_dir"}
-    writes = ("write_text", "write_bytes", "replace(", "unlink(", "rename(", "mkdir(")
-    for i, line in enumerate(lines, 1):
-        if line.strip().startswith("#"):
+    point and reports success.
+
+    Structural, for two reasons a fixture proved: a `__file__` assignment split over
+    lines defined a shared name the line scan never saw, and `str.replace(old, new)`
+    was read as `Path.replace(target)` — arity tells them apart, one argument vs two."""
+    src = BOT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    shared = {"code_dir"}
+    for n in ast.walk(tree):
+        # Node-level check, NOT ast.get_source_segment: that re-splits the whole source
+        # on every call, which is O(n²) over bot.py's ~14k lines and hung the sweep.
+        if isinstance(n, ast.AnnAssign):          # CODE_DIR: Path = Path(__file__).parent
+            targets, value = ([n.target] if n.target else []), n.value
+        elif isinstance(n, ast.Assign):
+            targets, value = n.targets, n.value
+        else:
             continue
-        if not any(w in line for w in writes):
+        if value is None:
             continue
-        if any(re.search(rf'\b{re.escape(n)}\b', line) for n in shared):
-            out.append(f"{BOT.name}:{i} {_enclosing_def(lines, i)}(): {line.strip()[:76]}")
-    return out
+
+        def has_file(node) -> bool:
+            return any(isinstance(d, ast.Name) and d.id == "__file__" for d in ast.walk(node))
+
+        for t in targets:
+            # Tuple targets are paired with tuple values so only the element actually
+            # derived from __file__ counts. `CODE_DIR, VERSION = Path(__file__).parent, "1"`
+            # defined a shared name the scanner never saw (corpus mutation `sw-tuple-target`).
+            if isinstance(t, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                    and len(t.elts) == len(value.elts):
+                for tgt, val in zip(t.elts, value.elts):
+                    if isinstance(tgt, ast.Name) and has_file(val):
+                        shared.add(tgt.id)
+            elif has_file(value):
+                for d in ast.walk(t):
+                    if isinstance(d, ast.Name):
+                        shared.add(d.id)
+    WRITES = {"write_text", "write_bytes", "unlink", "rename", "mkdir", "touch", "replace"}
+    out = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+            continue
+        if call.func.attr not in WRITES:
+            continue
+        if call.func.attr == "replace" and len(call.args) != 1:
+            continue                       # str.replace(old, new) is not a filesystem op
+        # Structural membership, not a regex over the receiver's SOURCE: rendering the
+        # source of every `.replace(` in bot.py (hundreds, nearly all str.replace) cost
+        # six of the sweep's ten seconds, because get_source_segment re-splits the file.
+        recv_names = {d.id for d in ast.walk(call.func.value) if isinstance(d, ast.Name)}
+        if not recv_names & shared:
+            continue
+        fn = _owner_at(tree, call.lineno)
+        if fn in ALLOW_SHARED_WRITES:
+            continue
+        stmt = " ".join((ast.get_source_segment(src, call) or "").split())
+        out.append(f"{BOT.name}:{call.lineno} {fn}(): {stmt[:76]}")
+    return sorted(set(out))
 
 
 # ── 3. Command handlers that can return without replying ─────────────────────
@@ -132,8 +265,16 @@ def silent_return() -> list[str]:
             continue
         if not fn.name.endswith("_cmd"):
             continue
+        # A `return` inside a nested helper returns from the HELPER, not the handler, so
+        # it cannot leave the user unanswered. dupefacts_cmd's inner `_check` returning []
+        # for a short list was reported for months on exactly this confusion.
+        nested = [n for n in ast.walk(fn)
+                  if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n is not fn]
+        inner = {ln for n in nested for ln in range(n.lineno, (n.end_lineno or n.lineno) + 1)}
         for node in ast.walk(fn):
             if not isinstance(node, ast.If):
+                continue
+            if node.lineno in inner:
                 continue
             test = " ".join(lines[node.test.lineno - 1:node.test.end_lineno])
             if any(g in test for g in GUARD):
@@ -171,10 +312,17 @@ def env_drift() -> list[str]:
     came from TIMEZONE. For any setting the docs describe by BEHAVIOUR, trace the value
     to its use by hand."""
     bot_src, env_src = BOT.read_text(encoding="utf-8"), ENV.read_text(encoding="utf-8")
+    # Every way bot.py reads the environment. os.environ.get / os.environ[...] were
+    # invisible, so a setting read that way looked undocumented-and-unread from both
+    # sides at once (gate_corpus `env-environ-get`).
     used = set(re.findall(r'os\.getenv\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot_src))
-    used |= set(re.findall(r'_env_(?:int|float)\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot_src))
-    documented = set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]{2,})=', env_src, re.M))
-    mentioned = set(re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', env_src))
+    used |= set(re.findall(r'os\.environ\.get\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot_src))
+    used |= set(re.findall(r'os\.environ\[\s*["\']([A-Z][A-Z0-9_]*)["\']', bot_src))
+    used |= set(re.findall(r'_env_(?:int|float|bool)\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot_src))
+    # {1,} not {2,}: at 3+ chars a two-letter name like TZ counted as USED but never as
+    # DOCUMENTED, so a correctly documented setting was reported as missing (`env-two-char-name`).
+    documented = set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]+)=', env_src, re.M))
+    mentioned = set(re.findall(r'\b([A-Z][A-Z0-9_]+)\b', env_src))
     out = []
     for v in sorted(documented - used):
         out.append(f".env.example documents {v} — nothing in bot.py reads it (silent no-op)")
@@ -196,21 +344,40 @@ def install_hint() -> list[str]:
     `_pip_hint()` in bot.py, which derive the right command from the running host.
 
     Benign hits to expect: the helper definitions themselves, and comments explaining
-    the history. Both are excluded below, so anything reported is a live string."""
-    src = BOT.read_text(encoding="utf-8").splitlines()
+    the history.
+
+    Reads string VALUES, not source lines. Adjacent literals are concatenated by the
+    parser, so a hint split across two lines is one value here and was invisible to the
+    line scan. It also fixes a false positive the old docstring claimed was handled:
+    the bodies of `_pkg_hint`/`_pip_hint` necessarily contain the very strings they
+    exist to centralise, and were only skipped when the helper's NAME appeared on the
+    same line — which it does not, one line into its own definition."""
+    src = BOT.read_text(encoding="utf-8")
+    lines = src.splitlines()
+    tree = ast.parse(src)
+    helper, docstrings = [], set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and \
+                n.name in ("_pkg_hint", "_pip_hint"):
+            helper.append((n.lineno, n.end_lineno or n.lineno))
+        body = getattr(n, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            docstrings.add(id(body[0].value))          # documentation, not advice
     out = []
-    for i, line in enumerate(src, 1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue                                   # commentary, not advice
-        if "_pkg_hint" in line or "_pip_hint" in line:
-            continue                                   # correct callers
-        if "sweep-ok" in line:
-            continue                                   # reviewed; reason on/above the line
-        if re.search(r'["\'][^"\']*\b(?:pkg|apt|apt-get)\s+install\b', line):
-            out.append(f"{BOT.name}:{i} hardcoded system-package hint — use _pkg_hint()")
-        if re.search(r'["\'][^"\']*(?<!-m )\bpip\s+install\b', line):
-            out.append(f"{BOT.name}:{i} hardcoded pip hint — use _pip_hint()")
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Constant) or not isinstance(n.value, str):
+            continue
+        if id(n) in docstrings or any(a <= n.lineno <= b for a, b in helper):
+            continue
+        line = lines[n.lineno - 1] if n.lineno <= len(lines) else ""
+        if "sweep-ok" in line or "_pkg_hint" in line or "_pip_hint" in line:
+            continue
+        if re.search(r'\b(?:pkg|apt|apt-get)\s+install\b', n.value):
+            out.append(f"{BOT.name}:{n.lineno} hardcoded system-package hint — use _pkg_hint()")
+        if re.search(r'(?<!-m )\bpip\s+install\b', n.value):
+            out.append(f"{BOT.name}:{n.lineno} hardcoded pip hint — use _pip_hint()")
     return sorted(set(out))
 
 
@@ -221,16 +388,63 @@ que ran run than that the their them then there these they this to two use used 
 was were what when which while who with would you your it's don't wasn't""".split())
 
 
+ARCHIVE_HEADING = "## Minor — archived"
+ARCHIVE_AFTER_DAYS = 30
+PAIR_LIMIT = 5      # a ranking nobody reads is just a list; show the strongest few
+PAIR_MAX_DF = 2     # a token in exactly 2 entries IS those entries' shared vocabulary
+PAIR_MIN_RARE = 2   # one rare word in common is a coincidence; two is a candidate
+
+
 def _minor_entries(text: str) -> list[tuple[str, str]]:
-    """(date, body) for each `- YYYY-MM-DD — …` bullet under the Minor heading."""
-    tail = text.split("## Minor", 1)
-    if len(tail) < 2:
-        return []
+    """(date, body) for each `- YYYY-MM-DD — …` bullet in the ACTIVE Minor section.
+
+    Archived entries are excluded deliberately: a Minor entry earns its place by being
+    available to pair with a FUTURE one, and after ARCHIVE_AFTER_DAYS nothing has. Its
+    remaining value is archaeological, which the archive preserves — so counting it
+    against the promotion threshold only guarantees the threshold fires forever."""
+    return [(d, b) for d, b, _ in _minor_section(text)[0]]
+
+
+_BULLET = r'^[-*+] (\d{4}-\d{2}-\d{2}) [—–-] '
+
+
+def _minor_section(text: str) -> tuple[list[tuple[str, str, int]], str]:
+    """([(date, body, offset)], active-section-text) for the ACTIVE Minor log.
+
+    BOTH splits are line-anchored. The archive split had to be (the archiving rule in
+    the header names that heading mid-sentence, and an unanchored split truncated the
+    active log to zero entries while reporting a confident all-clear — C14 in a parser).
+    The `## Minor` split has the mirror-image failure: prose naming the heading mid-
+    sentence made every dated bullet BELOW it — including occurrence lists inside
+    constraint bodies — parse as Minor entries. gate_corpus `cd-phantom-section`.
+
+    Bullets accept `-`, `*`, `+` and any dash separator: a `*`-bulleted entry silently
+    not counting is indistinguishable from a healthy log (gate_corpus `cd-star-bullets`)."""
+    parts = re.split(r'^## Minor\b', text, maxsplit=1, flags=re.M)
+    if len(parts) < 2:
+        return [], ""
+    active = re.split(rf'^{re.escape(ARCHIVE_HEADING)}', parts[1], maxsplit=1, flags=re.M)[0]
     out = []
-    for m in re.finditer(r'^- (\d{4}-\d{2}-\d{2}) — (.+?)(?=^- \d{4}-\d{2}-\d{2} —|\Z)',
-                         tail[1], re.M | re.S):
-        out.append((m.group(1), " ".join(m.group(2).split())))
-    return out
+    for m in re.finditer(_BULLET + r'(.+?)(?=' + _BULLET + r'|\Z)', active, re.M | re.S):
+        out.append((m.group(1), " ".join(m.group(2).split()), m.start()))
+    return out, active
+
+
+def _last_promotion(text: str) -> str:
+    """The date of the last promotion pass, from the Minor header. The backlog check
+    counts what has arrived SINCE it — that is what "is another pass worth running"
+    actually asks. Counting the total instead fires forever once the log is healthy:
+    on 2026-08-02 a pass promoted six entries into C17/C18 and left 19 with no shared
+    causes, and a total-based check would have demanded a seventh pass that could only
+    invent clusters.
+
+    Scoped to the Minor section, not the whole file: `re.search` takes the FIRST match,
+    so a constraint body quoting an old date ("the header used to read **Last promotion
+    pass: 2020-01-01**") hijacked it and manufactured a backlog of every entry in the
+    log. gate_corpus `cd-last-pass-in-prose`."""
+    _, active = _minor_section(text)
+    m = re.search(r'\*\*Last promotion pass:\s*(\d{4}-\d{2}-\d{2})', active or "")
+    return m.group(1) if m else ""
 
 
 def constraints_drift() -> list[str]:
@@ -261,29 +475,208 @@ def constraints_drift() -> list[str]:
                        f"'**Graduated' line — it owes a hook/eval/scanner, not more prose")
 
     minors = _minor_entries(text)
-    if len(minors) > 8:
-        out.append(f"Minor log holds {len(minors)} entries (>8) — run a promotion pass; "
-                   f"pairs sharing a cause become a numbered constraint")
+    last = _last_promotion(text)
+    pass_due = False  # defined before the branch: a missing header line must not NameError
+    if not last:
+        out.append("the Minor header has no '**Last promotion pass: YYYY-MM-DD**' line — "
+                   "the backlog check counts entries added since it and cannot run without it")
+    else:
+        since = [d for d, _ in minors if d > last]
+        pass_due = len(since) > 8
+        if pass_due:
+            out.append(f"{len(since)} Minor entries added since the last promotion pass "
+                       f"({last}) — run one; pairs sharing a cause become a numbered "
+                       f"constraint")
+        stale = [d for d, _ in minors
+                 if (_date.fromisoformat(_TODAY) - _date.fromisoformat(d)).days
+                 > ARCHIVE_AFTER_DAYS]
+        if stale:
+            out.append(f"{len(stale)} active Minor entries are older than "
+                       f"{ARCHIVE_AFTER_DAYS} days (oldest {min(stale)}) — move them under "
+                       f"'{ARCHIVE_HEADING}'; nothing has paired with them, so they are "
+                       f"archaeology now, not candidates")
 
+    # Pairs are the INPUT to a promotion pass, so they are listed only when one is due.
+    # Otherwise they restate, every run, the candidates the last pass already looked at
+    # and rejected — which is how the previous version stayed permanently noisy even
+    # right after a clean pass.
+    if not pass_due:
+        return out
+
+    # Ranked by how DISTINCTIVE the shared vocabulary is. Raw overlap made this unusable:
+    # 19 entries produced 62 pairs, more pairs than entries, every one needing human
+    # judgement — so nobody read any.
     toks = []
     for date, body in minors:
         words = {w for w in re.findall(r'[a-z_][a-z0-9_.\-]{3,}', body.lower())
                  if w not in _STOP}
         toks.append((date, body, words))
+    df: dict = {}
+    for _, _, words in toks:
+        for w in words:
+            df[w] = df.get(w, 0) + 1
+    n = max(len(toks), 1)
+    # Score on the RARE shared tokens only. Summing over all of them rewarded length:
+    # the top pair under that scoring shared 'blocks', 'missing', 'where' — three words
+    # that mean nothing together. Restricting to df<=2 took 96 pairs down to 14 and put
+    # the two genuinely-related marcus entries (preset-core.txt, preset-explicit.txt) at
+    # the top, which is the outcome the heuristic was always reaching for.
+    ranked = []
     for i in range(len(toks)):
         for j in range(i + 1, len(toks)):
-            shared = toks[i][2] & toks[j][2]
-            if len(shared) >= 3:
-                out.append(f"Minor {toks[i][0]} + {toks[j][0]} share "
-                           f"{sorted(shared)[:4]} — candidate shared cause, promote if real: "
-                           f"'{toks[i][1][:45]}…' / '{toks[j][1][:45]}…'")
+            rare = {w for w in toks[i][2] & toks[j][2] if df[w] <= PAIR_MAX_DF}
+            if len(rare) < PAIR_MIN_RARE:
+                continue
+            score = sum(_math.log(n / df[w]) for w in rare)
+            ranked.append((score, i, j, sorted(rare, key=lambda w: (df[w], w))[:3]))
+    ranked.sort(key=lambda r: (-r[0], r[1], r[2]))
+    for score, i, j, rarest in ranked[:PAIR_LIMIT]:
+        out.append(f"Minor {toks[i][0]} + {toks[j][0]} (score {score:.1f}) share {rarest} "
+                   f"— candidate shared cause, promote if real: "
+                   f"'{toks[i][1][:45]}…' / '{toks[j][1][:45]}…'")
+    if len(ranked) > PAIR_LIMIT:
+        out.append(f"({len(ranked) - PAIR_LIMIT} weaker pairs above the score floor not "
+                   f"shown — raise PAIR_LIMIT in sweep.py to see them)")
     return out
+
+
+def _handler_coverage() -> tuple[dict, set]:
+    """({handler: mention count}, {handlers the tests actually CALL}).
+
+    Shared by the source-assertion scanner and `.claude/hooks/delivery-gate.sh`, which
+    blocks a turn that ships a changed `*_cmd` no test drives. One implementation on
+    purpose: two copies of "does a test exercise this" would drift, and the drift would
+    be invisible in exactly the direction that lets a broken handler through.
+
+    `handlers` starts as every `*_cmd` function, then widens ONE HOP: any module-level
+    function a `*_cmd` body calls directly by name is pulled in too. `gather_audit_data`
+    is not itself named `*_cmd` but is called straight out of `audit_cmd`, and a
+    source-only test on it (`test_nanogpt_reports_the_model_too`, reading its source for
+    "SELFIE_MODEL"/"nanogpt" instead of calling it) slipped past the original
+    `*_cmd`-only scope — CHANGELOG v2026-08-03.6, self-identified as the same family as
+    the `/features` ValueError this scanner exists to catch (v2026-08-02.14). Deliberately
+    NOT walked two hops out (a helper's own helpers) — that direction runs to every
+    function bot.py defines and would misfire on functions legitimately tested by reading
+    their source on purpose, e.g. `test_shared_prompt_hardcodes_no_character_specific_feature`
+    scanning `build_selfie_prompt`'s source for hardcoded traits (v2026-08-03.2)."""
+    bot_tree = ast.parse(BOT.read_text(encoding="utf-8"))
+    module_funcs = {n.name: n for n in ast.walk(bot_tree)
+                    if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
+    handlers = {name for name in module_funcs if name.endswith("_cmd")}
+    for name in list(handlers):
+        for n in ast.walk(module_funcs[name]):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                    and n.func.id in module_funcs and n.func.id not in handlers:
+                handlers.add(n.func.id)
+    tree = ast.parse(TESTS.read_text(encoding="utf-8"))
+
+    # All three ways a test can name a handler. Only `bot.<name>` was recognised, so a
+    # `from bot import alpha_cmd` test that merely read its source was invisible in BOTH
+    # directions — no mention, no call, no finding (gate_corpus `sa-from-import`).
+    mods = {"bot"}                      # module aliases: import bot [as b]
+    local: dict[str, str] = {}          # local name -> handler name, from `from bot import x`
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "bot":
+                    mods.add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "bot":
+            for a in node.names:
+                if a.name in handlers:
+                    local[a.asname or a.name] = a.name
+
+    mentioned, called = {}, set()
+
+    def note(name):
+        mentioned[name] = mentioned.get(name, 0) + 1
+
+    for node in ast.walk(tree):
+        # <module>.<name> anywhere — a mention, wherever it appears
+        if isinstance(node, ast.Attribute) and getattr(node.value, "id", "") in mods:
+            if node.attr in handlers:
+                note(node.attr)
+        # a bare name imported from bot — same thing
+        elif isinstance(node, ast.Name) and node.id in local:
+            note(local[node.id])
+        # a CALL is the only thing that exercises dispatch, in either form
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Attribute) and getattr(f.value, "id", "") in mods \
+                    and f.attr in handlers:
+                called.add(f.attr)
+            elif isinstance(f, ast.Name) and f.id in local:
+                called.add(local[f.id])
+    return mentioned, called
+
+
+_HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
+
+
+def changed_lines_from_diff(diff: str) -> list[int]:
+    """1-indexed NEW-file line numbers a unified diff touches.
+
+    Lives here rather than inline in the hook so it can be run against a fixture: a
+    parser embedded in a shell heredoc is a parser nobody will ever test.
+
+    `+N,0` is a **pure deletion** — nothing in the new file changed, so it contributes
+    NO lines. The first draft used `max(count, 1)` and credited the deletion to line N,
+    which is the line *after* the removed block and usually belongs to a different
+    function. `+N` with no count is exactly one line (gate_corpus `gate-diff-*`)."""
+    out: list[int] = []
+    for line in diff.splitlines():
+        m = _HUNK.match(line)
+        if not m:
+            continue
+        start = int(m.group(1))
+        count = 1 if m.group(2) is None else int(m.group(2))
+        out.extend(range(start, start + count))
+    return out
+
+
+def handlers_at_lines(linenos) -> set[str]:
+    """Which `*_cmd` handlers own these 1-indexed lines of bot.py.
+
+    Exact line ranges, not git's hunk header: the header names the enclosing function
+    only when the change sits below the hunk's leading context, so a change in a
+    handler's first few lines is attributed to the PRECEDING function. The first draft
+    of the delivery-gate check used the header and silently missed exactly that case."""
+    want = set(linenos)
+    out = set()
+    for n in ast.walk(ast.parse(BOT.read_text(encoding="utf-8"))):
+        if not isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        if not n.name.endswith("_cmd"):
+            continue
+        if any(n.lineno <= ln <= (n.end_lineno or n.lineno) for ln in want):
+            out.add(n.name)
+    return out
+
+
+def source_assertion() -> list[str]:
+    """A test that only READS a handler's source cannot fail for the reason the handler
+    exists. `/features <name> on|off` raised ValueError on every invocation for four
+    releases while two tests covering it stayed green: one asserted the specs are
+    3-tuples, the other grepped the handler text for "_is_admin". Neither called it
+    (v2026-08-02.14; C8's fifth member, second to reach the fleet).
+
+    Flagged: a command handler (or a helper one hop below it — see `_handler_coverage`)
+    the tests MENTION but never CALL. That is the dangerous state — it reads as covered.
+    A handler with no tests at all is honestly untested and is not reported here. A
+    mention inside inspect.getsource(...) counts as a mention, never as a call; driving
+    the handler with fake Telegram objects is what counts."""
+    if not TESTS.exists():
+        return [f"{TESTS} is missing — the test suite is the input to this check"]
+    mentioned, called = _handler_coverage()
+    return [f"{TESTS.name}: {name}() is referenced {n}× but never called — the tests read "
+            f"it, nothing runs it"
+            for name, n in sorted(mentioned.items()) if name not in called]
 
 
 SCANNERS = {
     "markdown-interp": markdown_interp,
     "shared-writes": shared_writes,
     "silent-return": silent_return,
+    "source-assertion": source_assertion,
     "env-drift": env_drift,
     "install-hint": install_hint,
     "constraints-drift": constraints_drift,

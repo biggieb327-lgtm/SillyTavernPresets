@@ -5,9 +5,12 @@ description: End-to-end procedure for shipping any bot.py change (feature, bugfi
 
 # Ship a bot.py release
 
-The fleet deploys by curling raw files from `main`. Merging to main = making it
-deployable; the user then triggers the actual deploy from Telegram. Your job ends at
-"merged, green, deploy instructions given" — you cannot run `/update` yourself.
+All seven instances deploy from `main` via `deploy/vps-sync.sh` (one invocation per
+instance, run on the VPS as root) — see `deploy-and-verify-fleet` for the full command
+and the instance list. Merging to main = making it deployable; the user (or you, if you
+have VPS access this session) then runs `vps-sync.sh` per instance. `/update` is dead:
+the handler still exists but downloads over raw URLs, which 404 on the private repo.
+Your job ends at "merged, green, deploy instructions given."
 
 ## When NOT to use
 
@@ -38,7 +41,7 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    pytest can die at collection inside Debian's system cryptography. Both are
    environment gaps, not code bugs. Do not "fix" bot.py for them.
 
-3. **Implement.** Small diffs: one release = one theme (a mega-release risks all six
+3. **Implement.** Small diffs: one release = one theme (a mega-release risks all seven
    bots at once). New/changed env vars get documented in `.env.example`. Per owner
    policy (2026-07-18) new features default **ON** with a mandatory env kill switch —
    *unset = feature active*, `0`/off disables without a redeploy (see
@@ -55,12 +58,13 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
      first, fix second**. The `version-changelog-sync` eval fails if the newest
      `## v` heading ≠ BOT_VERSION.
 
-6. **Verify** — the standing block, all three, paste real output:
+6. **Verify** — one command, and paste its real output:
    ```bash
-   python3 -m py_compile telegram-companion-bot/bot.py
-   python -m pytest telegram-companion-bot/tests/ -q
-   bash .claude/evals/run-evals.sh
+   bash .claude/tools/verify.sh
    ```
+   Runs py_compile, pytest, `run-evals.sh` and `gate_corpus`, then prints the advisory
+   sweep. It exists so "I ran the tests" cannot quietly mean a different subset each
+   time. The individual commands still work if you need one in isolation.
 
    **If this release FIXES something, also sweep for the rest of the class** before
    step 7 — on 2026-07-25 every point fix that day turned out to be a class, and the
@@ -72,23 +76,42 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
    hit may be correctly mitigated). Triage each one, then load `fix-the-class` if the
    sweep — or the shape of the bug — suggests other instances exist.
 
-7. **Commit on the session's `claude/...` branch, then merge to `main` and push.**
-   Standing policy (owner-approved 2026-07-11): merge autonomously **only when step 6
-   is fully green**. Any red check = stop, report, do not merge.
+7. **Review the diff before merging it.** Green tests are not a review: on 2026-08-02 a
+   `/code-review` pass over one day's 13 releases found six defects a fully green suite
+   had shipped, including `/features <name> on|off` raising `ValueError` on every
+   invocation for four releases. Run it on the diff you are about to merge:
+   ```bash
+   /code-review          # reviews the working diff; /review is for a GitHub PR
+   ```
+   Fix what it finds, or say in the report why a finding is not real —
+   `verify-external-audit` applies to its output exactly as it does to any other
+   outside claim, because a review is a batch of *claims*, not a batch of defects.
+   **Two of the six were mis-diagnosed** on that pass and re-checking changed the fix.
+
+   Mechanically enforced half: the delivery gate blocks the turn if the diff touches a
+   `*_cmd` handler that no test **calls** (`sweep.py source-assertion` lists the
+   backlog). A test that reads a handler's source cannot fail for the reason the
+   handler exists — that is the defect the review found, five times over.
+
+8. **Commit on the session's `claude/...` branch, then merge to `main` and push.**
+   Standing policy (owner-approved 2026-07-11): merge autonomously **only when steps 6–7
+   are fully green**. Any red check = stop, report, do not merge.
    ```bash
    git checkout main && git pull origin main && git merge <branch> && git push -u origin main
    ```
    Never force-push main (risk-guard blocks it; deploys would brick).
 
-8. **Update planning docs in the same session**: mark the shipped item done in
+9. **Update planning docs in the same session**: mark the shipped item done in
    `ROADMAP.md` (this was skipped after R1–R6 and the docs drifted). If the release
    closed an operational-log "Next" item, note it there.
 
-9. **Hand off the deploy.** Tell the user exactly:
-   - `/update` to ONE bot → verify its `/audit` shows the new BOT_VERSION →
-     `/restart` to the other five → `/audit` each.
-   - If `run-bot.sh` changed, `/update` is NOT enough → point them at
-     `deploy-and-verify-fleet`.
+10. **Hand off the deploy.** Tell the user exactly:
+   - `/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>`,
+     once per instance (nora, bonnie, cass, emily, priya, jules, marcus) — it fetches
+     and hard-resets the checkout to `origin/main`, so it's correct even if the
+     on-disk checkout is stale.
+   - `/audit` on each instance afterward — MUST show the new BOT_VERSION.
+   - Full command block, verification, and rollback: `deploy-and-verify-fleet`.
 
 ## Quality bar
 
@@ -100,11 +123,14 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 
 ## Verification checklist
 
-- [ ] py_compile, pytest, run-evals.sh all green — actual output seen, not assumed
+- [ ] `bash .claude/tools/verify.sh` green — actual output seen, not assumed
+- [ ] `/code-review` run on the diff; every finding fixed or refuted in the report
+- [ ] No `*_cmd` the diff touches is left un-called by tests (the delivery gate blocks it)
 - [ ] BOT_VERSION bumped and equals the newest `## v` changelog heading
 - [ ] New env vars in `.env.example`, unset = old behavior
 - [ ] New pure functions have tests
-- [ ] Merged to main and pushed; CI (`evals` workflow) green on main
+- [ ] Merged to main and pushed; CI (`evals` workflow) **polled** on main and
+      reported as `<sha> | completed | success` — not asserted from having pushed
 - [ ] ROADMAP/plan docs updated
 - [ ] Deploy instructions given to the user
 
@@ -116,7 +142,7 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 - Leaving work on the claude/ branch: the fleet deploys from main, so an unmerged
   green branch ships nothing.
 - Proposing to split bot.py into modules. Recorded non-goal; the entire deploy
-  model (`/update` swaps one file, `bot.py.bak` rollback) depends on a single file.
+  model (`vps-sync.sh` swaps one file, `bot.py.bak` rollback) depends on a single file.
 - Running `git checkout -- bot.py` to undo an experiment while the file holds
   uncommitted real work — this destroyed ~700 lines once. Commit real work first;
   revert experiments by re-editing.
@@ -124,5 +150,5 @@ deployable; the user then triggers the actual deploy from Telegram. Your job end
 ## What to report back
 
 Version shipped, one-line root cause, the three verification outputs (pasted),
-merge commit on main, CI status, and the exact deploy commands the user should send
-from Telegram.
+merge commit on main, CI status, and the exact `vps-sync.sh` command(s) the user
+should run on the VPS.

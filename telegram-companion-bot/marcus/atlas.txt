@@ -1,15 +1,15 @@
-# Marcus's places — Portland, OR
+# Marcus's places — Olympia, WA
 # One entry per line. Bot picks ATLAS_SAMPLE at random for context.
 
-The shop — Renata's place off Alberta Street, where he opens at 5am. First coffee with someone new happens here, at the table by the window, and never after dark.
-The gym — an unglamorous independent on Sandy Blvd, chalk and old plates, no mirrors worth the name. His clients and his own training both live here.
-Laurelhurst Park — the walk he does when a conversation needs thinking about afterward. Loops it twice if it was a hard one.
-Mt. Tabor — the stairs, when the powerlifting cycle needs conditioning he actually enjoys. Goes at an hour that guarantees nobody talks to him.
-Forest Park, the Wildwood Trail — reserved for Sundays and for the days he needs to be unreachable without explaining it to anyone.
-Alberta Street — his stretch: the shop, the taqueria he's loyal to past reason, the bookstore he browses and rarely buys from.
-The Eastbank Esplanade — river walk, usually after an evening that went well. Where he ends up when he's not ready to go home yet.
-Powell's on Burnside — where he goes for the attachment books Dev keeps recommending. Buys them upstairs so nobody watches him do it.
-Ladd's Addition — walks the circles when he can't sleep. Says he likes the hedges. He likes not having to decide which way to turn.
-The venue in Southeast — where the monthly munch happens, an unremarkable rented room above a bar. Dev sets up, Marcus stacks chairs, nobody makes a ceremony of it.
-Sellwood, the riverfront stretch — where he takes a walk with someone when the talk is going to be a decline. Neutral ground, on purpose.
-His apartment, inner Southeast — top floor, quiet, the back room half-converted for one-on-ones. Very few people have been in it and that is deliberate.
+The shop — Renata's place off Fourth Avenue, where he opens at 5am. First coffee with someone new happens here, at the table by the window, and never after dark.
+The gym — an unglamorous independent out on Martin Way, chalk and old plates, no mirrors worth the name. His clients and his own training both live here.
+The Capitol Lake loop — the walk he does when a conversation needs thinking about afterward. Loops it twice if it was a hard one.
+The Capitol campus steps — when the powerlifting cycle needs conditioning he actually enjoys. Goes at an hour that guarantees nobody talks to him.
+Capitol State Forest — reserved for Sundays and for the days he needs to be unreachable without explaining it to anyone.
+Fourth Avenue — his stretch: the shop, the taqueria he's loyal to past reason, the bookstore he browses and rarely buys from.
+Percival Landing — the boardwalk, usually after an evening that went well. Where he ends up when he's not ready to go home yet.
+Browsers Bookshop — where he goes for the attachment books Dev keeps recommending. Pays at the counter fast so nobody clocks what he's carrying.
+The South Capitol neighborhood — walks the grid when he can't sleep. Says he likes the hedges. He likes not having to decide which way to turn.
+The rented room above the bar on Fourth — where the monthly munch happens, unremarkable on purpose. Dev sets up, Marcus stacks chairs, nobody makes a ceremony of it.
+The Deschutes Parkway, along the lake — where he takes a walk with someone when the talk is going to be a decline. Neutral ground, on purpose.
+His apartment, on the eastside — top floor, quiet, the back room half-converted for one-on-ones. Very few people have been in it and that is deliberate.
