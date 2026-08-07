@@ -19,21 +19,32 @@ in `list_triggers` without an entry here and that is not drift.
   notifications, then the owner-approved Reddit-ideas step, then the curl-based
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
-  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-07** (same
-  trigger id, via `update_trigger` — no recreate): the curl-to-reddit.com step,
-  permanently SKIPPED since 2026-07-20 (network policy blocks reddit.com at the
-  proxy), replaced with a call to the `idea-scraper-actor/` Apify actor (repo
-  root) — it wraps `trudax/reddit-scraper-lite` for Reddit and adds Substack via
-  public RSS feeds. See that actor's README for the field-name caveat (unverified
-  against a live run, since this environment had no path to `api.apify.com`
-  either at build time).
-- **Reddit + Substack access:** WebFetch cannot reach either; the prompt uses
-  Bash curl against `api.apify.com` to run `idea-scraper-actor/` synchronously.
-  Requires `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables
-  on the Claude Code Remote environment (owner-provisioned, see the actor's
-  README) — if either is unset, or `api.apify.com` itself returns a
-  CONNECT/tunnel 403 (same network-policy class that blocked reddit.com
-  directly), the step self-reports SKIPPED.
+  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-03** (same
+  trigger id, via `update_trigger` — no recreate, and NOT mirrored to this file
+  at the time — caught and backfilled 2026-08-07, see below): the curl-based
+  Reddit step, permanently SKIPPED since creation, was replaced with a
+  WebSearch-only "External ideas" scan that dropped Reddit as a source
+  entirely — diagnosis was that no fetch tool available to a fired session
+  can reach `reddit.com` or `developers.reddit.com` (Cloudflare blocks direct
+  HTTP past the proxy tunnel; WebFetch and WebSearch both refuse the domain
+  outright), and Reddit's app-registration flow now redirects to Devvit (a
+  platform for apps that run inside Reddit, not external OAuth read access).
+  **Prompt updated again 2026-08-07** (same trigger id, via `update_trigger`):
+  restored Reddit — and added Substack — via the `idea-scraper-actor/` Apify
+  actor (repo root), which reaches both through Apify's own infrastructure
+  instead of the fired session's own network path, so the 2026-08-03 blocker
+  doesn't apply to it. The WebSearch-only scan is kept as a fallback for when
+  Apify itself isn't configured/reachable. See that actor's README for the
+  field-name caveat (its Reddit-field mapping is unverified against a live
+  run — this environment had no path to `api.apify.com` either at build time).
+- **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
+  directly (see 2026-08-03 diagnosis above). The prompt uses Bash curl against
+  `api.apify.com` to run `idea-scraper-actor/` synchronously instead. Requires
+  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables on the
+  Claude Code Remote environment (owner-provisioned, see the actor's README)
+  — if either is unset, or `api.apify.com` itself returns a CONNECT/tunnel 403
+  (same network-policy class that blocked reddit.com directly), the step
+  self-reports SKIPPED and falls back to the WebSearch-only scan.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -43,10 +54,11 @@ in `list_triggers` without an entry here and that is not drift.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one evidence-based
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
-  runs a bounded Reddit + Substack scan (max 25 items per source per run, via
-  `idea-scraper-actor/` since 2026-08-07) and may append up to 3 URL-cited
-  "External ideas (unvetted — owner approval required)" to the same proposal file
-  — ideas only, never implemented by the loop.
+  runs a bounded external-ideas scan — Reddit + Substack via `idea-scraper-actor/`
+  (since 2026-08-07, max 25 items per source per run) plus a WebSearch fallback/
+  supplement — and may append up to 3 URL-cited "External ideas (unvetted —
+  owner approval required)" to the same proposal file — ideas only, never
+  implemented by the loop.
 
 ### Verbatim prompt
 
@@ -67,28 +79,35 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    eval that would prove it worked) to
    .claude/memory/improvement-proposals/<YYYY-MM>.md. If nothing qualifies, write
    no proposal — do not invent a pattern.
-3. Reddit + Substack ideas (runs whether or not a pattern qualified): bounded
-   external scan for ideas genuinely applicable to this companion-bot fleet
-   (companion features, python-telegram-bot pitfalls, model/API practices).
-   WebFetch cannot reach reddit.com or api.apify.com. Source: the
-   `idea-scraper-actor/` Apify actor (repo root; see its README) — NOT direct
-   curl to reddit.com, which this environment's network policy blocks (CONNECT
-   403 as of 2026-07-20). Requires both APIFY_API_TOKEN and APIFY_ACTOR_ID set
+3. External ideas (runs whether or not a pattern qualified): bounded external
+   scan for ideas genuinely applicable to this companion-bot fleet (companion
+   features, python-telegram-bot pitfalls, model/API practices).
+   Primary source: the `idea-scraper-actor/` Apify actor (repo root; see its
+   README) for Reddit + Substack. It reaches both through Apify's own
+   infrastructure (trudax/reddit-scraper-lite for Reddit, direct RSS for
+   Substack), sidestepping the fired session's own inability to reach
+   reddit.com directly (Cloudflare blocks it past the proxy tunnel; WebFetch
+   and WebSearch both refuse the domain; Reddit's app-registration flow now
+   redirects to Devvit rather than issuing OAuth app credentials — see this
+   Routine's history above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set
    as environment variables; if either is unset, or the call fails with a
-   CONNECT/tunnel 403 (api.apify.com itself blocked), report this step as
+   CONNECT/tunnel 403 (api.apify.com itself blocked), report this part as
    "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
-   and continue to step 4. Otherwise:
+   and fall back to the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"reddit_urls": ["https://www.reddit.com/r/SillyTavernAI/top/?t=month", "https://www.reddit.com/r/LocalLLaMA/top/?t=month", "https://www.reddit.com/r/TelegramBots/top/?t=month"], "substack_publications": [], "max_items_per_source": 25}'
    (max_items_per_source bounds Apify's pay-per-result cost — do not raise it
    without owner approval. substack_publications is empty by default; only add
-   entries the owner has named. WebSearch may supplement for discovery.) Never
-   fabricate sources. If any ideas apply, add an "External ideas (unvetted —
-   owner approval required)" section to the same <YYYY-MM>.md file: max 3
-   ideas, each with its source URL and one line on why it fits this fleet.
-   Ideas only — never implemented by this loop.
+   entries the owner has named.)
+   Supplement with WebSearch (max ~5 queries), scoped to sources a fired
+   session can actually reach — GitHub (python-telegram-bot's own issues/
+   discussions/wiki, comparable companion-bot projects), technical blogs,
+   Hacker News. Never fabricate sources. If any ideas apply, add an
+   "External ideas (unvetted — owner approval required)" section to the same
+   <YYYY-MM>.md file: max 3 ideas, each with its source URL and one line on
+   why it fits this fleet. Ideas only — never implemented by this loop.
 4. If the <YYYY-MM>.md file has content: commit only that file to the branch
    claude/improvement-loop (reset it to origin/main first if it already exists)
    and push ONLY to claude/improvement-loop. NEVER push to main or any other
@@ -271,11 +290,19 @@ brief — do not claim anything is new or recurring. Fix nothing.
   `edit-cards-and-presets`, section "Respect per-character canon"), and the live
   prompt was missing this file's "don't be fooled by a leftover high V-number"
   clause, so the two disagreed and a literal reading of the drift rule would have
-  halted the pass. **Prompt updated 2026-08-07** (same trigger id, via
-  `update_trigger` — no recreate): the curl-to-reddit.com step, permanently
-  SKIPPED since 2026-07-20, replaced with a call to `idea-scraper-actor/` (repo
-  root) — same actor the improvement-loop Routine now uses, also adding Substack
-  via RSS. See that actor's README for the field-name caveat.
+  halted the pass. **Prompt updated 2026-08-03** (same trigger id, via
+  `update_trigger` — no recreate, and NOT mirrored to this file at the time —
+  caught and backfilled 2026-08-07, same drift as `improvement-loop-monthly`
+  above, same session): the curl-based Reddit step was replaced with a
+  WebSearch-only "External ideas" scan that dropped Reddit as a source
+  entirely, same diagnosis as `improvement-loop-monthly` (Cloudflare/WebFetch/
+  WebSearch can't reach reddit.com; Reddit's app-registration now redirects to
+  Devvit). **Prompt updated again 2026-08-07** (same trigger id, via
+  `update_trigger`): restored Reddit, and added Substack, via a call to
+  `idea-scraper-actor/` (repo root) — same actor `improvement-loop-monthly`
+  uses, reaching both through Apify's infrastructure instead of the fired
+  session's own network path. The WebSearch-only scan is kept as a fallback.
+  See that actor's README for the field-name caveat.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -301,12 +328,13 @@ brief — do not claim anything is new or recurring. Fix nothing.
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
-- **Reddit + Substack access:** WebFetch cannot reach either. Same
-  `idea-scraper-actor/` path as `improvement-loop-monthly` — requires
-  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables; if
-  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
-  self-reports SKIPPED. Fired sessions also carry no MCP connectors (same as
-  the other Routines).
+- **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
+  directly (see 2026-08-03 diagnosis above). Same `idea-scraper-actor/` path
+  as `improvement-loop-monthly` — requires `APIFY_API_TOKEN` and
+  `APIFY_ACTOR_ID` set as environment variables; if either is unset, or
+  `api.apify.com` returns a CONNECT/tunnel 403, the step self-reports SKIPPED
+  and falls back to the WebSearch-only scan. Fired sessions also carry no MCP
+  connectors (same as the other Routines).
 
 ### Verbatim prompt
 
@@ -356,29 +384,35 @@ seed file, or preset, and never push to main.
       blast-radius rule applies here: every preset.txt proposal MUST include a
       before/after quote and an explicit note of the fleet-wide effect. Tag
       proposals [fleet preset].
-4. Reddit + Substack ideas: bounded pass for card-writing techniques applicable
-   to the characters/presets reviewed above. WebFetch cannot reach reddit.com or
-   api.apify.com. Source: the `idea-scraper-actor/` Apify actor (repo root; see
-   its README) — NOT direct curl to reddit.com, which this environment's
-   network policy blocks (CONNECT 403 as of 2026-07-20). Requires both
-   APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment variables; if either
-   is unset, or the call fails with a CONNECT/tunnel 403 (api.apify.com itself
-   blocked), report this step as "SKIPPED (Apify not configured/reachable; see
-   idea-scraper-actor/README.md)" and continue to step 5. Otherwise:
+4. External ideas: bounded pass for card-writing techniques applicable to the
+   characters/presets reviewed above.
+   Primary source: the `idea-scraper-actor/` Apify actor (repo root; see its
+   README) for Reddit + Substack. It reaches both through Apify's own
+   infrastructure, sidestepping the fired session's own inability to reach
+   reddit.com directly (Cloudflare blocks it past the proxy tunnel; WebFetch
+   and WebSearch both refuse the domain; Reddit's app-registration flow now
+   redirects to Devvit rather than issuing OAuth app credentials — see this
+   Routine's history above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set
+   as environment variables; if either is unset, or the call fails with a
+   CONNECT/tunnel 403 (api.apify.com itself blocked), report this part as
+   "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
+   and fall back to the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"reddit_urls": ["https://www.reddit.com/r/SillyTavernAI/top/?t=month"], "substack_publications": [], "max_items_per_source": 25}'
    (max_items_per_source bounds Apify's pay-per-result cost — do not raise it
    without owner approval. substack_publications is empty by default; only add
-   entries the owner has named. WebSearch may supplement for discovery of
-   similar character/roleplay-writing subreddits or Substacks.) Cite every
-   external idea with its source URL; never fabricate sources.
+   entries the owner has named.)
+   Supplement with WebSearch (max ~5 queries), scoped to sources a fired
+   session can actually reach — SillyTavern's own GitHub (wiki, discussions,
+   issues), character-card-writing blogs and guides, HuggingFace discussions.
+   Cite every external idea with its source URL; never fabricate sources.
 5. If there are findings or ideas: write ONE file
    character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
    [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea] /
-   [substack idea] with its evidence or URL, phrased as concrete edits the owner
-   could apply.
+   [substack idea] / [external idea] with its evidence or URL, phrased as
+   concrete edits the owner could apply.
    NOTHING is applied without owner approval. Commit only that file to the branch
    claude/character-review (reset it to origin/main first if it already exists)
    and push ONLY to claude/character-review — NEVER to main or any other branch.
