@@ -90,7 +90,11 @@ async def main() -> None:
         timeframe = actor_input.get("reddit_timeframe") or "month"
 
         if subreddits:
-            proxy_configuration = await Actor.create_proxy_configuration(groups=["RESIDENTIAL"])
+            # RESIDENTIAL has 0 available proxies on this Apify account (confirmed
+            # 2026-08-07 via GET /v2/users/me) - it silently produced zero-byte,
+            # zero-item "successful" runs. BUYPROXIES94952 is the account's own
+            # datacenter-proxy package with real capacity (27 available).
+            proxy_configuration = await Actor.create_proxy_configuration(groups=["BUYPROXIES94952"])
             proxy_url = await proxy_configuration.new_url() if proxy_configuration else None
             for subreddit in subreddits:
                 try:

@@ -25,20 +25,34 @@ Three approaches were tried in one day (2026-08-07) before this one:
 
 **This actor is approach 4**: it never runs anyone else's Actor. It makes its
 own HTTP requests — to Reddit's public `{subreddit}/top.json` listing
-(routed through Apify's own residential proxy, which *is* available on a
-Creator plan since it's the actor's own network egress, not another Actor's
-execution) and to each Substack publication's public `/feed` RSS endpoint
-(no proxy needed, not blocked). If this ever breaks again, the fix is either
-"the proxy stopped getting through Reddit's Cloudflare" (try a different
-proxy group, e.g. `RESIDENTIAL` → check Apify Console for others available on
-the current plan) or "the plan changed" (check Apify Console → Settings →
-billing) — not another architecture pivot.
+(routed through an Apify proxy group, since that's the actor's own network
+egress, not another Actor's execution — permitted on a Creator plan) and to
+each Substack publication's public `/feed` RSS endpoint (no proxy needed,
+not blocked).
 
-**Unverified as of 2026-08-07**: whether Apify's residential proxy actually
-gets past Reddit's Cloudflare block. The mechanism is sound (that's what
-residential proxies are for), but no live run has confirmed it — the first
-deploy attempt should be watched via Apify Console's run log before trusting
-this in production.
+**v0.2's first live runs (2026-08-07) used `groups=["RESIDENTIAL"]` and
+silently did nothing**: `status: SUCCEEDED`, `exitCode: 0` on every run (no
+403, no exception), but zero dataset items, 1–4s runtime, ~500 bytes
+transferred — far too little for even one real fetch. Root-caused via
+`GET /v2/users/me`: this Apify account's `RESIDENTIAL` proxy group has **0
+available proxies**; `BUYPROXIES94952` (27 available) and `StaticUS3` (3
+available) are the groups with real capacity. Switched to
+`BUYPROXIES94952`. **If this ever breaks again the same silent way** (a
+run that reports SUCCEEDED with 0 items and near-zero bytes transferred),
+check the account's actual proxy capacity first with `GET /v2/users/me` —
+don't assume the proxy group name in the code still matches what the
+account has. `Actor.log.warning()` calls inside `main.py`'s `except` blocks
+never appeared in the run log for this failure mode either, since the proxy
+client failed before reaching them — the run log alone will not show this,
+the account's proxy inventory will.
+
+**Still unverified as of 2026-08-07**: whether `BUYPROXIES94952` (a
+datacenter-style proxy package, not residential) actually gets past
+Reddit's Cloudflare block — datacenter IPs are frequently pre-blocklisted
+by exactly this kind of anti-bot system, which is the whole reason
+residential proxies exist as a separate product. This is genuinely
+uncertain, not just untested. Watch the next live run's actual item count,
+not just its `SUCCEEDED` status.
 
 ## Input
 
