@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-07.1"
+BOT_VERSION = "2026-08-07.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -9892,13 +9892,38 @@ people_cmd = _context_file_cmd(PEOPLE_FILE, _people_cache, "People")
 projects_cmd = _context_file_cmd(PROJECTS_FILE, _projects_cache, "Projects")
 
 
-schedule_cmd = _context_file_cmd(SCHEDULE_FILE, {}, "Schedule")
-schedule_cmd.__doc__ = (
-    "View or edit schedule.txt from Telegram.\n"
-    "/schedule          — show full schedule\n"
-    "/schedule <text>   — replace entire schedule\n"
-    "/schedule add <text> — append a line"
-)
+async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View or edit schedule.txt from Telegram.
+    /schedule          — show full schedule
+    /schedule <text>   — replace entire schedule
+    /schedule add <text> — append a line
+
+    Deliberately NOT the _context_file_cmd factory people_cmd/projects_cmd use
+    (see CHANGELOG v2026-08-07.2): that factory closes over its `file` argument
+    by value at the module-import call site, so a test's
+    monkeypatch.setattr(bot, "SCHEDULE_FILE", ...) has no effect on it — a real,
+    code-reviewed regression when this command briefly used the factory.
+    """
+    args = context.args or []
+    if not args:
+        current = SCHEDULE_FILE.read_text(encoding="utf-8").strip() if SCHEDULE_FILE.exists() else "(empty)"
+        await update.message.reply_text(
+            f"Schedule:\n{current}\n\n"
+            f"/schedule <text> — replace\n/schedule add <text> — append",
+        )
+        return
+    if args[0].lower() == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /schedule add <text>")
+            return
+        with SCHEDULE_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n{text}")
+        await update.message.reply_text(f"Schedule updated (added): {text}")
+    else:
+        text = " ".join(args).strip()
+        SCHEDULE_FILE.write_text(text, encoding="utf-8")
+        await update.message.reply_text(f"Schedule updated.")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11062,6 +11087,14 @@ async def _group_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    # NOT dead code like the other 20 sites removed in this release (see CHANGELOG
+    # v2026-08-07.1/.2): _private_gate explicitly no-ops for chat_id < 0 ("group_guard's
+    # jurisdiction") and group_guard never checks the sender's identity, only chat-level
+    # membership — this is the ONLY per-user allowlist check on group text messages.
+    # GROUP_CHAT_DESIGN.md §6: "Human gating unchanged... strangers in an allowed group
+    # are ignored unless ALLOWED_USERS is empty." Removing this breaks that invariant.
+    if not _is_allowed(update.effective_user.id):
+        return
     if not _rate_ok(update.effective_user.id):
         return
     if chat_id < 0:

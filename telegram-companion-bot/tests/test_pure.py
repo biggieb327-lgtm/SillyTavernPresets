@@ -2360,6 +2360,68 @@ class TestPrivateGate:
         self._run(_gate_update(10, None))
 
 
+class TestHandleMessageGroupGating:
+    """v2026-08-07.2: the ponytail-audit cleanup's deletion of handle_message's
+    per-handler _is_allowed check was reverted after /code-review caught it — that
+    check is the ONLY per-user allowlist enforcement for group text messages.
+    _private_gate (group -1) explicitly no-ops for chat_id < 0 ("group_guard's
+    jurisdiction"), and group_guard only checks chat-level GROUP_ALLOWED_CHATS
+    membership, never the sender's identity. GROUP_CHAT_DESIGN.md §6: "Human gating
+    unchanged... strangers in an allowed group are ignored unless ALLOWED_USERS is
+    empty." Pins that invariant directly against handle_message, not just _private_gate."""
+
+    GROUP_CHAT_ID = -100777001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        self._group_mode = bot.GROUP_MODE
+        self._group_chats = set(bot.GROUP_ALLOWED_CHATS)
+        self._last_request = dict(bot._last_request)
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.add(1)  # non-empty: strangers must be rejected
+        bot.GROUP_MODE = True
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.add(self.GROUP_CHAT_ID)
+        bot._last_request.clear()
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+        bot.GROUP_MODE = self._group_mode
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.update(self._group_chats)
+        bot._last_request.clear()
+        bot._last_request.update(self._last_request)
+
+    def _group_update(self, user_id):
+        msg = SimpleNamespace(text="hello", reply_to_message=None, message_id=1)
+        return SimpleNamespace(
+            message=msg,
+            effective_chat=SimpleNamespace(id=self.GROUP_CHAT_ID),
+            effective_user=SimpleNamespace(id=user_id, first_name="Someone"),
+        )
+
+    def test_non_allowlisted_group_member_never_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(999), _cmd_ctx()))
+        assert called == []
+
+    def test_allowlisted_group_member_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(1), _cmd_ctx()))
+        assert len(called) == 1
+
+
 class TestOnErrorHygiene:
     class _Bot:
         def __init__(self):

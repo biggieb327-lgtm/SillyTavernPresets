@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-07.2 — /code-review caught a group-chat gating regression in v2026-08-07.1
+
+**Root cause: `handle_message` does double duty and the audit treated all 21 sites as
+uniform.** v2026-08-07.1 deleted 21 per-handler `_is_allowed` guards on the theory that
+`_private_gate` (handler group -1) already covers every one of them. True for 20. Not
+true for `handle_message`: it's registered for both private AND group chats and
+branches internally on `chat_id < 0`. `_private_gate` explicitly no-ops for `chat_id <
+0` ("group_guard's jurisdiction — untouched here", per its own docstring), and
+`group_guard` only checks chat-level `GROUP_ALLOWED_CHATS` membership, never the
+sender's identity. Deleting the guard removed the ONLY per-user allowlist enforcement
+for group text messages, breaking `GROUP_CHAT_DESIGN.md` §6's documented invariant:
+"Human gating unchanged... strangers in an allowed group are ignored unless
+`ALLOWED_USERS` is empty." Caught by two independent `/code-review` finder agents
+(cross-file tracer + line-by-line diff scan) before merge; never reached main.
+
+**Fix:** restored `handle_message`'s `_is_allowed` check exactly where it was, with a
+comment distinguishing it from the other 20 (genuinely dead) sites so it isn't
+re-deleted by a future pass over the same class of finding. New
+`TestHandleMessageGroupGating` (2 tests) pins the invariant directly against
+`handle_message`, not just `_private_gate` — the gap existed pre-diff too (no test
+anywhere exercised "a non-allowlisted user's text in an allowed group"), so this
+closes a real, previously-untested hole, not just a regression from this release.
+
+**Also reverted:** `schedule_cmd`'s reuse of the `_context_file_cmd` factory (also
+from v2026-08-07.1). Two more `/code-review` findings: the factory closure binds its
+`file` argument by value at the module-import call site, so
+`monkeypatch.setattr(bot, "SCHEDULE_FILE", ...)` silently has no effect — confirmed
+against the existing `test_schedule_cmd_shows_the_schedule`, which was passing only
+because its assertion is loose enough not to notice; and turning `schedule_cmd` from
+a `FunctionDef` into a plain assignment drops it out of `sweep.py`'s AST-based
+handler-coverage scan, silently narrowing the delivery gate's future reach for this
+one handler. `schedule_cmd` is back to its original hand-rolled body (same one
+`people_cmd`/`projects_cmd` already accept this tradeoff for, pre-existing and out of
+scope here). This also moots a third, lower-severity finding (the factory's unchunked
+reply could raise on a near-4096-char replacement schedule) since the original body
+never had that shape.
+
+**Verification:** `bash .claude/tools/verify.sh` green: 1064/1064 tests (2 new:
+`TestHandleMessageGroupGating`), 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
 ## v2026-08-07.1 — Ponytail-audit cleanup: dead code, duplicated logic, redundant gating
 
 **Root cause: not a bug fix — a requested code-simplification pass.** A subagent audit
