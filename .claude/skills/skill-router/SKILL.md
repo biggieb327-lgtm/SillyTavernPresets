@@ -31,6 +31,8 @@ such exemption.
 | Moving instances from the phone to a VPS (ROADMAP 1.2) | `vps-migration` |
 | Working in voicekit-starter/ | `voicekit-work` |
 | Designing unattended/overnight iterative work (a Routine, /loop, or autonomous session) | `unattended-loops` |
+| User asks for terse/caveman-mode chat replies, or invokes /caveman | `caveman` |
+| User asks for the laziest/minimal-code solution, YAGNI mode, or invokes /ponytail | `ponytail` |
 | Anything else | Check `ListSkills`/`SearchSkills` for harness-provided skills (code-review, verify, security-review, update-config, …) — prefer those over improvising |
 
 Rules:
