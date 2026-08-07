@@ -3,7 +3,7 @@
     "name": "idea-scraper",
     "title": "Reddit + Substack idea scraper",
     "description": "Fetches Reddit's own public JSON listings and Substack RSS feeds directly through Apify's proxy, normalizing both into one dataset for the SillyTavernPresets repo's monthly Routines. Does not call any other Actor - a Creator-tier Apify plan cannot run public Actors, only Actors it owns.",
-    "version": "0.2",
+    "version": "0.4",
     "buildTag": "latest",
     "input": "./input_schema.json",
     "dockerfile": "../Dockerfile"

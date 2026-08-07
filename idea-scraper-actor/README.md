@@ -25,20 +25,53 @@ Three approaches were tried in one day (2026-08-07) before this one:
 
 **This actor is approach 4**: it never runs anyone else's Actor. It makes its
 own HTTP requests — to Reddit's public `{subreddit}/top.json` listing
-(routed through Apify's own residential proxy, which *is* available on a
-Creator plan since it's the actor's own network egress, not another Actor's
-execution) and to each Substack publication's public `/feed` RSS endpoint
-(no proxy needed, not blocked). If this ever breaks again, the fix is either
-"the proxy stopped getting through Reddit's Cloudflare" (try a different
-proxy group, e.g. `RESIDENTIAL` → check Apify Console for others available on
-the current plan) or "the plan changed" (check Apify Console → Settings →
-billing) — not another architecture pivot.
+(meant to be routed through one of Apify's own proxy groups, since that's
+the actor's own network egress, not another Actor's execution) and to each
+Substack publication's public `/feed` RSS endpoint (no proxy needed, not
+blocked).
 
-**Unverified as of 2026-08-07**: whether Apify's residential proxy actually
-gets past Reddit's Cloudflare block. The mechanism is sound (that's what
-residential proxies are for), but no live run has confirmed it — the first
-deploy attempt should be watched via Apify Console's run log before trusting
-this in production.
+**Status as of 2026-08-07: Reddit fetching does not work end to end.**
+Three real bugs found and fixed in sequence on live runs, in order of how
+they were uncovered — read this before assuming a new one is the same as
+an old one:
+
+1. **v0.2 through v0.3.2 never actually ran.** `main.py` defined
+   `async def main()` but nothing ever called it — no `asyncio.run(main())`,
+   no `if __name__ == "__main__":` block. `CMD ["python3", "-m", "src.main"]`
+   just imported the module, defined some functions, and exited 0. Every
+   "SUCCEEDED, 0 items" run through v0.3.2 (including the `RESIDENTIAL`
+   group findings below) reflects this, not a real Reddit-access attempt —
+   confirmed by adding a log line as the literal first statement in `main()`
+   and finding it never appeared in any run's log. Fixed in v0.3.3 by adding
+   the entrypoint.
+2. **Once `main()` actually ran, `create_proxy_configuration()` failed with
+   `ApifyApiError: Insufficient permissions`** — for *every* proxy group, not
+   just one. The traceback shows the failure inside `apify-client`'s
+   `user().get()` call (fetching the account's proxy password), before group
+   selection is even relevant. This is an account/token permission gap, not
+   a group-availability one. (`RESIDENTIAL`'s `availableCount: 0`, found via
+   `GET /v2/users/me` while investigating, is real but turned out to be a
+   red herring — `BUYPROXIES94952`'s 27 available proxies hit the identical
+   permission error.) Fixed in v0.3.4/v0.4 by wrapping proxy setup in a
+   try/except that falls back to an unproxied fetch instead of crashing the
+   run — but this does not fix Reddit access, it only stops the permission
+   error from being fatal.
+3. **The unproxied fallback gets a genuine Reddit 403.** With no proxy,
+   `_fetch_subreddit`'s `requests.get()` against `reddit.com` returns
+   `403 Client Error: Blocked` — confirmed live, not inferred. Apify's own
+   compute IPs are blocked by the same Cloudflare rule that blocks a fired
+   Claude Code session's `WebFetch`/direct `curl`.
+
+**Net result: there is currently no working path from this actor to
+Reddit**, proxied or not. Substack needs no proxy and should work now that
+`main()` actually runs, but is untested — no `substack_publications` URL was
+in any test call. **To actually fix Reddit access**, the account's Apify
+Proxy permission needs to be granted (Console/Apify support, not something
+an API token can self-serve) — and even then, whether any given group's
+egress IPs get past Cloudflare is still unverified; that's the next open
+question, not this one. Do not "fix" the group name again without checking
+`create_proxy_configuration()` actually succeeds first — a plausible-looking
+group swap will look identical to the v0.2 fix and still not work.
 
 ## Input
 
