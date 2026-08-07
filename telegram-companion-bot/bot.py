@@ -45,6 +45,16 @@ try:
 except Exception:
     _Garmin = None
 
+try:
+    import acoustic_ears  # optional; needs numpy
+except Exception:
+    acoustic_ears = None
+
+try:
+    import numpy as _np  # optional; needed for episodic recall's matrix cosine similarity
+except Exception:
+    _np = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -87,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-03.6"
+BOT_VERSION = "2026-08-07.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -113,6 +123,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NANOGPT_API_KEY = (os.getenv("NANOGPT_API_KEY") or "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
 if not TELEGRAM_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN not found in .env at " + str(env_path))
@@ -355,7 +366,33 @@ DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "fals
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
 INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
+# Safety: flag genuine acute distress in an incoming message and have her drop the
+# performance and respond with real care, same reply. On by default (owner policy
+# 2026-08-04: a safety net defaults on like everything else in rule 16, not off like
+# a cosmetic feature). Deliberately independent of INNER_VOICE_ENABLED -- it must not
+# be silently inert just because the unrelated cosmetic feature is off.
+#
+# bot-code-invariants rule 3 carve-out (owner-approved 2026-08-04, second one after
+# MEMORY_SEMANTIC_LIVE): this is a new per-message LLM side call, which rule 3 bars.
+# Approved anyway because it is NOT the "small cheap call" the rule's common-mistake
+# note warns about -- it carries no character/history context, just the raw message
+# plus a short classifier system prompt, so it does not re-pay the ~17k-token prompt
+# rule 3's cost argument is about. Folding this into post_reply_analysis (the normal
+# extension point) was considered and rejected: that call fires AFTER the reply is
+# already sent, so distress on THIS message could only change the NEXT reply -- one
+# message late is a real degradation for a safety feature, not an equivalent.
+SAFETY_ENABLED = os.getenv("SAFETY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SAFETY_MODEL = os.getenv("SAFETY_MODEL", MOOD_MODEL)
+SAFETY_RESOURCES = os.getenv(
+    "SAFETY_RESOURCES",
+    "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
+)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
+# Voice tone: a short pace/volume/tone/pause note alongside the transcript -- local FFT
+# analysis via vendored acoustic_ears.py (MIT, menelly/AI_Ears), no network call, no
+# extra API key. Runs concurrently with transcription so it adds no latency.
+# (Reimplemented from bae2dcb, 2026-07-01, never merged.)
+VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
 VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
 DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
 # Separate model for document/card analysis — should be an instruction model,
@@ -375,6 +412,12 @@ LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
 SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
 TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+# Adaptive style mirroring: passively read the user's recent texting habits (length, emoji,
+# caps, enthusiasm, textspeak) and nudge her register to subtly match -- no model call, pure
+# heuristics off the in-RAM history (reimplemented from a485b1b, 2026-06-30, never merged).
+STYLE_MIRROR = os.getenv("STYLE_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+STYLE_SAMPLE = _env_int("STYLE_SAMPLE", "20")    # how many recent user messages to read
+STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many before adapting
 # Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
 # only blocks carrying an explicit "raise this" instruction, while her live context (her day,
 # her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
@@ -621,12 +664,15 @@ def _reddit_access_token() -> str:
 
 # --- Selfies (image-to-image off a base portrait) ---
 # SELFIE_PROVIDER picks the backend: "gemini" calls Google's Gemini API directly
-# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint.
+# (nano-banana / gemini-2.5-flash-image), "nanogpt" goes through NanoGPT's image endpoint,
+# "xai" calls xAI's Grok Imagine API directly.
 SELFIE_PROVIDER = os.getenv("SELFIE_PROVIDER", "gemini" if GEMINI_API_KEY else "nanogpt")
 NANOGPT_IMAGE_URL = os.getenv("NANOGPT_IMAGE_URL", "https://nano-gpt.com/v1/images/generations")
 SELFIE_MODEL = os.getenv("SELFIE_MODEL", "flux-kontext")
 GEMINI_IMAGE_URL = os.getenv("GEMINI_IMAGE_URL", "https://generativelanguage.googleapis.com/v1beta/models")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+XAI_IMAGE_URL = os.getenv("XAI_IMAGE_URL", "https://api.x.ai/v1/images").rstrip("/")
+XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-quality")
 SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
 # When SELFIE_BASE names a file that is not there, fall back to the single unambiguous
 # *_base.* image in the instance dir rather than silently generating from text alone.
@@ -639,6 +685,8 @@ IMAGE_TIMEOUT = _env_int("IMAGE_TIMEOUT", "180")
 
 if SELFIE_PROVIDER == "gemini" and not GEMINI_API_KEY:
     raise SystemExit("SELFIE_PROVIDER=gemini but GEMINI_API_KEY not found in .env at " + str(env_path))
+if SELFIE_PROVIDER == "xai" and not XAI_API_KEY:
+    raise SystemExit("SELFIE_PROVIDER=xai but XAI_API_KEY not found in .env at " + str(env_path))
 
 # --- Memes (template + text overlay, not AI-generated -- AI image models render text
 # unreliably, and a meme lives or dies on legible captions) ---
@@ -754,6 +802,18 @@ _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
 
+# Offline life: a couple times a day, invent ONE concrete event in her own world (grounded
+# in schedule/people/projects/arc) so unprompted news feels like real news instead of
+# generic small talk. Concrete past-tense events only -- opposite of the introspective
+# nightly reflection. No embeddings; cheap chat model. (Reimplemented from b0eb485,
+# 2026-06-29, never merged.)
+LIFE_SIM_ENABLED = os.getenv("LIFE_SIM_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+LIFE_MODEL = os.getenv("LIFE_MODEL", MOOD_MODEL)
+LIFE_EVENTS_MAX = _env_int("LIFE_EVENTS_MAX", "8")
+LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
+LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
+_life_events_cache: dict = {"text": None, "ts": 0.0}
+
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
@@ -803,6 +863,7 @@ MEMORY_QUERY_EMBED_TIMEOUT = _env_float("MEMORY_QUERY_EMBED_TIMEOUT", "3.0")
 MEMORY_DEDUP_SIM = _env_float("MEMORY_DEDUP_SIM", "0.92")
 MEMORY_LORE_SEMANTIC_TOPK = _env_int("MEMORY_LORE_SEMANTIC_TOPK", "3")
 LORE_EMB_FILE = BASE_DIR / "lore_embeddings.json"
+LORE_EMB_MODEL_FILE = BASE_DIR / ".lore_embeddings.model"
 _lore_embeddings: dict[str, list[float]] = {}   # keyed by lore entry content
 _lore_emb_dirty = False
 _QUERY_EMBED_CACHE: "collections.OrderedDict[str, list[float]]" = collections.OrderedDict()
@@ -1341,6 +1402,81 @@ def _read_life_arc() -> str:
     return _read_life_file(LIFE_ARC_FILE, _life_arc_cache)
 
 
+def _read_life_events() -> list[str]:
+    text = _read_life_file(LIFE_EVENTS_FILE, _life_events_cache)
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _append_life_event(line: str):
+    line = line.strip().strip('"').strip()
+    if not line:
+        return
+    existing = []
+    if LIFE_EVENTS_FILE.exists():
+        existing = [l for l in LIFE_EVENTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
+    existing.append(f"[{stamp}] {line}")
+    if len(existing) > LIFE_EVENTS_MAX:
+        existing = existing[-LIFE_EVENTS_MAX:]
+    LIFE_EVENTS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
+    _life_events_cache["text"] = None
+
+
+def _generate_life_event() -> str:
+    """Invent ONE concrete thing that happened in her own life, grounded in her routine/people."""
+    parts = []
+    sched = _read_schedule_today()
+    if sched:
+        parts.append(f"Her routine today:\n{sched}")
+    people = _read_people()
+    if people:
+        parts.append(f"People in her life:\n{people[:700]}")
+    projects = _read_projects()
+    if projects:
+        parts.append(f"What she's working on:\n{projects[:400]}")
+    arc = _read_life_arc()
+    if arc:
+        parts.append(f"Her life right now:\n{arc[:400]}")
+    recent = _read_life_events()
+    if recent:
+        parts.append("Recent events (do NOT repeat these or rehash the same beat):\n"
+                     + "\n".join(recent[-LIFE_EVENTS_MAX:]))
+    if not parts:
+        return ""
+    sys = (
+        f"Invent ONE small, concrete thing that just happened in {NAME}'s own life while she was "
+        f"off living it — an actual event involving the people, places, work, or activities in her "
+        f"world: something a teammate or coworker did, a bit of news, a small win or mishap, a "
+        f"moment at practice or on a shift. Past tense, third person, ONE specific sentence under "
+        f"25 words. It must be an EVENT in her own day — NOT a feeling, NOT reflection, NOT about "
+        f"her phone or who she's texting. Make it fit her routine and the real people named. Vary "
+        f"it from the recent events. Reply with just the sentence, or the word none."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": "\n\n".join(parts)}],
+            model=LIFE_MODEL,
+        ).strip()
+        if raw and not raw.lower().startswith("none"):
+            return raw
+    except Exception as e:
+        log.warning("[life] generation failed: %s", type(e).__name__)
+    return ""
+
+
+async def update_life_event():
+    if not LIFE_SIM_ENABLED:
+        return
+    try:
+        line = await asyncio.to_thread(_generate_life_event)
+        if line:
+            await asyncio.to_thread(_append_life_event, line)
+            print(f"[life] event: {line}")
+    except Exception as e:
+        log.warning("[life] update failed: %s", type(e).__name__)
+
+
 def _read_memories() -> list[str]:
     text = _read_life_file(MEMORIES_FILE, _memories_cache)
     return [ln.strip() for ln in text.splitlines()
@@ -1682,29 +1818,88 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
 # --- Semantic memory (embeddings-backed recall) ---
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDINGS_FILE = BASE_DIR / "embeddings.json"
+EMBEDDINGS_MODEL_FILE = BASE_DIR / ".embeddings.model"
+# Generous cap so a personal bot's memory/fact vocabulary can't grow the cache forever --
+# unlike memories.txt/facts (already capped and consolidated), this cache keeps every
+# distinct text ever embedded, including lines later replaced during consolidation.
+EMBEDDINGS_MAX = _env_int("EMBEDDINGS_MAX", "5000")
 _embeddings_cache: dict[str, list[float]] = {}
 _embeddings_dirty = False
 
+# Episodic recall: archive scrolled-off conversation as embedded chunks and pull the most
+# relevant *past exchange* back per turn -- detail the rolling summary can't keep. Reuses
+# the per-turn query_vec computed for live semantic recall, so it adds no extra per-turn
+# embedding cost. Needs numpy for the cosine matrix. (Reimplemented from 9fa21af,
+# 2026-06-29, never merged -- rewritten against this file's actual embedding primitives,
+# EMBEDDING_MODEL/_embed_text, not the abandoned branch's own EMBED_MODEL/_embed.)
+EPISODIC_RECALL = MEMORY_SEMANTIC_LIVE and os.getenv(
+    "EPISODIC_RECALL", "1").strip() not in ("0", "false", "no", "off")
+EPISODE_MAX = _env_int("EPISODE_MAX", "4000")              # hard cap on archived chunks
+EPISODE_CHUNK_MSGS = _env_int("EPISODE_CHUNK_MSGS", "6")   # messages per chunk (1 msg overlap)
+EPISODE_EMBED_CHARS = _env_int("EPISODE_EMBED_CHARS", "1600")  # truncate before embed
+EPISODE_MIN_SIM = _env_float("EPISODE_MIN_SIM", "0.40")    # cosine floor to surface a memory
+EPISODE_TOPK = _env_int("EPISODE_TOPK", "1")                # how many past moments to surface
+EPISODE_MIN_AGE_HOURS = _env_float("EPISODE_MIN_AGE_HOURS", "24")  # don't recall very-recent stuff
+EPISODES_FILE = BASE_DIR / ".episodes.jsonl"
+EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
+# In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
+_episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
+_episodes_lock = threading.Lock()
+
+# On-this-day resurfacing: once a day, check whether an archived episode's anniversary
+# (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
+# archive, so it needs no extra storage. Gated on EPISODIC_RECALL.
+ONTHISDAY_ENABLED = EPISODIC_RECALL and os.getenv(
+    "ONTHISDAY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ONTHISDAY_TIME = os.getenv("ONTHISDAY_TIME", "10:30")        # local time for the daily check
+ONTHISDAY_INTERVALS = [365, 182, 91, 30]                     # anniversaries to look for (days)
+ONTHISDAY_WINDOW_DAYS = _env_int("ONTHISDAY_WINDOW_DAYS", "3")     # +/- match window
+ONTHISDAY_MIN_GAP_DAYS = _env_int("ONTHISDAY_MIN_GAP_DAYS", "5")   # don't reminisce too often
+ONTHISDAY_FILE = BASE_DIR / ".onthisday"  # JSON {date, ts}: last resurface + episode (no repeats)
+
 
 def _load_embeddings():
+    """A model change discards the cache -- vectors from different models aren't
+    comparable, and silently mixing them makes similarity scores meaningless without
+    any error (2026-08-04: this guard was on episodic recall from the start but
+    missing here; backported after being flagged as a live gap on this cache)."""
     global _embeddings_cache
+    model_ok = True
+    if EMBEDDINGS_MODEL_FILE.exists():
+        try:
+            model_ok = EMBEDDINGS_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EMBEDDINGS_FILE, EMBEDDINGS_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _embeddings_cache = {}
+        return
     try:
         if EMBEDDINGS_FILE.exists():
             _embeddings_cache = json.loads(EMBEDDINGS_FILE.read_text(encoding="utf-8"))
     except Exception:
         _embeddings_cache = {}
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:  # keep the newest by insertion order
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
 
 
 def _save_embeddings():
-    global _embeddings_dirty
+    global _embeddings_dirty, _embeddings_cache
     if not _embeddings_dirty:
         return
+    if len(_embeddings_cache) > EMBEDDINGS_MAX:
+        _embeddings_cache = dict(list(_embeddings_cache.items())[-EMBEDDINGS_MAX:])
     try:
         EMBEDDINGS_FILE.write_text(
             json.dumps(_embeddings_cache, ensure_ascii=False), encoding="utf-8")
+        EMBEDDINGS_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _embeddings_dirty = False
     except Exception as e:
-        log.warning("[embeddings] save failed: %s", e)
+        log.warning("[embeddings] save failed: %s", type(e).__name__)
 
 
 def _embed_text(text: str) -> list[float] | None:
@@ -1814,7 +2009,24 @@ def _find_near_duplicate_pairs(items: list[str], vecs: list, threshold: float
 
 
 def _load_lore_embeddings():
+    """Same model-change guard as _load_embeddings -- see its docstring. No cap here:
+    unlike memories/facts, lore entries are bounded by the character card's lorebook
+    size, not organically growing at runtime."""
     global _lore_embeddings
+    model_ok = True
+    if LORE_EMB_MODEL_FILE.exists():
+        try:
+            model_ok = LORE_EMB_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (LORE_EMB_FILE, LORE_EMB_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        _lore_embeddings = {}
+        return
     try:
         if LORE_EMB_FILE.exists():
             _lore_embeddings = json.loads(LORE_EMB_FILE.read_text(encoding="utf-8"))
@@ -1829,9 +2041,10 @@ def _save_lore_embeddings():
     try:
         LORE_EMB_FILE.write_text(
             json.dumps(_lore_embeddings, ensure_ascii=False), encoding="utf-8")
+        LORE_EMB_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
         _lore_emb_dirty = False
     except Exception as e:
-        log.warning("[lore-emb] save failed: %s", e)
+        log.warning("[lore-emb] save failed: %s", type(e).__name__)
 
 
 def _lore_semantic_hits(q_vec: list[float], top_k: int) -> list[str]:
@@ -1888,6 +2101,15 @@ async def _embed_lore_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("[lore-emb] warm failed: %s", e)
 
 
+async def _episodes_load_job(context: ContextTypes.DEFAULT_TYPE):
+    """One-shot at startup: load the episodic archive into RAM (off-loop)."""
+    try:
+        await asyncio.to_thread(_load_episodes)
+        print(f"[episodes] loaded {len(_episodes['ts'])} archived chunk(s).")
+    except Exception as e:
+        log.warning("[episodes] load failed: %s", type(e).__name__)
+
+
 async def _embed_query_cached(text: str) -> list[float] | None:
     """Embed a user message for live semantic recall, off the event loop and
     bounded by MEMORY_QUERY_EMBED_TIMEOUT. Small LRU so repeated openers
@@ -1912,6 +2134,253 @@ async def _embed_query_cached(text: str) -> list[float] | None:
         while len(_QUERY_EMBED_CACHE) > _QUERY_EMBED_CACHE_MAX:
             _QUERY_EMBED_CACHE.popitem(last=False)
     return vec
+
+
+# --- Episodic recall: embedded archive of scrolled-off conversation (needs numpy) ---
+
+def _normalize_rows(mat):
+    """Return mat with each row L2-normalized, so cosine similarity == a plain dot product."""
+    norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return mat / norms
+
+
+def _load_episodes():
+    """Off-loop: load the episode archive into RAM once. A model change discards the archive
+    (cross-model vectors aren't comparable); over-cap files are trimmed to the newest EPISODE_MAX."""
+    if _episodes["loaded"]:
+        return
+    _episodes["loaded"] = True
+    if not EPISODIC_RECALL or _np is None:
+        return
+    model_ok = True
+    if EPISODES_MODEL_FILE.exists():
+        try:
+            model_ok = EPISODES_MODEL_FILE.read_text(encoding="utf-8").strip() == EMBEDDING_MODEL
+        except Exception:
+            model_ok = False
+    if not model_ok:
+        for f in (EPISODES_FILE, EPISODES_MODEL_FILE):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    ts_list, text_list, vecs = [], [], []
+    if model_ok and EPISODES_FILE.exists():
+        for line in EPISODES_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+                v = o.get("vec")
+                if not v:
+                    continue
+                ts_list.append(float(o.get("ts", 0)))
+                text_list.append(str(o.get("text", "")))
+                vecs.append(v)
+            except Exception:
+                continue
+    trimmed = False
+    if len(vecs) > EPISODE_MAX:  # keep the newest, trim the file once
+        ts_list, text_list, vecs = ts_list[-EPISODE_MAX:], text_list[-EPISODE_MAX:], vecs[-EPISODE_MAX:]
+        trimmed = True
+    with _episodes_lock:
+        _episodes["ts"], _episodes["text"] = ts_list, text_list
+        _episodes["mat"] = _normalize_rows(_np.asarray(vecs, dtype=_np.float32)) if vecs else None
+    if trimmed:
+        _rewrite_episodes_file(ts_list, text_list, vecs)
+
+
+def _rewrite_episodes_file(ts_list, text_list, vecs):
+    try:
+        with EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for ts, text, v in zip(ts_list, text_list, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] file rewrite failed: %s", type(e).__name__)
+
+
+def _archive_episode_chunks(batch: list, uname: str):
+    """Off-loop: chunk the scrolled-off batch, embed each chunk, append to the archive (file +
+    RAM). File is append-only at runtime; RAM is capped; the file is trimmed at next startup."""
+    if not EPISODIC_RECALL or _np is None or not batch:
+        return
+    _load_episodes()  # ensure the existing archive is in RAM before we append to it
+    chunks, step = [], max(1, EPISODE_CHUNK_MSGS - 1)
+    i = 0
+    while i < len(batch):
+        window = batch[i:i + EPISODE_CHUNK_MSGS]
+        if not window:
+            break
+        text = "\n".join(
+            f"{(NAME if m['role'] == 'assistant' else uname)}: {m['content'].strip()}"
+            for m in window if m.get("content")
+        ).strip()
+        if text:
+            ts = window[-1].get("ts") or time.time()
+            chunks.append((float(ts), text))
+        if i + EPISODE_CHUNK_MSGS >= len(batch):
+            break
+        i += step
+    if not chunks:
+        return
+    vecs = []
+    for _, text in chunks:
+        vecs.append(_embed_text(text[:EPISODE_EMBED_CHARS]))
+    if any(v is None for v in vecs):
+        log.warning("[episodes] embed failed for %d/%d chunk(s); archiving skipped this batch.",
+                    sum(1 for v in vecs if v is None), len(vecs))
+        return
+    try:  # append to file outside the lock (don't hold it during disk I/O)
+        with EPISODES_FILE.open("a", encoding="utf-8") as f:
+            for (ts, text), v in zip(chunks, vecs):
+                f.write(json.dumps({"ts": ts, "text": text, "vec": v}) + "\n")
+        EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
+    except Exception as e:
+        log.warning("[episodes] append failed: %s", type(e).__name__)
+        return
+    new = _normalize_rows(_np.asarray(vecs, dtype=_np.float32))
+    with _episodes_lock:
+        for ts, text in chunks:
+            _episodes["ts"].append(ts)
+            _episodes["text"].append(text)
+        _episodes["mat"] = new if _episodes["mat"] is None else _np.vstack([_episodes["mat"], new])
+        n = len(_episodes["ts"])
+        if n > EPISODE_MAX:  # cap RAM (file trimmed at next startup)
+            cut = n - EPISODE_MAX
+            _episodes["ts"] = _episodes["ts"][cut:]
+            _episodes["text"] = _episodes["text"][cut:]
+            _episodes["mat"] = _episodes["mat"][cut:]
+    print(f"[episodes] archived {len(chunks)} chunk(s); {len(_episodes['ts'])} held.")
+
+
+def _episode_when(ts: float) -> str:
+    """Human phrasing of how long ago an episode was, for the recall prompt."""
+    days = max(0, int((time.time() - ts) / 86400))
+    if days <= 0:
+        return "earlier today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"about {days} days ago"
+    if days < 60:
+        return f"about {days // 7} weeks ago"
+    when = datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)
+    return f"back around {when.strftime('%b %d')}"
+
+
+def triggered_episode(query_vec) -> str:
+    """On-loop: return the most relevant past exchange(s) for this turn, or '' (no extra
+    embedding call -- reuses query_vec). Time-gated so the live window isn't echoed back."""
+    if not EPISODIC_RECALL or _np is None or query_vec is None:
+        return ""
+    with _episodes_lock:
+        mat = _episodes["mat"]
+        ts = _episodes["ts"][:]
+        text = _episodes["text"][:]
+    if mat is None or not ts:
+        return ""
+    q = _np.asarray(query_vec, dtype=_np.float32)
+    nq = _np.linalg.norm(q)
+    if nq == 0:
+        return ""
+    sims = mat @ (q / nq)
+    cutoff = time.time() - EPISODE_MIN_AGE_HOURS * 3600
+    picks = []
+    for idx in _np.argsort(-sims):
+        i = int(idx)
+        if i >= len(ts):
+            continue
+        if float(sims[i]) < EPISODE_MIN_SIM:
+            break
+        if ts[i] > cutoff:
+            continue
+        picks.append((ts[i], text[i]))
+        if len(picks) >= EPISODE_TOPK:
+            break
+    if not picks:
+        return ""
+    blocks = [f"({_episode_when(t)})\n{txt}" for t, txt in picks]
+    return ("# A specific moment you remember\n"
+            "Draw on this only if it genuinely fits the conversation — don't force a callback "
+            "or quote it back word for word:\n\n" + "\n\n".join(blocks))
+
+
+def _read_onthisday() -> dict:
+    try:
+        return json.loads(ONTHISDAY_FILE.read_text(encoding="utf-8")) if ONTHISDAY_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _onthisday_episode(exclude_ts=None):
+    """Find one archived episode whose anniversary lands today (~1mo/6mo/1yr ago). Prefers the
+    longest interval, then the closest match. Returns (ts, text) or None. Cheap (no network)."""
+    if not ONTHISDAY_ENABLED or _np is None:
+        return None
+    _load_episodes()
+    with _episodes_lock:
+        ts_list = _episodes["ts"][:]
+        text_list = _episodes["text"][:]
+    now = time.time()
+    best = None  # (interval, -offset, ts, text) — larger interval wins, then closest to anniversary
+    for ts, text in zip(ts_list, text_list):
+        if exclude_ts is not None and ts == exclude_ts:
+            continue
+        days_ago = (now - ts) / 86400
+        for interval in ONTHISDAY_INTERVALS:
+            off = abs(days_ago - interval)
+            if off <= ONTHISDAY_WINDOW_DAYS:
+                cand = (interval, -off, ts, text)
+                if best is None or cand[:2] > best[:2]:
+                    best = cand
+                break
+    return (best[2], best[3]) if best else None
+
+
+async def onthisday_job(context: ContextTypes.DEFAULT_TYPE):
+    """Once-daily: if a past moment's anniversary lands today, reach out to reminisce about it."""
+    if not ONTHISDAY_ENABLED:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    today = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+    last = _read_onthisday()
+    if last.get("date") == today:
+        return  # already reminisced today
+    last_date = last.get("date")
+    if last_date:
+        try:
+            if (date.fromisoformat(today) - date.fromisoformat(last_date)).days < ONTHISDAY_MIN_GAP_DAYS:
+                return  # keep it special — don't reminisce too often
+        except Exception:
+            pass
+    if in_quiet_hours() or _is_quiet(owner):
+        return
+    ep = await asyncio.to_thread(_onthisday_episode, last.get("ts"))
+    if not ep:
+        return
+    ts, text = ep
+    when = _episode_when(ts)
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f"[SYSTEM: {when} this moment happened between you and {uname}:\n\"{text}\"\n"
+        f"It just drifted back into your mind. Reach out warmly and fully in character — bring it up "
+        f"the way someone reminisces out of nowhere ('hey, remember when...'), say what it stirs up in "
+        f"you, maybe ask if they remember it too. Brief and genuine, not a recap or a quote.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        try:
+            ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": ts}), encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[onthisday] resurfaced an episode from {when}.")
+    except Exception as e:
+        log.warning("[onthisday] failed: %s", type(e).__name__)
 
 
 _load_embeddings()
@@ -4559,7 +5028,7 @@ def memory_block(chat_id: int, uname: str) -> str:
 
 async def assemble_messages_async(chat_id: int, latest_user_content: str,
                                   image_data_url: str = None, inner_voice: str = None,
-                                  group: bool = False):
+                                  group: bool = False, distress: bool = False):
     """Reply-path entry to assemble_messages: embeds the user's message off the event
     loop (MEMORY_SEMANTIC_LIVE) so semantic recall + semantic lore actually fire this
     turn. Degrades to keyword-only when disabled, when there's nothing to search, or
@@ -4569,12 +5038,64 @@ async def assemble_messages_async(chat_id: int, latest_user_content: str,
     if MEMORY_SEMANTIC_LIVE and latest_user_content and (_read_memories() or _lore_embeddings):
         query_vec = await _embed_query_cached(latest_user_content)
     return assemble_messages(chat_id, latest_user_content, image_data_url=image_data_url,
-                             inner_voice=inner_voice, group=group, query_vec=query_vec)
+                             inner_voice=inner_voice, group=group, query_vec=query_vec,
+                             distress=distress)
+
+
+_TXT_ABBREVS = frozenset({
+    "lol", "lmao", "lmfao", "rofl", "u", "ur", "rn", "idk", "tbh", "ngl", "omg",
+    "fr", "imo", "btw", "ikr", "smh", "wyd", "hbu", "ty", "np", "ofc", "bc", "cuz", "ya",
+})
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF❤✨‼⁉]"
+)
+
+
+def _user_style_note(chat_id: int) -> str:
+    """Heuristic: read the user's recent texting habits and nudge her register to subtly
+    match (length, emoji, caps, enthusiasm, textspeak). No model call -- pure stats off
+    RAM history."""
+    if not STYLE_MIRROR:
+        return ""
+    msgs = [m["content"] for m in conversation_history.get(chat_id, [])
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and m["content"].strip() and not m["content"].startswith("[")]
+    msgs = msgs[-STYLE_SAMPLE:]
+    n = len(msgs)
+    if n < STYLE_MIN_MSGS:
+        return ""
+    avg_words = sum(len(m.split()) for m in msgs) / n
+    emoji = sum(1 for m in msgs if _EMOJI_RE.search(m)) / n
+    lower = sum(1 for m in msgs if any(c.isalpha() for c in m) and m == m.lower()) / n
+    excl = sum(1 for m in msgs if "!" in m) / n
+    abbr = sum(1 for m in msgs
+               if {w.strip(".,!?").lower() for w in m.split()} & _TXT_ABBREVS) / n
+    traits = []
+    if avg_words <= 6:
+        traits.append("they text in short, clipped messages — keep yours brief and punchy to match")
+    elif avg_words >= 25:
+        traits.append("they write longer, fuller messages — you have room to be a bit more expansive")
+    if emoji >= 0.4:
+        traits.append("they use emoji freely — an emoji here and there fits")
+    elif emoji <= 0.05:
+        traits.append("they rarely use emoji — go light on them")
+    if lower >= 0.6:
+        traits.append("they text in casual all-lowercase — you can loosen your capitalization a touch")
+    if excl >= 0.5:
+        traits.append("they're punchy and exclaim a lot — match that liveliness")
+    if abbr >= 0.3:
+        traits.append("they use casual textspeak (lol, rn, idk) — a little of that is natural with them")
+    if not traits:
+        return ""
+    uname = user_names.get(chat_id, "they")
+    return (f"# Matching {uname}'s texting style\n"
+            f"Subtly mirror how {uname} texts, without losing your own voice: "
+            + "; ".join(traits) + ".")
 
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
-                      query_vec: list[float] | None = None):
+                      query_vec: list[float] | None = None, distress: bool = False):
     """Build the OpenAI-style message list the way SillyTavern layers a card.
 
     group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
@@ -4609,6 +5130,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# {NAME}'s current life arc\n{life_arc}\n"
             f"Draw on this naturally in conversation — it's the texture of her life right now."
         )})
+
+    if LIFE_SIM_ENABLED:
+        life_events = _read_life_events()
+        if life_events:
+            messages.append({"role": "system", "content": (
+                f"# What's been happening in {NAME}'s life\n"
+                + "\n".join("- " + e for e in life_events[-3:])
+                + f"\nReal things that happened to her while she was off living her life. Hers to "
+                  f"bring up if it fits — her news, not a checklist, and don't recite them all."
+            )})
 
     if ATLAS:
         picks = random.sample(ATLAS, min(ATLAS_SAMPLE, len(ATLAS)))
@@ -4869,6 +5400,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                       f" {uname} raises it.")
         messages.append(_sys_opt(block))
 
+    episode = triggered_episode(query_vec)
+    if episode:
+        messages.append(_sys_opt(episode))
+
     bds = boundaries.get(chat_id) or []
     if bds:
         messages.append({"role": "system", "content": (
@@ -4895,6 +5430,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         # fleet's voiceprint was addressing a placeholder instead of the character.
         for _lname, _ltext in PRESET_LAYERS:
             messages.append({"role": "system", "content": fill(_ltext, NAME, uname)})
+
+    if STYLE_MIRROR:
+        snote = _user_style_note(chat_id)
+        if snote:
+            messages.append({"role": "system", "content": snote})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})
@@ -4956,10 +5496,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     else:
         messages.append({"role": "user", "content": latest_user_content})
 
-    if inner_voice:
+    if inner_voice and not distress:  # skip the performative inner voice in a crisis
         messages.append({"role": "system", "content": (
             f"# {NAME}'s private thought — not shown to {uname}\n{inner_voice.strip()}"
         )})
+
+    if distress:  # kept last = highest salience, same reason inner_voice sits here
+        messages.append({"role": "system", "content": _safety_prompt(uname)})
 
     final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
     if PROMPT_STATS:
@@ -5543,6 +6086,44 @@ async def generate_inner_voice(chat_id: int, user_message: str, uname: str) -> s
         return ""
     except Exception:
         return ""
+
+
+def _assess_safety(user_message: str) -> bool:
+    """Sync/off-loop: True if the message shows genuine acute distress or crisis (not
+    roleplay, dark humor, or ordinary venting). Best-effort; any failure returns False
+    rather than block the reply on a broken classifier. No character/history context
+    on purpose -- see the SAFETY_ENABLED comment for why this call is cheap enough to
+    be a rule-3 carve-out."""
+    sys = (
+        "You are a safety classifier for a personal chat. Does this message express GENUINE, "
+        "present distress or crisis about the sender's own real life -- suicidal thoughts, "
+        "self-harm, intent to harm, a mental-health emergency, or being in real danger right now? "
+        "Roleplay, fiction, song lyrics, dark humor, or just venting about a rough day do NOT "
+        "count. Only real, current danger to a real person. Answer with ONLY 'yes' or 'no'."
+    )
+    try:
+        raw = call_nanogpt(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
+            model=SAFETY_MODEL,
+        ).strip().lower()
+        return raw.startswith("y")
+    except Exception as e:
+        log.warning("[safety] check failed: %s", type(e).__name__)
+        return False
+
+
+def _safety_prompt(uname: str) -> str:
+    """Kept-last system message (see assemble_messages) that tells her to drop the
+    performance for one turn, in her own voice -- never a canned crisis-line script."""
+    return (
+        f"# This matters more than the bit right now\n"
+        f"{uname} may be in real distress. Set the performance aside -- no chirping, no roleplay "
+        f"deflection, no jokes to dodge it. Be fully present, warm, and steady, in your own voice. "
+        f"Take what they said seriously, don't minimize it, and don't lecture. Gently encourage "
+        f"them to reach out to someone they trust or a professional, and if it fits, that "
+        f"{SAFETY_RESOURCES}. Stay yourself -- just the version of you that genuinely cares and "
+        f"isn't going anywhere."
+    )
 
 
 def _decide_reaction(user_message: str) -> str:
@@ -6260,9 +6841,62 @@ def _generate_selfie_nanogpt(prompt: str) -> bytes:
     raise RuntimeError("image response had neither b64_json nor url")
 
 
+def _xai_aspect_ratio(size: str) -> str:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD rather than a hardcoded lookup so any
+    per-instance SELFIE_SIZE carries over, not just the handful nanogpt shipped with."""
+    try:
+        w, h = (int(x) for x in size.lower().split("x", 1))
+        if w <= 0 or h <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        return "1:1"
+    g = math.gcd(w, h)
+    return f"{w // g}:{h // g}"
+
+
+def _generate_selfie_xai(prompt: str) -> bytes:
+    """Generate via xAI's Grok Imagine API (OpenAI-shaped, but its own endpoint family).
+
+    Uses /images/edits when a reference photo exists (face consistency), else
+    /images/generations. XAI_IMAGE_URL is the .../v1/images base both endpoints hang off.
+    """
+    headers = {"Authorization": f"Bearer {XAI_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": XAI_IMAGE_MODEL,
+        "prompt": prompt,
+        "n": 1,
+        "response_format": "b64_json",
+        "aspect_ratio": _xai_aspect_ratio(SELFIE_SIZE),
+    }
+    if _has_base_image():
+        url = f"{XAI_IMAGE_URL}/edits"
+        payload["image"] = {"url": _base_data_url(), "type": "image_url"}
+    else:
+        url = f"{XAI_IMAGE_URL}/generations"
+
+    r = _post_with_retries(url, headers=headers, json=payload, timeout=IMAGE_TIMEOUT)
+    r.raise_for_status()
+    item = r.json()["data"][0]
+    b64 = item.get("b64_json")
+    if b64:
+        # Some xAI responses put the full data URI in b64_json instead of raw base64
+        # (undocumented, seen inconsistently) -- strip the prefix if it's there.
+        if b64.startswith("data:"):
+            b64 = b64.split(",", 1)[-1]
+        return base64.b64decode(b64)
+    if item.get("url"):
+        img = _get_with_retries(item["url"], timeout=IMAGE_TIMEOUT)
+        img.raise_for_status()
+        return img.content
+    raise RuntimeError(f"xAI image response had neither b64_json nor url: {item}")
+
+
 def generate_selfie_image(prompt: str) -> bytes:
     if SELFIE_PROVIDER == "gemini":
         return _generate_selfie_gemini(prompt)
+    if SELFIE_PROVIDER == "xai":
+        return _generate_selfie_xai(prompt)
     return _generate_selfie_nanogpt(prompt)
 
 
@@ -6858,6 +7492,8 @@ async def maintain_memory(chat_id: int):
             except Exception as e:
                 log.warning("[memory] summarize failed; dropping overflow without summary: %s", e)
                 _count_error("memory")
+            if EPISODIC_RECALL:  # archive the verbatim turns before they're dropped (off-loop)
+                asyncio.create_task(asyncio.to_thread(_archive_episode_chunks, batch, uname))
             del conversation_history[chat_id][:drop_count]
             save_state()
             print(f"[memory] Summarized {drop_count} message(s) for chat {chat_id}.")
@@ -7698,6 +8334,27 @@ async def mood_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    items = _read_life_events()
+    if not items:
+        await update.message.reply_text(
+            "Nothing's happened yet — her life fills in over the day (or use /newsnow).")
+        return
+    await update.message.reply_text(
+        f"🌅 What's been happening in {NAME}'s life:\n" + "\n".join("• " + e for e in items))
+
+
+async def newsnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not LIFE_SIM_ENABLED:
+        await update.message.reply_text("Offline life is off (LIFE_SIM_ENABLED=0).")
+        return
+    await update.message.reply_text("🤔 Seeing what she got up to...")
+    await update_life_event()
+    items = _read_life_events()
+    await update.message.reply_text(("• " + items[-1]) if items else
+                                    "Nothing came of it that time — try again.")
+
+
 async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ms_list = milestones.get(chat_id) or []
@@ -7711,8 +8368,10 @@ async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
-async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+def _memory_export_text(chat_id) -> str:
+    """Shared by /exportmemory and the menu button — both dumped the same fields
+    with slightly different section labels before this dedup; wording now follows
+    this, the command's original text."""
     now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
     summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
     fts = facts.get(chat_id) or []
@@ -7745,17 +8404,31 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "=== RELATIONSHIP MILESTONES ===",
             "\n".join("- " + m["text"] for m in ms_list),
         ]
-    text = "\n".join(lines)
+    return "\n".join(lines)
+
+
+async def _send_memory_export(chat_id, send_document):
+    """send_document(fh) sends the open file handle — caller supplies reply_document
+    vs bot.send_document since the command and the menu-button paths use different
+    Telegram calls for the same file."""
     path = BASE_DIR / f"memory_export_{chat_id}.txt"
-    path.write_text(text, encoding="utf-8")
+    path.write_text(_memory_export_text(chat_id), encoding="utf-8")
     try:
         with path.open("rb") as fh:
-            await update.message.reply_document(
-                fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                caption=f"Memory dump for {NAME}.",
-            )
+            await send_document(fh)
     finally:
         path.unlink(missing_ok=True)
+
+
+async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await _send_memory_export(
+        chat_id,
+        lambda fh: update.message.reply_document(
+            fh, filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+            caption=f"Memory dump for {NAME}.",
+        ),
+    )
 
 
 # --- Pinned memories ---
@@ -8224,38 +8897,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send("No boundaries set. Use /boundary <text>.")
 
     elif data == "cmd:exportmemory":
-        now_str = (datetime.now(TZ) if TZ else datetime.now()).strftime("%Y-%m-%d %H:%M")
-        summ = (summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        fts = facts.get(chat_id) or []
-        rsumm = (recent_summaries.get(chat_id) or "").strip() or "(nothing yet)"
-        rfts = recent_facts.get(chat_id) or []
-        ms_list = milestones.get(chat_id) or []
-        goal = (next_goals.get(chat_id) or "").strip() or "(none)"
-        items = beliefs.get(chat_id, {}).get("items") or {}
-        lines = [
-            f"Memory export — {NAME} / {now_str}", "",
-            "=== LONG-TERM ===", f"Summary:\n{summ}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in fts) or "(none)"), "",
-            "=== RECENT ===", f"Summary:\n{rsumm}", "",
-            "Facts:\n" + ("\n".join("- " + f for f in rfts) or "(none)"), "",
-            "=== SELF-IMAGE ===",
-            "\n".join(f"- {t}: {d['score']}/10" for t, d in items.items()) or "(none yet)", "",
-            f"Next goal: {goal}",
-        ]
-        if ms_list:
-            lines += ["", "=== MILESTONES ===",
-                      "\n".join("- " + m["text"] for m in ms_list)]
-        path = BASE_DIR / f"memory_export_{chat_id}.txt"
-        path.write_text("\n".join(lines), encoding="utf-8")
-        try:
-            with path.open("rb") as fh:
-                await context.bot.send_document(
-                    chat_id=chat_id, document=fh,
-                    filename=f"memory_{NAME.lower()}_{chat_id}.txt",
-                    caption=f"Memory dump for {NAME}.",
-                )
-        finally:
-            path.unlink(missing_ok=True)
+        await _send_memory_export(
+            chat_id,
+            lambda fh: context.bot.send_document(
+                chat_id=chat_id, document=fh,
+                filename=f"memory_{NAME.lower()}_{chat_id}.txt",
+                caption=f"Memory dump for {NAME}.",
+            ),
+        )
 
     elif data.startswith("vibe:"):
         name = data[5:]
@@ -8397,8 +9046,6 @@ async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     text = " ".join(context.args).strip() if context.args else ""
     if not text:
         await update.message.reply_text("Usage: /addmem <memory text>")
@@ -8408,8 +9055,6 @@ async def addmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     entries = _read_memories()
     if not entries:
         await update.message.reply_text("[no NPC memories yet]")
@@ -8429,8 +9074,6 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg:
         await update.message.reply_text("Usage: /delmem <keyword or line number>")
@@ -8459,9 +9102,30 @@ async def delmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"No memories matched '{arg}'.")
 
 
-async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
+async def episodes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not EPISODIC_RECALL:
+        await update.message.reply_text(
+            "Episodic recall is off (needs MEMORY_SEMANTIC_LIVE + EPISODIC_RECALL).")
         return
+    if _np is None:
+        await update.message.reply_text(f"Episodic recall needs numpy: {_pip_hint('numpy')}")
+        return
+    with _episodes_lock:
+        n = len(_episodes["ts"])
+        newest = _episodes["ts"][-1] if n else 0
+        sample = _episodes["text"][-1] if n else ""
+    if not n:
+        await update.message.reply_text(
+            "No episodes archived yet (they accrue as conversation ages out).")
+        return
+    await _reply_chunked(
+        update,
+        f"📚 Episodic archive: {n} chunk(s) held (cap {EPISODE_MAX}).\n"
+        f"Most recent ({_episode_when(newest)}):\n\n{sample[:1200]}"
+    )
+
+
+async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = " ".join(context.args).strip() if context.args else ""
     parts = args.split(None, 1)
     if len(parts) < 2 or not parts[0].isdigit():
@@ -8482,8 +9146,6 @@ async def editmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     arg = " ".join(context.args).strip() if context.args else ""
     if not arg or not arg.isdigit():
         await update.message.reply_text("Usage: /sourcemem <number>")
@@ -8523,8 +9185,6 @@ async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     no data behind it risks flagging genuinely distinct facts (two different Costco
     trips, worded similarly) as duplicates, so this surfaces candidates for a human
     to judge rather than acting on them."""
-    if not _is_allowed(update.effective_user.id):
-        return
     chat_id = update.effective_chat.id
     await update.message.reply_text(
         "🔍 Checking for near-duplicate facts (embedding compare, may take a moment)...")
@@ -8555,8 +9215,6 @@ async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     args = context.args or []
     queue = _load_memory_review()
     if not args:
@@ -9239,6 +9897,12 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /schedule          — show full schedule
     /schedule <text>   — replace entire schedule
     /schedule add <text> — append a line
+
+    Deliberately NOT the _context_file_cmd factory people_cmd/projects_cmd use
+    (see CHANGELOG v2026-08-07.2): that factory closes over its `file` argument
+    by value at the module-import call site, so a test's
+    monkeypatch.setattr(bot, "SCHEDULE_FILE", ...) has no effect on it — a real,
+    code-reviewed regression when this command briefly used the factory.
     """
     args = context.args or []
     if not args:
@@ -9471,8 +10135,6 @@ def _transcribe_audio(data: bytes, filename: str, mime: str) -> str:
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -9484,22 +10146,35 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state()
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    tone_task = None
     try:
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         voice_bytes = await voice_file.download_as_bytearray()
+        if VOICE_TONE_ENABLED and acoustic_ears is not None:
+            # Kick this off now so it runs concurrently with the (blocking) transcription
+            # call below instead of adding serial latency.
+            tone_task = asyncio.create_task(_analyze_voice_tone(bytes(voice_bytes)))
         transcript = await asyncio.to_thread(
             _transcribe_audio, bytes(voice_bytes), "voice.ogg", "audio/ogg")
     except Exception as e:
         log.warning("Voice transcription failed: %s", e)
+        if tone_task:
+            tone_task.cancel()
         await context.bot.send_message(chat_id=chat_id,
                                        text="[couldn't make out that voice note]")
         return
 
     if not transcript:
+        if tone_task:
+            tone_task.cancel()
         return
 
     try:
+        acoustic = await tone_task if tone_task else None
+        tone_note = acoustic_ears.describe_acoustic(acoustic, len(transcript.split())) if acoustic else None
         content = f"[voice message]: {transcript}"
+        if tone_note:
+            content += f"\n[How it sounded: {tone_note}]"
         messages = await assemble_messages_async(chat_id, content)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
@@ -9528,10 +10203,27 @@ async def _run_ffmpeg(*args: str) -> tuple[bytes, bytes]:
     return await proc.communicate()
 
 
+async def _analyze_voice_tone(voice_bytes: bytes):
+    """Best-effort acoustic read on a voice note (pace/pauses/tone) -- local FFT
+    analysis, no network. Returns the analyze_acoustic() dict, or None on any failure."""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ogg_path = os.path.join(tmpdir, "voice.ogg")
+            wav_path = os.path.join(tmpdir, "voice.wav")
+            with open(ogg_path, "wb") as f:
+                f.write(voice_bytes)
+            await _run_ffmpeg("-y", "-i", ogg_path, "-ar", "44100", "-ac", "1",
+                               "-c:a", "pcm_s16le", wav_path)
+            if not os.path.exists(wav_path):
+                return None
+            return await asyncio.to_thread(acoustic_ears.analyze_acoustic, wav_path)
+    except Exception as e:
+        log.warning("[voice-tone] check failed: %s", type(e).__name__)
+        return None
+
+
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -9760,8 +10452,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_pdf and not is_json:
         return  # unsupported file type — let it fall through silently
 
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _rate_ok(update.effective_user.id):
         return
     user_names[chat_id] = update.effective_user.first_name or "you"
@@ -10397,6 +11087,12 @@ async def _group_poll_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    # NOT dead code like the other 20 sites removed in this release (see CHANGELOG
+    # v2026-08-07.1/.2): _private_gate explicitly no-ops for chat_id < 0 ("group_guard's
+    # jurisdiction") and group_guard never checks the sender's identity, only chat-level
+    # membership — this is the ONLY per-user allowlist check on group text messages.
+    # GROUP_CHAT_DESIGN.md §6: "Human gating unchanged... strangers in an allowed group
+    # are ignored unless ALLOWED_USERS is empty." Removing this breaks that invariant.
     if not _is_allowed(update.effective_user.id):
         return
     if not _rate_ok(update.effective_user.id):
@@ -10453,10 +11149,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 link_url = link.group(0)
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        # Run inner voice + link fetch in parallel to cut wall-clock latency.
+        # Run inner voice + safety check + link fetch in parallel to cut wall-clock latency.
         parallel = []
         if INNER_VOICE_ENABLED:
             parallel.append(generate_inner_voice(chat_id, user_message, user_names[chat_id]))
+        if SAFETY_ENABLED:
+            parallel.append(asyncio.to_thread(_assess_safety, user_message))
         if link_url:
             parallel.append(asyncio.to_thread(fetch_link, link_url))
 
@@ -10471,6 +11169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx += 1
         else:
             inner_voice = ""
+        if SAFETY_ENABLED:
+            distress = results[idx] is True  # BaseException or False both read as no-distress
+            idx += 1
+        else:
+            distress = False
         if link_url:
             fetched = results[idx] if not isinstance(results[idx], BaseException) else None
             if fetched:
@@ -10582,7 +11285,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"not in this list:\n{_mbrief}\n]"
                     )
 
-        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice)
+        messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice,
+                                                 distress=distress)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -10644,8 +11348,6 @@ async def _send_followup(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -10691,8 +11393,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """React in character to a sticker the user sent."""
     chat_id = update.effective_chat.id
-    if not _is_allowed(update.effective_user.id):
-        return
     gap_hours = (time.time() - last_seen.get(chat_id, time.time())) / 3600
     nudge_mood(chat_id, gap_hours)
     last_seen[chat_id] = time.time()
@@ -10875,6 +11575,10 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
     unotes = _read_user_notes()
     if unotes:
         parts.append(f"Things going on with {uname}: {unotes[:200]}")
+    life_events = _read_life_events()
+    if life_events:
+        parts.append("Recent things that happened in her own life she might want to share:\n"
+                     + "\n".join(life_events[-3:]))
     recent = conversation_history.get(chat_id, [])[-4:]
     if recent:
         snippet = " / ".join(
@@ -11468,8 +12172,6 @@ async def gifsafety_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     chat_id = update.effective_chat.id
     user_names[chat_id] = update.effective_user.first_name or "you"
     hint = " ".join(context.args).strip() if context.args else ""
@@ -12255,6 +12957,19 @@ def _tomtom_err_detail(resp) -> str:
     return detail[:200]
 
 
+def _classify_fetch_error_by_type(e) -> str:
+    """Exception-type fallback shared by _tomtom_err_reason/_wsdot_err_reason, used once
+    each caller has ruled out an HTTP status code (they classify codes differently —
+    TomTom adds key/rate-limit detail, WSDOT just reports the code — so only this
+    generic tail is common to both)."""
+    name = type(e).__name__
+    if "Timeout" in name:
+        return "timed out"
+    if "Connect" in name or "Connection" in name or "DNS" in name:
+        return "network/DNS error"
+    return name
+
+
 def _tomtom_err_reason(e) -> str:
     """Classify a requests exception into a short reason that never contains the URL/key
     (requests puts the API key in the query string, so `str(e)` would leak it into logs).
@@ -12268,12 +12983,7 @@ def _tomtom_err_reason(e) -> str:
     if code:
         detail = _tomtom_err_detail(resp)
         return f"HTTP {code}" + (f" — {detail}" if detail else "")
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _tomtom_geocode(query: str):
@@ -12695,6 +13405,11 @@ async def garmin_job(context: ContextTypes.DEFAULT_TYPE):
     await update_garmin()
 
 
+async def life_event_job(context: ContextTypes.DEFAULT_TYPE):
+    if LIFE_SIM_ENABLED:
+        await update_life_event()
+
+
 def _health_nudge_ok(owner: int) -> bool:
     """The same proactive gate note_followup_job uses — quiet flag, away, quiet hours,
     per-chat quiet windows, then the shared nudge budget. A health check-in is a nudge
@@ -12704,13 +13419,6 @@ def _health_nudge_ok(owner: int) -> bool:
             or _in_quiet_window(now_dt, quiet_windows.get(owner, []))):
         return False
     return _check_nudge_budget(owner)
-
-
-def _stress_alert_ts() -> float:
-    try:
-        return float(STRESS_ALERT_FILE.read_text()) if STRESS_ALERT_FILE.exists() else 0.0
-    except Exception:
-        return 0.0
 
 
 def _recent_stress_high():
@@ -12727,45 +13435,76 @@ def _recent_stress_high():
     return _stress_sustained(data.get("stressValuesArray") or [], cutoff_ms, STRESS_THRESHOLD)
 
 
-async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic: sustained high stress → one gentle in-character check-in."""
-    if not _alerts_on(STRESS_ALERTS):
+def _read_alert_ts(path: "Path") -> float:
+    try:
+        return float(path.read_text()) if path.exists() else 0.0
+    except Exception:
+        return 0.0
+
+
+async def _run_health_alert_job(
+    context: ContextTypes.DEFAULT_TYPE, *, alerts_on, alert_file: "Path",
+    cooldown_hours: float, fetch_check, trigger_text_fn, label: str,
+):
+    """Shared shape for stress_monitor_job/bb_monitor_job: cooldown gate → proactive
+    nudge gate → off-loop fetch+threshold → in-character trigger → persist cooldown.
+    rhr_monitor_job stays separate — its cooldown is once-per-calendar-day (not an
+    elapsed-hours window) and it always records history regardless of whether an
+    alert fires, so it doesn't fit this shape without bolting on cases this helper
+    would only serve once.
+
+    fetch_check() runs off-loop and returns (triggered: bool, value_for_logging).
+    trigger_text_fn(uname) returns the in-character system trigger text."""
+    if not alerts_on():
         return
     owner = get_owner()
     if owner is None:
         return
-    if time.time() - _stress_alert_ts() < STRESS_ALERT_COOLDOWN_HOURS * 3600:
+    if time.time() - _read_alert_ts(alert_file) < cooldown_hours * 3600:
         return  # already checked in recently
     if not _health_nudge_ok(owner):
         return
-    high, avg = await asyncio.to_thread(_recent_stress_high)
-    if not high:
+    triggered, value = await asyncio.to_thread(fetch_check)
+    if not triggered:
         return
     uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
-        f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
-        f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
-        f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
-    )
     try:
-        await send_triggered(context, owner, trigger)
+        await send_triggered(context, owner, trigger_text_fn(uname))
         _consume_nudge(owner)
         try:
-            STRESS_ALERT_FILE.write_text(str(time.time()))
+            alert_file.write_text(str(time.time()))
         except Exception:
             pass
-        print(f"[stress] high-stress check-in sent (avg {avg}).")
+        print(f"[{label}] check-in sent ({value}).")
     except Exception as e:
-        log.warning("[stress] alert failed: %s", type(e).__name__)
+        log.warning("[%s] alert failed: %s", label, type(e).__name__)
         _count_error("garmin")
 
 
-def _bb_alert_ts() -> float:
-    try:
-        return float(BB_ALERT_FILE.read_text()) if BB_ALERT_FILE.exists() else 0.0
-    except Exception:
-        return 0.0
+async def stress_monitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic: sustained high stress → one gentle in-character check-in."""
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(STRESS_ALERTS),
+        alert_file=STRESS_ALERT_FILE,
+        cooldown_hours=STRESS_ALERT_COOLDOWN_HOURS,
+        fetch_check=_recent_stress_high,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their stress has stayed high for a while now — "
+            f"they're wound up / on edge. Reach out gently and fully in character: notice they seem "
+            f"tense, check in warmly, and if it fits softly nudge them toward a breather. Brief and "
+            f"caring, NOT clinical. Don't cite numbers or mention a watch or dashboard.]"
+        ),
+        label="stress",
+    )
+
+
+def _bb_fetch_check():
+    """Off-loop: (triggered, body_battery) — triggered when Body Battery has bottomed out."""
+    bb = _body_battery_now()
+    if bb is None or bb > BB_LOW_THRESHOLD:
+        return (False, bb)
+    return (True, bb)
 
 
 def _body_battery_now():
@@ -12783,37 +13522,21 @@ def _body_battery_now():
 
 async def bb_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic: Body Battery bottomed out → one gentle "go easy" check-in."""
-    if not _alerts_on(BB_ALERTS):
-        return
-    owner = get_owner()
-    if owner is None:
-        return
-    if time.time() - _bb_alert_ts() < BB_ALERT_COOLDOWN_HOURS * 3600:
-        return
-    if not _health_nudge_ok(owner):
-        return
-    bb = await asyncio.to_thread(_body_battery_now)
-    if bb is None or bb > BB_LOW_THRESHOLD:
-        return
-    uname = user_names.get(owner, "you")
-    trigger = (
-        f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
-        f"right now — physically depleted, the kind of drained where pushing harder won't help. "
-        f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
-        f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
-        f"clinical. Don't cite numbers or mention a watch or battery.]"
+    await _run_health_alert_job(
+        context,
+        alerts_on=lambda: _alerts_on(BB_ALERTS),
+        alert_file=BB_ALERT_FILE,
+        cooldown_hours=BB_ALERT_COOLDOWN_HOURS,
+        fetch_check=_bb_fetch_check,
+        trigger_text_fn=lambda uname: (
+            f"[SYSTEM: {uname}'s smartwatch shows their body's energy reserves are running on empty "
+            f"right now — physically depleted, the kind of drained where pushing harder won't help. "
+            f"Reach out gently and fully in character: notice they seem worn out, be warm and soft, "
+            f"and if it fits nudge them to rest or go easy on themselves. Brief and caring, NOT "
+            f"clinical. Don't cite numbers or mention a watch or battery.]"
+        ),
+        label="bb",
     )
-    try:
-        await send_triggered(context, owner, trigger)
-        _consume_nudge(owner)
-        try:
-            BB_ALERT_FILE.write_text(str(time.time()))
-        except Exception:
-            pass
-        print(f"[bb] low-energy check-in sent (body battery {bb}).")
-    except Exception as e:
-        log.warning("[bb] alert failed: %s", type(e).__name__)
-        _count_error("garmin")
 
 
 def _resting_hr_today():
@@ -12908,16 +13631,12 @@ def _wsdot_err_reason(e) -> str:
     """Key-free reason for a WSDOT fetch failure. WSDOT puts the AccessCode in the query
     string, so `str(e)`/`%s` on the raw exception leaks the key into errors.log — the
     full URL with AccessCode reached the log this way (observed 2026-07-20). Classify by
-    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason."""
+    status/type instead; never log the raw exception. Same discipline as _tomtom_err_reason,
+    and shares its exception-type fallback (_classify_fetch_error_by_type)."""
     code = getattr(getattr(e, "response", None), "status_code", None)
     if code:
         return f"HTTP {code}"
-    name = type(e).__name__
-    if "Timeout" in name:
-        return "timed out"
-    if "Connect" in name or "Connection" in name or "DNS" in name:
-        return "network/DNS error"
-    return name
+    return _classify_fetch_error_by_type(e)
 
 
 def _fetch_wsdot_alerts() -> list:
@@ -13072,8 +13791,6 @@ def _garmin_off_reason() -> str:
 
 
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -13098,8 +13815,6 @@ async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     reason = _garmin_off_reason()
     if reason:
         await update.message.reply_text(reason)
@@ -13119,8 +13834,6 @@ async def healthnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed(update.effective_user.id):
-        return
     if not _alerts_on(STRESS_ALERTS):
         reason = _garmin_off_reason()
         await update.message.reply_text(
@@ -13224,6 +13937,8 @@ def _selfie_provider_label() -> str:
     remedy each time: report it where the owner already looks (v2026-08-03.6)."""
     if SELFIE_PROVIDER == "gemini":
         return f"gemini ({GEMINI_IMAGE_MODEL}, modalities {'+'.join(GEMINI_RESPONSE_MODALITIES)})"
+    if SELFIE_PROVIDER == "xai":
+        return f"xai ({XAI_IMAGE_MODEL})"
     return f"{SELFIE_PROVIDER} ({SELFIE_MODEL})"
 
 
@@ -13626,6 +14341,42 @@ def tail_error_lines(n: int = 20) -> list[str]:
     except FileNotFoundError:
         lines = []
     return [l for l in lines if l.strip()][-n:]
+
+
+async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """One-shot feature/health report for this bot — what's on, what's embedded, memory
+    counts. Reimplemented from 71dfa44 (2026-06-29, never merged), scoped down: the
+    original's log-error tail is dropped (redundant with /errors, which already does
+    that job better — admin-gated, paginated), and its flag list is trimmed to what
+    actually exists on this bot today rather than the abandoned branch's full set."""
+    chat_id = update.effective_chat.id
+    on = lambda b: "✅" if b else "—"
+    lines = [f"🪪 {NAME} — diagnostics"]
+    lines.append(
+        "Features:\n"
+        f"  {on(MEMORY_SEMANTIC_LIVE)} semantic memory   {on(EPISODIC_RECALL)} episodic recall   "
+        f"{on(SAFETY_ENABLED)} safety\n"
+        f"  {on(STYLE_MIRROR)} style mirror   {on(LIFE_SIM_ENABLED)} offline life   "
+        f"{on(ONTHISDAY_ENABLED)} on-this-day\n"
+        f"  {on(VOICE_TONE_ENABLED)} voice tone\n"
+        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   "
+        f"{on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
+    )
+    if MEMORY_SEMANTIC_LIVE:
+        lines.append(f"Embedded: {len(_lore_embeddings)} lore entries")
+    if EPISODIC_RECALL:
+        with _episodes_lock:
+            n_ep = len(_episodes["ts"])
+        lines.append(f"Episodes: {n_ep} chunk(s) archived (cap {EPISODE_MAX}, numpy: "
+                    f"{'yes' if _np is not None else 'MISSING'})")
+    if GARMIN_ENABLED:
+        age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
+        lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
+    lines.append(
+        f"Memory: {len(_read_memories())} NPC notes · {len(milestones.get(chat_id) or [])} "
+        f"milestones · {len([r for r in reminders if r['chat_id'] == chat_id])} reminders"
+    )
+    await _reply_chunked(update, "\n".join(lines))
 
 
 async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14107,6 +14858,7 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("editmem", "Edit a memory note by number"),
     BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
@@ -14114,6 +14866,8 @@ _BASE_COMMANDS = [
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
+    BotCommand("news", "See what's been happening in her life"),
+    BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -14166,6 +14920,7 @@ _BASE_COMMANDS = [
     BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
     BotCommand("audit", "Bot health and error report"),
+    BotCommand("diag", "Show this bot's behavior-toggle status"),
     BotCommand("errors", "Show recent errors.log lines (admin only)"),
     BotCommand("restart", "Clean restart via the supervisor (admin only)"),
     BotCommand("update", "Self-deploy from main — dead on the private repo, "
@@ -14379,12 +15134,15 @@ def main():
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))
     app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("recall", recall_cmd))
     app.add_handler(CommandHandler("addmem", addmem_cmd))
     app.add_handler(CommandHandler("mems", mems_cmd))
     app.add_handler(CommandHandler("delmem", delmem_cmd))
+    app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
@@ -14440,6 +15198,7 @@ def main():
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))
     app.add_handler(CommandHandler("fleet", fleet_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(CommandHandler("errors", errors_cmd))
     app.add_handler(CommandHandler("update", update_cmd))
     app.add_handler(CommandHandler("restart", restart_cmd))
@@ -14506,6 +15265,19 @@ def main():
             wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)
             app.job_queue.run_daily(wardrobe_rotate_job, time=wardrobe_time)
             log.info("Daily wardrobe rotation scheduled %02d:00.", _wr_h)
+        if LIFE_SIM_ENABLED:
+            for _lt in LIFE_EVENT_TIMES.split(","):
+                _lt = _lt.strip()
+                if not _lt:
+                    continue
+                try:
+                    _lh, _lm = (int(x) for x in _lt.split(":"))
+                except Exception:
+                    log.warning("[config] bad LIFE_EVENT_TIMES entry %r — skipped", _lt)
+                    continue
+                _ltime = dtime(_lh, _lm, tzinfo=TZ) if TZ else dtime(_lh, _lm)
+                app.job_queue.run_daily(life_event_job, time=_ltime)
+            log.info("Offline life events scheduled at %s.", LIFE_EVENT_TIMES)
         # Scheduled on CAPABILITY, not on the switch: every one of these jobs re-checks its
         # own gate when it fires, so registering them whenever the credentials exist makes
         # `/features health off` → `on` live. Gating registration on the switch made "off"
@@ -14563,6 +15335,21 @@ def main():
         if MEMORY_SEMANTIC_LIVE and LORE:
             app.job_queue.run_once(_embed_lore_job, when=20)
             log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
+        if EPISODIC_RECALL and _np is not None:
+            app.job_queue.run_once(_episodes_load_job, when=21)
+            log.info("Episodic recall on (cap %d chunks).", EPISODE_MAX)
+        elif EPISODIC_RECALL and _np is None:
+            log.warning("EPISODIC_RECALL is set but numpy is missing — episodic recall "
+                        "disabled. Install it with: %s", _pip_hint("numpy"))
+        if ONTHISDAY_ENABLED:
+            try:
+                _oh, _om = (int(x) for x in ONTHISDAY_TIME.split(":"))
+                _ohtime = dtime(_oh, _om, tzinfo=TZ) if TZ else dtime(_oh, _om)
+                app.job_queue.run_daily(onthisday_job, time=_ohtime)
+                log.info("On-this-day reminiscing scheduled at %s.", ONTHISDAY_TIME)
+            except Exception:
+                log.warning("[config] bad ONTHISDAY_TIME %r — on-this-day not scheduled",
+                            ONTHISDAY_TIME)
         if WSDOT_API_KEY:  # capability, not the switch — traffic_poll_job re-checks it
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)

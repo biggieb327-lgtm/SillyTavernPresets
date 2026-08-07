@@ -7,6 +7,396 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-07.2 — /code-review caught a group-chat gating regression in v2026-08-07.1
+
+**Root cause: `handle_message` does double duty and the audit treated all 21 sites as
+uniform.** v2026-08-07.1 deleted 21 per-handler `_is_allowed` guards on the theory that
+`_private_gate` (handler group -1) already covers every one of them. True for 20. Not
+true for `handle_message`: it's registered for both private AND group chats and
+branches internally on `chat_id < 0`. `_private_gate` explicitly no-ops for `chat_id <
+0` ("group_guard's jurisdiction — untouched here", per its own docstring), and
+`group_guard` only checks chat-level `GROUP_ALLOWED_CHATS` membership, never the
+sender's identity. Deleting the guard removed the ONLY per-user allowlist enforcement
+for group text messages, breaking `GROUP_CHAT_DESIGN.md` §6's documented invariant:
+"Human gating unchanged... strangers in an allowed group are ignored unless
+`ALLOWED_USERS` is empty." Caught by two independent `/code-review` finder agents
+(cross-file tracer + line-by-line diff scan) before merge; never reached main.
+
+**Fix:** restored `handle_message`'s `_is_allowed` check exactly where it was, with a
+comment distinguishing it from the other 20 (genuinely dead) sites so it isn't
+re-deleted by a future pass over the same class of finding. New
+`TestHandleMessageGroupGating` (2 tests) pins the invariant directly against
+`handle_message`, not just `_private_gate` — the gap existed pre-diff too (no test
+anywhere exercised "a non-allowlisted user's text in an allowed group"), so this
+closes a real, previously-untested hole, not just a regression from this release.
+
+**Also reverted:** `schedule_cmd`'s reuse of the `_context_file_cmd` factory (also
+from v2026-08-07.1). Two more `/code-review` findings: the factory closure binds its
+`file` argument by value at the module-import call site, so
+`monkeypatch.setattr(bot, "SCHEDULE_FILE", ...)` silently has no effect — confirmed
+against the existing `test_schedule_cmd_shows_the_schedule`, which was passing only
+because its assertion is loose enough not to notice; and turning `schedule_cmd` from
+a `FunctionDef` into a plain assignment drops it out of `sweep.py`'s AST-based
+handler-coverage scan, silently narrowing the delivery gate's future reach for this
+one handler. `schedule_cmd` is back to its original hand-rolled body (same one
+`people_cmd`/`projects_cmd` already accept this tradeoff for, pre-existing and out of
+scope here). This also moots a third, lower-severity finding (the factory's unchunked
+reply could raise on a near-4096-char replacement schedule) since the original body
+never had that shape.
+
+**Verification:** `bash .claude/tools/verify.sh` green: 1064/1064 tests (2 new:
+`TestHandleMessageGroupGating`), 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## v2026-08-07.1 — Ponytail-audit cleanup: dead code, duplicated logic, redundant gating
+
+**Root cause: not a bug fix — a requested code-simplification pass.** A subagent audit
+under this repo's new `ponytail` skill (lazy-senior-dev lens: unrequested abstractions,
+reinvented logic, dead code — see `.claude/skills/ponytail/`) found 6 candidates in
+bot.py. Each was independently verified before fixing; two were rejected after closer
+inspection rather than forced through (see below).
+
+**What shipped:**
+- `schedule_cmd` now reuses the `_context_file_cmd` factory that already backs
+  `people_cmd`/`projects_cmd`, instead of hand-rolling the same view/replace/append
+  shape. (Minor, stated: the replace-confirmation message now echoes the new text,
+  matching people/projects, instead of a bare "Schedule updated.")
+- `stress_monitor_job`/`bb_monitor_job` now share `_run_health_alert_job` (cooldown
+  gate → nudge gate → off-loop fetch+threshold → trigger → persist), collapsing two
+  near-identical ~30-line jobs into one. `rhr_monitor_job` stays separate — its
+  cooldown is once-per-calendar-day, not elapsed-hours, and it always records history
+  regardless of whether an alert fires, so it doesn't fit the shared shape without
+  bolting on cases the helper would only serve once.
+- Deleted 21 dead per-handler `if not _is_allowed(update.effective_user.id): return`
+  guards (news_cmd, addmem_cmd, handle_voice, handle_message, health_cmd, diag_cmd,
+  and 15 more). `_private_gate` (handler group -1, added specifically to replace this
+  exact per-handler pattern — its own docstring names the drift bug it fixed) already
+  stops a disallowed caller before any of these ever runs; confirmed by grep that none
+  of the 21 were ever called outside Telegram dispatch. 4 tests that called these
+  handlers directly to assert the now-removed guard (in `TestNewsCommands`,
+  `TestDiagCmd`, `TestEpisodesCmd`, `TestDupefactsCmd`) were retired with a comment
+  pointing at `TestPrivateGate`, which already covers the gating contract at the one
+  real choke point — deliberate widening, not a silent loosening.
+- `export_memory_cmd` and the menu button's `cmd:exportmemory` branch built the same
+  export text independently, ~25 duplicated lines each, with slightly different
+  section labels ("=== LONG-TERM ===" vs "=== LONG-TERM MEMORY ===", "Facts:" vs
+  "Recent facts:" for the recent-facts line). Now share `_memory_export_text`/
+  `_send_memory_export`; both paths use the command's original wording. New
+  `TestExportMemoryCmd` + `TestButtonCallbackExportMemory` — `button_callback` had
+  zero test coverage before this.
+- `_wsdot_err_reason`/`_tomtom_err_reason` shared their exception-type fallback
+  (timeout / connection-DNS / exception-class-name) into
+  `_classify_fetch_error_by_type`. Each keeps its own HTTP-status-code handling,
+  which genuinely differs (WSDOT just reports the code; TomTom adds key-rejected /
+  rate-limited / body-detail messages) — only the truly identical tail moved.
+
+**Rejected after closer inspection (surfaced, not forced):**
+- The audit flagged pin/boundary/joke/wardrobe/note add-list-remove-by-number as "the
+  same shape 5x." They aren't, underneath: per-chat dict-of-lists (pins, boundaries),
+  a flat list-of-dicts with a persistent id, not a list index (jokes), a flat dict
+  with extra metadata (wardrobe's current/auto/picked), and a flat text file (notes).
+  A shared helper would need more parameters/branches than the code it replaces —
+  an unrequested abstraction, not a simplification.
+- The audit also flagged `button_callback`'s other menu branches (pinned/boundaries/
+  jokes/wardrobe/selfimage) as re-deriving what their `_cmd` counterparts compute.
+  Checked: the "duplication" there is a single one-line list comprehension per
+  branch, and the surrounding message text is deliberately shorter for the button UI
+  than the full command's — not worth abstracting. Only `cmd:exportmemory` had real
+  (~25-line) duplicated logic, so only that one branch was touched.
+
+**Verification:** `bash .claude/tools/verify.sh` — py_compile clean; pytest 1062/1062
+(4 obsolete tests retired, 5 new: `TestExportMemoryCmd` ×2, `TestButtonCallbackExportMemory`,
+plus the 3 Garmin-source-inspection tests updated to check the composed source); eval
+suite green including `private-gate-registered`; gate-corpus green. `/code-review` run
+on the diff before merge.
+
+## v2026-08-06.1 — Add xAI Grok Imagine as a third selfie provider
+
+**Root cause: not a bug fix — a requested provider option.** `SELFIE_PROVIDER` already
+switched between "gemini" (Google's Gemini API directly) and "nanogpt" (NanoGPT's image
+endpoint); the owner asked to add xAI's Grok Imagine as a third choice, called directly
+rather than through NanoGPT's proxy.
+
+**What shipped:** `SELFIE_PROVIDER=xai` routes through a new `_generate_selfie_xai`,
+mirroring the shape of the existing Gemini/NanoGPT functions. It calls
+`XAI_IMAGE_URL/edits` when a reference photo is set (`_has_base_image()`, same face-lock
+path the other two providers use) and `XAI_IMAGE_URL/generations` otherwise, defaulting
+to `grok-imagine-image-quality`. `XAI_API_KEY`, `XAI_IMAGE_MODEL`, `XAI_IMAGE_URL` are new
+env vars (all optional except the key, required only when `SELFIE_PROVIDER=xai` — same
+fail-fast-at-startup pattern the Gemini path already uses). `SELFIE_SIZE`'s "WxH" pixel
+string is converted to xAI's `aspect_ratio` ratio format via GCD reduction
+(`_xai_aspect_ratio`) rather than a hardcoded lookup table, since any per-instance
+`SELFIE_SIZE` value needs to carry over, not just the couple of sizes already in use.
+xAI's `b64_json` response field has been observed in the wild both as raw base64 and as a
+full `data:image/...;base64,...` URI (the two mirrors of xAI's own docs disagreed, and
+the docs page itself 403s to a plain fetch) — decoding strips the `data:` prefix if
+present rather than assuming one shape.
+
+**Verification:** `TestXaiAspectRatio` (4 tests) + `TestGenerateSelfieXai` (6 tests,
+covering both endpoints, the b64_json/data-URI ambiguity, the URL-fallback path, and the
+neither-field error) + `_selfie_provider_label`/`gather_audit_data` cases extended for
+"xai" the same way the existing gemini/nanogpt cases work. `python3 -m py_compile bot.py`
+clean. `bash .claude/tools/verify.sh` — see run output in the PR/session record.
+
+## v2026-08-04.7 — Model-version guard + cap backported to the memory/lore embedding caches
+
+**Root cause: episodic recall's design was more careful than the caches it sits next
+to.** Comparing episodic recall's (v2026-08-04.6) archive design against the
+pre-existing `_embeddings_cache`/`_lore_embeddings` (memory/lore semantic recall,
+shipped independently on `main` 2026-07-06 — a sibling design, not an ancestor of the
+episode code) surfaced a real, live gap: `_load_embeddings`/`_load_lore_embeddings`
+had no model-fingerprint check at all. Changing `EMBEDDING_MODEL` would silently mix
+vectors from different models into the same cosine comparison, producing meaningless
+similarity scores with no error — external research on this exact failure mode
+(embedding cache invalidation) confirms it's a well-documented pitfall: degradation is
+gradual and distributional, not a single wrong answer, so it goes unnoticed for days.
+`_embeddings_cache` also had no cap: unlike memories.txt/facts (already bounded and
+consolidated), it keeps every distinct text ever embedded, including lines later
+replaced during consolidation — genuinely unbounded growth over the bot's lifetime.
+
+**What shipped:** both caches now write a `.model` sidecar fingerprint file
+(`.embeddings.model`, `.lore_embeddings.model`) on save and check it on load, discarding
+and rebuilding from scratch on mismatch — same pattern episodic recall already used for
+`.episodes.model`. `EMBEDDINGS_MAX` (default 5000) caps `_embeddings_cache`, trimming
+to the newest entries by insertion order on both load and save. No cap added to
+`_lore_embeddings`: lore entries are bounded by the character card's lorebook size, not
+organically growing at runtime the way conversational facts are, so a cap there would
+guard against nothing.
+
+**Web research done before writing any code** (per the owner's request, to check for
+better patterns before building): confirmed model-version fingerprinting as the
+critical, well-documented fix; confirmed a flat-JSON cache with a version sidecar is
+itself a legitimate lightweight pattern for a personal-scale system, not something to
+replace with heavier machinery (Redis/LRU libraries, vector DBs) that this system's
+scale doesn't call for. Nothing else in the research suggested a change beyond what
+episodic recall's own design had already demonstrated.
+
+**Verification:** `TestEmbeddingsCacheGuard` + `TestLoreEmbeddingsCacheGuard`
+(12 tests) — round-trip, fingerprint discard on mismatch, fingerprint kept on match,
+cap trimming on both load and save, no-op when not dirty, no raw exception in the save
+log (structural check, matching the Garmin/WSDOT convention). Break-tested RED three
+ways (both model-mismatch guards disabled, the load-time cap removed). `bash
+.claude/tools/verify.sh` green: 1051 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.6 — Episodic recall + on-this-day reminiscing, reimplemented from a deeper dependency chain
+
+**Root cause: the biggest thing on the lost branch, and not a simple port.**
+`9fa21af` (2026-06-29) built episodic recall; `a485b1b` (2026-06-30) built on-this-day
+reminiscing on top of it. Both are from `claude/push-to-repo-7i2f3c` and never merged.
+Unlike the four earlier ports this session, this one could not be a straight
+reimplementation: the abandoned branch's episodic recall was built on that branch's
+OWN embedding infrastructure (`EMBED_MODEL`, a batch `_embed()` call, a numpy-matrix
+vector cache) — none of which exists on `main`. Current `main` has a completely
+different, simpler embedding subsystem (`EMBEDDING_MODEL`, single-text `_embed_text`,
+a flat `_embeddings_cache` dict, no numpy at all before this session). This is
+rewritten against `main`'s actual primitives, not ported.
+
+**What it does:** when conversation ages out of the verbatim window (`maintain_memory`
+scroll-off), the dropped turns are chunked (`EPISODE_CHUNK_MSGS`), embedded one at a
+time via the existing `_embed_text`, and archived to `.episodes.jsonl` — a numpy
+matrix in RAM for fast cosine similarity (numpy is a real dependency as of
+v2026-08-04.4, no longer a reason to skip this). Each turn, `triggered_episode` reuses
+the query vector already computed for live semantic recall (zero extra per-turn embed
+cost) to pull back the single most relevant past exchange above `EPISODE_MIN_SIM`,
+time-gated by `EPISODE_MIN_AGE_HOURS` so the live window is never echoed back to
+itself. `EPISODE_MAX` caps the archive (~4000 chunks); a model change discards and
+rebuilds it, since cross-model vectors aren't comparable. `/episodes` shows the
+archive size.
+
+On top of that, `onthisday_job` runs once daily: if an archived episode's anniversary
+(~1mo/6mo/1yr ago, `ONTHISDAY_INTERVALS`) lands today, she reaches out unprompted to
+reminisce about it ("hey, remember when...") — min-gap and per-episode dedup keep it
+feeling special, not chatty. `/diag` extended to report both toggles and the archive
+count, matching how the abandoned branch itself grew `/diag` incrementally as each
+feature landed.
+
+**Deliberately not ported in this pass:** the branch's two follow-on commits —
+`1054506` (archiving sent photos as episodes) and `767aab6` (an optional cross-encoder
+reranker) — are enhancements to this subsystem, not required for on-this-day
+reminiscing to work. Flagged as separate follow-ups rather than folded in, keeping
+this release to one theme.
+
+**Verification:** `TestEpisodesCore` + `TestTriggeredEpisode` + `TestOnThisDay` +
+`TestEpisodesCmd` + `TestMaintainMemoryArchivesOnScrollOff` +
+`TestAssembleMessagesEpisodicRecall` + `TestEpisodicConfig` (34 tests) — archive
+round-trip, model-change discard, cap trimming, similarity floor, age-gating,
+anniversary-window matching (including "prefers the longer interval" and exclude-ts
+dedup), the `maintain_memory` scroll-off wiring (a real call through `maintain_memory`
+itself, not a source-read), and the new `/episodes` command driven directly. Break-
+tested RED five ways (similarity floor, age gate, anniversary window, scroll-off
+wiring, model-mismatch discard — each removed, confirmed the matching test failed,
+reverted). Also fixed two things `verify.sh` caught that weren't part of the plan:
+an eval-pinned optional-block count needed bumping from 7 to 8 (a real new block, not
+a bug), and two hardcoded `pip install` strings needed to go through the existing
+`_pip_hint()` helper instead. `bash .claude/tools/verify.sh` green: 1039 passed, 38
+evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## v2026-08-04.5 — /diag: a compact behavior-toggle status command
+
+**Root cause: the fifth thing from the same lost branch, scoped down rather than
+straight-ported.** `71dfa44` (2026-06-29) added `/diag` bundled with log rotation and
+an RHR monitor. The RHR monitor already shipped separately (`RHR_ALERTS` exists on
+`main`). Log rotation was Termux-era (`run-bot.sh` size-check-and-`mv`) — the fleet's
+been on systemd since 2026-07-26, and `errors.log` already rotates properly via
+Python's `RotatingFileHandler`, which is strictly better. `/diag`'s own design also
+doesn't fit as-is: its log-error tail duplicates the existing `/errors` command, and
+its flag list (`EPISODIC_RECALL`, `SCENE_CONTINUITY`, `EVENT_REMINDERS`,
+`READING_ENABLED`) names branch features not on `main`.
+
+**What shipped instead:** `/diag` as a compact status line for the toggles this
+session added — semantic memory, safety, style mirror, offline life, voice tone,
+garmin/stress/RHR/body-battery — a genuinely different axis from `/audit`'s
+`_FEATURES` dict (selfie/meme/gif/voice-backend/traffic/maps/health integrations),
+not a duplicate of it. `_is_allowed`-gated like the original, not admin-only.
+
+**Verification:** `TestDiagCmd` (4 tests) — answers, reports the new toggles by name,
+gated for non-allowed users, and an explicit check that the log-error tail stays
+dropped. Break-tested RED two ways (the gate check removed, two toggle lines
+removed). `bash .claude/tools/verify.sh` green: 1009 passed, 38 evals, 45/45
+gate-corpus.
+
+## v2026-08-04.4 — Voice-note acoustic tone analysis, reimplemented from the same abandoned branch
+
+**Root cause: a fourth feature from the same lost branch.** `bae2dcb` (2026-07-01,
+`claude/push-to-repo-7i2f3c`) vendored the offline half of `menelly/AI_Ears` (MIT) as
+`acoustic_ears.py` and it never merged either.
+
+**What it does:** `VOICE_TONE_ENABLED` runs a local FFT analysis on every voice note
+(pace, volume, pitch brightness, notable pauses) — pure NumPy, no network call, no
+extra API key — and folds a short note ("~140 wpm, dynamic volume, warm tone") alongside
+the transcript. `_analyze_voice_tone` kicks off concurrently with the existing NanoGPT
+transcription call in `handle_voice`, so it adds no serial latency; cancelled cleanly if
+transcription fails or comes back empty. `acoustic_ears.py` is vendored unmodified.
+
+**Two things beyond bot.py:** `numpy` added to `requirements.txt` as a real dependency
+(not commented-out-optional like `garminconnect` — no risky native build, every instance
+handles voice messages). `deploy/vps-sync.sh` only copies explicitly-named files, not a
+directory sync, so `acoustic_ears.py` needed an explicit sync line next to `bot.py`'s —
+without it the feature would have silently never reached any instance, same failure
+shape the abandoned branch's `update-all.sh` fix already worked around once.
+
+**Verification:** `TestAcousticEars` (vendored-module tests against a synthetic WAV:
+tone analysis, empty-audio error path, `describe_acoustic` formatting including wpm/
+pause counts) + `TestAnalyzeVoiceTone` (the bot.py wrapper: missing-output-file
+fail-safe, success path, ffmpeg-exception fail-safe) — 10 tests. Break-tested RED three
+ways (the missing-wav-file check removed, `describe_acoustic`'s None-guard removed, the
+pause-count line removed). `bash .claude/tools/verify.sh` green: 1005 passed, 38 evals,
+45/45 gate-corpus.
+
+## v2026-08-04.3 — Offline life events, reimplemented from the same abandoned branch
+
+**Root cause: a third feature from the same lost branch.** `b0eb485` (2026-06-29,
+`claude/push-to-repo-7i2f3c`, same branch as the safety detector and style mirroring)
+built offline life events and it never merged either.
+
+**What it does:** `LIFE_SIM_ENABLED` generates ONE concrete event in her own world a
+couple times a day (`LIFE_EVENT_TIMES`, default 13:00/20:30) — grounded in her
+schedule/people/projects/life-arc, a cheap chat model call, no embeddings. Stored in
+`life_events.txt` (capped at `LIFE_EVENTS_MAX`), injected into `assemble_messages` as
+"What's been happening in NAME's life" and into `_generate_proactive_hook`'s context,
+so unprompted check-ins carry real news instead of generic small talk. `/news` shows
+recent events, `/newsnow` forces one. All helper functions (`_read_schedule_today`,
+`_read_people`, `_read_projects`, `_read_life_arc`) already existed on `main` —
+this port reused them rather than rebuilding anything.
+
+**Verification:** `TestLifeEvents` + `TestAssembleMessagesLifeEvents` +
+`TestNewsCommands` (17 tests) — file round-trip, cap enforcement, "none"-response
+filtering, broken-classifier fail-open, the on/off wiring into `assemble_messages`,
+and both new `*_cmd` handlers driven directly (matching the delivery gate's
+call-not-mention requirement). Break-tested RED three ways (cap enforcement removed,
+`assemble_messages` wiring removed, "none" filter removed). `bash
+.claude/tools/verify.sh` green: 995 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.2 — Adaptive texting-style mirroring, reimplemented from the same abandoned branch
+
+**Root cause: another feature built once and lost.** `a485b1b` (2026-06-30, same
+`claude/push-to-repo-7i2f3c` branch as the safety detector) built `STYLE_MIRROR` and it
+never merged either. Found during a follow-up audit of that branch for other
+unreferenced work, prompted by the owner asking for the rest of what `ROADMAP.md` 3.10
+already flagged as unported.
+
+**What it does:** `_user_style_note` passively reads the user's last `STYLE_SAMPLE`
+messages (default 20, needs at least `STYLE_MIN_MSGS`=6) and nudges her register to
+subtly match — message length, emoji use, lowercase habits, exclamation frequency,
+casual textspeak (lol/idk/rn/tbh). **Zero model calls** — pure heuristics off the
+in-RAM `conversation_history`, so it adds no per-message LLM cost or latency at all
+(no rule-3 question here, unlike the safety detector). Bracket-tagged synthetic
+entries (`[sent ...]`, heartbeat messages) are excluded from the sample. Injected into
+`assemble_messages` right after the texting-style/preset-layer block. On by default,
+`STYLE_MIRROR=0` disables.
+
+**Verification:** `TestUserStyleNote` (11 tests) — each trait heuristic (short/long,
+emoji high/low, lowercase, textspeak), too-few-messages silence, bracket-tag exclusion,
+the on/off wiring into `assemble_messages`. Break-tested RED two ways (the disabled
+early-return skipped, the `assemble_messages` wiring removed). `bash
+.claude/tools/verify.sh` green: 978 passed, 38 evals, 45/45 gate-corpus.
+
+## v2026-08-04.1 — Safety: distress detection, reimplemented after being built once and never merged
+
+**Root cause: this feature already existed, once.** `d141e84` ("Add safety: detect
+genuine distress and respond with care", 2026-06-29) built `_assess_safety` and shipped
+it on `claude/push-to-repo-7i2f3c` — but that branch diverged from `main` on 2026-06-24
+and was never merged. `main` is 509 commits past that divergence point with no trace of
+it. Not removed after shipping — built once, on a branch that got abandoned in favor of
+continued work directly on `main`, and the feature never made the jump. Found via an
+external-improvement-ideas scan that proposed disclosure/dependency safeguards; the
+owner recognized the idea and asked to confirm it wasn't already live. It wasn't.
+
+**Fix:** `_assess_safety` (cheap off-loop classifier, no character/history context) and
+`_safety_prompt` reimplemented against current `bot.py`. `SAFETY_ENABLED` (default on),
+`SAFETY_MODEL`, `SAFETY_RESOURCES` (988 Suicide & Crisis Lifeline by default).
+`assemble_messages`/`assemble_messages_async` gained a `distress` param: when true, the
+performative inner-voice block is skipped and `_safety_prompt` is appended last (highest
+salience), same as the original design. Wired into `handle_message`'s existing
+`parallel` concurrency list alongside inner voice and link fetch, so it costs no serial
+latency. Deliberately independent of `INNER_VOICE_ENABLED` (default off) — a safety net
+must not be silently inert because an unrelated cosmetic feature is off. Scope matches
+what the abandoned branch actually shipped: `handle_message` (private text) only, not
+group/voice/photo paths — those never had it either.
+
+**bot-code-invariants rule 3 exception (owner-approved 2026-08-04, in the same
+session):** this adds a genuine new per-message LLM side call, which rule 3 bars.
+Approved because it is not the "small cheap call" the rule's common-mistake note warns
+against — no character/history context, so it doesn't re-pay the ~17k-token prompt
+rule 3's cost argument is about. Folding it into `post_reply_analysis` (the sanctioned
+extension point) was considered and rejected: that call fires after the reply is
+already sent, so distress on THIS message could only change the NEXT reply — one
+message late is a real degradation for a safety feature. Documented as a second
+carve-out in `bot-code-invariants` rule 3, next to the existing `MEMORY_SEMANTIC_LIVE`
+one, so a future session doesn't flag it as a violation.
+
+**Verification:** `TestSafetyClassifier` + `TestAssembleMessagesDistress` (10 tests) —
+classifier yes/no parsing, fail-open on a broken classifier, no raw exception in the
+safety log (structural check, matching the Garmin/WSDOT convention), distress
+suppresses inner voice and appends the safety prompt last, no distress by default. All
+break-tested RED (three separate injections: classifier forced False, the
+inner-voice-suppression gate removed, the safety-prompt append removed — each
+confirmed the matching test failed, then reverted). `bash .claude/tools/verify.sh`
+green: 967 passed, 38 evals, 45/45 gate-corpus, sweep 0 candidates.
+
+## 2026-08-04 — The second source-assertion backlog: 7 helpers with zero real test coverage (no bot.py change, no version bump)
+
+**Root cause:** `sweep.py`'s widened `_handler_coverage()` (2026-08-03) flagged
+`save_feature_prefs`, `save_state`, `save_wardrobe`, `send_gif`, `send_meme`,
+`send_selfie`, and `update_garmin` as mentioned-but-never-called by any test —
+`test_the_backlog_stays_empty` had been red on `main`, and CI failing on every push,
+since that scan landed. Three of the seven (`save_state`, `save_wardrobe`,
+`save_feature_prefs`) were deliberately monkeypatched to a no-op in every `*_cmd` test
+that calls them, for filesystem isolation — leaving their real write path itself with
+zero coverage. The other four had only `inspect.getsource` structural checks, never a
+real call — `send_selfie`, the function at the center of the entire multi-release
+face-drift investigation, had never once actually been invoked by a test.
+
+**Fix:** `TestTheSecondBacklogDriven` in `tests/test_pure.py` drives each of the 7
+directly, with fakes for its I/O (a fake Telegram `bot.*` object, monkeypatched
+Giphy/selfie-image/Garmin calls, `tmp_path`-redirected persistence files). No bot.py
+change — this closes a test gap, not a behavior bug; none of the 7 turned out to hide
+an actual defect.
+
+**Verification:** each of the 7 break-tested RED one at a time (an injected early
+`return`, confirmed the matching new test failed, then reverted before the next).
+`bash .claude/tools/verify.sh` green: 957 passed, 38 evals, 45/45 gate-corpus, sweep 0
+candidates.
+
 ## v2026-08-03.6 — /audit said "gemini" and stopped there
 
 **Root cause: only the NanoGPT branch named its model.** `selfie_provider` rendered

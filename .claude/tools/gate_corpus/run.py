@@ -84,6 +84,20 @@ CASES = [
     dict(name="sa-from-import", scanner="source-assertion", bot="sa_handlers.py",
          tests="sa_from_import.py", expect="hit", match="alpha_cmd",
          probes="A37 — handlers assumed to be referenced as bot.<name>"),
+    dict(name="sa-helper-mention-only", scanner="source-assertion",
+         bot="sa_handlers_helper.py", tests="sa_helper_mention_only.py",
+         expect="hit", match="helper_one",
+         probes="v2026-08-03.6 class — a helper one hop from a *_cmd, mentioned via "
+                "getsource, never called"),
+    dict(name="sa-helper-called", scanner="source-assertion",
+         bot="sa_handlers_helper.py", tests="sa_helper_called.py",
+         expect="clean", probes="the same helper actually called clears it"),
+    dict(name="sa-helper-two-hop", scanner="source-assertion",
+         bot="sa_handlers_helper.py", tests="sa_helper_two_hop.py",
+         expect="clean",
+         probes="scope boundary: a function two hops from *_cmd (called only by the "
+                "one-hop helper, not the handler itself) must NOT be widened in — "
+                "that direction runs to every function in bot.py"),
 
     # ── env-drift ──────────────────────────────────────────────────────────
     dict(name="env-undocumented", scanner="env-drift", bot="env_reads_newvar.py",

@@ -546,10 +546,28 @@ def _handler_coverage() -> tuple[dict, set]:
     Shared by the source-assertion scanner and `.claude/hooks/delivery-gate.sh`, which
     blocks a turn that ships a changed `*_cmd` no test drives. One implementation on
     purpose: two copies of "does a test exercise this" would drift, and the drift would
-    be invisible in exactly the direction that lets a broken handler through."""
-    handlers = {n.name for n in ast.walk(ast.parse(BOT.read_text(encoding="utf-8")))
-                if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
-                and n.name.endswith("_cmd")}
+    be invisible in exactly the direction that lets a broken handler through.
+
+    `handlers` starts as every `*_cmd` function, then widens ONE HOP: any module-level
+    function a `*_cmd` body calls directly by name is pulled in too. `gather_audit_data`
+    is not itself named `*_cmd` but is called straight out of `audit_cmd`, and a
+    source-only test on it (`test_nanogpt_reports_the_model_too`, reading its source for
+    "SELFIE_MODEL"/"nanogpt" instead of calling it) slipped past the original
+    `*_cmd`-only scope — CHANGELOG v2026-08-03.6, self-identified as the same family as
+    the `/features` ValueError this scanner exists to catch (v2026-08-02.14). Deliberately
+    NOT walked two hops out (a helper's own helpers) — that direction runs to every
+    function bot.py defines and would misfire on functions legitimately tested by reading
+    their source on purpose, e.g. `test_shared_prompt_hardcodes_no_character_specific_feature`
+    scanning `build_selfie_prompt`'s source for hardcoded traits (v2026-08-03.2)."""
+    bot_tree = ast.parse(BOT.read_text(encoding="utf-8"))
+    module_funcs = {n.name: n for n in ast.walk(bot_tree)
+                    if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
+    handlers = {name for name in module_funcs if name.endswith("_cmd")}
+    for name in list(handlers):
+        for n in ast.walk(module_funcs[name]):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                    and n.func.id in module_funcs and n.func.id not in handlers:
+                handlers.add(n.func.id)
     tree = ast.parse(TESTS.read_text(encoding="utf-8"))
 
     # All three ways a test can name a handler. Only `bot.<name>` was recognised, so a
@@ -641,10 +659,11 @@ def source_assertion() -> list[str]:
     3-tuples, the other grepped the handler text for "_is_admin". Neither called it
     (v2026-08-02.14; C8's fifth member, second to reach the fleet).
 
-    Flagged: a command handler the tests MENTION but never CALL. That is the dangerous
-    state — it reads as covered. A handler with no tests at all is honestly untested and
-    is not reported here. A mention inside inspect.getsource(...) counts as a mention,
-    never as a call; driving the handler with fake Telegram objects is what counts."""
+    Flagged: a command handler (or a helper one hop below it — see `_handler_coverage`)
+    the tests MENTION but never CALL. That is the dangerous state — it reads as covered.
+    A handler with no tests at all is honestly untested and is not reported here. A
+    mention inside inspect.getsource(...) counts as a mention, never as a call; driving
+    the handler with fake Telegram objects is what counts."""
     if not TESTS.exists():
         return [f"{TESTS} is missing — the test suite is the input to this check"]
     mentioned, called = _handler_coverage()

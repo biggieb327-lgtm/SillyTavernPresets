@@ -2360,6 +2360,68 @@ class TestPrivateGate:
         self._run(_gate_update(10, None))
 
 
+class TestHandleMessageGroupGating:
+    """v2026-08-07.2: the ponytail-audit cleanup's deletion of handle_message's
+    per-handler _is_allowed check was reverted after /code-review caught it — that
+    check is the ONLY per-user allowlist enforcement for group text messages.
+    _private_gate (group -1) explicitly no-ops for chat_id < 0 ("group_guard's
+    jurisdiction"), and group_guard only checks chat-level GROUP_ALLOWED_CHATS
+    membership, never the sender's identity. GROUP_CHAT_DESIGN.md §6: "Human gating
+    unchanged... strangers in an allowed group are ignored unless ALLOWED_USERS is
+    empty." Pins that invariant directly against handle_message, not just _private_gate."""
+
+    GROUP_CHAT_ID = -100777001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        self._group_mode = bot.GROUP_MODE
+        self._group_chats = set(bot.GROUP_ALLOWED_CHATS)
+        self._last_request = dict(bot._last_request)
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.add(1)  # non-empty: strangers must be rejected
+        bot.GROUP_MODE = True
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.add(self.GROUP_CHAT_ID)
+        bot._last_request.clear()
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+        bot.GROUP_MODE = self._group_mode
+        bot.GROUP_ALLOWED_CHATS.clear()
+        bot.GROUP_ALLOWED_CHATS.update(self._group_chats)
+        bot._last_request.clear()
+        bot._last_request.update(self._last_request)
+
+    def _group_update(self, user_id):
+        msg = SimpleNamespace(text="hello", reply_to_message=None, message_id=1)
+        return SimpleNamespace(
+            message=msg,
+            effective_chat=SimpleNamespace(id=self.GROUP_CHAT_ID),
+            effective_user=SimpleNamespace(id=user_id, first_name="Someone"),
+        )
+
+    def test_non_allowlisted_group_member_never_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(999), _cmd_ctx()))
+        assert called == []
+
+    def test_allowlisted_group_member_reaches_group_handling(self, monkeypatch):
+        called = []
+
+        async def _fake_group_handler(update, context):
+            called.append(update)
+
+        monkeypatch.setattr(bot, "_handle_group_message", _fake_group_handler)
+        asyncio.run(bot.handle_message(self._group_update(1), _cmd_ctx()))
+        assert len(called) == 1
+
+
 class TestOnErrorHygiene:
     class _Bot:
         def __init__(self):
@@ -3058,13 +3120,24 @@ class TestGarminConfig:
 class TestGarminInvariants:
     """Rules from bot-code-invariants that this feature could plausibly break."""
 
+    def _health_job_source(self, fn):
+        # stress_monitor_job/bb_monitor_job delegate their shared shape (cooldown
+        # gate, off-loop fetch, nudge gate, trigger) to _run_health_alert_job as of
+        # the ponytail-audit dedup (CHANGELOG) — check the composed source, since the
+        # invariant genuinely holds for both, just no longer inline in either wrapper.
+        # rhr_monitor_job kept its own body (different cooldown shape), so it's
+        # checked standalone.
+        import inspect
+        src = inspect.getsource(fn)
+        if fn in (bot.stress_monitor_job, bot.bb_monitor_job):
+            src += inspect.getsource(bot._run_health_alert_job)
+        return src
+
     def test_every_garmin_call_runs_off_the_event_loop(self):
         # Invariant #8: garminconnect is blocking requests underneath.
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job,
                    bot.rhr_monitor_job, bot.update_garmin):
-            src = inspect.getsource(fn)
-            assert "asyncio.to_thread" in src, fn.__name__
+            assert "asyncio.to_thread" in self._health_job_source(fn), fn.__name__
 
     def test_snapshot_never_enters_group_prompts(self):
         # GROUP_CHAT_DESIGN.md §5: watch metrics are private 1:1 state.
@@ -3087,14 +3160,12 @@ class TestGarminInvariants:
             assert ".__name__" in src, fn.__name__
 
     def test_check_ins_consume_the_nudge_budget(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_consume_nudge(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_consume_nudge(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_check_ins_respect_the_proactive_gate(self):
-        import inspect
         for fn in (bot.stress_monitor_job, bot.bb_monitor_job, bot.rhr_monitor_job):
-            assert "_health_nudge_ok(owner)" in inspect.getsource(fn), fn.__name__
+            assert "_health_nudge_ok(owner)" in self._health_job_source(fn), fn.__name__
 
     def test_health_nudge_gate_checks_every_condition(self):
         import inspect
@@ -3338,6 +3409,138 @@ class TestStripTiers:
         assert all(set(m) <= {"role", "content"} for m in msgs)
 
 
+# ── Safety: distress detection (2026-08-04, reimplemented from the abandoned
+# claude/push-to-repo-7i2f3c branch's d141e84, never merged the first time) ──────
+
+class TestSafetyClassifier:
+    def test_yes_is_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Yes.")
+        assert bot._assess_safety("I want to end it all") is True
+
+    def test_no_is_not_distress(self, monkeypatch):
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "No")
+        assert bot._assess_safety("just a rough day at work") is False
+
+    def test_a_broken_classifier_reads_as_no_distress(self, monkeypatch):
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._assess_safety("anything") is False
+
+    def test_no_raw_exception_in_safety_log(self):
+        # Only the exception's class name may reach a log line (cf. the Garmin/
+        # WSDOT key-leak convention).
+        import inspect
+        src = inspect.getsource(bot._assess_safety)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+    def test_prompt_carries_the_name_and_resource(self):
+        text = bot._safety_prompt("Tester")
+        assert "Tester" in text
+        assert bot.SAFETY_RESOURCES in text
+
+    def test_config_types(self):
+        assert isinstance(bot.SAFETY_ENABLED, bool)
+        assert isinstance(bot.SAFETY_MODEL, str) and bot.SAFETY_MODEL
+        assert isinstance(bot.SAFETY_RESOURCES, str) and bot.SAFETY_RESOURCES
+
+
+class TestAssembleMessagesDistress:
+    def test_distress_suppresses_inner_voice(self):
+        bot.conversation_history[9401] = []
+        bot.user_names[9401] = "Tester"
+        msgs = bot.assemble_messages(9401, "hello", inner_voice="she notices he sounds off",
+                                     distress=True)
+        assert not any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_no_distress_keeps_inner_voice(self):
+        bot.conversation_history[9402] = []
+        bot.user_names[9402] = "Tester"
+        msgs = bot.assemble_messages(9402, "hello", inner_voice="she notices he sounds off",
+                                     distress=False)
+        assert any("private thought" in (m.get("content") or "") for m in msgs)
+
+    def test_distress_appends_the_safety_prompt_last(self):
+        bot.conversation_history[9403] = []
+        bot.user_names[9403] = "Tester"
+        msgs = bot.assemble_messages(9403, "hello", distress=True)
+        assert msgs[-1]["role"] == "system"
+        assert "distress" in msgs[-1]["content"]
+
+    def test_no_distress_by_default(self):
+        bot.conversation_history[9404] = []
+        bot.user_names[9404] = "Tester"
+        msgs = bot.assemble_messages(9404, "hello")
+        assert not any("distress" in (m.get("content") or "") for m in msgs)
+
+
+# ── Adaptive texting-style mirroring (2026-08-04, reimplemented from a485b1b,
+# never merged) ───────────────────────────────────────────────────────────────
+
+class TestUserStyleNote:
+    def _seed(self, chat_id, msgs):
+        bot.conversation_history[chat_id] = [{"role": "user", "content": m} for m in msgs]
+        bot.user_names[chat_id] = "Tester"
+
+    def test_too_few_messages_is_silent(self):
+        self._seed(9501, ["hi"] * (bot.STYLE_MIN_MSGS - 1))
+        assert bot._user_style_note(9501) == ""
+
+    def test_short_clipped_texter(self):
+        self._seed(9502, ["yo"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9502)
+        assert "short, clipped" in note
+
+    def test_long_texter(self):
+        long_msg = " ".join(["word"] * 30)
+        self._seed(9503, [long_msg] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9503)
+        assert "longer, fuller" in note
+
+    def test_heavy_emoji_user(self):
+        self._seed(9504, ["nice 😂🔥"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9504)
+        assert "emoji freely" in note
+
+    def test_no_emoji_user(self):
+        self._seed(9505, ["that sounds reasonable to me honestly"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9505)
+        assert "rarely use emoji" in note
+
+    def test_lowercase_texter(self):
+        self._seed(9506, ["hey what's up today"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9506)
+        assert "all-lowercase" in note
+
+    def test_textspeak_user(self):
+        self._seed(9507, ["lol idk rn tbh"] * bot.STYLE_MIN_MSGS)
+        note = bot._user_style_note(9507)
+        assert "textspeak" in note
+
+    def test_bracket_tagged_messages_excluded(self):
+        # [sent ...] / heartbeat-style synthetic entries aren't the user's own texting.
+        self._seed(9508, ["[sent 10:00]"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9508) == ""
+
+    def test_disabled_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9509, ["yo"] * bot.STYLE_MIN_MSGS)
+        assert bot._user_style_note(9509) == ""
+
+    def test_assemble_messages_includes_the_note_when_enabled(self):
+        self._seed(9510, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9510, "hello")
+        assert any("texting style" in (m.get("content") or "") for m in msgs)
+
+    def test_assemble_messages_omits_the_note_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "STYLE_MIRROR", False)
+        self._seed(9511, ["yo"] * bot.STYLE_MIN_MSGS)
+        msgs = bot.assemble_messages(9511, "hello")
+        assert not any("texting style" in (m.get("content") or "") for m in msgs)
+
+
 class TestTieredTrimOrder:
     @staticmethod
     def _prompt(protected_tok, optional_toks, n_hist, hist_tok=25):
@@ -3458,8 +3661,9 @@ class TestOptionalBlocksAreMarked:
         import inspect
         return inspect.getsource(bot.assemble_messages)
 
-    def test_seven_optional_blocks_marked(self):
-        assert self._assembled().count("_sys_opt(") == 7
+    def test_eight_optional_blocks_marked(self):
+        # 7 pre-existing + triggered_episode (2026-08-04, episodic recall).
+        assert self._assembled().count("_sys_opt(") == 8
 
     def test_lore_is_optional(self):
         src = self._assembled()
@@ -5129,14 +5333,10 @@ class TestDupefactsCmd:
         assert bot.recent_facts[chat_id] == before_recent
         assert bot.facts[chat_id] == before_facts
 
-    def test_disallowed_user_gets_nothing(self):
-        chat_id = 555004
-        bot.ALLOWED_USERS.clear()
-        bot.ALLOWED_USERS.add(424242)  # non-empty and excludes the test user below
-        bot.recent_facts[chat_id] = ["a", "b"]
-        bot.facts[chat_id] = []
-        sent = self._run(chat_id, user_id=99999)
-        assert sent == []
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before dupefacts_cmd ever runs, and
+    # the per-handler `_is_allowed` check duplicated it as dead code. Gating is
+    # covered by TestPrivateGate now, not here.
 
 
 class TestSelfieWeatherMatching:
@@ -5542,11 +5742,11 @@ class TestSelfieProviderLabel:
 
     def setup_method(self):
         self._saved = (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
-                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL)
+                       bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL)
 
     def teardown_method(self):
         (bot.SELFIE_PROVIDER, bot.GEMINI_IMAGE_MODEL,
-         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL) = self._saved
+         bot.GEMINI_RESPONSE_MODALITIES, bot.SELFIE_MODEL, bot.XAI_IMAGE_MODEL) = self._saved
 
     def test_gemini_names_its_model(self):
         bot.SELFIE_PROVIDER = "gemini"
@@ -5560,6 +5760,11 @@ class TestSelfieProviderLabel:
         bot.SELFIE_PROVIDER = "nanogpt"
         bot.SELFIE_MODEL = "flux-kontext"
         assert bot._selfie_provider_label() == "nanogpt (flux-kontext)"
+
+    def test_xai_names_its_model(self):
+        bot.SELFIE_PROVIDER = "xai"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+        assert bot._selfie_provider_label() == "xai (grok-imagine-image-quality)"
 
     def test_audit_payload_and_startup_line_use_the_same_label(self):
         """Two surfaces, one value -- they disagreed once already (v2026-08-02.1)."""
@@ -5640,6 +5845,120 @@ class TestGeminiResponseModalities:
         self._capture_payload([{"text": "Here you go"},
                                {"inlineData": {"data": base64.b64encode(b"png").decode()}}])
         assert bot._generate_selfie_gemini("x") == b"png"
+
+
+class TestXaiAspectRatio:
+    """SELFIE_SIZE is a "WxH" pixel string (the NanoGPT convention); xAI's images API
+    takes a ratio instead. Reduced by GCD so any per-instance SELFIE_SIZE carries over."""
+
+    def test_square_reduces_to_1_1(self):
+        assert bot._xai_aspect_ratio("1024x1024") == "1:1"
+
+    def test_portrait_reduces(self):
+        assert bot._xai_aspect_ratio("768x1024") == "3:4"
+
+    def test_landscape_reduces(self):
+        assert bot._xai_aspect_ratio("1024x768") == "4:3"
+
+    def test_garbage_falls_back_to_square(self):
+        for bad in ("", "not-a-size", "0x0", "1024", None):
+            assert bot._xai_aspect_ratio(bad) == "1:1", bad
+
+
+class TestGenerateSelfieXai:
+    """SELFIE_PROVIDER=xai calls xAI's Grok Imagine API directly. Mirrors the shape of
+    TestGeminiResponseModalities's payload/response tests for the other two providers."""
+
+    def setup_method(self):
+        self._post = bot._post_with_retries
+        self._get = bot._get_with_retries
+        self._has_base = bot._has_base_image
+        self._base_url = bot._base_data_url
+        self._key = bot.XAI_API_KEY
+        self._model = bot.XAI_IMAGE_MODEL
+        self._url = bot.XAI_IMAGE_URL
+        bot._has_base_image = lambda: False
+        bot.XAI_API_KEY = "test-key"
+        bot.XAI_IMAGE_MODEL = "grok-imagine-image-quality"
+
+    def teardown_method(self):
+        bot._post_with_retries = self._post
+        bot._get_with_retries = self._get
+        bot._has_base_image = self._has_base
+        bot._base_data_url = self._base_url
+        bot.XAI_API_KEY = self._key
+        bot.XAI_IMAGE_MODEL = self._model
+        bot.XAI_IMAGE_URL = self._url
+
+    def _capture_post(self, response_json):
+        sent = {}
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return response_json
+
+        def _fake_post(url, **kw):
+            sent["url"] = url
+            sent["json"] = kw.get("json") or {}
+            return _R()
+
+        bot._post_with_retries = _fake_post
+        return sent
+
+    def test_generations_endpoint_used_without_a_base_photo(self):
+        import base64
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/generations"
+        assert "image" not in sent["json"]
+        assert sent["json"]["model"] == "grok-imagine-image-quality"
+
+    def test_edits_endpoint_used_with_a_base_photo(self):
+        import base64
+        bot._has_base_image = lambda: True
+        bot._base_data_url = lambda: "data:image/png;base64,YWJj"
+        sent = self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+        assert sent["url"] == f"{bot.XAI_IMAGE_URL}/edits"
+        assert sent["json"]["image"] == {"url": "data:image/png;base64,YWJj", "type": "image_url"}
+
+    def test_b64_json_with_a_data_uri_prefix_is_still_decoded(self):
+        """Seen inconsistently in the wild: some responses put the full data URI in
+        b64_json instead of raw base64. Decoding must not choke on the prefix."""
+        import base64
+        raw_b64 = base64.b64encode(b"png").decode()
+        sent = self._capture_post({"data": [{"b64_json": f"data:image/png;base64,{raw_b64}"}]})
+        assert bot._generate_selfie_xai("a selfie") == b"png"
+
+    def test_falls_back_to_url_when_no_b64_json(self):
+        sent = self._capture_post({"data": [{"url": "https://example.com/img.png"}]})
+
+        class _Img:
+            content = b"fromurl"
+            def raise_for_status(self): pass
+
+        bot._get_with_retries = lambda *a, **kw: _Img()
+        assert bot._generate_selfie_xai("a selfie") == b"fromurl"
+
+    def test_neither_field_raises(self):
+        self._capture_post({"data": [{}]})
+        try:
+            bot._generate_selfie_xai("a selfie")
+            assert False, "expected RuntimeError"
+        except RuntimeError as e:
+            assert "neither b64_json nor url" in str(e)
+
+    def test_dispatcher_routes_xai_to_xai(self):
+        import base64
+        saved = bot.SELFIE_PROVIDER
+        try:
+            bot.SELFIE_PROVIDER = "xai"
+            self._capture_post({"data": [{"b64_json": base64.b64encode(b"png").decode()}]})
+            assert bot.generate_selfie_image("x") == b"png"
+        finally:
+            bot.SELFIE_PROVIDER = saved
 
 
 class TestImageRetryOnTransientStatus:
@@ -6140,6 +6459,14 @@ class TestAuditReportsSelfieProvider:
             assert bot.gather_audit_data()["selfie_provider"] == "nanogpt (flux-kontext)"
         finally:
             bot.SELFIE_PROVIDER, bot.SELFIE_MODEL = saved
+
+    def test_xai_reports_the_model_too(self):
+        saved = (bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL)
+        try:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = "xai", "grok-imagine-image"
+            assert bot.gather_audit_data()["selfie_provider"] == "xai (grok-imagine-image)"
+        finally:
+            bot.SELFIE_PROVIDER, bot.XAI_IMAGE_MODEL = saved
 
     def test_value_is_a_non_empty_string(self):
         v = bot.gather_audit_data()["selfie_provider"]
@@ -6850,10 +7177,14 @@ class TestSetbaseBackupClaim:
 class _CmdMsg:
     def __init__(self):
         self.sent = []
+        self.documents = []
 
     async def reply_text(self, text, **kwargs):
         self.sent.append(text)
         return SimpleNamespace(message_id=1)
+
+    async def reply_document(self, fh, **kwargs):
+        self.documents.append({"bytes": fh.read(), **kwargs})
 
     async def set_reaction(self, *a, **k):
         return None
@@ -6983,6 +7314,160 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_the_backlog_stays_empty(self):
         """The check that keeps it at zero: sweep's own coverage query must report no
         handler this suite mentions but never calls."""
+        import pathlib as _pl
+        import sys
+        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
+                               ".claude" / "tools"))
+        import sweep
+        stranded = sorted(n for n in sweep._handler_coverage()[0]
+                          if n not in sweep._handler_coverage()[1])
+        assert stranded == [], stranded
+
+
+# ── 2026-08-03: the second source-assertion backlog, driven ────────────────────
+# `sweep.py`'s one-hop widening (operational-log 2026-08-03) found 7 more helpers
+# this suite MENTIONED -- via inspect.getsource or a monkeypatch-to-a-no-op -- but
+# never actually CALLED: save_feature_prefs, save_state, save_wardrobe, send_gif,
+# send_meme, send_selfie, update_garmin. Same shape TestEveryCommandHandlerActuallyRuns
+# closed for the original 12: drive each one for real with fakes for its I/O.
+
+class TestTheSecondBacklogDriven:
+    def test_save_state_writes_synchronously_with_no_running_loop(self, tmp_path, monkeypatch):
+        # The no-loop branch (startup/shutdown): _MAIN_LOOP is None, so save_state
+        # must fall straight through to a direct, synchronous write.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+        monkeypatch.setattr(bot, "_MAIN_LOOP", None)
+        bot.save_state()
+        data = json.loads((tmp_path / "state.json").read_text())
+        assert "conversation_history" in data and "llm_stats" in data
+
+    def test_save_state_debounces_on_the_event_loop(self, tmp_path, monkeypatch):
+        # The on-loop branch: a second call while one is already pending must be a
+        # no-op (_save_scheduled), and the deferred write must land ~0.5s later.
+        monkeypatch.setattr(bot, "STATE_FILE", tmp_path / "state.json")
+
+        async def _run():
+            bot.save_state()
+            first_scheduled = bot._save_scheduled
+            bot.save_state()  # must be a no-op: already scheduled
+            await asyncio.sleep(0.8)
+            return first_scheduled
+
+        first_scheduled = asyncio.run(_run())
+        assert first_scheduled is True
+        assert bot._save_scheduled is False
+        assert (tmp_path / "state.json").exists()
+
+    def test_save_wardrobe_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "wardrobe.json"
+        monkeypatch.setattr(bot, "WARDROBE_FILE", target)
+        bot.save_wardrobe()
+        assert json.loads(target.read_text()) == bot.wardrobe
+
+    def test_save_feature_prefs_writes_the_live_dict(self, tmp_path, monkeypatch):
+        target = tmp_path / "feature_prefs.json"
+        monkeypatch.setattr(bot, "FEATURE_PREFS_FILE", target)
+        bot.save_feature_prefs()
+        assert json.loads(target.read_text()) == bot.feature_prefs
+
+    def test_send_gif_sends_and_records_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", "fake-key")
+        monkeypatch.setattr(bot, "_giphy_search",
+                            lambda query, level, seen: ("http://x/cat.gif", "gid123", "a cat"))
+        bot._recent_gif_ids.pop(555, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_animation(self, chat_id, animation):
+                self.sent = (chat_id, animation)
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_gif(SimpleNamespace(bot=fb), 555, "cat waving"))
+        assert fb.sent == (555, "http://x/cat.gif")
+        assert bot._recent_gif_ids[555] == ["gid123"]
+
+    def test_send_meme_renders_and_sends_a_photo(self, monkeypatch):
+        monkeypatch.setattr(bot, "meme_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+
+        async def _fake_captions(hint, chat_id):
+            return "TOP", "BOTTOM"
+
+        monkeypatch.setattr(bot, "_generate_meme_captions", _fake_captions)
+        monkeypatch.setattr(bot, "_pick_meme_template", lambda chat_id: "fake.jpg")
+        monkeypatch.setattr(bot, "render_meme",
+                            lambda template, top, bottom: b"FAKEMEMEBYTES")
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo):
+                self.sent = (chat_id, photo.read())
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_meme(SimpleNamespace(bot=fb), 777, hint="lol"))
+        assert fb.sent == (777, b"FAKEMEMEBYTES")
+
+    def test_send_selfie_sends_a_photo_and_updates_dedup(self, monkeypatch):
+        monkeypatch.setattr(bot, "selfie_ready", lambda: True)
+
+        async def _fake_uploading(b, cid):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+
+        monkeypatch.setattr(bot, "_keep_uploading", _fake_uploading)
+        monkeypatch.setattr(bot, "generate_selfie_image", lambda prompt: b"FAKESELFIEBYTES")
+
+        async def _fake_caption(hint, chat_id):
+            return "cute"
+
+        monkeypatch.setattr(bot, "_selfie_caption", _fake_caption)
+        bot._recent_selfie_hints.pop(888, None)
+
+        class _FakeBot:
+            def __init__(self):
+                self.sent = None
+
+            async def send_photo(self, chat_id, photo, caption=None):
+                self.sent = (chat_id, photo.read(), caption)
+
+            async def send_message(self, chat_id, text):
+                pass
+
+        fb = _FakeBot()
+        asyncio.run(bot.send_selfie(SimpleNamespace(bot=fb), 888, hint="park day"))
+        assert fb.sent == (888, b"FAKESELFIEBYTES", "cute")
+        assert bot._recent_selfie_hints[888] == ["park day"]
+
+    def test_update_garmin_writes_the_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", True)
+        monkeypatch.setattr(bot, "_Garmin", object)  # any non-None sentinel
+        monkeypatch.setattr(bot, "GARMIN_FILE", tmp_path / "snapshot.json")
+        monkeypatch.setattr(bot, "_fetch_garmin", lambda: ("7,412 steps", []))
+        asyncio.run(bot.update_garmin())
+        assert bot._garmin["text"] == "7,412 steps"
+        assert json.loads((tmp_path / "snapshot.json").read_text())["text"] == "7,412 steps"
+
+    def test_the_second_backlog_stays_empty(self):
+        """Same check as test_the_backlog_stays_empty -- run again after the direct
+        calls above, proving they register as CALLS to the scanner, not just
+        more mentions."""
         import pathlib as _pl
         import sys
         sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
@@ -7204,3 +7689,867 @@ Done. Going with that"""
         out = asyncio.run(bot.generate_reply(
             [{"role": "user", "content": "card"}], model="doc", leak_guard=False))
         assert out == review
+
+
+# ── Offline life events (2026-08-04, reimplemented from b0eb485, never merged) ─────
+
+class TestLifeEvents:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+    def test_read_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot._read_life_events() == []
+
+    def test_append_then_read_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("A teammate brought donuts to the morning standup.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == 1
+        assert "A teammate brought donuts" in events[0]
+        assert events[0].startswith("[")  # date stamp prefix
+
+    def test_blank_line_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_event("   ")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert bot._read_life_events() == []
+
+    def test_caps_at_life_events_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        for i in range(bot.LIFE_EVENTS_MAX + 5):
+            bot._append_life_event(f"event {i}")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        events = bot._read_life_events()
+        assert len(events) == bot.LIFE_EVENTS_MAX
+        assert "event " + str(bot.LIFE_EVENTS_MAX + 4) in events[-1]  # newest kept
+
+    def test_generate_returns_the_model_line(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6, work after")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "Her coworker spilled coffee on the new carpet.")
+        assert bot._generate_life_event() == "Her coworker spilled coffee on the new carpet."
+
+    def test_generate_none_response_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+        monkeypatch.setattr(bot, "call_nanogpt", lambda messages, model=None: "none")
+        assert bot._generate_life_event() == ""
+
+    def test_generate_with_no_context_is_empty(self, monkeypatch):
+        # No schedule/people/projects/arc/recent events at all -- nothing to ground it in.
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "")
+        monkeypatch.setattr(bot, "_read_people", lambda: "")
+        monkeypatch.setattr(bot, "_read_projects", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_arc", lambda: "")
+        monkeypatch.setattr(bot, "_read_life_events", lambda: [])
+        assert bot._generate_life_event() == ""
+
+    def test_generate_broken_classifier_is_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "gym at 6")
+
+        def _boom(messages, model=None):
+            raise RuntimeError("api down")
+
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        assert bot._generate_life_event() == ""
+
+    def test_update_life_event_appends_when_enabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: "Something happened today.")
+        asyncio.run(bot.update_life_event())
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert "Something happened today." in bot._read_life_events()[0]
+
+    def test_update_life_event_noop_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        called = []
+        monkeypatch.setattr(bot, "_generate_life_event", lambda: called.append(1) or "x")
+        asyncio.run(bot.update_life_event())
+        assert called == []
+        assert bot._read_life_events() == []
+
+
+class TestAssembleMessagesLifeEvents:
+    def test_includes_life_events_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9601] = []
+        bot.user_names[9601] = "Tester"
+        msgs = bot.assemble_messages(9601, "hello")
+        assert any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_life_events_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        bot._append_life_event("Her friend adopted a cat.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot.conversation_history[9602] = []
+        bot.user_names[9602] = "Tester"
+        msgs = bot.assemble_messages(9602, "hello")
+        assert not any("Her friend adopted a cat" in (m.get("content") or "") for m in msgs)
+
+
+class TestExportMemoryCmd:
+    """v2026-08-07: /exportmemory and the menu button's cmd:exportmemory used to build
+    the export text twice, independently, with slightly different section labels —
+    now both call _send_memory_export/_memory_export_text. This drives the command
+    path; TestButtonCallbackExportMemory drives the button path."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+        self._orig_facts = dict(bot.facts)
+        self._orig_milestones = dict(bot.milestones)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+        bot.facts.clear()
+        bot.facts.update(self._orig_facts)
+        bot.milestones.clear()
+        bot.milestones.update(self._orig_milestones)
+
+    def test_sends_a_document_with_the_expected_sections(self):
+        chat_id = 9801
+        bot.summaries[chat_id] = "settling in well"
+        bot.facts[chat_id] = ["likes rainy days"]
+        bot.milestones[chat_id] = [{"text": "first inside joke", "ts": time.time()}]
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert len(m.documents) == 1
+        doc = m.documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "settling in well" in text
+        assert "likes rainy days" in text
+        assert "=== RELATIONSHIP MILESTONES ===" in text
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+
+    def test_cleans_up_the_temp_file(self):
+        chat_id = 9802
+        u, m = _cmd_update(chat_id=chat_id)
+        asyncio.run(bot.export_memory_cmd(u, _cmd_ctx()))
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
+class _CmdQuery:
+    def __init__(self, chat_id, data):
+        self.data = data
+        self.message = SimpleNamespace(chat_id=chat_id)
+
+    async def answer(self):
+        return None
+
+
+class _CmdBot:
+    def __init__(self):
+        self.sent_messages = []
+        self.sent_documents = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent_messages.append(text)
+
+    async def send_document(self, chat_id, document, **kwargs):
+        self.sent_documents.append({"bytes": document.read(), **kwargs})
+
+
+class TestButtonCallbackExportMemory:
+    """The menu button's cmd:exportmemory now shares _send_memory_export with
+    /exportmemory (see TestExportMemoryCmd) — this drives the button path directly,
+    since button_callback had zero test coverage before this dedup."""
+
+    def setup_method(self):
+        self._orig_summaries = dict(bot.summaries)
+
+    def teardown_method(self):
+        bot.summaries.clear()
+        bot.summaries.update(self._orig_summaries)
+
+    def test_sends_the_same_shaped_document_as_the_command(self):
+        chat_id = 9803
+        bot.summaries[chat_id] = "doing fine"
+        query = _CmdQuery(chat_id, "cmd:exportmemory")
+        update = SimpleNamespace(callback_query=query)
+        fake_bot = _CmdBot()
+        context = SimpleNamespace(bot=fake_bot)
+        asyncio.run(bot.button_callback(update, context))
+        assert len(fake_bot.sent_documents) == 1
+        doc = fake_bot.sent_documents[0]
+        text = doc["bytes"].decode("utf-8")
+        assert "doing fine" in text
+        assert "=== LONG-TERM MEMORY ===" in text  # now matches the command's wording
+        assert doc["filename"] == f"memory_{bot.NAME.lower()}_{chat_id}.txt"
+        assert not (bot.BASE_DIR / f"memory_export_{chat_id}.txt").exists()
+
+
+class TestNewsCommands:
+    """Direct-call tests, matching TestTheSecondBacklogDriven's contract: a command
+    either answers or is deliberately silent because a gate rejected the caller."""
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 434242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def test_news_cmd_answers_with_events(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot._append_life_event("A coworker got a promotion.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "A coworker got a promotion" in m.sent[0]
+
+    def test_news_cmd_empty_state_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        u, m = _cmd_update()
+        asyncio.run(bot.news_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "newsnow" in m.sent[0]
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): _private_gate
+    # (group -1) already stops a disallowed caller before news_cmd ever runs, and the
+    # per-handler `_is_allowed` check duplicated it as dead code. Gating is covered by
+    # TestPrivateGate now, not here.
+
+    def test_newsnow_cmd_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", True)
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        async def _fake_update():
+            bot._append_life_event("A generated event.")
+            bot._life_events_cache.update({"text": None, "ts": 0.0})
+
+        monkeypatch.setattr(bot, "update_life_event", _fake_update)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert any("A generated event" in s for s in m.sent)
+
+    def test_newsnow_cmd_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_SIM_ENABLED", False)
+        u, m = _cmd_update()
+        asyncio.run(bot.newsnow_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()
+
+
+# ── Acoustic tone analysis on voice notes (2026-08-04, reimplemented from bae2dcb,
+# never merged; vendored acoustic_ears.py unmodified from menelly/AI_Ears, MIT) ────
+
+class TestAcousticEars:
+    @staticmethod
+    def _write_wav(path, freq=440.0, duration=1.0, sr=44100, amplitude=0.5):
+        import wave as _wave
+        import numpy as _np
+        t = _np.linspace(0, duration, int(sr * duration), endpoint=False)
+        samples = (amplitude * _np.sin(2 * _np.pi * freq * t) * 32767).astype(_np.int16)
+        with _wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(samples.tobytes())
+
+    def test_analyze_acoustic_on_a_tone(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "tone.wav"
+        self._write_wav(wav_path, freq=440.0, duration=1.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert "error" not in result
+        assert result["duration_s"] == pytest.approx(1.0, abs=0.05)
+        assert result["sample_rate"] == 44100
+        assert result["brightness_label"] in (
+            "very bright", "bright", "warm", "dark")
+
+    def test_analyze_acoustic_empty_audio_reports_error(self, tmp_path):
+        import acoustic_ears
+        wav_path = tmp_path / "empty.wav"
+        self._write_wav(wav_path, duration=0.0)
+        result = acoustic_ears.analyze_acoustic(str(wav_path))
+        assert result.get("error") == "empty audio"
+
+    def test_describe_acoustic_none_input_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic(None) is None
+
+    def test_describe_acoustic_error_dict_is_none(self):
+        import acoustic_ears
+        assert acoustic_ears.describe_acoustic({"error": "empty audio"}) is None
+
+    def test_describe_acoustic_includes_wpm_when_word_count_given(self):
+        import acoustic_ears
+        a = {"duration_s": 10.0, "dynamics_label": "even", "brightness_label": "warm",
+             "pauses": []}
+        note = acoustic_ears.describe_acoustic(a, word_count=20)
+        assert "120 wpm" in note  # 20 words / (10s/60) = 120 wpm
+        assert "even volume" in note
+        assert "warm tone" in note
+
+    def test_describe_acoustic_mentions_pauses_when_present(self):
+        import acoustic_ears
+        a = {"duration_s": 5.0, "dynamics_label": "dynamic", "brightness_label": "bright",
+             "pauses": [(1.0, 1.5, 0.5), (2.0, 2.3, 0.3)]}
+        note = acoustic_ears.describe_acoustic(a)
+        assert "2 notable pause(s)" in note
+
+
+class TestAnalyzeVoiceTone:
+    def test_returns_none_when_ffmpeg_produces_no_wav(self, monkeypatch):
+        async def _fake_ffmpeg(*args):
+            return (b"", b"")  # never writes the output file
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"not real audio"))
+        assert result is None
+
+    def test_returns_the_analysis_on_success(self, monkeypatch, tmp_path):
+        import wave as _wave
+        import numpy as _np
+
+        async def _fake_ffmpeg(*args):
+            # args: -y -i <in> -ar 44100 -ac 1 -c:a pcm_s16le <out>
+            out_path = args[-1]
+            t = _np.linspace(0, 0.5, int(44100 * 0.5), endpoint=False)
+            samples = (0.3 * _np.sin(2 * _np.pi * 300 * t) * 32767).astype(_np.int16)
+            with _wave.open(out_path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes(samples.tobytes())
+            return (b"", b"")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _fake_ffmpeg)
+        result = asyncio.run(bot._analyze_voice_tone(b"fake ogg bytes"))
+        assert result is not None
+        assert "error" not in result
+
+    def test_ffmpeg_failure_is_none_not_raised(self, monkeypatch):
+        async def _boom(*args):
+            raise RuntimeError("ffmpeg not found")
+
+        monkeypatch.setattr(bot, "_run_ffmpeg", _boom)
+        assert asyncio.run(bot._analyze_voice_tone(b"x")) is None
+
+    def test_config_defaults(self):
+        assert isinstance(bot.VOICE_TONE_ENABLED, bool)
+
+
+# ── /diag (2026-08-04, reimplemented from 71dfa44, never merged; scoped down --
+# the log-error tail is dropped as redundant with /errors, and the flag list is
+# trimmed to what actually exists on this bot rather than the abandoned branch's
+# full set) ─────────────────────────────────────────────────────────────────────
+
+class TestDiagCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 444242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_diag_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "diagnostics" in m.sent[0]
+
+    def test_diag_cmd_reports_the_new_toggles(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        text = m.sent[0]
+        for label in ("safety", "style mirror", "offline life", "voice tone"):
+            assert label in text, label
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
+
+    def test_diag_cmd_omits_the_log_error_tail(self):
+        # Deliberately dropped as redundant with /errors -- must not resurface here.
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        assert "Log errors" not in m.sent[0]
+
+
+# ── Episodic recall + on-this-day reminiscing (2026-08-04, reimplemented from
+# 9fa21af + a485b1b's on-this-day portion, never merged -- rewritten against this
+# file's actual embedding primitives, EMBEDDING_MODEL/_embed_text, not the abandoned
+# branch's own EMBED_MODEL/_embed) ──────────────────────────────────────────────
+
+class TestEpisodesCore:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def test_normalize_rows_unit_length(self):
+        import numpy as np
+        mat = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        norms = np.linalg.norm(out, axis=1)
+        assert norms == pytest.approx([1.0, 1.0], abs=1e-5)
+
+    def test_normalize_rows_handles_zero_vector(self):
+        import numpy as np
+        mat = np.array([[0.0, 0.0]], dtype=np.float32)
+        out = bot._normalize_rows(mat)
+        assert not np.isnan(out).any()
+
+    def test_episode_when_phrasing(self):
+        now = time.time()
+        assert bot._episode_when(now) == "earlier today"
+        assert bot._episode_when(now - 86400) == "yesterday"
+        assert bot._episode_when(now - 5 * 86400) == "about 5 days ago"
+        assert bot._episode_when(now - 21 * 86400) == "about 3 weeks ago"
+        assert "back around" in bot._episode_when(now - 200 * 86400)
+
+    def test_archive_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        fixed_vec = [1.0, 0.0, 0.0]
+        monkeypatch.setattr(bot, "_embed_text", lambda text: list(fixed_vec))
+        batch = [{"role": "user", "content": "hey remember the beach trip", "ts": time.time()},
+                 {"role": "assistant", "content": "of course, that was fun", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 1
+        assert "beach trip" in bot._episodes["text"][0]
+
+    def test_archive_empty_batch_is_a_noop(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._archive_episode_chunks([], "Tester")
+        assert bot._episodes["ts"] == []
+
+    def test_archive_skips_on_embed_failure(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "_embed_text", lambda text: None)
+        batch = [{"role": "user", "content": "hello there", "ts": time.time()}]
+        bot._archive_episode_chunks(batch, "Tester")
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()
+
+    def test_load_discards_archive_on_model_change(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EPISODES_FILE.write_text(
+            json.dumps({"ts": time.time(), "text": "old memory", "vec": [1.0, 0.0]}) + "\n",
+            encoding="utf-8")
+        bot.EPISODES_MODEL_FILE.write_text("some-other-embedding-model", encoding="utf-8")
+        bot._load_episodes()
+        assert bot._episodes["ts"] == []
+        assert not bot.EPISODES_FILE.exists()  # discarded, not just ignored
+
+    def test_load_trims_to_episode_max(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODE_MAX", 3)
+        with bot.EPISODES_FILE.open("w", encoding="utf-8") as f:
+            for i in range(5):
+                f.write(json.dumps({"ts": float(i), "text": f"memory {i}", "vec": [1.0, 0.0]}) + "\n")
+        bot.EPISODES_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_episodes()
+        assert len(bot._episodes["ts"]) == 3
+        assert bot._episodes["text"] == ["memory 2", "memory 3", "memory 4"]  # newest kept
+
+
+class TestTriggeredEpisode:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", tmp_path / "episodes.model")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": False})
+
+    def _seed(self, ts, text, vec=(1.0, 0.0, 0.0)):
+        import numpy as np
+        bot._episodes["ts"].append(ts)
+        bot._episodes["text"].append(text)
+        row = bot._normalize_rows(np.array([list(vec)], dtype=np.float32))
+        bot._episodes["mat"] = row if bot._episodes["mat"] is None else np.vstack(
+            [bot._episodes["mat"], row])
+
+    def test_returns_empty_when_disabled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_returns_empty_with_no_query_vec(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "an old memory")
+        assert bot.triggered_episode(None) == ""
+
+    def test_returns_empty_when_archive_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_surfaces_a_similar_old_episode(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "the beach trip last month", vec=(1.0, 0.0, 0.0))
+        note = bot.triggered_episode([1.0, 0.0, 0.0])
+        assert "beach trip" in note
+        assert "specific moment you remember" in note
+
+    def test_below_similarity_floor_is_silent(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self._seed(time.time() - 48 * 3600, "unrelated topic", vec=(0.0, 1.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+    def test_too_recent_is_gated_out(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Inside the live window (EPISODE_MIN_AGE_HOURS default 24h) -- must not echo it back.
+        self._seed(time.time() - 3600, "something said an hour ago", vec=(1.0, 0.0, 0.0))
+        assert bot.triggered_episode([1.0, 0.0, 0.0]) == ""
+
+
+class TestOnThisDay:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODES_FILE", tmp_path / "episodes.jsonl")
+        monkeypatch.setattr(bot, "ONTHISDAY_FILE", tmp_path / "onthisday.json")
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        monkeypatch.setattr(bot, "ONTHISDAY_ENABLED", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+
+    def test_finds_a_one_month_anniversary(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["the anniversary moment"]
+        result = bot._onthisday_episode()
+        assert result is not None
+        ts, text = result
+        assert text == "the anniversary moment"
+
+    def test_no_match_outside_any_window(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._episodes["ts"] = [time.time() - 10 * 86400]  # doesn't land near any interval
+        bot._episodes["text"] = ["a random tuesday"]
+        assert bot._onthisday_episode() is None
+
+    def test_excludes_the_given_timestamp(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        target_ts = time.time() - 30 * 86400
+        bot._episodes["ts"] = [target_ts]
+        bot._episodes["text"] = ["already used"]
+        assert bot._onthisday_episode(exclude_ts=target_ts) is None
+
+    def test_prefers_the_longer_interval(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        # Both a ~30-day and a ~365-day episode qualify; the year-old one should win.
+        bot._episodes["ts"] = [time.time() - 30 * 86400, time.time() - 365 * 86400]
+        bot._episodes["text"] = ["recent one", "the year-old one"]
+        ts, text = bot._onthisday_episode()
+        assert text == "the year-old one"
+
+    def test_job_is_a_noop_with_no_owner(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: None)
+        sent = []
+        monkeypatch.setattr(bot, "send_triggered", lambda ctx, cid, trig: sent.append(1))
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []
+
+    def test_job_respects_the_min_gap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        today = datetime.now(bot.TZ).date().isoformat() if bot.TZ else datetime.now().date().isoformat()
+        bot.ONTHISDAY_FILE.write_text(json.dumps({"date": today, "ts": 0}), encoding="utf-8")
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert sent == []  # already reminisced today
+
+    def test_job_sends_and_records_when_a_match_exists(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "get_owner", lambda: 42)
+        monkeypatch.setattr(bot, "user_names", {42: "Tester"})
+        monkeypatch.setattr(bot, "in_quiet_hours", lambda: False)
+        monkeypatch.setattr(bot, "_is_quiet", lambda cid: False)
+        bot._episodes["ts"] = [time.time() - 30 * 86400]
+        bot._episodes["text"] = ["the moment that resurfaces"]
+        sent = []
+
+        async def _fake_send(ctx, cid, trig):
+            sent.append(trig)
+
+        monkeypatch.setattr(bot, "send_triggered", _fake_send)
+        asyncio.run(bot.onthisday_job(None))
+        assert len(sent) == 1
+        assert "the moment that resurfaces" in sent[0]
+        assert json.loads(bot.ONTHISDAY_FILE.read_text())["date"]  # recorded
+
+
+class TestEpisodesCmd:
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 464242
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    def test_off_says_so(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "off" in m.sent[0].lower()
+
+    def test_empty_archive_says_so(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "No episodes archived yet" in m.sent[0]
+
+    def test_reports_the_count(self, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [time.time()], "text": ["a stored moment"],
+                              "mat": None, "loaded": True})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.episodes_cmd(u, _cmd_ctx()))
+        assert "1 chunk" in m.sent[0]
+        assert "a stored moment" in m.sent[0]
+
+    # Per-handler gating dropped (ponytail-audit cleanup, CHANGELOG): see the same
+    # note in TestNewsCommands. Gating is covered by TestPrivateGate now, not here.
+
+
+class TestMaintainMemoryArchivesOnScrollOff:
+    def test_scroll_off_triggers_archiving(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        chat_id = 9701
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        captured = {}
+
+        def _fake_archive(batch, uname):
+            captured["batch"] = batch
+            captured["uname"] = uname
+
+        monkeypatch.setattr(bot, "_archive_episode_chunks", _fake_archive)
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)  # let the fire-and-forget archive task run
+
+        asyncio.run(_run())
+        assert "batch" in captured
+        assert len(captured["batch"]) > 0
+        assert captured["uname"] == "Tester"
+
+    def test_scroll_off_skips_archiving_when_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", False)
+        chat_id = 9702
+        now = time.time()
+        bot.conversation_history[chat_id] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}", "ts": now}
+            for i in range(25)
+        ]
+        bot.user_names[chat_id] = "Tester"
+        bot.recent_facts[chat_id] = []
+        bot.recent_summaries[chat_id] = ""
+        monkeypatch.setattr(bot, "_summarize", lambda *a, **k: ("a summary", []))
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        called = []
+        monkeypatch.setattr(bot, "_archive_episode_chunks",
+                            lambda batch, uname: called.append(1))
+
+        async def _run():
+            await bot.maintain_memory(chat_id)
+            await asyncio.sleep(0.05)
+
+        asyncio.run(_run())
+        assert called == []
+
+
+class TestAssembleMessagesEpisodicRecall:
+    def test_includes_triggered_episode_in_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9703] = []
+        bot.user_names[9703] = "Tester"
+        msgs = bot.assemble_messages(9703, "hello", query_vec=[1.0, 0.0, 0.0])
+        assert any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+    def test_omits_episode_block_with_no_query_vec(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EPISODIC_RECALL", True)
+        bot._episodes.update({"ts": [], "text": [], "mat": None, "loaded": True})
+        import numpy as np
+        bot._episodes["ts"] = [time.time() - 48 * 3600]
+        bot._episodes["text"] = ["a specific archived moment"]
+        bot._episodes["mat"] = bot._normalize_rows(np.array([[1.0, 0.0, 0.0]], dtype=np.float32))
+        bot.conversation_history[9704] = []
+        bot.user_names[9704] = "Tester"
+        msgs = bot.assemble_messages(9704, "hello")
+        assert not any("a specific archived moment" in (m.get("content") or "") for m in msgs)
+
+
+class TestEpisodicConfig:
+    def test_config_types(self):
+        assert isinstance(bot.EPISODIC_RECALL, bool)
+        assert isinstance(bot.ONTHISDAY_ENABLED, bool)
+        assert isinstance(bot.EPISODE_MAX, int)
+        assert isinstance(bot.EPISODE_MIN_SIM, float)
+
+
+# ── Embedding cache model-version guard + cap (2026-08-04, backported from episodic
+# recall's design to the pre-existing memory/lore embedding caches, which lacked
+# both -- a live gap flagged during a comparison of the two designs) ───────────────
+
+class TestEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "EMBEDDINGS_FILE", tmp_path / "embeddings.json")
+        monkeypatch.setattr(bot, "EMBEDDINGS_MODEL_FILE", tmp_path / "embeddings.model")
+        bot._embeddings_cache = {}
+        bot._embeddings_dirty = False
+
+    def test_load_with_no_file_is_empty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"hello there": [1.0, 0.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        bot._embeddings_cache = {}
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"hello there": [1.0, 0.0]}
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert bot.EMBEDDINGS_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"old text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {}
+        assert not bot.EMBEDDINGS_FILE.exists()  # discarded, not just ignored
+
+    def test_load_keeps_cache_on_model_match(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.EMBEDDINGS_FILE.write_text(json.dumps({"kept text": [1.0, 0.0]}), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert bot._embeddings_cache == {"kept text": [1.0, 0.0]}
+
+    def test_load_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 3)
+        data = {f"line {i}": [float(i)] for i in range(5)}
+        bot.EMBEDDINGS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        bot.EMBEDDINGS_MODEL_FILE.write_text(bot.EMBEDDING_MODEL, encoding="utf-8")
+        bot._load_embeddings()
+        assert len(bot._embeddings_cache) == 3
+        assert set(bot._embeddings_cache) == {"line 2", "line 3", "line 4"}  # newest kept
+
+    def test_save_trims_to_the_cap(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bot, "EMBEDDINGS_MAX", 2)
+        bot._embeddings_cache = {"a": [1.0], "b": [2.0], "c": [3.0]}
+        bot._embeddings_dirty = True
+        bot._save_embeddings()
+        assert len(bot._embeddings_cache) == 2
+        assert set(bot._embeddings_cache) == {"b", "c"}
+
+    def test_save_is_a_noop_when_not_dirty(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._embeddings_cache = {"x": [1.0]}
+        bot._embeddings_dirty = False
+        bot._save_embeddings()
+        assert not bot.EMBEDDINGS_FILE.exists()
+
+    def test_no_raw_exception_in_save_log(self):
+        import inspect
+        src = inspect.getsource(bot._save_embeddings)
+        assert '", e)' not in src
+        assert ".__name__" in src
+
+
+class TestLoreEmbeddingsCacheGuard:
+    def _isolate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LORE_EMB_FILE", tmp_path / "lore_embeddings.json")
+        monkeypatch.setattr(bot, "LORE_EMB_MODEL_FILE", tmp_path / "lore_embeddings.model")
+        bot._lore_embeddings = {}
+        bot._lore_emb_dirty = False
+
+    def test_save_then_load_round_trips(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"the tavern is in Bellevue": [1.0, 0.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        bot._lore_embeddings = {}
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {"the tavern is in Bellevue": [1.0, 0.0]}
+
+    def test_load_discards_on_model_mismatch(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.LORE_EMB_FILE.write_text(json.dumps({"old lore": [1.0]}), encoding="utf-8")
+        bot.LORE_EMB_MODEL_FILE.write_text("some-other-model", encoding="utf-8")
+        bot._load_lore_embeddings()
+        assert bot._lore_embeddings == {}
+        assert not bot.LORE_EMB_FILE.exists()
+
+    def test_save_writes_the_model_fingerprint(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._lore_embeddings = {"x": [1.0]}
+        bot._lore_emb_dirty = True
+        bot._save_lore_embeddings()
+        assert bot.LORE_EMB_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL

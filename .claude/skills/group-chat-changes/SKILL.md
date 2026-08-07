@@ -1,6 +1,6 @@
 ---
 name: group-chat-changes
-description: Rules for touching ANY group-chat code — GROUP_* env vars, the shared ledger, claim files, _group_deliver, bot-to-bot behavior, or the priya/jules pilot. Load BEFORE reading or modifying that code, even for "small" changes.
+description: Rules for touching ANY group-chat code — GROUP_* env vars, the shared ledger, claim files, _group_deliver, bot-to-bot behavior, the priya/jules pilot, OR any handler that branches on `chat_id < 0` / calls `_handle_group_message` (handle_message is the one that matters — it looks like a plain per-message handler and is also the group entry point). Load BEFORE reading or modifying that code, even for "small" changes, and even when the change looks private-chat-only.
 ---
 
 # Group-chat changes
@@ -105,6 +105,16 @@ or a DM, or phrase the probe in-world.
   on the ledger.
 - Trusting a hand-enumerated list of "all the write paths" — that approach failed
   twice in review; think in choke points and allowlists.
+- Deleting a per-handler `_is_allowed` check as "redundant with `_private_gate`"
+  without checking whether the handler is dual-purpose. `_private_gate` explicitly
+  excludes `chat_id < 0` ("group_guard's jurisdiction"), and `group_guard` never
+  checks the sender's identity — only chat-level `GROUP_ALLOWED_CHATS` membership.
+  A handler reachable from both private and group dispatch (`handle_message`) needs
+  its own guard even after `_private_gate` ships; the two mechanisms cover different
+  halves of the caller space, not the same half twice. Caught by `/code-review`
+  before merge on 2026-08-07 (see `.claude/memory/constraints.md` C19) — verifying
+  "not called outside dispatch" proves reachability, not which jurisdiction covers
+  the call.
 
 ## What to report back
 

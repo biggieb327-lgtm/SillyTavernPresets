@@ -262,6 +262,15 @@ each with a threshold and a test, so they are not restated here. What is project
    rounds of tests that asserted on source text instead of calling the handler — the
    delivery gate and evals are the repo's memory of past pain; satisfy them, don't
    argue with them.
+8. **Treat an explicit instruction — from a loaded skill, a doc, or the user — as a
+   literal constraint to check the actual diff against, not a stance to agree with and
+   move past.** C19/C20 (2026-08-07) shipped past ponytail's own explicit text —
+   "never lazy about understanding the problem... trace the whole thing first" and
+   "laziness that skips comprehension... is the dangerous kind" — while believing that
+   text was being followed. The caution was read and agreed with; it was never checked
+   against the specific diff being written. When wording is explicit, verify the work
+   against the words themselves before calling it done, the same way a delivery-gate
+   check is verified, not held in mind as a general attitude.
 
 ## Git workflow
 
@@ -300,6 +309,15 @@ above. `ls` it for the rest. The non-obvious bits:
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
+- No custom Apify actor lives in this repo. The `improvement-loop-monthly` and
+  `character-pass-monthly` Routines' Reddit + Substack idea scans call Apify's
+  hosted `trudax/reddit-scraper-lite` actor (id `oAuCIx3ItNrs2okjQ`) directly via
+  its REST API for Reddit, and fetch each named publication's public RSS feed
+  directly for Substack — no actor deploy, no owner-maintained code (see
+  `.claude/operating/routines.md`). A short-lived custom wrapper actor
+  (`idea-scraper-actor/`) existed 2026-08-07 for a few hours before being retired
+  in favor of this simpler direct-call approach; nothing in the repo references
+  it anymore.
 
 Nothing else at the repo root deploys anywhere: the standalone SillyTavern presets and
 cards (`TheAtelier*`, `UnifiedWritersRoom*`, `Chimera*`, `WritersBlock*`,

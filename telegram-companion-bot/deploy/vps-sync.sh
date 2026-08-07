@@ -101,6 +101,12 @@ cp "$SRC/preset.txt" "$BASE/$INST/preset.txt"
 cp "$SRC/$CARD"      "$BASE/$INST/$CARD"
 cp "$SRC/bot.py"     "$BASE/bot.py.new"
 
+# acoustic_ears.py is a vendored module bot.py imports directly (voice-note tone
+# analysis) -- keep it in lockstep with bot.py, same as the main file itself. Shared
+# across instances at $BASE, same as bot.py (not per-instance).
+need acoustic_ears.py
+cp "$SRC/acoustic_ears.py" "$BASE/acoustic_ears.py"
+
 # Preset LAYERS (v2026-07-25.5): copy exactly the layers THIS instance names in its own
 # PRESET_FILES. Self-maintaining — no layer list to keep in sync here.
 LAYERS=$(sed -n 's/^[[:space:]]*PRESET_FILES[[:space:]]*=[[:space:]]*//p' \
