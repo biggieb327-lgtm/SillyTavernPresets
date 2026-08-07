@@ -671,6 +671,88 @@ The mechanical descendants are the products this forced: `sweep.py`'s `SWEEP_BOT
 deliberately broken corpus, and the `source-assertion` scanner was itself break-tested by
 running it against the test suite as it stood *before* the bug it describes shipped.
 
+### C19 — Verifying "not reachable outside dispatch" proves reachability, not which jurisdiction covers the call
+**seen: 1** (2026-08-07)
+Deleted 21 per-handler `_is_allowed(update.effective_user.id)` guards as dead code,
+reasoning that `_private_gate` (handler group -1) already blocks a disallowed caller
+before any of them run. Verified this two ways: read `_private_gate`'s own docstring
+(explicitly names the per-handler pattern it replaced), and grepped every one of the
+21 function names for a call site outside `add_handler`/its own `def` — none existed,
+so none could be reached except through normal Telegram dispatch. Ran the full test
+suite (1062 passed), the eval suite (`private-gate-registered` included), and
+`gate_corpus` — all green.
+
+Missed that `handle_message` is dual-purpose: one `MessageHandler` serves both private
+and group chats, branching internally on `chat_id < 0`. `_private_gate`'s docstring
+says group updates are "`group_guard`'s jurisdiction — untouched here" and its code
+returns immediately for `chat_id < 0`; `group_guard` checks chat-level
+`GROUP_ALLOWED_CHATS` membership only, never the sender's identity. Deleting
+`handle_message`'s guard left group text messages from a non-allowlisted user gated
+by nothing, breaking `GROUP_CHAT_DESIGN.md` §6's documented invariant ("Human gating
+unchanged... strangers in an allowed group are ignored unless `ALLOWED_USERS` is
+empty"). None of my own verification caught it — no test anywhere, before or after
+this change, exercised "a non-allowlisted user's text in an allowed group", so a
+fully green suite shipped past the exact gap. Caught only by two of four `/code-review`
+finder agents (independently, via cross-file tracing and a line-by-line diff scan)
+before the branch was merged to main — it never shipped.
+
+**Constraint:** before deleting a guard as "covered by a different choke point,"
+check not just *whether* the handler is reachable outside that choke point, but
+*whether every context the handler serves* is covered by it. A handler that
+internally branches on the same condition a security mechanism partitions on
+(here, `chat_id < 0`) is by construction straddling two jurisdictions — grep for
+that branch, not just for external callers, before trusting one mechanism's
+coverage claim. This is what `group-chat-changes` calls loading the skill "even
+when the change looks private-chat-only" — the miss here was not recognizing
+`handle_message` as group-chat code at all, because nothing about its name says so.
+
+**Graduated 2026-08-07 (the specific instance):** `TestHandleMessageGroupGating`
+(2 tests) pins the invariant directly against `handle_message`, not just against
+`_private_gate` — closing a gap that existed even before this release, not only
+the regression from it. `group-chat-changes`'s description and "Common mistakes"
+now name this exact shape (any handler branching on `chat_id < 0` or calling
+`_handle_group_message`) as a trigger, so a future session touching `handle_message`
+has a cue to load the skill even when the handler's name gives no hint.
+**Not further mechanized:** no eval generalizes "does this diff delete a guard from
+a dual-jurisdiction handler" — that requires reading what the handler does, which
+is exactly what C8's un-mechanizable class already covers. The concrete instance is
+pinned; the general check stays a read-it-yourself judgment call.
+
+### C20 — A green test suite is not proof a reused pattern is safe for the new call site
+**seen: 1** (2026-08-07)
+Replaced `schedule_cmd`'s hand-written body with a call to the existing
+`_context_file_cmd` factory, the same one already backing `people_cmd`/`projects_cmd`
+— matching output confirmed, `python3 -m py_compile` clean, full pytest suite green
+(including the existing `test_schedule_cmd_shows_the_schedule`). Missed that the
+factory closes over its `file: Path` argument **by value at the factory-call site**
+(module import time), not as a live global lookup — unlike the original `schedule_cmd`,
+which read `SCHEDULE_FILE` fresh on every call. `test_schedule_cmd_shows_the_schedule`
+does `monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")`, which the
+new closure can no longer see: the test kept passing only because its assertion
+(`"Schedule" in m.sent[0]`) is loose enough not to notice it was reading/writing the
+real fixture-directory file instead of the isolated `tmp_path` one. Separately, turning
+`schedule_cmd` from a `FunctionDef` into a plain module-level assignment silently
+dropped it out of `sweep.py`'s AST-based handler-coverage scan, narrowing the delivery
+gate's future reach for that one handler specifically. Caught by a third `/code-review`
+finder agent (line-by-line diff scan) before merge; reverted to the original hand-rolled
+body rather than patching the factory, since the factory's already-accepted tradeoff
+(`people_cmd`/`projects_cmd` carry the same property) wasn't worth extending to a third
+caller for a ~15-line saving.
+
+**Constraint:** before reusing an existing factory/wrapper pattern for a new call site,
+check the pattern's known capture semantics (does it bind arguments by value at
+definition time, or read live?) against what the *target's own existing tests* assume
+— specifically, anything the tests `monkeypatch`. A green re-run of those tests is not
+evidence the reuse is safe if the test's own assertion is too loose to distinguish
+"read the patched value" from "silently read the original."
+
+**Not graduated.** No mechanism generalizes "does this refactor change a function from
+a live-global reader to an import-time-bound closure" — the concrete fix was simply
+not to extend the tradeoff to `schedule_cmd`. `people_cmd`/`projects_cmd` already carry
+the same property, pre-existing and out of scope here; if a monkeypatch-based test is
+ever written against either of them expecting isolation, it will fail the same silent
+way, which is worth knowing before writing one, not a debt to pay down now.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
