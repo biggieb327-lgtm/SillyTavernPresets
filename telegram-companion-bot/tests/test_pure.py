@@ -11,67 +11,98 @@ import bot
 
 
 # ── extract_tags ──────────────────────────────────────────────────────────────
-# Returns (clean_text, reaction, selfie_hint, meme_caption).
+# Returns (clean_text, reaction, selfie_hint, clothing_override, meme_caption).
 
 class TestExtractTags:
     def test_plain_text_unchanged(self):
         text = "hey what's up"
-        clean, reaction, selfie, meme = bot.extract_tags(text)
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(text)
         assert clean == text
         assert reaction is None
         assert selfie is None
+        assert clothing is None
         assert meme is None
 
     def test_react_tag(self):
-        clean, reaction, selfie, meme = bot.extract_tags("sure! [react: ❤️]")
+        clean, reaction, selfie, clothing, meme = bot.extract_tags("sure! [react: ❤️]")
         assert "react" not in clean.lower()
         assert reaction is not None
         assert selfie is None
+        assert clothing is None
         assert meme is None
 
     def test_selfie_tag(self):
-        clean, reaction, selfie, meme = bot.extract_tags(
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(
             "here you go [selfie: wearing a red dress at the park]"
         )
         assert "selfie" not in clean.lower()
         assert selfie == "wearing a red dress at the park"
+        assert clothing is None
         assert meme is None
 
+    def test_selfie_inline_clothing(self):
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(
+            "here [selfie: curled up on the couch | clothing: oversized white t-shirt]"
+        )
+        assert selfie == "curled up on the couch"
+        assert clothing == "oversized white t-shirt"
+        assert "[" not in clean
+
+    def test_dedicated_clothing_tag(self):
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(
+            "[selfie: mirror shot] [clothing: black lace lingerie]"
+        )
+        assert selfie == "mirror shot"
+        assert clothing == "black lace lingerie"
+
+    def test_dedicated_outfit_tag(self):
+        _, _, _, clothing, _ = bot.extract_tags("[outfit: just a hoodie]")
+        assert clothing == "just a hoodie"
+
+    def test_dedicated_clothing_wins_over_inline(self):
+        _, _, selfie, clothing, _ = bot.extract_tags(
+            "[selfie: scene | clothing: from-inline] [clothing: from-dedicated]"
+        )
+        assert selfie == "scene"
+        assert clothing == "from-dedicated"
+
     def test_meme_tag_two_parts(self):
-        clean, reaction, selfie, meme = bot.extract_tags(
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(
             "lol [meme: when the code works | on the first try]"
         )
         assert "meme" not in clean.lower()
         assert meme == ("when the code works", "on the first try")
 
     def test_meme_tag_one_part(self):
-        clean, reaction, selfie, meme = bot.extract_tags(
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(
             "check this out [meme: one does not simply]"
         )
         assert meme == ("one does not simply", "")
 
     def test_all_tags_together(self):
         text = "[react: 😂] haha [selfie: laughing] [meme: top | bottom]"
-        clean, reaction, selfie, meme = bot.extract_tags(text)
+        clean, reaction, selfie, clothing, meme = bot.extract_tags(text)
         assert reaction is not None
         assert selfie == "laughing"
+        assert clothing is None
         assert meme == ("top", "bottom")
         assert "[" not in clean
 
     def test_search_tag_stripped(self):
-        clean, _, _, _ = bot.extract_tags("let me look [search: python async]")
+        clean, _, _, _, _ = bot.extract_tags("let me look [search: python async]")
         assert "search" not in clean.lower()
         assert "[" not in clean
 
     def test_case_insensitive(self):
-        _, _, selfie, _ = bot.extract_tags("[Selfie: test hint]")
+        _, _, selfie, _, _ = bot.extract_tags("[Selfie: test hint]")
         assert selfie == "test hint"
 
     def test_empty_string(self):
-        clean, reaction, selfie, meme = bot.extract_tags("")
+        clean, reaction, selfie, clothing, meme = bot.extract_tags("")
         assert clean == ""
         assert reaction is None
         assert selfie is None
+        assert clothing is None
         assert meme is None
 
 
@@ -5034,7 +5065,7 @@ class TestDirectiveLeakGuard:
         text = "[SELFIE: her at the rink]"
         clean, dropped = bot._strip_directive_lines(text)
         assert dropped == [] and clean == text
-        _c, _r, hint, _m = bot.extract_tags(text)
+        _c, _r, hint, _clothing, _m = bot.extract_tags(text)
         assert hint == "her at the rink"
 
     def test_tag_survives_but_directive_neighbour_still_stripped(self):
@@ -6500,10 +6531,11 @@ class TestGifTagAndFiltering:
         assert bot._gif_query("ha [gif: derby wipeout] classic") == "derby wipeout"
         assert bot._gif_query("no tag here") is None
 
-    def test_extract_tags_still_returns_four_values(self):
-        """The 4-tuple contract is pinned; [gif:] rides alongside like [search:] does."""
+    def test_extract_tags_still_returns_five_values(self):
+        """The 5-tuple contract is pinned (clothing_override added v2026-08-08.1);
+        [gif:] rides alongside like [search:] does."""
         out = bot.extract_tags("hi [gif: x]")
-        assert len(out) == 4
+        assert len(out) == 5
 
     # --- safety ---
     def test_rating_map_offers_only_three_levels_and_never_r(self):

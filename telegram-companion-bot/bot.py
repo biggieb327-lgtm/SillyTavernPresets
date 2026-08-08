@@ -5159,9 +5159,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         cap_lines.append(
             f"- Send a selfie when it fits (e.g. {uname} asks for a pic, or to share a moment): "
             f"[selfie: a short visual description — your pose, expression, surroundings]. "
+            f"You can specify clothing too: [selfie: scene | clothing: what you're wearing] "
+            f"or a separate [clothing: ...] / [outfit: ...] tag. "
             f"If you describe what the selfie looks like in your text (the setting, lighting, "
             f"expression, what she's wearing), put those same details in the tag — the tag is "
-            f"what generates the image, so they must match. Keep it casual, in-character, SFW, "
+            f"what generates the image, so they must match. Keep it casual and in-character, "
             f"and don't overuse it."
         )
     _asked = latest_user_content or ""
@@ -5982,25 +5984,49 @@ def _strip_directive_lines(text: str) -> tuple:
 
 
 def extract_tags(text: str):
-    """Pull [react: ..], [selfie: ..], and [meme: ..] tags out, return
-    (clean_text, reaction, selfie_hint, meme_caption). meme_caption is a (top, bottom)
-    tuple or None."""
+    """Pull [react:], [selfie:], [clothing:/outfit:], and [meme:] tags out.
+
+    Returns:
+        (clean_text, reaction, selfie_hint, clothing_override, meme_caption)
+
+    Clothing can come from a dedicated [clothing:] / [outfit:] tag (wins) or from an
+    inline form inside the selfie tag: [selfie: scene | clothing: description].
+    """
     reaction = None
     rm = re.search(r"\[react:\s*([^\]]+?)\]", text, re.IGNORECASE)
     if rm:
         reaction = norm_emoji(rm.group(1))
         text = re.sub(r"\[react:\s*[^\]]+?\]", "", text, flags=re.IGNORECASE)
+
     selfie_hint = None
     sm = re.search(r"\[selfie:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
     if sm:
         selfie_hint = sm.group(1).strip()
         text = re.sub(r"\[selfie:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    clothing_override = None
+    cm = re.search(r"\[(?:clothing|outfit):\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
+    if cm:
+        clothing_override = cm.group(1).strip()
+        text = re.sub(r"\[(?:clothing|outfit):\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Inline form: [selfie: scene | clothing: ...] or | outfit:
+    if selfie_hint and clothing_override is None:
+        parts = re.split(
+            r"\s*\|\s*(?:clothing|outfit)\s*:\s*",
+            selfie_hint, maxsplit=1, flags=re.IGNORECASE,
+        )
+        if len(parts) == 2:
+            selfie_hint = parts[0].strip()
+            clothing_override = parts[1].strip()
+
     meme_caption = None
     mm = re.search(r"\[meme:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)
     if mm:
         parts = mm.group(1).split("|", 1)
         meme_caption = (parts[0].strip(), parts[1].strip() if len(parts) > 1 else "")
         text = re.sub(r"\[meme:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
+
     # Safety net: a [search: ..] tag should already be consumed by maybe_search, but if a
     # regenerated reply emits another one, strip it rather than leak the literal tag.
     sr = re.search(r"\[search:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
@@ -6011,9 +6037,10 @@ def extract_tags(text: str):
     gr = re.search(r"\[gif:\s*.*?\]", text, re.IGNORECASE | re.DOTALL)
     if gr:
         text = re.sub(r"\[gif:\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
-    if reaction or sm or mm or sr or gr:
+
+    if reaction or sm or cm or mm or sr or gr:
         text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip(), reaction, selfie_hint, meme_caption
+    return text.strip(), reaction, selfie_hint, clothing_override, meme_caption
 
 
 def _gif_query(text: str):
@@ -6403,8 +6430,20 @@ _SELFIE_ANATOMY_RULE = (
 )
 _SELFIE_REALISM_RULE = (
     "Shot on a phone front camera — candid and a little imperfect, natural skin texture and "
-    "real lighting, unposed, not a studio photo. Fully clothed, SFW. No added text, logos, "
-    "watermarks, or captions in the image."
+    "real lighting, unposed, not a studio photo. No added text, logos, watermarks, or captions "
+    "in the image."
+)
+# Clothing defaults. Overridden by an explicit [clothing:] / [outfit:] tag or inline
+# | clothing: ... inside [selfie: ...]. SELFIE_NSFW controls which default is used.
+_SELFIE_CLOTHING_SFW = (
+    "She is fully clothed in a natural, everyday outfit appropriate to the scene. "
+    "Casual and realistic — not lingerie, not lingerie-adjacent, not suggestive posing."
+)
+_SELFIE_CLOTHING_NSFW = (
+    "She is wearing revealing or intimate clothing that fits the scene "
+    "(lingerie, partially undressed, or nude if the context calls for it). "
+    "Keep it tasteful and photographic rather than pornographic — natural skin, real body, "
+    "no exaggerated features. The focus stays on her face and the candid moment."
 )
 # Restated at the END of the prompt, not only the start. The identity instruction is bits[0]
 # and ~1000 characters of pose/scene/weather/camera instruction now follow it; on an edit the
@@ -6475,6 +6514,9 @@ _SELFIE_CHANGE_SCOPE = (
 )
 # Kill switch: unset = face lock active, 0 = the v2026-08-03.1 prompt.
 SELFIE_FACE_LOCK = os.getenv("SELFIE_FACE_LOCK", "1").lower() not in ("0", "false", "no", "off")
+# Allow NSFW clothing / partial nudity in selfies when the scene or clothing override calls for it.
+# Default off so existing characters stay SFW until explicitly enabled per instance.
+SELFIE_NSFW = os.getenv("SELFIE_NSFW", "0").lower() not in ("0", "false", "no", "off")
 
 
 def _weather_outdoor_ok() -> bool:
@@ -6569,7 +6611,7 @@ def _weather_camera_pool() -> list:
     return filtered or SELFIE_CAMERA
 
 
-def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
+def build_selfie_prompt(hint: str, chat_id: int = None, clothing_override: str = None) -> str:
     scene = hint.strip() if hint else (random.choice(ATLAS) if ATLAS else "")
     framing = random.choice(SELFIE_FRAMINGS)
     expression = random.choice(SELFIE_EXPRESSIONS)
@@ -6665,6 +6707,21 @@ def build_selfie_prompt(hint: str, chat_id: int = None) -> str:
                       f"atmosphere, and what she might be wearing — don't describe the weather "
                       f"explicitly, just let it show.")
         bits.append(clause)
+    # Clothing: explicit override from [clothing:]/[outfit:] or inline | clothing: wins.
+    # Otherwise fall back to SFW/NSFW defaults controlled by SELFIE_NSFW.
+    if clothing_override:
+        bits.append(f"She is wearing: {clothing_override}.")
+        if SELFIE_NSFW:
+            bits.append(
+                "Interpret the clothing description naturally. "
+                "If it implies lingerie, partial nudity, or nudity, depict that accurately "
+                "while keeping the image photographic and focused on her face and the moment."
+            )
+        else:
+            bits.append("Depict the clothing as described. Keep the overall image tasteful.")
+    else:
+        bits.append(_SELFIE_CLOTHING_NSFW if SELFIE_NSFW else _SELFIE_CLOTHING_SFW)
+
     bits.append(_SELFIE_ANATOMY_RULE)
     bits.append(_SELFIE_REALISM_RULE)
     if chat_id is not None:
@@ -6993,7 +7050,8 @@ def _media_error_text(icon: str, e: Exception) -> str:
     return f"{icon} Couldn't make that one: {e}"
 
 
-async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bool = True):
+async def send_selfie(context, chat_id: int, hint: str = "",
+                      clothing_override: str = None, announce_errors: bool = True):
     if not selfie_ready():
         if announce_errors:
             # Two different problems, two different fixes (v2026-08-02.9): a missing asset
@@ -7011,7 +7069,7 @@ async def send_selfie(context, chat_id: int, hint: str = "", announce_errors: bo
         hint = await _infer_scene(chat_id)
     uploading = asyncio.create_task(_keep_uploading(context.bot, chat_id))
     try:
-        prompt = build_selfie_prompt(hint, chat_id)
+        prompt = build_selfie_prompt(hint, chat_id, clothing_override=clothing_override)
         caption_task = asyncio.create_task(_selfie_caption(hint, chat_id))
         img = await asyncio.to_thread(generate_selfie_image, prompt)
         caption = await caption_task
@@ -10734,7 +10792,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         ai_response = _MEMCHECK_RE.sub("", ai_response).strip()
         asyncio.create_task(_handle_memcheck(context, chat_id, memcheck_m.group(1).strip()))
     gif_query = _gif_query(ai_response)
-    clean, reaction, selfie_hint, meme_caption = extract_tags(ai_response)
+    clean, reaction, selfie_hint, clothing_override, meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
         clean = _strip_persona_breaks(clean)
@@ -10765,7 +10823,8 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
         if voice_reply.get(chat_id) and random.random() < tts_prob:
             asyncio.create_task(_send_voice_reply(context, chat_id, clean))
     if selfie_hint is not None:
-        await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+        await send_selfie(context, chat_id, selfie_hint,
+                          clothing_override=clothing_override, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
     if gif_query:
@@ -10996,7 +11055,7 @@ async def _group_deliver(context, chat_id: int, user_content: str, ai_response: 
     """Group delivery tail — allowlist-BUILT, not _deliver-with-skips: remember, react,
     send, ledger-append. Nothing else. The group-deliver-clean eval greps this body
     (GROUP_CHAT_DESIGN.md §5/§12)."""
-    clean, reaction, _selfie_hint, _meme_caption = extract_tags(ai_response)
+    clean, reaction, _selfie_hint, _clothing_override, _meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
     placeholder = clean or (f"[reacted {reaction}]" if reaction else "")
@@ -11509,7 +11568,7 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     text = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
     text = await maybe_search(context, chat_id, messages, text, uname)
     gif_query = _gif_query(text)
-    clean, _reaction, selfie_hint, meme_caption = extract_tags(text)
+    clean, _reaction, selfie_hint, clothing_override, meme_caption = extract_tags(text)
     if clean:
         clean = _strip_persona_breaks(clean)
     # Store a synthetic user entry so conversation history maintains proper user/assistant
@@ -11524,7 +11583,8 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     if clean:
         await send_bubbles(context, chat_id, clean)
     if selfie_hint is not None:
-        await send_selfie(context, chat_id, selfie_hint, announce_errors=False)
+        await send_selfie(context, chat_id, selfie_hint,
+                          clothing_override=clothing_override, announce_errors=False)
     if meme_caption is not None:
         await send_meme(context, chat_id, top=meme_caption[0], bottom=meme_caption[1], announce_errors=False)
     if gif_query:

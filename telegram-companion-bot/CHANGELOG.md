@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-08.1 — Selfie clothing override + SELFIE_NSFW for Grok Imagine
+
+**What:** Selfies can now take an explicit clothing description from the character,
+and a per-instance `SELFIE_NSFW` switch controls whether intimate clothing / nudity is
+allowed by default.
+
+**How to use:**
+- `[selfie: curled up on the couch | clothing: oversized white t-shirt and bare legs]`
+- or a separate `[clothing: ...]` / `[outfit: ...]` tag alongside the selfie tag
+- Set `SELFIE_NSFW=1` in the instance `.env` to allow NSFW defaults and intimate overrides
+
+**Why:** The xAI / Grok Imagine path was already wired; what was missing was a clean way
+for the character to specify clothing without fighting the hard-coded "Fully clothed, SFW"
+line inside `_SELFIE_REALISM_RULE`, and a toggle so NSFW instances can opt in without
+changing SFW ones.
+
+**Changes:**
+- `extract_tags` now returns a 5-tuple including `clothing_override`
+- `build_selfie_prompt(..., clothing_override=)` and `send_selfie(..., clothing_override=)`
+- Split clothing rules out of realism (`_SELFIE_CLOTHING_SFW` / `_SELFIE_CLOTHING_NSFW`)
+- System-prompt selfie instruction documents the new tag syntax
+- `.env.example` documents `SELFIE_NSFW`
+
 ## v2026-08-07.2 — /code-review caught a group-chat gating regression in v2026-08-07.1
 
 **Root cause: `handle_message` does double duty and the audit treated all 21 sites as
