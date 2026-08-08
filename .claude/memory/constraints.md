@@ -786,6 +786,13 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-08 — Reported a handoff as delivered having run only `run-evals.sh`, stating
+  "pytest isn't installed in this container" as a limitation, when `repo-change-control`
+  step 2 documents the exact two-command fix; installing it on the next turn immediately
+  surfaced 2 failing tests on `main` that the eval suite alone could not see → when a
+  verification step is skipped for an environment gap, check whether a skill already
+  documents the remedy before reporting the gap as a boundary; a stated limitation is not
+  the same as an unavoidable one.
 - 2026-08-07 — Edited both monthly Routines' Reddit-access steps in routines.md based
   solely on the file's own (stale) content, without first calling `list_triggers` to
   check the live prompts. The live triggers had already been updated via
