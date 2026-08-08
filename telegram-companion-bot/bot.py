@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-07.2"
+BOT_VERSION = "2026-08-08.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -5163,8 +5163,14 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"or a separate [clothing: ...] / [outfit: ...] tag. "
             f"If you describe what the selfie looks like in your text (the setting, lighting, "
             f"expression, what she's wearing), put those same details in the tag — the tag is "
-            f"what generates the image, so they must match. Keep it casual and in-character, "
-            f"and don't overuse it."
+            f"what generates the image, so they must match. "
+            # v2026-08-08.1 dropped "SFW" from this line unconditionally while adding the
+            # clothing tag. On a default (SELFIE_NSFW unset) instance that removed the only
+            # SFW instruction the character ever sees, which was never the intent — restored
+            # here, gated on the switch so NSFW instances keep the new wording.
+            + (f"Keep it casual and in-character, and don't overuse it."
+               if SELFIE_NSFW else
+               f"Keep it casual, in-character, SFW, and don't overuse it.")
         )
     _asked = latest_user_content or ""
     if not group and gif_ready() and (
@@ -6011,14 +6017,21 @@ def extract_tags(text: str):
         text = re.sub(r"\[(?:clothing|outfit):\s*.*?\]", "", text, flags=re.IGNORECASE | re.DOTALL)
 
     # Inline form: [selfie: scene | clothing: ...] or | outfit:
-    if selfie_hint and clothing_override is None:
+    # Always split it off the hint, even when a dedicated [clothing:] tag already won:
+    # the dedicated tag beats the inline VALUE, but the inline TEXT still has to leave
+    # the hint or "| clothing: ..." is fed to the image model as scene description.
+    if selfie_hint:
         parts = re.split(
             r"\s*\|\s*(?:clothing|outfit)\s*:\s*",
             selfie_hint, maxsplit=1, flags=re.IGNORECASE,
         )
         if len(parts) == 2:
             selfie_hint = parts[0].strip()
-            clothing_override = parts[1].strip()
+            # Falsiness, not `is None`: an empty dedicated tag ("[outfit: ]") yields ""
+            # and would otherwise discard a populated inline value AND fall back to the
+            # default, losing what the character actually asked for.
+            if not clothing_override:
+                clothing_override = parts[1].strip()
 
     meme_caption = None
     mm = re.search(r"\[meme:\s*(.*?)\]", text, re.IGNORECASE | re.DOTALL)

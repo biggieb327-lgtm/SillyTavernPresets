@@ -7,6 +7,62 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-08.2 — Repair v2026-08-08.1: unshipped version, leaked inline tag, red tests
+
+**Root cause:** v2026-08-08.1 was committed (`82c88fa`) with the changelog entry written
+but `BOT_VERSION` never bumped, and with two pytest failures left on `main`. Three
+separate problems, one commit:
+
+1. **`BOT_VERSION` stayed `2026-08-07.2`.** The `version-changelog-sync` eval went red on
+   `main`, which is a deploy blocker (`vps-sync.sh` hard-resets the VPS checkout to
+   `origin/main`), and `/audit` — the one mechanism that proves a deploy landed — would
+   have reported the previous build after a successful deploy.
+2. **The inline `| clothing:` fragment leaked into the image prompt.** `extract_tags`
+   only split the inline form off the selfie hint when no dedicated `[clothing:]` tag was
+   present (`if selfie_hint and clothing_override is None`). With both tags supplied, the
+   dedicated tag correctly won the *value*, but the literal text `| clothing: ...` stayed
+   in `selfie_hint` and was handed to the image model as scene description. Same shape as
+   the unstripped-tag leaks in v2026-07-29.1 and `[setbase: ..]` (2026-08-02), except it
+   reaches the image prompt rather than the chat.
+3. **Two tests were left failing.** `test_dedicated_clothing_wins_over_inline` caught
+   problem 2 and was shipped red. `test_rules_carry_the_constraints_the_image_models_need`
+   asserted `"Fully clothed, SFW."` lived in `_SELFIE_REALISM_RULE`; v2026-08-08.1 split
+   clothing out into `_SELFIE_CLOTHING_SFW`/`_NSFW`, so the assertion pinned a constant
+   that no longer owned the signal.
+4. **The word "SFW" was deleted from the selfie capability line** in `assemble_messages`
+   — `"Keep it casual, in-character, SFW, ..."` became `"Keep it casual and
+   in-character, ..."`, unconditionally rather than gated on `SELFIE_NSFW`, and
+   unmentioned in the v2026-08-08.1 changelog. On a default instance (`SELFIE_NSFW`
+   unset) that removed the only SFW instruction the character ever sees. Found by
+   `/code-review` on this release's diff, not by the test suite.
+5. **An empty dedicated tag discarded a populated inline value.** The inline-clothing
+   guard tested `clothing_override is None`, but `[outfit: ]` parses to `""` — not
+   `None` — so it beat the inline value and then fell through to the default, silently
+   losing the outfit the character actually named.
+
+**Fix:**
+- `BOT_VERSION` → `2026-08-08.2`; the v2026-08-08.1 selfie code itself is unchanged and
+  ships as written.
+- `extract_tags` now always splits the inline `| clothing:` form off the hint; the
+  dedicated tag still wins the value, but the inline text always leaves the hint.
+- Re-pointed the realism test at the **assembled prompt** instead of a constant, and
+  widened it to cover both SFW paths — the default path (`_SELFIE_CLOTHING_SFW` carries
+  "fully clothed") and the new `[clothing:]` override path (which had no coverage at
+  all). Deliberate widening with rationale, per the "never edit a check to make it pass"
+  rule in `CLAUDE.md`.
+- Restored "SFW" in the selfie capability line, gated on `SELFIE_NSFW` so NSFW instances
+  keep v2026-08-08.1's wording and SFW instances get the instruction back. Pinned by
+  `TestSelfieCapabilityLineSFWSignal` (break-tested: reintroducing the unconditional
+  drop turns it red).
+- The inline-clothing guard now tests falsiness rather than `is None`, so an empty
+  dedicated tag no longer discards a populated inline value.
+
+**Not fixed, flagged for the owner:** on an SFW instance the override path's safety signal
+is `"Keep the overall image tasteful."` rather than an explicit "fully clothed" — weaker
+than the pre-refactor wording that the Gemini blacked-out-image guard was written for.
+Whether that is strong enough for Gemini's filter is an empirical question that cannot be
+settled from a test run; it needs a live check against the image provider.
+
 ## v2026-08-08.1 — Selfie clothing override + SELFIE_NSFW for Grok Imagine
 
 **What:** Selfies can now take an explicit clothing description from the character,

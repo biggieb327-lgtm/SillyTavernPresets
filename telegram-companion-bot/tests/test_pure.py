@@ -66,6 +66,16 @@ class TestExtractTags:
         assert selfie == "scene"
         assert clothing == "from-dedicated"
 
+    def test_empty_dedicated_tag_does_not_discard_the_inline_value(self):
+        """v2026-08-08.2: the guard tested `is None`, so an empty "[outfit: ]" (which
+        parses to "") beat a populated inline value and then fell through to the default
+        -- the character's stated outfit was silently lost."""
+        _, _, selfie, clothing, _ = bot.extract_tags(
+            "[selfie: kitchen | clothing: a red dress][outfit: ]"
+        )
+        assert selfie == "kitchen"
+        assert clothing == "a red dress"
+
     def test_meme_tag_two_parts(self):
         clean, reaction, selfie, clothing, meme = bot.extract_tags(
             "lol [meme: when the code works | on the first try]"
@@ -5117,11 +5127,54 @@ class TestSelfiePromptFixedRules:
                     assert bot._SELFIE_ANATOMY_RULE in prompt
                     assert bot._SELFIE_REALISM_RULE in prompt
 
-    def test_rules_carry_the_constraints_the_image_models_need(self):
+    def test_rules_carry_the_constraints_the_image_models_need(self, monkeypatch):
         """Regression guards: extra limbs (Flux/Kontext) and Gemini's safety filter,
-        which returns blacked-out images without an explicit SFW/clothed signal."""
+        which returns blacked-out images without an explicit SFW/clothed signal.
+
+        WIDENED v2026-08-08.2: this asserted "Fully clothed, SFW." lived inside
+        _SELFIE_REALISM_RULE. v2026-08-08.1 split clothing out of the realism rule into
+        _SELFIE_CLOTHING_SFW/_NSFW, so the assertion pinned a constant that no longer
+        owns the signal and went red while the guarantee itself still held. Assert the
+        guarantee where it actually matters -- the assembled prompt -- and cover BOTH
+        SFW paths, since the override path is new and had no coverage at all.
+        """
         assert "No extra limbs." in bot._SELFIE_ANATOMY_RULE
-        assert "Fully clothed, SFW." in bot._SELFIE_REALISM_RULE
+
+        monkeypatch.setattr(bot, "SELFIE_NSFW", False)
+        # Default path: no [clothing:] tag, so the SFW clothing default must carry it.
+        assert "fully clothed" in bot.build_selfie_prompt("on the fire escape", None).lower()
+        # Override path: the character named an outfit, so the explicit "fully clothed"
+        # wording is gone by design -- an SFW signal must still reach the model.
+        override = bot.build_selfie_prompt(
+            "on the fire escape", None, clothing_override="a green raincoat"
+        )
+        assert "tasteful" in override.lower()
+
+
+class TestSelfieCapabilityLineSFWSignal:
+    """v2026-08-08.1 removed the word "SFW" from the selfie capability line while adding
+    the clothing tag -- unconditionally, not gated on SELFIE_NSFW, and unmentioned in its
+    changelog. On a default instance that deleted the only SFW instruction the character
+    ever sees. Restored in v2026-08-08.2 and pinned here."""
+
+    def _selfie_line(self, monkeypatch, nsfw):
+        monkeypatch.setattr(bot, "selfie_ready", lambda: True)
+        monkeypatch.setattr(bot, "SELFIE_NSFW", nsfw)
+        msgs = bot.assemble_messages(918273, "hello")
+        blob = "\n".join(m.get("content") or "" for m in msgs if isinstance(m.get("content"), str))
+        line = [ln for ln in blob.splitlines() if ln.startswith("- Send a selfie when it fits")]
+        assert line, "selfie capability line missing entirely"
+        return line[0]
+
+    def test_sfw_instance_is_told_to_keep_it_sfw(self, monkeypatch):
+        assert "SFW" in self._selfie_line(monkeypatch, False)
+
+    def test_nsfw_instance_is_not(self, monkeypatch):
+        assert "SFW" not in self._selfie_line(monkeypatch, True)
+
+    def test_clothing_tag_is_documented_either_way(self, monkeypatch):
+        for nsfw in (False, True):
+            assert "clothing:" in self._selfie_line(monkeypatch, nsfw)
 
 
 class TestCommandMenuMirrorsHandlers:
