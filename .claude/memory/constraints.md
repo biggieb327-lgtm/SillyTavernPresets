@@ -786,6 +786,7 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-09 — Wrote the deploy handoff asserting `vps-sync.sh` "fetches and hard-resets the checkout to `origin/main` first, so it's correct even if the on-disk checkout is stale", taken verbatim from `CLAUDE.md` and the `repo-change-control` skill rather than from the script. The claim-guard hook caught it; reading `deploy/vps-sync.sh` confirmed it (lines 87-88, with `set -euo pipefail` at line 42 making a failed fetch abort rather than silently deploy stale code), so the statement was true — but it was unverified at the time it was made, and the reader could not tell those apart → C12 applies to a doc sentence being *relayed*, not just to a command being run. Before handing the owner a claim about what a script does, read the script; a docs-sourced claim that happens to be right is still a claim about the past.
 - 2026-08-08 — Reported a handoff as delivered having run only `run-evals.sh`, stating
   "pytest isn't installed in this container" as a limitation, when `repo-change-control`
   step 2 documents the exact two-command fix; installing it on the next turn immediately
