@@ -8920,6 +8920,10 @@ class TestReverseGeocodeNeverRaises:
 
 
 class TestHandleLocationNamesThePlace:
+    """The lookup runs as a task, NOT inside the handler: PTB is built with no
+    concurrent_updates, so awaiting a 30s HTTP call there stalls every other update for
+    the instance and delays the "got it" ack by the same amount."""
+
     CHAT = 991
 
     def setup_method(self):
@@ -8930,18 +8934,13 @@ class TestHandleLocationNamesThePlace:
         bot.TRAFFIC_ENABLED = False        # else the handler tries to reply
         bot.save_state = lambda: None
         bot.user_location.pop(self.CHAT, None)
-        self.looked_up = []
 
     def teardown_method(self):
         (bot.LOCATION_PLACE, bot.TOMTOM_ENABLED, bot.TRAFFIC_ENABLED,
          bot.save_state) = self._saved
         bot.user_location.pop(self.CHAT, None)
 
-    def _run(self, monkeypatch, lat, lon, *, live=False, initial=True, label="Ballard, Seattle"):
-        def _rev(la, lo):
-            self.looked_up.append((la, lo))
-            return label
-        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", _rev)
+    def _share(self, lat, lon, *, live=False, initial=True):
         loc = SimpleNamespace(latitude=lat, longitude=lon,
                               live_period=3600 if live else None)
         msg = SimpleNamespace(location=loc)
@@ -8950,39 +8949,115 @@ class TestHandleLocationNamesThePlace:
             message=msg if initial else None,
             edited_message=None if initial else msg,
         )
-        asyncio.run(bot.handle_location(update, None))
+
+        async def _go():
+            await bot.handle_location(update, None)
+            # Let any task the handler spawned finish, so the test observes the end state
+            # rather than racing it.
+            for task in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+                await task
+
+        asyncio.run(_go())
         return bot.user_location[self.CHAT]
 
-    def test_initial_share_looks_up_and_stores_the_place(self, monkeypatch):
-        entry = self._run(monkeypatch, 47.6685, -122.3830)
-        assert entry["place"] == "Ballard, Seattle"
-        assert entry["place_new"] is True
-        assert len(self.looked_up) == 1
+    def test_the_handler_itself_does_not_block_on_the_lookup(self, monkeypatch):
+        """The regression that matters: a slow TomTom must not hold the update slot."""
+        started = []
 
-    def test_a_live_update_nearby_carries_the_label_without_a_second_lookup(self, monkeypatch):
-        self._run(monkeypatch, 47.6685, -122.3830, live=True)
-        assert len(self.looked_up) == 1
-        entry = self._run(monkeypatch, 47.6690, -122.3835, live=True, initial=False)
-        assert entry["place"] == "Ballard, Seattle"
-        # The whole point of the live branch: no quota spent re-learning the same answer.
-        assert len(self.looked_up) == 1
+        def _slow(la, lo):
+            started.append(time.time())
+            time.sleep(0.25)
+            return "Ballard, Seattle"
 
-    def test_a_live_update_far_away_drops_the_label_rather_than_lying(self, monkeypatch):
-        self._run(monkeypatch, 47.6685, -122.3830, live=True)
-        entry = self._run(monkeypatch, 47.6100, -122.2007, live=True, initial=False)
-        assert "place" not in entry
-        assert len(self.looked_up) == 1
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", _slow)
+        loc = SimpleNamespace(latitude=47.6685, longitude=-122.3830, live_period=None)
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=self.CHAT),
+            message=SimpleNamespace(location=loc), edited_message=None)
+
+        async def _go():
+            t0 = time.monotonic()
+            await bot.handle_location(update, None)
+            handler_time = time.monotonic() - t0
+            for task in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+                await task
+            return handler_time
+
+        handler_time = asyncio.run(_go())
+        assert handler_time < 0.2, f"handler blocked for {handler_time:.3f}s"
+        assert started, "the lookup never ran"
+        assert bot.user_location[self.CHAT]["place"] == "Ballard, Seattle"
+
+    def test_the_location_is_stored_before_any_lookup_happens(self, monkeypatch):
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode",
+                            lambda la, lo: "Ballard, Seattle")
+        entry = self._share(47.6685, -122.3830)
+        assert entry["lat"] == 47.6685 and entry["place_new"] is True
 
     def test_the_kill_switch_skips_the_lookup_entirely(self, monkeypatch):
+        looked = []
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode",
+                            lambda la, lo: looked.append(1) or "Ballard")
         bot.LOCATION_PLACE = False
-        entry = self._run(monkeypatch, 47.6685, -122.3830)
-        assert "place" not in entry
-        assert self.looked_up == []
+        entry = self._share(47.6685, -122.3830)
+        assert "place" not in entry and looked == []
 
-    def test_no_label_found_stores_nothing(self, monkeypatch):
-        entry = self._run(monkeypatch, 47.6685, -122.3830, label="")
+    def test_no_label_found_stores_nothing_but_keeps_the_location(self, monkeypatch):
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", lambda la, lo: "")
+        entry = self._share(47.6685, -122.3830)
         assert "place" not in entry
-        assert entry["lat"] == 47.6685      # the location itself is still stored
+        assert entry["lat"] == 47.6685
+
+    def test_a_live_update_nearby_carries_the_label_without_a_second_lookup(self, monkeypatch):
+        looked = []
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode",
+                            lambda la, lo: looked.append(1) or "Ballard, Seattle")
+        self._share(47.6685, -122.3830, live=True)
+        assert len(looked) == 1
+        entry = self._share(47.6690, -122.3835, live=True, initial=False)
+        assert entry["place"] == "Ballard, Seattle"
+        # The point of the live branch: no quota spent re-learning the same answer.
+        assert len(looked) == 1
+
+    def test_a_live_update_far_away_drops_the_label_rather_than_lying(self, monkeypatch):
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode",
+                            lambda la, lo: "Ballard, Seattle")
+        self._share(47.6685, -122.3830, live=True)
+        entry = self._share(47.6100, -122.2007, live=True, initial=False)
+        assert "place" not in entry
+
+
+class TestNameThePlaceStaleGuard:
+    CHAT = 992
+
+    def setup_method(self):
+        self._save = bot.save_state
+        bot.save_state = lambda: None
+        bot.user_location.pop(self.CHAT, None)
+
+    def teardown_method(self):
+        bot.save_state = self._save
+        bot.user_location.pop(self.CHAT, None)
+
+    def test_a_newer_share_is_not_captioned_with_the_old_lookup(self, monkeypatch):
+        """The lookup is in flight when a second pin lands. Writing the old answer onto
+        the new position is exactly the lie the live-update branch refuses to tell."""
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", lambda la, lo: "Ballard, Seattle")
+        bot.user_location[self.CHAT] = {"lat": 47.61, "lon": -122.20, "ts": 2000.0,
+                                        "live_until": None}
+        asyncio.run(bot._name_the_place(self.CHAT, 1000.0, 47.6685, -122.3830))
+        assert "place" not in bot.user_location[self.CHAT]
+
+    def test_the_matching_share_is_captioned(self, monkeypatch):
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", lambda la, lo: "Ballard, Seattle")
+        bot.user_location[self.CHAT] = {"lat": 47.6685, "lon": -122.3830, "ts": 1000.0,
+                                        "live_until": None}
+        asyncio.run(bot._name_the_place(self.CHAT, 1000.0, 47.6685, -122.3830))
+        assert bot.user_location[self.CHAT]["place"] == "Ballard, Seattle"
+
+    def test_a_vanished_chat_does_not_raise(self, monkeypatch):
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", lambda la, lo: "Ballard")
+        asyncio.run(bot._name_the_place(self.CHAT, 1000.0, 47.6, -122.3))
 
 
 # ── atlas_audit.py (v2026-08-09.2, repo tooling) ──────────────────────────────
@@ -9073,6 +9148,21 @@ class TestPlaceNoteIsOneShot:
 
     def test_a_stale_share_is_not_announced(self):
         assert bot._place_note(self._loc(ts=time.time() - 5 * 3600)) == ""
+
+    def test_a_share_still_fresh_but_no_longer_recent_is_not_announced(self):
+        """_fresh_location keeps a share usable for 4h, which is right for looking up
+        restaurants near it and wrong for a line that says "they just shared". Between
+        the two clocks she would open with news that is hours old."""
+        older = self._loc(ts=time.time() - (bot._PLACE_ANNOUNCE_SEC + 60))
+        assert bot._fresh_location(older)          # still good enough to route from
+        assert bot._place_note(older) == ""        # not good enough to react to
+
+    def test_a_share_inside_the_window_is_announced(self):
+        assert bot._place_note(self._loc(ts=time.time() - 60))
+
+    def test_a_missing_or_junk_timestamp_is_not_announced(self):
+        assert bot._place_note(self._loc(ts=None)) == ""
+        assert bot._place_note(self._loc(ts="soon")) == ""
 
     def test_no_place_no_line(self):
         assert bot._place_note(self._loc(place=None)) == ""

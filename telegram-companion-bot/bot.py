@@ -13098,6 +13098,11 @@ def _route_brief(route: dict, mode: str, dest_label: str) -> str:
     return line
 
 
+# How recent a share has to be for "they just shared their location" to still be true.
+# Deliberately not an env var: it is the tense of one sentence, not a behavior to tune.
+_PLACE_ANNOUNCE_SEC = 900
+
+
 def _place_note(loc) -> str:
     """The one-shot 'they're in <neighbourhood>' line for the prompt, or ''.
 
@@ -13111,7 +13116,16 @@ def _place_note(loc) -> str:
     it on every message for the next four hours is the failure this guards against."""
     if not (LOCATION_PLACE and isinstance(loc, dict)):
         return ""
-    if not (loc.get("place_new") and loc.get("place") and _fresh_location(loc)):
+    if not (loc.get("place_new") and loc.get("place")):
+        return ""
+    # Its own text says "just shared", so it needs a tighter clock than _fresh_location's
+    # 4 hours (or a live share's whole period). Share a pin, say nothing for three hours,
+    # then message: without this she opens with "you just shared your location" about a
+    # place they left before lunch.
+    try:
+        if (time.time() - float(loc["ts"])) > _PLACE_ANNOUNCE_SEC:
+            return ""
+    except (KeyError, TypeError, ValueError):
         return ""
     loc["place_new"] = False
     return (f"\n[They just shared their location and it's in {loc['place']}. You can see "
@@ -13253,8 +13267,11 @@ def _tomtom_reverse_geocode(lat, lon) -> str:
         r = _get_session().get(
             _TOMTOM_REVGEO_URL.format(lat=float(lat), lon=float(lon)),
             # entityType is deliberately NOT sent: it makes TomTom return the geography
-            # polygon instead of the address block this parser reads.
-            params={"key": TOMTOM_API_KEY, "limit": 1, "radius": 100},
+            # polygon instead of the address block this parser reads. radius is left at
+            # TomTom's default too — pinning it to 100m returns an empty `addresses` array
+            # wherever nothing sits within 100m, which is precisely the rural case the
+            # `municipality`-last ordering in _PLACE_LABEL_FIELDS exists to serve.
+            params={"key": TOMTOM_API_KEY, "limit": 1},
             timeout=(10, 30),
         )
         r.raise_for_status()
@@ -13980,6 +13997,27 @@ def _format_travel_times(times: list, lat=None, lon=None) -> str:
     return "\n".join(lines) if lines else "No travel time data available."
 
 
+async def _name_the_place(chat_id: int, ts: float, lat: float, lon: float):
+    """Reverse-geocode a share and attach the label, off the location handler.
+
+    Runs as a task so `handle_location` returns immediately (see its comment on PTB's
+    serial update processing). The mutation and `save_state` happen back on the event
+    loop, which is where state serialization belongs (bot-code-invariants #6)."""
+    place = await asyncio.to_thread(_tomtom_reverse_geocode, lat, lon)
+    if not place:
+        return
+    cur = user_location.get(chat_id)
+    # A newer share landed while this lookup was out. Patching it would caption the new
+    # position with the old neighbourhood — the exact lie the live-update branch avoids.
+    if not isinstance(cur, dict) or cur.get("ts") != ts:
+        return
+    cur["place"] = place
+    cur["place_lat"] = lat
+    cur["place_lon"] = lon
+    cur["place_new"] = True          # one-shot: consumed by the first reply after
+    save_state()
+
+
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Store the user's location (static or live); for traffic-enabled bots, acknowledge it."""
     chat_id = update.effective_chat.id
@@ -13997,32 +14035,30 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "live_until": live_until,
     }
 
-    # Name the neighbourhood (LOCATION_PLACE). One lookup per SHARE, never per live
-    # update: a live share fires this handler on every position ping, and geocoding each
-    # one would spend the quota to re-learn the same answer.
-    if LOCATION_PLACE and TOMTOM_ENABLED:
-        if update.message:            # the initial share — the one place a lookup is owed
-            place = await asyncio.to_thread(_tomtom_reverse_geocode, loc.latitude, loc.longitude)
-            if place:
-                entry["place"] = place
-                entry["place_lat"] = loc.latitude
-                entry["place_lon"] = loc.longitude
-                entry["place_new"] = True     # one-shot: consumed by the first reply after
-        elif prev.get("place"):
-            # A live update. Carry the label only while they are still plausibly in it;
-            # past that, drop it rather than tell her they are somewhere they left.
-            try:
-                moved = _haversine(loc.latitude, loc.longitude,
-                                   float(prev["place_lat"]), float(prev["place_lon"]))
-            except (KeyError, TypeError, ValueError):
-                moved = 9e9
-            if moved <= LOCATION_PLACE_MILES:
-                for k in ("place", "place_lat", "place_lon", "place_new"):
-                    if k in prev:
-                        entry[k] = prev[k]
+    # Name the neighbourhood (LOCATION_PLACE) — the live-update half, which costs no
+    # network. Carry the existing label only while they are still plausibly inside it;
+    # past that drop it rather than tell her they are somewhere they left.
+    if LOCATION_PLACE and TOMTOM_ENABLED and not update.message and prev.get("place"):
+        try:
+            moved = _haversine(loc.latitude, loc.longitude,
+                               float(prev["place_lat"]), float(prev["place_lon"]))
+        except (KeyError, TypeError, ValueError):
+            moved = 9e9
+        if moved <= LOCATION_PLACE_MILES:
+            for k in ("place", "place_lat", "place_lon", "place_new"):
+                if k in prev:
+                    entry[k] = prev[k]
 
     user_location[chat_id] = entry
     save_state()
+
+    # The lookup runs OFF this handler. PTB is built with no concurrent_updates, so its
+    # default processor handles one update at a time — awaiting a 30s HTTP call here would
+    # stall every other update for the instance and delay the acknowledgment below by the
+    # same amount. Nothing about the label is user-visible before her next reply, so it has
+    # no business on this path. One lookup per SHARE, never per live-position ping.
+    if LOCATION_PLACE and TOMTOM_ENABLED and update.message:
+        asyncio.create_task(_name_the_place(chat_id, entry["ts"], loc.latitude, loc.longitude))
 
     if TRAFFIC_ENABLED and update.message:  # only reply on the initial share, not every live update
         if loc.live_period:

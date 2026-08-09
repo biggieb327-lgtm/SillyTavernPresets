@@ -10,7 +10,12 @@ gap closed in v2026-08-09.1: a property of the content layer no check could see,
 nothing ever looked.
 
     python3 tools/atlas_audit.py priya --near "Bellevue, WA"
-    python3 tools/atlas_audit.py --all --near "Seattle" --radius 12
+    python3 tools/atlas_audit.py nora  --near "Olympia, WA" --radius 12
+
+**One instance per run, and that is deliberate** — there is no `--all`. The seven live in
+different cities, so a single anchor applied across them flags every correct entry in every
+other city as FAR and makes the exit code meaningless. A fleet sweep is seven invocations
+with seven anchors, which is the honest shape of the job.
 
 Pass --near the instance's LIVE `WEATHER_LOCATION`, not the city you believe she lives in.
 That value is what the prompt asserts ("She currently lives in {WEATHER_LOCATION}") and
@@ -171,16 +176,13 @@ def report(instance: str, rows: list) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("instance", nargs="?", help="seed directory name, e.g. priya")
-    ap.add_argument("--all", action="store_true", help="every instance with an atlas.txt")
+    ap.add_argument("instance", help="seed directory name, e.g. priya")
     ap.add_argument("--near", required=True,
-                    help="the instance's LIVE WEATHER_LOCATION, e.g. 'Bellevue, WA'")
+                    help="this instance's LIVE WEATHER_LOCATION, e.g. 'Bellevue, WA'")
     ap.add_argument("--radius", type=float, default=15.0,
                     help="miles from --near before an entry is FAR (default 15)")
     args = ap.parse_args()
 
-    if not args.instance and not args.all:
-        ap.error("give an instance name or --all")
     if not os.getenv("TOMTOM_API_KEY"):
         sys.exit("TOMTOM_API_KEY is not set — this tool searches for every atlas entry.")
 
@@ -193,17 +195,19 @@ def main() -> None:
 
         bot.TOMTOM_API_KEY = os.environ["TOMTOM_API_KEY"]   # fake .env has no key
 
-        anchor = bot._tomtom_geocode(args.near)
+        # _tomtom_geocode returns None only for "not found"; a network or HTTP failure
+        # raises _TomTomError, which unwrapped gives a traceback instead of this message.
+        try:
+            anchor = bot._tomtom_geocode(args.near)
+        except Exception as e:                      # noqa: BLE001 — any failure here is fatal
+            sys.exit(f"could not reach TomTom to geocode --near {args.near!r}: {e}")
         if not anchor:
             sys.exit(f"could not geocode --near {args.near!r}")
         origin = (anchor[0], anchor[1])
         print(f"# anchor: {args.near} -> {anchor[2]} ({anchor[0]:.4f}, {anchor[1]:.4f})")
         print(f"# radius: {args.radius} miles\n")
 
-        instances = (sorted(p.parent.name for p in REPO.glob("*/atlas.txt"))
-                     if args.all else [args.instance])
-        flagged = sum(report(inst, audit(bot, inst, origin, args.radius))
-                      for inst in instances)
+        flagged = report(args.instance, audit(bot, args.instance, origin, args.radius))
         # Non-zero when anything is flagged, so this can gate a character-pass Routine.
         sys.exit(1 if flagged else 0)
     finally:

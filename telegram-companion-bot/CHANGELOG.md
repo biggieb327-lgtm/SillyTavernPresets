@@ -67,6 +67,38 @@ pass; `name_matches` pins exactly the Bay-Terrace-Road case.
 Repo-only, like `selfie_prompt_preview.py` — `vps-sync.sh` does not copy `tools/`. Exits
 non-zero when anything is flagged so a character-pass Routine can gate on it.
 
+**Six defects `/code-review` found on this diff; five fixed, one accepted.**
+
+- **The lookup was awaited inside `handle_location`.** `main()` builds PTB with no
+  `concurrent_updates`, so its default processor handles one update at a time — a 30s
+  reverse-geocode stalled *every* update for that instance and delayed the existing
+  "📍 Got it" ack by the same amount. Now `_name_the_place` runs as a task: the location is
+  stored and acknowledged immediately, and the label lands when it lands. The task carries a
+  staleness guard — if a newer share arrived while the lookup was out, it drops the answer
+  rather than caption the new position with the old neighbourhood, which is the same lie the
+  live-update branch already refused to tell. A test asserts the handler returns in under
+  200ms against a deliberately slow lookup.
+- **`_place_note` said "just shared" on a share up to four hours old.** `_fresh_location`'s
+  window is right for routing from a pin and wrong for reacting to one. Now gated on
+  `_PLACE_ANNOUNCE_SEC` (15 min) as well; a test pins the gap between the two clocks.
+- **`radius: 100` made the rural fallback unreachable.** The reverse-geocode call pinned a
+  100m radius, so anywhere with nothing inside 100m returned an empty `addresses` array —
+  exactly the case `_PLACE_LABEL_FIELDS`' `municipality`-last ordering exists to serve. The
+  parameter contradicted its own comment. Left at TomTom's default now.
+- **`atlas_audit.py` let `_TomTomError` escape** on the anchor geocode, so a transient
+  network failure printed a traceback instead of its own error message. Found by running it.
+- **`--all` was removed rather than fixed.** It reused one `--near` anchor across seven
+  instances that live in different cities, so the docstring's own example flagged priya's
+  entirely-correct Bellevue atlas as FAR wholesale and made the exit code meaningless as a
+  Routine gate. A fleet sweep is seven invocations with seven anchors; that is the honest
+  shape of the job, so the tool now says so instead of pretending otherwise.
+- **Accepted, not fixed:** the one-shot flag is cleared and saved before the reply is
+  generated, so an exception during generation loses that share's reaction permanently. The
+  cost is one missed "you're in Ballard?" on an error path that already sends a failure
+  message; deferring the write until after a successful send means threading the state
+  through the reply path for that. Not worth it — recorded so the next reader knows it was
+  weighed rather than missed.
+
 **Found while building it, not fixed here (per-instance `.env`, not code):** priya's
 `setting.txt` and her entire atlas are **Bellevue**, but `/audit` reports
 `Location: Seattle`. `WEATHER_LOCATION` feeds `"She currently lives in {WEATHER_LOCATION} —
