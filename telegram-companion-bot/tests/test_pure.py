@@ -8755,6 +8755,25 @@ class TestSetbaseShowsTheCurrentPhoto:
         assert len(sent["text"]) == 1
         assert "512×768" not in sent["text"][0]
 
+    def test_an_unreadable_file_names_the_real_problem(self, tmp_path, monkeypatch):
+        """Present-but-unreadable is live in this deploy model: the bot runs as
+        bot@<instance> and a hand-copied photo arrives owned by root. Every selfie reads
+        the same path, so this is a selfie outage and the reply must say so."""
+        from pathlib import Path
+        TestBaseImageDimensions._png(tmp_path, 512, 768)
+        # chmod cannot express this: the suite runs as root, which bypasses the mode bits
+        # the production failure depends on. Raise the error the OS would raise instead.
+        def _denied(self):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(Path, "read_bytes", _denied)
+        before = len(bot._error_counts.get("media", []))
+        sent = self._run(tmp_path, monkeypatch)
+        assert sent["photo"] == []
+        assert "could not be read" in sent["text"][0]
+        assert "permissions" in sent["text"][0]
+        # Silent in /errors is how this stays invisible for weeks.
+        assert len(bot._error_counts.get("media", [])) == before + 1
+
     def test_a_telegram_rejection_still_answers_in_text(self, tmp_path, monkeypatch):
         TestBaseImageDimensions._png(tmp_path, 512, 768)
         monkeypatch.setattr(bot, "BASE_DIR", tmp_path)

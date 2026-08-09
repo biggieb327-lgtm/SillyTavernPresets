@@ -12027,7 +12027,20 @@ async def _reply_with_current_base(msg):
         await msg.reply_text(f"📷 No reference photo in play — {_base_image_status()}\n\n"
                              f"{_SETBASE_USAGE}")
         return
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        # Unreadable-but-present is a real state in this deploy model: the bot runs as
+        # bot@<instance> while a photo copied in by hand arrives owned by root. Every
+        # selfie reads this same path, so this is a live selfie failure, not a /setbase
+        # one — say so instead of letting on_error print something generic.
+        log.error("[setbase] could not read the reference photo %s: %s", path, e)
+        _count_error("media")
+        await msg.reply_text(
+            f"📷 {path.name} is in play but could not be read ({e.__class__.__name__}). "
+            f"Every selfie reads this same file, so they are failing too — check the "
+            f"instance directory's ownership and permissions.\n\n{_SETBASE_USAGE}")
+        return
     caption = (f"📷 Current reference photo: {path.name}{_base_image_size_note(path)}, "
                f"{len(raw) // 1024} KB.\n"
                f"Her face should fill much of this frame. A full-body or wide shot leaves an "
@@ -12037,8 +12050,12 @@ async def _reply_with_current_base(msg):
         await msg.reply_photo(photo=BytesIO(raw), caption=caption)
     except Exception as e:
         # A file on disk Telegram will not accept as a photo is itself worth reporting,
-        # so the caption still goes out rather than the handler failing silently.
+        # so the caption still goes out rather than the handler failing silently. Counted
+        # like the write-failure path below: sendPhoto caps at 10 MB and /setbase enforces
+        # only an 8 KB floor, so an oversized reference fails here on every invocation and
+        # would otherwise appear in neither /errors nor /audit.
         log.warning("[setbase] could not send the reference photo back: %s", e)
+        _count_error("media")
         await msg.reply_text(caption)
 
 

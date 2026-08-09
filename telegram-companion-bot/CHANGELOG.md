@@ -64,6 +64,16 @@ framed is now a question `/setbase` answers in seconds; if the photo turns out t
 portrait crop, the cause is elsewhere and the prompt layer is back on the table — but
 v2026-08-03.2 already showed that tuning it blind costs two releases and settles nothing.
 
+**Two defects `/code-review` caught on this diff, both in the new handler's failure paths.**
+The first: `path.read_bytes()` sat outside the `try`, so an unreadable-but-present reference
+escaped into the generic error handler. That state is live in this deploy model — instances
+run as `bot@<instance>` while a photo copied in by hand arrives owned by root — and every
+selfie reads the same path, so it is a selfie outage, not a `/setbase` inconvenience; the
+reply now says exactly that. The second: the send-failure path logged without calling
+`_count_error`, unlike the write-failure path beside it. `sendPhoto` caps at 10 MB and
+`/setbase` enforces only an 8 KB floor, so an oversized reference fails on every invocation
+and appeared in neither `/errors` nor `/audit`. Both now counted.
+
 Kill switch `SELFIE_BASE_PREVIEW=0` restores the usage-text-only reply. Prompt assembly is
 untouched, no new LLM calls, no new dependency (Pillow is already required).
 
