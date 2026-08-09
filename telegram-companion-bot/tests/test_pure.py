@@ -9173,3 +9173,75 @@ class TestPlaceNoteIsOneShot:
         assert bot._place_note("not a dict") == ""
         bot.LOCATION_PLACE = False
         assert bot._place_note(self._loc()) == ""
+
+
+# ── atlas_suggest.py (repo tooling) ───────────────────────────────────────────
+
+def _atlas_suggest():
+    """Import the tool by path — tools/ is not a package."""
+    import importlib.util
+    from pathlib import Path
+    p = Path(bot.__file__).resolve().parent / "tools" / "atlas_suggest.py"
+    spec = importlib.util.spec_from_file_location("atlas_suggest", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestAtlasSuggest:
+    def test_existing_names_uses_the_shared_atlas_parser(self, tmp_path):
+        """Dedupe matches on the place NAME, so a line whose description happens to
+        mention another place does not suppress that place as a suggestion."""
+        a = _atlas_suggest()
+        f = tmp_path / "atlas.txt"
+        f.write_text("# header\n\nMeydenbauer Bay Park — near the Bellevue Library\n",
+                     encoding="utf-8")
+        assert a.existing_names(f) == {"meydenbauer bay park"}
+
+    def test_missing_atlas_is_an_empty_set_not_a_crash(self, tmp_path):
+        a = _atlas_suggest()
+        assert a.existing_names(tmp_path / "nope.txt") == set()
+
+    def test_suggestion_line_leaves_the_meaning_to_a_person(self):
+        a = _atlas_suggest()
+        line = a.suggestion_line("Bellevue Library", "1111 110th Ave NE")
+        assert line.startswith("Bellevue Library — [")
+        assert "1111 110th Ave NE" in line
+
+    def test_collect_skips_known_places_and_dedupes_across_kinds(self):
+        a = _atlas_suggest()
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                return [
+                    {"poi": {"name": "Old Bellevue"}, "address": {"freeformAddress": "Main St"}},
+                    {"poi": {"name": "Cafe Cesura"}, "address": {"freeformAddress": "10 Bel"}},
+                    {"address": {"freeformAddress": "no poi here"}},      # a street
+                ]
+
+        seen = {"old bellevue"}
+        out = a.collect(_Bot, (47.6, -122.2), "coffee shop", seen, limit=5)
+        assert len(out) == 1 and out[0].startswith("Cafe Cesura — [")
+        # Mutating `seen` is what stops a place answering two kinds being proposed twice.
+        assert a.collect(_Bot, (47.6, -122.2), "bakery", seen, limit=5) == []
+
+    def test_collect_honours_the_per_kind_limit(self):
+        a = _atlas_suggest()
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                return [{"poi": {"name": f"Place {i}"}, "address": {}} for i in range(10)]
+
+        assert len(a.collect(_Bot, (47.6, -122.2), "park", set(), limit=3)) == 3
+
+    def test_a_failed_search_is_not_fatal(self):
+        a = _atlas_suggest()
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                raise RuntimeError("TomTom said no")
+
+        assert a.collect(_Bot, (47.6, -122.2), "park", set(), limit=3) == []

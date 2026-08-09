@@ -558,6 +558,44 @@ constraints; check their assumptions before acting on them.
   episodic recall — are enhancements to 3.16's episodic recall, not required for
   on-this-day to work. Not requested; flagged here as known follow-ups if wanted.
 
+### 3.18 "Open now" for /food and FOOD_SUGGESTIONS — S (owner-approved 2026-08-09, BLOCKED on a verified response shape)
+
+Approved to build, not built: **no session can currently see a TomTom opening-hours
+response**, and writing the parser from remembered API docs is the thing CLAUDE.md's Stack
+section exists to forbid. Three routes were tried on 2026-08-09 and all three are closed:
+the TomTom MCP connector's token expired mid-session; `api.tomtom.com` needs the fleet key,
+which no session has; and `developer.tomtom.com` is blocked by egress policy (`curl` gets
+`403 CONNECT tunnel failed` through the proxy — the same wall as `nano-gpt.com`).
+
+**Unblocked by:** one real response. Re-authorize the TomTom connector and capture a
+`fuzzy-search` result with `openingHours=nextSevenDays`, or paste one from a live instance.
+
+**The problem it fixes.** `FOOD_SUGGESTIONS` pre-fetches real nearby restaurants and hands
+them to the model with no idea whether any are open, so at 11pm she can recommend a place
+that shut at nine. That is the failure that makes her sound like she is reading a directory
+rather than knowing the neighbourhood. `openingHours=nextSevenDays` is a parameter on the
+search endpoint already called by `_fetch_tomtom_search`; no new endpoint is needed.
+
+**The tz-safe design, worked out and worth keeping.** ROADMAP 3.5 parked this as needing a
+"tz-safe opening-hours parse", which is the real difficulty: TomTom returns hours in the
+POI's local time and the bot only knows its own `TZ`. Computing "open now" against bot-local
+time is silently wrong whenever the user has shared a location in another timezone.
+
+The cheap resolution uses data the response already carries. TomTom documents
+`nextSevenDays` as starting with the current day **in the POI's local time**, so the
+earliest date in the payload *is* the POI's today. Compare it to the bot's local today:
+
+- **Dates differ** → the POI is in another timezone. Render the hours as text and emit **no
+  open/closed verdict** — refuse the judgement rather than ship a wrong one.
+- **Dates match** → close enough for the comparison to mean something; compute open/closed
+  against the bot's clock.
+
+State plainly what that check does and does not prove (C8): matching dates do not prove
+matching timezones, they bound the error to within a day. It is a cheap sanity gate, not a
+timezone lookup. `timeZone=iana` was tested as the real fix and returned **no timezone
+object** on reverse-geocode at full detail — unverified, possibly POI-scoped, possibly
+dropped by the MCP wrapper; worth one more test against a named POI before relying on it.
+
 ### 3.17 Preserve small worn face items in the selfie face lock — S (deferred by owner 2026-08-09)
 
 `_SELFIE_PRESERVE_RULE` enumerates what an edit model must copy from the reference photo
