@@ -186,9 +186,16 @@ ends **2026-08-09**; after that date this sentence is stale — confirm before r
   `raw.githubusercontent.com` URLs 404, so any doc or script still telling you to `curl`
   one is stale. Deploys read from the checkout at `/opt/telegram-bots/.repo`.
 - **Trained knowledge of these APIs drifts; the pins above don't.** Before relying on
-  undocumented `python-telegram-bot` or NanoGPT behavior, check current docs or a web
-  fetch rather than memory — this file only records traps already hit (the
+  undocumented `python-telegram-bot` or NanoGPT behavior, check the current source
+  rather than memory — this file only records traps already hit (the
   `asyncio.get_event_loop()` line above); the next one won't be here yet.
+  **Not via `WebFetch`** — it returns a small model's paraphrase, not the page
+  (`.claude/OPERATING_MANUAL.md` §9). `curl` the raw artifact and grep it:
+  `raw.githubusercontent.com` and `pypi.org` are reachable, so PTB's own source and
+  changelog are. `docs.python-telegram-bot.org` and `nano-gpt.com` are blocked by
+  egress policy to `curl` and `WebFetch` alike (verified 2026-08-09) — for those two,
+  the pins here and the code are the only sources a session can actually read, and
+  "unverified — host blocked" is the correct thing to report.
 
 ## Deployment
 

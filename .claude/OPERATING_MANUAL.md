@@ -122,6 +122,49 @@ deploying."
 **Prevents.** The reader trusting a guess because it was written in the voice of
 a verified fact.
 
+## 9. Read the source, not a summary of it
+
+**Procedure.** `WebFetch` does not hand you the page. Its own tool description says it
+"answers `prompt` against it using a small fast model" — so what arrives is another
+model's paraphrase, and the quotes, numbers, and names inside it may be compressed,
+averaged across unrelated tables, or invented outright. File WebFetch output under
+rule 4's **assumed** bucket, never **read**, and never quote it as if it were the
+source text. Any fact that will land in a diff, a version pin, a changelog row, or a
+number in a report gets fetched as raw bytes and grepped:
+
+```bash
+curl -sS -L --max-time 30 -o page.txt \
+  -w 'http=%{http_code} bytes=%{size_download}\n' '<url>'
+grep -n -m5 '<term>' page.txt
+```
+
+Read the status line before trusting the grep. An error page is a few dozen bytes and
+matches nothing, which is indistinguishable from a genuine "the term is absent" —
+a silent false negative dressed as a finding.
+
+Prefer the raw artifact over the rendered doc site: a repo's `CHANGES.rst` or source
+file, a registry's JSON. Those hosts are both reachable here and unparaphrased.
+
+**This environment's limit, verified 2026-08-09.** `curl` and `WebFetch` share one
+egress allowlist, so "just curl it instead" is not a universal escape hatch — the
+common advice to swap one for the other does not hold
+here. `raw.githubusercontent.com` and `pypi.org`
+answered 200; `arxiv.org`, `nano-gpt.com`, and `docs.python-telegram-bot.org` are
+refused to **both** (proxy `403`, WebFetch `EGRESS_BLOCKED`). When the host is
+blocked, the honest report is "not verified — host blocked by egress policy," not a
+WebFetch summary quietly promoted to a fact. Do not retry or route around a policy
+denial; report the blocked host (`/root/.ccr/README.md`).
+
+**Example.** Checking whether PTB's changelog mentions `get_event_loop`:
+`curl` returned `http=404 bytes=14`, and the grep over that 14-byte error page printed
+no match. Reported as-is, that becomes "the changelog doesn't mention it" — a
+confident claim sourced from a file that was never the changelog. The status line was
+the tell; the grep alone could not distinguish the two.
+
+**Prevents.** A small model's guess entering the repo wearing the costume of a
+citation — the failure where 30 papers yield 17 fabricated or reversed findings, each
+one specific, well-formatted, and unfalsifiable without the original text.
+
 ---
 
 ## Self-check before any final answer
@@ -130,7 +173,9 @@ Run all seven. A "no" on any of them means the answer is not ready.
 
 1. Does my first sentence answer the question that was actually asked?
 2. Is every number, path, and command in this answer executed, cited, or labeled
-   as an assumption — with no fourth category hiding anywhere?
+   as an assumption — with no fourth category hiding anywhere? (§9: anything that
+   reached me through `WebFetch` is the fourth category, however much it looks
+   like a quote.)
 3. Take the strongest claim in this answer: is the evidence behind it proportional
    to how firmly it is stated?
 4. Did the verification run *after* my final edit, and is its real output shown?
