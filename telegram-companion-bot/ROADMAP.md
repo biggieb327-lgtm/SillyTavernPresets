@@ -576,14 +576,24 @@ that shut at nine. That is the failure that makes her sound like she is reading 
 rather than knowing the neighbourhood. `openingHours=nextSevenDays` is a parameter on the
 search endpoint already called by `_fetch_tomtom_search`; no new endpoint is needed.
 
-**The tz-safe design, worked out and worth keeping.** ROADMAP 3.5 parked this as needing a
-"tz-safe opening-hours parse", which is the real difficulty: TomTom returns hours in the
-POI's local time and the bot only knows its own `TZ`. Computing "open now" against bot-local
-time is silently wrong whenever the user has shared a location in another timezone.
+**The tz-safe design, worked out and worth keeping — but check its premise first.**
+ROADMAP 3.5 parked this as needing a "tz-safe opening-hours parse" without saying what the
+difficulty was. The difficulty below is *consistent with* that phrase and is what a session
+in 2026-08 reconstructed; it is not quoted from the original note, so do not treat it as the
+recorded intent. The problem as reconstructed: hours come back in the POI's local time and
+the bot only knows its own `TZ`, so computing "open now" against bot-local time is silently
+wrong whenever the user has shared a location in another timezone.
 
-The cheap resolution uses data the response already carries. TomTom documents
-`nextSevenDays` as starting with the current day **in the POI's local time**, so the
-earliest date in the payload *is* the POI's today. Compare it to the bot's local today:
+The cheap resolution uses data the response already carries — **on one load-bearing premise
+that has not been verified against TomTom.** The `nextSevenDays` semantics below are read
+off the **TomTom MCP tool's parameter description** ("shows the opening hours for next week,
+starting with the current day in the local time of the POI"), which is a wrapper's account
+of the API, not the API's own documentation — that host is blocked by egress policy. If the
+raw REST endpoint orders or dates differently, the gate is unsound and the whole design
+needs rework. **Confirm it against the same real response that unblocks the parser.**
+
+Taking that premise: the earliest date in the payload is the POI's today. Compare it to the
+bot's local today:
 
 - **Dates differ** → the POI is in another timezone. Render the hours as text and emit **no
   open/closed verdict** — refuse the judgement rather than ship a wrong one.
