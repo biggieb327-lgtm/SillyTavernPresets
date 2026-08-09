@@ -8638,3 +8638,174 @@ class TestLoreEmbeddingsCacheGuard:
         bot._lore_emb_dirty = True
         bot._save_lore_embeddings()
         assert bot.LORE_EMB_MODEL_FILE.read_text().strip() == bot.EMBEDDING_MODEL
+
+
+# ── Reference-photo observability (v2026-08-09.1) ─────────────────────────────
+# v2026-08-03.2 spent two releases tuning selfie prompt text against a reference photo
+# nobody had looked at; the real cause was a full-body shot with the face at ~8% of the
+# frame. Nothing in the system would show what the reference photo was. These pin the
+# three places it is now reported.
+
+class TestBaseImageDimensions:
+    @staticmethod
+    def _png(tmp_path, w, h, name="x_base.png"):
+        from PIL import Image
+        p = tmp_path / name
+        Image.new("RGB", (w, h), (120, 90, 60)).save(p)
+        return p
+
+    def test_reads_a_real_image(self, tmp_path):
+        assert bot._base_image_dimensions(self._png(tmp_path, 640, 480)) == (640, 480)
+
+    def test_undecodable_file_is_none_not_an_exception(self, tmp_path):
+        # PNG magic bytes with a garbage body: /setbase's magic-byte check accepts this,
+        # so the audit path must survive it rather than raising.
+        p = tmp_path / "bad_base.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 9000)
+        assert bot._base_image_dimensions(p) is None
+
+    def test_missing_file_is_none(self, tmp_path):
+        assert bot._base_image_dimensions(tmp_path / "nope.png") is None
+
+    def test_note_formats_dimensions(self, tmp_path):
+        assert bot._base_image_size_note(self._png(tmp_path, 1024, 1024)) == " 1024×1024"
+
+    def test_note_flags_an_unreadable_file(self, tmp_path):
+        p = tmp_path / "bad_base.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 9000)
+        assert "UNREADABLE" in bot._base_image_size_note(p)
+
+    def test_audit_status_carries_the_dimensions(self, tmp_path, monkeypatch):
+        self._png(tmp_path, 800, 1200, "priya_base.png")
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "priya_base.png")
+        status = bot._base_image_status()
+        assert status.startswith("priya_base.png")
+        assert "800×1200" in status
+
+    def test_text_only_status_is_unchanged(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "priya_base.png")
+        assert "TEXT-ONLY" in bot._base_image_status()
+
+
+class TestSetbaseShowsTheCurrentPhoto:
+    """Bare /setbase used to print usage and nothing else. It now answers the question a
+    face-drift report actually raises: what does her reference photo look like?"""
+
+    def _run(self, tmp_path, monkeypatch, uid=4243):
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "x_base.png")
+        bot.ALLOWED_USERS.add(uid)
+        sent = {"text": [], "photo": []}
+
+        async def reply_text(text, **k):
+            sent["text"].append(text)
+
+        async def reply_photo(photo=None, caption=None, **k):
+            sent["photo"].append((photo.read(), caption))
+
+        msg = SimpleNamespace(document=None, photo=None, reply_to_message=None,
+                              reply_text=reply_text, reply_photo=reply_photo)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        try:
+            asyncio.run(bot.setbase_cmd(update, SimpleNamespace(args=[])))
+        finally:
+            bot.ALLOWED_USERS.discard(uid)
+        return sent
+
+    def test_sends_the_photo_back_with_its_dimensions(self, tmp_path, monkeypatch):
+        raw = TestBaseImageDimensions._png(tmp_path, 512, 768).read_bytes()
+        sent = self._run(tmp_path, monkeypatch)
+        assert sent["text"] == []
+        assert len(sent["photo"]) == 1
+        body, caption = sent["photo"][0]
+        assert body == raw          # the file on disk, not a re-encode
+        assert "512×768" in caption
+        assert "x_base.png" in caption
+
+    def test_caption_says_the_face_should_fill_the_frame(self, tmp_path, monkeypatch):
+        TestBaseImageDimensions._png(tmp_path, 512, 768)
+        _, caption = self._run(tmp_path, monkeypatch)["photo"][0]
+        # The whole point of the release: the caption states the failure in words rather
+        # than implying a numeric threshold that does not exist.
+        assert "fill much of this frame" in caption
+
+    def test_no_reference_photo_reports_that_instead(self, tmp_path, monkeypatch):
+        sent = self._run(tmp_path, monkeypatch)
+        assert sent["photo"] == []
+        assert "No reference photo in play" in sent["text"][0]
+        assert "TEXT-ONLY" in sent["text"][0]
+
+    def test_kill_switch_restores_the_usage_only_reply(self, tmp_path, monkeypatch):
+        TestBaseImageDimensions._png(tmp_path, 512, 768)
+        monkeypatch.setattr(bot, "SELFIE_BASE_PREVIEW", False)
+        sent = self._run(tmp_path, monkeypatch)
+        assert sent["photo"] == []
+        assert len(sent["text"]) == 1
+        assert "512×768" not in sent["text"][0]
+
+    def test_a_telegram_rejection_still_answers_in_text(self, tmp_path, monkeypatch):
+        TestBaseImageDimensions._png(tmp_path, 512, 768)
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "x_base.png")
+        uid = 4244
+        bot.ALLOWED_USERS.add(uid)
+        seen = []
+
+        async def reply_text(text, **k):
+            seen.append(text)
+
+        async def reply_photo(**k):
+            raise RuntimeError("Telegram said no")
+
+        msg = SimpleNamespace(document=None, photo=None, reply_to_message=None,
+                              reply_text=reply_text, reply_photo=reply_photo)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        try:
+            asyncio.run(bot.setbase_cmd(update, SimpleNamespace(args=[])))
+        finally:
+            bot.ALLOWED_USERS.discard(uid)
+        assert len(seen) == 1 and "512×768" in seen[0]
+
+
+class TestSetbaseInstallReportsDimensions:
+    """A bad reference should be visible when it is installed, not three selfies later."""
+
+    def test_install_confirmation_carries_the_size(self, tmp_path, monkeypatch):
+        from PIL import Image
+        import io
+        import os
+        buf = io.BytesIO()
+        # Noise, not a flat fill: a solid-colour PNG compresses below /setbase's 8 KB
+        # "too small to be usable" floor and never reaches the confirmation message.
+        Image.frombytes("RGB", (300, 900), os.urandom(300 * 900 * 3)).save(buf, format="PNG")
+        raw = buf.getvalue()
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "SELFIE_BASE", "x_base.png")
+        uid = 4245
+        bot.ALLOWED_USERS.add(uid)
+
+        class _File:
+            async def download_as_bytearray(self):
+                return bytearray(raw)
+
+        class _Doc:
+            mime_type = "image/png"
+
+            async def get_file(self):
+                return _File()
+
+        seen = []
+
+        async def reply_text(text, **k):
+            seen.append(text)
+
+        msg = SimpleNamespace(document=_Doc(), photo=None, reply_to_message=None,
+                              reply_text=reply_text)
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        try:
+            asyncio.run(bot.setbase_cmd(update, SimpleNamespace(args=[])))
+        finally:
+            bot.ALLOWED_USERS.discard(uid)
+        assert "300×900" in seen[0]

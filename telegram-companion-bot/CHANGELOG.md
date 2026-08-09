@@ -7,6 +7,66 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-09.1 — You cannot debug a face lock against a photo nobody can see
+
+**Root cause: the selfie pipeline's strongest identity signal was the one thing the system
+would never show you.** Owner-reported that Priya's selfies drift into a stranger with the
+face lock on. That is the same symptom as v2026-08-03.2, and that investigation ended with
+the finding that matters here: after three A/B rounds and 22 generated images tuning prompt
+text, the actual cause turned out to be the reference photo — a standing full-body beach
+shot with Emily's face at roughly **8% of the frame height**, about a hundred pixels. An
+edit model cannot copy a face it cannot see, so it synthesises one. That release wrote the
+gap down and did not close it:
+
+> *"Nothing in the system ever showed anyone what the reference photo **is**. `/audit`
+> reports the filename and provider — enough to prove a file is in play, never enough to
+> see that the face in it is unusably small. Two releases were spent tuning prompt text
+> against an image nobody had looked at."*
+
+Nothing since closed it. `/audit` still printed a bare filename; `/setbase` confirmed an
+install with format and KB and never said how big the picture was, let alone how it was
+framed. So the first question any face-drift report raises — *what does her reference photo
+actually look like?* — had no answer reachable from Telegram, on any of the seven
+instances. Diagnosis required VPS shell access and someone thinking to look.
+
+**Fix: make the reference photo inspectable from the chat it breaks in.**
+
+- **Bare `/setbase` now sends the current reference photo back**, captioned with its
+  filename, pixel dimensions and size, plus what a usable reference looks like. It was
+  previously a usage-text-only reply, which is the one place someone already goes when
+  thinking about the reference photo. `_reply_with_current_base` falls back to sending the
+  caption as text if Telegram rejects the file — a reference photo Telegram will not
+  display is itself the answer.
+- **`/audit` and the startup audit line now carry pixel dimensions** (`priya_base.png
+  1024×1024`), via `_base_image_dimensions` / `_base_image_size_note`. A file that is not a
+  decodable image reports `(UNREADABLE — not a decodable image)` rather than a size.
+- **The install confirmation reports dimensions too**, so a bad reference is visible at the
+  moment it is installed rather than three drifted selfies later.
+
+**Deliberately not built: a face-size metric.** The load-bearing number is what fraction of
+the frame her face fills, and measuring it needs face detection — a real dependency in a
+shared venv, for a check a human eye performs instantly and correctly. Worse, a number
+invites trusting it: the beach photo is large and high-resolution and *still* unusable, so
+any dimensions-based verdict would have passed it. Dimensions say how much detail exists at
+all; **the image itself is the check**, and the caption says so in words rather than
+implying a threshold that does not exist. This is C8 applied before the fact — ask what a
+reading actually measures — instead of after.
+
+`Image.open` reads the header only, so `.size` never decodes a frame and this is cheap
+enough to run on every `/audit`. The except is deliberately broad: PIL raises
+`UnidentifiedImageError`, `OSError` and `DecompressionBombError` here and a truncated file
+raises others still, and a reference photo we cannot measure must degrade to "unknown
+size", never break the audit or a selfie.
+
+**This does not itself fix Priya's face drift, and should not be read as claiming to.** It
+makes the leading hypothesis checkable in one command. Whether her reference is badly
+framed is now a question `/setbase` answers in seconds; if the photo turns out to be a good
+portrait crop, the cause is elsewhere and the prompt layer is back on the table — but
+v2026-08-03.2 already showed that tuning it blind costs two releases and settles nothing.
+
+Kill switch `SELFIE_BASE_PREVIEW=0` restores the usage-text-only reply. Prompt assembly is
+untouched, no new LLM calls, no new dependency (Pillow is already required).
+
 ## v2026-08-08.2 — Repair v2026-08-08.1: unshipped version, leaked inline tag, red tests
 
 **Root cause:** v2026-08-08.1 was committed (`82c88fa`) with the changelog entry written

@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-08.2"
+BOT_VERSION = "2026-08-09.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -678,6 +678,10 @@ SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
 # *_base.* image in the instance dir rather than silently generating from text alone.
 # Unset = active. Set to 0 to require an exact SELFIE_BASE match.
 SELFIE_BASE_AUTODETECT = os.getenv("SELFIE_BASE_AUTODETECT", "1").lower() not in ("0", "false", "no", "off")
+# `/setbase` with nothing attached sends the CURRENT reference photo back, so its framing can
+# be looked at. Two releases were spent tuning selfie prompt text against a reference nobody
+# had ever seen (v2026-08-03.2). Unset = active. Set to 0 for the usage-text-only reply.
+SELFIE_BASE_PREVIEW = os.getenv("SELFIE_BASE_PREVIEW", "1").lower() not in ("0", "false", "no", "off")
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = _env_float("SELFIE_GUIDANCE", "3.5")
 SELFIE_STEPS = _env_int("SELFIE_STEPS", "28")
@@ -6287,6 +6291,34 @@ def _resolve_base_image():
     return found[0] if len(found) == 1 else None
 
 
+def _base_image_dimensions(path):
+    """(width, height) of the reference photo, or None when it cannot be read.
+
+    Image.open parses the header only — .size never decodes a frame, so this is cheap
+    enough to run on every /audit. Deliberately broad except: a reference photo we cannot
+    measure must degrade to "unknown size", never break the audit or a selfie. PIL raises
+    UnidentifiedImageError, OSError and DecompressionBombError here, and a truncated file
+    raises others still."""
+    try:
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return None
+
+
+def _base_image_size_note(path) -> str:
+    """' 1024×1024' for the audit line, or a flag that the file is unreadable.
+
+    Dimensions are NOT a quality verdict: the v2026-08-03.2 beach photo was large and
+    still unusable, because what matters is how much of the frame her face fills and no
+    number here measures that. This says how much detail exists at all; seeing the framing
+    is what `/setbase` with no attachment is for."""
+    dims = _base_image_dimensions(path)
+    if dims is None:
+        return " (UNREADABLE — not a decodable image)"
+    return f" {dims[0]}×{dims[1]}"
+
+
 def _base_image_status() -> str:
     """One line for the startup audit: which photo is in play, or why none is."""
     configured = BASE_DIR / SELFIE_BASE
@@ -6300,9 +6332,11 @@ def _base_image_status() -> str:
             return (f"TEXT-ONLY, NO APPEARANCE.TXT — every selfie is a generic stranger "
                     f"(SELFIE_BASE={SELFIE_BASE})")
         return f"TEXT-ONLY (no reference photo; SELFIE_BASE={SELFIE_BASE})"
+    note = _base_image_size_note(resolved)
     if resolved != configured:
-        return f"{resolved.name} (AUTODETECTED — SELFIE_BASE={SELFIE_BASE} not found; set it in .env)"
-    return resolved.name
+        return (f"{resolved.name}{note} (AUTODETECTED — SELFIE_BASE={SELFIE_BASE} not found; "
+                f"set it in .env)")
+    return f"{resolved.name}{note}"
 
 
 def _has_base_image() -> bool:
@@ -11967,14 +12001,57 @@ _BASE_IMAGE_MAGIC = (
     (b"\xff\xd8\xff", "JPEG"),
 )
 
+_SETBASE_USAGE = (
+    "📷 Send the image as a FILE with /setbase as the caption, or reply to one "
+    "with /setbase.\nSending it as a normal photo works too, but Telegram "
+    "recompresses those and the reference photo anchors her face — send as a file "
+    "if you can."
+)
+
+
+async def _reply_with_current_base(msg):
+    """Answer a bare /setbase by sending back the reference photo currently in play.
+
+    The gap this closes was named in v2026-08-03.2 and left open: nothing in the system
+    ever showed anyone what the reference photo IS. `/audit` reports a filename, which
+    proves a file is in play and can never show that the face in it is ~8% of the frame —
+    the actual cause of the face drift that two releases of prompt tuning failed to fix,
+    found only when the owner was asked to send the file itself. No number here can measure
+    "how much of the frame is her face"; a human glance at the image settles it at once,
+    so the image is the answer and the dimensions are a footnote."""
+    if not SELFIE_BASE_PREVIEW:
+        await msg.reply_text(_SETBASE_USAGE)
+        return
+    path = _resolve_base_image()
+    if path is None:
+        await msg.reply_text(f"📷 No reference photo in play — {_base_image_status()}\n\n"
+                             f"{_SETBASE_USAGE}")
+        return
+    raw = path.read_bytes()
+    caption = (f"📷 Current reference photo: {path.name}{_base_image_size_note(path)}, "
+               f"{len(raw) // 1024} KB.\n"
+               f"Her face should fill much of this frame. A full-body or wide shot leaves an "
+               f"edit model too little of her face to copy, so it invents one — that is what "
+               f"a selfie drifting into a stranger looks like.\n\n{_SETBASE_USAGE}")
+    try:
+        await msg.reply_photo(photo=BytesIO(raw), caption=caption)
+    except Exception as e:
+        # A file on disk Telegram will not accept as a photo is itself worth reporting,
+        # so the caption still goes out rather than the handler failing silently.
+        log.warning("[setbase] could not send the reference photo back: %s", e)
+        await msg.reply_text(caption)
+
 
 async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Replace this instance's selfie reference photo, over Telegram.
+    """Show or replace this instance's selfie reference photo, over Telegram.
 
     Send the image as a FILE with /setbase as the caption, or reply to one with
     /setbase. A photo sent the normal way also works, but Telegram recompresses
     those and the reference is the strongest identity signal in the whole selfie
     pipeline -- a re-encoded one anchors worse.
+
+    Bare /setbase, with nothing attached, sends the CURRENT reference back instead
+    of only printing usage (v2026-08-09.1) -- see _reply_with_current_base.
 
     Exists because the scp route kept failing: those commands are phone-local
     while the owner's session is on the VPS, and three separate attempts went
@@ -11997,11 +12074,7 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_file = await photos[-1].get_file()
         compressed = True
     else:
-        await msg.reply_text(
-            "📷 Send the image as a FILE with /setbase as the caption, or reply to one "
-            "with /setbase.\nSending it as a normal photo works too, but Telegram "
-            "recompresses those and the reference photo anchors her face — send as a file "
-            "if you can.")
+        await _reply_with_current_base(msg)
         return
 
     raw = bytes(await tg_file.download_as_bytearray())
@@ -12040,7 +12113,8 @@ async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # backup of a file that had never been there.
     prev = "  (previous kept as %s.prev)" % dest.name if backed_up else ""
     await msg.reply_text(
-        f"📷 Reference photo updated: {dest.name} — {fmt}, {len(raw) // 1024} KB.{prev}\n"
+        f"📷 Reference photo updated: {dest.name}{_base_image_size_note(dest)} — {fmt}, "
+        f"{len(raw) // 1024} KB.{prev}\n"
         f"The next selfie uses it; no restart needed.{note}")
 
 
@@ -14961,7 +15035,7 @@ _BASE_COMMANDS = [
     BotCommand("gif", "Search and send a GIF"),
     BotCommand("gifsafety", "GIF safety: high, medium or low"),
     BotCommand("features", "Switch integrations on or off"),
-    BotCommand("setbase", "Replace her selfie reference photo"),
+    BotCommand("setbase", "Show or replace her selfie reference photo"),
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
     BotCommand("meme", "Send a meme (optional hint)"),
