@@ -558,6 +558,50 @@ constraints; check their assumptions before acting on them.
   episodic recall — are enhancements to 3.16's episodic recall, not required for
   on-this-day to work. Not requested; flagged here as known follow-ups if wanted.
 
+### 3.17 Preserve small worn face items in the selfie face lock — S (deferred by owner 2026-08-09)
+
+`_SELFIE_PRESERVE_RULE` enumerates what an edit model must copy from the reference photo
+— face shape, bone structure, eyes, nose, mouth, brows, skin tone, skin marks, hairline,
+hair colour and texture, apparent age — and then carries **one dedicated sentence for
+eyewear**, phrased conditionally both ways ("if she is wearing glasses there she is
+wearing those same glasses here; if she is wearing none, add none"). That sentence exists
+because Emily's glasses kept vanishing (v2026-08-03.2).
+
+Nothing covers the same class of item elsewhere on the face. `grep` finds "bindi" exactly
+once in the whole repo — `priya/appearance.txt` — and never in `bot.py`, so a bindi is
+governed by no rule at all: dropping it, adding one, or moving it violates nothing. It is
+not a "mark on her skin" in the sense the rule means, any more than glasses are.
+
+**Observed, not theorised (2026-08-09):** across six selfies from one session on Priya's
+re-cropped reference, the bindi is clearly present in about half and clearly absent in the
+rest. Same reference, same prompt, inconsistent result. (Small feature read off compressed
+images — the count is approximate, the inconsistency is not.)
+
+**The fix, when it is taken up:** widen the eyewear sentence into one clause covering small
+worn or applied face items — eyewear, forehead marks, piercings, earrings — stated
+conditionally both ways and category-generic. It must never assert that *she* has any of
+them: that is the character-bleed trap of v2026-08-01.8's courier jacket and .9's
+hardcoded freckles, and `test_shared_prompt_hardcodes_no_character_specific_feature` pins
+it (conditional phrasing is why "glasses" is allowed to appear at all).
+
+**Deliberately NOT in scope: the braid.** It is absent from five of the same six images,
+but `SELFIE_ACTIVITIES` includes "just woke up, hair a mess" and "fresh out of the shower
+with damp hair". Pinning a hairstyle would make the prompt contradict itself, which hands
+back exactly the latitude these rules exist to remove (v2026-08-03.2's reasoning for
+keeping the clarity rule compatible with every framing). Hair colour and texture are
+already pinned; style is legitimately variable.
+
+**Also seen once in the same six:** the beautify regression the rule already names —
+slimmer face, heavy eye makeup, restyled — in one draw of six. One sample; not enough to
+act on, recorded so a second sighting is recognised as a pattern rather than re-diagnosed.
+
+**Verification is a live A/B, not a test run.** No session container has a
+`GEMINI_API_KEY`, and the provider hosts are blocked by egress policy, so a prompt change
+here cannot be proven from the repo. Priya runs `gemini-3-pro-image-preview`, and **no
+face-lock A/B in the changelog was ever run against that model** — all 22 images in
+v2026-08-03.2 predate the fleet's move to it. Shipping prompt text and calling it fixed is
+what cost two releases in August.
+
 ---
 
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
