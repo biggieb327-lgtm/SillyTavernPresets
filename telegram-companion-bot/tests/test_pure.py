@@ -6330,8 +6330,18 @@ class TestBaseImageResolution:
         assert "TEXT-ONLY" in status and "nora_base.jpg" in status
 
     def test_status_line_is_quiet_when_correctly_configured(self):
-        self._touch("priya_base.png")
-        assert bot._base_image_status() == "priya_base.png"
+        """Scope widened in v2026-08-09.1, deliberately: the line now also carries pixel
+        dimensions, so an exact-equality assertion no longer expresses what this test is
+        for. "Quiet" means no warning — no AUTODETECTED, no TEXT-ONLY, no UNREADABLE —
+        and that is now asserted directly instead of implied by the equality. It also
+        writes a REAL png, so the dimension path is exercised rather than the failure
+        branch a fake header would take."""
+        from PIL import Image
+        Image.new("RGB", (900, 1200), (40, 80, 120)).save(self._dir / "priya_base.png")
+        status = bot._base_image_status()
+        assert status == "priya_base.png 900×1200"
+        for noise in ("AUTODETECTED", "TEXT-ONLY", "UNREADABLE", ".env"):
+            assert noise not in status
 
 
 class TestSharedPromptIsCharacterNeutral:
