@@ -8838,3 +8838,248 @@ class TestSetbaseInstallReportsDimensions:
         finally:
             bot.ALLOWED_USERS.discard(uid)
         assert "300×900" in seen[0]
+
+
+# ── Neighbourhood naming on a shared location (v2026-08-09.2) ─────────────────
+# She held lat/lon and could not say where that WAS, so she said nothing where a person
+# says "wait, you're in Ballard?". One reverse-geocode per share, injected into one reply.
+
+class TestPlaceLabel:
+    """The field order is load-bearing: TomTom names the local-neighbourhood field
+    differently across API generations, and `municipality` last keeps a rural share
+    from degrading to no label at all."""
+
+    @staticmethod
+    def _resp(**addr):
+        return {"addresses": [{"address": addr}]}
+
+    def test_neighbourhood_wins_and_carries_the_town(self):
+        assert bot._place_label(self._resp(
+            neighbourhood="Capitol Hill", municipality="Seattle")) == "Capitol Hill, Seattle"
+
+    def test_municipality_subdivision_is_the_other_generation(self):
+        assert bot._place_label(self._resp(
+            municipalitySubdivision="Ballard", municipality="Seattle")) == "Ballard, Seattle"
+
+    def test_falls_back_to_the_town_alone(self):
+        assert bot._place_label(self._resp(municipality="Wenatchee")) == "Wenatchee"
+
+    def test_does_not_say_the_town_twice(self):
+        assert bot._place_label(self._resp(
+            neighbourhood="Seattle", municipality="Seattle")) == "Seattle"
+
+    def test_empty_and_malformed_shapes_degrade_to_no_label(self):
+        for bad in (None, {}, {"addresses": []}, {"addresses": [None]},
+                    {"addresses": [{"address": None}]}, {"addresses": [{"address": []}]},
+                    {"addresses": [{"address": {}}]}):
+            assert bot._place_label(bad) == ""
+
+
+class TestReverseGeocodeNeverRaises:
+    """Its caller is the location handler, where a failed lookup must cost the user
+    nothing — there is no degraded answer to fall back to, the feature just doesn't
+    happen. Every other TomTom fetch raises _TomTomError; this one must not."""
+
+    def setup_method(self):
+        self._session = bot._get_session
+
+    def teardown_method(self):
+        bot._get_session = self._session
+
+    def _session_raising(self, exc):
+        class _S:
+            def get(_self, url, **kw):
+                raise exc
+        bot._get_session = lambda: _S()
+
+    def test_a_network_failure_is_an_empty_label(self):
+        self._session_raising(bot.requests.exceptions.ConnectionError("no route to host"))
+        assert bot._tomtom_reverse_geocode(47.6, -122.3) == ""
+
+    def test_a_garbage_body_is_an_empty_label(self):
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): raise ValueError("not json")
+        class _S:
+            def get(_self, url, **kw): return _R()
+        bot._get_session = lambda: _S()
+        assert bot._tomtom_reverse_geocode(47.6, -122.3) == ""
+
+    def test_a_good_body_returns_the_label(self):
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"addresses": [{"address": {"neighbourhood": "Fremont",
+                                                   "municipality": "Seattle"}}]}
+        class _S:
+            def get(_self, url, **kw): return _R()
+        bot._get_session = lambda: _S()
+        assert bot._tomtom_reverse_geocode(47.6, -122.3) == "Fremont, Seattle"
+
+
+class TestHandleLocationNamesThePlace:
+    CHAT = 991
+
+    def setup_method(self):
+        self._saved = (bot.LOCATION_PLACE, bot.TOMTOM_ENABLED, bot.TRAFFIC_ENABLED,
+                       bot.save_state)
+        bot.LOCATION_PLACE = True
+        bot.TOMTOM_ENABLED = True
+        bot.TRAFFIC_ENABLED = False        # else the handler tries to reply
+        bot.save_state = lambda: None
+        bot.user_location.pop(self.CHAT, None)
+        self.looked_up = []
+
+    def teardown_method(self):
+        (bot.LOCATION_PLACE, bot.TOMTOM_ENABLED, bot.TRAFFIC_ENABLED,
+         bot.save_state) = self._saved
+        bot.user_location.pop(self.CHAT, None)
+
+    def _run(self, monkeypatch, lat, lon, *, live=False, initial=True, label="Ballard, Seattle"):
+        def _rev(la, lo):
+            self.looked_up.append((la, lo))
+            return label
+        monkeypatch.setattr(bot, "_tomtom_reverse_geocode", _rev)
+        loc = SimpleNamespace(latitude=lat, longitude=lon,
+                              live_period=3600 if live else None)
+        msg = SimpleNamespace(location=loc)
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=self.CHAT),
+            message=msg if initial else None,
+            edited_message=None if initial else msg,
+        )
+        asyncio.run(bot.handle_location(update, None))
+        return bot.user_location[self.CHAT]
+
+    def test_initial_share_looks_up_and_stores_the_place(self, monkeypatch):
+        entry = self._run(monkeypatch, 47.6685, -122.3830)
+        assert entry["place"] == "Ballard, Seattle"
+        assert entry["place_new"] is True
+        assert len(self.looked_up) == 1
+
+    def test_a_live_update_nearby_carries_the_label_without_a_second_lookup(self, monkeypatch):
+        self._run(monkeypatch, 47.6685, -122.3830, live=True)
+        assert len(self.looked_up) == 1
+        entry = self._run(monkeypatch, 47.6690, -122.3835, live=True, initial=False)
+        assert entry["place"] == "Ballard, Seattle"
+        # The whole point of the live branch: no quota spent re-learning the same answer.
+        assert len(self.looked_up) == 1
+
+    def test_a_live_update_far_away_drops_the_label_rather_than_lying(self, monkeypatch):
+        self._run(monkeypatch, 47.6685, -122.3830, live=True)
+        entry = self._run(monkeypatch, 47.6100, -122.2007, live=True, initial=False)
+        assert "place" not in entry
+        assert len(self.looked_up) == 1
+
+    def test_the_kill_switch_skips_the_lookup_entirely(self, monkeypatch):
+        bot.LOCATION_PLACE = False
+        entry = self._run(monkeypatch, 47.6685, -122.3830)
+        assert "place" not in entry
+        assert self.looked_up == []
+
+    def test_no_label_found_stores_nothing(self, monkeypatch):
+        entry = self._run(monkeypatch, 47.6685, -122.3830, label="")
+        assert "place" not in entry
+        assert entry["lat"] == 47.6685      # the location itself is still stored
+
+
+# ── atlas_audit.py (v2026-08-09.2, repo tooling) ──────────────────────────────
+
+def _atlas_audit():
+    """Import the tool by path — tools/ is not a package."""
+    import importlib.util
+    from pathlib import Path
+    p = Path(bot.__file__).resolve().parent / "tools" / "atlas_audit.py"
+    spec = importlib.util.spec_from_file_location("atlas_audit", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestAtlasAudit:
+    def test_parse_uses_bot_own_filter(self):
+        aa = _atlas_audit()
+        text = "# header\n\nMeydenbauer Bay Park — resets her\n  \nOld Bellevue — slow Tuesday\n"
+        assert aa.parse_atlas(text) == [
+            "Meydenbauer Bay Park — resets her", "Old Bellevue — slow Tuesday"]
+
+    def test_place_name_strips_the_characterisation(self):
+        aa = _atlas_audit()
+        assert aa.place_name("Meydenbauer Bay Park — she goes to reset") == "Meydenbauer Bay Park"
+        assert aa.place_name("Old Bellevue - slow Tuesday mornings") == "Old Bellevue"
+        assert aa.place_name("Just A Name") == "Just A Name"
+
+    def test_name_match_accepts_a_longer_official_name(self):
+        aa = _atlas_audit()
+        assert aa.name_matches("Meydenbauer Bay Park", "Meydenbauer Beach Park & Boat Launch")
+
+    def test_name_match_rejects_the_fuzzy_near_miss(self):
+        """The exact failure this tool exists to avoid: asking for Meydenbauer Bay Park,
+        being handed Bay Terrace Road, and calling the atlas clean. Observed live."""
+        aa = _atlas_audit()
+        assert not aa.name_matches("Meydenbauer Bay Park", "Bay Terrace Road")
+
+    def test_stopwords_do_not_break_a_real_match(self):
+        aa = _atlas_audit()
+        assert aa.name_matches("The Fremont Bridge", "Fremont Bridge")
+
+    def test_best_poi_skips_streets_and_near_misses(self):
+        aa = _atlas_audit()
+        results = [
+            {"address": {"streetName": "Bay Terrace Road"}},          # no poi -> a street
+            {"poi": {"name": "Bay Terrace Road"}},                    # poi, wrong place
+            {"poi": {"name": "Meydenbauer Bay Park"}},                # the real one
+        ]
+        assert aa.best_poi(results, "Meydenbauer Bay Park")["poi"]["name"] == "Meydenbauer Bay Park"
+        assert aa.best_poi([], "x") is None
+        assert aa.best_poi([None, "junk"], "x") is None
+
+    def test_verdict_separates_missing_from_merely_distant(self):
+        aa = _atlas_audit()
+        assert aa.verdict(None, 15) == "NOT FOUND"
+        assert aa.verdict(41.0, 15) == "FAR"
+        assert aa.verdict(2.0, 15) == "ok"
+        assert aa.verdict(15.0, 15) == "ok"
+
+
+class TestPlaceNoteIsOneShot:
+    """A person reacts once to "you're in Ballard?". Re-injecting for the whole 4h
+    freshness window would have her reopening it on every message."""
+
+    def setup_method(self):
+        self._flag = bot.LOCATION_PLACE
+        bot.LOCATION_PLACE = True
+
+    def teardown_method(self):
+        bot.LOCATION_PLACE = self._flag
+
+    @staticmethod
+    def _loc(**over):
+        base = {"lat": 47.66, "lon": -122.38, "ts": time.time(), "live_until": None,
+                "place": "Ballard, Seattle", "place_new": True}
+        base.update(over)
+        return base
+
+    def test_first_call_returns_the_line(self):
+        assert "Ballard, Seattle" in bot._place_note(self._loc())
+
+    def test_second_call_returns_nothing(self):
+        loc = self._loc()
+        assert bot._place_note(loc)
+        assert bot._place_note(loc) == ""
+        assert loc["place_new"] is False
+
+    def test_a_stale_share_is_not_announced(self):
+        assert bot._place_note(self._loc(ts=time.time() - 5 * 3600)) == ""
+
+    def test_no_place_no_line(self):
+        assert bot._place_note(self._loc(place=None)) == ""
+        assert bot._place_note(self._loc(place_new=False)) == ""
+
+    def test_kill_switch_and_junk_inputs(self):
+        assert bot._place_note(None) == ""
+        assert bot._place_note("not a dict") == ""
+        bot.LOCATION_PLACE = False
+        assert bot._place_note(self._loc()) == ""

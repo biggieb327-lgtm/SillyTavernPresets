@@ -7,6 +7,74 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-09.2 — She has held your coordinates for a month and could never say where that is
+
+**Root cause: `user_location` stores lat/lon and nothing ever turned it into a word.** The
+traffic feature has stored `{lat, lon, ts, live_until}` per chat since it shipped, and
+`FOOD_SUGGESTIONS` and `MAP_INTENT` both consume it — but only as *numbers*, to search or
+route with. So when someone drops a pin, she can find restaurants near it and cannot say
+"wait, you're in Ballard?". A person reacts to the place; she had no way to know its name.
+
+**Fix: one reverse-geocode per share, one reaction per share.**
+
+- `_tomtom_reverse_geocode` on the initial share only — **never on a live-position ping.**
+  A live share re-enters `handle_location` on every update, and geocoding each one spends
+  quota re-learning the same answer. On a live update the existing label is carried while
+  they are within `LOCATION_PLACE_MILES` (0.6mi) of where it was computed, and **dropped**
+  past that: telling her they are somewhere they have left is worse than saying nothing.
+- `_place_label` reads `neighbourhood`, then `municipalitySubdivision`, then `municipality`.
+  Not defensive padding — TomTom names that field differently across API generations and an
+  instance's key may be provisioned against either. `municipality` last so a rural share
+  still names the town instead of degrading to nothing.
+- `_tomtom_reverse_geocode` **never raises**, unlike every other TomTom fetch here. Its
+  caller is the location handler, where there is no degraded answer to fall back to — the
+  feature simply does not happen.
+- `_place_note` is one-shot: it returns the prompt line *and consumes the flag*. A bot that
+  reopens "you're in Ballard?" on every message for the 4-hour freshness window is the
+  failure mode, not the feature.
+
+No fetch on the reply path, so the call budget is untouched (invariants #3, #8). It collects
+nothing new — it names coordinates already stored. Kill switch `LOCATION_PLACE=0`.
+
+**`_place_note` was split out of the message path for a reason worth recording.** That path
+has no test harness at all: the `FOOD_SUGGESTIONS` and `MAP_INTENT` injections beside it are
+pinned by nothing, and `grep` finds neither in `tests/`. Adding a third untestable branch is
+how the `/features` `ValueError` survived four releases. The extraction is the whole reason
+the one-shot behavior is provable.
+
+### New: `tools/atlas_audit.py` — are her local places real, and near her?
+
+`atlas.txt` is injected into every prompt as "Real spots {NAME} knows" and drawn from for
+selfie backgrounds, and **nothing has ever checked those places exist.** A fabricated cafe
+and a real one forty miles away read identically in the file and identically in her voice.
+Same shape as the reference-photo gap: invisible until a human who knows the city happens to
+read a reply.
+
+**The obvious implementation is wrong, and quietly — this was found by running it, not by
+reasoning about it.** Geocoding `"<place>, <city>"` looks right and silently launders bad
+data: asked for `Meydenbauer Bay Park, Seattle` (right park, wrong city) TomTom returns
+`Bay Terrace Road, Seattle` with no error and no warning. A fuzzy matcher never says "does
+not exist"; it returns the nearest plausible thing, and an audit built on it marks a broken
+atlas clean.
+
+Position-biased **POI search** discriminates properly, verified live: the real park comes
+back as a POI named `Meydenbauer Bay Park` in Bellevue, and an invented business
+("The Gilded Otter Coffee Roasters") returns zero results. So the tool queries the bare name
+biased at the anchor — **never `name, city`** — requires a POI rather than a street, and
+requires the found name to resemble what was asked for. A near-miss is `NOT FOUND`, not a
+pass; `name_matches` pins exactly the Bay-Terrace-Road case.
+
+Repo-only, like `selfie_prompt_preview.py` — `vps-sync.sh` does not copy `tools/`. Exits
+non-zero when anything is flagged so a character-pass Routine can gate on it.
+
+**Found while building it, not fixed here (per-instance `.env`, not code):** priya's
+`setting.txt` and her entire atlas are **Bellevue**, but `/audit` reports
+`Location: Seattle`. `WEATHER_LOCATION` feeds `"She currently lives in {WEATHER_LOCATION} —
+ignore any historical or background references to other cities"`, so the prompt actively
+tells the model to discount the city her own setting file is written in, and every selfie
+background is stamped `Seattle` while her places are across the lake. The town tally this
+tool prints per instance exists to surface precisely this.
+
 ## v2026-08-09.1 — You cannot debug a face lock against a photo nobody can see
 
 **Root cause: the selfie pipeline's strongest identity signal was the one thing the system

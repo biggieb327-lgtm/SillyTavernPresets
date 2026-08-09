@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-09.1"
+BOT_VERSION = "2026-08-09.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2565,6 +2565,13 @@ def _alerts_on(flag: bool) -> bool:
 TOMTOM_API_KEY      = os.getenv("TOMTOM_API_KEY", "")
 TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
 # Per-instance default travel mode for /route, validated per-call by _tomtom_mode().
+# Name the neighbourhood when a location is shared: she holds lat/lon today and cannot say
+# where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
+# One reverse-geocode per share, injected into exactly one reply. Unset = active, 0 = off.
+LOCATION_PLACE = os.getenv("LOCATION_PLACE", "1").lower() not in ("0", "false", "no", "off")
+# How far they can drift on a live share before the neighbourhood label is dropped rather
+# than carried. Miles, matching _haversine's unit.
+LOCATION_PLACE_MILES = _env_float("LOCATION_PLACE_MILES", "0.6")
 
 # --- Payment reminders (off by default on named character instances) ---
 PAYMENTS_ENABLED = os.getenv(
@@ -11309,6 +11316,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "or let the conversation breathe. Don't push harder on the current thread.]"
             )
 
+        # She can name where they are (LOCATION_PLACE). Sits OUTSIDE the food/map if-elif
+        # below on purpose — this is ambient context, not an answer to an ask, and must not
+        # compete with either for that one slot. The lookup already happened in
+        # handle_location, so nothing is fetched here and the call budget is untouched
+        # (bot-code-invariants #3). save_state on the loop, so a direct call is correct (#6).
+        if _pnote := _place_note(user_location.get(chat_id)):
+            save_state()
+            content_for_model += _pnote
+
         # In-character restaurant recs (FOOD_SUGGESTIONS, ROADMAP 3.5 release B):
         # on a food-ish message, hand the model real nearby places so it recommends
         # from fact, not imagination. Rides THIS reply — no extra LLM call
@@ -12811,6 +12827,7 @@ def _reverse_geocode_sync(lat: float, lon: float) -> str:
 
 _TOMTOM_SEARCH_URL  = "https://api.tomtom.com/search/2/search/{q}.json"
 _TOMTOM_GEOCODE_URL = "https://api.tomtom.com/search/2/geocode/{q}.json"
+_TOMTOM_REVGEO_URL  = "https://api.tomtom.com/search/2/reverseGeocode/{lat},{lon}.json"
 _TOMTOM_ROUTE_URL   = "https://api.tomtom.com/routing/1/calculateRoute/{o}:{d}/json"
 _TOMTOM_MODES       = {"car", "bicycle", "pedestrian", "truck", "taxi", "bus", "van", "motorcycle"}
 
@@ -13081,6 +13098,27 @@ def _route_brief(route: dict, mode: str, dest_label: str) -> str:
     return line
 
 
+def _place_note(loc) -> str:
+    """The one-shot 'they're in <neighbourhood>' line for the prompt, or ''.
+
+    CONSUMES the flag: returning a non-empty string marks the share as reacted-to, so a
+    caller that gets text owes a save_state(). Split out of the message path because that
+    path has no test harness at all — the food and map injections beside it are pinned by
+    nothing, and shipping a third untestable branch is how the /features ValueError got
+    through four releases.
+
+    One-shot by design. A person says "wait, you're in Ballard?" once; a bot that reopens
+    it on every message for the next four hours is the failure this guards against."""
+    if not (LOCATION_PLACE and isinstance(loc, dict)):
+        return ""
+    if not (loc.get("place_new") and loc.get("place") and _fresh_location(loc)):
+        return ""
+    loc["place_new"] = False
+    return (f"\n[They just shared their location and it's in {loc['place']}. You can see "
+            f"that much and nothing more — not an address, not why they're there. React "
+            f"only if it's worth reacting to, once, then let it go.]")
+
+
 def _fresh_location(loc, now=None, max_age: int = 4 * 3600) -> bool:
     """True if a stored user_location entry is usable for map answers: shared within
     max_age (4h — the photo path's precedent) OR still inside a live-share period."""
@@ -13175,6 +13213,56 @@ def _tomtom_geocode(query: str):
         return None
     label = ((results[0].get("address") or {}).get("freeformAddress")) or query
     return float(lat), float(lon), label
+
+
+# Field order matters and is not arbitrary. TomTom's own naming for "the bit of a city a
+# local would say out loud" differs across API generations: v2 Search calls it
+# `municipalitySubdivision`, the Orbis-era response the MCP tools wrap calls it
+# `neighbourhood`. Trying both is not defensive padding — one instance's key may be
+# provisioned against either. `municipality` last so a rural share still names the town
+# rather than degrading to nothing.
+_PLACE_LABEL_FIELDS = ("neighbourhood", "municipalitySubdivision", "municipality")
+
+
+def _place_label(data) -> str:
+    """Reverse-geocode response -> 'Capitol Hill, Seattle', or '' when unusable.
+
+    Total/defensive like every parser in this section: a shape change degrades to an
+    empty label (no injection) rather than raising into the reply path."""
+    addresses = (data or {}).get("addresses") or []
+    addr = ((addresses[0] if addresses else None) or {}).get("address") or {}
+    if not isinstance(addr, dict):
+        return ""
+    town = (addr.get("municipality") or "").strip()
+    for field in _PLACE_LABEL_FIELDS:
+        val = (addr.get(field) or "").strip()
+        if not val:
+            continue
+        # "Seattle, Seattle" reads as a bug to the one person who will ever see it.
+        return f"{val}, {town}" if town and val != town else val
+    return ""
+
+
+def _tomtom_reverse_geocode(lat, lon) -> str:
+    """(lat, lon) -> short place label, or '' when there is nothing usable to say.
+
+    Unlike the other TomTom fetches this NEVER raises: the caller is the location
+    handler, where a failed lookup must cost the user nothing at all. There is no
+    degraded-answer path to fall back to — the feature simply does not happen."""
+    try:
+        r = _get_session().get(
+            _TOMTOM_REVGEO_URL.format(lat=float(lat), lon=float(lon)),
+            # entityType is deliberately NOT sent: it makes TomTom return the geography
+            # polygon instead of the address block this parser reads.
+            params={"key": TOMTOM_API_KEY, "limit": 1, "radius": 100},
+            timeout=(10, 30),
+        )
+        r.raise_for_status()
+        return _place_label(r.json())
+    except Exception as e:
+        # reason only — never the URL or the key (it is a query param on this endpoint)
+        log.warning("[tomtom] reverse geocode failed: %s", _tomtom_err_reason(e))
+        return ""
 
 
 _TOMTOM_TRAFFIC_MODES = {"car", "truck", "taxi", "bus", "van", "motorcycle"}
@@ -13901,12 +13989,39 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if loc.live_period:
         live_until = time.time() + loc.live_period
 
-    user_location[chat_id] = {
+    prev = user_location.get(chat_id) or {}
+    entry = {
         "lat": loc.latitude,
         "lon": loc.longitude,
         "ts": time.time(),
         "live_until": live_until,
     }
+
+    # Name the neighbourhood (LOCATION_PLACE). One lookup per SHARE, never per live
+    # update: a live share fires this handler on every position ping, and geocoding each
+    # one would spend the quota to re-learn the same answer.
+    if LOCATION_PLACE and TOMTOM_ENABLED:
+        if update.message:            # the initial share — the one place a lookup is owed
+            place = await asyncio.to_thread(_tomtom_reverse_geocode, loc.latitude, loc.longitude)
+            if place:
+                entry["place"] = place
+                entry["place_lat"] = loc.latitude
+                entry["place_lon"] = loc.longitude
+                entry["place_new"] = True     # one-shot: consumed by the first reply after
+        elif prev.get("place"):
+            # A live update. Carry the label only while they are still plausibly in it;
+            # past that, drop it rather than tell her they are somewhere they left.
+            try:
+                moved = _haversine(loc.latitude, loc.longitude,
+                                   float(prev["place_lat"]), float(prev["place_lon"]))
+            except (KeyError, TypeError, ValueError):
+                moved = 9e9
+            if moved <= LOCATION_PLACE_MILES:
+                for k in ("place", "place_lat", "place_lon", "place_new"):
+                    if k in prev:
+                        entry[k] = prev[k]
+
+    user_location[chat_id] = entry
     save_state()
 
     if TRAFFIC_ENABLED and update.message:  # only reply on the initial share, not every live update
