@@ -567,8 +567,37 @@ the TomTom MCP connector's token expired mid-session; `api.tomtom.com` needs the
 which no session has; and `developer.tomtom.com` is blocked by egress policy (`curl` gets
 `403 CONNECT tunnel failed` through the proxy — the same wall as `nano-gpt.com`).
 
-**Unblocked by:** one real response. Re-authorize the TomTom connector and capture a
-`fuzzy-search` result with `openingHours=nextSevenDays`, or paste one from a live instance.
+**Connector retried later the same day, and the answer got sharper — read this before
+trying again.** The token was refreshed and the calls went through. Across two queries
+(`coffee` and `Starbucks`, near downtown Seattle), **12 of 12 POIs came back with no
+`openingHours` field at all**, with `response_detail=full` and `openingHours=nextSevenDays`
+accepted without error. Not a trimming artifact: those same responses carry `entryPoints`,
+`brands`, `extendedPostalCode`, `localizedCategories` and `countryCodeISO3`. The field is
+specifically absent — the identical silent-absence seen with `timeZone=iana`.
+
+Two live explanations, with very different consequences:
+
+1. **The MCP wrapper drops the field.** The fleet's own key would still return it and the
+   feature is fine.
+2. **This TomTom account tier does not license POI opening-hours data.** Then the fleet key
+   will not return it either, and this item is **not buildable as specified** — it would
+   need a different data source, and should be closed rather than left open.
+
+**The one command that settles it** (host: VPS, as root — it reads the fleet key from an
+instance `.env`, so it works nowhere else):
+
+```bash
+KEY=$(grep -oP '^TOMTOM_API_KEY=\K.*' /opt/telegram-bots/priya/.env)
+curl -sS "https://api.tomtom.com/search/2/search/coffee.json?key=$KEY&lat=47.6062&lon=-122.3321&radius=2000&limit=3&openingHours=nextSevenDays" \
+  | python3 -m json.tool | grep -A12 -i openingHours
+```
+
+Empty output means explanation 2 — close this item. Output means explanation 1, and that
+same JSON is the response shape the parser needs. **If it returns HTTP 400, suspect the
+parameter name**: `bot.py`'s routing code already carries a scar where the raw REST spelling
+(`fastest`) differs from the MCP tool's (`fast`), and MCP parameter names are not evidence
+about the REST API. The key is interpolated into the URL, so it lands in shell history —
+clear it afterwards if that matters on that box.
 
 **The problem it fixes.** `FOOD_SUGGESTIONS` pre-fetches real nearby restaurants and hands
 them to the model with no idea whether any are open, so at 11pm she can recommend a place
