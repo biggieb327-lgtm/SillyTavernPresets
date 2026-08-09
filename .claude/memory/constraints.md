@@ -278,14 +278,15 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 4** (2026-07-26 ×2, 2026-07-27, 2026-08-03) — *promoted by check 6 of the weekly
-hygiene Routine, from three Minor entries sharing one cause.*
+**seen: 5** (2026-07-26 ×2, 2026-07-27, 2026-08-03, 2026-08-09) — *promoted by check 6 of the
+weekly hygiene Routine, from three Minor entries sharing one cause.*
 Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
   changed since, and a test recommendation was built on it — **stale**
 - `grep '^MODEL='` returned nothing across six instances, read as "no model set"; the
   variable is `NANOGPT_MODEL` — **wrong scope**; the grep was answering a question
   nobody asked
+- **2026-08-09** — an image the owner pasted was declared to be `priya_base.jpg` because it "matches the audit's 1024×1024". `SELFIE_SIZE` defaults to `1024x1024` (`bot.py:685`), so **every generated selfie is 1024×1024 too** — the reading was identical on both sides of the question it was used to answer, and settled nothing. The conclusion built on it ("the photo is fine, the framing hypothesis is dead") was the load-bearing claim of the whole reply. **This is the same mistake this exact investigation already paid for**: v2026-08-03.2 scored 22 A/B images against a "baseline" that was itself a generated selfie, discovered only when someone noticed the Gemini watermark on it. Caught by `claim-guard`, not by me — **wrong discriminator**: a reading that both hypotheses predict equally cannot separate them.
 - `/errors` output full of `Conflict` tracebacks was read as a live fight; `errors.log`
   is historical, persists across restarts, and travels inside migration tars — **wrong
   currency**
