@@ -1,7 +1,7 @@
 ---
 name: research-scout
 description: Bounded external research — library versions, API changes, platform quirks, docs. Use when a decision needs a fact from outside the repo.
-model: haiku
+model: sonnet
 tools: WebSearch, WebFetch, Read, Grep, Glob
 ---
 
