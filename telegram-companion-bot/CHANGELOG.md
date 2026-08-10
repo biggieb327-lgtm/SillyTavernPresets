@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.11 — "Errors (total): 415" was not a total, not since boot, and not bounded
+
+**Root cause: one label making three false claims, and the number sat undiagnosed for a
+day because of it.** jules reported `Errors (total): 415` beside `Uptime: 0.0h`. Each
+part of that is misleading:
+
+- **Not since boot.** `_error_counts` is persisted into `state.json` and restored on load
+  (`bot.py:3373`), so a freshly restarted process legitimately reports hundreds. The
+  juxtaposition with a 0.0h uptime reads as a crisis and isn't one.
+- **Not a total.** `_count_error` keeps only the last 200 timestamps per category, and
+  load re-applies the same trim. A saturated category makes the sum a **floor**; the real
+  count is unknowable.
+- **Not bounded in time.** Only `errors_last_hour` filters by age. `total_all` is `len()`
+  over every retained timestamp, which can be arbitrarily old.
+
+The operational log had carried "415 real counted errors on jules remains uninvestigated"
+since v2026-08-10.5 — a day spent unable to act on a number nobody could interpret.
+
+**The owner's `state.json` breakdown settled it**, and the shape is why the label mattered:
+`network` 200 (2026-07-17 → today, **capped**) · `unhandled` 200 (**all inside 87 minutes**
+on 2026-07-19, capped) · `memory_ungrounded` 8 · `api` 4 · `fallback`, `heartbeat`,
+`note_ungrounded` 1 each. Two of seven categories are saturated, so 415 is a floor over an
+unknown real count, and the two big ones are entirely different problems — one ongoing at
+roughly 8/day, one a burst that stopped three weeks ago.
+
+**Fix: the line says what the number is.**
+
+```
+Errors (retained): 415 — across 7 categories, oldest 24.0d ago, survives restarts
+  — 2 at the 200/category cap (network, unhandled), so the real count is HIGHER
+```
+
+`_error_retention()` returns the facts as data (retained, categories, saturated list,
+oldest age) and `_error_retention_summary()` renders the qualifier. The count itself stays
+in `errors_total` for the admin HTTP API — the summary deliberately carries no count of
+its own, because two copies drift. `_self_audit`'s log line changes `total=` to
+`retained=` for the same reason.
+
+**The 200 became `_ERROR_KEEP_PER_CAT`**, used by the trim, the load path, and the summary
+that describes it. A label naming a cap the code no longer enforces is the same defect one
+level up, and a test pins that the cap named is the cap applied.
+
+6 tests, built on jules's real category shape rather than invented numbers. Three
+break-tests: the old label restored (1 red), saturation flagging removed so 415 reads as a
+total again (2 red), and the cap hardcoded to 999 so it drifts from the trim (1 red).
+**The third refused to inject on the first attempt** — 0 anchor matches — and the injector
+said so instead of reporting a green; that guard is this session's own lesson from two
+break-tests that silently injected nothing.
+
 ## v2026-08-10.10 — The map-intent over-firing watch had nothing to watch with
 
 **Root cause: a deferred follow-up whose trigger condition was never observable.** ROADMAP

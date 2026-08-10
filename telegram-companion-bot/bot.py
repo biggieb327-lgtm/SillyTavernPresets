@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.10"
+BOT_VERSION = "2026-08-10.11"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -232,11 +232,57 @@ def _map_stats_summary() -> str:
     return out
 
 
+# Timestamps kept per category. The oldest are dropped past this, which is why a bare sum
+# over _error_counts is a floor and not a total — see _error_retention.
+_ERROR_KEEP_PER_CAT = 200
+
+
 def _count_error(category: str):
     ts = _error_counts.setdefault(category, [])
     ts.append(time.time())
-    if len(ts) > 200:
-        del ts[:-200]
+    if len(ts) > _ERROR_KEEP_PER_CAT:
+        del ts[:-_ERROR_KEEP_PER_CAT]
+
+
+def _error_retention() -> dict:
+    """What `_error_counts` actually holds, as opposed to what a bare sum implies.
+
+    `Errors (total): 415` on jules with `Uptime: 0.0h` (2026-08-10) hid three things at
+    once, and the number was carried in the operational log as "uninvestigated" for a day
+    because none of them are visible from the label:
+
+    - **Not since boot.** The counts are persisted into `state.json` and restored on load,
+      so a freshly restarted process legitimately reports hundreds.
+    - **Not a total.** Each category keeps only the last `_ERROR_KEEP_PER_CAT` timestamps,
+      so any saturated category makes the sum a FLOOR — the real count is unknowable.
+    - **Not bounded in time.** Only `errors_last_hour` filters by age; nothing prunes the
+      retained list, so the oldest entry can be arbitrarily old.
+    """
+    cats = {cat: list(ts) for cat, ts in list(_error_counts.items())}
+    stamps = [t for ts in cats.values() for t in ts]
+    return {
+        "retained": len(stamps),
+        "categories": len([c for c, ts in cats.items() if ts]),
+        "saturated": sorted(c for c, ts in cats.items()
+                            if len(ts) >= _ERROR_KEEP_PER_CAT),
+        "oldest_days": round((time.time() - min(stamps)) / 86400, 1) if stamps else None,
+    }
+
+
+def _error_retention_summary() -> str:
+    """The qualifier `/audit` prints beside the count — what that number is, in words.
+    Returns no count of its own; `errors_total` carries it, and two copies would drift."""
+    r = _error_retention()
+    if not r["retained"]:
+        return "nothing retained"
+    out = "across " + str(r["categories"]) + (" category" if r["categories"] == 1
+                                              else " categories")
+    if r["oldest_days"] is not None:
+        out += f", oldest {r['oldest_days']}d ago, survives restarts"
+    if r["saturated"]:
+        out += (f" — {len(r['saturated'])} at the {_ERROR_KEEP_PER_CAT}/category cap "
+                f"({', '.join(r['saturated'])}), so the real count is HIGHER")
+    return out
 
 
 def _usage_tokens(usage, key: str) -> int:
@@ -3371,7 +3417,7 @@ def load_state():
             if isinstance(g, str) and g.strip() and cid not in open_threads:
                 open_threads[cid] = [g.strip()]
     for cat, ts in data.get("error_counts", {}).items():
-        _error_counts[cat] = ts[-200:]
+        _error_counts[cat] = ts[-_ERROR_KEEP_PER_CAT:]
     saved_llm = data.get("llm_stats")
     if saved_llm and saved_llm.get("date") == time.strftime("%Y-%m-%d"):
         _llm_stats.update(saved_llm)
@@ -14743,7 +14789,7 @@ async def _self_audit(context: ContextTypes.DEFAULT_TYPE):
 
     status = "ISSUES" if issues else "OK"
     summary = (f"[audit] {status} | uptime={uptime_h:.1f}h | "
-               f"errors_1h={total_recent} total={total_all} | "
+               f"errors_1h={total_recent} retained={total_all} | "
                f"disk_free={free_mb}MB | error_log={err_size}b")
     if recent:
         summary += " | " + " ".join(f"{k}={v}" for k, v in sorted(recent.items()) if v)
@@ -14811,6 +14857,7 @@ def gather_audit_data() -> dict:
         "errors_last_hour": {k: v for k, v in recent.items() if v},
         "errors_last_hour_total": sum(recent.values()),
         "errors_total": total_all,
+        "errors_retention": _error_retention_summary(),
         "state_file": state_ok,
         "errors_log_kb": round(err_size / 1024, 1),
         "bot_log_kb": round(bot_log_size / 1024, 1),
@@ -14892,7 +14939,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     if d["errors_last_hour"]:
         lines.append("  " + ", ".join(f"{k}: {v}" for k, v in sorted(d["errors_last_hour"].items())))
     lines += [
-        f"Errors (total): {d['errors_total']}",
+        f"Errors (retained): {d['errors_total']} — {d.get('errors_retention', '?')}",
         f"State file: {d['state_file']}",
         f"errors.log: {d['errors_log_kb']} KB",
         f"bot.log: {d['bot_log_kb']} KB",

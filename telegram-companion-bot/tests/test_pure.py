@@ -7094,6 +7094,93 @@ _MAP_INTENT_DEFAULT = bot.MAP_INTENT
 _FOOD_SUGGESTIONS_DEFAULT = bot.FOOD_SUGGESTIONS
 
 
+class TestErrorRetentionIsLabelledHonestly:
+    """v2026-08-10.11: jules reported `Errors (total): 415` beside `Uptime: 0.0h`, and
+    that number was none of the three things the label implied. The owner's own breakdown
+    settled it — 200 `network` (2026-07-17 → today, capped), 200 `unhandled` (all inside
+    87 minutes on 2026-07-19, capped), 15 across five other categories."""
+
+    def setup_method(self):
+        self._orig = {k: list(v) for k, v in bot._error_counts.items()}
+
+    def teardown_method(self):
+        bot._error_counts.clear(); bot._error_counts.update(self._orig)
+
+    def _jules(self):
+        """The real shape, from the owner's state.json breakdown."""
+        now = time.time()
+        bot._error_counts.clear()
+        bot._error_counts["network"] = [now - 24 * 86400 + i for i in range(200)]
+        bot._error_counts["unhandled"] = [now - 22 * 86400 + i for i in range(200)]
+        bot._error_counts["memory_ungrounded"] = [now - 20 * 86400 + i for i in range(8)]
+        bot._error_counts["api"] = [now - 21 * 86400 + i for i in range(4)]
+        for c in ("fallback", "heartbeat", "note_ungrounded"):
+            bot._error_counts[c] = [now - 24 * 86400]
+
+    def test_a_saturated_category_is_named_and_flagged_as_a_floor(self):
+        """The load-bearing one. A capped category makes the sum a FLOOR, and reporting
+        it as a total is how 415 sat in the operational log as 'uninvestigated'."""
+        self._jules()
+        r = bot._error_retention()
+        assert r["retained"] == 415
+        assert r["saturated"] == ["network", "unhandled"]
+        s = bot._error_retention_summary()
+        assert "HIGHER" in s and "network, unhandled" in s
+        assert f"{bot._ERROR_KEEP_PER_CAT}/category cap" in s
+
+    def test_the_cap_named_in_the_summary_is_the_cap_actually_applied(self):
+        """Two copies of 200 would drift, and the label would then describe a cap the
+        code no longer enforces — the exact shape of a diagnostic that lies."""
+        bot._error_counts.clear()
+        for _ in range(bot._ERROR_KEEP_PER_CAT + 50):
+            bot._count_error("network")
+        assert len(bot._error_counts["network"]) == bot._ERROR_KEEP_PER_CAT
+        assert bot._error_retention()["saturated"] == ["network"]
+
+    def test_it_says_the_count_survives_restarts(self):
+        """`Uptime: 0.0h` next to a big number reads as a crisis until you know the
+        counts are restored from state.json."""
+        self._jules()
+        assert "survives restarts" in bot._error_retention_summary()
+
+    def test_an_unsaturated_instance_makes_no_floor_claim(self):
+        bot._error_counts.clear()
+        bot._count_error("api")
+        s = bot._error_retention_summary()
+        assert "HIGHER" not in s and "cap" not in s
+        assert "1 category" in s
+
+    def test_a_clean_instance_says_nothing_retained(self):
+        bot._error_counts.clear()
+        assert bot._error_retention_summary() == "nothing retained"
+        assert bot._error_retention()["oldest_days"] is None
+
+    def test_audit_renders_the_qualifier_beside_the_count(self):
+        """Calls the handler rather than reading its source: a source grep proves the
+        string exists, not that /audit ever prints it (C8, and the delivery gate's rule
+        for any *_cmd a diff touches)."""
+        self._jules()
+        sent = []
+
+        async def reply_text(text, **k):
+            sent.append(text)
+
+        uid = 7331
+        bot.ALLOWED_USERS.add(uid)
+        try:
+            update = SimpleNamespace(
+                message=SimpleNamespace(reply_text=reply_text),
+                effective_user=SimpleNamespace(id=uid),
+                effective_chat=SimpleNamespace(id=uid, type="private"))
+            asyncio.run(bot.audit_cmd(update, SimpleNamespace(args=[], job_queue=None)))
+        finally:
+            bot.ALLOWED_USERS.discard(uid)
+        out = "\n".join(sent)
+        assert "Errors (retained): 415" in out
+        assert "so the real count is HIGHER" in out
+        assert "Errors (total)" not in out, "the old label must be gone, not duplicated"
+
+
 class TestMapIntentFireRateIsVisible:
     """v2026-08-10.10: ROADMAP 3.5 phase 2 deferred a per-chat cooldown "if the `[map]`
     log line ever shows over-firing". MAP_INTENT was off everywhere until v2026-08-10.8,
