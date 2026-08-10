@@ -682,8 +682,8 @@ guessed would fire on every legitimate `replace_all` and get disabled. What is m
 is the assertion inside the script, now the documented shape in `add-regression-eval`.
 
 ### C18 — A break-test proves one assertion, not the check
-**seen: 4** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01) — *promoted from the Minor
-log; all four entries deleted.*
+**seen: 6** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2) — *promoted
+from the Minor log; all entries deleted.*
 Four checks passed their break-test and were still dead in ways the break-test could not
 see. Three faults injected **at once**: two tests failed correctly, the third passed for
 the wrong reason (the injection made the function return `None` for every input, and the
@@ -701,12 +701,39 @@ Break-test against the *real* corpus (the file with the fences, the tree with th
 pragmas), never a minimal fixture that omits the structure the check must survive. **A
 break-test that will not go red is a bug in the check, not a clean tree** — that is the
 signal, and it has now paid out twice.
-**Graduated 2026-08-02 (deliberately prose, and here is why):** nothing can observe from
-outside whether two injections were applied together — the run looks identical either way.
-The mechanical descendants are the products this forced: `sweep.py`'s `SWEEP_BOT` /
-`SWEEP_TESTS` / `SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a
-deliberately broken corpus, and the `source-assertion` scanner was itself break-tested by
-running it against the test suite as it stood *before* the bug it describes shipped.
+**Occurrences 5 and 6 (2026-08-10) — the break-test did not run at all, and nobody could
+tell.** Two failures the constraint above does not describe, because they are upstream of
+"the injection only exercised one path":
+
+- **The injection never landed.** Three anchors matched **0** or **4** times instead of 1,
+  so the file was unchanged. pytest went green and that green was read as "the check
+  holds"; it meant "no defect was introduced." Twice in one session, plus a third caught
+  only because the injector had by then been changed to print its match count.
+- **The revert did not restore.** An Edit put a dict entry back without its leading
+  newline, folding it into the comment above. Python read it as a comment, `py_compile`
+  passed, and the corruption surfaced two steps later. **RED was proved; GREEN never was.**
+
+Across roughly eighteen break-test runs in that session, five were defective — about 28%,
+on the procedure every other check in this repo depends on for its credibility.
+
+**Graduated 2026-08-10 → `.claude/tools/break-test.sh`.** One invocation asserts the anchor
+matches exactly once, snapshots, injects, asserts the file changed, requires the command to
+go non-zero, restores from its own snapshot (never `git checkout` — C15), asserts
+byte-identical, re-runs and requires zero. Six facts printed. `break-test-selftest.sh`
+guards the tool through all six paths and is pinned by the `break-tester` eval.
+
+**The 2026-08-02 note said prose was the only option because "nothing can observe from
+outside whether two injections were applied together." That reasoning is sound and it is
+narrower than it was applied.** It is true of *multi-injection*, which is still prose and
+still unmechanised. It was never true of "did the injection land" or "did the revert
+restore" — both are trivially observable, and for eight days neither was observed. A stated
+reason for leaving something prose has a scope; check the next failure against that scope
+rather than against the conclusion.
+
+The other mechanical descendants stand: `sweep.py`'s `SWEEP_BOT` / `SWEEP_TESTS` /
+`SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a deliberately broken
+corpus, and the `source-assertion` scanner was itself break-tested by running it against the
+test suite as it stood *before* the bug it describes shipped.
 
 ### C19 — Verifying "not reachable outside dispatch" proves reachability, not which jurisdiction covers the call
 **seen: 1** (2026-08-07)
@@ -1050,9 +1077,9 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
 - 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
 - 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
 - 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
+- 2026-08-10 — Wrote `break-test.sh` with `trap restore EXIT` and guarded the restore on `[ -f "$SNAP" ]`. `mktemp` **creates** the file, so that guard was true before the snapshot had been taken, and the first early exit — a 0-match anchor, the exact failure the tool exists to catch — copied zero bytes over the target. **`bot.py` was truncated to nothing by the run that was checking the tool's own failure modes.** Restored from `git show HEAD:` (not `git checkout`, C15) and fixed with an explicit `SNAPPED` flag plus a non-empty check. → **a cleanup trap must prove the thing it restores was ever captured**; `mktemp` existing is not the resource existing. Found only because the tool's failure modes were exercised rather than assumed — the same discipline the tool exists to enforce, applied to the tool.
+- 2026-08-10 — Proposed replacing `verify.sh`'s `py_compile` step "because nothing catches a module-level NameError", and wrote that premise into a committed autopsy. `run-evals.sh` has had the `bot-imports` eval since the v2026-07-11 NameError incident, doing exactly that, with a comment saying py_compile cannot catch this class — and `verify.sh` runs it. The gap was never in the coverage; it was that I ran `py_compile` standalone by hand and read its green instead of running the harness. → **C22's third occurrence in one session, this time while writing the fix for the session's other mistakes.** Before proposing a mechanism, grep the mechanisms: `.claude/evals/`, `.claude/tools/`, `.claude/hooks/`. Kept the change (the step's label was genuinely lying) but corrected the comment so it does not claim a gap it did not close.
 - 2026-08-10 — Declared `python3 -m py_compile bot.py` clean and moved on, having placed `_ERROR_LOG_THROTTLE_S = _env_int(...)` about 120 lines ABOVE `_env_int`'s definition. Compiling checks syntax; it does not execute module level, so a NameError that makes the module unimportable passes it silently. Found only when pytest failed at collection with `NameError: name '_env_int' is not defined`. I had even predicted this ordering hazard earlier in the same session and then placed the constant without checking. → **`py_compile` is not an import.** For any module-level statement that CALLS something, prove it by importing the module, not by compiling it — `python3 -c "import bot"` under the test fixture is the check, and it is what `verify.sh` runs pytest for anyway.
-- 2026-08-10 — Ran three break-tests against the map-intent instrument; two injected nothing (one anchor matched 4 times, the other 0) and pytest came back green for both. I read those greens as "the check holds" for the length of one command, when they meant "the defect was never introduced". Caught by having printed the match count in the injector — the same C17 habit, applied to the break-test rather than to the edit. → **an injection step must assert it injected, and print that it did, before its result is evidence.** A break-test has two failure modes, not one: the check can be too weak, and the injection can miss; both look like green.
-- 2026-08-10 — Break-tested the `_FEATURES` entry by deleting the `mapintent` line, then "reverted" it with an Edit whose replacement dropped the leading newline. The entry landed *appended to the comment line above it*, so Python read it as a comment: `py_compile` passed, and only the full pytest run caught it, two steps later. I proved the check RED and never proved it GREEN again. → **a break-test is not reverted until the same command that went RED is re-run and comes back GREEN.** C3's other half; the revert is a code edit and deserves the same evidence the original did.
 - 2026-08-09 — Added a cross-reference to `.claude/OPERATING_MANUAL.md` §9 from CLAUDE.md but wrote the bare filename, `OPERATING_MANUAL.md`. `claude-md-refs-resolve` failed: CLAUDE.md's paths resolve from the repo root, where that file does not exist. The surrounding lines all use the `.claude/` prefix, so the wrong form was written next to four correct ones. → **a path written into a doc is a claim that resolves from that doc's stated root, not from the file you were just editing.** Caught by the eval, not by rereading — which is the argument for running the suite on doc-only changes too.
 
 ## Minor — archived

@@ -32,7 +32,18 @@ step() {  # step <label> <command...>
 }
 
 echo "── verify ──────────────────────────────────────────────────────"
-step "compile   bot.py"        python3 -m py_compile telegram-companion-bot/bot.py
+# IMPORT, not py_compile — and this adds NO coverage, which is the point worth writing down.
+# `run-evals.sh`'s `bot-imports` eval has imported bot.py under a fixture since the
+# v2026-07-11 NameError incident, and its comment already says py_compile cannot catch that
+# class. So step 3 below has always covered this.
+#
+# What was wrong was THIS step's label. On 2026-08-10 it printed `ok  compile bot.py` while
+# `_ERROR_LOG_THROTTLE_S = _env_int(...)` sat ~120 lines above `_env_int`'s definition — a
+# module that could not load, reported green. The author then ran `py_compile` standalone by
+# hand, read that green, and moved on; the harness that would have said otherwise was never
+# run. Importing here makes step 1 mean what it says and fail fast. The real lesson is
+# C22: the check already existed and was not consulted.
+step "import    bot.py"        python3 -c "import runpy; runpy.run_path('telegram-companion-bot/tests/conftest.py'); import bot; print('imported OK, BOT_VERSION', bot.BOT_VERSION)"
 step "pytest    unit suite"    python -m pytest telegram-companion-bot/tests/ -q
 step "evals     run-evals.sh"  bash .claude/evals/run-evals.sh
 step "corpus    gate_corpus"   python3 .claude/tools/gate_corpus/run.py

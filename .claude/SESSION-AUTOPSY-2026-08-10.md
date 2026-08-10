@@ -118,16 +118,46 @@ neither was being observed. C18 should be updated to say so.
 
 ### 2. `verify.sh`'s compile step should import, not compile
 
-`python3 -m py_compile bot.py` cannot see a module-level `NameError`, and reported `ok`
-on a module that would not load. Importing it under `tests/conftest.py`'s fixture covers
-everything compiling covered plus name resolution at module exec. One line, and it removes
-a check that prints a green it has not earned.
+**Corrected while implementing — the premise was wrong.** `run-evals.sh`'s `bot-imports`
+eval has imported bot.py under a fixture since the v2026-07-11 NameError incident, and its
+comment already says py_compile cannot catch that class. `verify.sh` runs it at step 3, so
+the coverage was never missing. Break-tested to confirm: with the defect injected,
+`bot-imports` fails.
+
+What was actually wrong is smaller and worse. **The step's label lied** — `ok  compile
+bot.py` on a module that could not load — and I ran `py_compile` *standalone, by hand*,
+read that green, and moved on without running the harness that already knew better.
+
+The change is still worth making (step 1 now means what it says, and fails fast) but it
+closes no gap. **This is C22 for the third time in this session — proposing a mechanism
+without checking whether the mechanism existed, while writing up the session's other
+mistakes.**
 
 ### 3. C18 gets the two observable sub-cases, and graduates mechanically via decision 1
 
 Not a new number — this is C18's own shape, and minting C23 would split one lesson across
 two entries. Its "deliberately prose" note is now partly falsified and should be narrowed to
 the multi-injection case it actually covers.
+
+## What happened when these were built
+
+**The break-tester's first version truncated `bot.py` to zero bytes.** `trap restore EXIT`
+guarded on `[ -f "$SNAP" ]`; `mktemp` *creates* that file, so the guard was true before the
+snapshot had been taken, and the first early exit — a 0-match anchor, the precise failure
+the tool exists to catch — copied nothing over the target. It was caught immediately,
+because the tool's failure modes were exercised rather than assumed, and `bot.py` was
+restored from `git show HEAD:` (not `git checkout` — C15) byte-identical.
+
+Two things follow. **A cleanup trap must prove the thing it restores was ever captured**;
+`mktemp` existing is not the resource existing. And the tool now ships with
+`break-test-selftest.sh`, pinned by a `break-tester` eval, which drives all six paths on
+temp files and asserts the one invariant that was violated: whatever happens, the target is
+byte-identical afterwards. Re-injecting the original trap bug turns it red on exactly the
+two early-exit cases.
+
+That a session about verification instruments produced, as its fix, an instrument that
+destroyed a source file on its first run is the strongest available argument for the
+constraint it implements.
 
 ## Deliberately not done
 

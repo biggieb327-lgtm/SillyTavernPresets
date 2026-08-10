@@ -742,6 +742,22 @@ else
   bad "roadmap-claims-current" "$roadmap_stale"
 fi
 
+# --- break-tester ------------------------------------------------------------------------
+# `break-test.sh` edits a source file in place and restores it, so its failure mode is
+# destroying source code — and its first version did. `mktemp` creates the snapshot file,
+# so the EXIT trap's `[ -f "$SNAP" ]` guard was true BEFORE the snapshot was taken, and any
+# early exit (a 0-match anchor, the exact 2026-08-10 failure the tool exists to catch)
+# copied zero bytes over the target. bot.py was truncated to nothing by the very run that
+# was checking the tool's own failure modes.
+# The selftest drives all six paths on temp files and asserts the one invariant that was
+# violated: whatever happens, the target is byte-identical afterwards.
+selftest=$(bash .claude/tools/break-test-selftest.sh 2>&1)
+if [ $? -eq 0 ]; then
+  ok "break-tester: $(printf '%s' "$selftest" | tail -1)"
+else
+  bad "break-tester" "$(printf '%s' "$selftest" | tail -15)"
+fi
+
 # --- gate-corpus ------------------------------------------------------------------------
 # The guards are themselves guarded. Every scanner in sweep.py and the delivery gate's
 # handler-coverage check run against fixtures built to slip past a naive implementation —
