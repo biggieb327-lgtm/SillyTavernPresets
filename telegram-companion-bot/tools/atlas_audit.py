@@ -55,6 +55,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -80,6 +81,9 @@ _STOPWORDS = {"the", "a", "an", "of", "and", "at", "on", "in", "for"}
 # vanishing into NOT FOUND and reading as fabricated. Kept independent of --radius, which
 # only decides the verdict.
 _SEARCH_RADIUS_M = 80_000
+_RETRIES = 3            # attempts per entry when the failure is a rate limit
+_BACKOFF_S = 2.0        # first retry waits this long, second twice it
+_SLEEP_S = 0.3          # between entries; the free tier throttles per second
 
 
 def parse_atlas(text: str) -> list:
@@ -125,11 +129,40 @@ def best_poi(results, query: str):
     return None
 
 
-def verdict(miles, radius: float) -> str:
-    """One word per entry, so a 20-line report is skimmable."""
+def verdict(miles, radius: float, failed: bool = False) -> str:
+    """One label per entry, so a 20-line report is skimmable.
+
+    LOOKUP FAILED is emphatically NOT "NOT FOUND". The first real run rate-limited after
+    nine entries and reported the remaining nine — Marymoor Park, Ballard Locks, Bellevue
+    Downtown Park among them — as NOT FOUND, i.e. as fabricated places. An unanswered
+    question and a negative answer are different things, and a tool that renders them
+    identically invites deleting perfectly good atlas entries."""
+    if failed:
+        return "LOOKUP FAILED"
     if miles is None:
         return "NOT FOUND"
     return "ok" if miles <= radius else "FAR"
+
+
+def _is_rate_limit(err: str) -> bool:
+    return "429" in (err or "") or "rate limit" in (err or "").lower()
+
+
+def lookup(bot, name: str, origin, sleep_s: float):
+    """(results, error). Retries a rate limit with backoff; other failures return at once.
+
+    TomTom's free tier throttles hard, and an atlas is 15–25 entries fired back to back:
+    the first run tripped 429 on entry ten and every one after it."""
+    for attempt in range(_RETRIES):
+        try:
+            return bot._fetch_tomtom_search(name, origin[0], origin[1], _SEARCH_RADIUS_M), None
+        except Exception as e:                      # noqa: BLE001 — reported, never raised
+            err = str(e)
+            if _is_rate_limit(err) and attempt < _RETRIES - 1:
+                time.sleep(_BACKOFF_S * (attempt + 1))
+                continue
+            return None, err
+    return None, "rate limited after retries"
 
 
 def _fake_instance() -> Path:
@@ -145,23 +178,26 @@ def _fake_instance() -> Path:
     return d
 
 
-def audit(bot, instance: str, origin, radius: float) -> list:
+def audit(bot, instance: str, origin, radius: float, sleep_s: float = _SLEEP_S) -> list:
     """(entry, name, found, town, miles, verdict) per atlas line."""
     path = REPO / instance / "atlas.txt"
     if not path.exists():
         sys.exit(f"no atlas.txt for instance {instance!r} at {path}")
+    entries = parse_atlas(path.read_text(encoding="utf-8"))
     rows = []
-    for entry in parse_atlas(path.read_text(encoding="utf-8")):
+    for i, entry in enumerate(entries):
         name = place_name(entry)
         found = town = ""
         miles = None
-        try:
-            # The bare name, biased at the anchor — never "name, city". See the module
-            # docstring: appending a city is what makes a wrong answer look right.
-            results = bot._fetch_tomtom_search(name, origin[0], origin[1], _SEARCH_RADIUS_M)
-        except Exception as e:                      # noqa: BLE001 — a dead entry is data
-            print(f"  ! search failed for {name!r}: {e}", file=sys.stderr)
-            results = []
+        if i:
+            time.sleep(sleep_s)     # pace the whole run, not just the retries
+        # The bare name, biased at the anchor — never "name, city". See the module
+        # docstring: appending a city is what makes a wrong answer look right.
+        results, err = lookup(bot, name, origin, sleep_s)
+        if err:
+            print(f"  ! lookup failed for {name!r}: {err}", file=sys.stderr)
+            rows.append((entry, name, "", "", None, verdict(None, radius, failed=True)))
+            continue
         hit = best_poi(results, name)
         if hit:
             found = (hit.get("poi") or {}).get("name") or ""
@@ -173,10 +209,17 @@ def audit(bot, instance: str, origin, radius: float) -> list:
     return rows
 
 
-def report(instance: str, rows: list) -> int:
-    """Print one instance's findings; return the number flagged."""
-    bad = [r for r in rows if r[5] != "ok"]
-    print(f"=== {instance}: {len(rows)} entries, {len(bad)} flagged")
+def report(instance: str, rows: list) -> tuple:
+    """Print one instance's findings; return (content flags, lookup failures).
+
+    The two are counted separately and never summed. A flag is something to fix in
+    atlas.txt; a failure means the audit did not run for that entry and says nothing at
+    all about it."""
+    flagged = [r for r in rows if r[5] in ("NOT FOUND", "FAR")]
+    failed = [r for r in rows if r[5] == "LOOKUP FAILED"]
+    checked = len(rows) - len(failed)
+    head = f"=== {instance}: {len(rows)} entries, {checked} checked, {len(flagged)} flagged"
+    print(head + (f", {len(failed)} NOT CHECKED (lookup failed)" if failed else ""))
     for entry, name, found, town, miles, v in rows:
         if v == "ok":
             continue
@@ -185,9 +228,13 @@ def report(instance: str, rows: list) -> int:
         print(f"  [{v}] {name}  ({dist}){extra}")
     towns = Counter(r[3] for r in rows if r[3])
     if towns:
-        print("  towns: " + ", ".join(f"{t}×{n}" for t, n in towns.most_common()))
+        print("  towns: " + ", ".join(f"{t}×{n}" for t, n in towns.most_common())
+              + f"   (of {checked} checked)")
+    if failed:
+        print(f"  ! {len(failed)} entries were never checked — rerun them before "
+              f"concluding anything about those lines.")
     print()
-    return len(bad)
+    return len(flagged), len(failed)
 
 
 def main() -> None:
@@ -198,6 +245,9 @@ def main() -> None:
                     help="this instance's LIVE WEATHER_LOCATION, e.g. 'Bellevue, WA'")
     ap.add_argument("--radius", type=float, default=15.0,
                     help="miles from --near before an entry is FAR (default 15)")
+    ap.add_argument("--sleep", type=float, default=_SLEEP_S,
+                    help=f"seconds between lookups; raise if you still hit 429 "
+                         f"(default {_SLEEP_S})")
     args = ap.parse_args()
 
     if not os.getenv("TOMTOM_API_KEY"):
@@ -227,9 +277,11 @@ def main() -> None:
         print(f"# anchor: {args.near} -> {anchor[2]} ({anchor[0]:.4f}, {anchor[1]:.4f})")
         print(f"# radius: {args.radius} miles\n")
 
-        flagged = report(args.instance, audit(bot, args.instance, origin, args.radius))
-        # Non-zero when anything is flagged, so this can gate a character-pass Routine.
-        sys.exit(1 if flagged else 0)
+        flagged, failed = report(args.instance,
+                                 audit(bot, args.instance, origin, args.radius, args.sleep))
+        # Distinct exit codes so a character-pass Routine can tell "the atlas has problems"
+        # from "the audit did not finish" — retry the second, act on the first.
+        sys.exit(2 if failed else (1 if flagged else 0))
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

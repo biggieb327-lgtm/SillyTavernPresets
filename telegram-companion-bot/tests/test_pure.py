@@ -9394,3 +9394,79 @@ class TestHoursNoteCodeReviewFixes:
         """e.date() is today here, so the clock time is meaningful and must survive."""
         poi = TestPoiHoursNote._poi(("2026-08-10", 18, 0, "2026-08-11", 2, 0))
         assert bot._poi_hours_note(poi, datetime(2026, 8, 11, 0, 30)) == "open until 02:00"
+
+
+class TestAtlasAuditLookupFailures:
+    """The first real run rate-limited after nine entries and reported the rest — Marymoor
+    Park, Ballard Locks, Bellevue Downtown Park — as NOT FOUND, i.e. as fabricated. An
+    unanswered question is not a negative answer."""
+
+    def test_a_failed_lookup_is_not_a_missing_place(self):
+        aa = _atlas_audit()
+        assert aa.verdict(None, 15, failed=True) == "LOOKUP FAILED"
+        assert aa.verdict(None, 15) == "NOT FOUND"
+
+    def test_rate_limits_are_recognised_whatever_the_wording(self):
+        aa = _atlas_audit()
+        assert aa._is_rate_limit("rate limited (HTTP 429) — wait a moment")
+        assert aa._is_rate_limit("HTTP 429")
+        assert not aa._is_rate_limit("HTTP 401")
+        assert not aa._is_rate_limit("")
+
+    def test_a_rate_limit_is_retried_then_succeeds(self, monkeypatch):
+        aa = _atlas_audit()
+        monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+        calls = []
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                calls.append(q)
+                if len(calls) < 3:
+                    raise RuntimeError("rate limited (HTTP 429) — wait a moment")
+                return [{"poi": {"name": q}}]
+
+        results, err = aa.lookup(_Bot, "Marymoor Park", (47.6, -122.3), 0)
+        assert err is None and len(calls) == 3
+        assert results[0]["poi"]["name"] == "Marymoor Park"
+
+    def test_a_non_rate_limit_error_does_not_burn_retries(self, monkeypatch):
+        aa = _atlas_audit()
+        monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+        calls = []
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                calls.append(q)
+                raise RuntimeError("HTTP 401 — bad key")
+
+        results, err = aa.lookup(_Bot, "x", (47.6, -122.3), 0)
+        assert results is None and "401" in err and len(calls) == 1
+
+    def test_a_persistent_rate_limit_gives_up_and_says_so(self, monkeypatch):
+        aa = _atlas_audit()
+        monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+
+        class _Bot:
+            @staticmethod
+            def _fetch_tomtom_search(q, lat, lon, radius):
+                raise RuntimeError("rate limited (HTTP 429) — wait a moment")
+
+        results, err = aa.lookup(_Bot, "x", (47.6, -122.3), 0)
+        assert results is None and "429" in err
+
+    def test_report_counts_failures_apart_from_flags(self, capsys):
+        aa = _atlas_audit()
+        rows = [
+            ("a — x", "a", "a", "Bellevue", 3.0, "ok"),
+            ("b — x", "b", "", "", None, "NOT FOUND"),
+            ("c — x", "c", "", "", None, "LOOKUP FAILED"),
+        ]
+        flagged, failed = aa.report("priya", rows)
+        assert (flagged, failed) == (1, 1)      # never summed into one number
+        out = capsys.readouterr().out
+        assert "2 checked" in out and "1 flagged" in out
+        assert "NOT CHECKED" in out
+        # The town tally must not imply it covered entries that were never looked up.
+        assert "of 2 checked" in out
