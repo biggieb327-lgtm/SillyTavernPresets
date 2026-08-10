@@ -85,6 +85,36 @@ itself back. Cards and preset layers aren't versioned by `vps-sync.sh`'s backup 
 if a card/preset edit needs rolling back, re-run `vps-sync.sh` after reverting the
 change on `main`.
 
+## Refreshing the checkout by hand (repo tools, not a deploy)
+
+`tools/` never deploys, so a fix to `atlas_audit.py` / `selfie_prompt_preview.py` reaches the
+VPS only when `/opt/telegram-bots/.repo` is updated. **A bare `git pull` or `git fetch` there
+fails** — `git@github.com: Permission denied (publickey)`. The remote is SSH and the
+read-only deploy key is not in root's default identity set; `vps-sync.sh` exports it per-run
+(line 79) rather than configuring it globally, so nothing outside the script inherits it.
+
+```bash
+# host: vps (as root)
+export GIT_SSH_COMMAND="ssh -i /root/.ssh/stpresets_ro -o IdentitiesOnly=yes"
+git -C /opt/telegram-bots/.repo fetch origin main
+git -C /opt/telegram-bots/.repo reset --hard origin/main
+```
+
+`reset --hard`, not `pull` — it is what the script does and it works from any HEAD state.
+The key path honours `STPRESETS_DEPLOY_KEY` if that is set. Simpler alternative when a
+restart is acceptable: **any `vps-sync.sh <instance>` run does this fetch-and-reset first**,
+so deploying one instance also refreshes the checkout for every tool.
+
+**Running a repo tool on the VPS needs the fleet venv**, not system python — system python
+has none of `bot.py`'s dependencies and the three tools that import it die on
+`ModuleNotFoundError` (they now name the venv in the error):
+
+```bash
+# host: vps (as root)
+/opt/telegram-bots/venv/bin/python3 \
+  /opt/telegram-bots/.repo/telegram-companion-bot/tools/atlas_audit.py priya --near "Seattle"
+```
+
 ## Deploy failure modes
 
 - `vps-sync.sh` exits at "FATAL: no git checkout" → the deploy key or checkout is
