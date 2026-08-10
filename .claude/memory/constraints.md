@@ -295,7 +295,7 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 5** (2026-07-26 ×2, 2026-07-27, 2026-08-03, 2026-08-09) — *promoted by check 6 of the
+**seen: 7** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
 Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
@@ -362,6 +362,25 @@ present, `CommandHandler("setbase"` registered, write atomic — and none exerci
 code proves the code exists; whether the framework ever calls it is a different claim
 needing a different test. The fix's own test now runs PTB's `check_update` rather than
 describing it.
+
+**Occurrences 6 and 7 (2026-08-03, 2026-08-10) — the instrument was built from the sample
+I had already seen, then trusted as a census.** Both promoted from the Minor log
+2026-08-10, and both are this constraint's *wrong sample* / *wrong instrument* bullets one
+step earlier: not "I misread the reading" but "I built the thing that produced it out of
+the two or three examples in front of me."
+- A per-character signal was keyed on `NAME`, checked against **priya** only, where that
+  field happens to be a bare first name. Five of seven cards carry full names
+  (`Emily Harper`) and bonnie's is `Bonnie (Libertarian)`, which could never match — the
+  signal was inert on most of the fleet with every test green, because the tests only ever
+  passed `"Priya"`. One loop over the seven cards would have shown it.
+- The hand-rolled boolean-env class was swept with two regexes written from the two idioms
+  I had read, and "~20 sites" went into a shipped changelog. The real count was 55, and a
+  third idiom (`== "true"`) matched neither pattern. Found by re-grepping more broadly out
+  of habit — nothing flagged it, and nothing could have.
+**Sharpened again: a clean sweep means "my pattern found nothing", never "nothing is
+there".** Before trusting an enumeration, enumerate the *population* first — the seven
+instances, the shapes the class can take — and check the instrument against each. Where the
+population is enumerable in one command, running that command is the check.
 
 **What stays prose, deliberately:** #1's shape — asserting a code path behaves some way
 without exercising it. The text reads identically whether or not the path was run, so no
@@ -809,6 +828,49 @@ unnamed entries as a general policy. No scanner can see this: `atlas_audit.py`'s
 the five that must stay descriptive and is precisely why it cannot flag the ones that
 shouldn't.
 
+### C22 — A copy of the thing was consulted where the thing itself was one command away
+**seen: 5** (2026-08-07 ×2, 2026-08-08, 2026-08-09, 2026-08-10) — *promoted from the Minor
+log 2026-08-10; all five entries deleted.*
+Five separate failures, one cause. In each, an authoritative source existed, was reachable
+by a single command, and a stale or secondary copy of it was used instead:
+
+| the copy used | the primary, one command away |
+|---|---|
+| a branch whose merge-base with `origin/main` was ~150 commits old | `git fetch origin main` |
+| `routines.md`'s text for a live Routine's prompt | `list_triggers` |
+| "pytest isn't installed" reported as an environment boundary | `repo-change-control` step 2, which documents the fix |
+| CLAUDE.md's sentence about what `vps-sync.sh` does | `deploy/vps-sync.sh` itself |
+| a new helper named `_env_flag` | `grep _env_ .claude/tools/sweep.py`, which had reserved `_env_bool` |
+
+The costs differed — re-deriving history the repo already recorded correctly, editing a
+file to describe a step the live Routine stopped running two weeks earlier, reporting a
+gap as unavoidable, relaying a claim that happened to be true, minting a second name for
+one concept — but the move was identical every time, and in every case the primary was
+cheaper to read than the reasoning spent on the copy.
+
+**C12 is the special case of this**, not the general rule: it covers a *documentation
+sentence* being relayed as a *claim*. Here the copy can be a stale git ref, a file that
+mirrors live state, a skill's summary, or my own memory of a scanner — and the output can
+be ordinary work rather than a claim to the owner.
+
+**Constraint:** before editing or asserting anything about a system that has a live
+source of truth, read the live source, not the file that describes it. Specifically:
+`git fetch origin main` before extended work on shared docs (`routines.md`, `CLAUDE.md`,
+`constraints.md`, `operational-log.md`); `list_triggers` before editing a Routine's prompt
+in `routines.md`; the script before describing what a script does; the scanners and evals
+before naming a new helper. **A copy existing is not evidence it is current** — the same
+distinction C8 draws for readings, applied to sources.
+
+**Graduated → `.claude/hooks/session-audit.sh`.** It now reports how far the branch's
+merge-base sits behind `origin/main` at every session start and warns past 25 commits,
+which is the one shape here a mechanism can see: the ~150-commit gap was invisible until
+the push was rejected. It reads the **local** `origin/main` ref without fetching, so the
+number is a lower bound, and it prints that ref's own age beside it — a staleness check
+that hid its own staleness would be this constraint in miniature. The other four resist
+mechanisation for the reason rule 4 allows prose: nothing in the diff distinguishes
+"read the live Routine and then edited the file" from "edited the file", and the tool call
+that would have made the difference leaves no trace in the repo.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
@@ -828,7 +890,7 @@ show up first. A section with nothing in it means under-reporting, not a clean r
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
 promotes was still worth ten seconds to write.
 
-**Last promotion pass: 2026-08-02** — `sweep.py constraints-drift` reads this line and
+**Last promotion pass: 2026-08-10** — `sweep.py constraints-drift` reads this line and
 counts only what has arrived *since* it, which is what "is another pass worth running"
 actually asks. **Update the date whenever you run a pass**, including one that promotes
 nothing. Counting the *total* instead is what made the check useless: the 2026-08-02 pass
@@ -842,35 +904,6 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
-- 2026-08-09 — Wrote the deploy handoff asserting `vps-sync.sh` "fetches and hard-resets the checkout to `origin/main` first, so it's correct even if the on-disk checkout is stale", taken verbatim from `CLAUDE.md` and the `repo-change-control` skill rather than from the script. The claim-guard hook caught it; reading `deploy/vps-sync.sh` confirmed it (lines 87-88, with `set -euo pipefail` at line 42 making a failed fetch abort rather than silently deploy stale code), so the statement was true — but it was unverified at the time it was made, and the reader could not tell those apart → C12 applies to a doc sentence being *relayed*, not just to a command being run. Before handing the owner a claim about what a script does, read the script; a docs-sourced claim that happens to be right is still a claim about the past.
-- 2026-08-08 — Reported a handoff as delivered having run only `run-evals.sh`, stating
-  "pytest isn't installed in this container" as a limitation, when `repo-change-control`
-  step 2 documents the exact two-command fix; installing it on the next turn immediately
-  surfaced 2 failing tests on `main` that the eval suite alone could not see → when a
-  verification step is skipped for an environment gap, check whether a skill already
-  documents the remedy before reporting the gap as a boundary; a stated limitation is not
-  the same as an unavoidable one.
-- 2026-08-07 — Edited both monthly Routines' Reddit-access steps in routines.md based
-  solely on the file's own (stale) content, without first calling `list_triggers` to
-  check the live prompts. The live triggers had already been updated via
-  `update_trigger` on 2026-08-03 — dropping Reddit for a WebSearch-only scan — without
-  that change ever being mirrored back to routines.md, so the file was describing a
-  step the live Routine had stopped running two weeks earlier. Caught before pushing,
-  by listing triggers to get the exact IDs for the actor integration. → **Before
-  editing a live Routine's prompt in routines.md, call `list_triggers` first and diff
-  its live prompt against the file** — the file's own header rule says drift can run
-  either direction, and it already had.
-- 2026-08-07 — Built four commits of Reddit/Apify integration work on a branch whose
-  merge-base with `origin/main` (`dee2058`) was ~150 commits behind by the time of
-  push — including two 2026-08-03 commits that had already correctly diagnosed and
-  applied the exact "Reddit dropped, WebSearch-only" state the entry above rediscovered
-  independently, from the live trigger, without checking `origin/main` first. The
-  non-fast-forward push rejection caught it before anything was overwritten, but the
-  session had already spent effort re-deriving history the repo already had correctly
-  recorded. → **Before extended work on docs/config files likely to be touched
-  elsewhere (routines.md, CLAUDE.md, constraints.md, operational-log.md), `git fetch
-  origin main` and diff against it, not just against the branch's own stale local
-  copy** — a merge-base existing is not the same as it being recent enough to trust.
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —
@@ -883,13 +916,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
   had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
   match sits inside a sentence, edit each site individually.**
-- 2026-08-03 — Keyed a per-character signal on `NAME` (the card's `name` field) after checking it
-  against priya only, where it happens to be a bare first name. Five of seven instances carry full
-  names ("Emily Harper"), and bonnie's `Bonnie (Libertarian)` couldn't match at all — the signal
-  was silently inert on most of the fleet while all tests passed. → **when a rule reads a
-  per-instance config value, enumerate that value across all seven instances before trusting its
-  shape.** One `python3 -c` loop over the seven cards would have shown it; the tests only ever
-  passed `"Priya"`.
 - 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
   then reported the Portland→Olympia relocation shipped. Every instance that already had the file
   silently no-op'd, and Emily kept saying Burnside for a further two rounds. → **a placement block
@@ -1024,9 +1050,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
 - 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
 - 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
 - 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
-- 2026-08-10 — Enumerated the hand-rolled boolean-env class with two regexes built from the two shapes I had already read, reported "~20 sites" in a shipped changelog, and called the sweep complete. The real count was 55, and a third idiom (`== "true"`, accepting exactly one word — the sharpest case) matched neither pattern. Found only because I re-grepped more broadly out of habit, not because anything flagged it. → **a sweep for a class is only as wide as the pattern that expresses it; a clean result means "my pattern found nothing", never "nothing is there".** Before trusting a class sweep, write down the shapes the class could take and check the pattern against each — or grep for the *variable's role* (every `os.getenv` whose result is used as a bool) rather than for remembered syntax. `fix-the-class` says candidates are not defects; the converse needed saying too.
 - 2026-08-10 — Break-tested the `_FEATURES` entry by deleting the `mapintent` line, then "reverted" it with an Edit whose replacement dropped the leading newline. The entry landed *appended to the comment line above it*, so Python read it as a comment: `py_compile` passed, and only the full pytest run caught it, two steps later. I proved the check RED and never proved it GREEN again. → **a break-test is not reverted until the same command that went RED is re-run and comes back GREEN.** C3's other half; the revert is a code edit and deserves the same evidence the original did.
-- 2026-08-10 — Wrote a new boolean-env helper and named it `_env_flag`, when `.claude/tools/sweep.py:321` had listed `_env_(?:int|float|bool)` for months — a previous session had already predicted the helper and reserved the name. Renamed to `_env_bool`, which then needed no sweep.py change at all. → **before naming a new helper, grep the checks and scanners for a name already reserved for it.** CLAUDE.md's vocabulary rule 1 says use the name the code already has; a regex in a scanner is the code having a name for something that does not exist yet, and it is greppable in exactly the same way.
 - 2026-08-09 — Added a cross-reference to `.claude/OPERATING_MANUAL.md` §9 from CLAUDE.md but wrote the bare filename, `OPERATING_MANUAL.md`. `claude-md-refs-resolve` failed: CLAUDE.md's paths resolve from the repo root, where that file does not exist. The surrounding lines all use the `.claude/` prefix, so the wrong form was written next to four correct ones. → **a path written into a doc is a claim that resolves from that doc's stated root, not from the file you were just editing.** Caught by the eval, not by rereading — which is the argument for running the suite on doc-only changes too.
 
 ## Minor — archived
