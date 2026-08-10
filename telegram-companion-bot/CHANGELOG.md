@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.10 — The map-intent over-firing watch had nothing to watch with
+
+**Root cause: a deferred follow-up whose trigger condition was never observable.** ROADMAP
+3.5 phase 2 parked a per-chat cooldown as conditional — *"if the `[map]` log line ever
+shows over-firing"* — and the only instrument was `log.info("[map] intent=…")`, which means
+grepping journalctl on the VPS. Until v2026-08-10.8 that cost nothing, because `MAP_INTENT`
+was off on all seven so the line never appeared. It now fires on every instance, and the
+condition that decides whether to build the cooldown is still unreadable from `/audit`.
+
+Same shape as v2026-08-10.4, .5, .6 and .8 — a signal that exists but reaches no surface.
+Four of those in one week is the argument for building the instrument before the feature
+that needs it.
+
+**Fix: `/audit` gets a `Map intent:` line carrying the rate, not a count.**
+`_track_map_intent` wraps the detector call inside the dispatch condition and counts every
+message that reached it, so the report reads `2/9 messages (22%) — 1 route, 1 nearby`
+rather than a bare fire count. **The denominator is the point**: a count alone cannot
+distinguish a busy day from an over-firing detector, which is exactly the question the
+deferred cooldown turns on. Counters reset daily, because a lifetime-cumulative rate
+answers nothing about now (C8, wrong currency).
+
+No-pin fires are counted separately. Those produce a share-a-pin nudge rather than map
+data, and a high share of them is a different problem wanting a different fix — it is the
+outcome that prompted the owner's *"what is the point of this feature?"* about jules on
+2026-08-10.
+
+**The cooldown itself stays unbuilt, deliberately.** ROADMAP conditions it on evidence;
+this is the instrument that produces the evidence, and building the remedy first would be
+guessing at a rate nobody has seen.
+
+`_map_intent` stays pure — the wrapper counts at the call site rather than inside the
+detector, whose negatives are test-pinned and whose tests should not have to care about
+ordering.
+
+8 tests. Three break-tests: the wrapper swallowing its return value (1 red — it sits inside
+a walrus, so altering the value changes which branch runs), the daily reset removed (1 red),
+and the denominator dropped from the summary (2 red). **Two of those three failed to inject
+on the first attempt** — anchors matching 4 times and 0 times — and the resulting greens
+were recorded as proving nothing until the anchors were made unique (C17, C18).
+
 ## v2026-08-10.9 — Every on/off env var accepted a different set of words
 
 **The class, in one sentence: an on/off env var parsed by a hand-rolled string comparison,

@@ -7094,6 +7094,95 @@ _MAP_INTENT_DEFAULT = bot.MAP_INTENT
 _FOOD_SUGGESTIONS_DEFAULT = bot.FOOD_SUGGESTIONS
 
 
+class TestMapIntentFireRateIsVisible:
+    """v2026-08-10.10: ROADMAP 3.5 phase 2 deferred a per-chat cooldown "if the `[map]`
+    log line ever shows over-firing". MAP_INTENT was off everywhere until v2026-08-10.8,
+    so it never could; now it fires on all seven and the rate was readable only by
+    grepping journalctl. The cooldown stays unbuilt — ROADMAP conditions it on evidence,
+    and this is the instrument that produces the evidence."""
+
+    def setup_method(self):
+        self._orig = dict(bot._map_stats)
+
+    def teardown_method(self):
+        bot._map_stats.clear(); bot._map_stats.update(self._orig)
+
+    def _reset(self):
+        bot._map_stats.update(date=time.strftime("%Y-%m-%d"),
+                              considered=0, route=0, nearby=0, no_pin=0)
+
+    def test_the_wrapper_returns_its_argument_untouched(self):
+        """It sits inside the walrus in the dispatch condition — if it altered the value,
+        it would change which branch runs."""
+        self._reset()
+        for val in (None, ("route", "the airport"), ("nearby", "ramen")):
+            assert bot._track_map_intent(val) is val
+
+    def test_a_miss_counts_as_considered_but_not_fired(self):
+        self._reset()
+        bot._track_map_intent(None)
+        assert bot._map_stats["considered"] == 1
+        assert bot._map_stats["route"] == 0 and bot._map_stats["nearby"] == 0
+
+    def test_each_kind_counts_under_its_own_name(self):
+        self._reset()
+        bot._track_map_intent(("route", "the airport"))
+        bot._track_map_intent(("nearby", "ramen"))
+        bot._track_map_intent(("nearby", "a pharmacy"))
+        assert (bot._map_stats["route"], bot._map_stats["nearby"]) == (1, 2)
+        assert bot._map_stats["considered"] == 3
+
+    def test_the_counters_reset_on_a_new_day(self):
+        """Without this the rate is lifetime-cumulative and answers nothing about now —
+        the same defect as reading errors.log for a live fight (C8, wrong currency)."""
+        bot._map_stats.update(date="1999-01-01", considered=99, route=99, nearby=99,
+                              no_pin=99)
+        bot._track_map_intent(None)
+        assert bot._map_stats["considered"] == 1
+        assert bot._map_stats["route"] == 0 and bot._map_stats["no_pin"] == 0
+
+    def test_the_summary_names_the_denominator(self):
+        """A bare fire count cannot tell a busy day from an over-firing detector, which
+        is the entire question the deferred cooldown turns on."""
+        self._reset()
+        for _ in range(7):
+            bot._track_map_intent(None)
+        bot._track_map_intent(("route", "the airport"))
+        bot._track_map_intent(("nearby", "ramen"))
+        out = bot._map_stats_summary()
+        assert "2/9" in out and "22%" in out
+        assert "1 route" in out and "1 nearby" in out
+
+    def test_no_pin_fires_are_reported_separately(self):
+        """They produce a share-a-pin nudge, not map data — a different problem from
+        over-firing, wanting a different fix."""
+        self._reset()
+        bot._track_map_intent(("route", "the airport"))
+        bot._map_stats["no_pin"] += 1
+        assert "1 with no fresh pin" in bot._map_stats_summary()
+        self._reset()
+        bot._track_map_intent(("route", "the airport"))
+        assert "no fresh pin" not in bot._map_stats_summary()
+
+    def test_a_quiet_day_says_so_instead_of_dividing_by_zero(self):
+        self._reset()
+        assert bot._map_stats_summary() == "no messages checked today"
+
+    def test_audit_renders_it(self):
+        """gather_audit_data keys that no surface renders are invisible in exactly the
+        situation they were added for — the audit-keys-rendered eval exists for this."""
+        saved = (bot.MAP_INTENT, bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED)
+        try:
+            bot.MAP_INTENT, bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED = True, "k", True
+            self._reset()
+            bot._track_map_intent(("route", "the airport"))
+            assert "1/1" in bot.gather_audit_data()["map_intent"]
+            bot.MAP_INTENT = False
+            assert bot.gather_audit_data()["map_intent"] == "off"
+        finally:
+            bot.MAP_INTENT, bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED = saved
+
+
 class TestNoHandRolledEnvBooleans:
     """v2026-08-10.9 fixed the class: 53 on/off env vars parsed by hand, in three idioms
     that accepted three different sets of words. This re-derives the offender list from

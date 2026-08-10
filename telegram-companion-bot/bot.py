@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.9"
+BOT_VERSION = "2026-08-10.10"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -189,6 +189,47 @@ def _take_call_usage():
     u = getattr(_call_usage, "last", None)
     _call_usage.last = None
     return u
+
+
+# --- Map-intent fire rate (ROADMAP 3.5 phase 2's deferred over-firing watch) ---
+# That watch was written as "add a per-chat cooldown if the `[map]` log line ever shows
+# over-firing", and until v2026-08-10.8 the flag was off everywhere so it never could.
+# Now it fires on all seven, and the only way to see the rate was to grep journalctl for
+# `[map] intent=` — the same "nobody could see the input" shape as v2026-08-10.4/.5/.6.
+# The cooldown itself stays unbuilt on purpose: ROADMAP conditions it on evidence, and
+# this is the instrument that produces the evidence.
+_map_stats: dict = {"date": "", "considered": 0, "route": 0, "nearby": 0, "no_pin": 0}
+
+
+def _track_map_intent(result):
+    """Count one map-intent decision and return it unchanged.
+
+    Wraps the call rather than living inside `_map_intent`, which stays a pure function
+    with test-pinned negatives — a detector that mutates a global is a detector whose
+    tests have to care about ordering. `considered` counts every message that reached the
+    detector, so `route + nearby` over `considered` is the actual fire rate rather than a
+    count with no denominator."""
+    today = time.strftime("%Y-%m-%d")
+    if _map_stats["date"] != today:
+        _map_stats.update(date=today, considered=0, route=0, nearby=0, no_pin=0)
+    _map_stats["considered"] += 1
+    if result is not None and result[0] in ("route", "nearby"):
+        _map_stats[result[0]] += 1
+    return result
+
+
+def _map_stats_summary() -> str:
+    """One line for /audit. Says 'considered' out loud because a bare fire count cannot
+    distinguish a busy day from an over-firing detector."""
+    fired = _map_stats["route"] + _map_stats["nearby"]
+    if not _map_stats["considered"]:
+        return "no messages checked today"
+    pct = round(100 * fired / _map_stats["considered"])
+    out = (f"{fired}/{_map_stats['considered']} messages ({pct}%) — "
+           f"{_map_stats['route']} route, {_map_stats['nearby']} nearby")
+    if _map_stats["no_pin"]:
+        out += f", {_map_stats['no_pin']} with no fresh pin"
+    return out
 
 
 def _count_error(category: str):
@@ -11482,11 +11523,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Rides THIS reply — no extra LLM call (bot-code-invariants #3); fetches are
         # off-loop via to_thread; a TomTom failure degrades to a normal reply.
         # elif keeps it to at most one injection per message — food (above) wins.
-        elif MAP_INTENT and TOMTOM_ENABLED and (_mi := _map_intent(user_message)) is not None:
+        elif MAP_INTENT and TOMTOM_ENABLED and (
+                _mi := _track_map_intent(_map_intent(user_message))) is not None:
             _mkind, _mquery = _mi
             log.info("[map] intent=%s payload=%r", _mkind, _mquery)  # fire-rate instrument
             _mloc = user_location.get(chat_id)
             if not _fresh_location(_mloc):
+                # Counted separately: these fires produce a share-a-pin nudge, not map
+                # data. A high no_pin share is a different problem from over-firing and
+                # wants a different fix — the owner asked "what is the point of this
+                # feature?" after exactly this outcome on jules (2026-08-10).
+                _map_stats["no_pin"] += 1
                 content_for_model += (
                     "\n[They're asking about "
                     + ("getting somewhere" if _mkind == "route" else "what's nearby")
@@ -14773,6 +14820,7 @@ def gather_audit_data() -> dict:
         "config_warnings": list(_CONFIG_WARNINGS),
         "llm_stats": dict(_llm_stats),
         "tomtom": (_tomtom_mode() if TOMTOM_ENABLED else "off"),
+        "map_intent": (_map_stats_summary() if MAP_INTENT and TOMTOM_ENABLED else "off"),
         "garmin": _garmin_audit_state(),
         "selfie_base": _base_image_status(),
         "selfie_provider": _selfie_provider_label(),
@@ -14850,6 +14898,7 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         f"bot.log: {d['bot_log_kb']} KB",
         f"PID: {d['pid']}",
         f"Maps (TomTom): {d.get('tomtom', 'off')}",
+        f"Map intent: {d.get('map_intent', 'off')}",
         f"Health feed (Garmin): {d.get('garmin', 'off')}",
         f"Selfie base: {d.get('selfie_base', '?')}  via {d.get('selfie_provider', '?')}",
         f"Features: {d.get('features', '?')}",

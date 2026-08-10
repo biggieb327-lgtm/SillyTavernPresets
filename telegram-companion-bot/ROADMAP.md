@@ -262,7 +262,13 @@ a list that cannot go stale beats a list that is correct today.
   weeks later, so the feature was built, tested, documented and dark. `mapintent` and
   `foodsuggestions` are `_FEATURES` entries now, so `/audit` and `/features` can report
   a flag whose state was previously readable only by grepping seven `.env` files.
-  The `[map]` over-firing watch above matters more now that it fires everywhere.
+  **The over-firing watch is now readable (v2026-08-10.10).** `/audit` carries a
+  `Map intent:` line reporting fires over messages-considered (`2/9 messages (22%) — 1
+  route, 1 nearby`), reset daily, with no-pin fires counted separately. The deferred
+  per-chat cooldown stays unbuilt on purpose: this ROADMAP conditions it on the log
+  showing over-firing, and the rate had never been observable — the flag was off
+  everywhere until v2026-08-10.8, and reading it meant grepping journalctl. Decide on the
+  cooldown from a week of that line, not from a guess.
 
 ### 3.6 ~~Schedule-driven unavailability~~ ✅ (shipped v2026-07-18.2, `SCHED_BUSY`)
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` item A (owner-approved 2026-07-18).
