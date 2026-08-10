@@ -8,27 +8,31 @@
 # neighborhoods over") were replaced 2026-08-10, keeping each one's FUNCTION rather than
 # its name — the same method Emily's and Marcus's atlases used moving to Olympia.
 #
-# Named landmarks here come from her own setting.txt (the outlet mall, the Skagit River,
-# I-5, the farmland, the mountains). Specific BUSINESS names are deliberately absent: they
-# cannot be invented safely, and tools/atlas_audit.py exists to check any that get added.
+# The named places below were verified against TomTom on 2026-08-10 and are all in
+# Burlington: Burlington Public Library (820 Washington Ave), Railroad Park (505 Washington
+# Ave), Alpha Park (633 E Fairhaven Ave), Encore on the Blvd (702 E Fairhaven Ave),
+# Diedrich Espresso (111 Fountain St), The Outlet Shoppes at Burlington (448 Fashion Way).
+# Every one is under 2.6km from her. Re-check any ADDED entry with
+# tools/atlas_audit.py bonnie --near "Burlington, WA" before it ships — the rest are
+# deliberately unnamed, because a generic landmark can never be factually wrong.
 
 Her apartment — the default; she has it optimized
 The mailbox — a significant journey on some days
 The parking lot behind her building, top row where nobody parks — she goes when she needs to see the sky without committing to outside
 The gas station mini-mart on the way out to the highway — knows every product, has opinions on the layout changes
 The one place that actually delivers this far out — doesn't need to visit, orders twice a week
-The outlet mall — dead on a weekday, which is the only condition under which she'll go
-The bench by the river trail that faces away from the parking lot — genuinely calming, no one else uses it
+The Outlet Shoppes at Burlington — dead on a weekday, which is the only condition under which she'll go
+Railroad Park — she goes for the freight line, not the park; found it by accident and kept it
+Alpha Park — closest green thing to her door, which is its entire appeal
+Burlington Public Library — she uses the self-checkout so she doesn't have to talk
+Encore on the Blvd — went once for the unsorted bins, bought three things, might go again
+Diedrich Espresso — drive-thru, and she has never once gotten out of the car
 Laundromat at 11pm — preferred hours, nobody there, brings a book
 The 24-hour pharmacy off the interstate — familiar at this point, knows where everything is
-The thrift store with the unsorted bins — went once, bought three things, might go again
+The bench by the river trail that faces away from the parking lot — genuinely calming, no one else uses it
 The fire escape landing outside her window (technically not a balcony) — she goes anyway, it's fine
-The library — she uses the self-checkout so she doesn't have to talk
 A friend's place over in Mount Vernon — rare excursion, requires planning and snacks for the drive back
-The overpass where you can watch the freight line come through — she found this by accident
 The slough where the ducks are extremely bold — she feeds them sometimes, they've lost all fear
 The drive north on I-5 with nowhere to be — sometimes goes at night when she can't sleep, turns around at the county line
-The secondhand bookshop that smells like old paper and slightly like cat — very good
-The drive-thru espresso stand she uses without ever getting out of the car — the whole appeal
 The farm stand that's only open half the year — she times her one seasonal outing around it
 The tavern she went to exactly once for someone's birthday — too loud, and everyone knew everyone
