@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.1"
+BOT_VERSION = "2026-08-10.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -13301,7 +13301,10 @@ def _tomtom_geocode(query: str):
     from urllib.parse import quote
     try:
         r = _get_session().get(
-            _TOMTOM_GEOCODE_URL.format(q=quote(query)),
+            # safe="" or a slash in the query becomes extra URL path segments and TomTom
+            # 404s. quote() keeps "/" unescaped by default, which is right for paths and
+            # wrong here: this interpolates INTO a path segment. See _fetch_tomtom_search.
+            _TOMTOM_GEOCODE_URL.format(q=quote(query, safe="")),
             params={"key": TOMTOM_API_KEY, "limit": 1, "countrySet": "US"},
             timeout=(10, 30),
         )
@@ -13425,7 +13428,12 @@ def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None,
             params["lat"], params["lon"] = lat, lon
             if radius_m:
                 params["radius"] = int(radius_m)
-        r = _get_session().get(_TOMTOM_SEARCH_URL.format(q=quote(query)), params=params, timeout=(10, 30))
+        # safe="" is load-bearing: quote() leaves "/" alone by default because it is
+        # normally escaping a whole path, but here the query is interpolated INTO one
+        # segment. "Boulevard Park / Taylor Dock" became three segments and returned
+        # HTTP 404 — found by tools/atlas_audit.py against jules's atlas, 2026-08-10.
+        r = _get_session().get(_TOMTOM_SEARCH_URL.format(q=quote(query, safe="")),
+                               params=params, timeout=(10, 30))
         r.raise_for_status()
         return (r.json() or {}).get("results") or []
     except Exception as e:

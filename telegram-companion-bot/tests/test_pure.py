@@ -9501,3 +9501,86 @@ class TestAtlasAuditAreaFallback:
         results = []
         assert aa.best_poi(results, "The Gilded Otter") is None
         assert aa.best_area(results, "The Gilded Otter") is None
+
+
+class TestTomTomQueryEscaping:
+    """v2026-08-10.2: a place name containing "/" became extra URL path segments and
+    TomTom returned 404. Found by tools/atlas_audit.py against jules's atlas, on
+    "Boulevard Park / Taylor Dock" and "Mt. Baker Highway / Artist Point"."""
+
+    def setup_method(self):
+        self._session = bot._get_session
+        self.urls = []
+        outer = self
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"results": []}
+
+        class _S:
+            def get(_self, url, **kw):
+                outer.urls.append(url)
+                return _R()
+
+        bot._get_session = lambda: _S()
+
+    def teardown_method(self):
+        bot._get_session = self._session
+
+    def test_search_escapes_a_slash_into_one_path_segment(self):
+        bot._fetch_tomtom_search("Boulevard Park / Taylor Dock", 48.75, -122.47, 1000)
+        assert "%2F" in self.urls[0]
+        # The bug: the query must not introduce path segments of its own.
+        tail = self.urls[0].split("/search/2/search/", 1)[1]
+        assert tail.count("/") == 0, tail
+
+    def test_geocode_escapes_a_slash_too(self):
+        """Same shape, same file, one call site apart — fixing only the one that failed
+        would leave /route and MAP_INTENT destinations still 404ing."""
+        bot._tomtom_geocode("Mt. Baker Highway / Artist Point")
+        tail = self.urls[0].split("/geocode/", 1)[1]
+        assert "%2F" in self.urls[0] and tail.count("/") == 0, tail
+
+    def test_ordinary_queries_are_unharmed(self):
+        bot._fetch_tomtom_search("restaurant", 47.6, -122.3, 5000)
+        assert self.urls[0].endswith("/search/2/search/restaurant.json")
+
+    def test_other_reserved_characters_survive(self):
+        bot._fetch_tomtom_search("Bob's Fish & Chips", 47.6, -122.3, 5000)
+        tail = self.urls[0].split("/search/2/search/", 1)[1]
+        assert tail.count("/") == 0 and "%26" in tail
+
+
+class TestAtlasAuditPicksTheNearestMatch:
+    """Emily's atlas names "The Spar", a real Olympia bar. Anchored on Olympia, TomTom's
+    top name-match was the Tacoma one 26 miles out and the audit reported FAR on a place
+    five minutes from her (2026-08-10). Relevance order is not distance order."""
+
+    def test_the_nearest_name_match_wins_not_the_first(self):
+        aa = _atlas_audit()
+        results = [
+            {"poi": {"name": "The Spar"}, "dist": 42000,
+             "address": {"municipality": "Tacoma"}},
+            {"poi": {"name": "The Spar Cafe"}, "dist": 300,
+             "address": {"municipality": "Olympia"}},
+        ]
+        hit = aa.best_poi(results, "The Spar")
+        assert hit["address"]["municipality"] == "Olympia"
+
+    def test_the_area_pass_is_distance_ordered_too(self):
+        aa = _atlas_audit()
+        results = [
+            {"dist": 50000, "address": {"freeformAddress": "Old Bellevue, Somewhere, WA"}},
+            {"dist": 800, "address": {"freeformAddress": "Old Bellevue, Bellevue, WA"}},
+        ]
+        assert aa.best_area(results, "Old Bellevue")["dist"] == 800
+
+    def test_a_missing_dist_never_beats_a_real_one(self):
+        aa = _atlas_audit()
+        results = [
+            {"poi": {"name": "Marymoor Park"}, "address": {"municipality": "Nowhere"}},
+            {"poi": {"name": "Marymoor Park"}, "dist": 1200,
+             "address": {"municipality": "Redmond"}},
+        ]
+        assert aa.best_poi(results, "Marymoor Park")["address"]["municipality"] == "Redmond"

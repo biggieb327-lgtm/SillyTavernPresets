@@ -7,6 +7,27 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.2 — A place name with a slash in it 404s every TomTom lookup
+
+**Root cause: `quote(query)` leaves `/` unescaped, and the query is interpolated INTO a URL
+path segment.** `urllib.parse.quote` keeps `/` by default because it is normally escaping a
+whole path; here `_TOMTOM_SEARCH_URL` and `_TOMTOM_GEOCODE_URL` both put the query *inside*
+one segment, so `Boulevard Park / Taylor Dock` became three segments and TomTom answered
+HTTP 404. Fixed with `safe=""` at **both** call sites — the geocode one never failed
+visibly, but it backs `/route`, `MAP_INTENT` destinations and the atlas tools' anchor, and
+fixing only the site that happened to break is how a class becomes two incidents.
+
+**Found by `tools/atlas_audit.py`, which is the point of it.** Jules's atlas carries
+`Boulevard Park / Taylor Dock` and `Mt. Baker Highway / Artist Point`; both returned 404
+where every other entry searched fine. No user had reported it, and nothing else in the
+system would have surfaced it — a 404 on a place lookup degrades to "no results", which is
+indistinguishable from a place that genuinely is not there.
+
+**User-visible before this fix:** any `/place`, `/nearby` or `/food` argument containing a
+slash, and any destination the model extracted with one, silently returned nothing.
+
+4 tests, both call sites break-tested RED together.
+
 ## 2026-08-10 — 89% of the test suite's runtime was one line, twice
 
 Tests only — no `bot.py` change, so no `BOT_VERSION` bump.

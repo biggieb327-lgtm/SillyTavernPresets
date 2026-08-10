@@ -118,15 +118,28 @@ def name_matches(query: str, found: str, threshold: float = 0.5) -> bool:
     return bool(q) and len(q & _tokens(found)) / len(q) >= threshold
 
 
+def _nearest(candidates):
+    """The candidate closest to the search anchor, by TomTom's own `dist` (metres).
+
+    Relevance order is not distance order. Emily's atlas names "The Spar", a real Olympia
+    bar; anchored on Olympia within an 80km radius, TomTom's top name-match was the Tacoma
+    one 26 miles away and the audit reported FAR on an entry that is a five-minute walk
+    from her (2026-08-10). Picking the FIRST match makes the verdict depend on TomTom's
+    ranking; picking the nearest makes it depend on geography, which is what is being
+    audited."""
+    rows = list(candidates)
+    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
+    return rows[0] if rows else None
+
+
 def best_poi(results, query: str):
-    """First result that is a real POI whose name resembles the query, else None."""
-    for r in results or []:
-        if not isinstance(r, dict):
-            continue
-        name = ((r.get("poi") or {}).get("name") or "").strip()
-        if name and name_matches(query, name):
-            return r
-    return None
+    """Nearest result that is a real POI whose name resembles the query, else None."""
+    return _nearest(
+        r for r in (results or [])
+        if isinstance(r, dict)
+        and ((r.get("poi") or {}).get("name") or "").strip()
+        and name_matches(query, (r.get("poi") or {}).get("name", "").strip())
+    )
 
 
 def best_area(results, query: str):
@@ -142,13 +155,13 @@ def best_area(results, query: str):
     reintroduce the fuzzy-match hole the POI approach was built to close: asked for
     "Meydenbauer Bay Park", a "Bay Terrace Road" geography still scores 1/3 and is
     rejected."""
-    for r in results or []:
-        if not isinstance(r, dict) or (r.get("poi") or {}).get("name"):
-            continue
-        addr = (r.get("address") or {}).get("freeformAddress") or ""
-        if addr and name_matches(query, addr):
-            return r
-    return None
+    return _nearest(
+        r for r in (results or [])
+        if isinstance(r, dict)
+        and not (r.get("poi") or {}).get("name")
+        and ((r.get("address") or {}).get("freeformAddress") or "")
+        and name_matches(query, (r.get("address") or {}).get("freeformAddress", ""))
+    )
 
 
 def verdict(miles, radius: float, failed: bool = False) -> str:
