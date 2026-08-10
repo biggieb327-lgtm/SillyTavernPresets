@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.1 — She recommended restaurants without knowing whether any were open
+
+**Root cause: `FOOD_SUGGESTIONS` pre-fetched real nearby restaurants and handed them to the
+model with no hours attached.** At 11pm she could name a place that shut at nine, which is
+the difference between knowing a neighbourhood and reading a directory out loud.
+`openingHours=nextSevenDays` is a parameter on the search endpoint `_fetch_tomtom_search`
+already calls — no new endpoint, no new LLM call.
+
+**Opt-in per call.** `/place`, `/nearby` and the atlas tools never read hours, so they don't
+request them and don't pay for the larger response. Only the two food paths pass it.
+
+### The two-round-trip detour, recorded so nobody repeats it
+
+**The MCP connector cannot see this field.** Twelve POIs across two queries (two independent
+cafés, ten Starbucks), `response_detail=full`, parameter accepted without error — and no
+`openingHours` on any of them, while `entryPoints`, `brands`, `extendedPostalCode` and
+`localizedCategories` all came through. The same silent absence `timeZone=iana` shows. One
+`curl` against the raw endpoint with the fleet key returned the field immediately. **The MCP
+tools are not a reliable probe for what the fleet's own key can fetch** — a field missing
+there says nothing about the REST API.
+
+**ROADMAP 3.18's proposed design was wrong, and the first real response is what showed it.**
+That entry proposed deciding "today" as *the earliest date in the payload*, reasoning that
+`nextSevenDays` starts with the POI's local today — read off the MCP tool's parameter
+description. The first genuine response had an earliest date of **tomorrow**. The premise
+was flagged as unverified when it was written down, which is the only reason it was checked
+rather than implemented.
+
+**What shipped instead needs no notion of "today".** `_poi_hours_note` asks one question:
+does any range bracket now? Ordering and which-date-is-today stop mattering.
+
+The timezone problem is real and unsolved — hours are POI-local, the bot knows only its own
+`TZ` — so it is *gated*, not guessed: a verdict is emitted only when some range falls on the
+instance's local date. Share a location in another timezone and places go unmarked instead
+of wrongly marked. Within a matching date the comparison is ordinary, and the case the
+feature exists for (11pm, kitchen shut at nine) is squarely inside it.
+
+**A bug the tests caught before it shipped:** the date gate first tested only each range's
+*start*, so a bar open 18:00–02:00 was called unknown at 00:30 — open, and reported as
+nothing. It now accepts a range whose start **or** end falls on our date. Every late-night
+place would have been silently unmarked.
+
+The prompt line distinguishes all three states rather than two: `closed now` means don't
+send them there, `open until` is a closing time she can mention, and a place with neither is
+one we have no hours for — recommendable, just not as "open".
+
+Kill switch `FOOD_OPEN_HOURS=0`. Closes ROADMAP 3.18 and the `/food` "open now" follow-up
+parked in 3.5 since v2026-07-11.13.
+
 ## v2026-08-09.2 — She has held your coordinates for a month and could never say where that is
 
 **Root cause: `user_location` stores lat/lon and nothing ever turned it into a word.** The

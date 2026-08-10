@@ -9245,3 +9245,132 @@ class TestAtlasSuggest:
                 raise RuntimeError("TomTom said no")
 
         assert a.collect(_Bot, (47.6, -122.2), "park", set(), limit=3) == []
+
+
+# ── Opening hours on the food paths (v2026-08-09.3) ──────────────────────────
+# FOOD_SUGGESTIONS handed the model real restaurants with no idea whether any were open,
+# so at 11pm she could recommend a place that shut at nine.
+
+class TestPoiHoursNote:
+    """Shape confirmed against the raw REST endpoint with the fleet key (the MCP
+    connector omits openingHours entirely, which is why this took a round trip)."""
+
+    @staticmethod
+    def _poi(*ranges):
+        return {"openingHours": {"mode": "nextSevenDays", "timeRanges": [
+            {"startTime": {"date": sd, "hour": sh, "minute": sm},
+             "endTime": {"date": ed, "hour": eh, "minute": em}}
+            for sd, sh, sm, ed, eh, em in ranges]}}
+
+    def test_inside_a_range_reports_the_closing_time(self):
+        poi = self._poi(("2026-08-10", 7, 0, "2026-08-10", 13, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 9, 30)) == "open until 13:00"
+
+    def test_closing_time_is_zero_padded(self):
+        poi = self._poi(("2026-08-10", 7, 0, "2026-08-10", 9, 5))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 8, 0)) == "open until 09:05"
+
+    def test_after_the_last_range_today_is_closed(self):
+        """The case the feature exists for: 11pm, and the place shut at nine."""
+        poi = self._poi(("2026-08-10", 7, 0, "2026-08-10", 21, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 23, 0)) == "closed now"
+
+    def test_between_two_ranges_on_the_same_day_is_closed(self):
+        poi = self._poi(("2026-08-10", 7, 0, "2026-08-10", 11, 0),
+                        ("2026-08-10", 17, 0, "2026-08-10", 22, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 14, 0)) == "closed now"
+
+    def test_a_payload_with_no_range_on_our_date_says_nothing(self):
+        """The tz gate. ROADMAP 3.18 proposed assuming the earliest date IS the POI's
+        today; the first real response had an earliest date of tomorrow, so that
+        assumption was dropped. No range on our date means either another timezone or a
+        payload starting tomorrow — losing a hint beats inventing one."""
+        poi = self._poi(("2026-08-11", 7, 0, "2026-08-11", 21, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 9, 0)) == ""
+
+    def test_a_range_crossing_midnight_still_works(self):
+        poi = self._poi(("2026-08-10", 18, 0, "2026-08-11", 2, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 11, 0, 30)) == "open until 02:00"
+
+    def test_no_hours_data_says_nothing(self):
+        assert bot._poi_hours_note({}, datetime(2026, 8, 10, 9, 0)) == ""
+        assert bot._poi_hours_note(None, datetime(2026, 8, 10, 9, 0)) == ""
+        assert bot._poi_hours_note({"openingHours": {}}, datetime(2026, 8, 10, 9, 0)) == ""
+
+    def test_malformed_ranges_are_skipped_not_raised(self):
+        poi = {"openingHours": {"timeRanges": [
+            {"startTime": {"date": "not-a-date", "hour": 7, "minute": 0},
+             "endTime": {"date": "2026-08-10", "hour": 13, "minute": 0}},
+            {"startTime": {"date": "2026-08-10", "hour": "7", "minute": "0"},
+             "endTime": {"date": "2026-08-10", "hour": 13, "minute": 0}},
+        ]}}
+        # The junk row is dropped; the string-typed one still parses.
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 9, 0)) == "open until 13:00"
+
+    def test_junk_container_shapes_do_not_raise(self):
+        for bad in ({"openingHours": {"timeRanges": "nope"}},
+                    {"openingHours": {"timeRanges": [None, 3, "x"]}},
+                    {"openingHours": []}):
+            assert bot._poi_hours_note(bad, datetime(2026, 8, 10, 9, 0)) == ""
+
+
+class TestHoursReachTheFormatters:
+    def test_prompt_brief_carries_the_hours(self):
+        results = [{"dist": 100, "poi": dict(TestPoiHoursNote._poi(
+            ("2026-08-10", 7, 0, "2026-08-10", 21, 0)), name="Blue Bottle",
+            categories=["CAFE"])}]
+        # _places_brief calls _poi_hours_note with the live clock, so pin it.
+        import unittest.mock as m
+        with m.patch.object(bot, "_local_now_naive", lambda: datetime(2026, 8, 10, 9, 0)):
+            assert "open until 21:00" in bot._places_brief(results)
+
+    def test_food_list_carries_the_hours(self):
+        results = [{"dist": 100, "poi": dict(TestPoiHoursNote._poi(
+            ("2026-08-10", 7, 0, "2026-08-10", 21, 0)), name="Blue Bottle",
+            categories=["CAFE"])}]
+        import unittest.mock as m
+        with m.patch.object(bot, "_local_now_naive", lambda: datetime(2026, 8, 10, 23, 0)):
+            assert "closed now" in bot._format_restaurants(results)
+
+    def test_a_poi_without_hours_renders_exactly_as_before(self):
+        results = [{"dist": 100, "poi": {"name": "Blue Bottle", "categories": ["CAFE"]}}]
+        assert bot._places_brief(results) == "- Blue Bottle (CAFE, 328 ft)"
+
+
+class TestOpeningHoursParamIsOptIn:
+    """Opt-in so /place, /nearby and the atlas tools don't pay for a field they ignore."""
+
+    def setup_method(self):
+        self._session, self._flag = bot._get_session, bot.FOOD_OPEN_HOURS
+        bot.FOOD_OPEN_HOURS = True
+        self.seen = []
+
+        outer = self
+
+        class _R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"results": []}
+
+        class _S:
+            def get(_self, url, **kw):
+                outer.seen.append(kw.get("params") or {})
+                return _R()
+
+        bot._get_session = lambda: _S()
+
+    def teardown_method(self):
+        bot._get_session, bot.FOOD_OPEN_HOURS = self._session, self._flag
+
+    def test_default_call_does_not_request_hours(self):
+        bot._fetch_tomtom_search("restaurant", 47.6, -122.3, 5000)
+        assert "openingHours" not in self.seen[0]
+
+    def test_opt_in_requests_them(self):
+        bot._fetch_tomtom_search("restaurant", 47.6, -122.3, 5000, True)
+        assert self.seen[0]["openingHours"] == "nextSevenDays"
+
+    def test_kill_switch_suppresses_them_even_when_asked(self):
+        bot.FOOD_OPEN_HOURS = False
+        bot._fetch_tomtom_search("restaurant", 47.6, -122.3, 5000, True)
+        assert "openingHours" not in self.seen[0]

@@ -558,7 +558,20 @@ constraints; check their assumptions before acting on them.
   episodic recall — are enhancements to 3.16's episodic recall, not required for
   on-this-day to work. Not requested; flagged here as known follow-ups if wanted.
 
-### 3.18 "Open now" for /food and FOOD_SUGGESTIONS — S (owner-approved 2026-08-09, BLOCKED on a verified response shape)
+### 3.18 ~~"Open now" for /food and FOOD_SUGGESTIONS~~ ✅ (shipped v2026-08-10.1, `FOOD_OPEN_HOURS`)
+
+**Shipped, but the design below is NOT what shipped — read the changelog entry.** The
+"earliest date in the payload is the POI's today" premise recorded here was disproved by the
+first real response, whose earliest date was tomorrow. It was flagged unverified when
+written, which is why it was checked instead of implemented. What shipped asks only whether
+some range brackets now, and gates the verdict on a range falling on the instance's local
+date. The blocker notes below are kept because the MCP-vs-REST finding outlived the item:
+**the MCP tools silently omit `openingHours`, so they are not a probe for what the fleet key
+can fetch.**
+
+<details><summary>Original blocked-item notes (historical)</summary>
+
+
 
 Approved to build, not built: **no session can currently see a TomTom opening-hours
 response**, and writing the parser from remembered API docs is the thing CLAUDE.md's Stack
@@ -634,6 +647,8 @@ matching timezones, they bound the error to within a day. It is a cheap sanity g
 timezone lookup. `timeZone=iana` was tested as the real fix and returned **no timezone
 object** on reverse-geocode at full detail — unverified, possibly POI-scoped, possibly
 dropped by the MCP wrapper; worth one more test against a named POI before relying on it.
+
+</details>
 
 ### 3.17 Preserve small worn face items in the selfie face lock — S (deferred by owner 2026-08-09)
 

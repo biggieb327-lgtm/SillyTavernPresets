@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-09.2"
+BOT_VERSION = "2026-08-10.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2569,6 +2569,9 @@ TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
 # One reverse-geocode per share, injected into exactly one reply. Unset = active, 0 = off.
 LOCATION_PLACE = os.getenv("LOCATION_PLACE", "1").lower() not in ("0", "false", "no", "off")
+# Ask TomTom for opening hours on the food paths and mark each place open/closed, so she
+# stops recommending somewhere that shut at nine. Unset = active, 0 = off.
+FOOD_OPEN_HOURS = os.getenv("FOOD_OPEN_HOURS", "1").lower() not in ("0", "false", "no", "off")
 # How far they can drift on a live share before the neighbourhood label is dropped rather
 # than carried. Miles, matching _haversine's unit.
 LOCATION_PLACE_MILES = _env_float("LOCATION_PLACE_MILES", "0.6")
@@ -11334,7 +11337,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _floc:
                 try:
                     _fres = await asyncio.to_thread(
-                        _fetch_tomtom_search, "restaurant", _floc["lat"], _floc["lon"], 5000)
+                        _fetch_tomtom_search, "restaurant", _floc["lat"], _floc["lon"], 5000,
+                        True)
                 except _TomTomError:
                     _fres = []
                 _brief = _restaurants_brief(_fres)
@@ -11342,7 +11346,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     content_for_model += (
                         "\n[Real restaurants near them right now — if you recommend food, use "
                         "ONLY these, in your own voice; do NOT invent places or name ones not "
-                        f"in this list:\n{_brief}\n]"
+                        f"in this list:\n{_brief}\n"
+                        "Where a place says 'closed now', don't send them there; 'open until' "
+                        "is a closing time you can mention. A place with neither is one you "
+                        "have no hours for — recommend it if it fits, just don't claim it's "
+                        "open.]"
                     )
             else:
                 content_for_model += (
@@ -12935,6 +12943,65 @@ def _format_nearby_results(results: list, limit: int = 5) -> str:
     return "\n\n".join(out) if out else "Nothing found nearby."
 
 
+def _poi_hour_ranges(poi) -> list:
+    """[(start, end)] naive local datetimes from a POI's openingHours, or [].
+
+    Shape confirmed against the raw REST endpoint with the fleet key on 2026-08-09 — the
+    MCP connector silently omits this field, so it could not be read there:
+        openingHours: {mode, timeRanges: [{startTime:{date,hour,minute},
+                                           endTime:{date,hour,minute}}]}
+    Times are in the POI's own local time, which is what makes the caller's date gate
+    necessary. Total/defensive: one malformed range is skipped, never raised."""
+    ranges = ((poi or {}).get("openingHours") or {}).get("timeRanges") or []
+    out = []
+    for tr in ranges if isinstance(ranges, list) else []:
+        try:
+            s, e = tr["startTime"], tr["endTime"]
+            sy, sm, sd = (int(x) for x in str(s["date"]).split("-"))
+            ey, em, ed = (int(x) for x in str(e["date"]).split("-"))
+            out.append((datetime(sy, sm, sd, int(s["hour"]), int(s["minute"])),
+                        datetime(ey, em, ed, int(e["hour"]), int(e["minute"]))))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def _local_now_naive():
+    """Wall-clock now in the instance's timezone, naive — comparable with the POI-local
+    datetimes above, which carry no offset."""
+    return (datetime.now(TZ) if TZ else datetime.now()).replace(tzinfo=None)
+
+
+def _poi_hours_note(poi, now=None) -> str:
+    """'open until 21:00' / 'closed now' / '' when we cannot honestly say.
+
+    Deliberately does NOT assume the payload starts with the POI's today. ROADMAP 3.18
+    proposed exactly that ("the earliest date in the payload IS the POI's today") on the
+    strength of the MCP tool's parameter description; the first real response had an
+    earliest date of tomorrow, so the assumption was dropped before it shipped.
+
+    The gate that replaces it: at least one range must fall on the instance's local date.
+    Times come back in the POI's local time and the bot only knows its own TZ, so when the
+    user shares a location in another timezone there is usually no range on our date and
+    this returns '' rather than a confidently wrong verdict. It also returns '' for a POI
+    whose payload simply starts tomorrow — losing a hint beats inventing one. Within a
+    matching date the comparison is ordinary: 'closed now' after the day's last range is a
+    real, useful answer, and the common case (user in her city) gets it."""
+    ranges = _poi_hour_ranges(poi)
+    if not ranges:
+        return ""
+    now = now or _local_now_naive()
+    # Either end may carry the date: a bar open 18:00–02:00 is genuinely open at 00:30
+    # under a range that STARTED yesterday, and testing only the start silently called
+    # every late-night place unknown.
+    if not any(now.date() in (s.date(), e.date()) for s, e in ranges):
+        return ""
+    for s, e in ranges:
+        if s <= now <= e:
+            return f"open until {e.hour:02d}:{e.minute:02d}"
+    return "closed now"
+
+
 def _poi_cuisine(poi) -> str:
     """A short cuisine/type label from a TomTom POI's categories, or '' — prefers a
     specific cuisine ('thai') over the generic 'restaurant'."""
@@ -12960,6 +13027,8 @@ def _format_restaurants(results: list, limit: int = 6) -> str:
         dist = r.get("dist")
         if isinstance(dist, (int, float)):
             bits.append(_fmt_distance(dist))
+        if hours := _poi_hours_note(poi):
+            bits.append(hours)
         tail = " · ".join(bits)
         out.append(f"🍽 {name}" + (f" · {tail}" if tail else ""))
     return "\n".join(out) if out else "No restaurants found nearby."
@@ -12992,7 +13061,9 @@ def _places_brief(results: list, limit: int = 5) -> str:
             continue
         cui = _poi_cuisine(poi)
         dist = r.get("dist")
-        meta = ", ".join(x for x in [cui, _fmt_distance(dist) if isinstance(dist, (int, float)) else ""] if x)
+        meta = ", ".join(x for x in [cui,
+                                     _fmt_distance(dist) if isinstance(dist, (int, float)) else "",
+                                     _poi_hours_note(poi)] if x)
         out.append(f"- {name}" + (f" ({meta})" if meta else ""))
     return "\n".join(out)
 
@@ -13312,12 +13383,22 @@ def _fetch_tomtom_route(o, d, mode: str):
         raise _TomTomError(reason)
 
 
-def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None) -> list:
+def _fetch_tomtom_search(query: str, lat=None, lon=None, radius_m=None,
+                         with_hours: bool = False) -> list:
     """Search/geocode a free-text query, optionally biased to a point. Returns results[];
-    raises _TomTomError on a network/HTTP failure."""
+    raises _TomTomError on a network/HTTP failure.
+
+    with_hours adds opening hours to every POI. Opt-in rather than always-on: it inflates
+    the response for the callers that never read it (/place, /nearby, the atlas tools),
+    and only the food paths do."""
     from urllib.parse import quote
     try:
         params = {"key": TOMTOM_API_KEY, "limit": 5, "countrySet": "US"}
+        if with_hours and FOOD_OPEN_HOURS:
+            # Spelled as the REST API spells it. The MCP tool takes the same word here,
+            # but that is a coincidence and not evidence — routing's `fastest` vs the MCP
+            # tool's `fast` is the same slot where copying MCP names caused HTTP 400s.
+            params["openingHours"] = "nextSevenDays"
         if lat is not None and lon is not None:
             params["lat"], params["lon"] = lat, lon
             if radius_m:
@@ -13411,7 +13492,8 @@ async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cuisine = " ".join(context.args).strip() if context.args else ""
     query = f"{cuisine} restaurant" if cuisine else "restaurant"
     try:
-        results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"], 5000)
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, loc["lat"], loc["lon"],
+                                          5000, True)
     except _TomTomError as e:
         await update.message.reply_text(f"🍽 Maps lookup failed: {e}. Try again in a moment.")
         return
