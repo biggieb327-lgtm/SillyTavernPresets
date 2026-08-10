@@ -783,10 +783,19 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   too, same kill switch as every other calibrated figure — no new one needed. Regression
   test updated in place (`test_memory_budget_uses_calibrated_units`), break-tested RED
   before being trusted.
-- **Not yet done:** the multiply half. Each instance's `.env` needs `MEMORY_TOKEN_BUDGET`
-  set to its own (prior value × its ratio) — CHANGELOG.md has the exact commands,
-  assuming the 300 default, **unconfirmed against each instance's actual `.env`** (no VPS
-  access this session to check for an existing override). Verify before running them.
+- **The 300 assumption is now CONFIRMED (owner-run check, 2026-08-10).** All seven `.env`
+  files have no `MEMORY_TOKEN_BUDGET` line at all, so every instance is running on the
+  in-code default of 300 and no instance carries an override. The v2026-08-01.3 table
+  therefore applies verbatim: bonnie 273 · emily 270 · nora 276 · priya 276 · cass 273 ·
+  marcus 273 · jules 279.
+  *(The first check handed over for this returned a blank for all seven and could not tell
+  "absent" from "set to empty" — its `|| echo` fallback tested `cut`'s exit status rather
+  than `grep`'s. Re-run with the test on the grep itself. Noted because the blank output
+  looked like an answer.)*
+- **Not yet done:** the multiply half — the seven one-line `.env` edits above, plus a
+  restart per instance. Until each lands, that instance runs on the shared in-code default
+  (300, now calibrated) rather than its own prior effective budget. Given the ratios
+  cluster at 0.90-0.93 that is close, but it is not exact.
   Until that `.env` edit lands per instance, that instance is quietly running on the
   shared in-code default (also 300, now calibrated) rather than its own prior effective
   budget — close, given how tight the ratios are, but not exact.
