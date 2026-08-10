@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.8"
+BOT_VERSION = "2026-08-10.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -266,20 +266,24 @@ _ENV_BOOL_FALSE = ("0", "false", "no", "off")
 def _env_bool(name: str, default: bool) -> bool:
     """One vocabulary for on/off env vars, in both directions.
 
-    bot.py grew two hand-rolled idioms instead. Default-off flags read
-    `os.getenv(X, "0").lower() in ("1", "true", "yes")`; default-on flags read
-    `os.getenv(X, "1").lower() not in ("0", "false", "no", "off")`. **They do not accept
-    the same words.** `FOOD_SUGGESTIONS=on` is False under the first — "on" is simply not
-    in its list — while `MAP_INTENT=yes` is True under the second. The same word means
-    different things depending on which default the flag happens to have, and the failure
-    is silent: the owner writes `on`, the bot reads off, and nothing says so.
+    bot.py had grown THREE hand-rolled idioms instead, and they accepted three different
+    sets of words:
+
+      default-off  `os.getenv(X, "0").lower() in ("1", "true", "yes")`   — no "on"
+      default-on   `os.getenv(X, "1").lower() not in ("0", "false", ...)` — anything wins
+      strict       `os.getenv(X, "false").lower() == "true"`              — only "true"
+
+    So `X=on` was False under the first, `X=1` was False under the third, and junk was
+    True under the second. The word that worked depended on which idiom the flag happened
+    to be written with, and every failure was silent: the owner writes a perfectly
+    reasonable value, the bot reads the opposite, and nothing says so.
 
     Unrecognized values warn and fall back to the default, the way `_env_int` does
-    (bot-code-invariants #15), instead of collapsing to off.
+    (bot-code-invariants #15), instead of silently collapsing to off (idioms 1 and 3) or
+    to on (idiom 2).
 
-    Only MAP_INTENT and FOOD_SUGGESTIONS route through this today — the two flags
-    v2026-08-10.8 is about. The other ~20 hand-rolled copies are a follow-up, not this
-    diff.
+    All 53 boolean env vars route through this as of v2026-08-10.9. `TestNoHandRolledEnvBooleans`
+    re-derives the offender list from source and fails on any new one, so this stays true.
     """
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -373,7 +377,7 @@ STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunk
 MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reason AND answer
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
 # Assembled-prompt size tracking. Set 0 to disable the bookkeeping entirely.
-PROMPT_STATS = os.getenv("PROMPT_STATS", "1").lower() not in ("0", "false", "no", "off")
+PROMPT_STATS = _env_bool("PROMPT_STATS", True)
 # In-memory only (like _recent_questions): a restart resets it. Persisting would add a
 # state-serialization path for numbers whose whole purpose is answering "what is this
 # instance doing right now".
@@ -381,41 +385,39 @@ _prompt_stats: dict = {"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
                        "max_chat": None, "max_blocks": [], "buckets": {}}
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
 REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
-REACTIONS_AUTO = os.getenv("REACTIONS_AUTO", "1").lower() not in ("0", "false", "no", "off")
-MOOD_AUTO = os.getenv("MOOD_AUTO", "1").lower() not in ("0", "false", "no", "off")
+REACTIONS_AUTO = _env_bool("REACTIONS_AUTO", True)
+MOOD_AUTO = _env_bool("MOOD_AUTO", True)
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
 # Stepped intent (SillyTavern st-stepped-thinking, folded in): the combined
 # post-reply analysis pass also emits a one-line forward-looking "frame of mind"
 # note, injected into the NEXT reply's prompt so she plans-then-speaks. Rides the
 # existing single call — NO extra LLM round-trip (invariant #3). Default ON with a
 # kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
-STEP_INTENT = os.getenv("STEP_INTENT", "1").lower() not in ("0", "false", "no", "off")
+STEP_INTENT = _env_bool("STEP_INTENT", True)
 # Directive-leak guard (v2026-07-29.1). The reply prompt teaches the model a
 # `[selfie: ...]` output convention; a reasoning model holding private planning
 # instructions can render that planning in the SAME syntax and it reaches the user,
 # because extract_tags only removes tags it knows by name. Default ON with a kill
 # switch (owner policy 2026-07-18: unset = active, 0/off disables).
-DIRECTIVE_LEAK_GUARD = os.getenv(
-    "DIRECTIVE_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
+DIRECTIVE_LEAK_GUARD = _env_bool("DIRECTIVE_LEAK_GUARD", True)
 # Reasoning-leak guard (v2026-08-03.1). Third variant of the chain-of-thought leak:
 # a thinking model can emit its ENTIRE deliberation as ordinary `content` — no
 # <think> tags for _strip_thinking, no empty-content-plus-reasoning_content for the
 # v2026-07-20.1 path, no bracket syntax for _strip_directive_lines. Default ON with
 # a kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
-REASONING_LEAK_GUARD = os.getenv(
-    "REASONING_LEAK_GUARD", "1").lower() not in ("0", "false", "no", "off")
+REASONING_LEAK_GUARD = _env_bool("REASONING_LEAK_GUARD", True)
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
 # FATIGUE_STATE is also the master switch for the minimal-reply license.
-FATIGUE_STATE = os.getenv("FATIGUE_STATE", "1").lower() not in ("0", "false", "no", "off")
+FATIGUE_STATE = _env_bool("FATIGUE_STATE", True)
 FATIGUE_THRESHOLD = _env_float("FATIGUE_THRESHOLD", "70")
 FATIGUE_DECAY_PER_HOUR = _env_float("FATIGUE_DECAY_PER_HOUR", "10")
 # Day-mood residue (ROADMAP 3.7 / Yuralume review): her generated day seeds how she
 # opens — one extra line parsed from the existing midnight day-generation call.
-DAY_MOOD_RESIDUE = os.getenv("DAY_MOOD_RESIDUE", "1").lower() not in ("0", "false", "no", "off")
+DAY_MOOD_RESIDUE = _env_bool("DAY_MOOD_RESIDUE", True)
 MOOD_LABEL_FRESH_HOURS = _env_float("MOOD_LABEL_FRESH_HOURS", "12")
-INNER_VOICE_ENABLED = os.getenv("INNER_VOICE_ENABLED", "false").lower() == "true"
+INNER_VOICE_ENABLED = _env_bool("INNER_VOICE_ENABLED", False)
 INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 # Safety: flag genuine acute distress in an incoming message and have her drop the
 # performance and respond with real care, same reply. On by default (owner policy
@@ -432,7 +434,7 @@ INNER_VOICE_MODEL = os.getenv("INNER_VOICE_MODEL", MOOD_MODEL)
 # extension point) was considered and rejected: that call fires AFTER the reply is
 # already sent, so distress on THIS message could only change the NEXT reply -- one
 # message late is a real degradation for a safety feature, not an equivalent.
-SAFETY_ENABLED = os.getenv("SAFETY_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SAFETY_ENABLED = _env_bool("SAFETY_ENABLED", True)
 SAFETY_MODEL = os.getenv("SAFETY_MODEL", MOOD_MODEL)
 SAFETY_RESOURCES = os.getenv(
     "SAFETY_RESOURCES",
@@ -443,7 +445,7 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 # analysis via vendored acoustic_ears.py (MIT, menelly/AI_Ears), no network call, no
 # extra API key. Runs concurrently with transcription so it adds no latency.
 # (Reimplemented from bae2dcb, 2026-07-01, never merged.)
-VOICE_TONE_ENABLED = os.getenv("VOICE_TONE_ENABLED", "true").lower() not in ("0", "false", "no", "off")
+VOICE_TONE_ENABLED = _env_bool("VOICE_TONE_ENABLED", True)
 VIDEO_MAX_SIZE_MB = _env_int("VIDEO_MAX_SIZE_MB", "50")
 DOCUMENT_MAX_SIZE_MB = _env_int("DOCUMENT_MAX_SIZE_MB", "2")
 # Separate model for document/card analysis — should be an instruction model,
@@ -457,24 +459,24 @@ VOICE_REPLY_TO_VOICE = _env_float("VOICE_REPLY_TO_VOICE", "0.9")
 # (with TTS_VOICE as the Inworld voice ID) instead of NanoGPT's speech endpoint.
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")   # base64 runtime key from the Inworld portal
 INWORLD_TTS_MODEL = os.getenv("INWORLD_TTS_MODEL", "inworld-tts-2")
-LINK_READING = os.getenv("LINK_READING", "1").lower() not in ("0", "false", "no", "off")
+LINK_READING = _env_bool("LINK_READING", True)
 LINK_FETCH_TIMEOUT = _env_int("LINK_FETCH_TIMEOUT", "8")
 LINK_MAX_CHARS = _env_int("LINK_MAX_CHARS", "2200")
-SEARCH_ENABLED = os.getenv("SEARCH_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SEARCH_ENABLED = _env_bool("SEARCH_ENABLED", True)
 SEARCH_RESULTS = _env_int("SEARCH_RESULTS", "4")
-TEXTING_REALISM = os.getenv("TEXTING_REALISM", "1").lower() not in ("0", "false", "no", "off")
+TEXTING_REALISM = _env_bool("TEXTING_REALISM", True)
 # Adaptive style mirroring: passively read the user's recent texting habits (length, emoji,
 # caps, enthusiasm, textspeak) and nudge her register to subtly match -- no model call, pure
 # heuristics off the in-RAM history (reimplemented from a485b1b, 2026-06-30, never merged).
-STYLE_MIRROR = os.getenv("STYLE_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+STYLE_MIRROR = _env_bool("STYLE_MIRROR", True)
 STYLE_SAMPLE = _env_int("STYLE_SAMPLE", "20")    # how many recent user messages to read
 STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many before adapting
 # Topic-initiative balance: the wholesale recall blocks (user_notes, open threads) were the
 # only blocks carrying an explicit "raise this" instruction, while her live context (her day,
 # her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
 # restore the pre-v2026-07-25.1 prompt text exactly.
-PROMPT_BALANCE = os.getenv("PROMPT_BALANCE", "1").lower() not in ("0", "false", "no", "off")
-TYPING_DELAY = os.getenv("TYPING_DELAY", "1").lower() not in ("0", "false", "no", "off")
+PROMPT_BALANCE = _env_bool("PROMPT_BALANCE", True)
+TYPING_DELAY = _env_bool("TYPING_DELAY", True)
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
 TYPING_DELAY_MAX = _env_float("TYPING_DELAY_MAX", "3.5")
@@ -483,7 +485,7 @@ TYPING_DELAY_MAX = _env_float("TYPING_DELAY_MAX", "3.5")
 # An instance participates in a group only when GROUP_MODE=1 AND the group is in
 # GROUP_ALLOWED_CHATS. Every other instance ignores group traffic entirely (fail
 # closed, fleet-wide) — see group_guard().
-GROUP_MODE = os.getenv("GROUP_MODE", "0").lower() in ("1", "true", "yes")
+GROUP_MODE = _env_bool("GROUP_MODE", False)
 GROUP_ALLOWED_CHATS: set[int] = _parse_id_set(
     os.getenv("GROUP_ALLOWED_CHATS", ""), "GROUP_ALLOWED_CHATS")
 GROUP_PEERS = [p.strip() for p in os.getenv("GROUP_PEERS", "").split(",") if p.strip()]
@@ -495,7 +497,7 @@ GROUP_PEER_NOTES = os.getenv("GROUP_PEER_NOTES", "")  # "Name: relationship line
 # GROUP_BANTER raises the ceiling and decays the reply chance with the depth of the
 # exchange instead of ending it at a wall. GROUP_BANTER=0 restores the v1 numbers
 # exactly; any knob set explicitly in .env still wins over both sets.
-GROUP_BANTER = os.getenv("GROUP_BANTER", "1").lower() not in ("0", "false", "no", "off")
+GROUP_BANTER = _env_bool("GROUP_BANTER", True)
 GROUP_BOT_REPLY_PROB = _env_float("GROUP_BOT_REPLY_PROB", "0.5" if GROUP_BANTER else "0.35")
 GROUP_BOT_CHAIN_MAX = _env_int("GROUP_BOT_CHAIN_MAX", "6" if GROUP_BANTER else "2")
 GROUP_CHAIN_DECAY = _env_float("GROUP_CHAIN_DECAY", "0.75" if GROUP_BANTER else "1.0")
@@ -552,10 +554,10 @@ _CONFIG_WARNINGS.extend(
     _group_config_warnings(GROUP_MODE, GROUP_ALLOWED_CHATS, GROUP_PEERS))
 
 # --- R6 evolution experiments (each behind its own flag, default off) ---
-FEEDBACK_REACTIONS = os.getenv("FEEDBACK_REACTIONS", "0").lower() in ("1", "true", "yes")
-CLOSENESS_ENABLED = os.getenv("CLOSENESS_ENABLED", "0").lower() in ("1", "true", "yes")
-THREADS_ENABLED = os.getenv("THREADS_ENABLED", "0").lower() in ("1", "true", "yes")
-JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "yes")
+FEEDBACK_REACTIONS = _env_bool("FEEDBACK_REACTIONS", False)
+CLOSENESS_ENABLED = _env_bool("CLOSENESS_ENABLED", False)
+THREADS_ENABLED = _env_bool("THREADS_ENABLED", False)
+JOKE_CANDIDATES = _env_bool("JOKE_CANDIDATES", False)
 # In-character restaurant recs: when the user asks about food and has shared a
 # location, hand the model real nearby places so it recommends from fact, not
 # imagination. Rides the single reply (no extra LLM call). Needs TOMTOM_API_KEY too.
@@ -659,9 +661,9 @@ _PRESET_ENV_NAMES: list[str] = list(_preset_names)
 # disable). PRESET_COMMAND=0 both unregisters /preset AND makes startup ignore a saved
 # override — so a stack that ruins a character's voice is undone with one .env line and
 # a restart, with no state.json surgery on a phone keyboard.
-PRESET_COMMAND = os.getenv("PRESET_COMMAND", "1").lower() not in ("0", "false", "no", "off")
+PRESET_COMMAND = _env_bool("PRESET_COMMAND", True)
 # Render her text bubbles in a monospace/code font, like a phone-screen message log.
-DEVICE_RENDER = os.getenv("DEVICE_RENDER", "0").lower() not in ("0", "false", "no", "off")
+DEVICE_RENDER = _env_bool("DEVICE_RENDER", False)
 _HTML_ESCAPE = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 _HTML_ESCAPE_RE = re.compile(r"[&<>]")
 
@@ -732,11 +734,11 @@ SELFIE_BASE = os.getenv("SELFIE_BASE", "priya_base.png")
 # When SELFIE_BASE names a file that is not there, fall back to the single unambiguous
 # *_base.* image in the instance dir rather than silently generating from text alone.
 # Unset = active. Set to 0 to require an exact SELFIE_BASE match.
-SELFIE_BASE_AUTODETECT = os.getenv("SELFIE_BASE_AUTODETECT", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_BASE_AUTODETECT = _env_bool("SELFIE_BASE_AUTODETECT", True)
 # `/setbase` with nothing attached sends the CURRENT reference photo back, so its framing can
 # be looked at. Two releases were spent tuning selfie prompt text against a reference nobody
 # had ever seen (v2026-08-03.2). Unset = active. Set to 0 for the usage-text-only reply.
-SELFIE_BASE_PREVIEW = os.getenv("SELFIE_BASE_PREVIEW", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_BASE_PREVIEW = _env_bool("SELFIE_BASE_PREVIEW", True)
 SELFIE_SIZE = os.getenv("SELFIE_SIZE", "1024x1024")
 SELFIE_GUIDANCE = _env_float("SELFIE_GUIDANCE", "3.5")
 SELFIE_STEPS = _env_int("SELFIE_STEPS", "28")
@@ -762,7 +764,7 @@ _recent_meme_templates: dict = {}  # chat_id -> list of recently used template f
 # She emits [gif: query] in her own words; candidates are filtered and one is sent as an
 # animation. NO new LLM call — it rides the reply she was already generating (invariant #3).
 GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
-GIF_ENABLED = os.getenv("GIF_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+GIF_ENABLED = _env_bool("GIF_ENABLED", True)
 GIPHY_SEARCH_URL = os.getenv("GIPHY_SEARCH_URL", "https://api.giphy.com/v1/gifs/search")
 GIF_TIMEOUT = _env_int("GIF_TIMEOUT", "8")
 GIF_CANDIDATES = _env_int("GIF_CANDIDATES", "25")
@@ -775,9 +777,9 @@ GIF_CHANCE = _env_float("GIF_CHANCE", "0.35")
 # Runtime-toggleable via /features. Each is a plain module global read at call time, so
 # flipping it reaches every call site without touching them — the same mechanism /setmodel
 # uses. Env value is the boot default; /features overrides and persists.
-SELFIE_ENABLED = os.getenv("SELFIE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
-MEME_ENABLED = os.getenv("MEME_ENABLED", "1").lower() not in ("0", "false", "no", "off")
-VOICE_ENABLED = os.getenv("VOICE_ENABLED", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_ENABLED = _env_bool("SELFIE_ENABLED", True)
+MEME_ENABLED = _env_bool("MEME_ENABLED", True)
+VOICE_ENABLED = _env_bool("VOICE_ENABLED", True)
 MEME_CHANCE = _env_float("MEME_CHANCE", "0.35")
 _ASKED_GIF = re.compile(r"\b[gj]ifs?\b", re.I)
 _ASKED_MEME = re.compile(r"\bmemes?\b", re.I)
@@ -848,13 +850,13 @@ LIFE_ARC_FILE = BASE_DIR / "life.txt"  # seeded by hand, then evolved (v2026-08-
 # Life arcs move in weeks, not days — day.txt already covers "what happened today".
 # Rotation is checked at midnight and acts only once every LIFE_ROTATE_DAYS, using a
 # stamp file rather than a weekday, so downtime delays it instead of skipping it.
-LIFE_ROTATE = os.getenv("LIFE_ROTATE", "1").lower() not in ("0", "false", "no", "off")
+LIFE_ROTATE = _env_bool("LIFE_ROTATE", True)
 LIFE_ROTATE_DAYS = _env_int("LIFE_ROTATE_DAYS", "7")
 LIFE_STAMP_FILE = BASE_DIR / ".life_rotated"
 # Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
 # explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
 # shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
-SCHED_BUSY = os.getenv("SCHED_BUSY", "1").lower() not in ("0", "false", "no", "off")
+SCHED_BUSY = _env_bool("SCHED_BUSY", True)
 SCHED_BUSY_DELAY_MULT = _env_float("SCHED_BUSY_DELAY_MULT", "3.0")
 _LIFE_TTL = 300  # re-read life files at most every 5 min
 _people_cache: dict = {"text": None, "ts": 0.0}
@@ -866,7 +868,7 @@ _life_arc_cache: dict = {"text": None, "ts": 0.0}
 # generic small talk. Concrete past-tense events only -- opposite of the introspective
 # nightly reflection. No embeddings; cheap chat model. (Reimplemented from b0eb485,
 # 2026-06-29, never merged.)
-LIFE_SIM_ENABLED = os.getenv("LIFE_SIM_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+LIFE_SIM_ENABLED = _env_bool("LIFE_SIM_ENABLED", True)
 LIFE_MODEL = os.getenv("LIFE_MODEL", MOOD_MODEL)
 LIFE_EVENTS_MAX = _env_int("LIFE_EVENTS_MAX", "8")
 LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
@@ -1191,8 +1193,7 @@ _TOKEN_CAL_MIN_EST = 200        # tiny prompts are dominated by per-message over
 token_calibration: dict = {"ratio": 1.0, "n": 0}
 # Kill switch (owner policy 2026-07-18): unset = calibrate. TOKEN_CALIBRATION=0 reports
 # the raw heuristic, which is what every number in the repo's history was measured with.
-TOKEN_CALIBRATION = os.getenv("TOKEN_CALIBRATION", "1").lower() not in (
-    "0", "false", "no", "off")
+TOKEN_CALIBRATION = _env_bool("TOKEN_CALIBRATION", True)
 
 
 def _calibration_sample(estimated: int, actual: int) -> float | None:
@@ -1908,8 +1909,7 @@ _episodes_lock = threading.Lock()
 # On-this-day resurfacing: once a day, check whether an archived episode's anniversary
 # (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
 # archive, so it needs no extra storage. Gated on EPISODIC_RECALL.
-ONTHISDAY_ENABLED = EPISODIC_RECALL and os.getenv(
-    "ONTHISDAY_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+ONTHISDAY_ENABLED = EPISODIC_RECALL and _env_bool("ONTHISDAY_ENABLED", True)
 ONTHISDAY_TIME = os.getenv("ONTHISDAY_TIME", "10:30")        # local time for the daily check
 ONTHISDAY_INTERVALS = [365, 182, 91, 30]                     # anniversaries to look for (days)
 ONTHISDAY_WINDOW_DAYS = _env_int("ONTHISDAY_WINDOW_DAYS", "3")     # +/- match window
@@ -2586,7 +2586,7 @@ _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTi
 # --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
 # Fail-closed on credentials like WSDOT above (no creds => inert), but the kill switch is
 # separate so the feed can be turned off without deleting credentials (invariant #16).
-GARMIN_FEED = os.getenv("GARMIN_FEED", "1").lower() not in ("0", "false", "no", "off")
+GARMIN_FEED = _env_bool("GARMIN_FEED", True)
 GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "").strip()
 GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
 GARMIN_ENABLED = GARMIN_FEED and bool(GARMIN_EMAIL and GARMIN_PASSWORD)
@@ -2616,7 +2616,7 @@ if GARMIN_ENABLED and _Garmin is None:
 # GARMIN_ENABLED. `/features health off` flips GARMIN_ENABLED at runtime, and a flag that
 # baked the parent in at import kept firing alerts while /features and /audit both reported
 # health=off. Read them through _alerts_on(), never bare.
-STRESS_ALERTS = os.getenv("STRESS_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+STRESS_ALERTS = _env_bool("STRESS_ALERTS", True)
 STRESS_THRESHOLD = _env_int("STRESS_THRESHOLD", "60")          # 0-100; sustained above this = high
 STRESS_SUSTAINED_MIN = _env_int("STRESS_SUSTAINED_MIN", "45")  # must stay high this long to trigger
 STRESS_POLL_MIN = _env_int("STRESS_POLL_MIN", "30")            # how often to check
@@ -2625,14 +2625,14 @@ STRESS_ALERT_FILE = BASE_DIR / ".stress_alert"  # persisted last-alert time; a r
 
 # Body Battery: Garmin's 0-100 energy-reserve gauge. Bottoming out means genuinely depleted.
 # Polled on the stress cadence — the client is cached, so it's one extra GET, not a login.
-BB_ALERTS = os.getenv("BB_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+BB_ALERTS = _env_bool("BB_ALERTS", True)
 BB_LOW_THRESHOLD = _env_int("BB_LOW_THRESHOLD", "20")
 BB_ALERT_COOLDOWN_HOURS = _env_float("BB_ALERT_COOLDOWN_HOURS", "8")
 BB_ALERT_FILE = BASE_DIR / ".bb_alert"
 
 # Resting-HR morning check: resting HR notably above the user's OWN rolling baseline is an
 # early "run down / coming down with something" signal.
-RHR_ALERTS = os.getenv("RHR_ALERTS", "1").lower() not in ("0", "false", "no", "off")
+RHR_ALERTS = _env_bool("RHR_ALERTS", True)
 RHR_ELEVATED_DELTA = _env_int("RHR_ELEVATED_DELTA", "7")  # bpm above baseline to flag
 RHR_BASELINE_DAYS = _env_int("RHR_BASELINE_DAYS", "14")   # rolling window for the baseline median
 RHR_BASELINE_MIN_DAYS = _env_int("RHR_BASELINE_MIN_DAYS", "3")  # no alert below this much history
@@ -2664,13 +2664,13 @@ TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
 # Name the neighbourhood when a location is shared: she holds lat/lon today and cannot say
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
 # One reverse-geocode per share, injected into exactly one reply. Unset = active, 0 = off.
-LOCATION_PLACE = os.getenv("LOCATION_PLACE", "1").lower() not in ("0", "false", "no", "off")
+LOCATION_PLACE = _env_bool("LOCATION_PLACE", True)
 # /place searches around HER city when the user has no fresh pin shared. Unset = active,
 # 0 = the pre-v2026-08-10.3 behavior (user's pin only, and a nationwide search without one).
-PLACE_ANCHOR_HER = os.getenv("PLACE_ANCHOR_HER", "1").lower() not in ("0", "false", "no", "off")
+PLACE_ANCHOR_HER = _env_bool("PLACE_ANCHOR_HER", True)
 # Ask TomTom for opening hours on the food paths and mark each place open/closed, so she
 # stops recommending somewhere that shut at nine. Unset = active, 0 = off.
-FOOD_OPEN_HOURS = os.getenv("FOOD_OPEN_HOURS", "1").lower() not in ("0", "false", "no", "off")
+FOOD_OPEN_HOURS = _env_bool("FOOD_OPEN_HOURS", True)
 # How far they can drift on a live share before the neighbourhood label is dropped rather
 # than carried. Miles, matching _haversine's unit.
 LOCATION_PLACE_MILES = _env_float("LOCATION_PLACE_MILES", "0.6")
@@ -2713,7 +2713,7 @@ REMINDERS_FILE = BASE_DIR / "reminders.json"
 # every instance reads it as day-generation context if present.
 _SCRIPT_DIR = Path(__file__).resolve().parent
 WORLD_FILE = Path(os.getenv("WORLD_FILE", str(_SCRIPT_DIR / "world.txt")))
-WORLD_GENERATOR = os.getenv("WORLD_GENERATOR", "").lower() in ("1", "true", "yes")
+WORLD_GENERATOR = _env_bool("WORLD_GENERATOR", False)
 
 def _read_world_context() -> str:
     try:
@@ -6549,7 +6549,7 @@ SELFIE_COLD_OUTFITS = {
 SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
 SELFIE_COLD_F = _env_float("SELFIE_COLD_F", "50")  # at/below this, bare-skin outfits are dropped
 # Kill switch (owner policy 2026-07-18): unset = matching active, 0 = pre-v2026-08-01.7 behavior.
-SELFIE_WEATHER_MATCH = os.getenv("SELFIE_WEATHER_MATCH", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_WEATHER_MATCH = _env_bool("SELFIE_WEATHER_MATCH", True)
 
 # Outerwear this instance's character puts on to go outside in cool weather. Per-instance
 # because it is a specific object, not a generic layer -- Nora's is Ingrid's inherited
@@ -6558,7 +6558,7 @@ OUTDOOR_LAYER = os.getenv("OUTDOOR_LAYER", "").strip()
 
 # --- Daily wardrobe rotation -----------------------------------------------------------
 # She dresses once a day, for that day's weather -- not fresh at random per photo.
-WARDROBE_DAILY = os.getenv("WARDROBE_DAILY", "1").lower() not in ("0", "false", "no", "off")
+WARDROBE_DAILY = _env_bool("WARDROBE_DAILY", True)
 WARDROBE_ROTATE_HOUR = _env_int("WARDROBE_ROTATE_HOUR", "7")  # morning: you dress for the day you get
 WARDROBE_RECENT_KEPT = _env_int("WARDROBE_RECENT_KEPT", "4")  # don't repeat the last N days' picks
 # Free-text outfit classification. Owner-authored outfits are arbitrary strings, so this is
@@ -6634,7 +6634,7 @@ SELFIE_SOFT_CAMERA = {
     "backlit so she's a little in shadow", "flat overhead lighting",
 }
 # Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
-SELFIE_IDENTITY_GUARD = os.getenv("SELFIE_IDENTITY_GUARD", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_IDENTITY_GUARD = _env_bool("SELFIE_IDENTITY_GUARD", True)
 
 # --- Face lock (v2026-08-03.2) ---------------------------------------------------------
 # Two prompt shapes let an edit model rebuild the face instead of copying it, and both
@@ -6679,10 +6679,10 @@ _SELFIE_CHANGE_SCOPE = (
     "None of it changes her."
 )
 # Kill switch: unset = face lock active, 0 = the v2026-08-03.1 prompt.
-SELFIE_FACE_LOCK = os.getenv("SELFIE_FACE_LOCK", "1").lower() not in ("0", "false", "no", "off")
+SELFIE_FACE_LOCK = _env_bool("SELFIE_FACE_LOCK", True)
 # Allow NSFW clothing / partial nudity in selfies when the scene or clothing override calls for it.
 # Default off so existing characters stay SFW until explicitly enabled per instance.
-SELFIE_NSFW = os.getenv("SELFIE_NSFW", "0").lower() not in ("0", "false", "no", "off")
+SELFIE_NSFW = _env_bool("SELFIE_NSFW", False)
 
 
 def _weather_outdoor_ok() -> bool:
@@ -6924,8 +6924,7 @@ _IMAGE_RETRIES = 3
 _IMAGE_RETRY_STATUSES = (429, 500, 502, 503, 504)
 _IMAGE_RETRY_AFTER_CAP = 10  # seconds; a hostile or absurd header must not stall the handler
 # Kill switch: unset = transient statuses retried, 0 = pre-v2026-08-03.4 (transport only).
-IMAGE_RETRY_TRANSIENT = os.getenv("IMAGE_RETRY_TRANSIENT", "1").lower() not in (
-    "0", "false", "no", "off")
+IMAGE_RETRY_TRANSIENT = _env_bool("IMAGE_RETRY_TRANSIENT", True)
 
 
 def _retry_delay(attempt: int, resp=None) -> float:
@@ -11704,8 +11703,8 @@ PHOTO_SELFIE_CHANCE = _env_float("PHOTO_SELFIE_CHANCE", "0.20")
 
 # Auto follow-up: when the bot says "hold on / brb / give me a sec" etc., schedule a
 # brief follow-up message after a short delay, as if she actually went and came back.
-# Disabled by default — set FOLLOWUP_ENABLED=true in .env to turn on.
-FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", "false").lower() == "true"
+# Disabled by default — set FOLLOWUP_ENABLED=1 (or true/yes/on) in .env to turn on.
+FOLLOWUP_ENABLED = _env_bool("FOLLOWUP_ENABLED", False)
 _FOLLOWUP_RE = re.compile(
     r"\b(hold on|hold up|brb|be right back"
     r"|give me a (sec|second|minute|min)"
@@ -15204,7 +15203,7 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # a private Tailscale network, never the public internet — ADMIN_API_BIND defaults to
 # loopback (never 0.0.0.0) so a misconfigured instance fails closed rather than open;
 # set it to the host's Tailscale IP to actually expose it on a VPS.
-ADMIN_API_ENABLED = os.getenv("ADMIN_API_ENABLED", "").strip().lower() in ("1", "true", "yes")
+ADMIN_API_ENABLED = _env_bool("ADMIN_API_ENABLED", False)
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "").strip()
 ADMIN_API_PORT = _env_int("ADMIN_API_PORT", "8765")
 ADMIN_API_BIND = os.getenv("ADMIN_API_BIND", "127.0.0.1").strip() or "127.0.0.1"
@@ -15314,7 +15313,7 @@ async def _stop_admin_api(application):
 # FLEET_PEERS — "name=port" for same-host peers, "name=host:port" across the
 # tailnet — so the same command keeps working mid-VPS-migration while instances
 # live on two hosts. Inert without FLEET_PEERS; FLEET_CMD=0 is the kill switch.
-FLEET_CMD = os.getenv("FLEET_CMD", "1").strip().lower() not in ("0", "false", "no", "off")
+FLEET_CMD = _env_bool("FLEET_CMD", True)
 FLEET_TIMEOUT = _env_float("FLEET_TIMEOUT", "4.0")
 
 

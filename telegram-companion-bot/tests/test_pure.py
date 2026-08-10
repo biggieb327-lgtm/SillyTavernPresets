@@ -7094,7 +7094,155 @@ _MAP_INTENT_DEFAULT = bot.MAP_INTENT
 _FOOD_SUGGESTIONS_DEFAULT = bot.FOOD_SUGGESTIONS
 
 
-class TestEnvFlagVocabulary:
+class TestNoHandRolledEnvBooleans:
+    """v2026-08-10.9 fixed the class: 53 on/off env vars parsed by hand, in three idioms
+    that accepted three different sets of words. This re-derives the offender list from
+    source rather than asserting a fixed count, so a NEW hand-rolled flag fails here
+    instead of quietly reintroducing the trap."""
+
+    # Each shape requires a QUOTED var name, which is how real code writes it. The
+    # _env_bool docstring spells all three out with a bare `X` precisely so it can explain
+    # them without tripping this scan (constraints C14: a scanner cannot tell "this does
+    # the bad thing" from "this explains it").
+    SHAPES = {
+        "membership": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*\.lower\(\)\s*(?:not\s+)?in\s*\(',
+        "equality": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*\.lower\(\)\s*==\s*["\']',
+    }
+    # Not booleans. Both read a named value out of a fixed set; neither is a switch.
+    ALLOWED = {
+        "GIF_SAFETY": "a level (high|medium|low), surfaced by /gifsafety",
+        "TOMTOM_TRAVEL_MODE": "an enum validated per-call by _tomtom_mode()",
+    }
+
+    def _lines(self):
+        import pathlib
+        src = pathlib.Path(bot.__file__).read_text().splitlines()
+        return [(i, l) for i, l in enumerate(src, 1) if not l.lstrip().startswith("#")]
+
+    def test_no_flag_still_parses_its_own_booleans(self):
+        import re
+        offenders = []
+        for i, line in self._lines():
+            for shape, rx in self.SHAPES.items():
+                if re.search(rx, line) and not any(a in line for a in self.ALLOWED):
+                    offenders.append(f"bot.py:{i} ({shape}) {line.strip()[:90]}")
+        assert not offenders, (
+            "on/off env vars must go through _env_bool — these parse their own:\n  "
+            + "\n  ".join(offenders))
+
+    def test_the_allowlist_has_not_gone_stale(self):
+        """An allowlist entry naming something that no longer exists hides the next real
+        hit behind a name nobody will re-check."""
+        import pathlib
+        src = pathlib.Path(bot.__file__).read_text()
+        for name, reason in self.ALLOWED.items():
+            assert f'os.getenv("{name}"' in src, f"{name} allowlisted ({reason}) but gone"
+
+    def test_the_docstring_still_explains_all_three_idioms(self):
+        """The scan passes trivially if someone deletes the explanation instead of the
+        idioms. The docstring is the only record of why three vocabularies existed."""
+        doc = bot._env_bool.__doc__
+        assert '== "true"' in doc and "not in" in doc and "in (" in doc
+
+
+class TestEveryBooleanFlagDefault:
+    """The v2026-08-10.9 rewrite touched 53 call sites mechanically. One wrong literal
+    would silently flip a feature on all seven bots, and nothing else in the suite would
+    notice — most of these flags have no test of their own.
+
+    The fixture .env (tests/conftest.py) sets none of them and writes no
+    feature_prefs.json, so each module global at import IS its shipped default. This table
+    was captured from the pre-rewrite source; every value was verified unchanged after."""
+
+    DEFAULTS = {
+        "ADMIN_API_ENABLED": False,
+        "BB_ALERTS": True,
+        "CLOSENESS_ENABLED": False,
+        "DAY_MOOD_RESIDUE": True,
+        "DEVICE_RENDER": False,
+        "DIRECTIVE_LEAK_GUARD": True,
+        "FATIGUE_STATE": True,
+        "FEEDBACK_REACTIONS": False,
+        "FLEET_CMD": True,
+        "FOLLOWUP_ENABLED": False,
+        "FOOD_OPEN_HOURS": True,
+        "FOOD_SUGGESTIONS": False,
+        "GARMIN_FEED": True,
+        "GIF_ENABLED": True,
+        "GROUP_BANTER": True,
+        "GROUP_MODE": False,
+        "IMAGE_RETRY_TRANSIENT": True,
+        "INNER_VOICE_ENABLED": False,
+        "JOKE_CANDIDATES": False,
+        "LIFE_ROTATE": True,
+        "LIFE_SIM_ENABLED": True,
+        "LINK_READING": True,
+        "LOCATION_PLACE": True,
+        "MAP_INTENT": True,
+        "MEME_ENABLED": True,
+        "MOOD_AUTO": True,
+        "ONTHISDAY_ENABLED": True,
+        "PLACE_ANCHOR_HER": True,
+        "PRESET_COMMAND": True,
+        "PROMPT_BALANCE": True,
+        "PROMPT_STATS": True,
+        "REACTIONS_AUTO": True,
+        "REASONING_LEAK_GUARD": True,
+        "RHR_ALERTS": True,
+        "SAFETY_ENABLED": True,
+        "SCHED_BUSY": True,
+        "SEARCH_ENABLED": True,
+        "SELFIE_BASE_AUTODETECT": True,
+        "SELFIE_BASE_PREVIEW": True,
+        "SELFIE_ENABLED": True,
+        "SELFIE_FACE_LOCK": True,
+        "SELFIE_IDENTITY_GUARD": True,
+        "SELFIE_NSFW": False,
+        "SELFIE_WEATHER_MATCH": True,
+        "STEP_INTENT": True,
+        "STRESS_ALERTS": True,
+        "STYLE_MIRROR": True,
+        "TEXTING_REALISM": True,
+        "THREADS_ENABLED": False,
+        "TOKEN_CALIBRATION": True,
+        "TYPING_DELAY": True,
+        "VOICE_ENABLED": True,
+        "VOICE_TONE_ENABLED": True,
+        "WARDROBE_DAILY": True,
+        "WORLD_GENERATOR": False,
+    }
+
+    def test_no_default_moved_in_the_rewrite(self):
+        wrong = {n: (getattr(bot, n, "<MISSING>"), want)
+                 for n, want in self.DEFAULTS.items()
+                 if getattr(bot, n, "<MISSING>") is not want}
+        assert not wrong, f"default changed (got, expected): {wrong}"
+
+    def test_the_table_covers_every_flag_in_source(self):
+        """Without this, adding a flag and forgetting the table leaves it unpinned — the
+        same gap that let 53 hand-rolled parsers accumulate unnoticed."""
+        import pathlib, re
+        src = pathlib.Path(bot.__file__).read_text()
+        in_source = set(re.findall(r'_env_bool\(\s*["\'](\w+)["\']', src))
+        assert in_source - set(self.DEFAULTS) == set(), (
+            "new _env_bool flags missing from DEFAULTS: "
+            + ", ".join(sorted(in_source - set(self.DEFAULTS))))
+        assert set(self.DEFAULTS) - in_source == set(), (
+            "DEFAULTS names a flag bot.py no longer reads: "
+            + ", ".join(sorted(set(self.DEFAULTS) - in_source)))
+
+    def test_the_default_off_set_is_exactly_the_one_we_expect(self):
+        """The table above would still pass if it had been regenerated from broken
+        source. This pins which flags are off independently of how they are parsed —
+        every name here is a deliberate product decision, not an accident."""
+        off = sorted(n for n, v in self.DEFAULTS.items() if v is False)
+        assert off == ["ADMIN_API_ENABLED", "CLOSENESS_ENABLED", "DEVICE_RENDER",
+                       "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
+                       "GROUP_MODE", "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
+                       "SELFIE_NSFW", "THREADS_ENABLED", "WORLD_GENERATOR"], off
+
+
+class TestEnvBoolVocabulary:
     """v2026-08-10.8: bot.py had two hand-rolled on/off idioms that accept different words.
     Default-off flags used `in ("1", "true", "yes")`, which reads `on` as OFF — the owner
     writes the most natural possible value and the feature silently stays dark. Default-on

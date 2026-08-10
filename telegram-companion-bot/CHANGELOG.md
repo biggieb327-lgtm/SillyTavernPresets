@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.9 — Every on/off env var accepted a different set of words
+
+**The class, in one sentence: an on/off env var parsed by a hand-rolled string comparison,
+so which words it accepts depends on which default it happens to have.** v2026-08-10.8
+fixed two instances of this and named the rest as a follow-up. This is the follow-up: all
+53 remaining sites, plus two more the first sweep missed.
+
+**Three idioms, three vocabularies, all silent.**
+
+| idiom | written as | trap |
+|---|---|---|
+| default-off | `os.getenv(X, "0").lower() in ("1", "true", "yes")` | `X=on` reads **off** |
+| default-on | `os.getenv(X, "1").lower() not in ("0", "false", "no", "off")` | `X=maybe` reads **on** |
+| strict | `os.getenv(X, "false").lower() == "true"` | `X=1` reads **off** |
+
+`GROUP_MODE=on` was off. `FOLLOWUP_ENABLED=1` was off — and `.env.example` documented that
+as a quirk to work around (*"note: this one is `true`/`false`, not 1/0"*) rather than as
+the defect it was. `DEVICE_RENDER=maybe` was on. Every one of these fails silently: the
+owner writes a perfectly reasonable value, the bot reads the opposite, and nothing says so.
+
+**The strict idiom was not in the original count.** v2026-08-10.8 said "~20 hand-rolled
+copies"; the real number was 53, and the two `== "true"` sites (`INNER_VOICE_ENABLED`,
+`FOLLOWUP_ENABLED`) matched none of the patterns that produced that estimate. They are the
+sharpest instances — accepting exactly one word — and they were found only by widening the
+grep after the first pass reported clean.
+
+**Fix: all 55 boolean flags route through `_env_bool`.** One vocabulary
+(`1/true/yes/on` ↔ `0/false/no/off`, case-insensitive, whitespace-trimmed), blank or absent
+takes the default, anything else warns via `_CONFIG_WARNINGS` and falls back to the default
+— never silently to off (idioms 1 and 3) or to on (idiom 2).
+
+**No default moved.** Each replacement's default was derived from the old expression rather
+than retyped: for `in (...)` the default is `<literal> in <tuple>`, for `not in (...)` it is
+`<literal> not in <tuple>`. Every flag's import-time value was snapshotted before the
+rewrite and compared after — 53 flags, zero changes, then 2 more added with the same result.
+
+**What does change is what a *set* value means**, and only in the directions above: `on`
+now works everywhere, `1` now works everywhere, and junk now warns instead of picking a
+side. `ADMIN_API_ENABLED=on` now enables the admin API where it previously did nothing,
+which is worth knowing before setting it.
+
+**Guards, both generalized rather than point assertions.** `TestNoHandRolledEnvBooleans`
+re-derives the offender list from bot.py source for all three shapes and fails on any new
+one, with a two-entry allowlist (`GIF_SAFETY`, `TOMTOM_TRAVEL_MODE` — named values, not
+switches) that carries a reason each and a second test that fails when an allowlist entry
+goes stale. `TestEveryBooleanFlagDefault` pins all 55 defaults in a table, asserts the table
+and the source agree in *both* directions, and separately pins which twelve flags are
+off — so a table regenerated from broken source would still fail.
+
+6 new tests (the suite goes 1215 → 1221; `TestEnvBoolVocabulary`'s 5 shipped in .8).
+Three break-tests: a hand-rolled idiom re-injected (2 red), one default flipped (1 red),
+and the equality shape specifically (1 red), each restored and re-run green.
+
 ## v2026-08-10.8 — MAP_INTENT was off on all seven bots and no status surface could say so
 
 **Root cause: a pilot flag that nobody ever un-piloted, and nothing that could report it.**
