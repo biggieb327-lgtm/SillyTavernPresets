@@ -9932,3 +9932,45 @@ class TestNoticePrefixKeepsCrashTriageWorking:
         line = f"2026-08-10 15:13:45 [WARNING] companion: {bot._NOTICE_PREFIX}=== STARTUP AUDIT ==="
         from datetime import datetime as _dt
         assert _dt.strptime(line[:19], "%Y-%m-%d %H:%M:%S").year == 2026
+
+
+class TestDiagGarminSubFlagsFollowTheFeed:
+    """Owner-reported on jules, 2026-08-10: /diag showed "— garmin" beside "✅ stress
+    ✅ resting-HR ✅ body-battery" — three monitors reported as running on an instance
+    with no Garmin credentials, where none of them can fire. _alerts_on exists for
+    exactly this and its docstring calls the bare read "the bug it exists to prevent";
+    diag_cmd was the one reader doing it anyway."""
+
+    UID = 8811
+
+    def setup_method(self):
+        self._saved = (bot.GARMIN_ENABLED, bot.STRESS_ALERTS, bot.RHR_ALERTS, bot.BB_ALERTS)
+        # The env preferences default ON; the feed is what decides whether they mean anything.
+        bot.STRESS_ALERTS = bot.RHR_ALERTS = bot.BB_ALERTS = True
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        (bot.GARMIN_ENABLED, bot.STRESS_ALERTS,
+         bot.RHR_ALERTS, bot.BB_ALERTS) = self._saved
+        bot.ALLOWED_USERS.discard(self.UID)
+
+    def _diag(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.diag_cmd(u, _cmd_ctx()))
+        return m.sent[0]
+
+    def test_no_garmin_means_no_green_monitors(self):
+        bot.GARMIN_ENABLED = False
+        line = [l for l in self._diag().splitlines() if "garmin" in l][0]
+        assert "✅" not in line, line
+
+    def test_with_garmin_the_preferences_show_through(self):
+        bot.GARMIN_ENABLED = True
+        line = [l for l in self._diag().splitlines() if "garmin" in l][0]
+        assert line.count("✅") == 4, line
+
+    def test_garmin_on_but_a_monitor_off_is_reported_off(self):
+        bot.GARMIN_ENABLED = True
+        bot.RHR_ALERTS = False
+        line = [l for l in self._diag().splitlines() if "garmin" in l][0]
+        assert line.count("✅") == 3 and "— resting-HR" in line, line

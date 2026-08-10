@@ -7,6 +7,24 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.6 — /diag reported three health monitors running on a bot with no Garmin
+
+**Root cause: `diag_cmd` read `STRESS_ALERTS`/`RHR_ALERTS`/`BB_ALERTS` bare, and those are
+preferences that only mean anything while the parent feed is live.** On jules — no Garmin
+credentials — `/diag` printed `— garmin   ✅ stress   ✅ resting-HR   ✅ body-battery`:
+three monitors reported as running that cannot fire. Owner-spotted.
+
+`_alerts_on(flag)` exists for precisely this and returns `GARMIN_ENABLED and flag`. Its own
+docstring says *"Every STRESS_ALERTS / BB_ALERTS / RHR_ALERTS read goes through this — a
+bare read is the bug it exists to prevent."* Every read did, except this one.
+
+**Checked for the class, and there isn't one.** The other bare reads (`main()`'s job
+scheduling) sit inside `if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:`, so
+they are already gated and correct. One site, fixed; nothing else to chase.
+
+Display only — no monitor behaviour changes, because none of them could run anyway. That is
+the point: the report was wrong, not the system. Three tests, break-tested RED.
+
 ## v2026-08-10.5 — Three features were inert on all seven bots and the warning was in plain sight
 
 **Root cause: nothing reconciles the shared venv with `requirements.txt`, and the warning

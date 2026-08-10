@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.5"
+BOT_VERSION = "2026-08-10.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -14903,8 +14903,14 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  {on(STYLE_MIRROR)} style mirror   {on(LIFE_SIM_ENABLED)} offline life   "
         f"{on(ONTHISDAY_ENABLED)} on-this-day\n"
         f"  {on(VOICE_TONE_ENABLED)} voice tone\n"
-        f"  {on(GARMIN_ENABLED)} garmin   {on(STRESS_ALERTS)} stress   "
-        f"{on(RHR_ALERTS)} resting-HR   {on(BB_ALERTS)} body-battery"
+        # Through _alerts_on, not bare: these three are preferences that only mean
+        # anything while the parent feed is live, so on an instance with no Garmin
+        # credentials a bare read printed "— garmin ✅ stress ✅ resting-HR ✅ body-battery"
+        # — three monitors reported as running that cannot fire (owner-reported on jules,
+        # 2026-08-10). _alerts_on's own docstring calls the bare read "the bug it exists to
+        # prevent"; this was the one reader that did it anyway.
+        f"  {on(GARMIN_ENABLED)} garmin   {on(_alerts_on(STRESS_ALERTS))} stress   "
+        f"{on(_alerts_on(RHR_ALERTS))} resting-HR   {on(_alerts_on(BB_ALERTS))} body-battery"
     )
     if MEMORY_SEMANTIC_LIVE:
         lines.append(f"Embedded: {len(_lore_embeddings)} lore entries")
