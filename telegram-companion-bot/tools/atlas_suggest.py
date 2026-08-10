@@ -9,6 +9,12 @@ one was to invent places and hope they existed.
     python3 tools/atlas_suggest.py priya --near "Bellevue, WA"
     python3 tools/atlas_suggest.py cass  --near "Portland, OR" --kinds "coffee shop,park"
 
+On the VPS use the fleet venv — system python has none of bot.py's dependencies, which this
+imports (absolute paths, so it runs from any directory):
+
+    /opt/telegram-bots/venv/bin/python3 \
+      /opt/telegram-bots/.repo/telegram-companion-bot/tools/atlas_suggest.py cass --near "Portland, OR"
+
 Prints ready-to-paste atlas lines with the description left blank — the half only a person
 can write. It **proposes and never edits**, the same contract `character-review/` has: a
 place list is not a character, and what a place MEANS to her is the whole point of the file.
@@ -102,7 +108,13 @@ def main() -> None:
         sys.argv = [sys.argv[0], str(home)]
         os.environ["BOT_HOME"] = str(home)
         sys.path.insert(0, str(REPO))
-        import bot  # noqa: E402 -- module-level init needs the env above
+        try:
+            import bot  # noqa: E402 -- module-level init needs the env above
+        except ModuleNotFoundError as e:
+            # Message shared with atlas_audit, which this already imports — one wording,
+            # so the two cannot drift apart.
+            sys.exit(atlas_audit._MISSING_DEPS.format(mod=e.name,
+                                                      script=Path(__file__).resolve()))
 
         bot.TOMTOM_API_KEY = os.environ["TOMTOM_API_KEY"]   # fake .env has no key
 

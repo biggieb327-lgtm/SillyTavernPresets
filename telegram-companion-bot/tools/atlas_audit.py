@@ -12,6 +12,12 @@ nothing ever looked.
     python3 tools/atlas_audit.py priya --near "Bellevue, WA"
     python3 tools/atlas_audit.py nora  --near "Olympia, WA" --radius 12
 
+On the VPS use the fleet venv — system python has none of bot.py's dependencies, which this
+imports (absolute paths, so it runs from any directory):
+
+    /opt/telegram-bots/venv/bin/python3 \
+      /opt/telegram-bots/.repo/telegram-companion-bot/tools/atlas_audit.py priya --near "Seattle"
+
 **One instance per run, and that is deliberate** — there is no `--all`. The seven live in
 different cities, so a single anchor applied across them flags every correct entry in every
 other city as FAR and makes the exit code meaningless. A fleet sweep is seven invocations
@@ -53,6 +59,17 @@ from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+# Every tool in tools/ that imports bot.py needs bot.py's dependencies, and the VPS's
+# system python has none of them — the fleet runs from a shared venv. Without this the
+# failure is a bare `ModuleNotFoundError: No module named 'PIL'` from inside bot.py's
+# import block, which says nothing about which interpreter to use (hit 2026-08-10).
+_MISSING_DEPS = (
+    "cannot import bot.py — {mod} is missing.\n"
+    "This tool imports bot.py, so it needs bot.py's dependencies:\n"
+    "  on the VPS:  /opt/telegram-bots/venv/bin/python3 {script} ...\n"
+    "  elsewhere:   pip install -r <repo>/telegram-companion-bot/requirements.txt"
+)
 # Entries read "Name — description of what it means to her". Only the part before the dash
 # is a place; the rest is characterisation and would wreck the query. Both the em dash and
 # a plain hyphen appear across the seven files.
@@ -191,7 +208,10 @@ def main() -> None:
         sys.argv = [sys.argv[0], str(home)]
         os.environ["BOT_HOME"] = str(home)
         sys.path.insert(0, str(REPO))
-        import bot  # noqa: E402 -- module-level init needs the env above
+        try:
+            import bot  # noqa: E402 -- module-level init needs the env above
+        except ModuleNotFoundError as e:
+            sys.exit(_MISSING_DEPS.format(mod=e.name, script=Path(__file__).resolve()))
 
         bot.TOMTOM_API_KEY = os.environ["TOMTOM_API_KEY"]   # fake .env has no key
 

@@ -126,6 +126,21 @@ reads stdin — `read`, `passwd`, anything interactive — in a block intended t
 Either split it into its own block with an explicit "run this alone" instruction, or avoid
 stdin entirely. Same family as the `cd`-then-relative-paths case: the block was correct when
 executed line by line and wrong when used the way operators actually use it.
+
+**Occurrence 5 (2026-08-10) — `python3` is not an interpreter, it is whichever one is first
+on that machine's PATH.** A handoff ran `python3 <repo>/tools/atlas_audit.py`. The fleet's
+dependencies live in a shared venv at `/opt/telegram-bots/venv/`, so the VPS's system python
+died on `ModuleNotFoundError: No module named 'PIL'` from inside `bot.py`'s import block —
+an error naming neither the venv nor the interpreter. CLAUDE.md states the shared venv
+plainly; it was read and not applied, which is the C20 shape (agreeing with a document
+instead of checking the work against it). **A bare interpreter, or any `python`/`pip`/`node`
+in an operator block, is a relative path with extra steps** — write the absolute one the
+target machine actually uses. Handoff-guard cannot catch this: `python3` is a valid absolute
+command name and only the target's PATH decides what it means.
+*Same round trip also exposed the class:* three tools in `tools/` import `bot.py` and none
+documented the venv, so `selfie_prompt_preview.py` had carried the identical trap since
+v2026-08-03.2. All three now fail with the venv path in the message rather than a bare
+traceback, break-tested under a dependency-free interpreter.
 **Correction, same day:** the first draft of this entry claimed handoff-guard "cannot see
 this one — the paste semantics are in the terminal, not the text". That was itself an
 unchecked assertion (C8). The signature is perfectly mechanical: a stdin-reading command

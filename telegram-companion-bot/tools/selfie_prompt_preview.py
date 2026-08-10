@@ -95,7 +95,19 @@ def main() -> None:
         sys.argv = [sys.argv[0], str(home)]
         os.environ["BOT_HOME"] = str(home)
         sys.path.insert(0, str(REPO))
-        import bot  # noqa: E402  -- module-level init needs the env above
+        try:
+            import bot  # noqa: E402  -- module-level init needs the env above
+        except ModuleNotFoundError as e:
+            # The VPS's system python has none of bot.py's dependencies; the fleet runs
+            # from a shared venv. Without this the failure is a bare ModuleNotFoundError
+            # from inside bot.py's import block, naming no interpreter (hit 2026-08-10 on
+            # atlas_audit — this tool had the identical trap since v2026-08-03.2).
+            sys.exit(
+                f"cannot import bot.py — {e.name} is missing.\n"
+                f"This tool imports bot.py, so it needs bot.py's dependencies:\n"
+                f"  on the VPS:  /opt/telegram-bots/venv/bin/python3 "
+                f"{Path(__file__).resolve()} ...\n"
+                f"  elsewhere:   pip install -r <repo>/telegram-companion-bot/requirements.txt")
 
         # No reference photo can be committed (.gitignore keeps every *.png/*.jpg out), so
         # the edit branch is forced on. That is the branch every live instance with a base
