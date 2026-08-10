@@ -582,9 +582,10 @@ a list that cannot go stale beats a list that is correct today.
 ### 3.18 ~~"Open now" for /food and FOOD_SUGGESTIONS~~ ✅ (shipped v2026-08-10.1, `FOOD_OPEN_HOURS`)
 
 **Shipped, but the design below is NOT what shipped — read the changelog entry.** The
-"earliest date in the payload is the POI's today" premise recorded here was disproved by the
-first real response, whose earliest date was tomorrow. It was flagged unverified when
-written, which is why it was checked instead of implemented. What shipped asks only whether
+"earliest date in the payload is the POI's today" premise recorded here is **still
+unverified** — neither confirmed nor, despite a 2026-08-10 changelog claim since corrected,
+refuted. That claim compared the response's date against a session date in an unestablished
+timezone. What shipped does not depend on the premise either way. What shipped asks only whether
 some range brackets now, and gates the verdict on a range falling on the instance's local
 date. The blocker notes below are kept because the MCP-vs-REST finding outlived the item:
 **the MCP tools silently omit `openingHours`, so they are not a probe for what the fleet key

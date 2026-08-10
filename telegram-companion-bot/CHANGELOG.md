@@ -76,9 +76,15 @@ there says nothing about the REST API.
 **ROADMAP 3.18's proposed design was wrong, and the first real response is what showed it.**
 That entry proposed deciding "today" as *the earliest date in the payload*, reasoning that
 `nextSevenDays` starts with the POI's local today — read off the MCP tool's parameter
-description. The first genuine response had an earliest date of **tomorrow**. The premise
-was flagged as unverified when it was written down, which is the only reason it was checked
-rather than implemented.
+description.
+
+**Correction (2026-08-10): the disproof claimed here is itself unsound.** The first real
+response showed an earliest date of `2026-08-10` and this was read as *tomorrow* by
+comparing it against a session date of `2026-08-09` — two dates in unestablished timezones.
+The VPS was plausibly already past local midnight, in which case `2026-08-10` was simply
+today and the premise held. **Nobody knows which, and the payload is not evidence either
+way without the local time it was fetched at.** The premise remains unverified, as it was
+when first written down — it was never confirmed, and it has not now been refuted.
 
 **What shipped instead needs no notion of "today".** `_poi_hours_note` asks one question:
 does any range bracket now? Ordering and which-date-is-today stop mattering.
