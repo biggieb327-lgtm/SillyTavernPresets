@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.2"
+BOT_VERSION = "2026-08-10.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2560,7 +2560,11 @@ def _alerts_on(flag: bool) -> bool:
     it exists to prevent."""
     return bool(GARMIN_ENABLED and flag)
 
-# --- TomTom Maps (routing + place/POI search; Nora, Emily, Priya) ---
+# --- TomTom Maps (routing + place/POI search) ---
+# Which instances have a key is per-instance and changes without a code deploy, so it is
+# deliberately NOT listed here — the roster read "Nora, Emily, Priya" and went stale the
+# day the owner provisioned the other four (2026-08-10). Check each instance's `.env`, or
+# the `maps=` field in its `/audit`.
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
 TOMTOM_API_KEY      = os.getenv("TOMTOM_API_KEY", "")
 TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
@@ -2569,6 +2573,12 @@ TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
 # One reverse-geocode per share, injected into exactly one reply. Unset = active, 0 = off.
 LOCATION_PLACE = os.getenv("LOCATION_PLACE", "1").lower() not in ("0", "false", "no", "off")
+# /place searches around HER city when the user has no fresh pin shared. Unset = active,
+# 0 = the pre-v2026-08-10.3 behavior (user's pin only, and a nationwide search without one).
+PLACE_ANCHOR_HER = os.getenv("PLACE_ANCHOR_HER", "1").lower() not in ("0", "false", "no", "off")
+# Metres. Wider than /nearby's 3km because /place looks up named places rather than
+# amenities; a miss widens the search and says so rather than silently going national.
+PLACE_RADIUS_M = _env_int("PLACE_RADIUS_M", "50000")
 # Ask TomTom for opening hours on the food paths and mark each place open/closed, so she
 # stops recommending somewhere that shut at nine. Unset = active, 0 = off.
 FOOD_OPEN_HOURS = os.getenv("FOOD_OPEN_HOURS", "1").lower() not in ("0", "false", "no", "off")
@@ -6551,7 +6561,10 @@ _SELFIE_PRESERVE_RULE = (
     "shape and bone structure, the same eyes, nose, mouth and brows, the same skin tone and "
     "the same marks on her skin, the same hairline, hair colour and hair texture, the same "
     "apparent age. Her eyewear matches the reference exactly — if she is wearing glasses "
-    "there she is wearing those same glasses here; if she is wearing none, add none. Do not "
+    "there she is wearing those same glasses here; if she is wearing none, add none. The "
+    "same holds for anything small she wears on her face, ears or hair — a forehead mark, a "
+    "stud, a hoop, a clip: whatever is there in the reference is there here, and whatever "
+    "is absent stays absent. Do not "
     "beautify, slim, smooth or restyle her: an ordinary face that matches the reference is "
     "right, and a better-looking one that does not is wrong."
 )
@@ -12917,13 +12930,24 @@ def _format_route(route: dict, mode: str) -> str:
 
 
 def _format_place_results(results: list, limit: int = 3) -> str:
-    """TomTom Search native 'results' -> readable list. Total/defensive."""
+    """TomTom Search native 'results' -> readable list. Total/defensive.
+
+    Distance-sorted and distance-labelled, like _format_nearby_results. Without it the
+    reply listed a Nevada and a Texas result under a Washington one with nothing to
+    distinguish them but an address line you had to read closely (owner-reported
+    2026-08-10). `dist` is absent on an unanchored search, and then this degrades to the
+    old name/address rendering."""
+    rows = [r for r in (results or []) if isinstance(r, dict)]
+    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
     out = []
-    for r in (results or [])[:limit]:
-        poi = (r or {}).get("poi") or {}
-        addr = (r or {}).get("address") or {}
+    for r in rows[:limit]:
+        poi = r.get("poi") or {}
+        addr = r.get("address") or {}
         name = poi.get("name") or addr.get("freeformAddress") or "Unknown"
+        dist = r.get("dist")
         line = f"📍 {name}"
+        if isinstance(dist, (int, float)):
+            line += f" · {_fmt_distance(dist)}"
         fa = addr.get("freeformAddress")
         if fa and fa != name:
             line += f"\n   {fa}"
@@ -13226,6 +13250,30 @@ def _place_note(loc) -> str:
             f"only if it's worth reacting to, once, then let it go.]")
 
 
+def _place_anchor(chat_id):
+    """(lat, lon, label) to bias a /place lookup toward, or (None, None, "").
+
+    Her city, unless a FRESH pin from the user overrides it. `/place` used to anchor only
+    on the user's pin, so an instance the owner had never shared a location with searched
+    the whole country: `/place Boulevard Park` on a Bellingham character returned Henderson
+    NV and El Paso TX (owner-reported 2026-08-10). She always has coordinates and the user
+    only sometimes does, so hers is the better default — and every other TomTom path here
+    is about her world anyway.
+
+    Her-first, not her-only: a pin shared in the last few hours is the user standing
+    somewhere specific and asking about it, which beats a static home every time."""
+    loc = user_location.get(chat_id)
+    if _fresh_location(loc):
+        return loc["lat"], loc["lon"], "your location"
+    if PLACE_ANCHOR_HER:
+        try:
+            return float(WEATHER_LAT), float(WEATHER_LON), WEATHER_LOCATION
+        except (TypeError, ValueError):
+            log.warning("[maps] WEATHER_LAT/WEATHER_LON unparseable; /place falls back "
+                        "to an unanchored search")
+    return None, None, ""
+
+
 def _fresh_location(loc, now=None, max_age: int = 4 * 3600) -> bool:
     """True if a stored user_location entry is usable for map answers: shared within
     max_age (4h — the photo path's precedent) OR still inside a live-share period."""
@@ -13499,15 +13547,23 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         await update.message.reply_text("Usage: /place <name or address>\ne.g. /place Pike Place Market")
         return
-    loc = user_location.get(update.effective_chat.id)
-    lat = loc["lat"] if loc else None
-    lon = loc["lon"] if loc else None
+    lat, lon, whose = _place_anchor(update.effective_chat.id)
     try:
-        results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon,
+                                          PLACE_RADIUS_M if lat is not None else None)
+        widened = False
+        if not results and lat is not None:
+            # Nothing within the radius. Widening is fine; doing it silently is not —
+            # an unannounced nationwide result set is the whole defect being fixed here.
+            results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
+            widened = True
     except _TomTomError as e:
         await update.message.reply_text(f"🔎 Maps lookup failed: {e}. Try again in a moment.")
         return
-    await update.message.reply_text(f"🔎 {query}\n\n{_format_place_results(results)}")
+    head = f"🔎 {query}" + (f" — near {whose}" if whose else "")
+    if widened:
+        head += f"\n(nothing within {PLACE_RADIUS_M // 1000}km, so this is a wider search)"
+    await update.message.reply_text(f"{head}\n\n{_format_place_results(results)}")
 
 
 async def food_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

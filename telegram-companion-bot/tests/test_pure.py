@@ -9667,3 +9667,84 @@ class TestAtlasAuditDescriptiveMarkers:
         aa = _atlas_audit()
         for s in ("Marymoor Park", "Powell's Books", "The Spar", "Lone Fir Cemetery"):
             assert aa.looks_like_a_named_place(s), s
+
+
+class TestPlaceAnchorsOnHer:
+    """v2026-08-10.3: /place anchored only on the user's pin, so an instance they had
+    never shared a location with searched nationwide — `/place Boulevard Park` on a
+    Bellingham character returned Henderson NV and El Paso TX."""
+
+    CHAT = 8801
+
+    def setup_method(self):
+        self._saved = (bot.PLACE_ANCHOR_HER, bot.WEATHER_LAT, bot.WEATHER_LON,
+                       bot.WEATHER_LOCATION)
+        bot.PLACE_ANCHOR_HER = True
+        bot.WEATHER_LAT, bot.WEATHER_LON = "48.7519", "-122.4787"    # Bellingham
+        bot.WEATHER_LOCATION = "Bellingham"
+        bot.user_location.pop(self.CHAT, None)
+
+    def teardown_method(self):
+        (bot.PLACE_ANCHOR_HER, bot.WEATHER_LAT, bot.WEATHER_LON,
+         bot.WEATHER_LOCATION) = self._saved
+        bot.user_location.pop(self.CHAT, None)
+
+    def test_no_pin_anchors_on_her_city_not_nowhere(self):
+        lat, lon, whose = bot._place_anchor(self.CHAT)
+        assert (round(lat, 3), round(lon, 3)) == (48.752, -122.479)
+        assert whose == "Bellingham"
+
+    def test_a_fresh_pin_overrides_her(self):
+        bot.user_location[self.CHAT] = {"lat": 47.6, "lon": -122.3, "ts": time.time(),
+                                        "live_until": None}
+        lat, lon, whose = bot._place_anchor(self.CHAT)
+        assert (lat, lon) == (47.6, -122.3) and whose == "your location"
+
+    def test_a_stale_pin_does_not_override_her(self):
+        """Her home is a better guess than where they were last week."""
+        bot.user_location[self.CHAT] = {"lat": 47.6, "lon": -122.3,
+                                        "ts": time.time() - 30 * 3600, "live_until": None}
+        _, _, whose = bot._place_anchor(self.CHAT)
+        assert whose == "Bellingham"
+
+    def test_kill_switch_restores_the_old_unanchored_behaviour(self):
+        bot.PLACE_ANCHOR_HER = False
+        assert bot._place_anchor(self.CHAT) == (None, None, "")
+
+    def test_unparseable_coordinates_degrade_instead_of_raising(self):
+        bot.WEATHER_LAT = "not-a-number"
+        assert bot._place_anchor(self.CHAT) == (None, None, "")
+
+
+class TestPlaceResultsShowDistance:
+    def test_results_are_distance_sorted_and_labelled(self):
+        results = [
+            {"poi": {"name": "Castner Range"}, "dist": 2_400_000, "address": {}},
+            {"poi": {"name": "Boulevard Park"}, "dist": 1200, "address": {}},
+        ]
+        out = bot._format_place_results(results)
+        assert out.index("Boulevard Park") < out.index("Castner Range")
+        # The defect: nothing in the reply revealed that result 2 was a thousand miles off.
+        assert "·" in out.split("Castner Range")[1].split("\n")[0]
+
+    def test_an_unanchored_search_still_renders(self):
+        results = [{"poi": {"name": "Boulevard Park"},
+                    "address": {"freeformAddress": "Boulevard Park, WA"}}]
+        assert "Boulevard Park, WA" in bot._format_place_results(results)
+
+
+class TestSelfiePreservesWornFaceItems:
+    """ROADMAP 3.17. Priya's bindi survived in about half of six selfies; the rule had a
+    dedicated clause for eyewear and nothing for any other worn face item."""
+
+    def test_the_clause_is_stated_both_ways(self):
+        rule = bot._SELFIE_PRESERVE_RULE
+        assert "whatever is there in the reference is there here" in rule
+        assert "whatever is absent stays absent" in rule
+
+    def test_it_names_a_category_never_a_character(self):
+        """Same guard as the eyewear clause: naming priya's bindi would be the
+        character-bleed trap of v2026-08-01.8's courier jacket."""
+        rule = bot._SELFIE_PRESERVE_RULE.lower()
+        for trait in ("bindi", "tamil", "septum", "freckles", "tattoo"):
+            assert trait not in rule, trait

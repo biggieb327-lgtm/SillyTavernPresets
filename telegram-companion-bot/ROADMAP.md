@@ -186,7 +186,11 @@ constraints; check their assumptions before acting on them.
   The generalized version of that lesson was **considered and rejected** as an invariant —
   see "Rejected or already covered" below.
 
-### 2.5 Correct the stale TomTom instance list in bot.py — XS (parked 2026-08-10, ride the next bot.py release)
+### 2.5 ~~Correct the stale TomTom instance list in bot.py~~ ✅ (shipped v2026-08-10.3, rode /place as predicted)
+
+**Resolved by naming no instances at all**, which was the option flagged when this was
+parked: the header now points at each `.env` and the `maps=` field in `/audit`. A roster
+that cannot go stale beats one that is correct today. Original notes below.
 
 `bot.py`'s TomTom section header reads `# --- TomTom Maps (routing + place/POI search;
 Nora, Emily, Priya) ---`. On 2026-08-10 the owner provisioned Emily's key onto **bonnie,
@@ -672,7 +676,13 @@ dropped by the MCP wrapper; worth one more test against a named POI before relyi
 
 </details>
 
-### 3.17 Preserve small worn face items in the selfie face lock — S (deferred by owner 2026-08-09)
+### 3.17 ~~Preserve small worn face items in the selfie face lock~~ ✅ (shipped v2026-08-10.3, rode /place)
+
+**Shipped as specified, effect unverified.** The clause names the category — "anything
+small she wears on her face, ears or hair — a forehead mark, a stud, a hoop, a clip" —
+conditionally both ways, no character's trait. No session can generate an image to check
+it, and priya runs `gemini-3-pro-image-preview`, which no face-lock A/B has ever covered.
+**The braid stayed out of scope** for the reason recorded below. Original spec follows.
 
 `_SELFIE_PRESERVE_RULE` enumerates what an edit model must copy from the reference photo
 — face shape, bone structure, eyes, nose, mouth, brows, skin tone, skin marks, hairline,

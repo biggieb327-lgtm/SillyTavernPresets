@@ -7,6 +7,52 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.3 — /place searched the whole country because it only knew where YOU were
+
+**Root cause: `/place` anchored on the user's shared pin and had no other idea where to
+look.** No pin shared with that instance meant `lat`/`lon` were `None`, and `radius_m` was
+`None` even when a pin existed — so a soft bias at best, a nationwide search at worst.
+Owner-reported: `/place Boulevard Park` on jules, who lives in Bellingham, returned Lake
+Mead Recreation Area (Henderson NV) and Castner Range National Monument (El Paso TX).
+
+**She always has coordinates; the user only sometimes does.** Every instance sets
+`WEATHER_LAT`/`WEATHER_LON`, and every other TomTom path here is about her world. So
+`_place_anchor` is **her-first**: her city by default, overridden by a pin shared in the
+last 4 hours — that is the user standing somewhere specific and asking about it, which
+beats a static home. A stale pin no longer wins; `nearby_cmd` three lines up had always
+gated on freshness and `place_cmd` never did.
+
+- **A radius, and an honest widening.** `PLACE_RADIUS_M` (50km, wider than `/nearby`'s 3km
+  because `/place` looks up named places rather than amenities). Nothing in range widens the
+  search **and says so** — an unannounced nationwide result set is the entire defect.
+- **Distance-sorted and distance-labelled**, matching `_format_nearby_results`. The reply
+  had listed a Nevada and a Texas result under a Washington one with nothing to tell them
+  apart but an address line you had to read closely.
+
+Kill switch `PLACE_ANCHOR_HER=0` restores the pin-only behavior.
+
+**Two parked items ride along, which is what they were parked for.**
+
+- **ROADMAP 2.5** — the TomTom section header named "Nora, Emily, Priya" and went stale the
+  day the other four were provisioned. Now names no instances at all: which ones hold a key
+  is per-instance and changes without a code deploy, so the comment points at each `.env`
+  and the `maps=` field in `/audit`. A roster that cannot go stale beats one that is correct
+  today.
+- **ROADMAP 3.17** — `_SELFIE_PRESERVE_RULE` had a dedicated clause for eyewear and nothing
+  for any other worn face item, so priya's bindi survived in about half of six selfies.
+  Extended to the category — *"anything small she wears on her face, ears or hair — a
+  forehead mark, a stud, a hoop, a clip"* — stated conditionally both ways like the eyewear
+  clause, naming no character's trait. A test pins both halves and the character-neutrality.
+  **Its effect is unverified**: no session can generate an image, and priya runs
+  `gemini-3-pro-image-preview`, which no face-lock A/B has ever been run against. The
+  mechanism matches the one that worked for Emily's glasses; that is the whole claim.
+
+**Theme mixing, stated rather than hidden:** repo-change-control asks for one theme per
+release, and a selfie-prompt change in a maps release is two. Taken deliberately — 3.17 was
+parked *specifically* to avoid a seven-instance deploy for one clause, and this is the
+carrier it was waiting for. The selfie half is revertible on its own via `SELFIE_FACE_LOCK=0`,
+though that is coarse: it disables the whole face lock, not just this clause.
+
 ## v2026-08-10.2 — A place name with a slash in it 404s every TomTom lookup
 
 **Root cause: `quote(query)` leaves `/` unescaped, and the query is interpolated INTO a URL
