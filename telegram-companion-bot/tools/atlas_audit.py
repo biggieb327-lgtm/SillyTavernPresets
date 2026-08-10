@@ -323,6 +323,15 @@ def report(instance: str, rows: list) -> tuple:
         # twenty of them back is the noise this exists to remove. --check-all overrides.
         print(f"  {len(skipped)} entries read as descriptions rather than place names and "
               f"were not looked up (--check-all to force).")
+        # The heuristic leans on capitalisation, so an atlas authored in lowercase would be
+        # skipped wholesale and this report would look reassuringly empty. Say so rather
+        # than let silence pass for a clean bill (owner raised the lowercase risk, and
+        # priya's own preset does mandate lowercase — for her texting, not her seed files).
+        if len(skipped) >= max(3, int(len(rows) * 0.6)):
+            print(f"  ! MOST of this atlas ({len(skipped)}/{len(rows)}) was skipped. Either it "
+                  f"is written descriptively on purpose — fine, nothing to audit — or it is "
+                  f"written in lowercase, which this heuristic cannot tell from a "
+                  f"description. Check a few by eye, or rerun with --check-all.")
     if failed:
         print(f"  ! {len(failed)} entries were never checked — rerun them before "
               f"concluding anything about those lines.")

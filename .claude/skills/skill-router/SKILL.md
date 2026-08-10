@@ -27,6 +27,7 @@ such exemption.
 | A fix is about to ship, or a check/eval is being written | `fix-the-class` |
 | Same failure class happened twice, or user asks to pin a check | `add-regression-eval` |
 | External audit/review output (LLM or human) lists claimed bugs | `verify-external-audit` |
+| Writing a tool that renders a verdict, reporting a finding, or explaining why something broke | `hubris` |
 | Touching any GROUP_* code, the ledger, or bot-to-bot behavior | `group-chat-changes` |
 | Moving instances from the phone to a VPS (ROADMAP 1.2) | `vps-migration` |
 | Working in voicekit-starter/ | `voicekit-work` |
