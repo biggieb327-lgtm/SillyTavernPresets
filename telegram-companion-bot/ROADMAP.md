@@ -186,6 +186,27 @@ constraints; check their assumptions before acting on them.
   The generalized version of that lesson was **considered and rejected** as an invariant —
   see "Rejected or already covered" below.
 
+### 2.5 Correct the stale TomTom instance list in bot.py — XS (parked 2026-08-10, ride the next bot.py release)
+
+`bot.py`'s TomTom section header reads `# --- TomTom Maps (routing + place/POI search;
+Nora, Emily, Priya) ---`. On 2026-08-10 the owner provisioned Emily's key onto **bonnie,
+cass, jules and marcus** as well (with `TOMTOM_TRAVEL_MODE=car` for cass, jules and marcus;
+bonnie left unset, which defaults to car), so **all seven instances now have TomTom** and
+that comment is wrong.
+
+Low stakes but not zero: it is the kind of in-code roster a session trusts without checking,
+and CLAUDE.md already carries a scar from a "quick reference" list that drifted, omitted
+seven skills and misrouted a session.
+
+**Deliberately parked, not skipped.** A comment-only edit still modifies `bot.py`, so the
+delivery gate requires a `BOT_VERSION` bump and a changelog entry, which means a
+seven-instance deploy for a line of prose. Fold it into the next real `bot.py` change —
+the same "ride the next functional release" reasoning as 2.4 above, which worked.
+
+**While you are there:** the roster belongs in exactly one place. Consider whether the
+comment should name instances at all rather than say "per-instance, see each `.env`" —
+a list that cannot go stale beats a list that is correct today.
+
 ---
 
 ## Track 3 — Character & product features
