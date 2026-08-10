@@ -82,7 +82,7 @@ def _get_session() -> requests.Session:
 _REPLY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="reply")
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
-from telegram.error import NetworkError, TimedOut, BadRequest
+from telegram.error import NetworkError, TimedOut, BadRequest, Conflict, Forbidden
 from telegram.ext import (
     ApplicationBuilder,
     ApplicationHandlerStop,
@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.11"
+BOT_VERSION = "2026-08-10.12"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -242,6 +242,34 @@ def _count_error(category: str):
     ts.append(time.time())
     if len(ts) > _ERROR_KEEP_PER_CAT:
         del ts[:-_ERROR_KEEP_PER_CAT]
+
+
+_throttle_state: dict = {}  # key -> [last_emit_ts, suppressed_since_then]
+
+
+def _log_operational(key: str, msg: str, *args):
+    """Log an EXPECTED operational condition at most once per `_ERROR_LOG_THROTTLE_S`,
+    and say how many occurrences the emitted line stands for.
+
+    jules's `errors.log` held **767** `Conflict` tracebacks from a single seven-hour
+    double-poller incident on 2026-07-19 (11:00–17:56, one every ~33s — the `getUpdates`
+    long-poll cycle). At roughly six lines each that is ~4,600 lines: most of the 2 MB
+    rotation budget spent on one fact repeated, which is why a log covering three weeks
+    is unreadable. **A storm that fills the log evicts everything else in it**, exactly as
+    a saturated category evicts the error counter (v2026-08-10.11). The fix for both is
+    the same: keep the count, drop the repetition.
+
+    Deliberately NOT used for genuinely unhandled exceptions — those keep their full
+    traceback every time, because each one may differ and the traceback is the evidence.
+    """
+    now = time.time()
+    st = _throttle_state.setdefault(key, [0.0, 0])
+    if _ERROR_LOG_THROTTLE_S > 0 and now - st[0] < _ERROR_LOG_THROTTLE_S:
+        st[1] += 1
+        return
+    suffix = (f" [+{st[1]} more in the last {int(now - st[0])}s]" if st[1] else "")
+    log.warning(msg + "%s", *args, suffix)
+    st[0], st[1] = now, 0
 
 
 def _error_retention() -> dict:
@@ -415,6 +443,14 @@ def _parse_id_set(raw: str, name: str) -> set[int]:
             logging.warning("[config] %s", msg)
             _CONFIG_WARNINGS.append(msg)
     return out
+
+
+# One line per key per this many seconds, carrying the count of what it stood in for.
+# 0 disables the throttle (every occurrence logs) — the kill switch for this behavior.
+# Defined HERE and not beside _log_operational: it needs _env_int, which is declared
+# further down the file than the throttle helper is. py_compile does not catch that
+# ordering — only an import does (caught 2026-08-10).
+_ERROR_LOG_THROTTLE_S = _env_int("ERROR_LOG_THROTTLE_S", "60")
 
 
 _allowed_raw = os.getenv("ALLOWED_USERS", "")
@@ -15527,6 +15563,29 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(err, BadRequest):
         log.error("[api] bad request — client-side defect, not the network: %s", err)
         _count_error("bad_request")
+        return
+    # Conflict and Forbidden are TelegramError but NOT NetworkError (verified against PTB
+    # 21.11.1), so before v2026-08-10.12 both fell through to the `unhandled` branch below
+    # and were filed as crashes. Neither is one:
+    #   Conflict  — two processes polling the same token. An OPERATIONS problem: a stray
+    #               poller, a half-finished migration, a supervisor that respawned.
+    #   Forbidden — the user blocked the bot, or it was removed from a group. Not a fault
+    #               at all; nothing in the code can prevent or fix it.
+    # This is the same defect v2026-07-25.5 fixed one layer over, where BadRequest was
+    # absorbed into `network` and, in that entry's words, "reads as ambient phone flakiness
+    # and gets ignored." The cost here is worse than a wrong label: on 2026-07-19 a
+    # seven-hour Conflict storm logged 767 tracebacks and pushed `unhandled` to its
+    # 200-entry cap, so any real crash on jules that week was evicted and is unrecoverable.
+    # Own categories mean a poller fight can no longer hide or destroy a genuine crash.
+    if isinstance(err, Conflict):
+        _log_operational("conflict",
+                         "[conflict] another process is polling this token — %s", err)
+        _count_error("conflict")
+        return
+    if isinstance(err, Forbidden):
+        _log_operational("forbidden",
+                         "[forbidden] blocked or removed by the chat — %s", err)
+        _count_error("forbidden")
         return
     if isinstance(err, (NetworkError, TimedOut)):
         log.warning("[net] transient: %s: %s", err.__class__.__name__, err)

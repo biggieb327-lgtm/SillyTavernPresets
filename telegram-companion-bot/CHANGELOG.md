@@ -7,6 +7,63 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.12 — A seven-hour poller fight was filed as 767 code crashes
+
+**Root cause: `Conflict` and `Forbidden` are `TelegramError` but not `NetworkError`.**
+`on_error` tests `BadRequest`, then `(NetworkError, TimedOut)`, then treats everything
+else as an unhandled crash. Verified against PTB 21.11.1: seven error classes fall
+through to that catch-all, and the two common ones are not crashes at all —
+**`Conflict`** is two processes polling one token (an operations problem: a stray poller,
+a half-finished migration, a supervisor that respawned) and **`Forbidden`** is a user
+blocking the bot or removing it from a group (not a fault; no code change can prevent it).
+
+This is the same defect **v2026-07-25.5** fixed one layer over, where `BadRequest` was
+absorbed into `network` and, in that entry's words, *"reads as ambient phone flakiness and
+gets ignored."*
+
+**The cost is worse than a wrong label — it destroys evidence.** Investigating jules's
+`unhandled` counter produced the full picture from her `errors.log`:
+
+| what the record said | what the log shows |
+|---|---|
+| operational log: *"Conflict for ~15 min"* | **11:00 → 17:56 on 2026-07-19, ~7 hours** |
+| `state.json` retained 200, oldest 16:29 | first `[unhandled]` at **16:00:08**, ~33s apart |
+| — | **767** `telegram.error.Conflict` occurrences |
+
+The 200-entry cap kept the last 87 minutes of a seven-hour incident: **~74% of it was
+evicted, including the start**. Because Conflict shared the `unhandled` category, any
+genuine crash on jules that week was pushed out too, and is unrecoverable. That is the
+argument for the split — not tidiness.
+
+**Fix 1: `conflict` and `forbidden` get their own branches and counters.** A poller fight
+can no longer hide inside, or evict, a real crash. The other five (`RetryAfter`,
+`ChatMigrated`, `InvalidToken`, `EndPointNotFound`, `PassportDecryptionError`) stay in
+`unhandled` for now — none has been observed, and inventing categories for unobserved
+conditions is how the roster goes stale.
+
+**Fix 2: `_log_operational` throttles expected conditions to one line per
+`ERROR_LOG_THROTTLE_S` (default 60), carrying the count it stands for.** Those 767
+tracebacks were ~4,600 lines — most of `errors.log`'s 2 MB rotation budget spent on one
+fact repeated, which is why a log covering three weeks held one afternoon. **Rotation was
+never the problem** (`RotatingFileHandler(maxBytes=2_000_000, backupCount=3)` has been
+configured all along); the problem is that a storm fills the budget and evicts everything
+else, exactly as a saturated category evicts the counter. Same fix both times: keep the
+count, drop the repetition. `ERROR_LOG_THROTTLE_S=0` disables it (invariant #16).
+
+**Genuinely unhandled exceptions are never throttled** — each may differ and the traceback
+is the evidence. A test drives 20 identical `ValueError`s through `on_error` and requires
+20 full tracebacks.
+
+10 tests, including one that asserts PTB still keeps `Conflict` outside `NetworkError`, so
+a future reparenting fails loudly instead of the counter going quiet. Four break-tests —
+Conflict branch removed (2 red), Forbidden branch removed (1 red), suppressed count
+dropped (1 red), kill switch ignored (1 red) — injection verified on each.
+
+**Also caught here: `python3 -m py_compile` passed on a module that could not import.**
+`_ERROR_LOG_THROTTLE_S` was written above `_env_int`'s definition; compiling checks syntax,
+not name resolution at module exec. Only running the suite found it. The constant now sits
+below the env helpers with a comment saying why.
+
 ## v2026-08-10.11 — "Errors (total): 415" was not a total, not since boot, and not bounded
 
 **Root cause: one label making three false claims, and the number sat undiagnosed for a

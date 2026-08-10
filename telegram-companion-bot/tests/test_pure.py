@@ -7094,6 +7094,138 @@ _MAP_INTENT_DEFAULT = bot.MAP_INTENT
 _FOOD_SUGGESTIONS_DEFAULT = bot.FOOD_SUGGESTIONS
 
 
+class TestOperationalErrorsAreNotCrashes:
+    """v2026-08-10.12. `Conflict` and `Forbidden` are TelegramError but NOT NetworkError,
+    so both fell through `on_error`'s guards into the `unhandled` catch-all and were filed
+    as code crashes. jules's log settles the cost: a seven-hour double-poller incident on
+    2026-07-19 (11:00-17:56, 767 events at ~33s spacing) pushed `unhandled` to its
+    200-entry cap, so any genuine crash that week was evicted and cannot be recovered."""
+
+    def setup_method(self):
+        self._counts = {k: list(v) for k, v in bot._error_counts.items()}
+        self._throttle = {k: list(v) for k, v in bot._throttle_state.items()}
+        bot._error_counts.clear(); bot._throttle_state.clear()
+
+    def teardown_method(self):
+        bot._error_counts.clear(); bot._error_counts.update(self._counts)
+        bot._throttle_state.clear(); bot._throttle_state.update(self._throttle)
+
+    def _fire(self, err):
+        ctx = SimpleNamespace(error=err, bot=None)
+        asyncio.run(bot.on_error(None, ctx))
+
+    def test_ptb_still_puts_conflict_outside_networkerror(self):
+        """The whole split rests on this. If PTB ever reparents Conflict under
+        NetworkError, the `network` branch would swallow it and this must fail loudly
+        rather than the counter silently going quiet (C12: check the library, not the
+        memory of it)."""
+        from telegram.error import Conflict, Forbidden, NetworkError, BadRequest
+        assert not issubclass(Conflict, NetworkError)
+        assert not issubclass(Forbidden, NetworkError)
+        assert issubclass(BadRequest, NetworkError), "the inversion bad_request exists for"
+
+    def test_a_conflict_is_counted_as_conflict_not_unhandled(self):
+        from telegram.error import Conflict
+        self._fire(Conflict("terminated by other getUpdates request"))
+        assert bot._error_counts.get("conflict") and len(bot._error_counts["conflict"]) == 1
+        assert "unhandled" not in bot._error_counts, "a poller fight is not a crash"
+
+    def test_a_forbidden_is_counted_as_forbidden_not_unhandled(self):
+        from telegram.error import Forbidden
+        self._fire(Forbidden("bot was blocked by the user"))
+        assert len(bot._error_counts.get("forbidden", [])) == 1
+        assert "unhandled" not in bot._error_counts
+
+    def test_a_real_exception_still_counts_as_unhandled(self):
+        """The split must not widen into swallowing genuine crashes."""
+        self._fire(ValueError("a real defect"))
+        assert len(bot._error_counts.get("unhandled", [])) == 1
+
+    def test_a_storm_cannot_evict_a_real_crash_from_the_counter(self):
+        """The 2026-07-19 outcome, replayed. Before the split these shared one category
+        and the crash was pushed out by the cap; now they cannot touch each other."""
+        from telegram.error import Conflict
+        self._fire(ValueError("the crash nobody could see"))
+        for _ in range(bot._ERROR_KEEP_PER_CAT + 300):
+            self._fire(Conflict("terminated by other getUpdates request"))
+        assert len(bot._error_counts["conflict"]) == bot._ERROR_KEEP_PER_CAT
+        assert len(bot._error_counts["unhandled"]) == 1, "the crash survived the storm"
+
+
+class TestOperationalLogThrottle:
+    """v2026-08-10.12: 767 near-identical tracebacks consumed most of errors.log's 2 MB
+    rotation budget, which is why a log spanning three weeks held one afternoon."""
+
+    def setup_method(self):
+        self._state = {k: list(v) for k, v in bot._throttle_state.items()}
+        self._s = bot._ERROR_LOG_THROTTLE_S
+        bot._throttle_state.clear()
+
+    def teardown_method(self):
+        bot._throttle_state.clear(); bot._throttle_state.update(self._state)
+        bot._ERROR_LOG_THROTTLE_S = self._s
+
+    def test_a_storm_collapses_to_one_line(self, caplog):
+        import logging
+        bot._ERROR_LOG_THROTTLE_S = 60
+        with caplog.at_level(logging.WARNING, logger="companion"):
+            for _ in range(500):
+                bot._log_operational("conflict", "[conflict] %s", "two pollers")
+        lines = [r for r in caplog.records if "[conflict]" in r.getMessage()]
+        assert len(lines) == 1, f"500 occurrences wrote {len(lines)} lines"
+
+    def test_the_suppressed_count_is_carried_not_lost(self, caplog):
+        """Collapsing to one line is only safe if the line says what it stands for —
+        otherwise the throttle destroys the same evidence the cap did."""
+        import logging
+        bot._ERROR_LOG_THROTTLE_S = 60
+        with caplog.at_level(logging.WARNING, logger="companion"):
+            for _ in range(50):
+                bot._log_operational("conflict", "[conflict] %s", "two pollers")
+            bot._throttle_state["conflict"][0] = time.time() - 61   # window elapsed
+            bot._log_operational("conflict", "[conflict] %s", "two pollers")
+        msgs = [r.getMessage() for r in caplog.records if "[conflict]" in r.getMessage()]
+        assert len(msgs) == 2
+        assert "+49 more" in msgs[1], msgs[1]
+
+    def test_zero_disables_the_throttle(self, caplog):
+        """The kill switch invariant #16 requires — every occurrence logs."""
+        import logging
+        bot._ERROR_LOG_THROTTLE_S = 0
+        with caplog.at_level(logging.WARNING, logger="companion"):
+            for _ in range(5):
+                bot._log_operational("conflict", "[conflict] %s", "two pollers")
+        assert len([r for r in caplog.records if "[conflict]" in r.getMessage()]) == 5
+
+    def test_separate_keys_do_not_throttle_each_other(self, caplog):
+        import logging
+        bot._ERROR_LOG_THROTTLE_S = 60
+        with caplog.at_level(logging.WARNING, logger="companion"):
+            bot._log_operational("conflict", "[conflict] %s", "x")
+            bot._log_operational("forbidden", "[forbidden] %s", "y")
+        got = [r.getMessage() for r in caplog.records]
+        assert any("[conflict]" in m for m in got) and any("[forbidden]" in m for m in got)
+
+    def test_unhandled_tracebacks_are_never_throttled(self, caplog):
+        """Each unhandled exception may differ and the traceback IS the evidence, so the
+        crash path must never collapse. Driven through on_error rather than read out of
+        its source: a source grep proves the call is absent, not that 500 crashes produce
+        500 tracebacks."""
+        import logging
+        bot._ERROR_LOG_THROTTLE_S = 60
+        saved = {k: list(v) for k, v in bot._error_counts.items()}
+        bot._error_counts.clear()
+        try:
+            with caplog.at_level(logging.ERROR, logger="companion"):
+                for _ in range(20):
+                    asyncio.run(bot.on_error(
+                        None, SimpleNamespace(error=ValueError("same defect"), bot=None)))
+            assert len([r for r in caplog.records
+                        if "[unhandled]" in r.getMessage()]) == 20
+        finally:
+            bot._error_counts.clear(); bot._error_counts.update(saved)
+
+
 class TestErrorRetentionIsLabelledHonestly:
     """v2026-08-10.11: jules reported `Errors (total): 415` beside `Uptime: 0.0h`, and
     that number was none of the three things the label implied. The owner's own breakdown
