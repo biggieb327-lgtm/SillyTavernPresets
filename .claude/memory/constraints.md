@@ -771,6 +771,44 @@ the same property, pre-existing and out of scope here; if a monkeypatch-based te
 ever written against either of them expecting isolation, it will fail the same silent
 way, which is worth knowing before writing one, not a debt to pay down now.
 
+### C21 — Output engineered to be unfalsifiable is not safe output, it is empty output
+**seen: 2** (2026-08-10 ×2 — bonnie's atlas, then cass's)
+Rewrote `bonnie/atlas.txt` and later `cass/atlas.txt` after a TomTom sweep found their
+entries pointed at places that don't exist. For the slots where a search returned nothing
+usable I left the entry describing a place without naming one — "the bar off Pike she's
+been going to since grad school", "the slough where the ducks are extremely bold" — and
+wrote the reasoning into both header comments as a policy: *a generic landmark can never
+be factually wrong.* That sentence is true and it is beside the point. The atlas is
+injected into every prompt as the places she knows and is drawn from for selfie
+backgrounds; an entry with no name gives the model nothing to be concrete about, so the
+unnamed version fails at the file's actual job while scoring perfectly on the only
+property I had chosen to measure. The owner rejected it in one line — "let's not use
+places that don't come back with an actual place, replace them with actual places that
+return results and they can be equivalent substitutes" — and every one of the fifteen
+slots then returned a real result on the first or second search. The searches I had
+called exhausted were four queries deep, not exhausted. Worse, I had already been told
+once, on bonnie, and shipped the same shape again on cass with the defence copied
+forward into the new header.
+
+**Constraint:** when a search or check comes back empty, do not fall back to an output
+whose correctness cannot be checked. Name what the unfindable thing was *for*, and search
+for that function instead — a bar off Pike is `BAR` biased to E Pike St, a flat trail is
+a `TRAIL_SYSTEM` within driving distance. If the substitute genuinely cannot be found,
+say so to the owner as a gap rather than filling the slot with something immune to being
+wrong. **And never write the fallback up as a policy in a header comment** — that is how
+one judgement call became the default for the next file.
+
+**Graduated → `tools/atlas_suggest.py` and the two header comments.** The mechanism
+already existed and I did not reach for it: `atlas_suggest.py` proposes real nearby places
+*by kind*, which is exactly the function-first search this constraint asks for, and it
+was written earlier the same day. Both atlas headers now record which entries are unnamed
+and why each one is unfindable in principle (her own apartment, its mailbox, its parking
+lot, its fire escape, a friend's house — addresses, not POIs) instead of defending
+unnamed entries as a general policy. No scanner can see this: `atlas_audit.py`'s
+`looks_like_a_named_place` deliberately skips descriptive entries, which is correct for
+the five that must stay descriptive and is precisely why it cannot flag the ones that
+shouldn't.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
