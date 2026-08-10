@@ -53,6 +53,52 @@ The prompt line distinguishes all three states rather than two: `closed now` mea
 send them there, `open until` is a closing time she can mention, and a place with neither is
 one we have no hours for — recommendable, just not as "open".
 
+### `/code-review` findings — four fixed, one open and it matters
+
+- **An always-open POI was given an invented closing time.** `nextSevenDays` returns a 24/7
+  place as ONE range spanning the week, and printing its end hour rendered "open until
+  00:00" for somewhere that never closes. A clock time is now only printed when the range
+  ends on our date; otherwise "open now".
+- **The date gate does not make this timezone-correct, and the docstring said it did.**
+  Calendar dates coincide across most zones for most of the day, so a New York POI seen from
+  a Los Angeles instance passes the gate and can be told "open until 21:00" at 22:00 New
+  York time. The gate only catches a payload with *nothing* for our date. The docstring now
+  says exactly that; the residual error is bounded to a user who has shared a pin in another
+  timezone. `timeZone=iana` is the real fix and is untested against raw REST.
+- **`FOOD_SUGGESTIONS` never checked location freshness** — `MAP_INTENT` beside it always
+  has. Harmless while it only listed names; not harmless once authoritative open/closed
+  claims ride along, since a weeks-old pin would attach them to restaurants in a city they
+  have left. Now gated on `_fresh_location`, so a stale pin falls through to the
+  share-a-pin nudge. **This changes existing `FOOD_SUGGESTIONS` behavior**, deliberately.
+- **The hours legend was appended unconditionally**, so `FOOD_OPEN_HOURS=0` still shipped
+  prompt text describing markers that could never appear. Now only when one is present.
+
+**Open, and it may undercut the feature's main case.** "closed now" is only reachable while
+the payload still carries a range dated today. The observation that prompted this release's
+redesign — the first real response's earliest date was *tomorrow* — is equally consistent
+with TomTom **dropping elapsed ranges**. If it does, then at 23:00 with the kitchen shut at
+21:00 there is no range for today, the gate fires, and the result is `""` rather than
+"closed now" — exactly the case the feature was built for. The tests cannot tell: they use
+synthetic payloads that retain today's elapsed range.
+
+**The check, and it must run in the evening** (host: VPS, as root — before dawn or midday it
+proves nothing, because the elapsed-range question only exists once ranges have elapsed):
+
+```bash
+KEY=$(grep -oP '^TOMTOM_API_KEY=\K.*' /opt/telegram-bots/priya/.env)
+curl -sS "https://api.tomtom.com/search/2/search/restaurant.json?key=$KEY&lat=47.6062&lon=-122.3321&radius=2000&limit=3&openingHours=nextSevenDays" \
+  | python3 -c "import json,sys;[print(f['poi']['name'], f.get('openingHours',{}).get('timeRanges',[{}])[0].get('startTime')) for f in json.load(sys.stdin)['results']]"
+```
+
+If the first `startTime` for a place that opened this morning still shows **today's** date,
+"closed now" works as shipped. If they have all rolled to tomorrow, the closed branch is
+dead and this needs a different approach — most likely asking for a wider window and
+reconstructing today from it.
+
+Shipping ahead of that answer is deliberate: the failure mode is a *missing* hint, never a
+wrong one. "open until" works either way, and a place with no marker is explicitly not to be
+claimed open.
+
 Kill switch `FOOD_OPEN_HOURS=0`. Closes ROADMAP 3.18 and the `/food` "open now" follow-up
 parked in 3.5 since v2026-07-11.13.
 

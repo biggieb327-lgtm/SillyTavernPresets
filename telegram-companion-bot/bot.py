@@ -11334,7 +11334,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # (bot-code-invariants #3); the TomTom fetch is off-loop via to_thread.
         if FOOD_SUGGESTIONS and TOMTOM_ENABLED and _is_food_query(user_message):
             _floc = user_location.get(chat_id)
-            if _floc:
+            # Freshness now matters more than it did: this path attaches authoritative
+            # open/closed claims, and a weeks-old pin would attach them to restaurants in a
+            # city they have left. MAP_INTENT below has always gated on this; FOOD_SUGGESTIONS
+            # never did, and a stale pin now falls through to the share-a-pin nudge instead.
+            if _fresh_location(_floc):
                 try:
                     _fres = await asyncio.to_thread(
                         _fetch_tomtom_search, "restaurant", _floc["lat"], _floc["lon"], 5000,
@@ -11343,14 +11347,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _fres = []
                 _brief = _restaurants_brief(_fres)
                 if _brief:
+                    # The legend only earns its tokens when a marker actually appears —
+                    # under FOOD_OPEN_HOURS=0, or where TomTom has no hours for anywhere
+                    # nearby, it would describe markers that cannot occur.
+                    _legend = ("\nWhere a place says 'closed now', don't send them there; "
+                               "'open until' is a closing time you can mention. A place with "
+                               "neither is one you have no hours for — recommend it if it "
+                               "fits, just don't claim it's open."
+                               if ("closed now" in _brief or "open until" in _brief
+                                   or "open now" in _brief) else "")
                     content_for_model += (
                         "\n[Real restaurants near them right now — if you recommend food, use "
                         "ONLY these, in your own voice; do NOT invent places or name ones not "
-                        f"in this list:\n{_brief}\n"
-                        "Where a place says 'closed now', don't send them there; 'open until' "
-                        "is a closing time you can mention. A place with neither is one you "
-                        "have no hours for — recommend it if it fits, just don't claim it's "
-                        "open.]"
+                        f"in this list:\n{_brief}{_legend}\n]"
                     )
             else:
                 content_for_model += (
@@ -12981,12 +12990,19 @@ def _poi_hours_note(poi, now=None) -> str:
     earliest date of tomorrow, so the assumption was dropped before it shipped.
 
     The gate that replaces it: at least one range must fall on the instance's local date.
-    Times come back in the POI's local time and the bot only knows its own TZ, so when the
-    user shares a location in another timezone there is usually no range on our date and
-    this returns '' rather than a confidently wrong verdict. It also returns '' for a POI
-    whose payload simply starts tomorrow — losing a hint beats inventing one. Within a
-    matching date the comparison is ordinary: 'closed now' after the day's last range is a
-    real, useful answer, and the common case (user in her city) gets it."""
+
+    **What that gate does and does not do (C8 — say what the reading measures).** It catches
+    a payload with nothing for our date at all: a POI whose hours start tomorrow, or a
+    timezone far enough out that the calendar dates disagree. It does NOT make this
+    timezone-correct. Calendar dates coincide across most zones for most of the day, so a
+    New York POI viewed from a Los Angeles instance passes the gate and can be told "open
+    until 21:00" at 22:00 New York time. Hours are POI-local, the bot knows only its own TZ,
+    and nothing here closes that gap — `timeZone=iana` is the real fix and returned nothing
+    when tested through the MCP connector (untested against raw REST).
+
+    The residual error is bounded to a user who has shared a pin in another timezone, which
+    is the travelling case; in the common one (user in her city) the comparison is ordinary
+    and 'closed now' after the day's last range is a real, useful answer."""
     ranges = _poi_hour_ranges(poi)
     if not ranges:
         return ""
@@ -12998,6 +13014,12 @@ def _poi_hours_note(poi, now=None) -> str:
         return ""
     for s, e in ranges:
         if s <= now <= e:
+            # A clock time only means something if the range ends today. `nextSevenDays`
+            # returns an always-open POI as ONE range spanning the week, and printing its
+            # end hour invents a closing time ("open until 00:00") for somewhere that
+            # never closes.
+            if e.date() != now.date():
+                return "open now"
             return f"open until {e.hour:02d}:{e.minute:02d}"
     return "closed now"
 

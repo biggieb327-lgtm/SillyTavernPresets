@@ -9374,3 +9374,22 @@ class TestOpeningHoursParamIsOptIn:
         bot.FOOD_OPEN_HOURS = False
         bot._fetch_tomtom_search("restaurant", 47.6, -122.3, 5000, True)
         assert "openingHours" not in self.seen[0]
+
+
+class TestHoursNoteCodeReviewFixes:
+    """Defects /code-review found on v2026-08-10.1 before it merged."""
+
+    def test_an_always_open_poi_gets_no_invented_closing_time(self):
+        """nextSevenDays returns 24/7 places as ONE week-long range; printing its end hour
+        claimed 'open until 00:00' for somewhere that never closes."""
+        poi = TestPoiHoursNote._poi(("2026-08-10", 0, 0, "2026-08-17", 0, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 9, 0)) == "open now"
+
+    def test_a_same_day_range_still_reports_its_closing_time(self):
+        poi = TestPoiHoursNote._poi(("2026-08-10", 7, 0, "2026-08-10", 21, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 10, 9, 0)) == "open until 21:00"
+
+    def test_a_midnight_crossing_range_keeps_its_closing_time(self):
+        """e.date() is today here, so the clock time is meaningful and must survive."""
+        poi = TestPoiHoursNote._poi(("2026-08-10", 18, 0, "2026-08-11", 2, 0))
+        assert bot._poi_hours_note(poi, datetime(2026, 8, 11, 0, 30)) == "open until 02:00"
