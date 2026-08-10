@@ -743,9 +743,12 @@ what cost two releases in August.
 ## Track 4 — Audit backlog & memory integrity (from AUDIT-2026-07-10.md)
 
 The 2026-07-10 audit (external Deepseek pass + verification + two user-observed bugs)
-shipped its confirmed fixes as v2026-07-10.2. What remains, triaged below — and specced
-in full, release-by-release, in **`IMPROVEMENTS_PLAN.md`** (self-contained handoff for
-whichever agent implements it):
+shipped its confirmed fixes as v2026-07-10.2. **Track 4 is complete as of 2026-08-10** —
+4.1 through 4.4 all shipped, the last piece being 4.4's per-instance `.env` rollout. Kept
+here rather than deleted because the "Rejected or already covered" section below is still
+load-bearing: it records claims already ruled invalid, and a future audit that re-raises
+them should find the reasoning rather than re-litigate it. Specs are in
+**`IMPROVEMENTS_PLAN.md`**:
 
 ### 4.1 ~~Memory auditor~~ ✅ (shipped as R1, v2026-07-11.1)
 - Source-attached memories (`memory_meta.json`), quote grounding, confidence + review
@@ -766,7 +769,7 @@ whichever agent implements it):
 *(R4 prompt hygiene, R5 UX, and R6 evolution experiments from the same plan shipped as
 v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
-### 4.4 ~~Retune `MEMORY_TOKEN_BUDGET` in calibrated units~~ ✅ (code shipped 2026-08-01, per-instance `.env` rollout pending)
+### 4.4 ~~Retune `MEMORY_TOKEN_BUDGET` in calibrated units~~ ✅ (code 2026-08-01; `.env` rollout completed 2026-08-10 — item fully closed)
 - **Context:** v2026-07-26.2 made reported token counts real (provider `usage`, plus a
   calibration ratio for what can only be estimated). `MEMORY_TOKEN_BUDGET` was
   deliberately left on the raw `len//4` unit.
@@ -792,10 +795,11 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   "absent" from "set to empty" — its `|| echo` fallback tested `cut`'s exit status rather
   than `grep`'s. Re-run with the test on the grep itself. Noted because the blank output
   looked like an answer.)*
-- **Not yet done:** the multiply half — the seven one-line `.env` edits above, plus a
-  restart per instance. Until each lands, that instance runs on the shared in-code default
-  (300, now calibrated) rather than its own prior effective budget. Given the ratios
-  cluster at 0.90-0.93 that is close, but it is not exact.
+- **Done 2026-08-10 (owner-run):** all seven `.env` files now carry their own multiplied
+  value — nora 276 · bonnie 273 · cass 273 · emily 270 · priya 276 · jules 279 ·
+  marcus 273 — each backed up as `.env.bak.2026-08-10`, every instance restarted. No
+  instance runs on the shared in-code default any more, so the item is closed rather than
+  approximately closed. **This was the last open piece of Track 4.**
   Until that `.env` edit lands per instance, that instance is quietly running on the
   shared in-code default (also 300, now calibrated) rather than its own prior effective
   budget — close, given how tight the ratios are, but not exact.
