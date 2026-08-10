@@ -9717,15 +9717,26 @@ class TestPlaceAnchorsOnHer:
 
 
 class TestPlaceResultsShowDistance:
-    def test_results_are_distance_sorted_and_labelled(self):
+    def test_results_are_labelled_with_distance(self):
         results = [
-            {"poi": {"name": "Castner Range"}, "dist": 2_400_000, "address": {}},
             {"poi": {"name": "Boulevard Park"}, "dist": 1200, "address": {}},
+            {"poi": {"name": "Castner Range"}, "dist": 2_400_000, "address": {}},
         ]
         out = bot._format_place_results(results)
-        assert out.index("Boulevard Park") < out.index("Castner Range")
         # The defect: nothing in the reply revealed that result 2 was a thousand miles off.
         assert "·" in out.split("Castner Range")[1].split("\n")[0]
+
+    def test_relevance_order_is_preserved_not_resorted(self):
+        """/nearby coffee wants the closest; /place Mount Baker wants the mountain.
+        Re-ranking five results by distance and keeping three drops the exact match in
+        favour of a nearer theatre and a nearer street."""
+        results = [
+            {"poi": {"name": "Mount Baker"}, "dist": 90_000, "address": {}},
+            {"poi": {"name": "Mount Baker Theatre"}, "dist": 800, "address": {}},
+            {"poi": {"name": "Mount Baker Apartments"}, "dist": 900, "address": {}},
+        ]
+        out = bot._format_place_results(results)
+        assert out.splitlines()[0].startswith("📍 Mount Baker ·"), out.splitlines()[0]
 
     def test_an_unanchored_search_still_renders(self):
         results = [{"poi": {"name": "Boulevard Park"},
@@ -9748,3 +9759,61 @@ class TestSelfiePreservesWornFaceItems:
         rule = bot._SELFIE_PRESERVE_RULE.lower()
         for trait in ("bindi", "tamil", "septum", "freckles", "tattoo"):
             assert trait not in rule, trait
+
+
+class TestPlaceCmdRuns:
+    """The diff rewrote place_cmd's control flow and no test called it — the exact gap the
+    delivery gate was built for after the /features ValueError shipped past four releases."""
+
+    UID = 8802
+
+    def setup_method(self):
+        self._saved = (bot.TOMTOM_ENABLED, bot.PLACE_ANCHOR_HER, bot.WEATHER_LAT,
+                       bot.WEATHER_LON, bot.WEATHER_LOCATION)
+        bot.TOMTOM_ENABLED = True
+        bot.PLACE_ANCHOR_HER = True
+        bot.WEATHER_LAT, bot.WEATHER_LON = "48.7519", "-122.4787"
+        bot.WEATHER_LOCATION = "Bellingham"
+        bot.ALLOWED_USERS.add(self.UID)
+        bot.user_location.pop(self.UID, None)
+
+    def teardown_method(self):
+        (bot.TOMTOM_ENABLED, bot.PLACE_ANCHOR_HER, bot.WEATHER_LAT,
+         bot.WEATHER_LON, bot.WEATHER_LOCATION) = self._saved
+        bot.ALLOWED_USERS.discard(self.UID)
+
+    def _run(self, monkeypatch, args, results=None, raises=None):
+        seen = {}
+
+        def _fetch(q, lat=None, lon=None, radius=None, with_hours=False):
+            seen["args"] = (q, lat, lon, radius)
+            if raises:
+                raise raises
+            return results or []
+
+        monkeypatch.setattr(bot, "_fetch_tomtom_search", _fetch)
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.place_cmd(u, _cmd_ctx(*args)))
+        return m.sent, seen
+
+    def test_it_answers_and_anchors_on_her_city(self, monkeypatch):
+        sent, seen = self._run(monkeypatch, ["Boulevard", "Park"],
+                               [{"poi": {"name": "Boulevard Park"}, "dist": 1200,
+                                 "address": {"freeformAddress": "Boulevard Park, WA"}}])
+        assert sent and "Boulevard Park" in sent[0]
+        assert "near Bellingham" in sent[0]
+        q, lat, lon, radius = seen["args"]
+        assert q == "Boulevard Park" and round(lat, 3) == 48.752
+        assert radius is None, "a radius would filter, not bias"
+
+    def test_no_args_explains_itself(self, monkeypatch):
+        sent, _ = self._run(monkeypatch, [])
+        assert "Usage" in sent[0]
+
+    def test_a_tomtom_failure_is_reported_not_raised(self, monkeypatch):
+        sent, _ = self._run(monkeypatch, ["x"], raises=bot._TomTomError("HTTP 500"))
+        assert "lookup failed" in sent[0].lower()
+
+    def test_no_matches_says_so(self, monkeypatch):
+        sent, _ = self._run(monkeypatch, ["nowhere"], [])
+        assert "No matches found" in sent[0]

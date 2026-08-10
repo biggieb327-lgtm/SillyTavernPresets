@@ -2576,9 +2576,6 @@ LOCATION_PLACE = os.getenv("LOCATION_PLACE", "1").lower() not in ("0", "false", 
 # /place searches around HER city when the user has no fresh pin shared. Unset = active,
 # 0 = the pre-v2026-08-10.3 behavior (user's pin only, and a nationwide search without one).
 PLACE_ANCHOR_HER = os.getenv("PLACE_ANCHOR_HER", "1").lower() not in ("0", "false", "no", "off")
-# Metres. Wider than /nearby's 3km because /place looks up named places rather than
-# amenities; a miss widens the search and says so rather than silently going national.
-PLACE_RADIUS_M = _env_int("PLACE_RADIUS_M", "50000")
 # Ask TomTom for opening hours on the food paths and mark each place open/closed, so she
 # stops recommending somewhere that shut at nine. Unset = active, 0 = off.
 FOOD_OPEN_HOURS = os.getenv("FOOD_OPEN_HOURS", "1").lower() not in ("0", "false", "no", "off")
@@ -12932,13 +12929,16 @@ def _format_route(route: dict, mode: str) -> str:
 def _format_place_results(results: list, limit: int = 3) -> str:
     """TomTom Search native 'results' -> readable list. Total/defensive.
 
-    Distance-sorted and distance-labelled, like _format_nearby_results. Without it the
-    reply listed a Nevada and a Texas result under a Washington one with nothing to
-    distinguish them but an address line you had to read closely (owner-reported
+    Distance-LABELLED but deliberately NOT distance-sorted, which is where this differs
+    from _format_nearby_results. `/nearby coffee` wants the closest; `/place Mount Baker`
+    wants the mountain, and re-ranking five results by distance and then keeping three can
+    push the exact match out entirely in favour of a nearer theatre and a nearer street.
+    TomTom's relevance order is the right order for a named lookup; the distance is what
+    was missing — the reply had listed a Nevada and a Texas result under a Washington one
+    with nothing to tell them apart but an address you had to read closely (owner-reported
     2026-08-10). `dist` is absent on an unanchored search, and then this degrades to the
     old name/address rendering."""
     rows = [r for r in (results or []) if isinstance(r, dict)]
-    rows.sort(key=lambda r: r.get("dist") if isinstance(r.get("dist"), (int, float)) else 9e9)
     out = []
     for r in rows[:limit]:
         poi = r.get("poi") or {}
@@ -13261,16 +13261,25 @@ def _place_anchor(chat_id):
     is about her world anyway.
 
     Her-first, not her-only: a pin shared in the last few hours is the user standing
-    somewhere specific and asking about it, which beats a static home every time."""
+    somewhere specific and asking about it, which beats a static home every time.
+
+    This BIASES the search; it does not filter it. An earlier draft passed a 50km radius,
+    which TomTom applies as a hard cut — so a handful of poor local fuzzy matches would
+    suppress the correct distant one with no signal at all. Bias plus a visible distance on
+    every line gets the local answer ranked first without ever hiding the right one."""
     loc = user_location.get(chat_id)
+    if not PLACE_ANCHOR_HER:
+        # Exactly the pre-v2026-08-10.3 behavior: the user's pin at ANY age, and an
+        # unanchored search without one. A kill switch that restores something else is not
+        # a kill switch.
+        return (loc["lat"], loc["lon"], "your location") if loc else (None, None, "")
     if _fresh_location(loc):
         return loc["lat"], loc["lon"], "your location"
-    if PLACE_ANCHOR_HER:
-        try:
-            return float(WEATHER_LAT), float(WEATHER_LON), WEATHER_LOCATION
-        except (TypeError, ValueError):
-            log.warning("[maps] WEATHER_LAT/WEATHER_LON unparseable; /place falls back "
-                        "to an unanchored search")
+    try:
+        return float(WEATHER_LAT), float(WEATHER_LON), WEATHER_LOCATION
+    except (TypeError, ValueError):
+        log.warning("[maps] WEATHER_LAT/WEATHER_LON unparseable; /place falls back "
+                    "to an unanchored search")
     return None, None, ""
 
 
@@ -13549,20 +13558,12 @@ async def place_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lat, lon, whose = _place_anchor(update.effective_chat.id)
     try:
-        results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon,
-                                          PLACE_RADIUS_M if lat is not None else None)
-        widened = False
-        if not results and lat is not None:
-            # Nothing within the radius. Widening is fine; doing it silently is not —
-            # an unannounced nationwide result set is the whole defect being fixed here.
-            results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
-            widened = True
+        # No radius: biased, never filtered, and one request. See _place_anchor.
+        results = await asyncio.to_thread(_fetch_tomtom_search, query, lat, lon, None)
     except _TomTomError as e:
         await update.message.reply_text(f"🔎 Maps lookup failed: {e}. Try again in a moment.")
         return
     head = f"🔎 {query}" + (f" — near {whose}" if whose else "")
-    if widened:
-        head += f"\n(nothing within {PLACE_RADIUS_M // 1000}km, so this is a wider search)"
     await update.message.reply_text(f"{head}\n\n{_format_place_results(results)}")
 
 

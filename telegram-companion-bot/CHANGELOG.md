@@ -19,17 +19,31 @@ Mead Recreation Area (Henderson NV) and Castner Range National Monument (El Paso
 `WEATHER_LAT`/`WEATHER_LON`, and every other TomTom path here is about her world. So
 `_place_anchor` is **her-first**: her city by default, overridden by a pin shared in the
 last 4 hours — that is the user standing somewhere specific and asking about it, which
-beats a static home. A stale pin no longer wins; `nearby_cmd` three lines up had always
-gated on freshness and `place_cmd` never did.
+beats a static home. A stale pin no longer wins.
 
-- **A radius, and an honest widening.** `PLACE_RADIUS_M` (50km, wider than `/nearby`'s 3km
-  because `/place` looks up named places rather than amenities). Nothing in range widens the
-  search **and says so** — an unannounced nationwide result set is the entire defect.
-- **Distance-sorted and distance-labelled**, matching `_format_nearby_results`. The reply
-  had listed a Nevada and a Texas result under a Washington one with nothing to tell them
-  apart but an address line you had to read closely.
+- **Distance-labelled**, so a result a thousand miles away says so. The reply had listed a
+  Nevada and a Texas result under a Washington one with nothing to tell them apart but an
+  address line you had to read closely.
+- **Deliberately NOT distance-sorted**, which is where `/place` differs from `/nearby`:
+  `/nearby coffee` wants the closest, `/place Mount Baker` wants the mountain.
 
-Kill switch `PLACE_ANCHOR_HER=0` restores the pin-only behavior.
+Kill switch `PLACE_ANCHOR_HER=0` restores the old behavior exactly — the user's pin at any
+age, unanchored without one.
+
+**Three things `/code-review` caught, all in the first draft of this release, all removed
+rather than patched.** The draft passed a 50km radius and widened on an empty result set.
+TomTom applies a radius as a **hard cut**, so any handful of poor local fuzzy matches would
+have suppressed the correct distant one with no widening and no signal — `/place Boulevard
+Park` from a Seattle-anchored instance would return Seattle junk. The draft also re-sorted
+all five results by distance before truncating to three, which drops the exact match for a
+nearer theatre and a nearer street. And the second request doubled the worst-case blocking
+window on a bot with no `concurrent_updates`. Anchoring **biases** the search and the
+distance label makes a far result visible; that is the whole job, in one request.
+
+**A false claim in this entry's first draft, corrected:** it stated `nearby_cmd` "had always
+gated on freshness". It does not — `_fresh_location` has exactly three callers
+(`FOOD_SUGGESTIONS`, `MAP_INTENT`, `_place_anchor`) and `/nearby` is not among them. `/nearby`
+still accepts a pin of any age. The asymmetry is real and now recorded the right way round.
 
 **Two parked items ride along, which is what they were parked for.**
 
