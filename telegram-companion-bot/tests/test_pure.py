@@ -9974,3 +9974,67 @@ class TestDiagGarminSubFlagsFollowTheFeed:
         bot.RHR_ALERTS = False
         line = [l for l in self._diag().splitlines() if "garmin" in l][0]
         assert line.count("✅") == 3 and "— resting-HR" in line, line
+
+
+class TestWeatherFailureBacksOff:
+    """v2026-08-10.7: a failed fetch updated neither `text` nor `ts`, so the success guard
+    stayed false and EVERY subsequent ensure_weather() retried — 13 call sites, on every
+    message, selfie and job. One 429 from open-meteo became a hot loop that sustained the
+    429, and all seven instances share the VPS IP (observed on jules, 2026-08-10)."""
+
+    def setup_method(self):
+        self._saved = dict(bot._weather_cache)
+        self._retry = bot.WEATHER_RETRY_S
+        bot._weather_cache.update({"text": None, "ts": 0.0, "fail_ts": 0.0})
+
+    def teardown_method(self):
+        bot._weather_cache.clear()
+        bot._weather_cache.update(self._saved)
+        bot.WEATHER_RETRY_S = self._retry
+
+    def _run(self, monkeypatch, outcomes):
+        """Drive ensure_weather once per outcome; returns how many fetches happened."""
+        calls = []
+
+        def _fetch():
+            calls.append(1)
+            o = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+            if isinstance(o, Exception):
+                raise o
+            return o
+
+        monkeypatch.setattr(bot, "_fetch_weather", _fetch)
+        for _ in outcomes:
+            asyncio.run(bot.ensure_weather())
+        return len(calls)
+
+    def test_a_failure_is_not_retried_on_every_call(self, monkeypatch):
+        boom = RuntimeError("429 Too Many Requests")
+        assert self._run(monkeypatch, [boom] * 5) == 1, "hot loop against the weather API"
+
+    def test_the_backoff_expires(self, monkeypatch):
+        boom = RuntimeError("429")
+        self._run(monkeypatch, [boom])
+        bot._weather_cache["fail_ts"] = time.time() - (bot.WEATHER_RETRY_S + 1)
+        assert self._run(monkeypatch, ["70°F, clear"]) == 1
+        assert bot._weather_cache["text"] == "70°F, clear"
+
+    def test_success_clears_the_failure_marker(self, monkeypatch):
+        self._run(monkeypatch, ["70°F, clear"])
+        assert bot._weather_cache["fail_ts"] == 0.0
+
+    def test_a_fresh_success_still_short_circuits(self, monkeypatch):
+        assert self._run(monkeypatch, ["70°F, clear"] * 4) == 1
+
+    def test_a_stale_cache_still_refreshes_after_the_ttl(self, monkeypatch):
+        self._run(monkeypatch, ["70°F, clear"])
+        bot._weather_cache["ts"] = time.time() - (bot.WEATHER_TTL + 1)
+        assert self._run(monkeypatch, ["55°F, rain"]) == 1
+        assert bot._weather_cache["text"] == "55°F, rain"
+
+    def test_a_failure_does_not_discard_good_cached_weather(self, monkeypatch):
+        """Stale weather beats none: the old reading stays until one succeeds."""
+        self._run(monkeypatch, ["70°F, clear"])
+        bot._weather_cache["ts"] = time.time() - (bot.WEATHER_TTL + 1)
+        self._run(monkeypatch, [RuntimeError("429")])
+        assert bot._weather_cache["text"] == "70°F, clear"

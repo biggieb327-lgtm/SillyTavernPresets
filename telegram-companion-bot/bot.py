@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.6"
+BOT_VERSION = "2026-08-10.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2524,7 +2524,15 @@ WEATHER_CODES = {
     95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail",
 }
 
-_weather_cache = {"text": None, "ts": 0.0}
+_weather_cache = {"text": None, "ts": 0.0, "fail_ts": 0.0}
+# After a failed fetch, wait this long before trying again. Without it a failure is retried
+# on EVERY ensure_weather() call — 13 call sites, on every message, selfie and scheduled
+# job — because the success guard tests `text` and `ts`, neither of which a failure
+# updates. That turns one 429 from open-meteo into a hot loop that sustains the 429, and
+# all seven instances share the VPS's IP, so one bot in that state can rate-limit the
+# fleet (observed on jules, 2026-08-10). Much shorter than WEATHER_TTL: a transient blip
+# should cost minutes of stale weather, not an hour.
+WEATHER_RETRY_S = _env_int("WEATHER_RETRY_S", "300")
 WEATHER_TTL = 3600  # refresh live weather at most every hour
 
 # --- WSDOT Traffic (Western Washington) ---
@@ -4271,13 +4279,20 @@ def _fetch_weather() -> str:
 
 async def ensure_weather():
     """Refresh the cached weather string at most every WEATHER_TTL seconds."""
-    if _weather_cache["text"] and time.time() - _weather_cache["ts"] < WEATHER_TTL:
+    now = time.time()
+    if _weather_cache["text"] and now - _weather_cache["ts"] < WEATHER_TTL:
+        return
+    # Back off after a failure. The guard above cannot do this job: it tests `text` and
+    # `ts`, and a failed fetch updates neither, so without this every call retries.
+    if now - (_weather_cache.get("fail_ts") or 0.0) < WEATHER_RETRY_S:
         return
     try:
         _weather_cache["text"] = await asyncio.to_thread(_fetch_weather)
         _weather_cache["ts"] = time.time()
+        _weather_cache["fail_ts"] = 0.0
     except Exception as e:
-        log.warning("[weather] fetch failed: %s", e)
+        _weather_cache["fail_ts"] = time.time()
+        log.warning("[weather] fetch failed (next try in %ds): %s", WEATHER_RETRY_S, e)
 
 
 def _season_and_calendar() -> str:

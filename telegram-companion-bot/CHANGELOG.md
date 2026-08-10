@@ -7,6 +7,32 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.7 — One weather 429 became a hot loop that sustained the 429
+
+**Root cause: `ensure_weather` recorded successes and nothing else.** Its guard is
+`if _weather_cache["text"] and now - _weather_cache["ts"] < WEATHER_TTL`, and a failed fetch
+updated neither field — so after any failure the guard stayed false and **every subsequent
+call retried immediately**. There are 13 `ensure_weather()` call sites: every message, every
+selfie, every scheduled job. A single 429 from open-meteo therefore produced a burst of
+fresh requests, which kept the 429 alive.
+
+**All seven instances share the VPS's IP**, so one bot stuck in that state can rate-limit
+weather for the whole fleet. Observed on jules at 16:00 on 2026-08-10, minutes after her
+coordinates were corrected — the log line carries `latitude=48.7519&longitude=-122.4787`,
+which is how we know the `.env` fix had landed.
+
+**Fix: `fail_ts` and a `WEATHER_RETRY_S` (300s) backoff.** A failure is now remembered, so
+it costs one attempt per five minutes instead of one per call. Success clears the marker.
+Deliberately far shorter than the 1h success TTL — a transient blip should cost minutes of
+stale weather, not an hour — and **good cached weather is never discarded on a failure**: a
+stale reading beats none, and a test pins that.
+
+The old behaviour is the shape a retry loop takes when only the happy path is recorded. The
+success guard could never do this job; it tests the two fields a failure does not touch.
+
+6 tests, the backoff break-tested RED — without it, five failing calls make five requests
+instead of one.
+
 ## v2026-08-10.6 — /diag reported three health monitors running on a bot with no Garmin
 
 **Root cause: `diag_cmd` read `STRESS_ALERTS`/`RHR_ALERTS`/`BB_ALERTS` bare, and those are
