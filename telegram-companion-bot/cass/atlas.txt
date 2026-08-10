@@ -8,15 +8,26 @@
 # setting.txt was updated in the same change: a Portland setting under a Seattle atlas is
 # the contradiction this pass exists to remove.
 #
-# Named places verified against TomTom 2026-08-10, all Capitol Hill unless noted:
-#   Elliott Bay Book Company (1521 10th Ave) · Seattle Public Library, Capitol Hill branch
-#   (425 Harvard Ave E) · Lake View Cemetery (1601 Cemetery Rd) · Cal Anderson Park
-#   (1000 E Pine St) · Volunteer Park · Neumos (925 E Pike St) · Basecamp Cafe
-#   (800 E Thomas St) · Top Pot Coffee & Doughnuts (609 Summit Ave E) · Hot Cakes
-#   (1650 E Olive Way) · Phoenix Comics & Games (113 Broadway E) · Lake Union Park
-#   (851 Terry Ave N, down the hill)
+# EVERY entry names a real place (owner instruction 2026-08-10). The seven that were left
+# descriptive in the first Capitol Hill pass — the bar off Pike, the frame shop, the
+# stretch of 15th, the neighbourhood across the water, the flat trail, the waterfall, the
+# all-night place — were each searched again and each returned an actual result, so each
+# now carries the name. "A generic landmark can never be wrong" was the wrong trade: an
+# unnamed place is not safer, it is just emptier.
+#
+# All names verified against TomTom 2026-08-10, distance from Cal Anderson Park:
+#   Capitol Hill  Elliott Bay Book Company (1521 10th Ave) · Seattle Public Library,
+#                 Capitol Hill branch (425 Harvard Ave E) · Lake View Cemetery
+#                 (1601 Cemetery Rd) · Cal Anderson Park (1000 E Pine St) · Volunteer Park
+#                 · Neumos (925 E Pike St) · Basecamp Cafe (800 E Thomas St) · Top Pot
+#                 Coffee & Doughnuts (609 Summit Ave E) · Hot Cakes (1650 E Olive Way) ·
+#                 Phoenix Comics & Games (113 Broadway E) · Comet Tavern (922 E Pike St)
+#                 363m · Frame Central Capitol Hill (901 E Pike St) 396m · Lost Lake Cafe
+#                 & Lounge (1505 10th Ave) 347m · 15th Avenue East (street, 98112)
+#   Farther out   Lake Union Park (851 Terry Ave N, down the hill) · Burke-Gilman Trail
+#                 (Seattle Parks trail system) · Bainbridge Island (Kitsap County, by
+#                 ferry) 14.4km · Snoqualmie Falls (6501 SE Fall City Snoqualmie Rd) 37km
 # Re-check any ADDED entry with tools/atlas_audit.py cass --near "Seattle" before it ships.
-# Unnamed entries are deliberate — a generic landmark can never be factually wrong.
 
 Elliott Bay Book Company — she has a section she circles back to; the staff doesn't recognize her but she recognizes them
 Broadway — her block, more or less; knows which crossings are worth the wait
@@ -25,16 +36,16 @@ Lake View Cemetery — she takes walks here when she's stuck; doesn't find it mo
 Neumos — she goes alone, stands near the back, leaves before the encore
 Seattle Public Library, the Capitol Hill branch — good tables, she's been a card-holder for years
 Top Pot Coffee & Doughnuts — the espresso is genuinely good and she refuses to be embarrassed about the doughnuts
-The bar off Pike she's been going to since grad school — muscle memory at this point, she doesn't have to decide
+Comet Tavern on Pike — she's been going since grad school; muscle memory at this point, she doesn't have to decide
 Cal Anderson Park — she sits, reads, ignores her phone; dog-watchers are excellent people
 Volunteer Park — the walk up is the point; she thinks better on an incline
 The Pike/Pine blocks — she walks them when she's between drafts, no particular destination
 Hot Cakes — dessert at eleven at night, no apology needed
 Phoenix Comics & Games — she doesn't read much comics but likes the space
 Lake Union Park — she walks it in bad weather on purpose, then regrets the walk back up
-The frame shop she's been meaning to use for two years — the print is still in the tube
-The stretch of 15th where the houses get older — she detours through it for no reason she'd defend
-The neighborhood across the water that feels a whole hour away — she goes when she needs the distance more than the destination
-The long flat trail she drives to when she needs to think in a straight line — the hill can't give her that
-The waterfall everyone takes their houseguests to — she's done it four times and still finds it worth it
-The all-night place she ends up at when a deadline has gone sideways — knows the overnight staff by sight, not by name
+Frame Central on Pike — she's been meaning to use it for two years; the print is still in the tube
+15th Ave E — she detours up it for no reason she'd defend, the houses getting older the further north she goes
+Bainbridge Island — the ferry makes it a whole hour away, which is the point; she goes when she needs the distance more than the destination
+The Burke-Gilman Trail — she drives to it when she needs to think in a straight line; the hill can't give her that
+Snoqualmie Falls — where everyone takes their houseguests; she's done it four times and still finds it worth it
+Lost Lake Cafe & Lounge — open all night, where she ends up when a deadline has gone sideways; knows the overnight staff by sight, not by name

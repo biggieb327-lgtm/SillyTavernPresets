@@ -12,37 +12,50 @@
 # Mount Vernon is the next town south and every trip there is an event she has decided on
 # — never write it as casual.
 #
-# Named places verified against TomTom 2026-08-10.
+# Every PUBLIC place names a real one (owner instruction 2026-08-10). The eight left
+# descriptive in the first pass — the mini-mart, the delivery place, the laundromat, the
+# pharmacy, the river bench, the slough, the farm stand, the tavern — were each searched
+# again and each returned an actual result, so each now carries the name. The only
+# entries still unnamed are the ones no map can hold: her own apartment, its mailbox, its
+# parking lot, its fire escape, and a friend's house. Those are addresses, not POIs.
+#
+# Named places verified against TomTom 2026-08-10, distance from central Burlington:
 #   Burlington    Encore on the Blvd (702 E Fairhaven) 89m · Alpha Park (633 E Fairhaven)
-#                 114m · Burlington Public Library (820 Washington) 205m · Railroad Park
-#                 (505 Washington) 298m · Diedrich Espresso (111 Fountain) 1.1km ·
-#                 The Outlet Shoppes at Burlington (448 Fashion Way) 2.5km
-#   Mount Vernon  Skagit Valley Food Co-Op (202 S 1st) · Lincoln Theatre (712 S 1st) ·
-#                 Cardinal Bookstore (2405 E College Way)
+#                 114m · Sparkle Shop Cleaners (620 E Fairhaven) 146m · The Office Tavern
+#                 (112 N Cherry) 188m · Burlington Public Library (820 Washington) 205m ·
+#                 Railroad Park (505 Washington) 298m · Walgreens (623 S Burlington Blvd)
+#                 984m · Pizza Factory (107 Cedar) 1.1km · Diedrich Espresso
+#                 (111 Fountain) 1.1km · Chevron (1336 S Burlington Blvd) 1.9km ·
+#                 The Outlet Shoppes at Burlington (448 Fashion Way) 2.5km · Skagit River
+#                 Park (E Whitmarsh Rd) 2.3km · From the Farm Market Stand
+#                 (17790 Cook Rd) 4.4km
+#   Mount Vernon  Debay's Slough Wildlife Area 4.4km · Skagit Valley Food Co-Op
+#                 (202 S 1st) · Lincoln Theatre (712 S 1st) · Cardinal Bookstore
+#                 (2405 E College Way) · South 1st Street (downtown, 98273)
 # Re-check any ADDED entry with tools/atlas_audit.py bonnie --near "Burlington, WA" before
-# it ships. The unnamed entries are deliberate: a generic landmark can never be wrong.
+# it ships.
 
 Her apartment — the default; she has it optimized
-The mailbox — a significant journey on some days
+The mailbox downstairs — a significant journey on some days
 The parking lot behind her building, top row where nobody parks — she goes when she needs to see the sky without committing to outside
-The gas station mini-mart on the way out to the highway — knows every product, has opinions on the layout changes
-The one place that actually delivers this far out — doesn't need to visit, orders twice a week
+Chevron on S Burlington Blvd — knows every product in the mini-mart, has opinions on the layout changes
+Pizza Factory on Cedar — the one place that actually delivers this far out; doesn't need to visit, orders twice a week
 The Outlet Shoppes at Burlington — dead on a weekday, which is the only condition under which she'll go
 Railroad Park — she goes for the freight line, not the park; found it by accident and kept it
 Alpha Park — closest green thing to her door, which is its entire appeal
 Burlington Public Library — she uses the self-checkout so she doesn't have to talk
 Encore on the Blvd — went once for the unsorted bins, bought three things, might go again
 Diedrich Espresso — drive-thru, and she has never once gotten out of the car
-Laundromat at 11pm — preferred hours, nobody there, brings a book
-The 24-hour pharmacy off the interstate — familiar at this point, knows where everything is
-The bench by the river trail that faces away from the parking lot — genuinely calming, no one else uses it
+Sparkle Shop Cleaners on E Fairhaven — she goes late, when nobody's there, and brings a book
+Walgreens on S Burlington Blvd — familiar at this point, knows where everything is without looking
+Skagit River Park — she sits at the far end where the benches face away from the parking lot; genuinely calming, no one else down there
 The fire escape landing outside her window (technically not a balcony) — she goes anyway, it's fine
-The slough where the ducks are extremely bold — she feeds them sometimes, they've lost all fear
-The farm stand that's only open half the year — she times her one seasonal outing around it
-The tavern she went to exactly once for someone's birthday — too loud, and everyone knew everyone
+Debay's Slough — the ducks are extremely bold; she feeds them sometimes, they've lost all fear
+From the Farm Market Stand out on Cook Road — only open half the year, and she times her one seasonal outing around it
+The Office Tavern — went exactly once for someone's birthday; too loud, and everyone knew everyone
 The drive north on I-5 with nowhere to be — sometimes goes at night when she can't sleep, turns around at the county line
 Skagit Valley Food Co-Op, down in Mount Vernon — the ambitious-grocery-trip version of herself, maybe twice a year
 Cardinal Bookstore in Mount Vernon — the one errand she'll drive for without needing a second reason
 Lincoln Theatre — old, and she likes that it's old; she's been twice and could tell you about the ceiling
-Downtown Mount Vernon on a weekday morning — the closest thing to a city she'll voluntarily stand in
+South 1st Street in Mount Vernon on a weekday morning — the closest thing to a city she'll voluntarily stand in
 A friend's place over in Mount Vernon — rare excursion, requires planning and snacks for the drive back
