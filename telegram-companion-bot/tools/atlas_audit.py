@@ -129,6 +129,28 @@ def best_poi(results, query: str):
     return None
 
 
+def best_area(results, query: str):
+    """First non-POI result whose ADDRESS resembles the query, else None.
+
+    Half an atlas is not points of interest. "Old Bellevue (Main Street)" is a real
+    historic district, "Factoria" a neighbourhood, "Ballard Locks" an area as much as a
+    landmark — none of them carry a `poi.name`, so a POI-only audit reported the district
+    as fabricated and invited deleting a perfectly good entry (observed on priya's real
+    atlas, 2026-08-10).
+
+    Runs only after `best_poi` finds nothing, and reuses `name_matches` so it cannot
+    reintroduce the fuzzy-match hole the POI approach was built to close: asked for
+    "Meydenbauer Bay Park", a "Bay Terrace Road" geography still scores 1/3 and is
+    rejected."""
+    for r in results or []:
+        if not isinstance(r, dict) or (r.get("poi") or {}).get("name"):
+            continue
+        addr = (r.get("address") or {}).get("freeformAddress") or ""
+        if addr and name_matches(query, addr):
+            return r
+    return None
+
+
 def verdict(miles, radius: float, failed: bool = False) -> str:
     """One label per entry, so a 20-line report is skimmable.
 
@@ -199,8 +221,13 @@ def audit(bot, instance: str, origin, radius: float, sleep_s: float = _SLEEP_S) 
             rows.append((entry, name, "", "", None, verdict(None, radius, failed=True)))
             continue
         hit = best_poi(results, name)
-        if hit:
+        if hit is None and (hit := best_area(results, name)) is not None:
+            # An area, not a business. Marked so the report does not read as though a
+            # named venue was confirmed.
+            found = ((hit.get("address") or {}).get("freeformAddress") or "") + " [area]"
+        elif hit:
             found = (hit.get("poi") or {}).get("name") or ""
+        if hit:
             town = (hit.get("address") or {}).get("municipality") or ""
             pos = hit.get("position") or {}
             if pos.get("lat") is not None and pos.get("lon") is not None:

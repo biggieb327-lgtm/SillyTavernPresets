@@ -9470,3 +9470,34 @@ class TestAtlasAuditLookupFailures:
         assert "NOT CHECKED" in out
         # The town tally must not imply it covered entries that were never looked up.
         assert "of 2 checked" in out
+
+
+class TestAtlasAuditAreaFallback:
+    """Half an atlas is districts and neighbourhoods, not businesses. A POI-only audit
+    called priya's real "Old Bellevue (Main Street)" fabricated (observed 2026-08-10)."""
+
+    def test_a_district_matches_on_its_address(self):
+        aa = _atlas_audit()
+        results = [{"address": {"freeformAddress": "Old Bellevue, Bellevue, WA"},
+                    "position": {"lat": 47.61, "lon": -122.20}}]
+        assert aa.best_area(results, "Old Bellevue") is not None
+
+    def test_the_area_pass_does_not_reopen_the_fuzzy_hole(self):
+        """The whole reason POI matching came first: a geography named Bay Terrace Road
+        must still lose to a query for Meydenbauer Bay Park."""
+        aa = _atlas_audit()
+        results = [{"address": {"freeformAddress": "Bay Terrace Road, Seattle, WA"}}]
+        assert aa.best_area(results, "Meydenbauer Bay Park") is None
+
+    def test_a_real_poi_is_never_handled_by_the_area_pass(self):
+        aa = _atlas_audit()
+        results = [{"poi": {"name": "Marymoor Park"},
+                    "address": {"freeformAddress": "Marymoor Park, Redmond, WA"}}]
+        assert aa.best_area(results, "Marymoor Park") is None
+        assert aa.best_poi(results, "Marymoor Park") is not None
+
+    def test_an_invented_place_still_fails_both_passes(self):
+        aa = _atlas_audit()
+        results = []
+        assert aa.best_poi(results, "The Gilded Otter") is None
+        assert aa.best_area(results, "The Gilded Otter") is None
