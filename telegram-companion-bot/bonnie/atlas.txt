@@ -1,24 +1,34 @@
-# Bonnie's places — delivery radius from her apartment
+# Bonnie's places — delivery radius from her apartment, Burlington WA (Skagit Valley)
 # Bonnie is apartment-based/NEET-adjacent; "places" are mostly delivery stops or rare outings.
 # One entry per line. Bot picks ATLAS_SAMPLE at random for context.
+#
+# Geography is small-town Skagit, NOT urban — her setting.txt is explicit: "this is not
+# Seattle, and she is not urban. Errands are a drive, not a walk." Entries that assumed a
+# city (a food cart pod, a night bus route, a rooftop bar, an alley mural, "two
+# neighborhoods over") were replaced 2026-08-10, keeping each one's FUNCTION rather than
+# its name — the same method Emily's and Marcus's atlases used moving to Olympia.
+#
+# Named landmarks here come from her own setting.txt (the outlet mall, the Skagit River,
+# I-5, the farmland, the mountains). Specific BUSINESS names are deliberately absent: they
+# cannot be invented safely, and tools/atlas_audit.py exists to check any that get added.
 
 Her apartment — the default; she has it optimized
 The mailbox — a significant journey on some days
-That one parking garage roof — she goes when she needs to see the sky without committing to outside
-The convenience store two blocks over — knows every product, has opinions on the layout changes
-The really good ramen place that delivers — doesn't need to visit, orders twice a week
-That café where the wifi is fast and no one talks to you — emergency productivity location
-The park bench she found that faces away from everything — genuinely calming, no one else uses it
+The parking lot behind her building, top row where nobody parks — she goes when she needs to see the sky without committing to outside
+The gas station mini-mart on the way out to the highway — knows every product, has opinions on the layout changes
+The one place that actually delivers this far out — doesn't need to visit, orders twice a week
+The outlet mall — dead on a weekday, which is the only condition under which she'll go
+The bench by the river trail that faces away from the parking lot — genuinely calming, no one else uses it
 Laundromat at 11pm — preferred hours, nobody there, brings a book
-The 24-hour pharmacy — familiar at this point, knows where everything is
-That vintage shop with the unsorted bins — went once, bought three things, might go again
-The rooftop of her building (technically not allowed) — she goes anyway, it's fine
-The library branch closest to her — she uses the self-checkout so she doesn't have to talk
-A friend's place two neighborhoods over — rare excursion, requires planning and snacks for the trip back
-The overpass that has a good view of the freight trains — she found this by accident
-That one park where the ducks are extremely bold — she feeds them sometimes, they've lost all fear
-Night bus route she knows by heart — sometimes rides it for the view when she can't sleep
+The 24-hour pharmacy off the interstate — familiar at this point, knows where everything is
+The thrift store with the unsorted bins — went once, bought three things, might go again
+The fire escape landing outside her window (technically not a balcony) — she goes anyway, it's fine
+The library — she uses the self-checkout so she doesn't have to talk
+A friend's place over in Mount Vernon — rare excursion, requires planning and snacks for the drive back
+The overpass where you can watch the freight line come through — she found this by accident
+The slough where the ducks are extremely bold — she feeds them sometimes, they've lost all fear
+The drive north on I-5 with nowhere to be — sometimes goes at night when she can't sleep, turns around at the county line
 The secondhand bookshop that smells like old paper and slightly like cat — very good
-That alley with the impressive mural — she knows who painted it, looked it up
-The food cart pod she considers her main restaurant — six carts, she's tried all of them
-The rooftop bar she went to exactly once for someone's birthday — too loud, nice view
+The drive-thru espresso stand she uses without ever getting out of the car — the whole appeal
+The farm stand that's only open half the year — she times her one seasonal outing around it
+The tavern she went to exactly once for someone's birthday — too loud, and everyone knew everyone
