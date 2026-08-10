@@ -6910,9 +6910,14 @@ class TestFeatureDetailAndLocation:
             bot._FEATURES["meme"] = saved
 
     def test_location_is_reported(self):
+        """Widened in v2026-08-10.4, in this class's own spirit: it exists because
+        "location is what drives weather", and the coordinates are the part that actually
+        does. The label alone hid jules fetching Seattle's weather under a Bellingham
+        name for weeks, so the exact-equality assertion was pinning the wrong string."""
         import inspect
         d = bot.gather_audit_data()
-        assert d["location"] == bot.WEATHER_LOCATION
+        assert d["location"].startswith(bot.WEATHER_LOCATION)
+        assert bot.WEATHER_LAT in d["location"] and bot.WEATHER_LON in d["location"]
         assert "location" in inspect.getsource(bot.audit_cmd)
 
 
@@ -9817,3 +9822,54 @@ class TestPlaceCmdRuns:
     def test_no_matches_says_so(self, monkeypatch):
         sent, _ = self._run(monkeypatch, ["nowhere"], [])
         assert "No matches found" in sent[0]
+
+
+class TestWeatherConfigWarning:
+    """v2026-08-10.4. WEATHER_LOCATION is a LABEL the prompt asserts and the selfie prompt
+    stamps on backgrounds; WEATHER_LAT/WEATHER_LON are what the weather API reads. Nothing
+    tied them together, so jules was labelled Bellingham and fetched Seattle's weather —
+    87 miles south — from creation until 2026-08-10. The exact fleet state that day is the
+    test matrix below."""
+
+    LAT, LON = bot._WEATHER_LAT_DEFAULT, bot._WEATHER_LON_DEFAULT
+
+    def test_the_jules_case_warns(self):
+        w = bot._weather_config_warning("Bellingham", self.LAT, self.LON)
+        assert len(w) == 1
+        assert "Bellingham" in w[0] and "Seattle's weather" in w[0]
+
+    def test_defaults_everywhere_are_coherent(self):
+        """nora, cass and priya: nothing set at all. Seattle label, Seattle coordinates —
+        no warning, because nobody claimed to be anywhere else."""
+        assert bot._weather_config_warning("Seattle", self.LAT, self.LON) == []
+
+    def test_both_set_is_trusted(self):
+        """bonnie (Burlington), emily and marcus (Olympia): label and coordinates both
+        set. Whether they AGREE is not checkable here — only that the operator set both."""
+        assert bot._weather_config_warning("Burlington", "48.4759", "-122.3254") == []
+        assert bot._weather_config_warning("Olympia", "47.0379", "-122.9007") == []
+
+    def test_one_coordinate_changed_is_enough_to_count_as_set(self):
+        assert bot._weather_config_warning("Bellingham", "48.7519", self.LON) == []
+
+    def test_the_whole_fleet_of_2026_08_10_produces_exactly_one_warning(self):
+        fleet = {
+            "nora": ("Seattle", self.LAT, self.LON),
+            "bonnie": ("Burlington", "48.4759", "-122.3254"),
+            "cass": ("Seattle", self.LAT, self.LON),
+            "emily": ("Olympia", "47.0379", "-122.9007"),
+            "jules": ("Bellingham", self.LAT, self.LON),
+            "marcus": ("Olympia", "47.0379", "-122.9007"),
+            "priya": ("Seattle", self.LAT, self.LON),
+        }
+        warned = [n for n, cfg in fleet.items() if bot._weather_config_warning(*cfg)]
+        assert warned == ["jules"], warned
+
+
+class TestAuditShowsWeatherCoordinates:
+    def test_the_audit_location_carries_the_coordinates(self, monkeypatch):
+        monkeypatch.setattr(bot, "WEATHER_LOCATION", "Bellingham")
+        monkeypatch.setattr(bot, "WEATHER_LAT", "47.6062")
+        monkeypatch.setattr(bot, "WEATHER_LON", "-122.3321")
+        d = bot.gather_audit_data()
+        assert d["location"] == "Bellingham (47.6062, -122.3321)"

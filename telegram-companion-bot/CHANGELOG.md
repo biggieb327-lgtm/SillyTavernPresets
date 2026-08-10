@@ -7,6 +7,41 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.4 — Jules has been getting Seattle's weather since the day she was created
+
+**Root cause: `WEATHER_LOCATION` is a label and `WEATHER_LAT`/`WEATHER_LON` are the data,
+they default independently, and nothing ever compared them.** Jules's `.env` sets
+`WEATHER_LOCATION=Bellingham` and no coordinates, so they fell back to `47.6062, -122.3321`
+— downtown Seattle, **87 miles south**. Every weather reading she has ever fetched was
+Seattle's, which also drives her selfie clothing, the "it is NOT raining" negative, and the
+warm/cold scene filtering.
+
+**How it finally surfaced, which is the part worth keeping.** Not from weather looking
+wrong — a rainy Puget Sound city standing in for another rainy Puget Sound city is
+invisible. It surfaced because v2026-08-10.3 put **distances** on `/place` results: the
+header said "near Bellingham" and every result was 6–8 miles from Burien. The label and the
+data had disagreed for weeks and the only thing that ever caught it was an unrelated feature
+printing a number that made the anchor visible.
+
+**Fix — make the disagreement impossible to miss, twice over:**
+
+- `_weather_config_warning` fires when `WEATHER_LOCATION` is set away from its default while
+  the coordinates are still at theirs. Joins the existing `_CONFIG_WARNINGS` list that
+  `/audit` already prints, next to the group-config warnings that exist for the same reason.
+- `/audit`'s Location line now carries the coordinates: `Bellingham (47.6062, -122.3321)` is
+  self-evidently wrong at a glance where `Bellingham` alone is not.
+
+**The check is deliberately narrow.** It cannot tell whether coordinates that *are* set
+match their label — that needs a geocode, and geocoding a label is what this release proves
+nobody should rely on. It answers one question: did someone rename the place and forget the
+data? Run against the whole fleet as it stood on 2026-08-10 it returns **exactly one
+instance, jules**, and a test pins that matrix — nora/cass/priya all-default, bonnie
+Burlington with real coordinates, emily and marcus Olympia with real coordinates.
+
+**Not fixed here, because it is not a code bug:** priya's label says Seattle while her
+`setting.txt` and atlas are Bellevue. Her coordinates and label agree, so this check stays
+quiet, correctly — that one is a content/config decision.
+
 ## v2026-08-10.3 — /place searched the whole country because it only knew where YOU were
 
 **Root cause: `/place` anchored on the user's shared pin and had no other idea where to

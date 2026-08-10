@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.3"
+BOT_VERSION = "2026-08-10.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2421,9 +2421,38 @@ def norm_emoji(e: str) -> str:
     return "".join(ch for ch in e if ch != "\ufe0f").strip()  # drop U+FE0F
 
 # --- Setting / live environment (where she lives now, weather, local time) ---
-WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "Seattle")
-WEATHER_LAT = os.getenv("WEATHER_LAT", "47.6062")
-WEATHER_LON = os.getenv("WEATHER_LON", "-122.3321")
+# Named so _weather_config_warning can tell "the operator chose Seattle" from "nobody set
+# anything". WEATHER_LOCATION is only a LABEL — it is never geocoded; WEATHER_LAT/LON are
+# what the weather API actually reads, and the two are independently defaulted.
+_WEATHER_LOCATION_DEFAULT = "Seattle"
+_WEATHER_LAT_DEFAULT, _WEATHER_LON_DEFAULT = "47.6062", "-122.3321"
+WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", _WEATHER_LOCATION_DEFAULT)
+WEATHER_LAT = os.getenv("WEATHER_LAT", _WEATHER_LAT_DEFAULT)
+WEATHER_LON = os.getenv("WEATHER_LON", _WEATHER_LON_DEFAULT)
+
+
+def _weather_config_warning(location: str, lat: str, lon: str) -> list:
+    """Location renamed but the coordinates left at the default → operator warning.
+
+    `WEATHER_LOCATION` is a label the prompt asserts ("She currently lives in …") and the
+    selfie prompt stamps on every background. `WEATHER_LAT`/`WEATHER_LON` are what the
+    weather API reads. Nothing ties them together, so setting one and forgetting the other
+    is silent: jules was labelled Bellingham and fetching weather for downtown Seattle, 87
+    miles south, from the day she was created until 2026-08-10. Nothing surfaced it — it
+    took a `/place` result list with distances on it for anyone to notice.
+
+    Pure, so the four states are testable; the caller feeds it the module constants."""
+    if location == _WEATHER_LOCATION_DEFAULT:
+        return []                       # nobody renamed anything; defaults are coherent
+    if (lat, lon) != (_WEATHER_LAT_DEFAULT, _WEATHER_LON_DEFAULT):
+        return []                       # both set — trusting the operator got them right
+    return [f"WEATHER_LOCATION is {location!r} but WEATHER_LAT/WEATHER_LON are still the "
+            f"defaults ({_WEATHER_LAT_DEFAULT}, {_WEATHER_LON_DEFAULT} — downtown Seattle), "
+            f"so she is LABELLED {location} and gets Seattle's weather. Set both and "
+            f"restart."]
+
+
+_CONFIG_WARNINGS.extend(_weather_config_warning(WEATHER_LOCATION, WEATHER_LAT, WEATHER_LON))
 # BOT_TIMEZONE is the name `.env.example` has always documented and the one instances
 # actually set — but until 2026-07-25 nothing read it except the `--check-config`
 # preflight, purely to label a warning. The clock came from TIMEZONE, so setting the
@@ -14671,7 +14700,10 @@ def gather_audit_data() -> dict:
         "seeds": _seed_summary(),
         "owner": ("set" if get_owner() is not None else "NOT SET — nothing proactive can fire"),
         "timezone": (str(TZ) if TZ else "(system default)"),
-        "location": WEATHER_LOCATION,
+        # Coordinates alongside the label, because they are set independently and a
+        # disagreement is invisible otherwise — "Bellingham (47.6062, -122.3321)" is
+        # self-evidently wrong at a glance, where "Bellingham" alone is not.
+        "location": f"{WEATHER_LOCATION} ({WEATHER_LAT}, {WEATHER_LON})",
         "prompt_stats": _prompt_audit_state(),
         # Stored raw at card load; calibrated here so the Card: line shares a unit with
         # the Preset layers: line computed just above it.
