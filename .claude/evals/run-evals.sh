@@ -742,6 +742,31 @@ else
   bad "roadmap-claims-current" "$roadmap_stale"
 fi
 
+# --- verify-steps-covered -----------------------------------------------------------------
+# C13 (seen 7): "a verification command that cannot fail is not verification". Every
+# required step in verify.sh must be proved able to go red by verify-can-fail.sh — on
+# 2026-08-10 one of them could not, and printed `ok  compile  bot.py` on a module that
+# would not import for eight days before anyone asked.
+# verify-can-fail.sh itself is far too slow for this suite (it runs the full block four
+# times). This is the cheap half: it fails when verify.sh grows a step that nothing
+# exercises, which is the drift that would let a decorative step back in unnoticed.
+declare -a vsteps vcases
+mapfile -t vsteps < <(grep -oE '^step "[^"]+"' .claude/tools/verify.sh | sed 's/^step "//;s/"$//' | awk '{print $1}')
+mapfile -t vcases < <(grep -oE '^case_ "[0-9]+/[0-9]+ +[a-z_]+' .claude/tools/verify-can-fail.sh | awk '{print $NF}')
+uncovered=""
+for st in "${vsteps[@]}"; do
+  found=0
+  for c in "${vcases[@]}"; do [ "$st" = "$c" ] && found=1; done
+  [ "$found" -eq 1 ] || uncovered="$uncovered $st"
+done
+if [ -z "$uncovered" ] && [ "${#vsteps[@]}" -gt 0 ]; then
+  ok "verify-steps-covered: all ${#vsteps[@]} verify.sh step(s) exercised by verify-can-fail.sh"
+elif [ "${#vsteps[@]}" -eq 0 ]; then
+  bad "verify-steps-covered" "parsed 0 steps out of verify.sh — the parser broke, which is exactly the silent-green shape this check exists for"
+else
+  bad "verify-steps-covered" "verify.sh step(s) nothing proves can fail:$uncovered — add a case_ to .claude/tools/verify-can-fail.sh"
+fi
+
 # --- break-tester ------------------------------------------------------------------------
 # `break-test.sh` edits a source file in place and restores it, so its failure mode is
 # destroying source code — and its first version did. `mktemp` creates the snapshot file,

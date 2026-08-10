@@ -458,6 +458,31 @@ seed file, or preset, and never push to main.
 
 ---
 
+## map-fire-rate-review-2026-08-17 (one-shot)
+
+- **Created:** 2026-08-10 (trigger id `trig_012TQTqApvyJcXWurcjVzmsV`).
+- **Schedule:** `run_once_at` 2026-08-17T16:00:00Z — 09:00 Pacific. Self-disables after
+  firing (`ended_reason=run_once_fired`).
+- **Mode:** fresh session per firing (`create_new_session_on_fire: true`), so the prompt is
+  written standalone.
+- **Connectors:** none. The tool warned it could pass none through, which is correct for
+  this Routine — it reads `/audit` output the owner pastes, and needs no TomTom MCP.
+- **Listed here despite being a one-shot** because the exemption at the top of this file
+  covers `send_later` session-bound reminders. This is a `create_trigger` one-shot that
+  fires a *fresh* session a week from now, with nobody's context but its own prompt — the
+  exact thing this file exists to keep visible.
+- **What it does:** decides ROADMAP 3.5 phase 2's deferred per-chat map cooldown **from a
+  week of evidence instead of a guess**. `MAP_INTENT` went default-on fleet-wide in
+  v2026-08-10.8; v2026-08-10.10 added the `Map intent:` line to `/audit` reporting fires
+  over messages-considered. ROADMAP conditioned the cooldown on "if the `[map]` log line
+  ever shows over-firing", and until .10 that condition was unobservable.
+- **Explicitly instructed NOT to build the cooldown by default.** The prompt says to close
+  the follow-up as decided-against if the rate looks fine. A reminder that fires is not
+  evidence that work is owed, and a fresh session with a build-shaped prompt will build.
+- **Also carries** the open `network`-errors question (jules, ~8/day, capped at 200) so
+  that thread is not lost if it goes unclosed this week.
+
+
 ## Retired
 
 - **"Monthly improvement loop — SillyTavernPresets"** (`trig_01Hmkj9LUnXbKadzXTnXraq5`,

@@ -480,8 +480,8 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 6** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2) — *promoted from the
-Minor log on the third occurrence, as that entry said it should be.*
+**seen: 7** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10) — *promoted
+from the Minor log on the third occurrence, as that entry said it should be.*
 
 **Fifth and sixth (2026-08-03), both in one release, both in *authored checks* rather
 than run commands — the new shape.** Writing the reasoning-leak guard I produced (a) a
@@ -528,12 +528,32 @@ entirely mine: **I told the user a suite had passed when I had not seen it pass.
 gate in a pipeline — `cmd | tail` discards its exit status; capture output and echo `$?`,
 or run the gate on its own line and read the result. And never report a check as green
 without having read its actual output in this turn.
-**Graduated 2026-07-29 — the mechanism already existed, which is the finding.**
+**Seventh (2026-08-10) — the check that could not fail was inside `verify.sh` itself.**
+Step 1 ran `python3 -m py_compile bot.py` and printed `ok  compile  bot.py` on a module
+that could not import: `_ERROR_LOG_THROTTLE_S = _env_int(...)` sat ~120 lines above
+`_env_int`'s definition, and compiling checks syntax without ever executing module level.
+The green was read and acted on. Coverage was never actually missing — `run-evals.sh`'s
+`bot-imports` eval has imported bot.py under a fixture since the v2026-07-11 NameError
+incident — but **`verify.sh` is the harness every other claim here rests on, and no step of
+it had ever been proved capable of going red.** One was not, for eight days.
+
+**Graduated 2026-08-10 → `.claude/tools/verify-can-fail.sh` + the `verify-steps-covered`
+eval.** The tool asks this constraint's own question of each required step, one edit at a
+time, and watches: it injects a defect per step through `break-test.sh` and requires the
+step to exit non-zero. All four pass today. It is deliberately not in `run-evals.sh` — it
+runs the full block four times — so the cheap half is an eval that fails when `verify.sh`
+grows a step nothing exercises, and fails loudly if its own parser stops finding steps
+rather than reporting a confident zero (C14). Both halves break-tested.
+
+Step 1 itself now imports under the test fixture instead of compiling, so its label means
+what it says. That change closes no coverage gap and the autopsy records it as C22's third
+occurrence that session — the mechanism existed and was not consulted.
+
+**Prior graduation (2026-07-29) stands for the invocation half.**
 `.claude/hooks/eval-gate.sh` is a Stop hook that runs the suite itself from
-`$CLAUDE_PROJECT_DIR` on every turn touching gated surfaces, so the enforcement half was
-never actually at risk: my broken invocation could not have shipped anything unverified.
-No new hook is owed. The reporting half — claiming a green you did not observe — has no
-code shape to intercept and stays prose, per rule 4.
+`$CLAUDE_PROJECT_DIR` on every turn touching gated surfaces, so a broken invocation could
+never ship anything unverified. The reporting half — claiming a green you did not observe —
+still has no code shape to intercept and stays prose, per rule 4.
 
 ### C12 — A command copied out of documentation is a claim about the past
 **seen: 2** (2026-07-29, 2026-08-02)
