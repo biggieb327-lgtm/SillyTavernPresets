@@ -7414,8 +7414,12 @@ class TestEveryCommandHandlerActuallyRuns:
         sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
                                ".claude" / "tools"))
         import sweep
-        stranded = sorted(n for n in sweep._handler_coverage()[0]
-                          if n not in sweep._handler_coverage()[1])
+        # Bind BOTH halves from one call. Written as
+        # `n for n in _handler_coverage()[0] if n not in _handler_coverage()[1]`, the
+        # condition re-ran the whole scan per handler: 64 calls at 0.571s each, 37s in one
+        # test, and 89% of the suite's runtime sat in this line and its twin.
+        mentioned, called = sweep._handler_coverage()
+        stranded = sorted(n for n in mentioned if n not in called)
         assert stranded == [], stranded
 
 
@@ -7559,18 +7563,15 @@ class TestTheSecondBacklogDriven:
         assert bot._garmin["text"] == "7,412 steps"
         assert json.loads((tmp_path / "snapshot.json").read_text())["text"] == "7,412 steps"
 
-    def test_the_second_backlog_stays_empty(self):
-        """Same check as test_the_backlog_stays_empty -- run again after the direct
-        calls above, proving they register as CALLS to the scanner, not just
-        more mentions."""
-        import pathlib as _pl
-        import sys
-        sys.path.insert(0, str(_pl.Path(bot.__file__).resolve().parents[1] /
-                               ".claude" / "tools"))
-        import sweep
-        stranded = sorted(n for n in sweep._handler_coverage()[0]
-                          if n not in sweep._handler_coverage()[1])
-        assert stranded == [], stranded
+    # `test_the_second_backlog_stays_empty` lived here until 2026-08-10. It re-ran
+    # test_the_backlog_stays_empty's assertion, on the stated rationale that running it
+    # *after* the direct calls above proved they "register as CALLS to the scanner, not
+    # just more mentions". That rationale does not hold: `sweep._handler_coverage()` is
+    # static AST analysis of bot.py and this file on disk, so no amount of test execution
+    # can change its answer and the ordering is meaningless. It computed an identical value
+    # by identical means — a duplicate costing 37s, and false assurance besides. The
+    # coverage assertion lives once, in TestEveryCommandHandlerActuallyRuns. The tests
+    # below, which genuinely drive save_state/send_gif/send_meme/send_selfie/etc., stay.
 
 
 # ── reasoning-leak guard ──────────────────────────────────────────────────────

@@ -7,6 +7,51 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-10 — 89% of the test suite's runtime was one line, twice
+
+Tests only — no `bot.py` change, so no `BOT_VERSION` bump.
+
+**Root cause: an expensive function called from a generator's condition, where it re-runs
+per item.** Asked to audit whether 1142 tests could be consolidated for speed, the profile
+answered a different question:
+
+```
+37.43s  TestEveryCommandHandlerActuallyRuns::test_the_backlog_stays_empty
+37.08s  TestTheSecondBacklogDriven::test_the_second_backlog_stays_empty
+ ~9.4s  the other 1140 tests, all of them
+```
+
+Both tests were written as:
+
+```python
+stranded = sorted(n for n in sweep._handler_coverage()[0]
+                  if n not in sweep._handler_coverage()[1])
+```
+
+The iterable is evaluated once; **the condition is evaluated per item.**
+`sweep._handler_coverage()` AST-parses `bot.py` and this 9,400-line test file — 0.571s a
+call — and there are 63 handlers. 64 calls × 0.571s = 36.5s, against 37.4s observed. Binding
+both halves from one call is the whole fix.
+
+**And the second test was a duplicate.** Its docstring justified itself as the same check
+"run again after the direct calls above, proving they register as CALLS to the scanner, not
+just more mentions". That cannot be true: `_handler_coverage()` is static AST analysis of
+files on disk, so no amount of test execution changes its answer and the ordering is
+meaningless. It computed an identical value by identical means — 37s for false assurance.
+Deleted; the coverage assertion lives once, in `TestEveryCommandHandlerActuallyRuns`. The
+tests around it that genuinely drive `save_state`/`send_gif`/`send_meme`/`send_selfie` stay.
+
+**Result: 83.9s → 8.8s, 1141 tests, same coverage.** This runs on every push through
+`.github/workflows/evals.yml` and before every claimed-done change through `verify.sh`.
+
+**The consolidation the audit was actually asked for: there is nothing worth doing.** With
+the hot spot gone the suite averages ~8ms a test, and the structure is already well
+factored — 222 classes, median 3–5 tests each, largest 15 tests / 209 lines, no monster
+class, and the five zero-test classes are all legitimate fixtures (`_CmdMsg`,
+`_PresetFixture`, `_CalFixture`, `_CmdQuery`, `_CmdBot`). Merging tests now would trade
+readable per-incident cases for a saving measured in milliseconds, against a file whose
+docstrings are the repo's record of what each check is for.
+
 ## v2026-08-10.1 — She recommended restaurants without knowing whether any were open
 
 **Root cause: `FOOD_SUGGESTIONS` pre-fetched real nearby restaurants and handed them to the
