@@ -438,7 +438,14 @@ import re, sys, pathlib
 bot = pathlib.Path(sys.argv[1]).read_text()
 env = pathlib.Path(sys.argv[2]).read_text()
 used = set(re.findall(r'os\.getenv\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot))
-used |= set(re.findall(r'_env_(?:int|float)\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot))
+# `bool` joined int|float on 2026-08-10 (v2026-08-10.8), when MAP_INTENT and
+# FOOD_SUGGESTIONS moved from hand-rolled `os.getenv(...) in (...)` to `_env_bool`.
+# This widens what counts as a read; it does not weaken the check. A var routed through
+# a config helper is still read, and the eval reported both as "documented but never
+# read" purely because the helper's name was not in this list.
+# sweep.py's env-drift scanner already listed `bool` here before the helper existed —
+# this copy had drifted from it, which is why the eval failed and the sweep did not.
+used |= set(re.findall(r'_env_(?:int|float|bool)\(\s*["\']([A-Z][A-Z0-9_]*)["\']', bot))
 documented = set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]{2,})=', env, re.M))
 mentioned = set(re.findall(r'\b([A-Z][A-Z0-9_]{2,})\b', env))
 dead = sorted(documented - used)

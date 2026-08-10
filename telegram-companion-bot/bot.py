@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.7"
+BOT_VERSION = "2026-08-10.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -257,6 +257,42 @@ def _env_int(name: str, default: str) -> int:
         logging.warning("[config] %s", msg)
         _CONFIG_WARNINGS.append(msg)
         return int(default)
+
+
+_ENV_BOOL_TRUE  = ("1", "true", "yes", "on")
+_ENV_BOOL_FALSE = ("0", "false", "no", "off")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """One vocabulary for on/off env vars, in both directions.
+
+    bot.py grew two hand-rolled idioms instead. Default-off flags read
+    `os.getenv(X, "0").lower() in ("1", "true", "yes")`; default-on flags read
+    `os.getenv(X, "1").lower() not in ("0", "false", "no", "off")`. **They do not accept
+    the same words.** `FOOD_SUGGESTIONS=on` is False under the first — "on" is simply not
+    in its list — while `MAP_INTENT=yes` is True under the second. The same word means
+    different things depending on which default the flag happens to have, and the failure
+    is silent: the owner writes `on`, the bot reads off, and nothing says so.
+
+    Unrecognized values warn and fall back to the default, the way `_env_int` does
+    (bot-code-invariants #15), instead of collapsing to off.
+
+    Only MAP_INTENT and FOOD_SUGGESTIONS route through this today — the two flags
+    v2026-08-10.8 is about. The other ~20 hand-rolled copies are a follow-up, not this
+    diff.
+    """
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    v = raw.strip().lower()
+    if v in _ENV_BOOL_TRUE:
+        return True
+    if v in _ENV_BOOL_FALSE:
+        return False
+    msg = f"{name}={raw!r} is not a recognized on/off value — using default {default}"
+    logging.warning("[config] %s", msg)
+    _CONFIG_WARNINGS.append(msg)
+    return default
 
 
 def _env_float(name: str, default: str = None):
@@ -523,11 +559,15 @@ JOKE_CANDIDATES = os.getenv("JOKE_CANDIDATES", "0").lower() in ("1", "true", "ye
 # In-character restaurant recs: when the user asks about food and has shared a
 # location, hand the model real nearby places so it recommends from fact, not
 # imagination. Rides the single reply (no extra LLM call). Needs TOMTOM_API_KEY too.
-FOOD_SUGGESTIONS = os.getenv("FOOD_SUGGESTIONS", "0").lower() in ("1", "true", "yes")
+FOOD_SUGGESTIONS = _env_bool("FOOD_SUGGESTIONS", False)
 # Generalized map intent (ROADMAP 3.5 phase 2): "how do I get to X" / "is there a
 # <thing> nearby" pre-fetch real TomTom route/place data into the single reply, the
 # same way FOOD_SUGGESTIONS does. Independent of FOOD_SUGGESTIONS; needs TOMTOM_API_KEY.
-MAP_INTENT = os.getenv("MAP_INTENT", "0").lower() in ("1", "true", "yes")
+# Default ON since v2026-08-10.8 (owner, 2026-08-10), matching the new-feature policy in
+# bot-code-invariants #16. It shipped default-off as a pilot flag and then stayed off on
+# all seven for weeks, so the bots invented distances they had a real API for. Unset =
+# active, 0 = off. Still gated on TOMTOM_ENABLED, so a keyless instance is unaffected.
+MAP_INTENT = _env_bool("MAP_INTENT", True)
 
 _DEFAULT_TEXTING_STYLE = (
     "# How you text\n"
@@ -12271,6 +12311,16 @@ _FEATURES = {
                 lambda: "inworld" if INWORLD_API_KEY else "nanogpt"),
     "traffic": ("TRAFFIC_ENABLED", lambda: bool(WSDOT_API_KEY), None),
     "maps":    ("TOMTOM_ENABLED",  lambda: bool(TOMTOM_API_KEY), None),
+    # The two conversational halves of TomTom. They are separate entries and not folded
+    # into "maps" because they are separate switches in the code and fail differently:
+    # `maps` is the key, and gates /route /nearby /place; these two gate whether an
+    # ordinary message ever gets real map data attached. All three were reported as one
+    # thing until v2026-08-10.8, which is how MAP_INTENT sat off on all seven for weeks
+    # with nothing on any status surface able to say so. Capability is the key for both,
+    # so a keyless instance reads n/a rather than off — the distinction _feature_off_reason
+    # exists to keep.
+    "mapintent":       ("MAP_INTENT",       lambda: bool(TOMTOM_API_KEY), None),
+    "foodsuggestions": ("FOOD_SUGGESTIONS", lambda: bool(TOMTOM_API_KEY), None),
     "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD), None),
 }
 FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"

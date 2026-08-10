@@ -7086,6 +7086,176 @@ class TestFeaturesCmdActuallyFlips:
         assert self._run(["voice", "off"], uid=4243) == []
 
 
+# Captured at collection, before any test can flip the module globals. The fixture .env
+# (tests/conftest.py) sets neither MAP_INTENT nor FOOD_SUGGESTIONS and writes no
+# feature_prefs.json, so these ARE the shipped defaults as bot.py computed them at import.
+# Reading them later would only prove some earlier test restored what it borrowed.
+_MAP_INTENT_DEFAULT = bot.MAP_INTENT
+_FOOD_SUGGESTIONS_DEFAULT = bot.FOOD_SUGGESTIONS
+
+
+class TestEnvFlagVocabulary:
+    """v2026-08-10.8: bot.py had two hand-rolled on/off idioms that accept different words.
+    Default-off flags used `in ("1", "true", "yes")`, which reads `on` as OFF — the owner
+    writes the most natural possible value and the feature silently stays dark. Default-on
+    flags used `not in ("0", "false", "no", "off")`, which reads unrecognized junk as ON.
+    `_env_bool` gives both directions one vocabulary and warns on anything else."""
+
+    def test_unset_and_empty_both_take_the_default(self, monkeypatch):
+        monkeypatch.delenv("XF", raising=False)
+        assert bot._env_bool("XF", True) is True
+        assert bot._env_bool("XF", False) is False
+        for blank in ("", "   "):
+            monkeypatch.setenv("XF", blank)
+            assert bot._env_bool("XF", True) is True, f"{blank!r} is not a decision"
+            assert bot._env_bool("XF", False) is False
+
+    def test_every_true_word_is_true_regardless_of_the_default(self, monkeypatch):
+        for word in ("1", "true", "yes", "on", "TRUE", "  On  "):
+            monkeypatch.setenv("XF", word)
+            assert bot._env_bool("XF", False) is True, f"{word!r} must switch a flag ON"
+            assert bot._env_bool("XF", True) is True
+
+    def test_every_false_word_is_false_regardless_of_the_default(self, monkeypatch):
+        for word in ("0", "false", "no", "off", "OFF", "  no "):
+            monkeypatch.setenv("XF", word)
+            assert bot._env_bool("XF", True) is False, f"{word!r} must switch a flag OFF"
+            assert bot._env_bool("XF", False) is False
+
+    def test_on_is_not_read_as_off(self, monkeypatch):
+        """The specific bug the helper exists for. Under the old default-off idiom
+        `os.getenv(X, "0").lower() in ("1", "true", "yes")`, the string "on" is absent
+        from the list and evaluates False."""
+        monkeypatch.setenv("XF", "on")
+        assert "on" not in ("1", "true", "yes"), "the old idiom's list, for the record"
+        assert bot._env_bool("XF", False) is True
+
+    def test_junk_warns_and_falls_back_instead_of_reading_as_off(self, monkeypatch):
+        """A typo must never brick a feature quietly (bot-code-invariants #15). The old
+        default-ON idiom did the opposite and read junk as ON, which is just as wrong."""
+        monkeypatch.setenv("XF", "ture")
+        before = len(bot._CONFIG_WARNINGS)
+        assert bot._env_bool("XF", True) is True
+        assert bot._env_bool("XF", False) is False
+        assert len(bot._CONFIG_WARNINGS) == before + 2
+        assert "ture" in bot._CONFIG_WARNINGS[-1]
+
+
+class TestMapIntentDefaultsOn:
+    """v2026-08-10.8: MAP_INTENT shipped default-off as a pilot flag and was still off on
+    all seven instances weeks later, so every bot improvised distances it had a real API
+    for. Owner flipped it to default-on with a kill switch (bot-code-invariants #16)."""
+
+    def test_the_shipped_default_is_on(self):
+        assert _MAP_INTENT_DEFAULT is True, (
+            "a keyed instance with no MAP_INTENT line must have map intent active")
+
+    def test_food_suggestions_is_still_opt_in(self):
+        """Only MAP_INTENT was flipped. FOOD_SUGGESTIONS attaches authoritative
+        open/closed claims, so it stays a per-character decision."""
+        assert _FOOD_SUGGESTIONS_DEFAULT is False
+
+    def test_the_kill_switch_works_for_every_off_word(self, monkeypatch):
+        for word in ("0", "false", "no", "off"):
+            monkeypatch.setenv("MAP_INTENT", word)
+            assert bot._env_bool("MAP_INTENT", True) is False, f"MAP_INTENT={word}"
+
+    def test_the_feature_is_still_gated_on_the_key(self):
+        """Default-on must not mean a keyless instance starts trying to reach TomTom.
+        The fixture has no TOMTOM_API_KEY, so capability is what holds it shut."""
+        assert bot.TOMTOM_API_KEY == ""
+        on, capable = bot._feature_state("mapintent")
+        assert capable is False and on is False
+
+
+class TestConversationalMapFlagsAreReportable:
+    """v2026-08-10.8: MAP_INTENT and FOOD_SUGGESTIONS were readable nowhere. Not in
+    `_FEATURES`, so not in /features; not in the STARTUP AUDIT line, so not in /audit.
+    MAP_INTENT sat off on all seven for weeks and no status surface could say so — the
+    same 'nobody could see the input' shape as v2026-08-10.5 and .6."""
+
+    def _run(self, args, uid=4242):
+        msg = SimpleNamespace(sent=[])
+
+        async def reply_text(text, **k):
+            msg.sent.append(text)
+
+        msg.reply_text = reply_text
+        update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
+        asyncio.run(bot.features_cmd(update, SimpleNamespace(args=args)))
+        return msg.sent
+
+    def setup_method(self):
+        self._orig_allowed = set(bot.ALLOWED_USERS)
+        self._orig_prefs = dict(bot.feature_prefs)
+        self._orig_file = bot.FEATURE_PREFS_FILE
+        self._orig = (bot.MAP_INTENT, bot.FOOD_SUGGESTIONS, bot.TOMTOM_API_KEY)
+        bot.ALLOWED_USERS.add(4242)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._orig_allowed)
+        bot.feature_prefs.clear()
+        bot.feature_prefs.update(self._orig_prefs)
+        bot.FEATURE_PREFS_FILE = self._orig_file
+        bot.MAP_INTENT, bot.FOOD_SUGGESTIONS, bot.TOMTOM_API_KEY = self._orig
+
+    def test_both_flags_are_registered_features(self):
+        assert bot._FEATURES["mapintent"][0] == "MAP_INTENT"
+        assert bot._FEATURES["foodsuggestions"][0] == "FOOD_SUGGESTIONS"
+
+    def test_audit_summary_names_them_separately_from_the_key(self, tmp_path):
+        """`maps` is the key and gates /route /nearby /place; these two gate whether an
+        ordinary message gets map data. Folding them into one field is what made the
+        blind spot."""
+        bot.TOMTOM_API_KEY = "k"
+        bot.MAP_INTENT, bot.FOOD_SUGGESTIONS = True, False
+        out = bot._features_summary()
+        assert "mapintent=on" in out
+        assert "foodsuggestions=off" in out
+        assert "maps=" in out
+
+    def test_a_keyless_instance_reads_na_not_off(self, tmp_path):
+        """'off' means switch it back on; 'n/a' means edit a .env. Different fixes."""
+        bot.TOMTOM_API_KEY = ""
+        out = bot._features_summary()
+        assert "mapintent=n/a" in out and "foodsuggestions=n/a" in out
+
+    def test_the_listing_shows_them(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.TOMTOM_API_KEY = "k"
+        bot.MAP_INTENT = True
+        out = self._run([])[0]
+        assert "mapintent: on" in out and "foodsuggestions: off" in out
+
+    def test_features_mapintent_off_moves_the_global_and_persists(self, tmp_path):
+        """The no-restart kill switch invariant #16 requires. Break-tested: without the
+        _FEATURES entry this raises 'Unknown feature' and MAP_INTENT never moves."""
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.TOMTOM_API_KEY = "k"
+        bot.MAP_INTENT = True
+        sent = self._run(["mapintent", "off"])
+        assert bot.MAP_INTENT is False, "the whole point of the command"
+        assert bot.feature_prefs["mapintent"] is False
+        assert json.loads(bot.FEATURE_PREFS_FILE.read_text())["mapintent"] is False
+        assert "switched off" in sent[0]
+
+    def test_switching_it_back_on_moves_it_back(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.TOMTOM_API_KEY = "k"
+        bot.MAP_INTENT = False
+        self._run(["mapintent", "on"])
+        assert bot.MAP_INTENT is True
+
+    def test_a_keyless_instance_refuses_the_switch(self, tmp_path):
+        bot.FEATURE_PREFS_FILE = tmp_path / "feature_prefs.json"
+        bot.TOMTOM_API_KEY = ""
+        bot.MAP_INTENT = False
+        sent = self._run(["mapintent", "on"])
+        assert "isn't configured" in sent[0]
+        assert bot.MAP_INTENT is False, "a switch cannot conjure a missing key"
+
+
 class TestHealthAlertsFollowTheLiveSwitch:
     """v2026-08-02.14: STRESS/BB/RHR_ALERTS were computed as `GARMIN_ENABLED and <env>` at
     import. `/features health off` flips GARMIN_ENABLED, so the monitors kept firing off a
@@ -7104,7 +7274,7 @@ class TestHealthAlertsFollowTheLiveSwitch:
         bot.GARMIN_ENABLED = False
         assert bot._alerts_on(True) is False
 
-    def test_the_env_flags_no_longer_bake_in_the_parent(self):
+    def test_the_env_bools_no_longer_bake_in_the_parent(self):
         """If these fold GARMIN_ENABLED back in at import, the runtime switch is dead
         again and this whole class regresses silently."""
         import inspect

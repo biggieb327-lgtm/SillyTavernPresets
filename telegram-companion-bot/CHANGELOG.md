@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.8 — MAP_INTENT was off on all seven bots and no status surface could say so
+
+**Root cause: a pilot flag that nobody ever un-piloted, and nothing that could report it.**
+`MAP_INTENT` shipped default-off (`os.getenv("MAP_INTENT", "0")`) as a per-instance pilot.
+Weeks later a fleet-wide `.env` sweep found it unset on **all seven** — including nora,
+emily and priya, the three it was piloted on. Every bot therefore improvised distances and
+"is there a X nearby" answers it had a real TomTom API for. All seven have had keys since
+2026-08-10, so `/route`, `/nearby` and `/place` worked the whole time; only the
+conversational half was dark.
+
+**It stayed dark because it was unreadable.** `MAP_INTENT` appeared in exactly two places
+in bot.py: its definition and its one use site. It was not in `_FEATURES`, so `/features`
+could not list it and `/audit` could not summarize it; it was not in the `=== STARTUP
+AUDIT ===` line either. The audit's `Maps:` field reports `_tomtom_mode()` gated on
+`TOMTOM_ENABLED` — the key and the travel mode, not this flag. The only way to learn the
+state of the feature was to read seven `.env` files by hand, which is what finally found
+it. **Third time this week the root cause was "nobody could see the input"** (v2026-08-10.5
+inert features, .6 the Garmin monitors).
+
+**Fix, three parts.**
+
+1. **`MAP_INTENT` defaults ON**, matching the new-feature policy (owner 2026-07-18,
+   `bot-code-invariants` #16). Unset = active, `0` = off. Still gated on `TOMTOM_ENABLED`,
+   so a keyless instance is untouched. No `.env` edit is needed on any instance.
+2. **`mapintent` and `foodsuggestions` are `_FEATURES` entries**, so both now appear in
+   `/audit`'s summary and `/features`, and both are flippable at runtime with
+   `/features <name> on|off` — the no-restart kill switch #16 requires. They are separate
+   entries rather than folded into `maps` because they are separate switches that fail
+   differently: `maps` is the key and gates the three commands, these two gate whether an
+   ordinary message ever gets real map data attached. Capability for both is the key, so a
+   keyless instance reads `n/a` (edit a `.env`) rather than `off` (flip a switch) — the
+   distinction `_feature_off_reason` exists to keep.
+3. **`_env_bool(name, default)`**, because the two flags disagreed about what "on" means.
+   bot.py had grown two hand-rolled boolean idioms: default-off flags read
+   `in ("1", "true", "yes")` and default-on flags read `not in ("0", "false", "no", "off")`.
+   **They do not accept the same words.** `FOOD_SUGGESTIONS=on` evaluates FALSE under the
+   first — "on" is simply not in its list — so the most natural possible value silently
+   disables the feature. The second reads unrecognized junk as ON. One helper, one
+   vocabulary (`1/true/yes/on` and `0/false/no/off`), and anything else warns and falls
+   back to the default the way `_env_int` does (#15).
+
+`FOOD_SUGGESTIONS` deliberately stays default-off: it attaches authoritative open/closed
+claims to named restaurants, so it remains a per-character decision. Only its parsing
+changed.
+
+**Scope note:** only these two flags route through `_env_bool`. About twenty other
+hand-rolled copies remain and are a follow-up, not this diff — `FOOD_SUGGESTIONS=on`
+reading as off is a live trap wherever a default-off flag exists.
+
+16 tests. Four break-tests, each pinning a different claim: the default reverted to off
+(red), the `_FEATURES` entry removed (8 red), `"on"` dropped from the true vocabulary
+(2 red), and junk falling back to off instead of the default (red).
+
 ## v2026-08-10.7 — One weather 429 became a hot loop that sustained the 429
 
 **Root cause: `ensure_weather` recorded successes and nothing else.** Its guard is

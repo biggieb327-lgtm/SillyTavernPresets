@@ -257,6 +257,12 @@ a list that cannot go stale beats a list that is correct today.
   Deferred follow-ups (owner-settled 2026-07-17): "what's near <remote place>",
   memory-resolved "home"/"work" destinations, and a per-chat cooldown if the `[map]`
   log line ever shows over-firing.
+  **Default ON since v2026-08-10.8**, with `MAP_INTENT=0` and `/features mapintent off`
+  as kill switches. It shipped default-off as a pilot and was still unset on all seven
+  weeks later, so the feature was built, tested, documented and dark. `mapintent` and
+  `foodsuggestions` are `_FEATURES` entries now, so `/audit` and `/features` can report
+  a flag whose state was previously readable only by grepping seven `.env` files.
+  The `[map]` over-firing watch above matters more now that it fires everywhere.
 
 ### 3.6 ~~Schedule-driven unavailability~~ ✅ (shipped v2026-07-18.2, `SCHED_BUSY`)
 - **Evidence:** `REVIEW-BRAINENGINE-2026-07-18.md` item A (owner-approved 2026-07-18).
@@ -802,6 +808,16 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
   Confirmed unset in all six live `.env` files (owner-run VPS check, 2026-07-28), so the
   flags genuinely are off — they are off *on purpose*. See constraints C10: an
   unexplained default is not the same as an unintended one.
+
+  **`MAP_INTENT` left this list on 2026-08-10 (v2026-08-10.8) — the rejection still
+  stands and this is not an exception to it.** What was rejected is a bulk flip as audit
+  debt; what this text asks for instead is "revisit deliberately". A fleet-wide `.env`
+  sweep found `MAP_INTENT` unset on **all seven**, including the three it was piloted on,
+  and the owner flipped it to default-on in the same conversation. So the 2026-07-28
+  reading was right that the flag was off and wrong that it was off *on purpose*: nothing
+  could report its state, so "unset" was indistinguishable from "decided". That is the
+  limit of a `.env` grep, not a fault in C10. `FOOD_SUGGESTIONS` and `GROUP_MODE` stay in
+  the class, still off, still per-instance product decisions.
 
 - **"Add a prompt-assembly style rule to `bot-code-invariants`" — rejected 2026-08-01,
   do not re-open.** Considered alongside 2.4 after `ShopDevX/adeptlydev` b6d7437 (a
