@@ -103,6 +103,46 @@ def place_name(entry: str) -> str:
     return entry.strip()
 
 
+# Words that mark an entry as a DESCRIPTION of a place rather than its name. Relative
+# pronouns and personal pronouns are the giveaway: a named place is a noun phrase, while
+# "the café where the wifi is fast" and "the food cart pod she considers her main
+# restaurant" are sentences about one.
+_DESCRIPTIVE_MARKERS = {
+    "that", "where", "which", "who", "she", "her", "hers", "his", "he", "they", "their",
+    "with", "when", "someone", "everything", "knows", "found", "considers", "went",
+}
+# Stripped before judging capitalisation, so "The Spar" is read as "Spar".
+_LEADING = {"the", "a", "an", "that", "her", "his", "their", "one", "some"}
+
+
+def looks_like_a_named_place(name: str) -> bool:
+    """Is this entry a place TomTom could plausibly know, or a description of one?
+
+    Bonnie's and marcus's atlases are written as "the mailbox", "that one parking garage
+    roof", "his apartment, on the eastside" — deliberate, and arguably the better style,
+    since a generic landmark can never be factually wrong. Looking them up wastes a
+    request each and fills the report with NOT FOUND lines that are not defects.
+
+    A heuristic, and it says so: it errs toward SKIPPING, so a real place wrongly skipped
+    goes unaudited rather than wrongly flagged. That is the safe direction here — the cost
+    is a missing check, not a false accusation against good content. `--check-all` forces
+    every entry through."""
+    toks = re.findall(r"[A-Za-z0-9'’\-]+", name or "")
+    if not toks:
+        return False
+    lowered = [t.lower() for t in toks]
+    # Skip the first token when scanning for markers: a leading "That"/"Her" is a
+    # determiner ("That alley"), while a later one is doing sentence work.
+    if any(t in _DESCRIPTIVE_MARKERS for t in lowered[1:]):
+        return False
+    body = toks[1:] if lowered[0] in _LEADING else toks
+    sig = [t for t in body if t.lower() not in _STOPWORDS]
+    caps = [t for t in sig if t[:1].isupper()]
+    # Proper nouns should carry the phrase, not garnish it: "Deschutes Parkway, along the
+    # lake" qualifies; "rented room above the bar on Fourth" does not.
+    return bool(caps) and len(caps) * 2 >= len(sig)
+
+
 def _tokens(s: str) -> set:
     return {t for t in re.findall(r"[a-z0-9]+", (s or "").lower()) if t not in _STOPWORDS}
 
@@ -213,7 +253,8 @@ def _fake_instance() -> Path:
     return d
 
 
-def audit(bot, instance: str, origin, radius: float, sleep_s: float = _SLEEP_S) -> list:
+def audit(bot, instance: str, origin, radius: float, sleep_s: float = _SLEEP_S,
+          check_all: bool = False) -> list:
     """(entry, name, found, town, miles, verdict) per atlas line."""
     path = REPO / instance / "atlas.txt"
     if not path.exists():
@@ -224,6 +265,11 @@ def audit(bot, instance: str, origin, radius: float, sleep_s: float = _SLEEP_S) 
         name = place_name(entry)
         found = town = ""
         miles = None
+        if not check_all and not looks_like_a_named_place(name):
+            # No request at all — this is the point. Twenty descriptive entries used to
+            # cost twenty lookups and produce twenty NOT FOUND lines that were not defects.
+            rows.append((entry, name, "", "", None, "not a place name"))
+            continue
         if i:
             time.sleep(sleep_s)     # pace the whole run, not just the retries
         # The bare name, biased at the anchor — never "name, city". See the module
@@ -257,11 +303,13 @@ def report(instance: str, rows: list) -> tuple:
     all about it."""
     flagged = [r for r in rows if r[5] in ("NOT FOUND", "FAR")]
     failed = [r for r in rows if r[5] == "LOOKUP FAILED"]
-    checked = len(rows) - len(failed)
+    skipped = [r for r in rows if r[5] == "not a place name"]
+    checked = len(rows) - len(failed) - len(skipped)
     head = f"=== {instance}: {len(rows)} entries, {checked} checked, {len(flagged)} flagged"
-    print(head + (f", {len(failed)} NOT CHECKED (lookup failed)" if failed else ""))
+    print(head + (f", {len(failed)} NOT CHECKED (lookup failed)" if failed else "")
+          + (f", {len(skipped)} not place names" if skipped else ""))
     for entry, name, found, town, miles, v in rows:
-        if v == "ok":
+        if v in ("ok", "not a place name"):
             continue
         dist = "—" if miles is None else f"{miles:.1f} mi"
         extra = f" -> {found} ({town})" if found else ""
@@ -270,6 +318,11 @@ def report(instance: str, rows: list) -> tuple:
     if towns:
         print("  towns: " + ", ".join(f"{t}×{n}" for t, n in towns.most_common())
               + f"   (of {checked} checked)")
+    if skipped:
+        # Named, not listed: a descriptive atlas is a style, not a defect, and printing
+        # twenty of them back is the noise this exists to remove. --check-all overrides.
+        print(f"  {len(skipped)} entries read as descriptions rather than place names and "
+              f"were not looked up (--check-all to force).")
     if failed:
         print(f"  ! {len(failed)} entries were never checked — rerun them before "
               f"concluding anything about those lines.")
@@ -285,6 +338,8 @@ def main() -> None:
                     help="this instance's LIVE WEATHER_LOCATION, e.g. 'Bellevue, WA'")
     ap.add_argument("--radius", type=float, default=15.0,
                     help="miles from --near before an entry is FAR (default 15)")
+    ap.add_argument("--check-all", action="store_true",
+                    help="look up every entry, including ones that read as descriptions")
     ap.add_argument("--sleep", type=float, default=_SLEEP_S,
                     help=f"seconds between lookups; raise if you still hit 429 "
                          f"(default {_SLEEP_S})")
@@ -318,7 +373,8 @@ def main() -> None:
         print(f"# radius: {args.radius} miles\n")
 
         flagged, failed = report(args.instance,
-                                 audit(bot, args.instance, origin, args.radius, args.sleep))
+                                 audit(bot, args.instance, origin, args.radius, args.sleep,
+                                       args.check_all))
         # Distinct exit codes so a character-pass Routine can tell "the atlas has problems"
         # from "the audit did not finish" — retry the second, act on the first.
         sys.exit(2 if failed else (1 if flagged else 0))

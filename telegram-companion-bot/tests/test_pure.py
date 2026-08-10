@@ -9584,3 +9584,86 @@ class TestAtlasAuditPicksTheNearestMatch:
              "address": {"municipality": "Redmond"}},
         ]
         assert aa.best_poi(results, "Marymoor Park")["address"]["municipality"] == "Redmond"
+
+
+class TestAtlasAuditSkipsDescriptions:
+    """Owner, 2026-08-10: "They're not real places so there's no point in trying to find
+    them on TomTom." Every string below is a real line from a real atlas, taken from the
+    seven-instance run — not invented examples."""
+
+    DESCRIPTIONS = [
+        "The mailbox", "That one parking garage roof",
+        "The convenience store two blocks over",
+        "The really good ramen place that delivers",
+        "That café where the wifi is fast and no one talks to you",
+        "The park bench she found that faces away from everything",
+        "The 24-hour pharmacy", "That vintage shop with the unsorted bins",
+        "The rooftop of her building (technically not allowed)",
+        "The library branch closest to her", "A friend's place two neighborhoods over",
+        "The overpass that has a good view of the freight trains",
+        "That one park where the ducks are extremely bold",
+        "Night bus route she knows by heart",
+        "That alley with the impressive mural",
+        "The food cart pod she considers her main restaurant",
+        "The shop", "The rented room above the bar on Fourth",
+        "His apartment, on the eastside", "The dealership", "Her parents' house",
+    ]
+    NAMED = [
+        "The Spar", "Powell's Books", "Lone Fir Cemetery", "Marymoor Park",
+        "Old Bellevue (Main Street)", "Boulevard Park / Taylor Dock",
+        "Mt. Baker Highway / Artist Point", "The Deschutes Parkway, along the lake",
+        "Cape Disappointment", "Westport", "Factoria", "Anacortes",
+        "The 5 Point Cafe", "Bellevue Arts Museum", "Willamette River East Bank Esplanade",
+    ]
+
+    def test_descriptions_are_not_looked_up(self):
+        aa = _atlas_audit()
+        wrong = [s for s in self.DESCRIPTIONS if aa.looks_like_a_named_place(s)]
+        assert wrong == [], f"would waste a lookup on: {wrong}"
+
+    def test_real_place_names_still_are(self):
+        aa = _atlas_audit()
+        wrong = [s for s in self.NAMED if not aa.looks_like_a_named_place(s)]
+        assert wrong == [], f"would skip auditing: {wrong}"
+
+    def test_empty_and_junk_are_skipped_not_crashed(self):
+        aa = _atlas_audit()
+        for junk in ("", None, "   ", "!!!"):
+            assert aa.looks_like_a_named_place(junk) is False
+
+    def test_a_skipped_entry_is_not_a_flag(self):
+        aa = _atlas_audit()
+        rows = [("a — x", "The mailbox", "", "", None, "not a place name"),
+                ("b — x", "Powell's Books", "", "", None, "NOT FOUND")]
+        flagged, failed = aa.report("bonnie", rows)
+        assert (flagged, failed) == (1, 0)
+
+
+class TestAtlasAuditDescriptiveMarkers:
+    """Pins the marker set specifically. Break-testing the skip against the 21 real
+    descriptive lines came back GREEN with markers disabled — capitalisation alone decided
+    every one of them, so the marker branch was untested code claiming to do work (C18: a
+    break-test proves one assertion, not the check).
+
+    These are where it actually earns its place: an entry with no em dash to split on, so
+    place_name() returns the whole line, carrying a real proper noun AND sentence
+    structure. Capitalisation says "named place"; the marker says "no, that's a sentence"."""
+
+    SENTENCES_ABOUT_PLACES = [
+        "Marymoor Park where she runs the loop",
+        "Powell's Books that she avoids on weekends",
+        "The Spar when it is not packed",
+        "Lone Fir Cemetery with the old headstones",
+    ]
+
+    def test_a_proper_noun_inside_a_sentence_is_still_a_sentence(self):
+        aa = _atlas_audit()
+        wrong = [s for s in self.SENTENCES_ABOUT_PLACES if aa.looks_like_a_named_place(s)]
+        assert wrong == [], f"capitalisation alone would look these up: {wrong}"
+
+    def test_the_same_names_without_the_sentence_are_looked_up(self):
+        """The control: strip the clause and each becomes a lookup again, so the test
+        above is pinning the marker and not just rejecting these strings outright."""
+        aa = _atlas_audit()
+        for s in ("Marymoor Park", "Powell's Books", "The Spar", "Lone Fir Cemetery"):
+            assert aa.looks_like_a_named_place(s), s
