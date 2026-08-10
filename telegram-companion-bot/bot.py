@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.4"
+BOT_VERSION = "2026-08-10.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -149,6 +149,21 @@ _error_handler.setFormatter(logging.Formatter(
     "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
 ))
 log.addHandler(_error_handler)
+
+# Routine operational lines log at WARNING so they land in errors.log, where they are
+# genuinely useful — the STARTUP AUDIT is how you learn which version was running when
+# something broke, and a graceful-stop line is what _tally_unexpected_restarts keys on to
+# tell a deploy from a crash. But they are written on EVERY restart, and at four lines a
+# restart they crowded out the things worth reading: jules logged
+# "EPISODIC_RECALL is set but numpy is missing" on every single startup for days, in a
+# 1.59 MB errors.log, and nobody saw it while three features sat inert fleet-wide
+# (2026-08-10). Marked, not removed: /errors hides them by default and says how many it
+# hid, and every file-reading consumer still sees them.
+#
+# The prefix goes on the MESSAGE, after the timestamp and level, so `line[:19]` date
+# parsing and the substring matching in _tally_unexpected_restarts both still work. A
+# test pins that coupling.
+_NOTICE_PREFIX = "[notice] "
 
 # --- Error tracking for self-audit ---
 _BOOT_TIME = time.time()
@@ -14461,7 +14476,8 @@ def _log_startup_diagnostic():
     state_size = STATE_FILE.stat().st_size if STATE_FILE.exists() else 0
     err_size = _error_log_path.stat().st_size if _error_log_path.exists() else 0
     log.warning(
-        "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
+        _NOTICE_PREFIX
+        + "=== STARTUP AUDIT === v%s | Python %s | Instance: %s | Card: %s | "
         "Model: %s | Fallback: %s | Stream timeout: %ds | Max tokens: %d | "
         "Maps: %s | Selfie base: %s | Selfie model: %s | Disk free: %d MB | state.json: %d bytes | errors.log: %d bytes | Chats: %d | PID: %d",
         BOT_VERSION, platform.python_version(), BASE_DIR.name, CARD_NAME,
@@ -14849,14 +14865,26 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-def tail_error_lines(n: int = 20) -> list[str]:
-    """Last n non-blank lines of errors.log — shared by /errors and the admin HTTP API."""
+def tail_error_lines(n: int = 20, include_notices: bool = False) -> tuple:
+    """(last n interesting lines of errors.log, how many notices were hidden).
+
+    Routine lines — the STARTUP AUDIT banner and graceful stops — are filtered out by
+    default so a real warning is not buried under four lines per restart. The count comes
+    back with them so nothing is hidden silently: "I filtered 12" is information, an
+    unexplained gap is not.
+
+    Filtering happens HERE, not in the file, so `_count_recent_restarts` and
+    `_tally_unexpected_restarts` keep reading the complete log."""
     n = max(1, min(n, 50))
     try:
         lines = _error_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
         lines = []
-    return [l for l in lines if l.strip()][-n:]
+    lines = [l for l in lines if l.strip()]
+    if include_notices:
+        return lines[-n:], 0
+    kept = [l for l in lines if _NOTICE_PREFIX not in l]
+    return kept[-n:], len(lines) - len(kept)
 
 
 async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14899,21 +14927,28 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the tail of errors.log so bug reports carry evidence."""
     if not _is_admin(update.effective_user.id):
         return
-    args = context.args or []
+    args = [a.lower() for a in (context.args or [])]
+    show_all = "all" in args
     try:
-        n = max(1, min(int(args[0]), 50)) if args else 20
+        nums = [a for a in args if a.isdigit()]
+        n = max(1, min(int(nums[0]), 50)) if nums else 20
     except ValueError:
         n = 20
-    lines = tail_error_lines(n)
+    lines, hidden = tail_error_lines(n, include_notices=show_all)
     if not lines:
-        await update.message.reply_text("✅ No errors logged.")
+        note = (f" ({hidden} routine notice(s) hidden — /errors all to see them)"
+                if hidden else "")
+        await update.message.reply_text(f"✅ No errors logged.{note}")
         return
     text = "\n".join(lines)
     # Telegram cap is 4096 chars; drop oldest lines until it fits.
     while len(text) > 3800 and len(lines) > 1:
         lines = lines[1:]
         text = "\n".join(lines)
-    await update.message.reply_text(f"🪵 Last {len(lines)} error line(s):\n\n{text[:3900]}")
+    head = f"🪵 Last {len(lines)} error line(s)"
+    if hidden:
+        head += f" · {hidden} routine notice(s) hidden (/errors all)"
+    await update.message.reply_text(f"{head}:\n\n{text[:3900]}")
 
 
 _RAW_BOT_URL = ("https://raw.githubusercontent.com/biggieb327-lgtm/"
@@ -15146,7 +15181,8 @@ class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 n = max(1, min(int(qs.get("n", ["20"])[0]), 50))
             except ValueError:
                 n = 20
-            self._json(200, {"lines": tail_error_lines(n)})
+            _lines, _hidden = tail_error_lines(n)
+            self._json(200, {"lines": _lines, "notices_hidden": _hidden})
         elif path == "/admin/backup":
             data = build_backup_zip()
             self.send_response(200)
@@ -15525,7 +15561,7 @@ async def _on_shutdown(application):
     # restart by the EXIT CODE in run-bot.sh's "[run-bot] … exited (code N)" line:
     # 0 = clean/intentional, 137 = SIGKILL (phantom-process/OOM killer), 143 = a SIGTERM
     # PTB never converted to a clean stop (OEM battery manager).
-    log.warning("[shutdown] graceful stop — saving state.")
+    log.warning(_NOTICE_PREFIX + "[shutdown] graceful stop — saving state.")
     _write_state()
     await _stop_admin_api(application)
 

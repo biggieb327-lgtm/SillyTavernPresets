@@ -9873,3 +9873,62 @@ class TestAuditShowsWeatherCoordinates:
         monkeypatch.setattr(bot, "WEATHER_LON", "-122.3321")
         d = bot.gather_audit_data()
         assert d["location"] == "Bellingham (47.6062, -122.3321)"
+
+
+class TestErrorsLogNoticeFiltering:
+    """v2026-08-10.5: jules logged "EPISODIC_RECALL is set but numpy is missing" on every
+    startup for days, inside a 1.59 MB errors.log, while three features sat inert
+    fleet-wide. Four routine lines per restart buried it."""
+
+    NOTICE = f"2026-08-10 15:29:24 [WARNING] companion: {bot._NOTICE_PREFIX}=== STARTUP AUDIT === v1"
+    STOP = f"2026-08-10 15:13:44 [WARNING] companion: {bot._NOTICE_PREFIX}[shutdown] graceful stop — saving state."
+    REAL = "2026-08-10 14:46:06 [WARNING] companion: EPISODIC_RECALL is set but numpy is missing"
+
+    def _log(self, monkeypatch, tmp_path, lines):
+        p = tmp_path / "errors.log"
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.setattr(bot, "_error_log_path", p)
+
+    def test_notices_are_hidden_and_counted(self, monkeypatch, tmp_path):
+        self._log(monkeypatch, tmp_path, [self.STOP, self.NOTICE, self.REAL, self.NOTICE])
+        lines, hidden = bot.tail_error_lines(20)
+        assert lines == [self.REAL]
+        # Counted, not silently dropped — an unexplained gap is not information.
+        assert hidden == 3
+
+    def test_all_shows_everything(self, monkeypatch, tmp_path):
+        self._log(monkeypatch, tmp_path, [self.STOP, self.REAL])
+        lines, hidden = bot.tail_error_lines(20, include_notices=True)
+        assert len(lines) == 2 and hidden == 0
+
+    def test_a_log_of_only_notices_reads_as_clean(self, monkeypatch, tmp_path):
+        self._log(monkeypatch, tmp_path, [self.STOP, self.NOTICE])
+        lines, hidden = bot.tail_error_lines(20)
+        assert lines == [] and hidden == 2
+
+
+class TestNoticePrefixKeepsCrashTriageWorking:
+    """The prefix goes on the MESSAGE so line[:19] date parsing and the substring matches
+    in _tally_unexpected_restarts survive it. That coupling is invisible and would fail
+    as a silently miscounted restart storm, so it is pinned."""
+
+    def test_a_deploy_restart_is_still_recognised_as_intentional(self):
+        from datetime import datetime as _dt
+        lines = [
+            f"2026-08-10 15:13:44 [WARNING] companion: {bot._NOTICE_PREFIX}[shutdown] graceful stop — saving state.",
+            f"2026-08-10 15:13:45 [WARNING] companion: {bot._NOTICE_PREFIX}=== STARTUP AUDIT === v1 | PID: 1",
+        ]
+        cutoff = _dt(2026, 8, 10, 15, 0, 0)
+        assert bot._tally_unexpected_restarts(lines, cutoff) == 0
+
+    def test_a_crash_restart_is_still_counted(self):
+        from datetime import datetime as _dt
+        lines = [f"2026-08-10 15:13:45 [WARNING] companion: {bot._NOTICE_PREFIX}=== STARTUP AUDIT === v1 | PID: 1"]
+        cutoff = _dt(2026, 8, 10, 15, 0, 0)
+        assert bot._tally_unexpected_restarts(lines, cutoff) == 1
+
+    def test_the_timestamp_is_still_at_the_front_of_the_line(self):
+        """line[:19] is parsed with strptime; a prefix in the wrong place breaks it."""
+        line = f"2026-08-10 15:13:45 [WARNING] companion: {bot._NOTICE_PREFIX}=== STARTUP AUDIT ==="
+        from datetime import datetime as _dt
+        assert _dt.strptime(line[:19], "%Y-%m-%d %H:%M:%S").year == 2026

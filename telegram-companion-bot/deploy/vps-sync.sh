@@ -118,6 +118,23 @@ for pl in $LAYERS; do
   cp "$SRC/$pl" "$BASE/$INST/$pl"
 done
 
+# Reconcile the shared venv with requirements.txt BEFORE the compile check, so a release
+# that adds a dependency arrives with it. Until 2026-08-10 this script only ever borrowed
+# the venv's python to compile-check; nothing reconciled dependencies, so v2026-08-04.4 and
+# .6 shipped numpy-dependent features that were silently inert on all seven bots for days.
+# The bot warned on every startup and it was invisible in a 1.59 MB errors.log.
+#
+# Deliberately NOT fatal. Every numpy import site is wrapped in try/except and degrades one
+# feature, so a pip failure must not block an urgent bot.py fix — but it must be impossible
+# to miss in the output, which a silent `|| true` would not be. Normally a fast no-op.
+echo "[vps-sync] reconciling venv with requirements.txt..."
+if ! "$BASE/venv/bin/pip" install -q -r "$SRC/requirements.txt"; then
+  echo "[vps-sync] !!  DEPENDENCY INSTALL FAILED — the code below still deploys, but any"
+  echo "[vps-sync] !!  feature needing a missing package will be silently inert. Check with"
+  echo "[vps-sync] !!  /diag on this instance, and rerun:"
+  echo "[vps-sync] !!    $BASE/venv/bin/pip install -r $SRC/requirements.txt"
+fi
+
 "$BASE/venv/bin/python" -m py_compile "$BASE/bot.py.new"
 # Fatal, not `|| true`: this backup IS the rollback path (see OPS_MANUAL.md), so a
 # silently failed backup is a silently gone rollback — the exact failure this script

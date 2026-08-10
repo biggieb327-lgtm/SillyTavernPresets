@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-10.5 — Three features were inert on all seven bots and the warning was in plain sight
+
+**Root cause: nothing reconciles the shared venv with `requirements.txt`, and the warning
+that said so was buried under routine log noise.** `numpy>=1.26,<3.0` is a hard requirement
+— its own comment in `requirements.txt` calls it "a real dependency, not
+commented-out-optional" — and it was never installed into `/opt/telegram-bots/venv/`. The
+venv is shared, so this was fleet-wide:
+
+| Feature | State |
+|---|---|
+| `EPISODIC_RECALL` | inert — every path guards on `_np is None` |
+| `ONTHISDAY_ENABLED` | inert — gated on `EPISODIC_RECALL` |
+| `VOICE_TONE_ENABLED` | inert — `acoustic_ears` import fails without numpy |
+
+All three default **on**, and all three have been dead since v2026-08-04.4 and .6 shipped
+them. The bot logged `EPISODIC_RECALL is set but numpy is missing` on **every single
+startup**, with the exact install command in the message. Nobody saw it.
+
+**Two independent fixes, because there were two independent failures.**
+
+**1. `vps-sync.sh` now reconciles the venv** (`pip install -q -r requirements.txt`) before
+the compile check. The script had only ever *borrowed* the venv's python to compile-check;
+nothing ever checked that the venv could satisfy the code being deployed, so a release
+adding a dependency shipped broken with no signal at deploy time. Deliberately **not
+fatal** — every numpy import site is wrapped and degrades one feature, so a pip failure must
+not block an urgent `bot.py` fix — but it prints a four-line banner that cannot be missed,
+where a silent `|| true` was how this happened.
+
+**2. `/errors` hides routine notices.** The STARTUP AUDIT banner and graceful stops log at
+WARNING so they reach `errors.log`, which is right: the banner is how you learn which
+version was running when something broke, and `_tally_unexpected_restarts` keys on the
+graceful-stop line to tell a deploy from a crash. But at four lines per restart in a 1.59 MB
+file, they buried the numpy warning completely. They are now prefixed `[notice]` and
+filtered from `/errors` by default, **with the hidden count shown** — `12 routine notice(s)
+hidden (/errors all)`. Hiding without saying so would just be a quieter version of the same
+bug.
+
+Filtering happens in `tail_error_lines`, not in the file, so `_count_recent_restarts` keeps
+reading the complete log. The prefix goes on the *message*, after the timestamp and level,
+so `line[:19]` date parsing and the substring matches in `_tally_unexpected_restarts` both
+still work — an invisible coupling that would have failed as a silently miscounted restart
+storm, so three tests pin it.
+
+**Corrected from my own report an hour earlier:** I told the owner that `Errors (total): 415`
+was inflated by routine WARNING lines. It is not. `errors.log` and `_error_counts` are
+entirely separate mechanisms — the count comes only from explicit `_count_error()` calls and
+the audit banner never touched it. 415 is 415 real counted errors, and dismissing it was
+wrong.
+
 ## v2026-08-10.4 — Jules has been getting Seattle's weather since the day she was created
 
 **Root cause: `WEATHER_LOCATION` is a label and `WEATHER_LAT`/`WEATHER_LON` are the data,
