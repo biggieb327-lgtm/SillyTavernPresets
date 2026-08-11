@@ -2,8 +2,8 @@
     "actorSpecification": 1,
     "name": "idea-scraper",
     "title": "Reddit + Substack idea scraper",
-    "description": "Fetches Reddit's own public JSON listings and Substack RSS feeds directly through Apify's proxy, normalizing both into one dataset for the SillyTavernPresets repo's monthly Routines. Does not call any other Actor - a Creator-tier Apify plan cannot run public Actors, only Actors it owns.",
-    "version": "0.4",
+    "description": "Fetches Reddit's Atom feeds (the JSON listings are 403-blocked by client fingerprinting, from every IP) and Substack via public RSS, normalizing both into one dataset for the SillyTavernPresets repo's monthly Routines. No proxy is required; Apify residential proxy remains as automatic failover. Does not call any other Actor - this account's plan has ACTORS_PUBLIC_ALL disabled.",
+    "version": "0.12",
     "buildTag": "latest",
     "input": "./input_schema.json",
     "dockerfile": "../Dockerfile"
