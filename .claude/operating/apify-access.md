@@ -99,11 +99,36 @@ in `env_013Kxcz…` actually trusts its own clone is unverified** — it is a
 property of the runner, not of the docs. Any Routine step that uses the Apify
 MCP tools must therefore branch on the tools being present, never assume them.
 
+## What the Routine environment actually allows
+
+`[reported 2026-08-11]` A probe session run inside `env_013Kxcz…` summarised its
+own findings as: **`api.apify.com` reachable, `mcp.apify.com` refused with a
+gateway 403, `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` both set, proxy enabled.**
+Provenance matters here: this is that session's summary line, not raw command
+output read directly — it agrees with the same 403 shape observed first-hand in
+the Default environment, but it is one step removed. Re-run the probe before
+betting anything expensive on the "proxy enabled" half, which is the least
+specific claim in it and the one that would change most.
+
+Taken with the first-hand Default-environment results, the access map is:
+
+| | Default (`env_012hEH…`) | SillyTavernPresets (`env_013Kxcz…`) |
+|---|---|---|
+| `api.apify.com` | refused, gateway 403 | **reachable** |
+| `mcp.apify.com` | refused, gateway 403 | **refused, gateway 403** |
+| `APIFY_API_TOKEN` | unset | **set** |
+
+So **`mcp.apify.com` is blocked in both environments today.** The `.mcp.json`
+above is correct configuration that cannot connect anywhere yet; it starts
+working the moment `mcp.apify.com` joins the egress allowlist, and until then
+the `curl` path to `api.apify.com` is the only Apify route that runs — which is
+the second reason the Routines were left on it.
+
 ## Open questions — none of these are settled
 
 Each needs a run inside `env_013KxczVfcQicP87yAYmHtKj`, not the Default one:
 
-1. Are `api.apify.com` and `mcp.apify.com` on that environment's allowlist?
+1. Will `mcp.apify.com` be allowlisted? Until it is, the MCP server is inert.
 2. Does the Apify plan still refuse to run public/store Actors? (Recorded
    2026-08-07 from a verbatim Apify error; not re-tested since.)
 3. Has Apify Proxy permission been granted on the account? Until it is,
