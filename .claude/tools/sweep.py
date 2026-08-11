@@ -332,6 +332,93 @@ def env_drift() -> list[str]:
 
 
 # ── 5. Install advice that hardcodes a package manager ──────────────────────
+def async_blocking() -> list[str]:
+    """A synchronous network call inside an `async def` blocks the whole event loop.
+
+    bot-code-invariants #8 — "never call bare requests in an async handler, wrap in
+    asyncio.to_thread" — had no mechanism until 2026-08-11: prose and review only. It was
+    written after real incidents and every current call site obeys it, which is exactly
+    when a rule quietly stops being checked.
+
+    While the loop is blocked, PTB's httpx connection to Telegram sits unread and the
+    symptom is `NetworkError: httpx.ReadError` — an error that looks like bad connectivity
+    and is actually local. From `/errors` it is indistinguishable from weather.
+
+    **Resolves one level of indirection, and this is the whole difficulty.** The first
+    draft of this scanner matched only low-level names (`requests`, `_get_session`, the
+    Garmin client) and returned a confident 0 — but bot.py never calls those from an
+    `async def`; it calls sync WRAPPERS like `_fetch_wsdot_times()` that do the I/O
+    internally. Break-testing caught it: injecting a real violation
+    (`times = _fetch_wsdot_times()` in place of the `to_thread` call) left the scanner
+    still reporting 0. It now computes, to a fixpoint, the set of module-level sync
+    functions that reach a blocking primitive, and flags calls to those too.
+
+    Benign hits to expect: a sync helper that only *builds* a client without performing
+    I/O, and anything inside `run_in_executor` — not recognised here, since this repo
+    standardised on `to_thread`; add it to the safe set if that ever changes."""
+    src = BOT.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    PRIMITIVES = {"requests", "urlopen", "urlretrieve", "httpx",
+                  "_get_session", "_garmin_client", "_Garmin"}
+
+    def call_roots(node):
+        """Every name a call in `node` is rooted at."""
+        for n in ast.walk(node):
+            if isinstance(n, ast.Call):
+                root = n.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                yield (getattr(root, "id", None) or getattr(n.func, "attr", None)), n
+
+    sync_fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    blocking = set(PRIMITIVES)
+    while True:                       # fixpoint: wrappers of wrappers count too
+        grew = False
+        for name, node in sync_fns.items():
+            if name in blocking:
+                continue
+            if any(r in blocking for r, _ in call_roots(node)):
+                blocking.add(name); grew = True
+        if not grew:
+            break
+
+    # Allowlist: a call the AST cannot clear, because the mitigation is a RUNTIME check.
+    # Each entry carries the guard that makes it safe, and the guard is re-verified below —
+    # an allowlist that outlives its reason hides the next real violation behind a name
+    # nobody re-checks.
+    ALLOW = {
+        "assemble_messages": (
+            "triggered_memories", "get_running_loop",
+            "reaches _embed_text only via the query_vec=None fallback, and that branch "
+            "calls asyncio.get_running_loop() and skips the embed when it is on the loop "
+            "(bot.py ~4361). The reply path pre-embeds off-loop and passes query_vec in."),
+    }
+    out = []
+    for name, (guard_fn, guard_call, why) in ALLOW.items():
+        node = sync_fns.get(guard_fn)
+        if node is None or guard_call not in ast.unparse(node):
+            out.append(f"ALLOWLIST STALE: {name} is exempted because {guard_fn}() calls "
+                       f"{guard_call}(), and that guard is now GONE — the exemption is "
+                       f"hiding a real violation. Reason on file: {why}")
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.AsyncFunctionDef):
+            continue
+        safe = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call):
+                nm = getattr(n.func, "attr", None) or getattr(n.func, "id", None)
+                if nm in ("to_thread", "run_in_executor"):
+                    for arg in n.args:
+                        for sub in ast.walk(arg):
+                            safe.add(id(sub))
+        for root, node in call_roots(fn):
+            if root in blocking and id(node) not in safe and root not in ALLOW:
+                out.append(f"bot.py:{node.lineno} {fn.name}() calls "
+                           f"{ast.unparse(node)[:52]} on the event loop — "
+                           f"wrap it in asyncio.to_thread")
+    return sorted(set(out))
+
+
 def install_hint() -> list[str]:
     """An install hint naming the wrong package manager sends the operator to a
     command that cannot run. `pkg` is Termux-only and does not exist on the Ubuntu
@@ -679,6 +766,7 @@ SCANNERS = {
     "source-assertion": source_assertion,
     "env-drift": env_drift,
     "install-hint": install_hint,
+    "async-blocking": async_blocking,
     "constraints-drift": constraints_drift,
 }
 
