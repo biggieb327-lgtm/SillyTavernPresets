@@ -4,6 +4,11 @@ A small Apify Actor that fetches Reddit's own public JSON listings and
 Substack RSS feeds directly, for the `improvement-loop-monthly` and
 `character-pass-monthly` Routines in `.claude/operating/routines.md`.
 
+How a session reaches Apify at all — the `.mcp.json` server, the egress
+allowlist, and which environment the Routines actually fire into — is
+`.claude/operating/apify-access.md`. This file owns the Actor and the Reddit
+history; that one owns the access layer above it.
+
 ## Why this exists (read before touching Reddit access again)
 
 Three approaches were tried in one day (2026-08-07) before this one:

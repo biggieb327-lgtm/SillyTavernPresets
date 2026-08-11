@@ -319,7 +319,10 @@ above. `ls` it for the rest. The non-obvious bits:
 - `idea-scraper-actor/` (root) is a custom Apify actor the `improvement-loop-monthly`
   and `character-pass-monthly` Routines call for their Reddit + Substack idea scans
   (see its README and `.claude/operating/routines.md`). Not deployed by anything in
-  this repo; the owner deploys it to Apify by hand (`apify push`). **Read its README
+  this repo; the owner deploys it to Apify by hand (`apify push`). How a session
+  reaches Apify at all — the `.mcp.json` server at the repo root, the egress
+  allowlist, and which environment the Routines fire into — is
+  `.claude/operating/apify-access.md`. **Read its README
   before touching Reddit access again** — two other approaches (direct `curl` to
   reddit.com from a fired session; calling `trudax/reddit-scraper-lite` as a public
   Actor, wrapped or direct) were tried and abandoned the same day (2026-08-07) for
