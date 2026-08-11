@@ -604,10 +604,25 @@ seed file, or preset, and never push to main.
   an article than the scraped summary carries, `curl` the URL and quote those
   bytes.
 - **Reddit + Substack access:** same `idea-scraper-actor/` path as the monthly
-  Routines — Atom/RSS, no proxy, token in an `Authorization: Bearer` header, never
-  in the URL. Requires `APIFY_API_TOKEN` (rotated 2026-08-11) and `APIFY_ACTOR_ID`
-  on the Claude Code Remote environment. `subreddits` is empty for this Routine:
+  Routines — RSS, no proxy, token in an `Authorization: Bearer` header, never in
+  the URL. Requires `APIFY_API_TOKEN` (rotated 2026-08-11) and `APIFY_ACTOR_ID` on
+  the Claude Code Remote environment. `subreddits` is empty for this Routine:
   Reddit belongs to the two monthly Routines.
+- **Subscriber feeds, added 2026-08-11 (Actor v0.13):** the first run returned 17
+  items and kept none, judging them "paid-newsletter teasers with no concrete
+  extractable technique in the free text." That is a property of a paywalled
+  publication's public RSS, not a tuning problem — the substance is simply not in
+  the feed. The Actor now also reads **subscriber** feeds for `emergingai` and
+  `learnaiwithme.com` (Gencay's publication, which `gencay.substack.com`
+  redirects to), which carry full post bodies.
+  Those URLs contain tokens, so they are a credential and live ONLY in the
+  Actor's `SUBSTACK_PRIVATE_FEEDS` secret env var — never in this file, never in
+  the trigger prompt, never in Actor input, because **this repo is public** and
+  Actor input is echoed into the run record. Rows, logs and error messages carry
+  only the sanitized origin; see the Actor README for the three guarantees and
+  their tests. Consequently `substack_publications` in the payload is `[]`: a
+  publication listed in both places would be fetched twice and the public teaser
+  would win the deduplication.
 
 ### Verbatim prompt
 
@@ -641,15 +656,40 @@ Scope — two questions, both about how things WORK, not what characters say:
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": [], "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 8}'
+     -d '{"subreddits": [], "substack_publications": [], "max_items_per_source": 10, "max_age_days": 8}'
    Never put the token in the URL (?token=) — it leaks into access logs.
+   substack_publications is EMPTY here on purpose. Both publications are
+   paywalled, so their public feeds carry only free previews; the Actor reads
+   them through subscriber feeds held in its own SUBSTACK_PRIVATE_FEEDS secret
+   env var. Those URLs contain tokens and must never appear in this prompt, in
+   routines.md, or in Actor input — this repo is public. Do not "fix" an empty
+   result by pasting feed URLs into the payload.
+   VERIFY THE SECRET IS LIVE: the run log must contain a line reading
+   "N private Substack feed(s) configured". If that line is absent and you got
+   0 rows, the secret is unset or was dropped by a redeploy — report exactly
+   "SKIPPED (SUBSTACK_PRIVATE_FEEDS not set on the Actor)" and END. Do not
+   report that as a quiet week; the two are indistinguishable from the data and
+   only that log line tells them apart.
    Each row is {source, title, url, external_url, summary, published_at,
-   community}; published_at is always ISO 8601 or null. max_age_days of 8 covers
-   the week since the last run plus a day of margin — do not change it without
-   owner approval. An empty result is a normal quiet week, not a failure.
-3. Judge each item against A and B. MOST ITEMS WILL NOT APPLY. Say so and drop
-   them. Do not stretch an article into relevance to fill the file — a week with
-   two real ideas is a better result than a week with five padded ones.
+   community}; published_at is always ISO 8601 or null, and community is the
+   publication origin with any token stripped. max_age_days of 8 covers the week
+   since the last run plus a day of margin — do not change it without owner
+   approval. An empty result from a live secret is a normal quiet week.
+3. Judge each item against A and B. These two publications were chosen BECAUSE
+   their subject matter — memory, retrieval, agent harnesses, evals, prompt and
+   context structure — IS this fleet's subject matter. Start from the assumption
+   that the material is useful and that your job is TRANSLATION, not gatekeeping.
+   For each item ask "what would this change here?" rather than "does this match
+   an open ticket?" A technique written for a different system still counts if
+   you can name the file, behaviour, or guard category it would change: a memory
+   architecture aimed at a coding agent may apply directly to how these bots
+   store, retrieve and forget facts about a person; an eval idea aimed at a
+   research harness may apply directly to .claude/tools/ or the break-test
+   discipline. Do the work of carrying the idea across.
+   What does NOT count is an idea you cannot tie to something specific in this
+   repo — that is a reading summary, not a proposal. Two well-translated ideas
+   beat five vague ones. But an empty week should mean the posts genuinely
+   contained no mechanism, not that the translation felt like effort.
 4. Evidence rule (from .claude/agents/research-scout.md): every idea carries its
    source URL AND an exact quoted line from the item's own text. Never quote from
    a WebFetch summary — that output is a paraphrase from a small model and its
