@@ -395,6 +395,11 @@ def async_blocking() -> list[str]:
     }
     out = []
     for name, (guard_fn, guard_call, why) in ALLOW.items():
+        if name not in blocking:
+            # The exemption is suppressing nothing here, so it cannot be hiding anything.
+            # Without this, the staleness check fired on any file that simply does not
+            # define the guard function — three gate_corpus cases caught that (2026-08-11).
+            continue
         node = sync_fns.get(guard_fn)
         if node is None or guard_call not in ast.unparse(node):
             out.append(f"ALLOWLIST STALE: {name} is exempted because {guard_fn}() calls "

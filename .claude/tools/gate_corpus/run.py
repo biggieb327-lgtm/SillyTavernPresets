@@ -40,6 +40,30 @@ REPO = TOOLS.parent.parent
 
 # name, scanner, fixture overrides, expected outcome, and the assumption it probes.
 CASES = [
+    # ── async-blocking ─────────────────────────────────────────────────────
+    dict(name="ab-direct", scanner="async-blocking", bot="ab_direct.py",
+         expect="hit", match="handler", probes="baseline: a primitive called from an async def"),
+    dict(name="ab-to-thread", scanner="async-blocking", bot="ab_to_thread.py",
+         expect="clean", probes="baseline: the same call inside asyncio.to_thread is correct"),
+    dict(name="ab-sync-wrapper", scanner="async-blocking", bot="ab_wrapper.py",
+         expect="hit", match="handler",
+         probes="the 2026-08-11 miss — bot.py calls sync WRAPPERS, never primitives, from "
+                "async defs; a primitive-name scanner reports a confident 0 here"),
+    dict(name="ab-wrapper-to-thread", scanner="async-blocking", bot="ab_wrapper_to_thread.py",
+         expect="clean",
+         probes="the wrapper off-loop must stay clean, or every real call site is flagged"),
+    dict(name="ab-transitive", scanner="async-blocking", bot="ab_transitive.py",
+         expect="hit", match="handler",
+         probes="depth 2 — a single-pass resolver stops at _outer and misses this"),
+    dict(name="ab-sync-only", scanner="async-blocking", bot="ab_sync_only.py",
+         expect="clean", probes="a blocking call with no async caller blocks nothing"),
+    dict(name="ab-allowlist-live", scanner="async-blocking", bot="ab_allow_live.py",
+         expect="clean",
+         probes="the allowlisted shape with its runtime get_running_loop guard intact"),
+    dict(name="ab-allowlist-stale", scanner="async-blocking", bot="ab_allow_stale.py",
+         expect="hit", match="ALLOWLIST STALE",
+         probes="guard removed — the exemption now hides a real violation and must say so"),
+
     # ── markdown-interp ────────────────────────────────────────────────────
     dict(name="md-plain-interp", scanner="markdown-interp", bot="md_plain.py",
          expect="hit", match="['name']", probes="baseline: bare {var} through Markdown"),
