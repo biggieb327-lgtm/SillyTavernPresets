@@ -28,6 +28,15 @@ accomplishments, it has failed.
 
 ## What counts as a good stopping point
 
+**Run the check first — do not eyeball this list:**
+
+```bash
+bash .claude/tools/debrief-check.sh
+```
+
+It decides three of the four conditions mechanically and refuses to guess the fourth. If
+it is red, you are not at a stopping point and the debrief would be recording fiction.
+
 All four, or it is not one:
 
 1. `bash .claude/tools/verify.sh` green, output read in this turn.
@@ -127,7 +136,8 @@ data arrives, so it cannot be revised to fit.
 
 ## Verification checklist
 
-- [ ] `verify.sh` green, output pasted
+- [ ] `bash .claude/tools/debrief-check.sh` green (it runs `verify.sh` for you)
+- [ ] CI confirmed by hand for HEAD — the one condition the check refuses to guess
 - [ ] Session reconstructed from `git log` / memory-layer greps, not memory
 - [ ] Constraints updated: `seen` counts incremented, Minor entries added, promotions done
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence

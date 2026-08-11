@@ -767,6 +767,56 @@ else
   bad "verify-steps-covered" "verify.sh step(s) nothing proves can fail:$uncovered — add a case_ to .claude/tools/verify-can-fail.sh"
 fi
 
+# --- skill-refs-resolve ------------------------------------------------------------------
+# Sibling of claude-md-refs-resolve, one level out. `skill-index-integrity` already proves
+# the router and .claude/skills/ agree — but nothing checked the paths INSIDE a skill body,
+# and a skill is loaded precisely when someone is about to act on what it says. A skill
+# that sends the next session to a renamed tool is worse than no skill.
+#
+# Deliberately NARROWER than the CLAUDE.md check: only tokens containing a "/" count. A
+# bare filename in prose (`atlas.txt`, `core.py`) is a mention, not a path claim, and
+# resolving those against a list of candidate roots produced 16 false positives on the
+# first run — a check that noisy on day one gets switched off. 35 real path claims are
+# checked; requiring the slash is what makes the signal trustworthy.
+#
+# Found on its first run: voicekit-work cited `templates/voice_profile_template.json`,
+# which lives at voicekit-starter/src/voicekit/templates/. Fixed in the same commit.
+skill_refs=$(python3 - <<'PYEOF'
+import re
+from pathlib import Path
+ROOTS = ["", "telegram-companion-bot", ".claude", "voicekit-starter"]
+EXTS = "md|sh|py|json|txt|yml|yaml|html|service|example|jsonl"
+skills = sorted(Path(".claude/skills").glob("*/SKILL.md"))
+missing = []
+for sk in skills:
+    # Strip fences first — same desync lesson as claude-md-refs-resolve (2026-07-31).
+    text = re.sub(r"^```.*?^```", "", sk.read_text(encoding="utf-8"), flags=re.S | re.M)
+    for tok in sorted(set(re.findall(r"`([^`]+)`", text))):
+        if tok.startswith(("/", "~", "http")) or "/" not in tok:
+            continue
+        if tok.endswith("/"):
+            cand = tok.rstrip("/")
+            if not re.fullmatch(r"[.A-Za-z0-9_][A-Za-z0-9_./@-]*", cand):
+                continue
+        elif re.fullmatch(rf"[.A-Za-z0-9_@][A-Za-z0-9_./@-]*\.({EXTS})", tok):
+            cand = tok
+        else:
+            continue
+        if not any((Path(r) / cand).exists() for r in ROOTS):
+            missing.append(f"{sk.parent.name}:{tok}")
+if not skills:
+    print("PARSE-FAIL: no SKILL.md files found — the glob broke, which is the silent-green "
+          "shape this check exists to avoid")
+elif missing:
+    print("skills name paths that do not exist: " + ", ".join(missing))
+PYEOF
+)
+if [ -z "$skill_refs" ]; then
+  ok "skill-refs-resolve: every repo path a SKILL.md names still exists"
+else
+  bad "skill-refs-resolve" "$skill_refs"
+fi
+
 # --- break-tester ------------------------------------------------------------------------
 # `break-test.sh` edits a source file in place and restores it, so its failure mode is
 # destroying source code — and its first version did. `mktemp` creates the snapshot file,

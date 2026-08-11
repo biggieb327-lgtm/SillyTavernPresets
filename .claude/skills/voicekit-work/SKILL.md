@@ -9,8 +9,8 @@ A modular Python CLI (`src/` layout, `pyproject.toml`, entry point
 `voicekit = "voicekit.cli:main"`) that extracts author voice profiles from writing
 samples, generates voice-matched drafts, and judges drafts against a profile.
 OpenAI-compatible API via `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL`.
-Modules: `cli.py`, `core.py`, `schemas.py`, `prompts.py`,
-`templates/voice_profile_template.json`.
+Modules, all under `voicekit-starter/src/voicekit/`: `cli.py`, `core.py`, `schemas.py`,
+`prompts.py`, and `voicekit-starter/src/voicekit/templates/voice_profile_template.json`.
 
 ## When NOT to use
 
