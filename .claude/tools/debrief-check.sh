@@ -21,6 +21,24 @@ grn()  { printf '\033[32mok\033[0m    %s\n' "$1"; pass=$((pass + 1)); }
 red()  { printf '\033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail + 1)); }
 note() { printf '\033[36mnote\033[0m  %s\n' "$1"; }
 
+LEDGER=".claude/memory/debrief-log.md"
+
+# --record appends a row instead of checking. Kept as an explicit flag, not a side effect
+# of a passing run: a check that mutates state cannot be run freely to ask "where am I?",
+# and a check you hesitate to run is one you stop running.
+if [ "${1:-}" = "--record" ]; then
+  prev=$(grep -oE '^\| [0-9-]+ \| [0-9a-f]{7,} \|' "$LEDGER" 2>/dev/null | tail -1 | awk '{print $4}')
+  head_sha=$(git rev-parse --short HEAD)
+  if [ -n "${prev:-}" ]; then
+    n=$(git rev-list --count "${prev}..HEAD" 2>/dev/null || echo '?')
+  else
+    n='?'
+  fi
+  printf '| %s | %s | %s | |\n' "$(date +%Y-%m-%d)" "$head_sha" "$n" >> "$LEDGER"
+  echo "recorded: ${head_sha}, ${n} commit(s) since the previous debrief — add a note by hand"
+  exit 0
+fi
+
 echo "── debrief-check ───────────────────────────────────────────────"
 
 # --- 1. nothing uncommitted --------------------------------------------------------------

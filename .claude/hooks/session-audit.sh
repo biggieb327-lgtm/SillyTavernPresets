@@ -38,6 +38,21 @@ if [ "${branch}" != "main" ] && git rev-parse --verify -q origin/main >/dev/null
     fi
   fi
 fi
+# How long since the last recorded session-debrief, in commits of real work. Surfaced HERE
+# because SessionStart is the only moment it is actionable — by the end of a session the
+# context that would have been harvested is already being compacted away.
+# Reports the number and does not judge it: one data point is not a distribution, and
+# inventing a "debrief every N commits" threshold from it is the estimate-as-fact trap
+# (C8). Add the threshold once .claude/memory/debrief-log.md has enough rows to show one.
+if [ -f .claude/memory/debrief-log.md ]; then
+  last=$(grep -oE '^\| [0-9-]+ \| [0-9a-f]{7,} \|' .claude/memory/debrief-log.md 2>/dev/null | tail -1)
+  lsha=$(printf '%s' "$last" | awk '{print $4}')
+  ldate=$(printf '%s' "$last" | awk '{print $2}')
+  if [ -n "${lsha:-}" ] && git cat-file -e "${lsha}^{commit}" 2>/dev/null; then
+    since=$(git rev-list --count "${lsha}..HEAD" 2>/dev/null || echo '?')
+    echo "[session-audit] last session-debrief: ${ldate} (${lsha}), ${since} commit(s) ago — \`bash .claude/tools/debrief-check.sh\` when this session reaches a stopping point"
+  fi
+fi
 echo "[session-audit] standing rules: read telegram-companion-bot/CHANGELOG.md before bot changes; bot.py changes need BOT_VERSION bump + changelog entry (delivery gate blocks otherwise); run .claude/evals/run-evals.sh before claiming done."
 if [ "${dirty}" != "0" ]; then
   echo "[session-audit] WARNING: working tree not clean — inspect before assuming a fresh start:"
