@@ -1,119 +1,243 @@
-# idea-scraper-actor
+# idea-scraper
 
-A small Apify Actor that fetches Reddit's own public JSON listings and
-Substack RSS feeds directly, for the `improvement-loop-monthly` and
+An Apify Actor that collects recent posts from Reddit and Substack into one
+normalized dataset, for the `improvement-loop-monthly` and
 `character-pass-monthly` Routines in `.claude/operating/routines.md`.
 
-## Why this exists (read before touching Reddit access again)
+It never runs anyone else's Actor. This account's plan has
+`ACTORS_PUBLIC_ALL` disabled (`GET /v2/users/me` →
+*"The 'All public Actors' feature isn't enabled for your account"*), so it can
+only run Actors it owns. Everything here is this Actor's own HTTP requests.
 
-Three approaches were tried in one day (2026-08-07) before this one:
+---
 
-1. **Direct `curl` from a fired Claude Code session to `reddit.com`.** Blocked:
-   Cloudflare returns a 403 after a completed TLS handshake, and `WebFetch`/
-   `WebSearch` both refuse the domain outright. No workaround from inside a
-   fired session.
-2. **A custom Actor wrapping `trudax/reddit-scraper-lite`** (calling it via
-   `Actor.call()`). Retired the same day it was built, in favor of:
-3. **Calling `trudax/reddit-scraper-lite` directly** via Apify's
-   `run-sync-get-dataset-items` REST endpoint, no custom Actor. **Blocked**:
-   the owner's Apify plan (Creator) returned `"The Creator plan does not
-   include permission to run public Actors"` — a billing-tier restriction,
-   not a network or token problem. This applies to *any* public Actor,
-   called *any* way (direct REST call or `Actor.call()` from inside your own
-   Actor) — approach 2 would have hit the identical wall had it still been
-   live.
+## Working path (as of 2026-08-11)
 
-**This actor is approach 4**: it never runs anyone else's Actor. It makes its
-own HTTP requests — to Reddit's public `{subreddit}/top.json` listing
-(meant to be routed through one of Apify's own proxy groups, since that's
-the actor's own network egress, not another Actor's execution) and to each
-Substack publication's public `/feed` RSS endpoint (no proxy needed, not
-blocked).
+```
+Reddit    →  https://www.reddit.com/r/{sub}/top.rss     (Atom, no proxy)
+Substack  →  https://{publication}/feed                 (RSS, no proxy)
+```
 
-**Status as of 2026-08-07: Reddit fetching does not work end to end.**
-Three real bugs found and fixed in sequence on live runs, in order of how
-they were uncovered — read this before assuming a new one is the same as
-an old one:
+Neither source needs a proxy. Apify residential proxy stays in the strategy
+list as automatic failover, second after `direct`.
 
-1. **v0.2 through v0.3.2 never actually ran.** `main.py` defined
-   `async def main()` but nothing ever called it — no `asyncio.run(main())`,
-   no `if __name__ == "__main__":` block. `CMD ["python3", "-m", "src.main"]`
-   just imported the module, defined some functions, and exited 0. Every
-   "SUCCEEDED, 0 items" run through v0.3.2 (including the `RESIDENTIAL`
-   group findings below) reflects this, not a real Reddit-access attempt —
-   confirmed by adding a log line as the literal first statement in `main()`
-   and finding it never appeared in any run's log. Fixed in v0.3.3 by adding
-   the entrypoint.
-2. **Once `main()` actually ran, `create_proxy_configuration()` failed with
-   `ApifyApiError: Insufficient permissions`** — for *every* proxy group, not
-   just one. The traceback shows the failure inside `apify-client`'s
-   `user().get()` call (fetching the account's proxy password), before group
-   selection is even relevant. This is an account/token permission gap, not
-   a group-availability one. (`RESIDENTIAL`'s `availableCount: 0`, found via
-   `GET /v2/users/me` while investigating, is real but turned out to be a
-   red herring — `BUYPROXIES94952`'s 27 available proxies hit the identical
-   permission error.) Fixed in v0.3.4/v0.4 by wrapping proxy setup in a
-   try/except that falls back to an unproxied fetch instead of crashing the
-   run — but this does not fix Reddit access, it only stops the permission
-   error from being fatal.
-3. **The unproxied fallback gets a genuine Reddit 403.** With no proxy,
-   `_fetch_subreddit`'s `requests.get()` against `reddit.com` returns
-   `403 Client Error: Blocked` — confirmed live, not inferred. Apify's own
-   compute IPs are blocked by the same Cloudflare rule that blocks a fired
-   Claude Code session's `WebFetch`/direct `curl`.
+**Reddit's Atom feeds work. Reddit's JSON listings are blocked.** Both
+`www.reddit.com/r/{sub}/top.json` and `api.reddit.com/r/{sub}/top` return
+`403 Blocked` from every proxy group available to this account *and* from
+Apify's bare compute IP. The Atom feeds are reachable from all of those. The
+exit IP was never the variable in either direction - the endpoint was.
 
-**Net result: there is currently no working path from this actor to
-Reddit**, proxied or not. Substack needs no proxy and should work now that
-`main()` actually runs, but is untested — no `substack_publications` URL was
-in any test call. **To actually fix Reddit access**, the account's Apify
-Proxy permission needs to be granted (Console/Apify support, not something
-an API token can self-serve) — and even then, whether any given group's
-egress IPs get past Cloudflare is still unverified; that's the next open
-question, not this one. Do not "fix" the group name again without checking
-`create_proxy_configuration()` actually succeeds first — a plausible-looking
-group swap will look identical to the v0.2 fix and still not work.
+---
+
+## Read this before "fixing" Reddit again
+
+Four things look like the problem and are not. Each cost a deploy-and-test
+cycle to rule out:
+
+| Don't | Why |
+|---|---|
+| Remove the `httpx>=0.24,<0.28` pin | httpx 0.28 dropped the `proxies=` kwarg the pinned apify SDK 1.x still passes. Every proxy call dies with `AsyncClient.__init__() got an unexpected keyword argument 'proxies'`. |
+| Switch back to the JSON endpoints | They are blocked by client fingerprinting, not by IP. See history #5. |
+| Buy more proxy types | Residential, static-datacenter and rotating-datacenter IPs all got identical 403s on JSON. The exit IP is not the variable. |
+| Set the Actor to `LIMITED_PERMISSIONS` | The scoped run token cannot read the account proxy password, so *every* proxy group fails with "Insufficient permissions". The Actor must stay `FULL_PERMISSIONS`. |
+
+---
 
 ## Input
 
-See `.actor/input_schema.json`. Key fields: `subreddits` (bare names, no
-`r/` prefix), `reddit_timeframe` (Reddit's own `t=` param), `substack_publications`
-(full URLs), `max_items_per_source` (bounds cost/runtime - do not raise
-casually, this is called from unattended monthly Routines).
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `subreddits` | string[] | `[]` | Names without `r/`. Empty skips Reddit. |
+| `reddit_timeframe` | enum | `month` | Reddit's `t` param. |
+| `substack_publications` | string[] | `[]` | Publication URLs, custom domains, or `substack.com/@handle` profile links. Empty skips Substack. |
+| `max_items_per_source` | int | `25` | Caps both sources. Keeps unattended runs bounded. |
+| `max_age_days` | int | `31` | Drop items older than N days. `0` disables. |
+| `summary_max_chars` | int | `1500` | Characters kept per summary. Was hard-coded to 500. |
+| `filter_titles` | string[] | `[]` | Case-insensitive regexes; matching entries dropped. |
+| `fail_on_empty_source` | bool | `true` | Fail if **any** requested source returned zero rows. |
+| `require_reddit` | bool | `true` | Deprecated — set `false` to exempt Reddit from the check above. |
+| `reddit_strategy_override` | enum | `""` | Force one strategy, for diagnostics. |
 
 ## Output
 
-One dataset row per item: `{source, title, url, summary, published_at, community}`.
-`source` is `"reddit"` or `"substack"`.
+Every row, from either source, has the same shape:
 
-## Deploying
-
-Requires Node.js (for the Apify CLI) and an Apify account/token. From this
-directory:
-
-```bash
-npm install -g apify-cli
-apify login -t <your Apify API token>
-apify push
+```json
+{
+  "source": "reddit",
+  "title": "…",
+  "url": "https://www.reddit.com/r/SillyTavernAI/comments/…",
+  "external_url": "https://streamable.com/xjbaqm",
+  "summary": "… (≤ summary_max_chars, default 1500)",
+  "published_at": "2026-07-28T07:12:46+00:00",
+  "community": "r/SillyTavernAI"
+}
 ```
 
-This builds and deploys under your account as `<username>/idea-scraper`. The
-actor ID (needed for `APIFY_ACTOR_ID`, see below) is shown in the push output
-or on the Actor's page in Apify Console.
+`source` is `reddit` or `substack`. `community` is `r/{subreddit}` or the
+publication URL.
 
-## Wiring into the Routines
+`published_at` is **always ISO 8601, or `null`** — never a raw feed string.
+Reddit's Atom gives ISO and Substack's RSS gives RFC 2822, and passing both
+through unchanged (as v0.10 did) produced a column that could not be sorted
+across sources. An unparseable date becomes `null` rather than raw text, on
+the reasoning that a missing value fails visibly here instead of at sort time
+in the consumer.
 
-Both Routines call this actor synchronously via Apify's REST API:
+`external_url` is where a link/image post actually points — `i.redd.it/…`,
+`streamable.com/…`, a gallery. It is `null` for text posts and for Substack.
+On a link post it is the only substance the row carries, because those have
+no body at all.
+
+---
+
+## How a strategy is chosen
+
+The Actor walks an ordered `(proxy, endpoint)` list against the **first**
+subreddit, and reuses whatever works for the rest. One run diagnoses the
+whole matrix instead of one deploy per guess.
+
+Log lines, all four meaningful:
+
+| Line | Meaning |
+|---|---|
+| `STRATEGY SKIP` | Not runnable — an env var is unset, or a proxy group is unusable. Not a failure. |
+| `STRATEGY FAILED` | The request was made and rejected. The error text is the diagnosis. |
+| `STRATEGY EMPTY` | HTTP 200 but zero entries parsed. Usually a feed-format change. |
+| `STRATEGY OK` | Winner. Used for all remaining subreddits. |
+
+Every successful run also sets a status message —
+`strategy=group:RESIDENTIAL reddit=5 substack=0` — readable via
+`GET /v2/actor-runs/{id}` no matter what the log level is doing.
+
+`direct` was tested on 2026-08-11 and **succeeded** (`strategy=direct
+reddit=5`), so as of 0.10 it leads the list and no proxy is used in normal
+operation. `group:RESIDENTIAL` sits second and takes over automatically if
+Reddit ever starts blocking Apify's shared compute IPs. Apify's compute IPs
+are shared and their reputation drifts, so keep the fallback rather than
+deleting it.
+
+---
+
+## Substack URL handling
+
+Users paste whatever they have, so the input is normalized rather than trusted:
+
+* **Tracking params are stripped.** `https://substack.com/@name?utm_source=share`
+  with `/feed` appended naively produces a URL with the query string in the
+  middle. This was a live bug through 0.11.
+* **Reader-profile links are not publications.** `substack.com/@handle` has no
+  feed of its own, so the handle is also tried as `handle.substack.com/feed`.
+  Check the log for `substack: fell back to` to see which candidate served.
+* **Each candidate must parse and contain `<item>` elements** to be accepted —
+  an HTML error page or an empty feed falls through to the next candidate
+  rather than counting as success.
+
+If every candidate fails, the error names each URL tried.
+
+## Recency
+
+Reddit enforces recency server-side through `reddit_timeframe` (`t=month`).
+Substack's RSS has no equivalent — it serves the most recent entries however
+old they are, so a dormant publication would contribute year-old posts. The
+`max_age_days` filter is applied client-side to **both** sources so they share
+one definition of "recent". Items with no parseable date are kept: a missing
+date is not evidence of being old.
+
+## Known limitations of the Atom path
+
+**Link posts have no body, by construction.** Atom `<content>` for a link or
+image post is *only* `submitted by /u/x [link] [comments]` boilerplate. As of
+0.11 that boilerplate is stripped, so `summary` is empty rather than
+misleading, and `external_url` carries the destination instead. Expect roughly
+half of a typical `top` listing to have an empty summary — that is accurate,
+not a regression. Self-posts come through in full: one measured post carried
+14,360 characters of body, of which v0.10 kept 500.
+
+**No NSFW filtering.** (unchanged in 0.11) The old JSON path filtered `over_18` and `stickied`.
+Atom carries neither. Verified against a live feed: every `<entry>` has
+exactly one `<category>` (the subreddit name), and an NSFW post is
+structurally identical to a safe one — absence of `media:thumbnail` is not a
+signal either, since safe link posts also lack it. `filter_titles` is a blunt
+keyword substitute, not an equivalent. It is empty by default: on an
+AI-roleplay subreddit, adult content may be signal rather than noise. Decide
+deliberately before leaving an unattended Routine running.
+
+---
+
+## History: five blockers, each hidden behind the last
+
+1. **v0.2–v0.3.2 never ran.** `main()` was defined but never invoked — no
+   `asyncio.run()`. `python3 -m src.main` exited 0 having done nothing, which
+   is indistinguishable from a genuinely empty result. Fixed in 0.4.
+
+2. **Runs executed under `LIMITED_PERMISSIONS`.** Confirmed via
+   `GET /v2/acts/{id}` → `actorPermissionLevel`. The scoped run token could not
+   read the account proxy password, so `create_proxy_configuration()` raised
+   *"Insufficient permissions"* for **every** group — which is why swapping
+   groups never helped. Fixed by setting the Actor to `FULL_PERMISSIONS`.
+
+3. **httpx incompatibility.** With permissions fixed, the same call failed with
+   `AsyncClient.__init__() got an unexpected keyword argument 'proxies'`
+   (run `jCU5ds7tavTAdoySy`, build 0.5.1). `requirements.txt` had no httpx pin,
+   so the build pulled httpx ≥ 0.28, which removed `proxies=`. Fixed by pinning
+   `httpx>=0.24,<0.28`.
+
+4. **Proxy attached, Reddit still refused.** Run `vFWSyk0LIsrO6gWic`,
+   build 0.5.3: no `create_proxy_configuration failed` line, and the status
+   message no longer said *"no proxy URL could be obtained"* — the request went
+   out through `BUYPROXIES94952` and came back `403 Blocked`.
+
+5. **The 403 is fingerprint-based, not IP-based.** Run `pwewGtcRIBTHZavIe`
+   tried five combinations — `RESIDENTIAL`, `StaticUS3` and `BUYPROXIES94952`
+   against both `www.reddit.com/*.json` and `api.reddit.com` — and every one
+   returned an identical `403 Blocked`. Residential proxy is confirmed
+   *working* (real responses, ~7 s latency, no "unusable" warning);
+   `maxMonthlyResidentialProxyGbytes: 10` is the real capability signal and
+   `RESIDENTIAL availableCount: 0` is a red herring, since residential is
+   metered by traffic rather than IP count. A block that ignores exit IP
+   entirely is Cloudflare fingerprinting the client — `python-requests`' TLS
+   handshake and thin header set. **Switching to the Atom feeds cleared it.**
+
+**OAuth is not available as a fallback.** Reddit's classic script-app
+registration at `reddit.com/prefs/apps` redirects to Devvit (checked
+2026-08-11), so no new `client_id`/`client_secret` can be issued. The OAuth
+code path is retained and activates automatically if credentials ever exist,
+but nothing depends on it.
+
+---
+
+## Operations
+
+**Deploying without the apify CLI.** The Actor's source is stored as
+`SOURCE_FILES`, and `deploy_v09.py` pushes a version and triggers a build using
+only Python's stdlib — no Node, no Docker, no CLI. Unchanged files are
+inherited from the previous version, so only edited files need to exist
+locally. Secrets are uploaded as `isSecret` env vars on the version, which is
+how to set them without the CLI's secret store.
+
+**Never put a token in a URL or a non-secret env var.** Both have happened
+here. Apify's API takes `Authorization: Bearer`; `?token=` leaks into logs,
+history and referrers. A credential pasted into a plain env var is stored in
+cleartext and readable by anyone who can `GET` the version.
+
+**Verifying a run:**
 
 ```bash
-curl -sS -X POST \
-  "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 25}'
+curl -sS -H "Authorization: Bearer $APIFY_API_TOKEN" \
+  "https://api.apify.com/v2/actor-runs/$RID" \
+  | python3 -c "import json,sys;d=json.load(sys.stdin)['data'];print(d['status']);print(d.get('statusMessage'))"
 ```
 
-Requires `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables
-on the Claude Code Remote environment the Routines fire into (`SillyTavernPresets`,
-`env_013KxczVfcQicP87yAYmHtKj` as of 2026-08-07) — set them under that
-environment's settings at claude.ai/code, not in this repo. See
-`.claude/operating/routines.md` for the exact prompts and the SKIP fallback
-(WebSearch-only) when Apify isn't configured or reachable.
+**Troubleshooting:**
+
+| Symptom | Cause |
+|---|---|
+| Run SUCCEEDED, dataset empty | Only possible with `fail_on_empty_source: false`. Otherwise the run fails with a status message naming which source came back empty and why. |
+| Info-level log lines missing | `APIFY_LOG_LEVEL` is not `INFO` on the version. Setting the logger level in code is not enough — the handler threshold wins. The deploy script ships `APIFY_LOG_LEVEL=INFO` by default. |
+| `published_at` is `null` | The feed served a date in neither ISO 8601 nor RFC 2822. Check the raw feed; the parse is deliberately strict. |
+| `Insufficient permissions` | Actor reverted to `LIMITED_PERMISSIONS`. |
+| `unexpected keyword argument 'proxies'` | The httpx pin was dropped from `requirements.txt`. |
+| `403 Blocked` on every strategy | Reddit extended fingerprinting to the Atom feeds. Nothing short of browser impersonation will help — decide deliberately. |
+| `STRATEGY EMPTY` | Feed still served but the Atom shape changed; check `_parse_atom`. |
+| API calls return 404 for a known-good Actor | Almost always a bad or wrong-account token — Apify returns 404 rather than 403 for Actors a token cannot see. Check `users/me` first. |

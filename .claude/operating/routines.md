@@ -61,17 +61,51 @@ in `list_triggers` without an entry here and that is not drift.
   Apify's own residential proxy (which the Creator plan does permit, since
   it's the actor's own network egress, not another Actor's execution) —
   unverified against a live run as of this update, see the actor's README.
-  Substack unchanged, direct RSS, no proxy needed.
-- **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
-  directly (see 2026-08-03 diagnosis above), and this Apify account's plan
-  cannot run `trudax/reddit-scraper-lite` or any other public Actor directly
-  (see 2026-08-07 history above). Bash curl against `api.apify.com` runs
-  `idea-scraper-actor/` (owner's own Actor) synchronously instead. Requires
-  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables on the
-  Claude Code Remote environment (owner-provisioned, see the actor's README)
-  — if either is unset, or `api.apify.com` itself returns a CONNECT/tunnel 403
-  (same network-policy class that blocked reddit.com directly), the step
-  self-reports SKIPPED and falls back to the WebSearch-only scan.
+  Substack unchanged, direct RSS, no proxy needed. **Actor rebuilt and verified
+  live 2026-08-11** (owner session; live trigger prompt updated the same day and
+  mirrored here in the same session, per this file's rule): the design described
+  above never worked end to end. Five blockers, each hidden behind the last:
+  (1) `main()` was defined but never invoked, so v0.2-v0.3.2 exited 0 having done
+  nothing — indistinguishable from a genuinely empty result; (2) the Actor ran under
+  `LIMITED_PERMISSIONS`, whose scoped run token cannot read the account proxy
+  password, so `create_proxy_configuration()` failed with "Insufficient permissions"
+  for *every* group — which is why swapping groups never helped. **The Actor must
+  stay FULL_PERMISSIONS**; (3) with permissions fixed, httpx 0.28 had removed the
+  `proxies=` kwarg the pinned apify SDK 1.x still passes, so `requirements.txt` now
+  pins `httpx>=0.24,<0.28` — **do not remove that pin**; (4) with the proxy finally
+  attaching, Reddit still returned an identical 403 from residential, static-
+  datacenter and rotating-datacenter IPs, against both `www.reddit.com/*.json` and
+  `api.reddit.com` — the block is Cloudflare fingerprinting the client, not IP
+  reputation, so **buying more proxy types cannot fix it**; (5) Reddit's **Atom**
+  feeds (`/r/{sub}/top.rss`) are not blocked at all, from any IP including Apify's
+  bare compute IP. The Actor now reads Atom with no proxy (residential stays second
+  in an ordered strategy list as automatic failover; a forced `direct` run returned
+  `strategy=direct reddit=5`). Reddit OAuth is not an available fallback:
+  `reddit.com/prefs/apps` still redirects to Devvit (re-confirmed 2026-08-11), so no
+  client_id/secret can be issued. Substack verified live the same day (5 rows from
+  emergingai.substack.com — the first time that path had ever been exercised). Also
+  fixed in the same pass: `published_at` is now always ISO 8601 across both sources
+  (Substack emitted RFC 2822, so the dataset could not be sorted across sources);
+  summaries are no longer capped at 500 chars (one measured Reddit post carried
+  14,360 chars of body); link/image posts carry an `external_url` instead of a
+  boilerplate summary; and the Reddit-only `require_reddit` guard became
+  `fail_on_empty_source`, covering every requested source — a total Substack failure
+  previously exited 0 with an empty dataset. **`APIFY_API_TOKEN` was rotated
+  2026-08-11** after the old value was exposed; the Claude Code Remote environment
+  variable must hold the new token or every firing will 401.
+- **Reddit + Substack access (rewritten 2026-08-11):** the Actor reads Reddit's
+  **Atom** feed (`/r/{sub}/top.rss`) and Substack's RSS directly, with **no proxy**
+  — see the 2026-08-11 history above for why the JSON listings are permanently
+  unusable and why more proxy types will not help. Called over `api.apify.com` with
+  the token in an `Authorization: Bearer` **header, never in the URL** (`?token=`
+  leaks the credential into access logs and browser history). Requires
+  `APIFY_API_TOKEN` (rotated 2026-08-11 — the environment variable must hold the
+  current value) and `APIFY_ACTOR_ID` on the Claude Code Remote environment. If
+  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
+  self-reports SKIPPED and falls back to the WebSearch-only scan. Note that
+  `fail_on_empty_source` defaults true, so a run that reaches Reddit but produces
+  nothing now FAILS with a status message naming the cause, instead of returning
+  `[]`. Fired sessions carry no MCP connectors.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -83,8 +117,8 @@ in `list_triggers` without an entry here and that is not drift.
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
   runs a bounded external-ideas scan — Reddit + Substack via `idea-scraper-actor/`
   (owner's own Apify Actor, fetching Reddit's public JSON directly through Apify's
-  proxy — no public Actor involved), max 25 items per source per run, plus a
-  WebSearch fallback/supplement — and may append up to 3 URL-cited "External ideas
+  proxy — no public Actor involved), max 10 items per source per run and
+  nothing older than 31 days, plus a WebSearch fallback/supplement — and may append up to 3 URL-cited "External ideas
   (unvetted — owner approval required)" to the same proposal file — ideas only,
   never implemented by the loop.
 
@@ -120,13 +154,19 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    configured/reachable; see idea-scraper-actor/README.md)" and fall back to
    the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
-     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
+     -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 25}'
+     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 31}'
+   Never put the token in the URL (?token=) — it leaks into access logs.
    Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has (max_items_per_source of 25 per subreddit bounds Apify usage —
-   do not raise without owner approval. substack_publications is empty by
-   default; only add entries the owner has named.)
+   actually has. Each row is {source, title, url, external_url, summary,
+   published_at, community}. A link/image post has an EMPTY summary and its
+   destination in external_url — that is normal, not a failure. published_at is
+   always ISO 8601 or null.
+   (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
+   the scan to the last month — do not raise either without owner approval. Only
+   add substack_publications the owner has named.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — GitHub (python-telegram-bot's own issues/
    discussions/wiki, comparable companion-bot projects), technical blogs,
@@ -338,7 +378,38 @@ brief — do not claim anything is new or recurring. Fix nothing.
   (Creator tier cannot run any public Actor) — same finding and same fix as
   `improvement-loop-monthly` above, same session. Rebuilt `idea-scraper-actor/`
   v0.2 to fetch Reddit's own public JSON directly through Apify's proxy
-  instead of calling another Actor, and reinstated as the primary source.
+  instead of calling another Actor, and reinstated as the primary source. **Actor rebuilt and verified
+  live 2026-08-11** (owner session; live trigger prompt updated the same day and
+  mirrored here in the same session, per this file's rule): the design described
+  above never worked end to end. Five blockers, each hidden behind the last:
+  (1) `main()` was defined but never invoked, so v0.2-v0.3.2 exited 0 having done
+  nothing — indistinguishable from a genuinely empty result; (2) the Actor ran under
+  `LIMITED_PERMISSIONS`, whose scoped run token cannot read the account proxy
+  password, so `create_proxy_configuration()` failed with "Insufficient permissions"
+  for *every* group — which is why swapping groups never helped. **The Actor must
+  stay FULL_PERMISSIONS**; (3) with permissions fixed, httpx 0.28 had removed the
+  `proxies=` kwarg the pinned apify SDK 1.x still passes, so `requirements.txt` now
+  pins `httpx>=0.24,<0.28` — **do not remove that pin**; (4) with the proxy finally
+  attaching, Reddit still returned an identical 403 from residential, static-
+  datacenter and rotating-datacenter IPs, against both `www.reddit.com/*.json` and
+  `api.reddit.com` — the block is Cloudflare fingerprinting the client, not IP
+  reputation, so **buying more proxy types cannot fix it**; (5) Reddit's **Atom**
+  feeds (`/r/{sub}/top.rss`) are not blocked at all, from any IP including Apify's
+  bare compute IP. The Actor now reads Atom with no proxy (residential stays second
+  in an ordered strategy list as automatic failover; a forced `direct` run returned
+  `strategy=direct reddit=5`). Reddit OAuth is not an available fallback:
+  `reddit.com/prefs/apps` still redirects to Devvit (re-confirmed 2026-08-11), so no
+  client_id/secret can be issued. Substack verified live the same day (5 rows from
+  emergingai.substack.com — the first time that path had ever been exercised). Also
+  fixed in the same pass: `published_at` is now always ISO 8601 across both sources
+  (Substack emitted RFC 2822, so the dataset could not be sorted across sources);
+  summaries are no longer capped at 500 chars (one measured Reddit post carried
+  14,360 chars of body); link/image posts carry an `external_url` instead of a
+  boilerplate summary; and the Reddit-only `require_reddit` guard became
+  `fail_on_empty_source`, covering every requested source — a total Substack failure
+  previously exited 0 with an empty dataset. **`APIFY_API_TOKEN` was rotated
+  2026-08-11** after the old value was exposed; the Claude Code Remote environment
+  variable must hold the new token or every firing will 401.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -364,14 +435,20 @@ brief — do not claim anything is new or recurring. Fix nothing.
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
-- **Reddit + Substack access:** WebFetch/WebSearch cannot reach reddit.com
-  directly (see 2026-08-03 diagnosis above), and this Apify account's plan
-  cannot run a public Actor directly (see 2026-08-07 history above). Same
-  `idea-scraper-actor/` path as `improvement-loop-monthly` — requires
-  `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` set as environment variables; if
+- **Reddit + Substack access (rewritten 2026-08-11):** same path as
+  `improvement-loop-monthly`. The Actor reads Reddit's
+  **Atom** feed (`/r/{sub}/top.rss`) and Substack's RSS directly, with **no proxy**
+  — see the 2026-08-11 history above for why the JSON listings are permanently
+  unusable and why more proxy types will not help. Called over `api.apify.com` with
+  the token in an `Authorization: Bearer` **header, never in the URL** (`?token=`
+  leaks the credential into access logs and browser history). Requires
+  `APIFY_API_TOKEN` (rotated 2026-08-11 — the environment variable must hold the
+  current value) and `APIFY_ACTOR_ID` on the Claude Code Remote environment. If
   either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
-  self-reports SKIPPED and falls back to the WebSearch-only scan. Fired
-  sessions also carry no MCP connectors (same as the other Routines).
+  self-reports SKIPPED and falls back to the WebSearch-only scan. Note that
+  `fail_on_empty_source` defaults true, so a run that reaches Reddit but produces
+  nothing now FAILS with a status message naming the cause, instead of returning
+  `[]`. Fired sessions carry no MCP connectors.
 
 ### Verbatim prompt
 
@@ -433,13 +510,19 @@ seed file, or preset, and never push to main.
    configured/reachable; see idea-scraper-actor/README.md)" and fall back to
    the WebSearch pass below only. Otherwise:
    curl -sS -X POST \
-     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items?token=$APIFY_API_TOKEN" \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
+     -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 25}'
+     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 31}'
+   Never put the token in the URL (?token=) — it leaks into access logs.
    Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has (max_items_per_source of 25 bounds Apify usage — do not raise
-   without owner approval. substack_publications is empty by default; only
-   add entries the owner has named.)
+   actually has. Each row is {source, title, url, external_url, summary,
+   published_at, community}. A link/image post has an EMPTY summary and its
+   destination in external_url — that is normal, not a failure. published_at is
+   always ISO 8601 or null.
+   (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
+   the scan to the last month — do not raise either without owner approval. Only
+   add substack_publications the owner has named.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — SillyTavern's own GitHub (wiki, discussions,
    issues), character-card-writing blogs and guides, HuggingFace discussions.

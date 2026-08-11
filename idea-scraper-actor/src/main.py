@@ -1,146 +1,500 @@
 """Idea scraper actor: Reddit + Substack, no dependency on any other Actor.
 
-An Apify Creator-tier plan cannot run public Actors (confirmed 2026-08-07: a
-direct run-sync call against trudax/reddit-scraper-lite was rejected with
-"The Creator plan does not include permission to run public Actors"). This
-actor works around that by fetching Reddit's own public JSON listings and
-Substack's public RSS feeds directly - neither is "running a public Actor",
-both are this actor's own HTTP requests. Reddit is meant to go through one
-of Apify's own proxy groups to bypass the Cloudflare block that stops a
-fired Claude Code session from reaching reddit.com directly; **as of
-2026-08-07 that proxy step itself fails with an account permission error
-on every group**, and a fail-soft fallback to an unproxied request gets a
-genuine 403 from Reddit - so Reddit fetching does not currently work end
-to end. Substack needs no proxy and is unaffected. See README.md.
+## WORKING PATH (as of 2026-08-11)
 
-Normalizes both sources into one dataset shape so callers (the
+    https://www.reddit.com/r/{sub}/top.rss   (no proxy needed)
+
+Reddit's **Atom feeds work; the JSON listings are blocked.** Confirmed by
+run pwewGtcRIBTHZavIe (all five JSON combinations 403) followed by a
+successful RSS run on build 0.8.x. Do not "fix" a future breakage by
+reaching for the JSON endpoints again - see history below.
+
+## History (read before changing the Reddit path)
+
+Each blocker was hidden behind the previous one.
+
+1. **v0.2-v0.3.2 never ran.** `main()` defined but never invoked. Clean
+   exit 0, no output. Fixed in 0.4.
+2. **LIMITED_PERMISSIONS.** The scoped run token could not read the account
+   proxy password, so `create_proxy_configuration()` raised "Insufficient
+   permissions" for *every* group - which is why swapping groups never
+   helped. Fixed by setting the Actor to FULL_PERMISSIONS.
+3. **httpx incompatibility.** `AsyncClient.__init__() got an unexpected
+   keyword argument 'proxies'` - httpx 0.28 removed `proxies=`, which the
+   pinned apify SDK 1.x still passes. Fixed by pinning httpx<0.28 in
+   requirements.txt. **Do not remove that pin.**
+4. **OAuth is unavailable.** Reddit's classic script-app registration at
+   reddit.com/prefs/apps redirects to Devvit (confirmed 2026-08-11), so no
+   new client_id/secret can be issued. The OAuth path is retained and
+   activates by itself if credentials ever exist; nothing depends on it.
+5. **The JSON 403 is fingerprint-based, not IP-based.** RESIDENTIAL,
+   StaticUS3 and BUYPROXIES94952 all got identical 403s against both
+   www.reddit.com/*.json and api.reddit.com. Residential proxy is confirmed
+   *working* (real responses, ~7s latency; `maxMonthlyResidentialProxyGbytes:
+   10` is the real signal and `RESIDENTIAL availableCount: 0` is a red
+   herring). Buying more proxy types will not help. The Atom feeds simply
+   sit behind different edge rules.
+
+## Two known limitations of the Atom path
+
+* **Thin summaries on link posts.** Atom `<content>` for a link post is
+  literally "submitted by /u/x [link] [comments]" - there is no `selftext`
+  equivalent. Self-posts come through in full.
+* **No NSFW filtering.** The JSON path filtered `over_18` and `stickied`;
+  Atom carries neither. Verified against a live feed: every entry has
+  exactly one `<category>` (the subreddit name) and an NSFW post is
+  structurally identical to a safe one. `filter_titles` below is a
+  best-effort keyword filter, off by default - it is a blunt instrument,
+  not a replacement for the flag.
+
+Normalizes every source into one dataset shape so callers (the
 SillyTavernPresets Routines) don't need source-specific parsing:
 
     {source, title, url, summary, published_at, community}
 """
 import asyncio
-import re
+import logging
 from datetime import datetime, timezone
-from html import unescape
+import os
+import re
+import xml.etree.ElementTree as ET
 
 import requests
 from apify import Actor
 
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_USER_AGENT = "python:idea-scraper-actor:0.4 (by /u/SillyTavernPresetsBot)"
-# create_proxy_configuration() currently fails for EVERY group on this account
-# with "Insufficient permissions" (confirmed 2026-08-07) - the failure is inside
-# apify-client's user().get() call that fetches the proxy password, before group
-# choice is even relevant, so this is an account/token permission gap, not a
-# group-availability one (RESIDENTIAL's availableCount:0, checked the same day
-# via GET /v2/users/me, turned out to be a red herring - BUYPROXIES94952's 27
-# available proxies didn't help either, same error). Kept as the target group
-# for whenever that permission is granted; see main()'s try/except for the
-# fail-soft fallback to an unproxied fetch, which itself gets a genuine Reddit
-# 403 ("Blocked") - so as of 2026-08-07 there is no working path to Reddit from
-# this actor, proxied or not. See README.md.
-_REDDIT_PROXY_GROUP = "BUYPROXIES94952"
+from .extract import (
+    from_epoch,
+    reddit_content,
+    strip_html,
+    substack_feed_candidates,
+    to_iso,
+    truncate,
+    within_age,
+)
+
+_CONTENT_NS = "{http://purl.org/rss/1.0/modules/content/}"
+_DEFAULT_USER_AGENT = "python:idea-scraper-actor:0.12"
+_ATOM = "{http://www.w3.org/2005/Atom}"
+
+# Ordered. The confirmed-working combination is first; the rest are fallbacks
+# kept so a future Reddit change is diagnosed in one run rather than five.
+#   env:NAME       full proxy URL taken verbatim from env var NAME
+#   envgroup:NAME  proxy group whose *name* is in env var NAME
+#   group:NAME     literal proxy group name
+#   direct         no proxy at all
+_STRATEGIES = [
+    # `direct` leads as of 0.10: confirmed working with no proxy at all
+    # (run with reddit_strategy_override="direct" -> "strategy=direct reddit=5").
+    # RESIDENTIAL stays second as automatic failover if Reddit ever starts
+    # blocking Apify's shared compute IPs - it costs nothing sitting here.
+    ("direct", "https://www.reddit.com/r/{sub}/top.rss"),
+    ("group:RESIDENTIAL", "https://www.reddit.com/r/{sub}/top.rss"),
+    ("group:BUYPROXIES94952", "https://www.reddit.com/r/{sub}/top.rss"),
+    ("env:UNBLOCKER_PROXY_URL", "https://www.reddit.com/r/{sub}/top.rss"),
+    ("envgroup:UNBLOCKER_GROUP", "https://www.reddit.com/r/{sub}/top.rss"),
+    ("group:RESIDENTIAL", "https://old.reddit.com/r/{sub}/top.json"),
+    # Control: 403'd consistently through build 0.7.x. If this ever passes,
+    # Reddit changed something rather than the fix working.
+    ("group:RESIDENTIAL", "https://www.reddit.com/r/{sub}/top.json"),
+]
+
+_REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+_REDDIT_OAUTH_BASE = "https://oauth.reddit.com"
 
 
-def _strip_html(text: str) -> str:
-    return _HTML_TAG_RE.sub("", unescape(text or "")).strip()
+def _user_agent() -> str:
+    return os.environ.get("REDDIT_USER_AGENT") or _DEFAULT_USER_AGENT
 
 
-def _fetch_subreddit(subreddit: str, timeframe: str, limit: int, proxy_url: str | None) -> list[dict]:
-    url = f"https://www.reddit.com/r/{subreddit}/top.json"
-    resp = requests.get(
-        url,
-        params={"t": timeframe, "limit": limit, "raw_json": 1},
-        headers={"User-Agent": _USER_AGENT},
-        proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+def _proxies(proxy_url: str | None) -> dict | None:
+    return {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+
+_group_cache: dict[str, str | None] = {}
+
+
+async def _proxy_for_group(group: str) -> str | None:
+    if group in _group_cache:
+        return _group_cache[group]
+    try:
+        configuration = await Actor.create_proxy_configuration(groups=[group])
+        url = await configuration.new_url() if configuration else None
+    except Exception as exc:  # noqa: BLE001 - a group being unavailable is data
+        Actor.log.warning(
+            "proxy group %r unusable: %s "
+            "('Insufficient permissions' => LIMITED_PERMISSIONS; "
+            "unexpected keyword 'proxies' => httpx pin regressed)",
+            group, exc,
+        )
+        url = None
+    _group_cache[group] = url
+    return url
+
+
+async def _resolve_proxy(spec: str) -> tuple[str | None, str | None]:
+    """Return (proxy_url, skip_reason). skip_reason set => not runnable."""
+    kind, _, value = spec.partition(":")
+    if kind == "direct":
+        return None, None
+    if kind == "env":
+        url = os.environ.get(value)
+        return (url, None) if url else (None, f"{value} not set")
+    if kind in ("envgroup", "group"):
+        group = os.environ.get(value) if kind == "envgroup" else value
+        if not group:
+            return None, f"{value} not set"
+        url = await _proxy_for_group(group)
+        return (url, None) if url else (None, f"group {group!r} unusable")
+    return None, f"unknown proxy spec {spec!r}"
+
+
+# --------------------------------------------------------------------------
+# Parsing
+# --------------------------------------------------------------------------
+
+def _parse_json_listing(payload: dict, subreddit: str, limit: int, chars: int) -> list[dict]:
     entries = []
     for child in payload.get("data", {}).get("children", [])[:limit]:
         post = child.get("data", {})
         if post.get("over_18") or post.get("stickied"):
             continue
         permalink = post.get("permalink")
+        url = post.get("url")
         entries.append({
             "source": "reddit",
-            "title": _strip_html(post.get("title", "")),
-            "url": f"https://www.reddit.com{permalink}" if permalink else post.get("url"),
-            "summary": _strip_html(post.get("selftext", ""))[:500],
-            "published_at": datetime.fromtimestamp(
-                post.get("created_utc", 0), tz=timezone.utc
-            ).isoformat() if post.get("created_utc") else None,
+            "title": strip_html(post.get("title", "")),
+            "url": f"https://www.reddit.com{permalink}" if permalink else url,
+            "external_url": url if url and permalink and permalink not in url else None,
+            "summary": truncate(strip_html(post.get("selftext", "")), chars),
+            "published_at": from_epoch(post.get("created_utc")),
             "community": f"r/{subreddit}",
         })
     return entries
 
 
-def _fetch_substack_rss(pub_url: str, limit: int) -> list[dict]:
-    import xml.etree.ElementTree as ET
-
-    pub_url = pub_url.rstrip("/")
-    feed_url = pub_url if pub_url.endswith("/feed") else f"{pub_url}/feed"
-    resp = requests.get(feed_url, timeout=30, headers={"User-Agent": _USER_AGENT})
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
+def _parse_atom(content: bytes, subreddit: str, limit: int, chars: int) -> list[dict]:
+    """Reddit's .rss is Atom, not RSS 2.0 - hence <feed>/<entry>, not <item>."""
+    root = ET.fromstring(content)
     entries = []
-    for item in root.findall("./channel/item")[:limit]:
+    for entry in root.findall(f"{_ATOM}entry")[:limit]:
+        link = entry.find(f"{_ATOM}link")
+        content_el = entry.find(f"{_ATOM}content")
+        post_url = link.get("href") if link is not None else None
+        body, external = reddit_content(content_el.text if content_el is not None else "")
+        published = entry.findtext(f"{_ATOM}published") or entry.findtext(f"{_ATOM}updated")
         entries.append({
-            "source": "substack",
-            "title": (item.findtext("title") or "").strip(),
-            "url": (item.findtext("link") or "").strip(),
-            "summary": _strip_html(item.findtext("description") or "")[:500],
-            "published_at": (item.findtext("pubDate") or "").strip(),
-            "community": pub_url,
+            "source": "reddit",
+            "title": strip_html(entry.findtext(f"{_ATOM}title") or ""),
+            "url": post_url,
+            # Empty on a text-only post; on a link/image post this is the real
+            # destination, which is the only substance such an entry carries.
+            "external_url": external if external and external != post_url else None,
+            "summary": truncate(body, chars),
+            "published_at": to_iso(published),
+            "community": f"r/{subreddit}",
         })
     return entries
 
 
+def _fetch_listing(
+    url: str, timeframe: str, limit: int, proxy_url: str | None, subreddit: str,
+    headers: dict | None = None, chars: int = 1500,
+) -> list[dict]:
+    request_headers = {"User-Agent": _user_agent()}
+    if headers:
+        request_headers.update(headers)
+    resp = requests.get(
+        url,
+        params={"t": timeframe, "limit": limit, "raw_json": 1},
+        headers=request_headers,
+        proxies=_proxies(proxy_url),
+        timeout=45,
+    )
+    resp.raise_for_status()
+    if ".rss" in url or "xml" in resp.headers.get("Content-Type", ""):
+        return _parse_atom(resp.content, subreddit, limit, chars)
+    return _parse_json_listing(resp.json(), subreddit, limit, chars)
+
+
+def _apply_filters(
+    entries: list[dict], patterns: list[str], max_age_days: int, now: datetime
+) -> list[dict]:
+    """Keyword filter (best-effort; Atom carries no over_18 flag) plus age cut.
+
+    Reddit enforces age server-side via t=month, but Substack's RSS has no
+    equivalent - it just serves the most recent N entries however old they are.
+    Applying the cut here keeps both sources on the same definition of "recent".
+    """
+    compiled = [re.compile(p, re.IGNORECASE) for p in (patterns or [])]
+    kept = []
+    for entry in entries:
+        haystack = f"{entry.get('title','')} {entry.get('summary','')}"
+        if any(rx.search(haystack) for rx in compiled):
+            Actor.log.info("dropped (pattern): %s", (entry.get("title") or "")[:60])
+            continue
+        if not within_age(entry.get("published_at"), max_age_days, now):
+            Actor.log.info(
+                "dropped (older than %dd): %s", max_age_days, (entry.get("title") or "")[:60]
+            )
+            continue
+        kept.append(entry)
+    return kept
+
+
+# --------------------------------------------------------------------------
+# OAuth path - inert unless credentials exist (see history note 4)
+# --------------------------------------------------------------------------
+
+def _reddit_oauth_token(client_id: str, client_secret: str, proxy_url: str | None) -> str:
+    resp = requests.post(
+        _REDDIT_TOKEN_URL,
+        auth=(client_id, client_secret),
+        data={"grant_type": "client_credentials"},
+        headers={"User-Agent": _user_agent()},
+        proxies=_proxies(proxy_url),
+        timeout=30,
+    )
+    if resp.status_code == 401:
+        raise RuntimeError("Reddit rejected the client credentials (401)")
+    resp.raise_for_status()
+    token = resp.json().get("access_token")
+    if not token:
+        raise RuntimeError(f"Reddit returned no access_token: {resp.text[:200]}")
+    return token
+
+
+async def _try_oauth(timeframe: str, limit: int, subreddit: str, chars: int):
+    client_id = os.environ.get("REDDIT_CLIENT_ID")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
+    if not (client_id and client_secret):
+        return None
+    proxy_url = await _proxy_for_group("RESIDENTIAL")
+    try:
+        token = _reddit_oauth_token(client_id, client_secret, proxy_url)
+        entries = _fetch_listing(
+            f"{_REDDIT_OAUTH_BASE}/r/{subreddit}/top", timeframe, limit, proxy_url,
+            subreddit, headers={"Authorization": f"bearer {token}"}, chars=chars,
+        )
+        return (token, proxy_url, entries)
+    except Exception as exc:  # noqa: BLE001 - fall through to the strategy list
+        Actor.log.warning("OAuth path failed: %s", exc)
+        return None
+
+
+# --------------------------------------------------------------------------
+# Substack
+# --------------------------------------------------------------------------
+
+def _fetch_substack_rss(pub_url: str, limit: int, chars: int) -> list[dict]:
+    """Fetch one publication, trying each candidate feed URL in order.
+
+    A reader-profile link (substack.com/@handle) has no feed of its own, so the
+    handle is also tried against the conventional publication host. Tracking
+    query params are stripped - appending "/feed" to a URL that still carries
+    "?utm_source=share" produces a broken path.
+    """
+    candidates = substack_feed_candidates(pub_url)
+    if not candidates:
+        raise ValueError(f"could not derive a feed URL from {pub_url!r}")
+
+    last_error: Exception | None = None
+    for feed_url in candidates:
+        try:
+            resp = requests.get(
+                feed_url, timeout=30, headers={"User-Agent": _user_agent()}
+            )
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            items = root.findall("./channel/item")
+            if not items:
+                raise ValueError("feed parsed but contained no <item> elements")
+        except Exception as exc:  # noqa: BLE001 - try the next candidate
+            Actor.log.info("substack candidate failed: %s -> %s", feed_url, exc)
+            last_error = exc
+            continue
+
+        if feed_url != candidates[0]:
+            Actor.log.info("substack: fell back to %s", feed_url)
+        entries = []
+        for item in items[:limit]:
+            # <description> is the editorial subtitle - short and high signal.
+            # <content:encoded> is the full article. Keep both.
+            subtitle = strip_html(item.findtext("description") or "")
+            body = strip_html(item.findtext(f"{_CONTENT_NS}encoded") or "")
+            if body.startswith(subtitle):
+                summary = body
+            elif subtitle and body:
+                summary = f"{subtitle}\n\n{body}"
+            else:
+                summary = subtitle or body
+            entries.append({
+                "source": "substack",
+                "title": (item.findtext("title") or "").strip(),
+                "url": (item.findtext("link") or "").strip(),
+                "external_url": None,
+                "summary": truncate(summary, chars),
+                "published_at": to_iso(item.findtext("pubDate")),
+                "community": pub_url,
+            })
+        return entries
+
+    raise RuntimeError(
+        f"no candidate feed worked for {pub_url!r} "
+        f"(tried {', '.join(candidates)}): {last_error}"
+    )
+
+
 async def main() -> None:
     async with Actor:
+        # Info-level logging was silently suppressed through 0.8, which is why
+        # STRATEGY OK / SKIP lines never appeared and every diagnosis had to be
+        # inferred from which *warnings* were absent. Force it on.
+        logging.getLogger("apify").setLevel(logging.INFO)
+        Actor.log.setLevel(logging.INFO)
+
         actor_input = await Actor.get_input() or {}
         subreddits = actor_input.get("subreddits") or []
         substack_publications = actor_input.get("substack_publications") or []
         max_items = int(actor_input.get("max_items_per_source") or 25)
         timeframe = actor_input.get("reddit_timeframe") or "month"
+        filter_titles = actor_input.get("filter_titles") or []
+        override = (actor_input.get("reddit_strategy_override") or "").strip()
+        chars = int(actor_input.get("summary_max_chars") or 1500)
+        max_age_days = int(actor_input.get("max_age_days") or 0)
+        now = datetime.now(timezone.utc)
+
+        # One guard covering every requested source. The old input was
+        # require_reddit, which only protected Reddit - so a total Substack
+        # failure still exited 0 with an empty dataset (observed 2026-08-11).
+        # require_reddit is still honoured as a deprecated per-source opt-out.
+        fail_on_empty = actor_input.get("fail_on_empty_source")
+        if fail_on_empty is None:
+            fail_on_empty = True
+        legacy_require_reddit = actor_input.get("require_reddit")
+
+        strategies = _STRATEGIES
+        if override:
+            strategies = [s for s in _STRATEGIES if s[0] == override]
+            if not strategies:
+                Actor.log.warning(
+                    "reddit_strategy_override=%r matches no strategy; using full list",
+                    override,
+                )
+                strategies = _STRATEGIES
+
+        reddit_rows = 0
+        reddit_errors: list[str] = []
+        winner: tuple[str, str] | None = None
+        oauth = None
 
         if subreddits:
-            proxy_url = None
-            try:
-                proxy_configuration = await Actor.create_proxy_configuration(groups=[_REDDIT_PROXY_GROUP])
-                proxy_url = await proxy_configuration.new_url() if proxy_configuration else None
-            except Exception as exc:  # noqa: BLE001 - proxy is a nice-to-have, not load-bearing
-                Actor.log.warning(
-                    "Proxy configuration failed (%s) - fetching Reddit directly from "
-                    "Apify's own compute IP instead of group %r", exc, _REDDIT_PROXY_GROUP,
-                )
-            if not proxy_url:
-                Actor.log.warning("No proxy URL - fetching Reddit directly, may hit a Cloudflare block")
-            for subreddit in subreddits:
-                try:
-                    entries = _fetch_subreddit(subreddit, timeframe, max_items, proxy_url)
-                except Exception as exc:  # noqa: BLE001 - one bad subreddit shouldn't kill the run
-                    Actor.log.warning("Reddit fetch failed for r/%s: %s", subreddit, exc)
-                    continue
-                Actor.log.info("r/%s: fetched %d entries", subreddit, len(entries))
-                for entry in entries:
-                    await Actor.push_data(entry)
+            first, rest = subreddits[0], subreddits[1:]
+            entries: list[dict] = []
 
+            oauth = await _try_oauth(timeframe, max_items, first, chars)
+            if oauth:
+                winner, entries = ("OAUTH", ""), oauth[2]
+            else:
+                for spec, template in strategies:
+                    proxy_url, skip_reason = await _resolve_proxy(spec)
+                    url = template.format(sub=first)
+                    if skip_reason:
+                        Actor.log.info("STRATEGY SKIP    %-26s %s (%s)", spec, url, skip_reason)
+                        continue
+                    try:
+                        entries = _fetch_listing(
+                            url, timeframe, max_items, proxy_url, first, chars=chars
+                        )
+                    except Exception as exc:  # noqa: BLE001 - try the next strategy
+                        Actor.log.warning("STRATEGY FAILED  %-26s %s -> %s", spec, url, exc)
+                        reddit_errors.append(f"{spec} {url}: {exc}")
+                        continue
+                    if not entries:
+                        Actor.log.warning(
+                            "STRATEGY EMPTY   %-26s %s -> HTTP 200 but 0 entries", spec, url
+                        )
+                        reddit_errors.append(f"{spec} {url}: 200 but 0 entries")
+                        continue
+                    Actor.log.info(
+                        "STRATEGY OK      %-26s %s -> %d entries", spec, url, len(entries)
+                    )
+                    winner = (spec, template)
+                    break
+
+            if winner:
+                for entry in _apply_filters(entries, filter_titles, max_age_days, now):
+                    await Actor.push_data(entry)
+                    reddit_rows += 1
+
+                for subreddit in rest:
+                    try:
+                        if winner[0] == "OAUTH":
+                            more = _fetch_listing(
+                                f"{_REDDIT_OAUTH_BASE}/r/{subreddit}/top", timeframe,
+                                max_items, oauth[1], subreddit,
+                                headers={"Authorization": f"bearer {oauth[0]}"},
+                                chars=chars,
+                            )
+                        else:
+                            proxy_url, _ = await _resolve_proxy(winner[0])
+                            more = _fetch_listing(
+                                winner[1].format(sub=subreddit), timeframe, max_items,
+                                proxy_url, subreddit, chars=chars,
+                            )
+                    except Exception as exc:  # noqa: BLE001 - one bad subreddit is not fatal
+                        Actor.log.warning("Reddit fetch failed for r/%s: %s", subreddit, exc)
+                        reddit_errors.append(f"r/{subreddit}: {exc}")
+                        continue
+                    Actor.log.info("r/%s: fetched %d entries", subreddit, len(more))
+                    for entry in _apply_filters(more, filter_titles, max_age_days, now):
+                        await Actor.push_data(entry)
+                        reddit_rows += 1
+            else:
+                Actor.log.warning("Every Reddit strategy failed or was skipped")
+
+        substack_rows = 0
+        substack_errors: list[str] = []
         for pub_url in substack_publications:
             try:
-                entries = _fetch_substack_rss(pub_url, max_items)
-            except Exception as exc:  # noqa: BLE001 - one bad feed shouldn't kill the run
+                entries = _fetch_substack_rss(pub_url, max_items, chars)
+            except Exception as exc:  # noqa: BLE001 - one bad feed is not fatal
                 Actor.log.warning("Substack fetch failed for %s: %s", pub_url, exc)
+                substack_errors.append(f"{pub_url}: {exc}")
                 continue
-            for entry in entries:
+            for entry in _apply_filters(entries, filter_titles, max_age_days, now):
                 await Actor.push_data(entry)
+                substack_rows += 1
+
+        # The run's status message is visible via GET /v2/actor-runs/{id} and in
+        # the Console regardless of log level - so the winning strategy is
+        # recoverable even if info logging is suppressed again.
+        summary = (
+            f"strategy={winner[0] if winner else 'NONE'} "
+            f"reddit={reddit_rows} substack={substack_rows}"
+        )
+        Actor.log.info("Done: %s", summary)
+
+        empty_sources = []
+        if subreddits and reddit_rows == 0 and legacy_require_reddit is not False:
+            detail = "; ".join(reddit_errors) or "no error recorded"
+            empty_sources.append(
+                f"{len(subreddits)} subreddit(s) requested, 0 rows: {detail}"
+            )
+        if substack_publications and substack_rows == 0:
+            detail = "; ".join(substack_errors) or "no error recorded"
+            empty_sources.append(
+                f"{len(substack_publications)} Substack publication(s) requested, "
+                f"0 rows: {detail}"
+            )
+
+        if empty_sources:
+            message = " | ".join(empty_sources)
+            if fail_on_empty:
+                await Actor.fail(status_message=message[:1000])
+                return
+            Actor.log.warning("%s (fail_on_empty_source=false)", message)
+        await Actor.set_status_message(summary[:1000])
 
 
 if __name__ == "__main__":
-    # This was missing entirely through v0.2 and v0.3.0-0.3.2: `main()` was defined
-    # but never invoked, so `python3 -m src.main` ran to a clean exit (0) having
-    # done nothing - no input read, no fetch, no log line - which looks identical
-    # to a real empty result. Confirmed 2026-08-07 by adding a log line as the very
-    # first statement in main() and finding it never appears in any run's log.
     asyncio.run(main())
