@@ -39,6 +39,10 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/anchor-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Anchor guard (C7)"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/shell-semantics-guard.sh\""
           }
         ]
       }

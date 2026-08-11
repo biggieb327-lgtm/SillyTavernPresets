@@ -169,3 +169,74 @@ constraint it implements.
   actually worked today was structural — `_error_retention()` returns `saturated` as data,
   so the floor is visible at the source rather than remembered at the keyboard. Where a
   number can carry its own provenance, make it; where it cannot, no hook will help.
+
+
+---
+
+# Continued — 2026-08-11 (debrief pass)
+
+Run through the `session-debrief` skill this session produced. 27 commits total, 29 files,
++2400/-172. Counts below came from commands run during the debrief, not from recall.
+
+## The second half's mistakes, grouped
+
+Nine Minor entries survived the first pass. Three of them shared a real cause and became
+**C23 — the shell evaluated something the command text does not show**: a `||` fallback
+binding to the tail of a pipe, `git commit -m` executing backticks, and a relative path
+resolving under a `cd` from an earlier tool call. Each was self-inflicted twice over — the
+`||` shape was its *third* occurrence that day, and the cwd shape is named three times
+inside C13, which had been re-read in full about an hour earlier while graduating it.
+
+**C22 went 5 → 7.** Both new occurrences landed *after* it was minted, and one of them
+*while writing it up*: proposing a `verify.sh` change "because nothing catches a
+module-level NameError" when `run-evals.sh` had had the `bot-imports` eval since
+2026-07-11. The debrief is the highest-risk moment for C22, because you are reasoning about
+the machinery instead of reading it — `session-debrief` now carries a grep step for exactly
+that.
+
+## The observation that is deliberately NOT a constraint
+
+Four entries shared "I had already written the correction down, in this same session" — the
+`||` form explained to the owner hours earlier, `-F` adopted four commits before, C13 read
+an hour before, C22 written the same afternoon.
+
+That is a property of the **timing**, not a cause. The technical causes are unrelated
+(operator binding, quoting, shell state, not-grepping), and grouping by recurrence would
+have produced an unactionable entry while leaving three real constructs unmechanised. It is
+recorded here instead, where it costs nothing and misleads no one.
+
+**What it does say:** writing a correction down does not install it. Only the mechanised
+half of C23 will actually stop those two shapes — which is the argument for spending the
+effort on a hook rather than on a better-worded rule.
+
+## What worked, second half
+
+- **`break-test.sh` caught three defects in things built to fix defects**: its own trap
+  (which truncated `bot.py` to zero bytes on first run), the `async-blocking` scanner's
+  first draft (a confident 0 against an injected real violation), and a break-test of the
+  skill registration whose polarity was inverted.
+- **`gate_corpus` caught what break-testing structurally could not** — the allowlist
+  staleness check fired on any file that simply lacked the guard function. Break-tests all
+  run against the real `bot.py`, where that function exists; only fixtures shaped
+  differently could show it.
+- **Pre-registered stopping rules held.** emily's outlier was closed on a rule written
+  before the data arrived, after three falsified hypotheses, rather than on a fourth guess.
+- **Three wrong predictions were caught because they were labelled predictions** and tested.
+
+## Open, with stopping rules
+
+| thread | state | stopping rule |
+|---|---|---|
+| emily's 3.2/day network transients | CLOSED — spread across 12 of 14 days, chronic background, three hypotheses falsified | already applied; do not reopen without a NEW discriminating reading |
+| map-intent fire rate | scheduled `trig_012TQTqApvyJcXWurcjVzmsV`, fires 2026-08-17 09:00 PT | if the rate is unremarkable, close ROADMAP 3.5's cooldown as decided-against; **do not build it because the reminder fired** |
+| `gate_corpus` cases for `shell-semantics-guard.sh` | not written — the guard is exercised across 7 cases by hand and live-tested end to end | write them if a third shape is ever added |
+
+## What the next session should NOT redo
+
+- The fleet's error counters are VPS-era only (2130 → 205 retained). Numbers before
+  2026-08-11 in older docs are phone-era and already explained; do not re-diagnose them.
+- `network` and `unhandled` across all seven are accounted for. No unexplained numbers
+  remain on the fleet.
+- Track 4 is complete. `MEMORY_TOKEN_BUDGET` is set per-instance on all seven.
+- Invariant #8 is clean and now has a scanner. The two `assemble_messages` hits are
+  allowlisted with a reason and a staleness check — they are not findings.

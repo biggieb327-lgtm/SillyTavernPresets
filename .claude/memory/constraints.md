@@ -876,8 +876,8 @@ the five that must stay descriptive and is precisely why it cannot flag the ones
 shouldn't.
 
 ### C22 — A copy of the thing was consulted where the thing itself was one command away
-**seen: 5** (2026-08-07 ×2, 2026-08-08, 2026-08-09, 2026-08-10) — *promoted from the Minor
-log 2026-08-10; all five entries deleted.*
+**seen: 7** (2026-08-07 ×2, 2026-08-08, 2026-08-09, 2026-08-10 ×3) — *promoted from the
+Minor log 2026-08-10; occurrences 6 and 7 landed AFTER it was minted, in the same session.*
 Five separate failures, one cause. In each, an authoritative source existed, was reachable
 by a single command, and a stale or secondary copy of it was used instead:
 
@@ -908,6 +908,16 @@ in `routines.md`; the script before describing what a script does; the scanners 
 before naming a new helper. **A copy existing is not evidence it is current** — the same
 distinction C8 draws for readings, applied to sources.
 
+**Occurrences 6 and 7 (2026-08-10) — both after this constraint was written, one of them
+while writing it up.** Offered to "rotate or truncate" `errors.log` without reading
+`bot.py:144`, where `RotatingFileHandler(maxBytes=2_000_000, backupCount=3)` had been
+configured all along. Then proposed replacing `verify.sh`'s `py_compile` step "because
+nothing catches a module-level NameError" and committed that premise into a session
+autopsy — `run-evals.sh` has had the `bot-imports` eval doing exactly that since the
+v2026-07-11 NameError incident, and its comment says so. **The debrief is the highest-risk
+moment for this constraint**, because you are reasoning *about* the machinery instead of
+reading it; `session-debrief` now carries a grep step for that reason.
+
 **Graduated → `.claude/hooks/session-audit.sh`.** It now reports how far the branch's
 merge-base sits behind `origin/main` at every session start and warns past 25 commits,
 which is the one shape here a mechanism can see: the ~150-commit gap was invisible until
@@ -917,6 +927,43 @@ that hid its own staleness would be this constraint in miniature. The other four
 mechanisation for the reason rule 4 allows prose: nothing in the diff distinguishes
 "read the live Routine and then edited the file" from "edited the file", and the tool call
 that would have made the difference leaves no trace in the repo.
+
+### C23 — The shell evaluated something the command text does not show
+**seen: 3** (2026-08-10 ×2, 2026-08-11) — *promoted from the Minor log 2026-08-11; all
+three entries deleted.*
+Three failures in one session, three different constructs, one cause: **what the shell
+actually did depended on something the written command does not display.**
+
+| written | what it looks like | what the shell did |
+|---|---|---|
+| `grep -m1 X f \| cut -d= -f2- \|\| echo '(absent)'` | fallback when grep finds nothing | `\|\|` tests **`cut`**, which returns 0 either way — the fallback can never fire, and "absent" is indistinguishable from "empty" |
+| `git commit -m "…\`git show HEAD:\`…"` | a literal message | backticks **executed**; a repo directory listing landed in the commit body |
+| `python3 - <<PY` reading `.claude/memory/…` | a repo-root path | resolved under a `cd` from an **earlier tool call** — this shell persists cwd |
+
+Each was self-inflicted twice over: the `\|\|` shape was its **third** occurrence that day
+and I had written the corrected form and explained the binding to the owner hours earlier;
+the `-m` quoting had already killed an earlier commit and `-F` was adopted as the fix four
+commits before; the cwd shape is named three times inside C13, which I had re-read in full
+about an hour earlier while graduating it.
+
+**Constraint:** in any command whose result you will act on or hand over —
+- put a test on the command you mean, never on the tail of a pipeline
+  (`if grep -q …; then … else … fi`, not `… | cut … || echo`);
+- pass multi-line or punctuation-bearing text through a **file** (`git commit -F`,
+  heredocs with quoted delimiters), never through a double-quoted `-m`;
+- use absolute paths, or `cd` inside the same invocation — cwd is *session* state.
+
+**Graduated → `.claude/hooks/shell-semantics-guard.sh`** for the two shapes a PreToolUse
+hook can see: a `||` fallback whose left side ends in a pipe, and `git commit -m` carrying
+a backtick or `$(`. The cwd shape is **deliberately not** guarded — a relative path is
+correct far more often than not, and a hook that fired on every one of them would be
+turned off within a day; that half stays prose and stays inside C13.
+
+**What this is NOT:** a constraint about re-offending. Four entries this session shared
+"I had already written the correction down", and that is a property of the *timing*, not a
+cause — grouping by it would have produced an unactionable entry and left these three
+constructs unmechanised. Recorded in `SESSION-AUTOPSY-2026-08-10.md` as an observation
+instead.
 
 ## Minor — running log
 
@@ -1098,13 +1145,9 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
 - 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
 - 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
 - 2026-08-11 — Wrote a break-test whose command was `run-evals.sh | grep -q '^FAIL <name>' && exit 0 || exit 1` — inverted. `break-test.sh` requires the command to exit NON-ZERO with the defect present, so a correctly-caught defect produced exit 0 and the tool reported "did not go red". The eval was fine; my wrapper was backwards, and the extra grep was pointless anyway since `run-evals.sh` already exits non-zero on any failure. → **a break-test's command must FAIL when the defect is present — check the polarity before reading the result**, and prefer the check's own exit status over a grep for its output. Caught only because the tool is strict about the red step; a hand-run break-test would have shown a passing eval and a confusing message and been waved through.
-- 2026-08-11 — Ran a `python3 - <<PY` heredoc with a relative path (`.claude/memory/operational-log.md`) after an earlier `cd telegram-companion-bot` in a previous call. This shell persists cwd across calls, so it resolved under the wrong root and died with FileNotFoundError; the `&& git commit` behind it then reported "nothing to commit" — a clean-looking outcome for work that never happened. **C13 names this exact failure three times in its own text** ("run repo tooling by absolute path, or `cd` in the same command") and I had re-read that constraint in full one hour earlier while graduating it. → **cwd is session state, not command state.** Absolute paths in every handed-over or scripted file operation, or `cd` inside the same invocation. It failed loudly this time; the same slip behind a `git add -A` would have committed nothing and said so quietly.
 - 2026-08-10 — Handed over a prune of `error_counts` inside each instance's `state.json` as *prune all six, then restart all six*. `bot.py` holds `_error_counts` in memory and rewrites the whole file on `save_state()`, so every second between a file being edited and its owner being restarted is a window where the running bot writes its full in-memory copy back over the edit. I **named the race in the same message** — "a running instance rewrites state.json on its own schedule and could overwrite the prune" — and then talked past it: "restarting after is enough in practice, but stopping first is strictly safer." It is not enough in practice. Emily, the busiest instance and therefore the likeliest to save state mid-window, came back at exactly her pre-prune 425. → **to edit a file a live process owns, stop the process first — prune second, start third.** Naming a race and then recommending the racy order is worse than not noticing it: the caveat makes it look considered. If a hazard is real enough to write down, it is real enough to change the command.
 - 2026-08-10 — Proposed that the fleet's ~8.7/day `network` errors were Termux phone-era residue aging out of the 200-cap, then **withdrew the hypothesis in the same message** because every instance's newest entry was today. That reading cannot discriminate: "newest is today" is equally true of "8.7/day, ongoing" and of "1/day now, 26.7/day historically". The daily histogram settled it in one command — 93.5% of nora's retained entries predate the cutover, and her VPS-era rate (1.08/day) matches VPS-native marcus (0.93/day). The first hypothesis was right and I talked myself out of it with a non-discriminating reading. → **withdrawing a hypothesis needs a discriminating reading exactly as much as asserting one does.** C8's own question — what would this reading look like under the *other* hypothesis? — applies symmetrically, and I applied it only to the claim I was making, not to the claim I was retracting. Same session that took C8 to seen 7.
-- 2026-08-10 — Handed over `grep -m1 '^MEMORY_TOKEN_BUDGET=' .env | cut -d= -f2- || echo '(absent → default 300)'` to read seven instances' config. `||` binds to the exit status of the LAST command in the pipeline, which is `cut`, and `cut` returns 0 whether or not `grep` matched — so the fallback can never fire and "absent" renders identically to "set to empty". All seven came back blank and the reading could not distinguish them. **This is the third time in one session for this exact shape**: the `TOMTOM_TRAVEL_MODE` check earlier today had the identical `|| echo` defect, I diagnosed it, wrote the corrected form, explained it to the owner — and then wrote the broken form again two hours later. → **a `||` fallback after a pipe is testing the wrong command.** Put the test on the grep itself (`if grep -q …; then … else … fi`), never on the tail of a pipeline. Diagnosing a bug is not the same as having stopped making it; the correction has to reach the fingers, not just the write-up.
-- 2026-08-10 — Committed the autopsy fixes with `git commit -m "<long message>"` in double quotes. Backticks and `$(...)`-adjacent text inside it were evaluated by the shell: `git show HEAD:` ran as a command substitution and dumped a repo directory listing into the commit body, and several backticked identifiers vanished. Amended with `-F <file>` before pushing. **I had already hit this exact failure earlier in the same session** (the atlas commit at `537148f` died on an unescaped parenthesis, and I switched to `-F` then) and regressed to the unsafe form four commits later. → **never pass a multi-line commit message through `-m` with double quotes; write it to a file and use `-F`.** A rule adopted mid-session is not adopted until it displaces the habit — the tell is reaching for the form that failed, not the form that worked.
 - 2026-08-10 — Wrote `break-test.sh` with `trap restore EXIT` and guarded the restore on `[ -f "$SNAP" ]`. `mktemp` **creates** the file, so that guard was true before the snapshot had been taken, and the first early exit — a 0-match anchor, the exact failure the tool exists to catch — copied zero bytes over the target. **`bot.py` was truncated to nothing by the run that was checking the tool's own failure modes.** Restored from `git show HEAD:` (not `git checkout`, C15) and fixed with an explicit `SNAPPED` flag plus a non-empty check. → **a cleanup trap must prove the thing it restores was ever captured**; `mktemp` existing is not the resource existing. Found only because the tool's failure modes were exercised rather than assumed — the same discipline the tool exists to enforce, applied to the tool.
-- 2026-08-10 — Proposed replacing `verify.sh`'s `py_compile` step "because nothing catches a module-level NameError", and wrote that premise into a committed autopsy. `run-evals.sh` has had the `bot-imports` eval since the v2026-07-11 NameError incident, doing exactly that, with a comment saying py_compile cannot catch this class — and `verify.sh` runs it. The gap was never in the coverage; it was that I ran `py_compile` standalone by hand and read its green instead of running the harness. → **C22's third occurrence in one session, this time while writing the fix for the session's other mistakes.** Before proposing a mechanism, grep the mechanisms: `.claude/evals/`, `.claude/tools/`, `.claude/hooks/`. Kept the change (the step's label was genuinely lying) but corrected the comment so it does not claim a gap it did not close.
 - 2026-08-10 — Declared `python3 -m py_compile bot.py` clean and moved on, having placed `_ERROR_LOG_THROTTLE_S = _env_int(...)` about 120 lines ABOVE `_env_int`'s definition. Compiling checks syntax; it does not execute module level, so a NameError that makes the module unimportable passes it silently. Found only when pytest failed at collection with `NameError: name '_env_int' is not defined`. I had even predicted this ordering hazard earlier in the same session and then placed the constant without checking. → **`py_compile` is not an import.** For any module-level statement that CALLS something, prove it by importing the module, not by compiling it — `python3 -c "import bot"` under the test fixture is the check, and it is what `verify.sh` runs pytest for anyway.
 - 2026-08-09 — Added a cross-reference to `.claude/OPERATING_MANUAL.md` §9 from CLAUDE.md but wrote the bare filename, `OPERATING_MANUAL.md`. `claude-md-refs-resolve` failed: CLAUDE.md's paths resolve from the repo root, where that file does not exist. The surrounding lines all use the `.claude/` prefix, so the wrong form was written next to four correct ones. → **a path written into a doc is a claim that resolves from that doc's stated root, not from the file you were just editing.** Caught by the eval, not by rereading — which is the argument for running the suite on doc-only changes too.
 
