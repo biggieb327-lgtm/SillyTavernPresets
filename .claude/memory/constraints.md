@@ -998,6 +998,29 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-11 — Wrote a 40-iteration polling loop that curled `api.github.com` for a branch
+  and grepped the response for the branch name. GitHub REST is MCP-only in this
+  environment: every call returned `"GitHub access is not enabled for this session"`, so
+  the grep could never match and the loop could only ever time out. Burned the full 10
+  minutes proving nothing, and the same fact is already written down in the
+  `routine-prompts-runnable` eval's own comment. → **Before waiting on a check, run one
+  iteration and read its output. A poll whose success branch has never once been observed
+  is C13 wearing a loop.**
+- 2026-08-11 — Spawned a child session to probe another environment, then discovered this
+  build exposes `create_session` but no `list_events` or `send_message` — no way to read
+  its transcript or steer it. Spawned a second one told to push its report to a branch;
+  it drifted into writing an actor "v0.5" nobody asked for and never pushed. Two sessions,
+  ~25 minutes, zero facts retrieved. → **Before delegating, name the channel the answer
+  comes back on and confirm that channel exists. An agent you cannot read is a write-only
+  agent.**
+- 2026-08-11 — Ran `pip install -r requirements.txt` in the session container to clear two
+  dependency FAILs in `verify.sh`. It installed a `cryptography` whose binding didn't match
+  the system `cffi`, so `bot.py` began crashing on import with a pyo3 panic and the
+  `bot-imports` eval went from skipped to FAIL. The eval's own failure message is what
+  distinguished it ("if it points into site-packages, the environment's packages are
+  broken, not bot.py"). Repaired with `--force-reinstall cffi`. → **Installing to fix a
+  red check can manufacture a different red. Re-read the failure's own text before
+  believing the code broke.**
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —
