@@ -105,7 +105,15 @@ in `list_triggers` without an entry here and that is not drift.
   self-reports SKIPPED and falls back to the WebSearch-only scan. Note that
   `fail_on_empty_source` defaults true, so a run that reaches Reddit but produces
   nothing now FAILS with a status message naming the cause, instead of returning
-  `[]`. Fired sessions carry no MCP connectors.
+  `[]`. Fired sessions carry no MCP connectors. **Substack moved out
+  2026-08-11** (same session as the live prompt edit): `emergingai.substack.com`
+  and `substack.com/@gencay` were removed from this Routine and given to the new
+  `practice-scan-weekly` below. Evidence for the split — the 2026-08-11 on-demand
+  fire of both monthly Routines pulled 20 Substack rows and yielded exactly one
+  usable idea between them; character-pass's own report called the rest "general
+  Claude/agent-building content with no card-writing angle." That material is
+  about memory and working practice, which is what `practice-scan-weekly` is for.
+  Each Routine now owns one source set.
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -157,7 +165,7 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 31}'
+     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 10, "max_age_days": 31}'
    Never put the token in the URL (?token=) — it leaks into access logs.
    Read titles/URLs/body text straight out of whatever JSON keys the response
    actually has. Each row is {source, title, url, external_url, summary,
@@ -165,8 +173,9 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
    destination in external_url — that is normal, not a failure. published_at is
    always ISO 8601 or null.
    (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
-   the scan to the last month — do not raise either without owner approval. Only
-   add substack_publications the owner has named.)
+   the scan to the last month — do not raise either without owner approval.
+   substack_publications is empty ON PURPOSE as of 2026-08-11: both publications
+   moved to practice-scan-weekly, which owns them. Do not add them back here.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — GitHub (python-telegram-bot's own issues/
    discussions/wiki, comparable companion-bot projects), technical blogs,
@@ -409,7 +418,15 @@ brief — do not claim anything is new or recurring. Fix nothing.
   `fail_on_empty_source`, covering every requested source — a total Substack failure
   previously exited 0 with an empty dataset. **`APIFY_API_TOKEN` was rotated
   2026-08-11** after the old value was exposed; the Claude Code Remote environment
-  variable must hold the new token or every firing will 401.
+  variable must hold the new token or every firing will 401. **Substack moved out
+  2026-08-11** (same session as the live prompt edit): `emergingai.substack.com`
+  and `substack.com/@gencay` were removed from this Routine and given to the new
+  `practice-scan-weekly` below. Evidence for the split — the 2026-08-11 on-demand
+  fire of both monthly Routines pulled 20 Substack rows and yielded exactly one
+  usable idea between them; character-pass's own report called the rest "general
+  Claude/agent-building content with no card-writing angle." That material is
+  about memory and working practice, which is what `practice-scan-weekly` is for.
+  Each Routine now owns one source set.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -513,7 +530,7 @@ seed file, or preset, and never push to main.
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 31}'
+     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 10, "max_age_days": 31}'
    Never put the token in the URL (?token=) — it leaks into access logs.
    Read titles/URLs/body text straight out of whatever JSON keys the response
    actually has. Each row is {source, title, url, external_url, summary,
@@ -521,8 +538,9 @@ seed file, or preset, and never push to main.
    destination in external_url — that is normal, not a failure. published_at is
    always ISO 8601 or null.
    (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
-   the scan to the last month — do not raise either without owner approval. Only
-   add substack_publications the owner has named.)
+   the scan to the last month — do not raise either without owner approval.
+   substack_publications is empty ON PURPOSE as of 2026-08-11: both publications
+   moved to practice-scan-weekly, which owns them. Do not add them back here.)
    Supplement with WebSearch (max ~5 queries), scoped to sources a fired
    session can actually reach — SillyTavern's own GitHub (wiki, discussions,
    issues), character-card-writing blogs and guides, HuggingFace discussions.
@@ -540,6 +558,116 @@ seed file, or preset, and never push to main.
 ```
 
 ---
+
+---
+
+## practice-scan-weekly
+
+- **Created:** 2026-08-11, owner-requested. Owns the two Substack publications
+  that `improvement-loop-monthly` and `character-pass-monthly` gave up the same
+  day (see their entries above). Reason for the split, from evidence rather than
+  taste: the 2026-08-11 on-demand fire of both monthly Routines pulled 20 Substack
+  rows and produced exactly one usable idea between them, and character-pass's own
+  report judged the rest "general Claude/agent-building content with no
+  card-writing angle." The material is good — it was pointed at the wrong two
+  Routines. This one asks the questions that material actually answers.
+- **Schedule:** cron `0 15 * * 4` — 15:00 UTC every Thursday. Offset from every
+  other Routine (ops-brief 14:00 daily, hygiene-check Mon 09:00, improvement-loop
+  1st 09:00, character-pass 15th 14:00) so two heavy unattended sessions never
+  compete.
+- **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
+- **Notifications:** push on completion (email off).
+- **Why weekly and `max_age_days: 8`:** the monthly Routines use 31 to match their
+  cadence. This one runs every 7 days, so 8 gives one day of margin — consecutive
+  runs neither skip a post published just after a run nor re-report one already
+  seen. Raising it re-reports; lowering it drops posts.
+- **No WebSearch fallback, deliberately.** The other Routines fall back to a
+  WebSearch scan when Apify is unreachable, because their external-ideas step is a
+  supplement to work they do anyway. This Routine *is* the two publications — with
+  them unreachable there is nothing for it to do, and a WebSearch substitute would
+  quietly turn a scoped scan into an open-ended trawl. It reports SKIPPED and ends.
+- **What it does:** reads the week's posts from `emergingai.substack.com` and
+  `substack.com/@gencay` via `idea-scraper-actor/` and judges each against two
+  questions: (A) **fleet memory** — would this improve the companion bots' memory,
+  retrieval, forgetting or grounding, judged against the live guard categories in
+  `.claude/memory/operational-log.md`; and (B) **operating** — would this improve
+  how this repo's own agent system works: `.claude/skills/`, `.claude/agents/`,
+  `.claude/hooks/`, the Routines, or the evidence discipline in `CLAUDE.md`.
+  Findings go to `.claude/memory/practice-scan/<YYYY-MM-DD>.md` on branch
+  `claude/practice-scan`, max 5 ideas, each tagged `[fleet memory]` or
+  `[operating]`. **Proposal-only** — it edits no code, card, preset, hook, skill,
+  agent or eval, and never pushes to `main`.
+- **Evidence rule** borrowed from `.claude/agents/research-scout.md`: every idea
+  carries its source URL *and* an exact quoted line from the item's own text, and
+  nothing may be quoted from a `WebFetch` summary — that output is a paraphrase
+  from a small model and its quotes can be compressed or invented. To read more of
+  an article than the scraped summary carries, `curl` the URL and quote those
+  bytes.
+- **Reddit + Substack access:** same `idea-scraper-actor/` path as the monthly
+  Routines — Atom/RSS, no proxy, token in an `Authorization: Bearer` header, never
+  in the URL. Requires `APIFY_API_TOKEN` (rotated 2026-08-11) and `APIFY_ACTOR_ID`
+  on the Claude Code Remote environment. `subreddits` is empty for this Routine:
+  Reddit belongs to the two monthly Routines.
+
+### Verbatim prompt
+
+```
+Weekly practice scan for the SillyTavernPresets repo. This Routine is recorded in
+.claude/operating/routines.md — read that file first; if this prompt and that file
+disagree, stop and report the drift to the owner instead of proceeding.
+
+PROPOSAL-ONLY. Write no code and edit no card, seed, preset, hook, skill, agent,
+eval, or Routine. Never push to main. Your only deliverable is one proposals file
+on the branch claude/practice-scan.
+
+Scope — two questions, both about how things WORK, not what characters say:
+  A. FLEET MEMORY. Would this make the companion bots' memory, retrieval,
+     forgetting, or grounding better? Judge against the live guard categories
+     named in .claude/memory/operational-log.md (e.g. memory_ungrounded,
+     note_ungrounded), not against a general idea of what memory should be.
+  B. OPERATING. Would this make this repo's own agent system work better —
+     .claude/skills/, .claude/agents/, .claude/hooks/, the Routines themselves,
+     or the evidence and verification discipline in CLAUDE.md?
+
+1. Read .claude/memory/operational-log.md and .claude/memory/constraints.md first,
+   so relevance is judged against real open problems rather than guessed ones.
+2. Fetch the week's posts. Requires APIFY_API_TOKEN and APIFY_ACTOR_ID as
+   environment variables; if either is unset, or the call fails with a
+   CONNECT/tunnel 403 (api.apify.com itself blocked), report
+   "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
+   and END. This Routine has no WebSearch fallback on purpose — it IS these two
+   publications, and a substitute would turn a scoped scan into an open trawl.
+   curl -sS -X POST \
+     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
+     -H "Authorization: Bearer $APIFY_API_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"subreddits": [], "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 8}'
+   Never put the token in the URL (?token=) — it leaks into access logs.
+   Each row is {source, title, url, external_url, summary, published_at,
+   community}; published_at is always ISO 8601 or null. max_age_days of 8 covers
+   the week since the last run plus a day of margin — do not change it without
+   owner approval. An empty result is a normal quiet week, not a failure.
+3. Judge each item against A and B. MOST ITEMS WILL NOT APPLY. Say so and drop
+   them. Do not stretch an article into relevance to fill the file — a week with
+   two real ideas is a better result than a week with five padded ones.
+4. Evidence rule (from .claude/agents/research-scout.md): every idea carries its
+   source URL AND an exact quoted line from the item's own text. Never quote from
+   a WebFetch summary — that output is a paraphrase from a small model and its
+   quotes can be compressed or invented. If you need more of an article than the
+   scraped summary carries, curl the URL and quote the bytes you fetched.
+5. If anything applies: write ONE file
+   .claude/memory/practice-scan/<YYYY-MM-DD>.md, dated the day this Routine fired.
+   Max 5 ideas, each tagged [fleet memory] or [operating], each with its URL, its
+   quoted line, and one line naming the specific file or behavior it would change.
+   Rank them by what you would do first. Commit only that file to the branch
+   claude/practice-scan (reset it to origin/main first if it already exists) and
+   push ONLY to claude/practice-scan — NEVER to main or any other branch.
+6. If nothing applies: push NOTHING, create NO branch, and end with the one-line
+   summary "practice-scan: nothing this week".
+7. End with a report of <= 15 lines: what you read, what you kept, and what you
+   dropped and why. You run in a fresh session and cannot see last week's report —
+   do not claim an idea is new or recurring.
+```
 
 ## map-fire-rate-review-2026-08-17 (one-shot)
 
