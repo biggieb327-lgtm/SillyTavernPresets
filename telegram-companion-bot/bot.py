@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-12.1"
+BOT_VERSION = "2026-08-12.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1002,7 +1002,7 @@ _life_events_cache: dict = {"text": None, "ts": 0.0}
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
 MEMORIES_MAX = _env_int("MEMORIES_MAX", "200")
-MEMORY_AUTO = os.getenv("MEMORY_AUTO", "1").strip() not in ("0", "false", "no")
+MEMORY_AUTO = _env_bool("MEMORY_AUTO", True)
 MEMORY_AUTOCONF = _env_int("MEMORY_AUTOCONF", "7")
 AWAY_AUTO_HOURS = _env_int("AWAY_AUTO_HOURS", "3")
 _memories_cache: dict = {"text": None, "ts": 0.0}
@@ -1019,8 +1019,8 @@ _memory_meta: dict[str, dict] = {}
 # flipped ON in v2026-07-27.1 to match the standing default-on policy (invariant #16).
 # Each keeps its kill switch: 0 restores the old behavior without a redeploy.
 MEMORY_DECAY_HALFLIFE_DAYS = _env_float("MEMORY_DECAY_HALFLIFE_DAYS", "90")
-MEMORY_HEDGE = os.getenv("MEMORY_HEDGE", "1").strip() not in ("0", "false", "no")
-MEMORY_AUDIT = os.getenv("MEMORY_AUDIT", "1").strip() not in ("0", "false", "no")
+MEMORY_HEDGE = _env_bool("MEMORY_HEDGE", True)
+MEMORY_AUDIT = _env_bool("MEMORY_AUDIT", True)
 MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
@@ -1047,7 +1047,7 @@ _mem_last_injected: dict = {}  # chat_id -> {memory line: turn last injected}
 # loop). These make the reply path embed the user's message once — off the loop, via
 # to_thread — so semantic recall and semantic lore actually fire. Default ON with a
 # kill switch; degrades to keyword-only on timeout/failure.
-MEMORY_SEMANTIC_LIVE = os.getenv("MEMORY_SEMANTIC_LIVE", "1").strip() not in ("0", "false", "no")
+MEMORY_SEMANTIC_LIVE = _env_bool("MEMORY_SEMANTIC_LIVE", True)
 MEMORY_QUERY_EMBED_TIMEOUT = _env_float("MEMORY_QUERY_EMBED_TIMEOUT", "3.0")
 MEMORY_DEDUP_SIM = _env_float("MEMORY_DEDUP_SIM", "0.92")
 MEMORY_LORE_SEMANTIC_TOPK = _env_int("MEMORY_LORE_SEMANTIC_TOPK", "3")
@@ -1808,10 +1808,10 @@ USER_NOTES_FILE = BASE_DIR / "user_notes.txt"
 USER_NOTES_MAX = _env_int("USER_NOTES_MAX", "15")
 # Kill switch for recurring-note capture + rollover; unset = on. Off = recurring
 # mentions degrade to today's one-off behavior (asked once, then retired).
-NOTE_RECURRING = os.getenv("NOTE_RECURRING", "1").strip() not in ("0", "false", "no")
+NOTE_RECURRING = _env_bool("NOTE_RECURRING", True)
 # Reject notes whose supporting quote isn't verbatim from the user's own lines —
 # same defense memories got after the 2026-07-10 hallucination bug. 0 = old behavior.
-NOTE_GROUNDED = os.getenv("NOTE_GROUNDED", "1").strip() not in ("0", "false", "no")
+NOTE_GROUNDED = _env_bool("NOTE_GROUNDED", True)
 NOTE_AUTOCONF = _env_int("NOTE_AUTOCONF", "3")  # min self-reported confidence to auto-accept a note; below = reject
 NOTE_ASKED_TTL_DAYS = _env_int("NOTE_ASKED_TTL_DAYS", "7")  # retire (asked …) notes after N days; 0 = keep
 NOTE_DEDUP_SIM = _env_float("NOTE_DEDUP_SIM", "0.8")  # word-containment dup threshold; 0 = prefix-only
@@ -9684,9 +9684,18 @@ async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 ("✓ Applied: " if ok else "⚠ Not applied: ") + msg)
             return
+        # The listing above showed the owner BOTH the claim and its `src:` quote, so
+        # approving it is a human entailment judgement made with the same evidence the
+        # weekly audit would use. Record that in the origin: `_audit_source_quote`
+        # requires origin "auto", so an approved memory stops being eligible for an
+        # `unsupported` proposal and the audit cannot re-litigate the owner's call —
+        # the same posture `memory_audit_seen.json` already takes for rejections.
+        promoted = dict(item.get("meta") or {})
+        if promoted.get("origin") == "auto":
+            promoted["origin"] = "auto-reviewed"
         # to_thread: _append_memory -> _memory_replace -> _embed_memory_line makes a
         # blocking HTTP call; keep it off the event loop.
-        await asyncio.to_thread(_append_memory, item["text"], True, item.get("meta"))
+        await asyncio.to_thread(_append_memory, item["text"], True, promoted or None)
         _memory_log("REVIEW-OK", item["text"])
         await update.message.reply_text(f"✓ Promoted to memory: {item['text']}")
     else:

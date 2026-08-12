@@ -1785,6 +1785,78 @@ class TestParseAuditFindings:
         assert [f["targets"] for f in out] == [[self.RAMEN]]
 
 
+class TestReviewmemOkMarksTheOwnersJudgement:
+    """/reviewmem's listing shows the owner BOTH the claim and its `src:` quote, so an
+    `ok` is a human entailment judgement made on the same evidence the weekly audit
+    would use. Promoting it as plain origin "auto" left it eligible for an
+    `unsupported` proposal, i.e. the audit could ask the owner to delete a memory they
+    had just approved. Drives the real handler — a test that reads its source cannot
+    fail for the reason the handler exists (C8)."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def setup_method(self):
+        # Only _append_memory is stubbed: it reaches _embed_memory_line, which makes a
+        # blocking HTTP call. The queue and log helpers are left REAL and run against
+        # the fixture instance's own files — a stub there would mean this test names
+        # them without ever exercising them.
+        self.appended = []
+        self._orig_append = bot._append_memory
+        bot._append_memory = lambda text, auto=False, meta=None: self.appended.append(
+            (text, auto, meta))
+
+    def teardown_method(self):
+        bot._append_memory = self._orig_append
+        bot._save_memory_review([])
+
+    def _run(self, queue):
+        bot._save_memory_review(list(queue))
+        assert bot._load_memory_review() == list(queue), "queue file round-trip failed"
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=1))
+        asyncio.run(bot.reviewmem_cmd(update, SimpleNamespace(args=["ok", "1"])))
+        return msg.sent
+
+    def test_ok_promotes_as_auto_reviewed(self):
+        item = {"text": "likes ramen weekly",
+                "meta": {"origin": "auto", "confidence": 5,
+                         "source": "might try that ramen place"}}
+        sent = self._run([item])
+        assert self.appended, "handler never reached _append_memory"
+        text, auto, meta = self.appended[0]
+        assert text == "likes ramen weekly" and auto is True
+        assert meta["origin"] == "auto-reviewed"
+        # The quote is kept — /sourcemem still shows where it came from.
+        assert meta["source"] == "might try that ramen place"
+        assert any("Promoted" in s for s in sent)
+
+    def test_the_promoted_memory_is_not_audit_eligible(self):
+        """The point of the origin change, asserted end to end rather than by name."""
+        self._run([{"text": "likes ramen weekly",
+                    "meta": {"origin": "auto", "source": "might try that ramen place"}}])
+        _, _, meta = self.appended[0]
+        assert bot._audit_source_quote(meta) == ""
+        data = {"findings": [{"type": "unsupported", "lines": [1], "action": "delete"}]}
+        entries = ["likes ramen weekly"]
+        assert bot._parse_audit_findings(
+            data, entries, 3, {"likes ramen weekly": meta}) == []
+
+    def test_non_auto_origin_is_left_alone(self):
+        self._run([{"text": "x", "meta": {"origin": "manual", "source": "s"}}])
+        assert self.appended[0][2]["origin"] == "manual"
+
+    def test_missing_meta_does_not_crash(self):
+        self._run([{"text": "x"}])
+        assert self.appended[0][2] is None
+
+
 class TestAuditSourceQuote:
     def test_auto_with_source(self):
         assert bot._audit_source_quote(
@@ -7572,9 +7644,16 @@ class TestNoHandRolledEnvBooleans:
     # _env_bool docstring spells all three out with a bare `X` precisely so it can explain
     # them without tripping this scan (constraints C14: a scanner cannot tell "this does
     # the bad thing" from "this explains it").
+    # `.lower()` is OPTIONAL, and that is the whole point of the 2026-08-12 widening.
+    # Both shapes originally required it, so a FOURTH idiom — `.strip()` with no
+    # `.lower()` — matched neither, and six flags sat outside the class v2026-08-10.9
+    # claimed to have closed. Those six were all default-on membership tests whose
+    # tuple is ("0", "false", "no"): `off` is not in it, so `MEMORY_AUDIT=off` read as
+    # ON, and so did `False` and `NO`, the idiom being case-sensitive without .lower().
+    # C8: a clean sweep means "my pattern found nothing", never "nothing is there".
     SHAPES = {
-        "membership": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*\.lower\(\)\s*(?:not\s+)?in\s*\(',
-        "equality": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*\.lower\(\)\s*==\s*["\']',
+        "membership": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*(?:not\s+)?in\s*\(',
+        "equality": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*==\s*["\']',
     }
     # Not booleans. Both read a named value out of a fixed set; neither is a switch.
     ALLOWED = {
@@ -7648,8 +7727,14 @@ class TestEveryBooleanFlagDefault:
         "LOCATION_PLACE": True,
         "MAP_INTENT": True,
         "MEME_ENABLED": True,
+        "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,
+        "MEMORY_AUTO": True,
+        "MEMORY_HEDGE": True,
+        "MEMORY_SEMANTIC_LIVE": True,
         "MOOD_AUTO": True,
+        "NOTE_GROUNDED": True,
+        "NOTE_RECURRING": True,
         "ONTHISDAY_ENABLED": True,
         "PLACE_ANCHOR_HER": True,
         "PRESET_COMMAND": True,

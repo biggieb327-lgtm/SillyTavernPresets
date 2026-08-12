@@ -998,6 +998,14 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-12 (**second occurrence, same session**) — Did it again in the very next
+  release: wrote "10 new tests … Total: 1,273" into the v2026-08-12.2 changelog while
+  drafting; `verify.sh` said 1267, and the real count was 4 (I had counted six DEFAULTS
+  table rows as tests). Wrote the sentence, then measured — the exact sequence the entry
+  below says to invert, hours after writing it. → **Promote on the next occurrence.** The
+  rule is not "remember to check", it is mechanical: leave the number as `TOTAL` in the
+  draft and fill it from the `verify.sh` line, so an unfilled placeholder is visible and
+  a wrong number is not.
 - 2026-08-12 — Wrote "24 new tests … Total: 1,269" into a changelog entry from memory
   while writing it, then measured 16 and 1,261. Two wrong numbers in a shipped-facing
   document, both of the kind a reader has no way to check. `grep -c 'def test_'` was one

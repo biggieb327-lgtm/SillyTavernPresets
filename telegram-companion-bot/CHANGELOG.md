@@ -7,6 +7,59 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-12.2 — Six kill switches ignored `off`, and the audit could reopen a memory the owner had just approved
+
+**Root cause 1: v2026-08-10.9 closed the hand-rolled-boolean class against three
+idioms, and there was a fourth.** That release rewrote 53 flags to `_env_bool` and left
+`TestNoHandRolledEnvBooleans` to catch any new one. Both of its regexes require
+`.lower()`. Six flags are written `os.getenv(X, "1").strip() not in ("0", "false",
+"no")` — `.strip()`, no `.lower()` — so they matched neither shape and were never in the
+count: `MEMORY_AUTO`, `MEMORY_HEDGE`, `MEMORY_AUDIT`, `MEMORY_SEMANTIC_LIVE`,
+`NOTE_RECURRING`, `NOTE_GROUNDED`.
+
+**What that cost: `off` did not turn them off.** The tuple is `("0", "false", "no")`, so
+`MEMORY_AUDIT=off` is not in it and read as **ON** — the exact failure v2026-08-10.9
+existed to remove, on the word its own summary advertised as newly working everywhere
+(*"`on` now works everywhere"*). Being case-sensitive without `.lower()`, `False`, `NO`
+and `Off` also read as ON. `NOTE_GROUNDED` is one of invariant #17's three
+extraction-honesty layers, so the fleet had a kill switch for a memory guard that
+silently ignored four of the six ways an operator would write "off".
+
+All six now route through `_env_bool`, defaults derived from the old expression rather
+than retyped (unset → `"1" not in (...)` → True → `_env_bool(X, True)`), and pinned in
+`TestEveryBooleanFlagDefault.DEFAULTS`. **The guard is widened in the same commit**:
+`.lower()` is now optional in both shapes, so the fourth idiom fails the test. The
+`_env_bool` docstring still explains all idioms with a bare unquoted `X`, and the
+regexes still require a quoted name, so documenting the trap does not trip the scanner
+(C14).
+
+**Root cause 2: `/reviewmem ok` promoted a memory as plain `origin: "auto"`, so the
+weekly audit could propose deleting it.** The listing shows the owner both the claim and
+its `src:` quote before they approve, which makes an `ok` a human entailment judgement
+on exactly the evidence v2026-08-12.1's `unsupported` check uses. Storing it
+indistinguishably from an unreviewed auto-extraction let the audit re-litigate that
+call — asking the owner to delete a memory they had just approved. Promotion now records
+`origin: "auto-reviewed"`, which `_audit_source_quote` already excludes (it requires
+`"auto"`), so no new condition was needed. The source quote is kept, so `/sourcemem` is
+unchanged. This mirrors what `memory_audit_seen.json` already does for rejections: an
+owner decision is not re-asked.
+
+**Operator note:** if any instance's `.env` sets one of the six to `off`, `Off`, `False`
+or `NO`, that flag was ON before this release and is OFF after — which is what the
+operator wrote. Worth a `grep -E '^(MEMORY_AUTO|MEMORY_HEDGE|MEMORY_AUDIT|MEMORY_SEMANTIC_LIVE|NOTE_RECURRING|NOTE_GROUNDED)='`
+across the seven `.env` files before deploying.
+
+4 new tests, all driving `reviewmem_cmd` itself rather than reading it: promotion
+origin, audit-ineligibility asserted end to end through `_parse_audit_findings`,
+non-auto origin untouched, and missing meta. Six flags were also added to
+`TestEveryBooleanFlagDefault.DEFAULTS` (table rows, not tests). Total: 1,267.
+
+`TestEveryCommandHandlerActuallyRuns` caught the first draft of those tests: they
+stubbed `_load_memory_review`, `_save_memory_review` and `_memory_log`, which named
+three helpers without ever exercising them. They now run for real against the fixture
+instance's own files, and only `_append_memory` is stubbed — it reaches
+`_embed_memory_line`, which makes a blocking HTTP call.
+
 ## v2026-08-12.1 — The grounding guard checked the quote was real, never that the claim followed from it
 
 **Root cause: `_quote_grounded` answers a different question than the one the guard is
