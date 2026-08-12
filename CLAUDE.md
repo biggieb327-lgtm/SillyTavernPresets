@@ -334,3 +334,109 @@ cards (`TheAtelier*`, `UnifiedWritersRoom*`, `Chimera*`, `WritersBlock*`,
 `d76dcdf` — **an archive, not a source of truth**; it describes the phone-era system and
 is excluded from the secret scan), and `weekly-budget.html` + `index.html` (an unrelated
 personal budget page).
+
+## Sprints
+
+Work is organized into sprints. Each sprint groups ROADMAP items by theme, sized to
+land in roughly 1-2 weeks of focused work. Items within a sprint are independent unless
+noted — pick them up in any order, ship each as its own release.
+
+The sprint list below maps the open ROADMAP work; completed sprints get struck through
+the same way ROADMAP items do. Sprint numbers are stable identifiers (S1, S2, ...) — do
+not renumber when one completes.
+
+### S1 — Observability & consolidation
+
+The foundation layer: confirm what the fleet can measure, extend nightly compute, and
+make the restraint system legible.
+
+| Item | ROADMAP | Size | Notes |
+|------|---------|------|-------|
+| Prompt caching verification | 6.1 | S | Step 1 first (read-only); steps 2-3 depend on its answer |
+| Nightly consolidation extension | 6.2 | S | Additive to existing `nightly_maintenance` job |
+| Disengagement leading indicator | 5.2 | M | Observability-only, no behavior change |
+| Nudge skip-reason transparency | 5.11 | S | Read-only addition to `/nudges` |
+
+### S2 — Proactive intelligence
+
+Unify the independently-shipped proactive features into one coherent system.
+
+| Item | ROADMAP | Size | Notes |
+|------|---------|------|-------|
+| Shared proactive-message triage queue | 5.1 | M | Prove the collision/silent-day failure mode first |
+| Rising urgency floor for neglected memories | 5.4 | S | Bounded to recall-scoring path |
+| `/reviewlife` nightly-suggested edits | 5.9 | M | Pairs with 6.2; explicit approval only |
+
+### S3 — Character depth
+
+Deepen how the characters act and remember, building on the preset layer work (3.13)
+and the episodic recall system (3.16).
+
+| Item | ROADMAP | Size | Notes |
+|------|---------|------|-------|
+| Stepped thinking Phase 2 | 3.8 | M | Only if S1's caching result supports it; default OFF |
+| `/mixtape` composed highlight-reel | 5.10 | S | Pure composition over shipped pipelines |
+| Response refinement on recurring topics | 5.3 | M | Experimental — pilot one instance, default OFF |
+
+### S4 — Group interaction & reply quality
+
+Group-chat behavior changes and the reply advisor, both requiring design review before
+code.
+
+| Item | ROADMAP | Size | Notes |
+|------|---------|------|-------|
+| Comping mode for group chat | 5.5 | S | Experimental — read `GROUP_CHAT_DESIGN.md` first |
+| Trading-fours interaction mode | 5.6 | S | Experimental — opt-in mode, lowest priority |
+| Reply advisor | 6.3 | L | Needs `bot-code-invariants` #3 carve-out before any code |
+
+### S5 — Resilience & self-monitoring
+
+Exploratory items on drift detection and behavioral variance.
+
+| Item | ROADMAP | Size | Notes |
+|------|---------|------|-------|
+| Inward drift detection | 5.7 | S | Experimental — check for overlap with Track 4 first |
+| Banked variance as resilience | 5.8 | — | Direction only, not a spec; owner decides |
+
+### End-of-sprint rituals
+
+**Every sprint ends with three rituals, run in order after the last item ships.** These
+are not optional cleanup — they are the sprint's closing gate, the same way `run-evals.sh`
+is a release's closing gate. Do not mark a sprint complete until all three have run.
+
+**1. Gap analysis** — review every item that shipped in the sprint against its ROADMAP
+"done when" criteria and the sprint's theme. Identify:
+- Items whose "done when" was met in letter but not in spirit (a feature that shipped
+  but was never verified on a live instance; an observability addition nobody has
+  checked against real data).
+- Cross-item gaps the sprint exposed (two features that interact in a way neither
+  spec anticipated; a shared dependency that neither item's tests cover).
+- ROADMAP items the sprint's work made newly actionable or newly blocked.
+
+Write the findings as a short section in the operational log
+(`.claude/memory/operational-log.md`), not a standalone doc. One row per finding, same
+format as every other operational-log entry. If nothing was found, record that too —
+"S1 gap analysis: no gaps identified" is a valid entry; silence is not.
+
+**2. Simplify** — run `/simplify` against the sprint's cumulative diff (all commits
+since the sprint started). The sprint's code is fresh enough to still be in working
+memory; waiting longer means simplification opportunities rot into "that's just how it
+is." Apply the fixes in a single follow-up commit titled
+`simplify: post-sprint S<N> cleanup`.
+
+**3. Security review** — run `/security-review` against the sprint's cumulative diff.
+
+**Model-specific rule for the security review:**
+- **Opus 5 / Opus 4.6 / Opus 4.8:** run the security review as part of the ritual.
+  These models have the depth to catch subtle issues without false-positive noise.
+- **Fable 5:** skip the security review — the owner will run it manually. Fable 5
+  sessions should note "security review deferred to owner (Fable 5 policy)" in the
+  gap analysis log entry instead of running it. All other rituals (gap analysis,
+  simplify) still apply.
+- **Any other model:** run the security review. When in doubt, run it.
+
+The three rituals produce at most three artifacts: operational-log rows (gap analysis),
+one commit (simplify), and security-review findings (filed as operational-log rows if
+anything actionable, or noted as clean). A sprint with no code changes (pure research,
+pure design) still runs the gap analysis; simplify and security review are no-ops and
+can be skipped with a note.
