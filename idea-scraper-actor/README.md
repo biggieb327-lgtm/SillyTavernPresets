@@ -152,8 +152,15 @@ tuning problem — `practice-scan-weekly` judged the posts "paid-newsletter teas
 with no concrete extractable technique in the free text," and no setting on this
 Actor changes what the feed contains.
 
-Substack gives subscribers a **private feed URL** carrying the full post body.
-That URL contains a token and is therefore a credential.
+**Substack does not issue subscriber RSS feeds** (confirmed 2026-08-12). The
+`/p` in a Substack URL marks a private publication; it is not a token. Two runs
+failed 404 against invented URL shapes before this was established. The support
+below is kept for a future publication that offers such a feed — it is tested
+and correct — but nothing is configured for the current two, and
+`substack_publications` carries their public URLs instead. Paid posts arrive as
+free previews; the consuming Routine researches the topic from primary sources.
+
+Where a publication *does* offer one, the URL contains a token and is a credential.
 
 **It is never Actor input.** Actor input is echoed into the run record and into
 whatever prompt invoked the run, and this repo is public. Private feeds are read

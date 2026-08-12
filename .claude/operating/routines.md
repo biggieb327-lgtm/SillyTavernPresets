@@ -622,21 +622,22 @@ seed file, or preset, and never push to main.
   the URL. Requires `APIFY_API_TOKEN` (rotated 2026-08-11) and `APIFY_ACTOR_ID` on
   the Claude Code Remote environment. `subreddits` is empty for this Routine:
   Reddit belongs to the two monthly Routines.
-- **Subscriber feeds, added 2026-08-11 (Actor v0.13):** the first run returned 17
-  items and kept none, judging them "paid-newsletter teasers with no concrete
-  extractable technique in the free text." That is a property of a paywalled
-  publication's public RSS, not a tuning problem — the substance is simply not in
-  the feed. The Actor now also reads **subscriber** feeds for `emergingai` and
-  `learnaiwithme.com` (Gencay's publication, which `gencay.substack.com`
-  redirects to), which carry full post bodies.
-  Those URLs contain tokens, so they are a credential and live ONLY in the
-  Actor's `SUBSTACK_PRIVATE_FEEDS` secret env var — never in this file, never in
-  the trigger prompt, never in Actor input, because **this repo is public** and
-  Actor input is echoed into the run record. Rows, logs and error messages carry
-  only the sanitized origin; see the Actor README for the three guarantees and
-  their tests. Consequently `substack_publications` in the payload is `[]`: a
-  publication listed in both places would be fetched twice and the public teaser
-  would win the deduplication.
+- **Subscriber feeds: attempted 2026-08-11, abandoned 2026-08-12.** The first
+  run returned 17 items and kept none, judging them "paid-newsletter teasers with
+  no concrete extractable technique in the free text" — a property of a paywalled
+  publication's public RSS, not a tuning problem. The fix attempted was an
+  authenticated full-text feed (Actor v0.13, `SUBSTACK_PRIVATE_FEEDS`). **It does
+  not exist:** Substack issues no subscriber RSS URL (owner-confirmed
+  2026-08-12; the `/p` in a Substack URL marks a private publication, it is not a
+  token). Two runs failed 404 against invented URL shapes before this was
+  established.
+  The Actor's secret support is kept — tested, harmless, and correct if any
+  publication ever offers such a feed — but **nothing is configured and nothing
+  should be**, and `substack_publications` carries the two public URLs again.
+  The real answer is step 4's DEEPEN path: a preview still names the topic the
+  author judged worth writing about, and the technique is researched from
+  primary sources. Do not re-attempt an authenticated feed without new evidence
+  that Substack has started issuing one.
 
 ### Verbatim prompt
 
@@ -670,20 +671,18 @@ Scope — two questions, both about how things WORK, not what characters say:
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": [], "substack_publications": [], "max_items_per_source": 10, "max_age_days": 8, "summary_max_chars": 4000}'
+     -d '{"subreddits": [], "substack_publications": ["https://emergingai.substack.com", "https://substack.com/@gencay"], "max_items_per_source": 10, "max_age_days": 8, "summary_max_chars": 4000}'
    Never put the token in the URL (?token=) — it leaks into access logs.
-   substack_publications is EMPTY here on purpose. Both publications are
-   paywalled, so their public feeds carry only free previews; the Actor reads
-   them through subscriber feeds held in its own SUBSTACK_PRIVATE_FEEDS secret
-   env var. Those URLs contain tokens and must never appear in this prompt, in
-   routines.md, or in Actor input — this repo is public. Do not "fix" an empty
-   result by pasting feed URLs into the payload.
-   VERIFY THE SECRET IS LIVE: the run log must contain a line reading
-   "N private Substack feed(s) configured". If that line is absent and you got
-   0 rows, the secret is unset or was dropped by a redeploy — report exactly
-   "SKIPPED (SUBSTACK_PRIVATE_FEEDS not set on the Actor)" and END. Do not
-   report that as a quiet week; the two are indistinguishable from the data and
-   only that log line tells them apart.
+   The two publications are listed directly above; these are public
+   publication URLs, not credentials. Substack does NOT issue subscriber RSS
+   feeds (confirmed with the owner 2026-08-12), so there is no authenticated
+   full-text path and none is coming. The Actor still supports one via its
+   SUBSTACK_PRIVATE_FEEDS secret, for a future publication that offers it, but
+   nothing is configured and nothing should be.
+   CONSEQUENCE: paid posts arrive as FREE PREVIEWS. That is the steady state,
+   not a fault to report. Step 4's DEEPEN path is therefore the NORMAL route
+   for this Routine rather than a fallback — expect to research most topics
+   from primary sources rather than quote them from the feed.
    Each row is {source, title, url, external_url, summary, published_at,
    community}; published_at is always ISO 8601 or null, and community is the
    publication origin with any token stripped. max_age_days of 8 covers the week
