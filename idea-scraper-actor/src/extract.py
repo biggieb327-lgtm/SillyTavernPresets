@@ -170,3 +170,30 @@ def sanitize_feed_url(url: str) -> str:
     if not parsed.netloc:
         return "(unknown publication)"
     return f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+
+def redact_url(text, url: str, origin: str, limit: int = 240) -> str:
+    """Strip a credential URL out of an error message.
+
+    `requests` puts the full request URL in its HTTPError text
+    ("404 Client Error: Not Found for url: https://host/feed/p/TOKEN"), so
+    interpolating an exception into a message leaks the token into the run log
+    and the run's status message. This removes it. Added in 0.14 after exactly
+    that happened on run pVRaNhKrEbRgsxgVJ.
+    """
+    out = str(text)
+    for form in (url, (url or "").rstrip("/")):
+        if form:
+            out = out.replace(form, f"{origin}/<redacted>")
+    return out[:limit]
+
+
+def looks_truncated(url: str) -> bool:
+    """A private feed URL carries a long opaque token. A short one is a fragment.
+
+    A long URL pasted into a phone terminal can acquire a line break, leaving a
+    prefix that still parses as a URL - which is how two feeds 404'd at '.../p'
+    while the configured count looked healthy.
+    """
+    parsed_path = (url or "").split("://", 1)[-1]
+    return len(url or "") < 45 or "/" not in parsed_path.strip("/")

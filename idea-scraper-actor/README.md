@@ -162,14 +162,31 @@ from a secret environment variable instead:
     SUBSTACK_PRIVATE_FEEDS   one or more subscriber feed URLs,
                              separated by commas, spaces or newlines
 
-Set it as an `isSecret` env var on the Actor version (`deploy_v013.py` does this
+Set it as an `isSecret` env var on the Actor version (`deploy_v014.py` does this
 from your shell environment). Three guarantees, each covered by a test:
 
 * **Rows** carry only the sanitized origin (`https://learnaiwithme.com`) in
   `community` — never the feed URL.
 * **Logs** print only that origin (`private feed OK: https://… -> N items`).
-* **Errors** re-raise without the URL, so a failing feed cannot leak its token
-  into a run's status message.
+* **Errors** are redacted before they are raised.
+
+**The error guarantee was broken in 0.13 and fixed in 0.14.** The handler
+interpolated the caught exception, and `requests` embeds the full request URL in
+its `HTTPError` text — so a 404 produced `... Not Found for url:
+https://host/feed/p/TOKEN`, which reached the run log and the run's status
+message. Run `pVRaNhKrEbRgsxgVJ` did exactly that. The 0.13 test only exercised
+the empty-feed branch, which never touches the URL; the HTTP-error branch, the
+one that fires in practice, was untested. 0.14 redacts before raising and tests
+all three branches — HTTP error, connection error, empty feed.
+
+If a private feed URL ever appears in a run log, **regenerate it at the
+publication** rather than only fixing the code: the log has already been written.
+
+**Truncation.** A long URL pasted into a phone terminal can pick up a line
+break. The prefix still parses as a URL, so the configured count looks right and
+the failure surfaces three layers later as a 404 on a nonsense path. 0.14 warns
+when a fragment is discarded, and when a stored entry is too short to carry a
+token.
 
 **Do not list the same publication in both `substack_publications` and
 `SUBSTACK_PRIVATE_FEEDS`.** Rows are deduplicated by post URL and public jobs run

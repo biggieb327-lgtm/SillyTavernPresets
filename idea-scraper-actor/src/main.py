@@ -64,7 +64,9 @@ from apify import Actor
 
 from .extract import (
     from_epoch,
+    looks_truncated,
     parse_private_feeds,
+    redact_url,
     reddit_content,
     sanitize_feed_url,
     strip_html,
@@ -332,8 +334,14 @@ def _fetch_substack_private(feed_url: str, limit: int, chars: int) -> list[dict]
         resp = requests.get(feed_url, timeout=30, headers={"User-Agent": _user_agent()})
         resp.raise_for_status()
         items = ET.fromstring(resp.content).findall("./channel/item")
-    except Exception as exc:  # noqa: BLE001 - re-raise without the URL
-        raise RuntimeError(f"private feed for {origin} failed: {exc}") from None
+    except Exception as exc:  # noqa: BLE001 - re-raise with the URL redacted
+        # Do NOT interpolate `exc` directly: requests embeds the full request
+        # URL in its HTTPError text, which would put the subscriber token into
+        # the run log and the run's status message.
+        raise RuntimeError(
+            f"private feed for {origin} failed: "
+            f"{redact_url(exc, feed_url, origin)}"
+        ) from None
     if not items:
         raise RuntimeError(
             f"private feed for {origin} parsed but contained no <item> elements "
@@ -497,12 +505,31 @@ async def main() -> None:
         # the URL carries a token, and input is echoed into the run record and
         # into whatever prompt invoked the run. Only sanitized origins are ever
         # logged or stored.
-        private_feeds = parse_private_feeds(os.environ.get("SUBSTACK_PRIVATE_FEEDS"))
+        raw_feeds = os.environ.get("SUBSTACK_PRIVATE_FEEDS")
+        private_feeds = parse_private_feeds(raw_feeds)
         if private_feeds:
             Actor.log.info(
                 "%d private Substack feed(s) configured: %s", len(private_feeds),
                 ", ".join(sanitize_feed_url(f) for f in private_feeds),
             )
+            # A long URL pasted into a phone terminal can pick up a line break.
+            # The prefix still parses as a URL and the configured count still
+            # looks right, so the failure surfaces three layers away as a 404 on
+            # a nonsense path. Say it here instead.
+            dropped = len([p for p in re.split(r"[,\s]+", raw_feeds.strip()) if p]) - len(private_feeds)
+            if dropped > 0:
+                Actor.log.warning(
+                    "SUBSTACK_PRIVATE_FEEDS: ignored %d fragment(s) that are not URLs. "
+                    "A long URL split by a paste looks exactly like this.", dropped,
+                )
+            for feed in private_feeds:
+                if looks_truncated(feed):
+                    Actor.log.warning(
+                        "SUBSTACK_PRIVATE_FEEDS: the entry for %s is only %d characters "
+                        "and has no token-bearing path. A subscriber feed URL carries a "
+                        "long opaque token - this one looks truncated.",
+                        sanitize_feed_url(feed), len(feed),
+                    )
 
         substack_jobs = [("public", p) for p in substack_publications]
         substack_jobs += [("private", f) for f in private_feeds]
