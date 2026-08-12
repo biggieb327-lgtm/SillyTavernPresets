@@ -577,15 +577,29 @@ seed file, or preset, and never push to main.
   compete.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
 - **Notifications:** push on completion (email off).
+- **`summary_max_chars: 4000`** for this Routine, against the Actor default of
+  1500: a subscriber feed carries whole articles, and a technique described in
+  1500 characters is usually still preamble. The monthly Routines keep 1500 —
+  they read Reddit posts, where 1500 is generous.
 - **Why weekly and `max_age_days: 8`:** the monthly Routines use 31 to match their
   cadence. This one runs every 7 days, so 8 gives one day of margin — consecutive
   runs neither skip a post published just after a run nor re-report one already
   seen. Raising it re-reports; lowering it drops posts.
-- **No WebSearch fallback, deliberately.** The other Routines fall back to a
-  WebSearch scan when Apify is unreachable, because their external-ideas step is a
-  supplement to work they do anyway. This Routine *is* the two publications — with
-  them unreachable there is nothing for it to do, and a WebSearch substitute would
-  quietly turn a scoped scan into an open-ended trawl. It reports SKIPPED and ends.
+- **WebSearch is a deepening step, not a fallback.** Two different roles, and the
+  distinction is load-bearing. As a *fallback* it is still banned: if Apify is
+  unreachable this Routine reports SKIPPED and ends, because it IS these two
+  publications and a substitute would turn a scoped scan into an open-ended trawl.
+  As a *deepening step* (added 2026-08-12) it is required: a teaser names a topic
+  but withholds the mechanism, so the Routine researches that topic from sources it
+  can actually read and cites both the Substack pointer and a primary source. The
+  scope guard is that the publications choose the topic — at most 6 queries per
+  run, and no free-associating into adjacent subjects.
+- **Teasers are a signal, not a failure.** The 2026-08-11 first run treated the
+  paywall as a dead end and kept nothing from 17 items. That was correct under the
+  prompt as written then, and the prompt was wrong: what an author judged worth
+  writing about is useful information even when the body is locked. A subscriber
+  feed (see above) removes the paywall where one is configured; the deepening step
+  handles the rest.
 - **What it does:** reads the week's posts from `emergingai.substack.com` and
   `substack.com/@gencay` via `idea-scraper-actor/` and judges each against two
   questions: (A) **fleet memory** — would this improve the companion bots' memory,
@@ -656,7 +670,7 @@ Scope — two questions, both about how things WORK, not what characters say:
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"subreddits": [], "substack_publications": [], "max_items_per_source": 10, "max_age_days": 8}'
+     -d '{"subreddits": [], "substack_publications": [], "max_items_per_source": 10, "max_age_days": 8, "summary_max_chars": 4000}'
    Never put the token in the URL (?token=) — it leaks into access logs.
    substack_publications is EMPTY here on purpose. Both publications are
    paywalled, so their public feeds carry only free previews; the Actor reads
@@ -690,22 +704,40 @@ Scope — two questions, both about how things WORK, not what characters say:
    repo — that is a reading summary, not a proposal. Two well-translated ideas
    beat five vague ones. But an empty week should mean the posts genuinely
    contained no mechanism, not that the translation felt like effort.
-4. Evidence rule (from .claude/agents/research-scout.md): every idea carries its
-   source URL AND an exact quoted line from the item's own text. Never quote from
-   a WebFetch summary — that output is a paraphrase from a small model and its
-   quotes can be compressed or invented. If you need more of an article than the
-   scraped summary carries, curl the URL and quote the bytes you fetched.
-5. If anything applies: write ONE file
+4. DEEPEN. Items arrive in two shapes; handle them differently.
+   FULL TEXT — a subscriber feed is configured for that publication, so the
+   mechanism is already in the summary field. Quote it and translate it. No
+   search needed.
+   TEASER — the free preview. The body is paywalled, but the teaser still tells
+   you what the author judged worth writing about, and THAT is the signal these
+   publications are here for. Do not discard a teaser as unusable. Take the
+   topic it names and research the real technique from sources you CAN read:
+   official docs, changelogs, engineering blogs, GitHub issues and discussions.
+   Bounded: at most 6 WebSearch queries for the whole run, scoped to topics the
+   week's teasers actually raised. Do not free-associate into adjacent subjects
+   — the point of the scan is that these two publications chose the topic.
+   An idea built from a teaser cites BOTH: the Substack post as the pointer
+   (title + URL, labelled "pointer"), and the primary source that substantiates
+   the technique (URL + exact quoted line). A pointer with no primary source is
+   a topic, not a proposal — keep searching or drop it.
+5. Evidence rule (from .claude/agents/research-scout.md): every idea carries its
+   source URL AND an exact quoted line from the source's own text. Never quote
+   from a WebFetch summary — that output is a paraphrase from a small model and
+   its quotes can be compressed or invented; use WebFetch to LOCATE a page, then
+   curl the URL and quote the bytes you fetched. The Actor's own summary field is
+   different and may be quoted directly: it is scraped RSS/HTML text, not a model
+   paraphrase.
+6. If anything applies: write ONE file
    .claude/memory/practice-scan/<YYYY-MM-DD>.md, dated the day this Routine fired.
    Max 5 ideas, each tagged [fleet memory] or [operating], each with its URL, its
    quoted line, and one line naming the specific file or behavior it would change.
    Rank them by what you would do first. Commit only that file to the branch
    claude/practice-scan (reset it to origin/main first if it already exists) and
    push ONLY to claude/practice-scan — NEVER to main or any other branch.
-6. If nothing applies: push NOTHING, create NO branch, and end with the one-line
+7. If nothing applies: push NOTHING, create NO branch, and end with the one-line
    summary "practice-scan: nothing this week".
-7. End with a report of <= 15 lines: what you read, what you kept, and what you
-   dropped and why. You run in a fresh session and cannot see last week's report —
+8. End with a report of <= 15 lines: what you read, what you kept, what you
+   deepened by search, and what you dropped and why. You run in a fresh session and cannot see last week's report —
    do not claim an idea is new or recurring.
 ```
 
