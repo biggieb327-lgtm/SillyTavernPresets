@@ -7652,8 +7652,8 @@ class TestNoHandRolledEnvBooleans:
     # ON, and so did `False` and `NO`, the idiom being case-sensitive without .lower().
     # C8: a clean sweep means "my pattern found nothing", never "nothing is there".
     SHAPES = {
-        "membership": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*(?:not\s+)?in\s*\(',
-        "equality": r'os\.getenv\(\s*["\']\w+["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*==\s*["\']',
+        "membership": r'os\.getenv\(\s*["\'](\w+)["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*(?:not\s+)?in\s*\(',
+        "equality": r'os\.getenv\(\s*["\'](\w+)["\']\s*,[^)]*\)\s*(?:\.strip\(\))?\s*(?:\.lower\(\))?\s*==\s*["\']',
     }
     # Not booleans. Both read a named value out of a fixed set; neither is a switch.
     ALLOWED = {
@@ -7661,21 +7661,40 @@ class TestNoHandRolledEnvBooleans:
         "TOMTOM_TRAVEL_MODE": "an enum validated per-call by _tomtom_mode()",
     }
 
-    def _lines(self):
+    def _scannable_source(self):
+        """Whole source, comment lines blanked, newlines preserved so a match's offset
+        still maps to its real line number.
+
+        Scanned as ONE string rather than line by line, and that is the 2026-08-12 fix.
+        Both offenders found that day — EPISODIC_RECALL and PAYMENTS_ENABLED — were
+        WRAPPED (`os.getenv(\\n    "NAME", ...)`), so no single line contained a whole
+        expression and a per-line scan could not see them whatever the regex said. The
+        missing `.lower()` was the visible half; the line-based scan was why the class
+        survived two rounds of "swept, clean".
+        """
         import pathlib
-        src = pathlib.Path(bot.__file__).read_text().splitlines()
-        return [(i, l) for i, l in enumerate(src, 1) if not l.lstrip().startswith("#")]
+        return "\n".join(
+            "" if l.lstrip().startswith("#") else l
+            for l in pathlib.Path(bot.__file__).read_text().splitlines())
 
     def test_no_flag_still_parses_its_own_booleans(self):
         import re
+        src = self._scannable_source()
         offenders = []
-        for i, line in self._lines():
-            for shape, rx in self.SHAPES.items():
-                if re.search(rx, line) and not any(a in line for a in self.ALLOWED):
-                    offenders.append(f"bot.py:{i} ({shape}) {line.strip()[:90]}")
+        for shape, rx in self.SHAPES.items():
+            for m in re.finditer(rx, src):
+                # The name comes from the match itself, not from "is this string
+                # anywhere on the line" — an allowlisted name mentioned nearby must
+                # never exempt a different flag's expression.
+                if m.group(1) in self.ALLOWED:
+                    continue
+                line_no = src.count("\n", 0, m.start()) + 1
+                offenders.append(
+                    f"bot.py:{line_no} ({shape}) "
+                    + " ".join(m.group(0).split())[:90])
         assert not offenders, (
             "on/off env vars must go through _env_bool — these parse their own:\n  "
-            + "\n  ".join(offenders))
+            + "\n  ".join(sorted(offenders)))
 
     def test_the_allowlist_has_not_gone_stale(self):
         """An allowlist entry naming something that no longer exists hides the next real
@@ -7708,6 +7727,8 @@ class TestEveryBooleanFlagDefault:
         "DAY_MOOD_RESIDUE": True,
         "DEVICE_RENDER": False,
         "DIRECTIVE_LEAK_GUARD": True,
+        # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
+        "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
         "FEEDBACK_REACTIONS": False,
         "FLEET_CMD": True,
@@ -7736,6 +7757,10 @@ class TestEveryBooleanFlagDefault:
         "NOTE_GROUNDED": True,
         "NOTE_RECURRING": True,
         "ONTHISDAY_ENABLED": True,
+        # The one instance-dependent default: `not IS_NAMED_INSTANCE`, and the fixture
+        # instance IS named, so False is the shipped default here. Nothing pinned this
+        # before v2026-08-12.2 — it was hand-rolled, so the table never saw it.
+        "PAYMENTS_ENABLED": False,
         "PLACE_ANCHOR_HER": True,
         "PRESET_COMMAND": True,
         "PROMPT_BALANCE": True,
@@ -7793,6 +7818,10 @@ class TestEveryBooleanFlagDefault:
         assert off == ["ADMIN_API_ENABLED", "CLOSENESS_ENABLED", "DEVICE_RENDER",
                        "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
                        "GROUP_MODE", "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
+                       # Off on NAMED instances only (`not IS_NAMED_INSTANCE`), which
+                       # the fixture is. Added v2026-08-12.2 when it stopped being
+                       # hand-rolled; its default was pinned by nothing before that.
+                       "PAYMENTS_ENABLED",
                        "SELFIE_NSFW", "THREADS_ENABLED", "WORLD_GENERATOR"], off
 
 

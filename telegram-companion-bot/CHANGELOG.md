@@ -25,13 +25,41 @@ and `Off` also read as ON. `NOTE_GROUNDED` is one of invariant #17's three
 extraction-honesty layers, so the fleet had a kill switch for a memory guard that
 silently ignored four of the six ways an operator would write "off".
 
-All six now route through `_env_bool`, defaults derived from the old expression rather
-than retyped (unset → `"1" not in (...)` → True → `_env_bool(X, True)`), and pinned in
-`TestEveryBooleanFlagDefault.DEFAULTS`. **The guard is widened in the same commit**:
-`.lower()` is now optional in both shapes, so the fourth idiom fails the test. The
-`_env_bool` docstring still explains all idioms with a bare unquoted `X`, and the
-regexes still require a quoted name, so documenting the trap does not trip the scanner
-(C14).
+**The real root cause was not the missing `.lower()` — it was that the guard read the
+file line by line.** The first draft of this release migrated those six, widened the
+regexes, and called the class closed. `/code-review` then found two more, and both are
+the reason the class kept surviving: `EPISODIC_RECALL` (bot.py:2081) and
+`PAYMENTS_ENABLED` (bot.py:2865) are **wrapped** —
+
+```python
+PAYMENTS_ENABLED = os.getenv(
+    "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
+).lower() not in ("0", "false", "no", "off")
+```
+
+— so no single line holds a whole expression and `_lines()` could not see them whatever
+the regex said. `PAYMENTS_ENABLED` even uses idiom 2 *with* `.lower()`: the original
+guard was supposed to catch it and structurally could not. That is C8 again — a clean
+sweep means "my pattern found nothing", never "nothing is there" — and it is also why
+the grep that produced "six sites" for this entry's first draft was itself wrong.
+
+**Eight sites now route through `_env_bool`**, defaults derived from the old expression
+rather than retyped (unset → `"1" not in (...)` → True → `_env_bool(X, True)`;
+`PAYMENTS_ENABLED` → `not IS_NAMED_INSTANCE`). All eight are pinned in
+`TestEveryBooleanFlagDefault.DEFAULTS`, and `PAYMENTS_ENABLED` joins the default-off
+set — being hand-rolled, its instance-dependent default had never been pinned by
+anything.
+
+**The guard is fixed in two ways in the same commit:** `.lower()` is now optional in
+both shapes, and the scan runs over the **whole source** with comment lines blanked
+(offsets preserved, so reported line numbers stay right) instead of line by line. The
+allowlist is now matched against the variable name captured by the regex rather than
+"is this string anywhere on the line", so a nearby allowlisted name can no longer exempt
+a different flag's expression. Break-tested by re-injecting both removed forms — the
+single-line `MEMORY_AUDIT` one and, decisively, the wrapped `PAYMENTS_ENABLED` one that
+the old scan passed. The `_env_bool` docstring still explains every idiom with a bare
+unquoted `X`, and the regexes still require a quoted name, so documenting the trap does
+not trip the scanner (C14).
 
 **Root cause 2: `/reviewmem ok` promoted a memory as plain `origin: "auto"`, so the
 weekly audit could propose deleting it.** The listing shows the owner both the claim and
@@ -44,10 +72,18 @@ call — asking the owner to delete a memory they had just approved. Promotion n
 unchanged. This mirrors what `memory_audit_seen.json` already does for rejections: an
 owner decision is not re-asked.
 
-**Operator note:** if any instance's `.env` sets one of the six to `off`, `Off`, `False`
-or `NO`, that flag was ON before this release and is OFF after — which is what the
-operator wrote. Worth a `grep -E '^(MEMORY_AUTO|MEMORY_HEDGE|MEMORY_AUDIT|MEMORY_SEMANTIC_LIVE|NOTE_RECURRING|NOTE_GROUNDED)='`
-across the seven `.env` files before deploying.
+**Operator note:** if any instance's `.env` sets one of these to a word the old idiom
+did not recognise, the flag was ON before this release and is OFF after — which is what
+the operator wrote. The six `.strip()`-only flags missed `off` and every case variant;
+`EPISODIC_RECALL` missed case variants only; `PAYMENTS_ENABLED`'s vocabulary was already
+complete. Worth checking the seven `.env` files before deploying:
+
+```bash
+# host: VPS (as root)
+grep -nE '^(MEMORY_AUTO|MEMORY_HEDGE|MEMORY_AUDIT|MEMORY_SEMANTIC_LIVE|NOTE_RECURRING|NOTE_GROUNDED|EPISODIC_RECALL)=' /opt/telegram-bots/*/.env
+```
+
+No output means nothing changes for the fleet.
 
 4 new tests, all driving `reviewmem_cmd` itself rather than reading it: promotion
 origin, audit-ineligibility asserted end to end through `_parse_audit_findings`,

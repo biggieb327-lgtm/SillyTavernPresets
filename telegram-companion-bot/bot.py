@@ -1150,15 +1150,22 @@ def _audit_source_quote(meta: dict | None) -> str:
     """The verbatim user quote a memory was extracted from, or "" when the entry has
     nothing a claim can be judged against.
 
-    ONLY `origin: "auto"` qualifies, and "has a source" is not the same test. Three
+    ONLY `origin: "auto"` qualifies, and "has a source" is not the same test. Four
     other origins would pass a bare `meta.get("source")` check and must not:
 
-      manual       (/remember)  no source key at all — the owner typed the claim
-      manual-edit  (/editmem)   inherits the ORIGINAL quote onto text the owner
-                                deliberately rewrote, so the quote no longer
-                                describes the claim standing next to it
-      audit-merge               source is a "merged: a | b" trail, not anything a
-                                user ever said
+      manual        (/remember)     no source key at all — the owner typed the claim
+      manual-edit   (/editmem)      inherits the ORIGINAL quote onto text the owner
+                                    deliberately rewrote, so the quote no longer
+                                    describes the claim standing next to it
+      audit-merge                   source is a "merged: a | b" trail, not anything a
+                                    user ever said
+      auto-reviewed (/reviewmem ok) the owner was shown the claim AND this quote and
+                                    approved the pair, so the entailment call has
+                                    already been made by a human
+
+    Keep the test as `!= "auto"`, never an explicit list of the four above: a new
+    origin must be ineligible until someone decides otherwise, and an allowlist
+    inverts that.
 
     Judging any of those for entailment proposes deleting the owner's own work, which
     is the worst failure this feature can have. Returning "" here makes them ineligible
@@ -2078,8 +2085,7 @@ _embeddings_dirty = False
 # embedding cost. Needs numpy for the cosine matrix. (Reimplemented from 9fa21af,
 # 2026-06-29, never merged -- rewritten against this file's actual embedding primitives,
 # EMBEDDING_MODEL/_embed_text, not the abandoned branch's own EMBED_MODEL/_embed.)
-EPISODIC_RECALL = MEMORY_SEMANTIC_LIVE and os.getenv(
-    "EPISODIC_RECALL", "1").strip() not in ("0", "false", "no", "off")
+EPISODIC_RECALL = MEMORY_SEMANTIC_LIVE and _env_bool("EPISODIC_RECALL", True)
 EPISODE_MAX = _env_int("EPISODE_MAX", "4000")              # hard cap on archived chunks
 EPISODE_CHUNK_MSGS = _env_int("EPISODE_CHUNK_MSGS", "6")   # messages per chunk (1 msg overlap)
 EPISODE_EMBED_CHARS = _env_int("EPISODE_EMBED_CHARS", "1600")  # truncate before embed
@@ -2862,9 +2868,7 @@ FOOD_OPEN_HOURS = _env_bool("FOOD_OPEN_HOURS", True)
 LOCATION_PLACE_MILES = _env_float("LOCATION_PLACE_MILES", "0.6")
 
 # --- Payment reminders (off by default on named character instances) ---
-PAYMENTS_ENABLED = os.getenv(
-    "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
-).lower() not in ("0", "false", "no", "off")
+PAYMENTS_ENABLED = _env_bool("PAYMENTS_ENABLED", not IS_NAMED_INSTANCE)
 PAYMENTS_FILE = BASE_DIR / "payments.json"
 REMINDER_TIME = os.getenv("REMINDER_TIME", "09:00")        # HH:MM in local TZ
 REMINDER_WEEKDAY = _env_int("REMINDER_WEEKDAY", "3")  # Mon=0 ... Thu=3 ... Sun=6
