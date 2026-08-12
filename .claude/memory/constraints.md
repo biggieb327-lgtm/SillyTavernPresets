@@ -998,6 +998,25 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-12 — Wrote "24 new tests … Total: 1,269" into a changelog entry from memory
+  while writing it, then measured 16 and 1,261. Two wrong numbers in a shipped-facing
+  document, both of the kind a reader has no way to check. `grep -c 'def test_'` was one
+  command and I ran it *after* writing the claim rather than before. → **A count in a
+  changelog is a measurement, not a recollection — run the command first and paste the
+  number into the sentence, never write the sentence and verify later.** (Caught again
+  the same session: the corrected wording, "16 new tests … plus one pinning
+  `_quote_grounded`'s limit", implied 17 when the pin was one of the 16. `/code-review`
+  found that one, not me.)
+- 2026-08-12 — Created a one-shot probe Routine to measure egress from a *fired* session
+  and wrote its report path as "commit and push to a branch", without checking that
+  `create_trigger` stores no `sources` unless given them. Every working Routine in
+  `routines.md` carries `sources`; mine did not, so the spawned session had no repo
+  checkout and no way to report. Seven minutes of polling an empty branch, and the
+  measurement was never obtained. The evidence was one field away in the same
+  `list_triggers` output I had already read. → **Before designing a fired session's
+  report channel, diff your new trigger's `session_context` against a Routine known to
+  work — the channel is part of the experiment, and an unreported result is
+  indistinguishable from a blocked one.**
 - 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
   over a file containing a ``` fence. Three-backtick delimiters pair against each other,
   so the tokenizer desynchronized and the check was blind to everything below the fence —

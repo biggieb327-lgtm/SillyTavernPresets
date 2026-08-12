@@ -233,6 +233,41 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
     check the owner runs in a full session** — where `list_triggers` does work.
   Both were failing safe (the prompt bans reporting a skipped check as green), so
   the brief degraded honestly rather than lying — but the checks were dead weight.
+- **Re-measured 2026-08-12 — the 2026-07-29 note above still holds, and a bare
+  `api.github.com` 200 is the trap that makes it look wrong.** A handoff reported
+  `api.github.com` → **200** from an interactive session and read that as
+  contradicting the note. It does not. `https://api.github.com/` and `/rate_limit`
+  are passed through; the endpoints an actual check needs are not:
+
+  | probe (interactive session, 2026-08-12) | result |
+  |---|---|
+  | `https://api.github.com/` | 200 |
+  | `https://api.github.com/rate_limit` | 200, real quota JSON |
+  | `https://api.github.com/repos/biggieb327-lgtm/SillyTavernPresets` | **403** |
+  | `.../actions/runs?per_page=1` (what the deleted CI check needed) | **403** |
+
+  The 403 body is not GitHub's — it is the agent proxy's, verbatim:
+  `{"message":"GitHub access is not enabled for this session. An org admin must
+  connect the Claude GitHub App for this organization."}` So the refusal is a
+  session-authorization decision, not a host-reachability one, and "is the host up"
+  cannot answer it (constraints C8: a reading that both hypotheses predict equally).
+
+  **The deleted checks stay deleted.** In the *interactive* session — the more
+  privileged of the two — direct REST is already 403, and the `github` MCP tools that
+  do work are absent from fired sessions by construction (a trigger's stored
+  `session_context.allowed_tools` lists none). Both paths are therefore closed to a
+  fired session, so restoring check 3 would restore a check that cannot pass.
+  `[unverified]` a fired session's own direct-curl result was NOT measured: a one-shot
+  probe Routine was created and fired at 12:43Z, but it was created without a
+  `sources` entry, so the session it spawned had no repo checkout to push its report
+  from. That is a flaw in the probe, not a result — do not read the missing branch as
+  evidence of anything. Anyone re-running it must copy `sources` from a working
+  Routine (e.g. `practice-scan-weekly`) into the new trigger.
+
+  Other hosts, same interactive run: `www.reddit.com` 200, `raw.githubusercontent.com`
+  301, `github.com` 400, `api.apify.com` 404 (all reachable — a status code means the
+  host answered). Blocked with `CONNECT tunnel failed, response 403`: `openai.com`,
+  `docs.ragas.io`, `docs.apify.com`, `substack.com`.
 
 ### Verbatim prompt
 
@@ -665,8 +700,11 @@ Scope — two questions, both about how things WORK, not what characters say:
    environment variables; if either is unset, or the call fails with a
    CONNECT/tunnel 403 (api.apify.com itself blocked), report
    "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
-   and END. This Routine has no WebSearch fallback on purpose — it IS these two
-   publications, and a substitute would turn a scoped scan into an open trawl.
+   and END. WebSearch is NOT a substitute for an unreachable Apify — this Routine
+   IS these two publications, and swapping in a search would turn a scoped scan
+   into an open trawl. (Step 4 does use WebSearch, for a different job: deepening
+   a topic these publications already chose. Banned as a source of items, required
+   as a way to research them.)
    curl -sS -X POST \
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
@@ -687,7 +725,8 @@ Scope — two questions, both about how things WORK, not what characters say:
    community}; published_at is always ISO 8601 or null, and community is the
    publication origin with any token stripped. max_age_days of 8 covers the week
    since the last run plus a day of margin — do not change it without owner
-   approval. An empty result from a live secret is a normal quiet week.
+   approval. An empty result from a working Actor call is a normal quiet week —
+   report it as one, not as a failure.
 3. Judge each item against A and B. These two publications were chosen BECAUSE
    their subject matter — memory, retrieval, agent harnesses, evals, prompt and
    context structure — IS this fleet's subject matter. Start from the assumption
@@ -703,10 +742,8 @@ Scope — two questions, both about how things WORK, not what characters say:
    repo — that is a reading summary, not a proposal. Two well-translated ideas
    beat five vague ones. But an empty week should mean the posts genuinely
    contained no mechanism, not that the translation felt like effort.
-4. DEEPEN. Items arrive in two shapes; handle them differently.
-   FULL TEXT — a subscriber feed is configured for that publication, so the
-   mechanism is already in the summary field. Quote it and translate it. No
-   search needed.
+4. DEEPEN. Every item arrives as a TEASER — Substack issues no subscriber feed
+   (step 2), so there is no full-text path and this is the only shape.
    TEASER — the free preview. The body is paywalled, but the teaser still tells
    you what the author judged worth writing about, and THAT is the signal these
    publications are here for. Do not discard a teaser as unusable. Take the
@@ -726,6 +763,15 @@ Scope — two questions, both about how things WORK, not what characters say:
    curl the URL and quote the bytes you fetched. The Actor's own summary field is
    different and may be quoted directly: it is scraped RSS/HTML text, not a model
    paraphrase.
+   A BLOCKED HOST IS NOT A GAP TO FILL. If the primary source is unreachable
+   (proxy 403, CONNECT tunnel failure), the honest answer is to label the idea
+   "unverified — host blocked by egress policy" and keep the pointer. Do NOT
+   substitute a third-party mirror, someone's repo copy, or a blog asserting what
+   the primary source said — an unofficial copy is not a primary source, and
+   quoting one reads as verification without being it. This inherits
+   research-scout's rule verbatim; the 2026-08-12 run cited a stranger's markdown
+   mirror of an OpenAI post because openai.com was blocked, which is exactly the
+   substitution this forbids. Drop the idea or ship it labelled unverified.
 6. If anything applies: write ONE file
    .claude/memory/practice-scan/<YYYY-MM-DD>.md, dated the day this Routine fired.
    Max 5 ideas, each tagged [fleet memory] or [operating], each with its URL, its
