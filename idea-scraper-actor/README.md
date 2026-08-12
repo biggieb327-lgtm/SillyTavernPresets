@@ -144,6 +144,39 @@ old they are, so a dormant publication would contribute year-old posts. The
 one definition of "recent". Items with no parseable date are kept: a missing
 date is not evidence of being old.
 
+## Substack subscriber feeds (paywalled publications)
+
+A paywalled publication's **public** RSS carries only the free preview. Two
+independent Routine runs on 2026-08-11 confirmed this is a hard ceiling, not a
+tuning problem — `practice-scan-weekly` judged the posts "paid-newsletter teasers
+with no concrete extractable technique in the free text," and no setting on this
+Actor changes what the feed contains.
+
+Substack gives subscribers a **private feed URL** carrying the full post body.
+That URL contains a token and is therefore a credential.
+
+**It is never Actor input.** Actor input is echoed into the run record and into
+whatever prompt invoked the run, and this repo is public. Private feeds are read
+from a secret environment variable instead:
+
+    SUBSTACK_PRIVATE_FEEDS   one or more subscriber feed URLs,
+                             separated by commas, spaces or newlines
+
+Set it as an `isSecret` env var on the Actor version (`deploy_v013.py` does this
+from your shell environment). Three guarantees, each covered by a test:
+
+* **Rows** carry only the sanitized origin (`https://learnaiwithme.com`) in
+  `community` — never the feed URL.
+* **Logs** print only that origin (`private feed OK: https://… -> N items`).
+* **Errors** re-raise without the URL, so a failing feed cannot leak its token
+  into a run's status message.
+
+**Do not list the same publication in both `substack_publications` and
+`SUBSTACK_PRIVATE_FEEDS`.** Rows are deduplicated by post URL and public jobs run
+first, so the paywalled teaser would win over the full text — the exact opposite
+of the point. A publication with a subscriber feed should be removed from
+`substack_publications` entirely.
+
 ## Known limitations of the Atom path
 
 **Link posts have no body, by construction.** Atom `<content>` for a link or

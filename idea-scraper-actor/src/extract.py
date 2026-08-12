@@ -142,3 +142,31 @@ def within_age(published_iso: str | None, max_age_days: int, now: datetime) -> b
     if published.tzinfo is None:
         published = published.replace(tzinfo=timezone.utc)
     return (now - published).days <= max_age_days
+
+
+# --- Private (subscriber) Substack feeds -----------------------------------
+# A Substack private RSS URL carries a token that grants access to paid content.
+# It is a credential: it must never reach the repo, the Actor input, the run log,
+# or the output dataset. It is read from a secret env var, and every row it
+# produces is labelled with the sanitized publication origin instead.
+
+def parse_private_feeds(raw: str | None) -> list[str]:
+    """Split a secret env var into feed URLs. Accepts comma/newline/space."""
+    if not raw:
+        return []
+    parts = re.split(r"[,\s]+", raw.strip())
+    return [p for p in parts if p.startswith(("http://", "https://"))]
+
+
+def sanitize_feed_url(url: str) -> str:
+    """scheme://host, dropping path, query and fragment.
+
+    Used for the `community` field so a token embedded in a private feed path
+    or query string never lands in the dataset that callers read and quote.
+    """
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit((url or "").strip())
+    if not parsed.netloc:
+        return "(unknown publication)"
+    return f"{parsed.scheme or 'https'}://{parsed.netloc}"

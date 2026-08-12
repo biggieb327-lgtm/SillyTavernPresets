@@ -64,7 +64,9 @@ from apify import Actor
 
 from .extract import (
     from_epoch,
+    parse_private_feeds,
     reddit_content,
+    sanitize_feed_url,
     strip_html,
     substack_feed_candidates,
     to_iso,
@@ -285,6 +287,62 @@ async def _try_oauth(timeframe: str, limit: int, subreddit: str, chars: int):
 # Substack
 # --------------------------------------------------------------------------
 
+def _substack_items(items, community: str, limit: int, chars: int) -> list[dict]:
+    """Shared by the public and private-feed paths - identical row shape.
+
+    `community` is always a sanitized origin for private feeds, never the feed
+    URL itself, so a subscriber token cannot reach the dataset.
+    """
+    entries = []
+    for item in items[:limit]:
+        # <description> is the editorial subtitle - short and high signal.
+        # <content:encoded> is the full article. On a paywalled publication the
+        # public feed carries only the free preview here; a subscriber feed
+        # carries the whole post, which is the entire point of using one.
+        subtitle = strip_html(item.findtext("description") or "")
+        body = strip_html(item.findtext(f"{_CONTENT_NS}encoded") or "")
+        if body.startswith(subtitle):
+            summary = body
+        elif subtitle and body:
+            summary = f"{subtitle}\n\n{body}"
+        else:
+            summary = subtitle or body
+        entries.append({
+            "source": "substack",
+            "title": (item.findtext("title") or "").strip(),
+            "url": (item.findtext("link") or "").strip(),
+            "external_url": None,
+            "summary": truncate(summary, chars),
+            "published_at": to_iso(item.findtext("pubDate")),
+            "community": community,
+        })
+    return entries
+
+
+def _fetch_substack_private(feed_url: str, limit: int, chars: int) -> list[dict]:
+    """Fetch one subscriber feed URL verbatim - no candidate derivation.
+
+    The URL is a credential. It is never logged, never raised in an exception,
+    and never written to a row; only its sanitized origin is. Callers must pass
+    it in from a secret env var, never from Actor input, because Actor input is
+    echoed into the run record and into whatever prompt invoked the run.
+    """
+    origin = sanitize_feed_url(feed_url)
+    try:
+        resp = requests.get(feed_url, timeout=30, headers={"User-Agent": _user_agent()})
+        resp.raise_for_status()
+        items = ET.fromstring(resp.content).findall("./channel/item")
+    except Exception as exc:  # noqa: BLE001 - re-raise without the URL
+        raise RuntimeError(f"private feed for {origin} failed: {exc}") from None
+    if not items:
+        raise RuntimeError(
+            f"private feed for {origin} parsed but contained no <item> elements "
+            "(is the token still valid?)"
+        )
+    Actor.log.info("private feed OK: %s -> %d items", origin, len(items))
+    return _substack_items(items, origin, limit, chars)
+
+
 def _fetch_substack_rss(pub_url: str, limit: int, chars: int) -> list[dict]:
     """Fetch one publication, trying each candidate feed URL in order.
 
@@ -315,28 +373,7 @@ def _fetch_substack_rss(pub_url: str, limit: int, chars: int) -> list[dict]:
 
         if feed_url != candidates[0]:
             Actor.log.info("substack: fell back to %s", feed_url)
-        entries = []
-        for item in items[:limit]:
-            # <description> is the editorial subtitle - short and high signal.
-            # <content:encoded> is the full article. Keep both.
-            subtitle = strip_html(item.findtext("description") or "")
-            body = strip_html(item.findtext(f"{_CONTENT_NS}encoded") or "")
-            if body.startswith(subtitle):
-                summary = body
-            elif subtitle and body:
-                summary = f"{subtitle}\n\n{body}"
-            else:
-                summary = subtitle or body
-            entries.append({
-                "source": "substack",
-                "title": (item.findtext("title") or "").strip(),
-                "url": (item.findtext("link") or "").strip(),
-                "external_url": None,
-                "summary": truncate(summary, chars),
-                "published_at": to_iso(item.findtext("pubDate")),
-                "community": pub_url,
-            })
-        return entries
+        return _substack_items(items, pub_url, limit, chars)
 
     raise RuntimeError(
         f"no candidate feed worked for {pub_url!r} "
@@ -454,14 +491,43 @@ async def main() -> None:
 
         substack_rows = 0
         substack_errors: list[str] = []
-        for pub_url in substack_publications:
+        seen_urls: set[str] = set()
+
+        # Subscriber feeds come from a SECRET env var, never from Actor input:
+        # the URL carries a token, and input is echoed into the run record and
+        # into whatever prompt invoked the run. Only sanitized origins are ever
+        # logged or stored.
+        private_feeds = parse_private_feeds(os.environ.get("SUBSTACK_PRIVATE_FEEDS"))
+        if private_feeds:
+            Actor.log.info(
+                "%d private Substack feed(s) configured: %s", len(private_feeds),
+                ", ".join(sanitize_feed_url(f) for f in private_feeds),
+            )
+
+        substack_jobs = [("public", p) for p in substack_publications]
+        substack_jobs += [("private", f) for f in private_feeds]
+
+        for kind, ref in substack_jobs:
+            label = ref if kind == "public" else sanitize_feed_url(ref)
             try:
-                entries = _fetch_substack_rss(pub_url, max_items, chars)
+                if kind == "private":
+                    entries = _fetch_substack_private(ref, max_items, chars)
+                else:
+                    entries = _fetch_substack_rss(ref, max_items, chars)
             except Exception as exc:  # noqa: BLE001 - one bad feed is not fatal
-                Actor.log.warning("Substack fetch failed for %s: %s", pub_url, exc)
-                substack_errors.append(f"{pub_url}: {exc}")
+                Actor.log.warning("Substack fetch failed for %s: %s", label, exc)
+                substack_errors.append(f"{label}: {exc}")
                 continue
             for entry in _apply_filters(entries, filter_titles, max_age_days, now):
+                # The same post arrives twice if a publication is listed both as
+                # a public URL and as a subscriber feed. Keep the first, which is
+                # whichever job ran first - public jobs are ordered first, so a
+                # paywalled teaser would win. Prefer configuring one or the other.
+                url = entry.get("url") or ""
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
                 await Actor.push_data(entry)
                 substack_rows += 1
 
@@ -480,11 +546,11 @@ async def main() -> None:
             empty_sources.append(
                 f"{len(subreddits)} subreddit(s) requested, 0 rows: {detail}"
             )
-        if substack_publications and substack_rows == 0:
+        if (substack_publications or private_feeds) and substack_rows == 0:
             detail = "; ".join(substack_errors) or "no error recorded"
             empty_sources.append(
-                f"{len(substack_publications)} Substack publication(s) requested, "
-                f"0 rows: {detail}"
+                f"{len(substack_publications) + len(private_feeds)} Substack "
+                f"source(s) requested, 0 rows: {detail}"
             )
 
         if empty_sources:
