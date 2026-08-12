@@ -1168,7 +1168,13 @@ def _audit_source_quote(meta: dict | None) -> str:
     if not isinstance(meta, dict) or meta.get("origin") != "auto":
         return ""
     src = meta.get("source")
-    return src.strip() if isinstance(src, str) and src.strip() else ""
+    if not isinstance(src, str):
+        return ""
+    # Collapse whitespace, same as _audit_pair_key. A Telegram message can contain
+    # newlines and _quote_grounded normalizes before comparing, so a multi-line quote
+    # can be stored verbatim — and it would emit a bare unnumbered line into the
+    # numbered entry list the model reads its 1-based `lines` indices out of.
+    return " ".join(src.split())
 
 
 def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float,

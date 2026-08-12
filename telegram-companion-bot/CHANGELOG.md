@@ -55,9 +55,22 @@ can tell "this stale detail" from "this claim your own words do not support".
 **`MEMORY_AUDIT_UNSUPPORTED`** (default ON, invariant #16): `0` drops the type from the
 prompt AND from validation, so a bad week costs no redeploy.
 
-24 new tests (`_audit_source_quote`, the prompt payload's `src:` lines, the ramen case
-end to end, every owner-entered origin, the kill switch, and a mixed batch where one
-ineligible finding must not drop the eligible one). Total: 1,269.
+**Caught by `/code-review` before merge:** a stored quote can contain newlines —
+Telegram messages do, and `_quote_grounded` normalizes before comparing, so a multi-line
+quote passes the write-time guard and is stored verbatim. Rendered into the audit prompt
+it emitted a bare unnumbered line inside the numbered list the model reads its 1-based
+`lines` indices out of. `_audit_source_quote` now collapses whitespace, the way
+`_audit_pair_key` already did.
+
+18 new tests: `_audit_source_quote` (including the multi-line case), the prompt payload's
+`src:` lines and an assertion that every rendered line is numbered or a `src:` line, the
+ramen case end to end, every owner-entered origin, the kill switch, a mixed batch where
+one ineligible finding must not drop the eligible one, and one pinning `_quote_grounded`'s
+documented limit so the gap is not later mistaken for a bug in it. Total: 1,263.
+
+Five guards break-tested RED→GREEN via `.claude/tools/break-test.sh`: the origin
+eligibility rule, the parser's eligibility check, delete-only, the kill switch, and the
+prompt's `src:` line.
 
 ## v2026-08-10.12 — A seven-hour poller fight was filed as 767 code crashes
 

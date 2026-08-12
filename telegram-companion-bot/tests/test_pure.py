@@ -1805,6 +1805,17 @@ class TestAuditSourceQuote:
         assert bot._audit_source_quote("nope") == ""
         assert bot._audit_source_quote({}) == ""
 
+    def test_multiline_quote_collapsed(self):
+        """A stored quote can contain newlines — Telegram messages do, and
+        _quote_grounded normalizes before comparing, so a multi-line quote passes the
+        write-time guard and is stored verbatim. Left alone it would emit a bare
+        unnumbered line into the numbered list the model reads `lines` indices from."""
+        assert bot._quote_grounded("i might try\nthat ramen place",
+                                   ["I might try\nthat ramen place sometime"])
+        assert bot._audit_source_quote(
+            {"origin": "auto", "source": "i might try\nthat ramen place"}
+        ) == "i might try that ramen place"
+
 
 class TestAuditPromptPayloadSource:
     entries = ["likes ramen weekly", "owner typed this"]
@@ -1829,6 +1840,18 @@ class TestAuditPromptPayloadSource:
                                        with_source=True)
         assert on.startswith("1.")
         assert "\n2." in on
+
+    def test_every_line_is_numbered_or_a_src_line(self):
+        """The model reads 1-based `lines` indices off this list, so a stray unnumbered
+        line — from a quote containing a newline — would shift what it points at."""
+        import re
+        meta = {"likes ramen weekly": {"origin": "auto",
+                                       "source": "i might try\nthat ramen place"},
+                "owner typed this": {"origin": "manual"}}
+        out = bot._audit_prompt_payload(self.entries, meta, time.time(),
+                                        with_source=True)
+        for line in out.splitlines():
+            assert re.match(r"^\d+\.|^    src: ", line), f"unnumbered line: {line!r}"
 
 
 class TestAuditReviewItem:

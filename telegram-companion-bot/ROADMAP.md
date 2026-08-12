@@ -756,6 +756,11 @@ them should find the reasoning rather than re-litigate it. Specs are in
   append-only memory audit log — per the IMPROVEMENTS_PLAN.md R1 spec. "Done when"
   met: a wrong memory is traceable and correctable from Telegram in under a minute.
   Follow-up memory-loop refinements shipped v2026-07-12.1–.2.
+- **Quote grounding proves the evidence is real, never that the claim follows from it**
+  — closed v2026-08-12.1 with an `unsupported` finding type in the weekly audit, judged
+  against each entry's own stored quote. Auto-extracted memories only; `/remember`,
+  `/editmem` and audit merges are ineligible by construction. Deliberately NOT fixed in
+  `_quote_grounded`, which is on the reply path.
 
 ### 4.2 ~~Availability awareness~~ ✅ (shipped as R2, v2026-07-11.2)
 - `/away` + `/back`, remote-default framing, auto-extraction via post-reply analysis
