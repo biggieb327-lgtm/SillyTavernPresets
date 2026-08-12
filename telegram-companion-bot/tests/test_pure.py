@@ -712,6 +712,19 @@ class TestQuoteGrounded:
         assert not bot._quote_grounded(None, ["line"])
         assert not bot._quote_grounded("quote", None)
 
+    def test_a_real_quote_under_an_unsupported_claim_still_passes(self):
+        """The documented limit of this guard, pinned so nobody mistakes it for a bug.
+
+        _quote_grounded answers "is this evidence real?" and never "does the claim follow
+        from it?". Here the quote is a verbatim substring, so the memory
+        "likes ramen and eats it weekly" is stored with a real quote attached and
+        memory_ungrounded never fires. Catching that gap is the weekly audit's
+        `unsupported` finding type (v2026-08-12.1), NOT this function — an entailment
+        check here would put an LLM round-trip on the reply path."""
+        assert bot._quote_grounded(
+            "might try that new ramen place",
+            ["I might try that new ramen place sometime"])
+
 
 # ── Memory replace (R1 memory auditor) ───────────────────────────────────────
 
@@ -1705,6 +1718,118 @@ class TestParseAuditFindings:
         ]}
         assert bot._parse_audit_findings(data, self.entries, 3) == []
 
+    # --- unsupported (v2026-08-12.1) ---
+    # The ramen case: a real verbatim quote under a claim it does not support.
+    RAMEN = "likes ramen and eats it weekly"
+    AUTO_META = {RAMEN: {"origin": "auto", "source": "might try that new ramen place"}}
+
+    def test_unsupported_delete_accepted(self):
+        data = {"findings": [{"type": "unsupported", "lines": [1], "action": "delete",
+                              "reason": "quote says 'might try', memory claims a habit"}]}
+        out = bot._parse_audit_findings(data, [self.RAMEN], 3, self.AUTO_META)
+        assert len(out) == 1
+        assert out[0]["type"] == "unsupported"
+        assert out[0]["targets"] == [self.RAMEN]
+        assert out[0]["merged_text"] is None
+
+    def test_unsupported_merge_dropped(self):
+        """Merging an unsupported claim propagates the fabrication instead of removing it."""
+        data = {"findings": [{"type": "unsupported", "lines": [1, 2], "action": "merge",
+                              "merged_text": "likes ramen"}]}
+        entries = [self.RAMEN, "hates tea"]
+        meta = dict(self.AUTO_META, **{"hates tea": {"origin": "auto", "source": "I hate tea"}})
+        assert bot._parse_audit_findings(data, entries, 3, meta) == []
+
+    def test_unsupported_without_meta_dropped(self):
+        """Fail-closed: a caller that passes no meta loses the feature, it never
+        proposes deleting an entry whose grounding quote it could not read."""
+        data = {"findings": [{"type": "unsupported", "lines": [1], "action": "delete"}]}
+        assert bot._parse_audit_findings(data, [self.RAMEN], 3) == []
+        assert bot._parse_audit_findings(data, [self.RAMEN], 3, {}) == []
+
+    def test_unsupported_never_proposed_for_owner_entered_memories(self):
+        """The worst failure this feature could have: proposing deletion of memories the
+        owner typed or edited deliberately. /remember has no source; /editmem INHERITS
+        the original quote onto rewritten text; an audit merge stores a 'merged:' trail.
+        Only origin 'auto' carries a quote that describes the claim beside it."""
+        entry = "owner entered this"
+        for meta in (
+            {},                                                        # legacy, no meta
+            {entry: {"origin": "manual"}},                              # /remember
+            {entry: {"origin": "manual", "source": ""}},                # empty source
+            {entry: {"origin": "manual-edit", "source": "old quote"}},  # /editmem
+            {entry: {"origin": "audit-merge", "source": "merged: a | b"}},
+        ):
+            data = {"findings": [{"type": "unsupported", "lines": [1], "action": "delete"}]}
+            assert bot._parse_audit_findings(data, [entry], 3, meta) == [], meta
+
+    def test_unsupported_dropped_when_kill_switch_off(self, monkeypatch):
+        monkeypatch.setattr(bot, "MEMORY_AUDIT_UNSUPPORTED", False)
+        data = {"findings": [{"type": "unsupported", "lines": [1], "action": "delete"}]}
+        assert bot._parse_audit_findings(data, [self.RAMEN], 3, self.AUTO_META) == []
+
+    def test_kill_switch_off_leaves_other_types_working(self, monkeypatch):
+        monkeypatch.setattr(bot, "MEMORY_AUDIT_UNSUPPORTED", False)
+        data = {"findings": [{"type": "stale", "lines": [1], "action": "delete"}]}
+        assert len(bot._parse_audit_findings(data, [self.RAMEN], 3, self.AUTO_META)) == 1
+
+    def test_mixed_batch_keeps_the_eligible_one(self):
+        """One finding being ineligible must not drop the rest of the batch."""
+        entries = [self.RAMEN, "owner typed this"]
+        meta = dict(self.AUTO_META, **{"owner typed this": {"origin": "manual"}})
+        data = {"findings": [
+            {"type": "unsupported", "lines": [2], "action": "delete"},   # ineligible
+            {"type": "unsupported", "lines": [1], "action": "delete"},   # eligible
+        ]}
+        out = bot._parse_audit_findings(data, entries, 3, meta)
+        assert [f["targets"] for f in out] == [[self.RAMEN]]
+
+
+class TestAuditSourceQuote:
+    def test_auto_with_source(self):
+        assert bot._audit_source_quote(
+            {"origin": "auto", "source": "  might try ramen  "}) == "might try ramen"
+
+    def test_non_auto_origins_have_no_judgeable_quote(self):
+        assert bot._audit_source_quote({"origin": "manual-edit", "source": "q"}) == ""
+        assert bot._audit_source_quote({"origin": "audit-merge", "source": "merged: a | b"}) == ""
+        assert bot._audit_source_quote({"origin": "manual"}) == ""
+
+    def test_missing_or_blank_source(self):
+        assert bot._audit_source_quote({"origin": "auto"}) == ""
+        assert bot._audit_source_quote({"origin": "auto", "source": "   "}) == ""
+        assert bot._audit_source_quote({"origin": "auto", "source": 42}) == ""
+
+    def test_bad_shapes(self):
+        assert bot._audit_source_quote(None) == ""
+        assert bot._audit_source_quote("nope") == ""
+        assert bot._audit_source_quote({}) == ""
+
+
+class TestAuditPromptPayloadSource:
+    entries = ["likes ramen weekly", "owner typed this"]
+    meta = {"likes ramen weekly": {"origin": "auto", "source": "might try that ramen place",
+                                   "confidence": 8},
+            "owner typed this": {"origin": "manual"}}
+
+    def test_source_shown_only_when_requested(self):
+        off = bot._audit_prompt_payload(self.entries, self.meta, time.time())
+        assert "src:" not in off
+
+    def test_source_shown_for_auto_only(self):
+        on = bot._audit_prompt_payload(self.entries, self.meta, time.time(),
+                                       with_source=True)
+        assert 'src: "might try that ramen place"' in on
+        # The owner-entered entry is still listed, just with nothing to judge it against.
+        assert "owner typed this" in on
+        assert on.count("src:") == 1
+
+    def test_numbering_survives_the_src_lines(self):
+        on = bot._audit_prompt_payload(self.entries, self.meta, time.time(),
+                                       with_source=True)
+        assert on.startswith("1.")
+        assert "\n2." in on
+
 
 class TestAuditReviewItem:
     def test_merge_item_shape(self):
@@ -1721,6 +1846,18 @@ class TestAuditReviewItem:
                                        "targets": ["a"], "merged_text": None,
                                        "reason": ""})
         assert item["action"] == "delete" and "AUDIT delete" in item["text"]
+        assert "unsupported" not in item["text"]
+
+    def test_unsupported_delete_is_labelled(self):
+        """'delete this stale detail' and 'delete this claim the user's own words do not
+        support' want different scrutiny from the owner; the reason line alone does not
+        distinguish them."""
+        item = bot._audit_review_item({"type": "unsupported", "action": "delete",
+                                       "targets": ["likes ramen weekly"],
+                                       "merged_text": None,
+                                       "reason": "quote says 'might try'"})
+        assert "AUDIT delete (unsupported)" in item["text"]
+        assert "quote says 'might try'" in item["text"]
 
 
 class TestEnqueueAuditProposals:
@@ -7488,6 +7625,7 @@ class TestEveryBooleanFlagDefault:
         "LOCATION_PLACE": True,
         "MAP_INTENT": True,
         "MEME_ENABLED": True,
+        "MEMORY_AUDIT_UNSUPPORTED": True,
         "MOOD_AUTO": True,
         "ONTHISDAY_ENABLED": True,
         "PLACE_ANCHOR_HER": True,

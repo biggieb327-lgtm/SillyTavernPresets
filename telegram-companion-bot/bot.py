@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-10.12"
+BOT_VERSION = "2026-08-12.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1025,6 +1025,11 @@ MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
 MEMORY_AUDIT_SEEN_FILE = BASE_DIR / "memory_audit_seen.json"
 MEMORY_AUDIT_SEEN_MAX = 100
+# Fourth finding type for the weekly audit: a stored claim its own grounding quote
+# does not support. _quote_grounded proves the quote is real; nothing proved the
+# claim followed from it. Default ON with a kill switch (invariant #16); 0 drops the
+# type from the prompt AND from _parse_audit_findings, so a bad week costs no redeploy.
+MEMORY_AUDIT_UNSUPPORTED = _env_bool("MEMORY_AUDIT_UNSUPPORTED", True)
 
 # Repeat-injection suppression (v2026-07-18.1): triggered_memories is stateless across
 # turns, so while a conversation stays on one theme the same top-scoring lines win the
@@ -1141,8 +1146,36 @@ def _audit_pair_key(targets: list[str]) -> str:
     return "|".join(sorted(" ".join(t.lower().split()) for t in targets))
 
 
-def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float) -> str:
-    """Numbered entry list for the audit prompt, annotated with age and confidence."""
+def _audit_source_quote(meta: dict | None) -> str:
+    """The verbatim user quote a memory was extracted from, or "" when the entry has
+    nothing a claim can be judged against.
+
+    ONLY `origin: "auto"` qualifies, and "has a source" is not the same test. Three
+    other origins would pass a bare `meta.get("source")` check and must not:
+
+      manual       (/remember)  no source key at all — the owner typed the claim
+      manual-edit  (/editmem)   inherits the ORIGINAL quote onto text the owner
+                                deliberately rewrote, so the quote no longer
+                                describes the claim standing next to it
+      audit-merge               source is a "merged: a | b" trail, not anything a
+                                user ever said
+
+    Judging any of those for entailment proposes deleting the owner's own work, which
+    is the worst failure this feature can have. Returning "" here makes them ineligible
+    in both places that matter: the prompt shows no quote, and _parse_audit_findings
+    drops an `unsupported` finding that names them anyway.
+    """
+    if not isinstance(meta, dict) or meta.get("origin") != "auto":
+        return ""
+    src = meta.get("source")
+    return src.strip() if isinstance(src, str) and src.strip() else ""
+
+
+def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float,
+                          with_source: bool = False) -> str:
+    """Numbered entry list for the audit prompt, annotated with age and confidence.
+    With `with_source`, appends the grounding quote for entries that have a real one —
+    without it the model has nothing to judge entailment against."""
     out = []
     for i, line in enumerate(entries):
         m = meta.get(line.strip(), {})
@@ -1154,13 +1187,21 @@ def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float)
         if isinstance(conf, int):
             notes.append(f"conf={conf}")
         tag = f" ({', '.join(notes)})" if notes else ""
-        out.append(f"{i + 1}.{tag} {line}")
+        src = _audit_source_quote(m) if with_source else ""
+        suffix = f'\n    src: "{src[:300]}"' if src else ""
+        out.append(f"{i + 1}.{tag} {line}{suffix}")
     return "\n".join(out)
 
 
-def _parse_audit_findings(data: dict, entries: list[str], max_findings: int) -> list[dict]:
+def _parse_audit_findings(data: dict, entries: list[str], max_findings: int,
+                          meta: dict[str, dict] | None = None) -> list[dict]:
     """Validate the audit model's JSON; map 1-based indices back to exact entry text.
-    Drops malformed/out-of-range findings rather than guessing."""
+    Drops malformed/out-of-range findings rather than guessing.
+
+    `meta` gates the `unsupported` type and is deliberately fail-closed: omitted (or
+    missing the entry) means no grounding quote is known, so an `unsupported` finding
+    naming that entry is dropped rather than trusted. A caller that forgets to pass
+    meta loses the feature; it never proposes deleting an entry it could not check."""
     findings = data.get("findings") if isinstance(data, dict) else None
     if not isinstance(findings, list):
         return []
@@ -1173,10 +1214,17 @@ def _parse_audit_findings(data: dict, entries: list[str], max_findings: int) -> 
         ftype = f.get("type")
         action = f.get("action")
         idxs = f.get("lines")
-        if ftype not in ("contradiction", "superseded", "stale"):
+        if ftype not in ("contradiction", "superseded", "stale", "unsupported"):
             continue
         if action not in ("delete", "merge"):
             continue
+        if ftype == "unsupported":
+            if not MEMORY_AUDIT_UNSUPPORTED:
+                continue
+            # Delete-only by design: merging an unsupported claim into a neighbouring
+            # entry propagates the fabrication instead of removing it.
+            if action != "delete":
+                continue
         if not isinstance(idxs, list) or not idxs:
             continue
         try:
@@ -1185,6 +1233,10 @@ def _parse_audit_findings(data: dict, entries: list[str], max_findings: int) -> 
             continue
         if any(i < 1 or i > len(entries) for i in uniq):
             continue
+        if ftype == "unsupported" and not all(
+                _audit_source_quote((meta or {}).get(entries[i - 1].strip()))
+                for i in uniq):
+            continue  # no grounding quote to have judged it against
         merged_text = f.get("merged_text")
         if action == "merge":
             if len(uniq) < 2:
@@ -1213,7 +1265,12 @@ def _audit_review_item(finding: dict) -> dict:
         text = ("AUDIT merge: " + " + ".join(f"'{t}'" for t in targets)
                 + f" -> '{finding['merged_text']}'")
     else:
-        text = "AUDIT delete: " + " + ".join(f"'{t}'" for t in targets)
+        # Name the unsupported type explicitly: "delete this stale detail" and "delete
+        # this claim the user's own words do not support" want different scrutiny, and
+        # the model's one-line reason alone does not tell them apart.
+        label = "AUDIT delete (unsupported): " if finding.get("type") == "unsupported" \
+            else "AUDIT delete: "
+        text = label + " + ".join(f"'{t}'" for t in targets)
     if reason:
         text += f" ({reason})"
     return {
@@ -7957,24 +8014,45 @@ async def maintain_long_term_memory(chat_id: int):
 def _memory_audit_scan(entries: list[str], meta_snapshot: dict[str, dict]) -> list[dict]:
     """Sync worker (runs in a thread): one cheap-model pass over memories.txt asking
     for contradictions / superseded / stale entries. Returns validated findings."""
-    payload = _audit_prompt_payload(entries, meta_snapshot, time.time())
+    unsupported = MEMORY_AUDIT_UNSUPPORTED
+    payload = _audit_prompt_payload(entries, meta_snapshot, time.time(),
+                                    with_source=unsupported)
+    header = ("Memories (age = days since recorded, conf = extraction confidence 1-10"
+              + (', src = the user\'s own words the memory was drawn from):\n\n'
+                 if unsupported else "):\n\n"))
+    kinds = ("Find entries that CONTRADICT each other, are SUPERSEDED by a newer entry, "
+             "or are clearly STALE (a one-off detail that no longer matters). ")
+    if unsupported:
+        # The grounding guard proves the src quote is real; it never proved the memory
+        # follows from it. "I might try that ramen place" -> "loves ramen, eats it
+        # weekly" passes _quote_grounded and is a fabrication.
+        kinds += (
+            "Also find entries that are UNSUPPORTED: the memory claims more than its "
+            "own src quote establishes — an exaggeration, or an inference the quote "
+            "does not license. Judge ONLY against that entry's src line. An entry "
+            "shown with NO src line cannot be unsupported — never report one. "
+            "A memory that merely says less than its quote is fine; report it only "
+            "when the quote genuinely fails to support the claim. ")
+    schema_type = ("contradiction|superseded|stale|unsupported" if unsupported
+                   else "contradiction|superseded|stale")
     prompt = (
         "You are auditing a list of stored memories for quality problems.\n"
-        "Memories (age = days since recorded, conf = extraction confidence 1-10):\n\n"
-        f"{payload}\n\n"
-        "Find entries that CONTRADICT each other, are SUPERSEDED by a newer entry, "
-        "or are clearly STALE (a one-off detail that no longer matters). "
-        f"Report at most {MEMORY_AUDIT_MAX_PROPOSALS} findings, most confident first. "
+        + header
+        + f"{payload}\n\n"
+        + kinds
+        + f"Report at most {MEMORY_AUDIT_MAX_PROPOSALS} findings, most confident first. "
         "If nothing clearly qualifies, return an empty list — do not invent problems.\n\n"
         "Respond with ONLY a JSON object, no prose:\n"
-        '{"findings": [{"type": "contradiction|superseded|stale", '
+        '{"findings": [{"type": "' + schema_type + '", '
         '"lines": [<1-based line numbers>], "action": "delete|merge", '
         '"merged_text": "<single replacement memory, only when action is merge>", '
         '"reason": "<one short sentence>"}]}'
+        + ("\nUse action \"delete\" for unsupported — never merge one." if unsupported else "")
     )
     raw = call_nanogpt(
         [{"role": "user", "content": prompt}], model=SUMMARY_MODEL)
-    return _parse_audit_findings(_extract_json(raw), entries, MEMORY_AUDIT_MAX_PROPOSALS)
+    return _parse_audit_findings(_extract_json(raw), entries, MEMORY_AUDIT_MAX_PROPOSALS,
+                                 meta_snapshot)
 
 
 async def memory_audit_job(chat_id: int):

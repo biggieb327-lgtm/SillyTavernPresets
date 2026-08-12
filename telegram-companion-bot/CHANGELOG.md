@@ -7,6 +7,58 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-12.1 — The grounding guard checked the quote was real, never that the claim followed from it
+
+**Root cause: `_quote_grounded` answers a different question than the one the guard is
+trusted to answer.** It is a substring test — is this quote a real, verbatim thing the
+user said? — and both extraction callers (`memory_ungrounded`, `note_ungrounded`) treat a
+pass as "this memory is grounded". Those are two different properties and only the first
+was ever enforced. The user says *"I might try that new ramen place sometime"*; the model
+stores *"User loves ramen and eats it weekly"* with `memory_quote` = *"try that new ramen
+place"*. The quote IS a verbatim substring, so `_quote_grounded` returns True,
+`memory_ungrounded` never fires, and a fabricated preference lands in `memories.txt` with
+a real quote attached to it. Nothing downstream can tell it from a well-founded memory —
+`/sourcemem` shows a genuine quote, and the confidence gate sees a confident extraction.
+
+**Fix: a fourth finding type in the weekly audit, not a stricter write-time guard.** The
+`MEMORY_AUDIT` pass already reads `memories.txt` with a cheap model once a week, off the
+message path, and routes proposals through `/reviewmem` where the owner approves every
+mutation. `unsupported` joins contradiction/superseded/stale there. Each entry's stored
+grounding quote is now passed to the audit prompt alongside the claim (`src:` line) — the
+model had no way to judge entailment before, since the quote was never in the prompt at
+all. **Zero new LLM calls** (invariant #3): same weekly call, longer prompt.
+
+**Why not tighten the write-time guard instead:** rejecting at extraction trades a
+silent-bad-memory problem for a silent-lost-memory problem with no human in the loop, and
+an entailment check inside `_quote_grounded` would put a model round-trip on the reply
+path for every extraction. Invariant #17's three layers are untouched; this is a fourth,
+after the fact, with the owner in it by construction.
+
+**The eligibility rule is `origin == "auto"`, and "has a source" would have been the
+wrong test.** Three other origins carry a `source` that must never be judged for
+entailment: `/editmem` (`manual-edit`) **inherits the original quote onto text the owner
+deliberately rewrote**, an audit merge stores a `"merged: a | b"` trail rather than
+anything a user said, and `/remember` (`manual`) has no source at all. Proposing deletion
+of memories the owner entered by hand is the worst failure this feature could have, so it
+is closed twice: `_audit_source_quote` returns `""` for those origins, which both hides
+the `src:` line from the prompt and makes `_parse_audit_findings` drop an `unsupported`
+finding that names them anyway.
+
+**Fail-closed on the validation side.** `_parse_audit_findings` takes `meta` as an
+optional 4th argument; omitted, no entry has a known quote and every `unsupported`
+finding is dropped. A caller that forgets to pass it loses the feature rather than
+proposing deletions it could not check. `unsupported` is also delete-only — merging an
+unsupported claim into a neighbouring entry propagates the fabrication instead of
+removing it — and the review item is labelled `AUDIT delete (unsupported):` so the owner
+can tell "this stale detail" from "this claim your own words do not support".
+
+**`MEMORY_AUDIT_UNSUPPORTED`** (default ON, invariant #16): `0` drops the type from the
+prompt AND from validation, so a bad week costs no redeploy.
+
+24 new tests (`_audit_source_quote`, the prompt payload's `src:` lines, the ramen case
+end to end, every owner-entered origin, the kill switch, and a mixed batch where one
+ineligible finding must not drop the eligible one). Total: 1,269.
+
 ## v2026-08-10.12 — A seven-hour poller fight was filed as 767 code crashes
 
 **Root cause: `Conflict` and `Forbidden` are `TelegramError` but not `NetworkError`.**
