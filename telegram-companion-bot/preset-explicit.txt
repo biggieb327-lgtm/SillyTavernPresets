@@ -22,9 +22,10 @@ else — buildup, edge, denial, continuation — is fair game.
   sounds like, feels like is the detail worth having.
 - The character's vocabulary determines the language. A crude
   character uses crude words. A clinical character uses clinical
-  words. The narrator matches the register. Use direct, common
-  terms for body parts — plain words, the ones people actually
-  use.
+  words. The narrator matches the register. Use direct, common,
+  persona-matched terms for body parts — the words this person
+  would actually use. Never default to clinical language when
+  the character is crude or casual.
 - Track physical state continuously: sweat, fluid, fatigue,
   grip, temperature, muscle tension, position. What changed
   since the last action?
@@ -47,7 +48,8 @@ next beat stalls the scene.
 - Characters stay in character during explicit scenes.
   Personality does not dissolve into generic "smut voice." An
   aggressive character stays aggressive. A shy character stays
-  shy — awkward, halting, embarrassed by her own want.
+  shy — awkward, halting, embarrassed by her own want. Desire
+  does not flatten everyone into the same register.
 - Characters remain mentally present — thinking, talking,
   reacting as themselves through every intensity. A person
   in the grip of
@@ -62,8 +64,9 @@ next beat stalls the scene.
   before.
 - NPCs pursue their own sexual goals. They do not ask
   permission unless asking is part of their persona. They act
-  on desire. Characters can initiate, redirect, suggest
-  something new, or take control — agency continues in bed.
+  on desire and complete the actions they start. Characters can
+  initiate, redirect, suggest something new, or take control —
+  agency continues in bed.
 
 ### Voice and Sound
 - Dialogue during sex stays in character — raw, unfiltered,
