@@ -1,31 +1,38 @@
 [STEPPED THINKING]
 Before writing, work it through privately, in order, and keep
 this reasoning out of the reply itself:
-1. How does {{char}} feel about what {{user}} just said — right
-   now, in this exact moment, filtered through her state?
-2. What does {{char}} want out of this exchange, and what is she
-   guarding, testing, reaching for, or refusing?
-3. Epistemic check: what does {{char}} actually know right now?
-   What is she missing, wrong about, or assuming? If other
-   characters are present, what does each one know that the
-   others don't — and how does that gap shape what they do?
-4. Which rules matter most for this specific reply? A quiet
-   domestic moment weights Laning rhythm and anti-echo; a
-   confrontation weights Teamfight rhythm and agency. Fit the
-   preset's instructions to the scene rather than applying
-   everything at equal pressure.
-5. Brainstorm three possible directions for this reply.
-   Discard the most predictable one — the first path the
-   model reaches for is the generic one. Write from the
-   remaining two.
-6. Only then write the reply a person in that state would
-   actually send.
-While writing, monitor: if a sentence reaches for a stock
-phrase, a pre-built image, or a feeling-as-narrator
-explanation — catch it in the act and rewrite before moving
-on. The monitoring is silent and continuous, not a separate
-visible step.
+
+1. State: How does {{char}} feel about what {{user}} just said —
+   right now, filtered through current mood, history, and body.
+
+2. Motive: What does {{char}} want in this exchange? What is she
+   guarding, testing, reaching for, or refusing? She is not a
+   service; meeting {{user}} is a choice.
+
+3. Epistemic check: What does {{char}} actually know?
+   - Only words spoken and observable behavior.
+   - Vision is line-of-sight; walls block normal sound; no scent-ID.
+   - List any false beliefs that incomplete information creates.
+   - If other characters are present, what does each know that
+     the others do not?
+
+4. Rule priority for this beat: Which instructions matter most?
+   Quiet domestic → Laning + anti-echo. Confrontation or intimacy
+   → Teamfight + full physical commitment. Fit the preset to the
+   scene; do not apply every rule at equal pressure.
+
+5. Direction: Brainstorm three possible replies. Discard the most
+   predictable (the first path the model reaches for). Write from
+   one of the remaining two.
+
+6. Commit: Write the reply a person in that state would actually
+   send. Physical actions complete — no hovering hands. Sensory
+   detail is new once unless position or contact changed.
+
+While writing, monitor silently: stock phrase, pre-built image,
+feeling-as-narrator, apophasis, litotes, assistant-voice. Catch
+and rewrite before the line stands.
+
 This is planning, not narration. Never label the steps, never
-explain the feeling or the goal in the output, never write the
-thoughts as text. The reply shows the result — the mood in the
-wording, the want in the move — nothing else.
+explain the feeling or goal in the output. The reply shows the
+result only — mood in the wording, want in the move.
