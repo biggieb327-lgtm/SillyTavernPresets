@@ -20,12 +20,15 @@ in `list_triggers` without an entry here and that is not drift.
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
   `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
-  **Recreated 2026-08-14** to attempt Tavily connector attachment
-  (trigger id `trig_01PNMScmqEaNjE4CJeTZHQ7Y`; previous id
-  `trig_012bvUUnBtnaE87CbBkjyAaZ` deleted). `connectors` param on
-  `create_trigger` is not available for this organization — CCR sessions
-  cannot pass connector grants through to fired sessions. Prompt unchanged.
-  To attach Tavily, recreate from the claude.ai routines UI.
+  **Recreated 2026-08-14** from the claude.ai routines UI with Tavily and Nimble
+  MCP connectors attached (trigger id `trig_01LLosvPBfMZTRstP1N9QdUs`; previous
+  ids `trig_01PNMScmqEaNjE4CJeTZHQ7Y` (intermediate CCR attempt, same day —
+  `connectors` param on `create_trigger` not available from CCR sessions),
+  `trig_012bvUUnBtnaE87CbBkjyAaZ` deleted). Prompt updated: Reddit access via
+  `tavily_search(include_domains=["reddit.com"])` replaces the Apify Actor `curl`;
+  `tavily_search` replaces `WebSearch` for the supplement scan. The Apify Actor is
+  no longer needed for this Routine (Reddit was the only source that used it here;
+  Substack moved to `practice-scan-weekly` on 2026-08-11).
   **Prompt updated 2026-08-03**, owner
   decision (same trigger id, via `update_trigger`, applied to the live trigger
   the same day — this file's own copy of that update was NOT written at the
@@ -100,27 +103,15 @@ in `list_triggers` without an entry here and that is not drift.
   previously exited 0 with an empty dataset. **`APIFY_API_TOKEN` was rotated
   2026-08-11** after the old value was exposed; the Claude Code Remote environment
   variable must hold the new token or every firing will 401.
-- **Reddit + Substack access (rewritten 2026-08-11):** the Actor reads Reddit's
-  **Atom** feed (`/r/{sub}/top.rss`) and Substack's RSS directly, with **no proxy**
-  — see the 2026-08-11 history above for why the JSON listings are permanently
-  unusable and why more proxy types will not help. Called over `api.apify.com` with
-  the token in an `Authorization: Bearer` **header, never in the URL** (`?token=`
-  leaks the credential into access logs and browser history). Requires
-  `APIFY_API_TOKEN` (rotated 2026-08-11 — the environment variable must hold the
-  current value) and `APIFY_ACTOR_ID` on the Claude Code Remote environment. If
-  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
-  self-reports SKIPPED and falls back to the WebSearch-only scan. Note that
-  `fail_on_empty_source` defaults true, so a run that reaches Reddit but produces
-  nothing now FAILS with a status message naming the cause, instead of returning
-  `[]`. Fired sessions carry no MCP connectors. **Substack moved out
-  2026-08-11** (same session as the live prompt edit): `emergingai.substack.com`
-  and `substack.com/@gencay` were removed from this Routine and given to the new
-  `practice-scan-weekly` below. Evidence for the split — the 2026-08-11 on-demand
-  fire of both monthly Routines pulled 20 Substack rows and yielded exactly one
-  usable idea between them; character-pass's own report called the rest "general
-  Claude/agent-building content with no card-writing angle." That material is
-  about memory and working practice, which is what `practice-scan-weekly` is for.
-  Each Routine now owns one source set.
+- **Reddit access (rewritten 2026-08-14):** `tavily_search` with
+  `include_domains=["reddit.com"]` — the fired session carries Tavily and Nimble as
+  MCP connectors (attached via the claude.ai routines UI, 2026-08-14) and reaches
+  Reddit directly. This replaces the Apify Actor chain entirely for this Routine
+  (the 5-month cascade of Cloudflare blocks, proxy fights, Atom feed workarounds —
+  see the 2026-08-11 history above — is now historical). `APIFY_API_TOKEN` and
+  `APIFY_ACTOR_ID` are no longer required here; Reddit was the only source that
+  used the Actor, and Substack moved to `practice-scan-weekly` on 2026-08-11
+  (evidence for the split in the history above).
 - **Schedule:** cron `0 9 1 * *` — 09:00 on the 1st of each month (assumed UTC;
   exact hour is not load-bearing).
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`) — the
@@ -130,12 +121,11 @@ in `list_triggers` without an entry here and that is not drift.
 - **What it does:** the monthly improvement loop described in CLAUDE.md — runs the
   `improvement-analyst` role over the logs and pushes at most one evidence-based
   proposal to `claude/improvement-loop`, never to `main`. Since 2026-07-20 it also
-  runs a bounded external-ideas scan — Reddit + Substack via `idea-scraper-actor/`
-  (owner's own Apify Actor, fetching Reddit's public JSON directly through Apify's
-  proxy — no public Actor involved), max 10 items per source per run and
-  nothing older than 31 days, plus a WebSearch fallback/supplement — and may append up to 3 URL-cited "External ideas
-  (unvetted — owner approval required)" to the same proposal file — ideas only,
-  never implemented by the loop.
+  runs a bounded external-ideas scan — Reddit via `tavily_search` (3 subreddits,
+  scoped to the last month), supplemented by up to 5 additional `tavily_search`
+  queries for GitHub, blogs, and Hacker News — and may append up to 3 URL-cited
+  "External ideas (unvetted — owner approval required)" to the same proposal file
+  — ideas only, never implemented by the loop.
 
 ### Verbatim prompt
 
@@ -159,37 +149,25 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
 3. External ideas (runs whether or not a pattern qualified): bounded external
    scan for ideas genuinely applicable to this companion-bot fleet (companion
    features, python-telegram-bot pitfalls, model/API practices).
-   Primary source: `idea-scraper-actor/` (repo root; see its README) — the
-   owner's own Apify Actor, fetching Reddit's public JSON listing through
-   Apify's own proxy and Substack's public RSS directly. Not a public Actor
-   (this Apify account's plan cannot run one — see this Routine's history
-   above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment
-   variables; if either is unset, or the call fails with a CONNECT/tunnel 403
-   (api.apify.com itself blocked), report this part as "SKIPPED (Apify not
-   configured/reachable; see idea-scraper-actor/README.md)" and fall back to
-   the WebSearch pass below only. Otherwise:
-   curl -sS -X POST \
-     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
-     -H "Authorization: Bearer $APIFY_API_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI", "LocalLLaMA", "TelegramBots"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 10, "max_age_days": 31}'
-   Never put the token in the URL (?token=) — it leaks into access logs.
-   Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has. Each row is {source, title, url, external_url, summary,
-   published_at, community}. A link/image post has an EMPTY summary and its
-   destination in external_url — that is normal, not a failure. published_at is
-   always ISO 8601 or null.
-   (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
-   the scan to the last month — do not raise either without owner approval.
-   substack_publications is empty ON PURPOSE as of 2026-08-11: both publications
-   moved to practice-scan-weekly, which owns them. Do not add them back here.)
-   Supplement with WebSearch (max ~5 queries), scoped to sources a fired
-   session can actually reach — GitHub (python-telegram-bot's own issues/
-   discussions/wiki, comparable companion-bot projects), technical blogs,
-   Hacker News. Never fabricate sources. If any ideas apply, add an
-   "External ideas (unvetted — owner approval required)" section to the same
-   <YYYY-MM>.md file: max 3 ideas, each with its source URL and one line on
-   why it fits this fleet. Ideas only — never implemented by this loop.
+   Primary source: tavily_search (this session carries the Tavily connector).
+   Run up to 3 Reddit-scoped searches, one per community:
+     tavily_search(query="r/SillyTavernAI companion bot features preset",
+       include_domains=["reddit.com"], time_range="month", max_results=10)
+     tavily_search(query="r/LocalLLaMA telegram bot LLM API local model",
+       include_domains=["reddit.com"], time_range="month", max_results=10)
+     tavily_search(query="r/TelegramBots python async bot python-telegram-bot",
+       include_domains=["reddit.com"], time_range="month", max_results=10)
+   Read titles, URLs, and content snippets from the results. Deduplicate
+   across queries. This replaces the old Apify Actor path for Reddit —
+   do not attempt any curl to api.apify.com for Reddit; Tavily reaches
+   Reddit directly.
+   Supplement with tavily_search (max ~5 additional queries), scoped to
+   GitHub (python-telegram-bot's own issues/discussions/wiki, comparable
+   companion-bot projects), technical blogs, Hacker News. Never fabricate
+   sources. If any ideas apply, add an "External ideas (unvetted — owner
+   approval required)" section to the same <YYYY-MM>.md file: max 3 ideas,
+   each with its source URL and one line on why it fits this fleet. Ideas
+   only — never implemented by this loop.
 4. If the <YYYY-MM>.md file has content: commit only that file to the branch
    claude/improvement-loop (reset it to origin/main first if it already exists)
    and push ONLY to claude/improvement-loop. NEVER push to main or any other
@@ -400,12 +378,14 @@ brief — do not claim anything is new or recurring. Fix nothing.
   (trigger id `trig_01VXMxTLk8ZKwQ61tC3JxkCA`; previous ids
   `trig_01Df8nyGoMAoau5fidB9dhSn`, `trig_01T9Jjcn2ehwGGAJWovRFdNg`,
   `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted).
-  **Recreated 2026-08-14** to attempt Tavily connector attachment
-  (trigger id `trig_01PiMXsgzeG3cvFa2YD8exBj`; previous id
-  `trig_01VXMxTLk8ZKwQ61tC3JxkCA` deleted). Same blocker as
-  improvement-loop-monthly: `connectors` param not available for this org.
-  Prompt unchanged except `[substack idea]` tag removed from step 5 (Substack
-  moved to practice-scan-weekly 2026-08-11).
+  **Recreated 2026-08-14** from the claude.ai routines UI with Tavily and Nimble
+  MCP connectors attached (trigger id `trig_01U2MwXDyKvz9gRaDp2sFMp5`; previous
+  ids `trig_01PiMXsgzeG3cvFa2YD8exBj` (intermediate CCR attempt, same day —
+  `connectors` param on `create_trigger` not available from CCR sessions),
+  `trig_01VXMxTLk8ZKwQ61tC3JxkCA` deleted). Prompt updated: Reddit access via
+  `tavily_search(include_domains=["reddit.com"])` replaces the Apify Actor `curl`;
+  `tavily_search` replaces `WebSearch` for the supplement scan. `[substack idea]`
+  tag removed from step 5 (Substack moved to practice-scan-weekly 2026-08-11).
   **Prompt updated 2026-07-26** (same
   trigger id, via `update_trigger` — no recreate): repointed at the
   `character-reviewer` agent contract instead of inlining the review rules, and two
@@ -485,7 +465,7 @@ brief — do not claim anything is new or recurring. Fix nothing.
   same way the other Routines delegate to `improvement-analyst` and
   `context-librarian` — the contract owns the review method, the proposal-only
   posture, the per-character canon (via `edit-cards-and-presets`) and the evidence
-  bar; this prompt owns only the run scope, the Reddit + Substack step, and the output/branch
+  bar; this prompt owns only the run scope, the Reddit step, and the output/branch
   discipline. **Changing the review method means editing the agent file, not this
   prompt.** The contract's ≤25-line output limit binds the session's final report,
   not the PROPOSALS file. Concretely: reviews cards dropped in
@@ -493,28 +473,19 @@ brief — do not claim anything is new or recurring. Fix nothing.
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
-  fleet-wide texting voiceprint), and runs a bounded Reddit + Substack scan via
-  `idea-scraper-actor/` (owner's own Apify Actor) for card-writing techniques
-  (every idea URL-cited). Findings go to
+  fleet-wide texting voiceprint), and runs a bounded Reddit scan via `tavily_search` for
+  card-writing techniques (every idea URL-cited). Findings go to
   `character-review/PROPOSALS-<YYYY-MM>.md` on branch `claude/character-review`,
   never to `main`, and no card/seed/preset is ever edited — the owner applies
   accepted proposals interactively under `edit-cards-and-presets`. `preset.txt`
   proposals carry a mandatory before/after quote and a fleet-wide-blast-radius
   note (it feeds all six bots).
-- **Reddit + Substack access (rewritten 2026-08-11):** same path as
-  `improvement-loop-monthly`. The Actor reads Reddit's
-  **Atom** feed (`/r/{sub}/top.rss`) and Substack's RSS directly, with **no proxy**
-  — see the 2026-08-11 history above for why the JSON listings are permanently
-  unusable and why more proxy types will not help. Called over `api.apify.com` with
-  the token in an `Authorization: Bearer` **header, never in the URL** (`?token=`
-  leaks the credential into access logs and browser history). Requires
-  `APIFY_API_TOKEN` (rotated 2026-08-11 — the environment variable must hold the
-  current value) and `APIFY_ACTOR_ID` on the Claude Code Remote environment. If
-  either is unset, or `api.apify.com` returns a CONNECT/tunnel 403, the step
-  self-reports SKIPPED and falls back to the WebSearch-only scan. Note that
-  `fail_on_empty_source` defaults true, so a run that reaches Reddit but produces
-  nothing now FAILS with a status message naming the cause, instead of returning
-  `[]`. Fired sessions carry no MCP connectors.
+- **Reddit access (rewritten 2026-08-14):** same path as
+  `improvement-loop-monthly` — `tavily_search` with
+  `include_domains=["reddit.com"]`, scoped to r/SillyTavernAI. The fired session
+  carries Tavily and Nimble as MCP connectors (attached via the claude.ai routines
+  UI, 2026-08-14). `APIFY_API_TOKEN` and `APIFY_ACTOR_ID` are no longer required
+  here; Substack moved to `practice-scan-weekly` on 2026-08-11.
 
 ### Verbatim prompt
 
@@ -566,33 +537,16 @@ seed file, or preset, and never push to main.
       proposals [fleet preset].
 4. External ideas: bounded pass for card-writing techniques applicable to the
    characters/presets reviewed above.
-   Primary source: `idea-scraper-actor/` (repo root; see its README) — the
-   owner's own Apify Actor, fetching Reddit's public JSON listing through
-   Apify's own proxy and Substack's public RSS directly. Not a public Actor
-   (this Apify account's plan cannot run one — see this Routine's history
-   above). Requires APIFY_API_TOKEN and APIFY_ACTOR_ID set as environment
-   variables; if either is unset, or the call fails with a CONNECT/tunnel 403
-   (api.apify.com itself blocked), report this part as "SKIPPED (Apify not
-   configured/reachable; see idea-scraper-actor/README.md)" and fall back to
-   the WebSearch pass below only. Otherwise:
-   curl -sS -X POST \
-     "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
-     -H "Authorization: Bearer $APIFY_API_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"subreddits": ["SillyTavernAI"], "reddit_timeframe": "month", "substack_publications": [], "max_items_per_source": 10, "max_age_days": 31}'
-   Never put the token in the URL (?token=) — it leaks into access logs.
-   Read titles/URLs/body text straight out of whatever JSON keys the response
-   actually has. Each row is {source, title, url, external_url, summary,
-   published_at, community}. A link/image post has an EMPTY summary and its
-   destination in external_url — that is normal, not a failure. published_at is
-   always ISO 8601 or null.
-   (max_items_per_source of 10 and max_age_days of 31 bound Apify usage and hold
-   the scan to the last month — do not raise either without owner approval.
-   substack_publications is empty ON PURPOSE as of 2026-08-11: both publications
-   moved to practice-scan-weekly, which owns them. Do not add them back here.)
-   Supplement with WebSearch (max ~5 queries), scoped to sources a fired
-   session can actually reach — SillyTavern's own GitHub (wiki, discussions,
-   issues), character-card-writing blogs and guides, HuggingFace discussions.
+   Primary source: tavily_search (this session carries the Tavily connector).
+   Run one Reddit-scoped search for card-writing techniques:
+     tavily_search(query="r/SillyTavernAI character card writing preset technique",
+       include_domains=["reddit.com"], time_range="month", max_results=10)
+   Read titles, URLs, and content snippets from the results. This replaces
+   the old Apify Actor path for Reddit — do not attempt any curl to
+   api.apify.com for Reddit; Tavily reaches Reddit directly.
+   Supplement with tavily_search (max ~5 queries), scoped to sources the
+   session can reach — SillyTavern's own GitHub (wiki, discussions, issues),
+   character-card-writing blogs and guides, HuggingFace discussions.
    Cite every external idea with its source URL; never fabricate sources.
 5. If there are findings or ideas: write ONE file
    character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
@@ -613,11 +567,15 @@ seed file, or preset, and never push to main.
 ## practice-scan-weekly
 
 - **Created:** 2026-08-11, owner-requested.
-  **Recreated 2026-08-14** to attempt Tavily connector attachment
-  (trigger id `trig_01KCYCrfhKDxLmGtKRVPtVad`; previous id
-  `trig_01XwP3AtQ4JXTonjw9eg1Pk2` deleted). Same blocker as
-  improvement-loop-monthly: `connectors` param not available for this org.
-  Prompt unchanged. Owns the two Substack publications
+  **Recreated 2026-08-14** from the claude.ai routines UI with Tavily and Nimble
+  MCP connectors attached (trigger id `trig_01BMky9nnUHeR8oxBk9vJ3zt`; previous
+  ids `trig_01KCYCrfhKDxLmGtKRVPtVad` (intermediate CCR attempt, same day —
+  `connectors` param on `create_trigger` not available from CCR sessions),
+  `trig_01XwP3AtQ4JXTonjw9eg1Pk2` deleted). Prompt updated: DEEPEN step uses
+  `tavily_extract` on article URLs and `tavily_search` for topic research,
+  replacing `WebSearch`; evidence rule updated (`tavily_extract` output is raw page
+  content and may be quoted directly). Substack listing still via Apify Actor.
+  Owns the two Substack publications
   that `improvement-loop-monthly` and `character-pass-monthly` gave up the same
   day (see their entries above). Reason for the split, from evidence rather than
   taste: the 2026-08-11 on-demand fire of both monthly Routines pulled 20 Substack
@@ -639,15 +597,16 @@ seed file, or preset, and never push to main.
   cadence. This one runs every 7 days, so 8 gives one day of margin — consecutive
   runs neither skip a post published just after a run nor re-report one already
   seen. Raising it re-reports; lowering it drops posts.
-- **WebSearch is a deepening step, not a fallback.** Two different roles, and the
+- **Tavily is a deepening tool, not a fallback.** Two different roles, and the
   distinction is load-bearing. As a *fallback* it is still banned: if Apify is
   unreachable this Routine reports SKIPPED and ends, because it IS these two
   publications and a substitute would turn a scoped scan into an open-ended trawl.
-  As a *deepening step* (added 2026-08-12) it is required: a teaser names a topic
-  but withholds the mechanism, so the Routine researches that topic from sources it
-  can actually read and cites both the Substack pointer and a primary source. The
-  scope guard is that the publications choose the topic — at most 6 queries per
-  run, and no free-associating into adjacent subjects.
+  As a *deepening tool* (upgraded from WebSearch 2026-08-14): `tavily_extract` on
+  each article URL pulls full or extended content beyond the RSS preview;
+  `tavily_search` researches the topic from primary sources when the extract is
+  still paywalled. The scope guard is that the publications choose the topic — at
+  most 6 `tavily_search` queries per run, and no free-associating into adjacent
+  subjects.
 - **Teasers are a signal, not a failure.** The 2026-08-11 first run treated the
   paywall as a dead end and kept nothing from 17 items. That was correct under the
   prompt as written then, and the prompt was wrong: what an author judged worth
@@ -666,16 +625,20 @@ seed file, or preset, and never push to main.
   `[operating]`. **Proposal-only** — it edits no code, card, preset, hook, skill,
   agent or eval, and never pushes to `main`.
 - **Evidence rule** borrowed from `.claude/agents/research-scout.md`: every idea
-  carries its source URL *and* an exact quoted line from the item's own text, and
-  nothing may be quoted from a `WebFetch` summary — that output is a paraphrase
-  from a small model and its quotes can be compressed or invented. To read more of
-  an article than the scraped summary carries, `curl` the URL and quote those
-  bytes.
-- **Reddit + Substack access:** same `idea-scraper-actor/` path as the monthly
-  Routines — RSS, no proxy, token in an `Authorization: Bearer` header, never in
-  the URL. Requires `APIFY_API_TOKEN` (rotated 2026-08-11) and `APIFY_ACTOR_ID` on
-  the Claude Code Remote environment. `subreddits` is empty for this Routine:
-  Reddit belongs to the two monthly Routines.
+  carries its source URL *and* an exact quoted line from the item's own text.
+  `tavily_extract` returns raw page content (not a model paraphrase) — its output
+  may be quoted directly, same as the Actor's own summary field. `tavily_search`
+  result snippets are search-engine excerpts and may be quoted. Do NOT quote from
+  `WebFetch` summaries — that output is a paraphrase from a small model.
+- **Substack access:** `idea-scraper-actor/` fetches the two publications' RSS
+  directly — same Actor path as before; `tavily_search` cannot replicate a
+  per-publication RSS listing. Called over `api.apify.com` with the token in an
+  `Authorization: Bearer` header, never in the URL. Requires `APIFY_API_TOKEN`
+  (rotated 2026-08-11) and `APIFY_ACTOR_ID` on the Claude Code Remote environment.
+  `subreddits` is empty: Reddit belongs to the two monthly Routines (which now use
+  `tavily_search`). DEEPEN uses `tavily_extract` and `tavily_search` — the session
+  carries Tavily and Nimble as MCP connectors (attached via the claude.ai routines
+  UI, 2026-08-14).
 - **Subscriber feeds: attempted 2026-08-11, abandoned 2026-08-12.** The first
   run returned 17 items and kept none, judging them "paid-newsletter teasers with
   no concrete extractable technique in the free text" — a property of a paywalled
@@ -719,11 +682,11 @@ Scope — two questions, both about how things WORK, not what characters say:
    environment variables; if either is unset, or the call fails with a
    CONNECT/tunnel 403 (api.apify.com itself blocked), report
    "SKIPPED (Apify not configured/reachable; see idea-scraper-actor/README.md)"
-   and END. WebSearch is NOT a substitute for an unreachable Apify — this Routine
-   IS these two publications, and swapping in a search would turn a scoped scan
-   into an open trawl. (Step 4 does use WebSearch, for a different job: deepening
-   a topic these publications already chose. Banned as a source of items, required
-   as a way to research them.)
+   and END. tavily_search is NOT a substitute for an unreachable Apify — this
+   Routine IS these two publications, and swapping in a search would turn a
+   scoped scan into an open trawl. (Step 4 does use tavily_search, for a
+   different job: deepening a topic these publications already chose. Banned as
+   a source of items, required as a way to research them.)
    curl -sS -X POST \
      "https://api.apify.com/v2/acts/$APIFY_ACTOR_ID/run-sync-get-dataset-items" \
      -H "Authorization: Bearer $APIFY_API_TOKEN" \
@@ -761,27 +724,34 @@ Scope — two questions, both about how things WORK, not what characters say:
    repo — that is a reading summary, not a proposal. Two well-translated ideas
    beat five vague ones. But an empty week should mean the posts genuinely
    contained no mechanism, not that the translation felt like effort.
-4. DEEPEN. Every item arrives as a TEASER — Substack issues no subscriber feed
-   (step 2), so there is no full-text path and this is the only shape.
-   TEASER — the free preview. The body is paywalled, but the teaser still tells
-   you what the author judged worth writing about, and THAT is the signal these
-   publications are here for. Do not discard a teaser as unusable. Take the
-   topic it names and research the real technique from sources you CAN read:
-   official docs, changelogs, engineering blogs, GitHub issues and discussions.
-   Bounded: at most 6 WebSearch queries for the whole run, scoped to topics the
-   week's teasers actually raised. Do not free-associate into adjacent subjects
-   — the point of the scan is that these two publications chose the topic.
+4. DEEPEN. This session carries the Tavily connector — use tavily_search and
+   tavily_extract instead of WebSearch for all deepening.
+   Every item arrives as a TEASER — Substack issues no subscriber feed
+   (step 2), so there is no full-text path via RSS alone.
+   FIRST: for each article URL returned by the Actor, try tavily_extract(urls=
+   [<article_url>]) to pull the full or extended content. tavily_extract returns
+   raw page content (not a model paraphrase) and may retrieve more than the RSS
+   preview. If it returns substantial content beyond the preview, use it directly.
+   SECOND: if the extract is still a teaser or paywalled, take the topic it
+   names and research the real technique from sources you CAN read: use
+   tavily_search to find official docs, changelogs, engineering blogs, GitHub
+   issues and discussions that substantiate the technique.
+   Bounded: at most 6 tavily_search queries for the whole run, scoped to
+   topics the week's teasers actually raised. Do not free-associate into
+   adjacent subjects — the point of the scan is that these two publications
+   chose the topic.
    An idea built from a teaser cites BOTH: the Substack post as the pointer
    (title + URL, labelled "pointer"), and the primary source that substantiates
    the technique (URL + exact quoted line). A pointer with no primary source is
    a topic, not a proposal — keep searching or drop it.
 5. Evidence rule (from .claude/agents/research-scout.md): every idea carries its
-   source URL AND an exact quoted line from the source's own text. Never quote
-   from a WebFetch summary — that output is a paraphrase from a small model and
-   its quotes can be compressed or invented; use WebFetch to LOCATE a page, then
-   curl the URL and quote the bytes you fetched. The Actor's own summary field is
-   different and may be quoted directly: it is scraped RSS/HTML text, not a model
-   paraphrase.
+   source URL AND an exact quoted line from the source's own text.
+   tavily_extract returns raw page content (not a model paraphrase) — its output
+   MAY be quoted directly, same as the Actor's own summary field. The Actor's
+   summary field is scraped RSS/HTML text and may also be quoted directly.
+   tavily_search result snippets are search-engine excerpts and may be quoted.
+   Do NOT quote from WebFetch summaries — that output is a paraphrase from a
+   small model and its quotes can be compressed or invented.
    A BLOCKED HOST IS NOT A GAP TO FILL. If the primary source is unreachable
    (proxy 403, CONNECT tunnel failure), the honest answer is to label the idea
    "unverified — host blocked by egress policy" and keep the pointer. Do NOT
