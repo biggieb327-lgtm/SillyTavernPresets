@@ -6,6 +6,8 @@ __pycache__/
 telegram-bot/
 substack-articles/
 .claude/.runtime/
+.claude/settings.local.json
+CLAUDE.local.md
 
 # Self-update runtime artifacts in the shared code dir (host-local, never committed).
 # .update.lock is created by perform_self_update's host-wide lock — and by the tests
