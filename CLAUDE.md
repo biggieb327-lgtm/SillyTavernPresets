@@ -167,8 +167,8 @@ The authoritative instance list is the set of `bot@<instance>` systemd units.
 **Phone-era tooling is historical.** `update-all.sh`, `sync-cards.sh`,
 `watchdog.sh`, `run-bot.sh` and the `.supervise.sh` supervisor were Termux-only and
 now manage nothing; VPS deploys go through `deploy/vps-sync.sh` (see Deployment
-below). The phone retains `~/<name>-bot.migrated` rollback dirs until the 14-day soak
-ends **2026-08-09**; after that date this sentence is stale — confirm before relying on it.
+below). The phone's rollback dirs (`~/<name>-bot.migrated`) were retained through a
+14-day soak that ended 2026-08-09; they may still exist but are no longer load-bearing.
 
 ## Stack
 
