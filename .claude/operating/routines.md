@@ -19,7 +19,14 @@ in `list_triggers` without an entry here and that is not drift.
   notifications, then the owner-approved Reddit-ideas step, then the curl-based
   Reddit access path (trigger id `trig_012bvUUnBtnaE87CbBkjyAaZ`; previous ids
   `trig_014UoejLm5Wv7TkqJC4j9CjJ`, `trig_01TyGUFRHqMrPVWhju4ZPyxE`,
-  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted). **Prompt updated 2026-08-03**, owner
+  `trig_01FucVg8ikSvULSzB5H4Swpt` deleted).
+  **Recreated 2026-08-14** to attempt Tavily connector attachment
+  (trigger id `trig_01PNMScmqEaNjE4CJeTZHQ7Y`; previous id
+  `trig_012bvUUnBtnaE87CbBkjyAaZ` deleted). `connectors` param on
+  `create_trigger` is not available for this organization — CCR sessions
+  cannot pass connector grants through to fired sessions. Prompt unchanged.
+  To attach Tavily, recreate from the claude.ai routines UI.
+  **Prompt updated 2026-08-03**, owner
   decision (same trigger id, via `update_trigger`, applied to the live trigger
   the same day — this file's own copy of that update was NOT written at the
   time, and only caught/backfilled 2026-08-07, see below): dropped Reddit as an
@@ -392,7 +399,14 @@ brief — do not claim anything is new or recurring. Fix nothing.
   path, then preset review, then the `TheAtelierV5`→`TheAtelier_2.0` rename
   (trigger id `trig_01VXMxTLk8ZKwQ61tC3JxkCA`; previous ids
   `trig_01Df8nyGoMAoau5fidB9dhSn`, `trig_01T9Jjcn2ehwGGAJWovRFdNg`,
-  `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted). **Prompt updated 2026-07-26** (same
+  `trig_01F9vhqcJXw2VWkGkzgwcW7i` deleted).
+  **Recreated 2026-08-14** to attempt Tavily connector attachment
+  (trigger id `trig_01PiMXsgzeG3cvFa2YD8exBj`; previous id
+  `trig_01VXMxTLk8ZKwQ61tC3JxkCA` deleted). Same blocker as
+  improvement-loop-monthly: `connectors` param not available for this org.
+  Prompt unchanged except `[substack idea]` tag removed from step 5 (Substack
+  moved to practice-scan-weekly 2026-08-11).
+  **Prompt updated 2026-07-26** (same
   trigger id, via `update_trigger` — no recreate): repointed at the
   `character-reviewer` agent contract instead of inlining the review rules, and two
   stale references fixed — the prompt told the fired session to read a "Character
@@ -583,7 +597,7 @@ seed file, or preset, and never push to main.
 5. If there are findings or ideas: write ONE file
    character-review/PROPOSALS-<YYYY-MM>.md — specific suggestions, each tagged
    [inbox card] / [fleet card] / [root preset] / [fleet preset] / [reddit idea] /
-   [substack idea] / [external idea] with its evidence or URL, phrased as
+   [external idea] with its evidence or URL, phrased as
    concrete edits the owner could apply.
    NOTHING is applied without owner approval. Commit only that file to the branch
    claude/character-review (reset it to origin/main first if it already exists)
@@ -598,7 +612,12 @@ seed file, or preset, and never push to main.
 
 ## practice-scan-weekly
 
-- **Created:** 2026-08-11, owner-requested. Owns the two Substack publications
+- **Created:** 2026-08-11, owner-requested.
+  **Recreated 2026-08-14** to attempt Tavily connector attachment
+  (trigger id `trig_01KCYCrfhKDxLmGtKRVPtVad`; previous id
+  `trig_01XwP3AtQ4JXTonjw9eg1Pk2` deleted). Same blocker as
+  improvement-loop-monthly: `connectors` param not available for this org.
+  Prompt unchanged. Owns the two Substack publications
   that `improvement-loop-monthly` and `character-pass-monthly` gave up the same
   day (see their entries above). Reason for the split, from evidence rather than
   taste: the 2026-08-11 on-demand fire of both monthly Routines pulled 20 Substack
