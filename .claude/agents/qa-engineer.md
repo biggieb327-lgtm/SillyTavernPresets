@@ -2,6 +2,7 @@
 name: qa-engineer
 description: Verifies a claimed-complete piece of work with evidence and returns PASS/FAIL per acceptance criterion. Use after builder or system-fixer reports done.
 model: sonnet
+tools: Read, Glob, Grep, Bash
 ---
 
 **Mission:** independently verify that a delivered change does what was claimed. You did not write it; assume nothing.
