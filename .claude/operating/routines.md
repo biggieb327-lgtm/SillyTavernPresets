@@ -254,6 +254,16 @@ exactly. (Step 3 below is an owner-approved 2026-07-20 addition to that contract
   host answered). Blocked with `CONNECT tunnel failed, response 403`: `openai.com`,
   `docs.ragas.io`, `docs.apify.com`, `substack.com`.
 
+- **Google Drive persistence added 2026-08-15** (prompt updated via `update_trigger`,
+  same trigger id): step 5 saves the report as a Google Doc titled
+  "Hygiene Check YYYY-MM-DD" in the Audits folder (`Claude Code / Bot Fleet /
+  Audits`, folder ID `1gYhKT6J69gY6OiGio-B2ptJNP2N9BXK0`). Soft requirement:
+  skipped silently if the Google Drive connector is unavailable — the report
+  still appears in the session transcript. **The connector must be attached to this
+  Routine from the claude.ai routines UI** (same way Tavily/Nimble were attached to
+  the proposal Routines on 2026-08-14 — `connectors` param on `create_trigger` is
+  not available from CCR sessions). Until attached, step 5 will skip on every firing.
+
 ### Verbatim prompt
 
 ```
@@ -263,7 +273,9 @@ disagree, stop and report the drift to the owner instead of proceeding.
 
 Act as the context-librarian agent: read .claude/agents/context-librarian.md and
 follow its role. This run is REPORT-ONLY: make no commits, push nothing, create no
-branches, modify no Routines, and edit no files. Read-only actions only.
+branches, modify no Routines, and edit no files. Read-only repo actions only (the
+Google Drive save in step 5 is the one exception — it writes the report to a shared
+folder, not the repo).
 
 Two checks that used to be here are gone because a fired session cannot run them
 (verified 2026-07-29): CI state on main needs the GitHub REST API, and
@@ -298,6 +310,10 @@ Check, quoting the exact lines/values you compared as evidence:
    regression can recur in bot.py", a skill for "the procedure was wrong").
    PROPOSE ONLY — do not edit constraints.md, do not write the hook. Escalation is
    the owner's call, and the graduation itself belongs in a reviewed session.
+5. PERSIST: If the Google Drive connector is available, save the full report as a
+   Google Doc titled "Hygiene Check YYYY-MM-DD" (today's date) in the Audits folder
+   (folder ID 1gYhKT6J69gY6OiGio-B2ptJNP2N9BXK0). If the connector is unavailable,
+   skip silently — the report still appears in the session transcript.
 
 If a check's tooling is unavailable in this session, report that check as
 "SKIPPED (tooling unavailable)" — never guess and never report a skipped check as
@@ -330,6 +346,15 @@ owner and the monthly improvement loop own that judgment. Fix nothing.
   403s `api.github.com` regardless. GitHub's own failed-run email on `main` is the
   alerting path. All three surviving checks are pure git, which **does** work in a
   fired session (`git fetch origin main` verified OK via the local relay).
+- **Google Drive persistence added 2026-08-15** (prompt updated via `update_trigger`,
+  same trigger id): step 4 saves the brief as a Google Doc titled
+  "Ops Brief YYYY-MM-DD" in the Fleet Reports folder (`Claude Code / Bot Fleet /
+  Fleet Reports`, folder ID `1O137TcegRs6u5hNXmaOqpuf17tT6ZS_7`). Soft requirement:
+  skipped silently if the Google Drive connector is unavailable — the push
+  notification still delivers the brief. **The connector must be attached to this
+  Routine from the claude.ai routines UI** (same way Tavily/Nimble were attached to
+  the proposal Routines on 2026-08-14 — `connectors` param on `create_trigger` is
+  not available from CCR sessions). Until attached, step 4 will skip on every firing.
 
 ### Verbatim prompt
 
@@ -339,10 +364,11 @@ Daily ops brief for the SillyTavernPresets repo. This Routine is recorded in
 disagree, stop and report the drift to the owner instead of proceeding.
 
 This is a fast morning triage read, REPORT-ONLY: make no commits, push nothing,
-create no branches, modify no Routines, and edit no files. Read-only actions only.
-The deeper weekly hygiene check owns doc drift and log format — do
-not duplicate it. This brief cannot see the phone or the bots; it covers the repo
-side only, and must not speculate about fleet health.
+create no branches, modify no Routines, and edit no files. Read-only repo actions
+only (the Google Drive save in step 4 is the one exception — it writes the brief
+to a shared folder, not the repo). The deeper weekly hygiene check owns doc drift
+and log format — do not duplicate it. This brief cannot see the phone or the bots;
+it covers the repo side only, and must not speculate about fleet health.
 
 This brief does NOT check CI. The GitHub REST API is reachable only through the
 github MCP tools, which fired sessions do not carry (verified 2026-07-29), so no CI
@@ -361,6 +387,10 @@ Check:
    Exception: claude/improvement-loop and claude/character-review ahead of main
    are proposal branches awaiting owner review — report them as that, not as
    stalled.
+4. PERSIST: If the Google Drive connector is available, save the brief as a Google
+   Doc titled "Ops Brief YYYY-MM-DD" (today's date) in the Fleet Reports folder
+   (folder ID 1O137TcegRs6u5hNXmaOqpuf17tT6ZS_7). If the connector is unavailable,
+   skip silently — the push notification still delivers the brief.
 
 If a check's tooling is unavailable, report it as "SKIPPED (tooling unavailable)"
 — never guess and never report a skipped check as green. Keep the whole brief
