@@ -401,6 +401,56 @@ brief — do not claim anything is new or recurring. Fix nothing.
 
 ---
 
+## morning-todo
+
+- **Created:** 2026-08-15, owner-requested (trigger id `trig_019LhLAPPiwSZDG1fMppcLhG`).
+- **Schedule:** daily at 13:45 UTC (15 minutes before ops-brief-daily).
+- **What it does:** notification-only — queries the Fleet Knowledge Base in Notion
+  for `Status=current` follow-ups and open questions, and Todoist's Bot Fleet project
+  for due/overdue tasks. Sends a push notification with the combined to-do list.
+  Makes no changes anywhere.
+- **Connectors required:** Notion and Todoist. **Must be attached from the claude.ai
+  routines UI** — `connectors` param on `create_trigger` is not available from CCR
+  sessions (confirmed 2026-08-14, re-confirmed 2026-08-15). Until attached, both
+  sources will report "SKIPPED (connector unavailable)".
+- **Push notification:** enabled.
+
+### Verbatim prompt
+
+```
+Morning to-do digest. This Routine is recorded in
+.claude/operating/routines.md — read that file first; if this prompt and that file
+disagree, stop and report the drift to the owner instead of proceeding.
+
+This is a NOTIFICATION-ONLY run: make no commits, push nothing, create no branches,
+modify no Routines, edit no files, complete no tasks, and update no Notion entries.
+Gather and report only.
+
+Build a concise daily to-do list from two sources:
+
+1. NOTION — Fleet Knowledge Base (database 89c9e767576149a480221c10d7a97f47,
+   data-source 2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f). Search for entries with
+   Status=current AND Category in (follow-up, open-question). List each by title
+   and source date. If the Notion connector is unavailable, report
+   "Notion: SKIPPED (connector unavailable)" and continue.
+
+2. TODOIST — Bot Fleet project (project ID 6hH27J5Q2WVPrppm). Find tasks that
+   are due today, overdue, or have no due date but are in the "Investigate"
+   section (section ID 6hH27MP6cvPgqghF). List each by title, due date, and
+   section. If the Todoist connector is unavailable, report
+   "Todoist: SKIPPED (connector unavailable)" and continue.
+
+Format the output as a short digest:
+- Start with "Morning To-Do — YYYY-MM-DD"
+- Group items: OVERDUE (if any), TODAY, OPEN (no due date but needs attention)
+- One line per item, max ~15 lines total
+- End with a count: "N items need attention" or "all clear — nothing due"
+
+Do not act on any item. Do not suggest fixes. This is a list, not a triage.
+```
+
+---
+
 ## character-pass-monthly
 
 - **Created:** 2026-07-20, owner-requested; recreated 3× same day — curl Reddit
