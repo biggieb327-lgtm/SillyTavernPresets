@@ -54,6 +54,7 @@ if [ -f .claude/memory/debrief-log.md ]; then
   fi
 fi
 echo "[session-audit] standing rules: read telegram-companion-bot/CHANGELOG.md before bot changes; bot.py changes need BOT_VERSION bump + changelog entry (delivery gate blocks otherwise); run .claude/evals/run-evals.sh before claiming done."
+echo "[session-audit] NOTION: Fleet Knowledge Base (database 89c9e767576149a480221c10d7a97f47, data-source 2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f) — before non-trivial work, search it for Status=current entries relevant to your task. Write findings, decisions, and state changes back when you produce them."
 if [ "${dirty}" != "0" ]; then
   echo "[session-audit] WARNING: working tree not clean — inspect before assuming a fresh start:"
   git status --porcelain | head -10

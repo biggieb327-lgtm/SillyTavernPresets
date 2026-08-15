@@ -279,6 +279,25 @@ each with a threshold and a test, so they are not restated here. What is project
    against the words themselves before calling it done, the same way a delivery-gate
    check is verified, not held in mind as a general attitude.
 
+## Shared brain (Notion)
+
+The **Fleet Knowledge Base** in Notion (database `89c9e767576149a480221c10d7a97f47`,
+data-source `2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f`) is the cross-session memory layer.
+It holds findings, decisions, open questions, fleet state, and follow-ups that sessions
+need without re-deriving them from the operational log or commit history.
+
+- **Before non-trivial work:** search the database for `Status=current` entries relevant
+  to your task. Use `notion-search` with the database's data-source URL.
+- **During work:** when you produce a finding, decision, or state change worth
+  remembering, create a row. Set Category, Status (`current`), Source (today's date or
+  session context), and Tags.
+- **Resolving entries:** when a follow-up is completed or a finding is superseded, update
+  its Status to `resolved` or `superseded` — do not delete rows.
+
+The repo's `.claude/memory/` files remain the system of record for reviewed, durable
+knowledge (operational-log, constraints). The Notion database is the faster-moving layer
+that doesn't require a commit to persist.
+
 ## Git workflow
 
 - Develop on `claude/...` branches if useful, but **always merge green work to `main`**
