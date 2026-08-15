@@ -7,7 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
-## v2026-08-12.2 — Six kill switches ignored `off`, and the audit could reopen a memory the owner had just approved
+## v2026-08-15.1 — mes_example reached the model raw; the 2026-07-20 Jules fix was one card, not the code path
+
+**Root cause: `load_character` dumped `mes_example` verbatim, `<START>` markers and
+`{{user}}:` lines included.** The 2026-07-20 incident (Jules emitted `Her:`/`You:`
+speaker labels and repeated the user's turns) was root-caused to this same dump at
+`bot.py:3264-3265` and fixed by adding an inline anti-label instruction to Jules's own
+card. That closed the symptom for one character. The 2026-08 monthly character pass
+found the same raw shape still present in Nora (4 `<START>` markers), Priya (9
+`{{user}}:` labeled lines), and Marcus (9 `{{user}}:` labeled lines) — none of them had
+Jules's inline fix, because the actual defect was never in the code.
+
+**Fix:** `_clean_mes_example()` strips `<START>` separator lines and any line starting
+`{{user}}:` before the block reaches the prompt, so no card needs its own inline
+workaround. `load_character` calls it instead of dumping `data["mes_example"]` raw.
+
+**Eval:** `TestMesExampleCleaning` in `tests/test_pure.py` — pins that `<START>` and
+`{{user}}:` lines are stripped, and that `load_character` actually calls the cleaner.
 
 **Root cause 1: v2026-08-10.9 closed the hand-rolled-boolean class against three
 idioms, and there was a fourth.** That release rewrote 53 flags to `_env_bool` and left

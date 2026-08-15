@@ -4321,6 +4321,26 @@ class TestPromptStatsUnits(object):
         assert "_tokens(" in est_branch and "_est_tokens(" not in est_branch
 
 
+class TestMesExampleCleaning:
+    """v2026-08-15.1: the 2026-07-20 Jules regression (speaker labels, repeated user
+    turns) was root-caused to bot.py dumping mes_example raw, then fixed on Jules's
+    card alone. Nora/Priya/Marcus still carried the same raw shape a month later."""
+
+    def test_start_markers_are_stripped(self):
+        raw = "<START>\n{{char}}: hey\n<START>\n{{char}}: hi again"
+        assert "<START>" not in bot._clean_mes_example(raw)
+
+    def test_user_labeled_lines_are_dropped(self):
+        raw = "<START>\n{{user}}: I missed you.\n{{char}}: Ok wow."
+        cleaned = bot._clean_mes_example(raw)
+        assert "{{user}}:" not in cleaned
+        assert "{{char}}: Ok wow." in cleaned
+
+    def test_load_character_applies_the_cleaner(self):
+        import inspect
+        assert "_clean_mes_example(" in inspect.getsource(bot.load_character)
+
+
 class TestPresetPlaceholdersAreFilled:
     """v2026-07-26.4: preset layers were the ONE prose block fill() never touched, so
     every voice rule in the fleet's voiceprint addressed a literal {{char}}."""

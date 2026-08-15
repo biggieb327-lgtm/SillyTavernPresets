@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-12.2"
+BOT_VERSION = "2026-08-15.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3241,6 +3241,20 @@ def fill(text: str, char: str, user: str) -> str:
     return text.replace("{{char}}", char).replace("{{user}}", user)
 
 
+def _clean_mes_example(text: str) -> str:
+    """Strip <START> block separators and {{user}}: labeled lines from a card's
+    mes_example before it reaches the prompt raw. SillyTavern's own <START> marks a
+    new example block; dumped literally it's noise the model has no reason to know.
+    A {{user}}: line teaches the model to emit speaker labels and repeat the user's
+    turns verbatim -- the 2026-07-20 Jules regression, which content-fixed one card
+    with an inline instruction; this closes it fleet-wide at the source."""
+    lines = [
+        line for line in text.split("\n")
+        if line.strip() != "<START>" and not line.strip().startswith("{{user}}:")
+    ]
+    return "\n".join(lines).strip()
+
+
 def load_character(path: Path):
     raw = json.loads(path.read_text(encoding="utf-8"))
     data = raw.get("data", raw)  # v2 cards nest fields under "data"
@@ -3262,7 +3276,7 @@ def load_character(path: Path):
     if data.get("scenario"):
         parts.append("# Scenario\n" + data["scenario"].strip())
     if data.get("mes_example"):
-        parts.append("# Example dialogue\n" + data["mes_example"].strip())
+        parts.append("# Example dialogue\n" + _clean_mes_example(data["mes_example"]))
     system_prompt = "\n\n".join(p for p in parts if p)
 
     # Post-history instructions + depth prompt -> strong final anchor.
