@@ -536,6 +536,16 @@ Do not act on any item. Do not suggest fixes. This is a list, not a triage.
   Claude/agent-building content with no card-writing angle." That material is
   about memory and working practice, which is what `practice-scan-weekly` is for.
   Each Routine now owns one source set.
+  **Prompt updated 2026-08-15** (same trigger id — must be applied manually via
+  the claude.ai routines UI because the trigger was created there, not by an
+  agent): inbox cards moved from `character-review/` (git) to a Google Drive
+  folder (ID `1mG4SO8dcGhT4JNRFrRGzKn5KpX8KwC0x`, named "Character Cards" under
+  Claude Code / Bot Fleet). Step 1 now uses `mcp__Google_Drive__search_files` and
+  `mcp__Google_Drive__read_file_content` instead of listing the git directory.
+  **The Google Drive connector must be attached to this Routine from the
+  claude.ai routines UI** (connector UUID `096de2ee-94c4-4ae8-8de2-4777ffd883d2`,
+  name "Google-Drive") — `connectors` param on `update_trigger` is not available
+  from CCR sessions.
 - **Schedule:** cron `0 14 15 * *` — 14:00 UTC (~07:00 Pacific) on the 15th of each
   month, offset from the improvement loop's 1st-of-month slot.
 - **Mode:** fresh session per firing (`create_new_session_on_fire: true`).
@@ -548,8 +558,9 @@ Do not act on any item. Do not suggest fixes. This is a list, not a triage.
   bar; this prompt owns only the run scope, the Reddit step, and the output/branch
   discipline. **Changing the review method means editing the agent file, not this
   prompt.** The contract's ≤25-line output limit binds the session's final report,
-  not the PROPOSALS file. Concretely: reviews cards dropped in
-  `character-review/` (the root-level inbox; see its README), spot-checks the six live fleet
+  not the PROPOSALS file. Concretely: reviews cards uploaded to the Google Drive
+  inbox folder (ID `1mG4SO8dcGhT4JNRFrRGzKn5KpX8KwC0x`; see
+  `character-review/README.md`), spot-checks the six live fleet
   cards/seeds for internal contradictions and drift, reviews presets (owner-scoped
   2026-07-20: the latest root SillyTavern presets — currently `TheAtelier_2.0.json`
   and `UnifiedWritersRoom_V32.json` — plus `telegram-companion-bot/preset.txt`, the
@@ -590,10 +601,13 @@ per-character canon" section holds the binding register rules — these cards sh
 relationships someone actually has. PROPOSAL-ONLY: never edit any character card,
 seed file, or preset, and never push to main.
 
-1. Review inbox: list character-review/ (ignore README.md and PROPOSALS-*
-   files). Review each card found there against the edit-cards-and-presets
-   rules: chara_card_v2 validity, internal consistency, register, lorebook
-   coherence.
+1. Review inbox: use the Google Drive connector to list files in the inbox
+   folder (ID: 1mG4SO8dcGhT4JNRFrRGzKn5KpX8KwC0x, named "Character Cards"
+   under Claude Code / Bot Fleet). Use mcp__Google_Drive__search_files with
+   query parentId = '1mG4SO8dcGhT4JNRFrRGzKn5KpX8KwC0x' to list inbox cards,
+   then mcp__Google_Drive__read_file_content for each JSON file found. Review
+   each card against the edit-cards-and-presets rules: chara_card_v2 validity,
+   internal consistency, register, lorebook coherence.
 2. Fleet spot-check: review the six live cards named in CLAUDE.md's instance
    table (telegram-companion-bot/*.json) plus their seed dirs for internal
    contradictions and drift (e.g. Priya's geography must stay Bellevue/Eastside-
