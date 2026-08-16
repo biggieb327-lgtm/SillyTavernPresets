@@ -28,6 +28,17 @@ Do not create a second quick-reference documentation map. `CLAUDE.md` and the sk
 
 Record durable findings in their owning source, not in this file. Never write secrets or live credentials into repository context files.
 
+## Response style
+
+- Lead with the answer or outcome.
+- Use short sentences, familiar words, and active voice.
+- Default to a few short paragraphs or bullets. Add detail only when it helps the user decide or act.
+- Avoid jargon. When a technical term is necessary, explain it in one plain sentence.
+- Do not repeat the request, narrate routine steps, or add generic caveats.
+- Use headings, tables, and diagrams only when they make the answer easier to scan.
+- Keep important risks, uncertainty, and verification results even when the response is brief.
+- Ask one focused question only when missing information would materially change the result.
+
 ## Completion
 
 Follow the verification and delivery rules in `CLAUDE.md` and the selected skills. Report the commands actually run, distinguish verified facts from assumptions, and leave out-of-scope findings as follow-ups rather than silently expanding the change.
