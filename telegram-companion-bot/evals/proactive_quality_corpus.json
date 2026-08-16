@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "dimensions": ["timing", "specificity", "novelty", "pressure"],
+  "scale": "0=bad, 1=weak, 2=acceptable, 3=strong",
+  "classification": {
+    "good": "all dimensions >= 2 and total >= 10",
+    "bad": "any dimension == 0 or total <= 6",
+    "mixed": "everything else",
+    "collision_prone": "two or more individually eligible candidates share collision_group"
+  },
+  "cases": [
+    {
+      "id": "reminder_due_specific",
+      "source": "reminder",
+      "candidate": "hey — your dentist thing is in about 20 minutes",
+      "context": "User explicitly asked for the reminder; it is now due.",
+      "scores": {"timing": 3, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "good",
+      "collision_group": "weekday_1540"
+    },
+    {
+      "id": "reminder_too_early",
+      "source": "reminder",
+      "candidate": "don't forget your dentist appointment tomorrow afternoon",
+      "context": "The reminder was requested for 20 minutes before the appointment, not the day before.",
+      "scores": {"timing": 0, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "health_sleep_specific",
+      "source": "health",
+      "candidate": "you got barely five hours again. rough morning?",
+      "context": "Fresh sleep data shows 4h58m after a normal week around 7h.",
+      "scores": {"timing": 3, "specificity": 3, "novelty": 2, "pressure": 3},
+      "expected": "good",
+      "collision_group": "weekday_0815"
+    },
+    {
+      "id": "health_generic",
+      "source": "health",
+      "candidate": "remember to take care of yourself today 💛",
+      "context": "No abnormal health signal; candidate was produced only because health data refreshed.",
+      "scores": {"timing": 1, "specificity": 0, "novelty": 1, "pressure": 2},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "memory_callback_specific",
+      "source": "memory",
+      "candidate": "did that absurdly expensive ramen place ever redeem itself?",
+      "context": "User previously complained about the restaurant and said they might try it once more this week.",
+      "scores": {"timing": 2, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "good",
+      "collision_group": "friday_evening"
+    },
+    {
+      "id": "memory_forced_recall",
+      "source": "memory",
+      "candidate": "you told me your sister had a cold three weeks ago. how is she now?",
+      "context": "No recent mention or reason the stale memory is newly relevant.",
+      "scores": {"timing": 1, "specificity": 3, "novelty": 2, "pressure": 1},
+      "expected": "mixed",
+      "collision_group": null
+    },
+    {
+      "id": "day_event_followup",
+      "source": "day_life",
+      "candidate": "okay, verdict on the presentation you were dreading?",
+      "context": "The user's presentation ended 45 minutes ago and they discussed being nervous about it earlier today.",
+      "scores": {"timing": 3, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "good",
+      "collision_group": "weekday_1540"
+    },
+    {
+      "id": "day_event_before_it_happens",
+      "source": "day_life",
+      "candidate": "so how did the presentation go?",
+      "context": "Calendar/day context says the presentation starts in 90 minutes.",
+      "scores": {"timing": 0, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "silence_break_natural",
+      "source": "check_in",
+      "candidate": "random but i just remembered your war on raisins in cookies and i'm still judging you",
+      "context": "No conversation for most of the day; callback is recent and playful.",
+      "scores": {"timing": 2, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "good",
+      "collision_group": "friday_evening"
+    },
+    {
+      "id": "silence_break_generic",
+      "source": "check_in",
+      "candidate": "hey, just checking in. how are you doing?",
+      "context": "No new signal; nearly identical check-in was sent yesterday.",
+      "scores": {"timing": 2, "specificity": 0, "novelty": 0, "pressure": 2},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "silence_break_pressure",
+      "source": "check_in",
+      "candidate": "haven't heard from you all day... did i do something wrong?",
+      "context": "User is simply busy and has not indicated distress or conflict.",
+      "scores": {"timing": 1, "specificity": 1, "novelty": 2, "pressure": 0},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "health_collision_candidate",
+      "source": "health",
+      "candidate": "your stress has been pinned high for a while — work being stupid again?",
+      "context": "Fresh stress signal is elevated; another high-quality reminder candidate is due in the same window.",
+      "scores": {"timing": 3, "specificity": 3, "novelty": 2, "pressure": 3},
+      "expected": "good",
+      "collision_group": "weekday_1540"
+    },
+    {
+      "id": "memory_collision_candidate",
+      "source": "memory",
+      "candidate": "you survived presentation day. i'm assuming there was at least one deeply cursed slide?",
+      "context": "Presentation just ended; another day-event candidate targets the same event in the same window.",
+      "scores": {"timing": 3, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "good",
+      "collision_group": "weekday_1540"
+    },
+    {
+      "id": "novel_but_mistimed",
+      "source": "memory",
+      "candidate": "important question: did you ever finish that ridiculous lego spaceship?",
+      "context": "Specific and fresh, but current context says the user is driving.",
+      "scores": {"timing": 0, "specificity": 3, "novelty": 3, "pressure": 3},
+      "expected": "bad",
+      "collision_group": null
+    },
+    {
+      "id": "specific_but_repetitive",
+      "source": "check_in",
+      "candidate": "how's the new keyboard treating you?",
+      "context": "The bot has asked about the same keyboard in two of its last three proactive messages.",
+      "scores": {"timing": 2, "specificity": 3, "novelty": 0, "pressure": 3},
+      "expected": "bad",
+      "collision_group": null
+    }
+  ]
+}
