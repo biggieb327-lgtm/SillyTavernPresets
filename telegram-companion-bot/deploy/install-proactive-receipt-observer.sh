@@ -10,6 +10,7 @@ ENV_DIR="/etc/telegram-bots"
 ENV_FILE="$ENV_DIR/proactive-receipt-${INSTANCE}.env"
 BOT_UNIT="bot@${INSTANCE}.service"
 OBS_UNIT="proactive-receipt-observer@${INSTANCE}.service"
+RECEIPT_PATH="/opt/telegram-bots/${INSTANCE}/proactive-receipts.jsonl"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run as root." >&2
@@ -36,6 +37,14 @@ if ! systemctl is-active --quiet "$BOT_UNIT"; then
   exit 3
 fi
 
+# The foreground smoke-test observer must be stopped before systemd takes over. Two readers
+# would mirror the same journal events into duplicate receipt rows.
+if pgrep -af "proactive_receipt_observer.py.*--out ${RECEIPT_PATH}" >/dev/null 2>&1; then
+  echo "A foreground observer for $INSTANCE is already running." >&2
+  echo "Stop it with Ctrl-C, then rerun this installer so only systemd owns observation." >&2
+  exit 4
+fi
+
 install -m 0644 "$UNIT_SRC" "$UNIT_DST"
 install -d -m 0755 "$ENV_DIR"
 printf 'OWNER_CHAT_ID=%s\n' "$OWNER_CHAT_ID" > "$ENV_FILE"
@@ -46,6 +55,6 @@ systemctl enable --now "$OBS_UNIT"
 
 printf '\nInstalled and started %s\n' "$OBS_UNIT"
 systemctl status "$OBS_UNIT" --no-pager --lines=12
-printf '\nReceipts: /opt/telegram-bots/%s/proactive-receipts.jsonl\n' "$INSTANCE"
+printf '\nReceipts: %s\n' "$RECEIPT_PATH"
 printf 'Observer logs: journalctl -u %s -f\n' "$OBS_UNIT"
 printf 'Stop observer only: systemctl stop %s\n' "$OBS_UNIT"
