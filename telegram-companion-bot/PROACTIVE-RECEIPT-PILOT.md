@@ -29,47 +29,74 @@ are **not yet independently observable from current logs**; reaching Sprint 1's 
 acceptance gate will require either an explicit log line at those existing decision points or
 a later narrow `bot.py` instrumentation patch.
 
-## Start Emily's pilot observer
+## Persistent Emily soak
 
-The authoritative bot service name and VPS layout come from `OPS_MANUAL.md`: Emily is
-`bot@emily`, the repository checkout is `/opt/telegram-bots/.repo`, and her instance state
-lives under `/opt/telegram-bots/emily/`.
+The foreground launcher is useful for a smoke test, but the seven-day soak should run under its
+own systemd unit so an SSH disconnect cannot stop observation. The observer service is
+**deliberately independent** of `bot@emily`: its unit contains no `Requires=`, `Wants=`, or
+`PartOf=` relationship to the bot unit. Starting, stopping, restarting, enabling, or disabling
+the observer therefore does not manipulate Emily's bot process.
 
-Get the owner chat id from Emily with `/chatid`, then on the VPS run the launcher from the
-repository checkout:
+After the systemd-observer PR is merged, update the VPS checkout to current `main`. The VPS
+uses the repository-specific read-only SSH key; if needed, bind the checkout once with:
 
 ```bash
 cd /opt/telegram-bots/.repo
-OWNER_CHAT_ID=<value shown by Emily's /chatid> \
-  telegram-companion-bot/deploy/start-proactive-receipt-pilot.sh emily
+git config core.sshCommand 'ssh -i /root/.ssh/stpresets_ro -o IdentitiesOnly=yes'
+git fetch origin
+git reset --hard origin/main
 ```
 
-Equivalent direct command, useful when debugging the launcher:
+Then install the persistent Emily observer. Invoke the installer through `bash` so installation
+does not depend on the repository file's executable bit:
 
 ```bash
-journalctl -u bot@emily -f -o cat | \
-  python3 /opt/telegram-bots/.repo/telegram-companion-bot/proactive_receipt_observer.py \
-    --chat-id "$OWNER_CHAT_ID" \
-    --out /opt/telegram-bots/emily/proactive-receipts.jsonl
+cd /opt/telegram-bots/.repo
+OWNER_CHAT_ID=8121667008 \
+  bash telegram-companion-bot/deploy/install-proactive-receipt-observer.sh emily
 ```
 
-The launcher is foreground-only on purpose for this first soak. Closing it stops observation
-and leaves `bot@emily` untouched. Do not install it as a persistent systemd unit until the
-observation format itself has survived the pilot.
+The installer:
 
-## Verify before leaving it running
+- refuses to proceed unless `bot@emily.service` is already active;
+- installs `/etc/systemd/system/proactive-receipt-observer@.service`;
+- stores Emily's owner id in `/etc/telegram-bots/proactive-receipt-emily.env` mode `0600`;
+- runs `systemctl daemon-reload`;
+- enables and starts only `proactive-receipt-observer@emily.service`.
 
-In a second VPS shell:
+The observer starts reading at the **end** of the journal (`journalctl -n 0 -f`), so a restart
+will not replay old heartbeat lines into duplicate receipts.
+
+## Verify persistence
 
 ```bash
 systemctl status bot@emily --no-pager | head -12
-tail -n 5 /opt/telegram-bots/emily/proactive-receipts.jsonl
-journalctl -u bot@emily -n 30 --no-pager | grep '\[heartbeat\]'
+systemctl status proactive-receipt-observer@emily --no-pager | head -15
+systemctl is-enabled proactive-receipt-observer@emily
+journalctl -u proactive-receipt-observer@emily -n 30 --no-pager
+tail -n 10 /opt/telegram-bots/emily/proactive-receipts.jsonl
 ```
 
-The bot must remain active before and after starting/stopping the observer. A receipt should
-appear only after a recognized proactive log line occurs; an empty file immediately after
-startup is normal.
+`active (running)` plus `enabled` on the observer means it survives SSH disconnects and reboot.
+An empty or unchanged receipt file immediately after startup is normal; it advances only when
+a recognized proactive decision appears in Emily's journal.
+
+To prove independence safely:
+
+```bash
+systemctl stop proactive-receipt-observer@emily
+systemctl is-active bot@emily
+systemctl start proactive-receipt-observer@emily
+systemctl is-active bot@emily
+```
+
+Both bot checks must still return `active`. Do **not** stop `bot@emily` as part of this test.
+
+To remove persistence after the soak while leaving Emily untouched:
+
+```bash
+systemctl disable --now proactive-receipt-observer@emily
+```
 
 ## Soak checks
 
@@ -96,7 +123,7 @@ When the soak ends, record:
 - start/end timestamps and Emily's deployed `BOT_VERSION`;
 - receipt counts by source and decision;
 - counts by `hard_veto`;
-- any observer write failures;
+- any observer write failures or systemd restarts;
 - any receipt/journal mismatch;
 - whether stopping/restarting the observer changed Emily in any visible way;
 - explicit **pass / revise / stop** decision.
@@ -105,11 +132,6 @@ A pass means the observer is trustworthy for the sources it can actually identif
 **not** close Sprint 1's all-source gate by itself.
 
 ## Current limitation and next patch
-
-This observer is an interim safe bridge because the GitHub connector used to build this sprint
-cannot apply a surgical patch to the 12k-line `bot.py` without replacing the entire file.
-It gives the project a real observation-only soak for paths whose decisions are already logged,
-without taking that rewrite risk.
 
 The remaining Sprint 1 instrumentation gap is explicit receipts for health and memory candidate
 classes and collision-window correlation. Those should be added at their existing decision
