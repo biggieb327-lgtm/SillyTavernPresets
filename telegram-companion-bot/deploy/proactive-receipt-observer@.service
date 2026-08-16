@@ -1,0 +1,22 @@
+[Unit]
+Description=Proactive receipt observer (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/telegram-bots/.repo/telegram-companion-bot
+EnvironmentFile=/etc/telegram-bots/proactive-receipt-%i.env
+ExecStart=/bin/bash -o pipefail -c '/usr/bin/journalctl -u bot@%i -f -n 0 -o cat | exec /usr/bin/python3 /opt/telegram-bots/.repo/telegram-companion-bot/proactive_receipt_observer.py --chat-id "$OWNER_CHAT_ID" --out /opt/telegram-bots/%i/proactive-receipts.jsonl'
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Intentionally no Requires/Wants/PartOf relationship to bot@%i.service.
+# Starting/stopping this observer must never start/stop/restart the bot.
+
+[Install]
+WantedBy=multi-user.target
