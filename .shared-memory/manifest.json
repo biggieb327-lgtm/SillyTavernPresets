@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "scope": "project",
+  "memoryFile": ".shared-memory/memory.json",
+  "activityFile": ".shared-memory/activity.jsonl"
+}
