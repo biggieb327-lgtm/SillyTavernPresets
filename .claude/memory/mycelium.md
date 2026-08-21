@@ -124,6 +124,20 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/evals/run-evals.sh` | status: open
+`[observed]` 12 of 15 checks in `run-evals.sh` reported PASS whenever their own parser
+died; all fixed, and `eval-parsers-fail-loudly` now blocks the shape. **What the next
+session should not redo:** the sweep of the other 19 shell files under `.claude/tools/`
+and `.claude/hooks/` — it is done, 3 of 4 hits were false positives, one real fail-open in
+`break-test-selftest.sh` is fixed. `[decision]` operational-log rows between 2,000 and
+2,900 characters were left alone on purpose; the 3,000 cap stops regression and rewriting
+fifty accurate records for a rounder number is not worth the risk of losing detail.
+**Two things still open, neither mine to settle:** the `REPEAT MISTAKES` line is now 1,108
+of the startup context's 2,436 characters and fifteen names is past the point of being
+read — showing the top five by `seen` would keep the signal, but what a session sees first
+is an owner call. And nothing detects `CLAUDE.md`↔`skill-router` divergence, inherited
+open from the 2026-07-30 row and still true.
+
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: — | status: open
 The startup context this repo hands each new session was 9,921 characters, and 7,768 of
 them were one CLOSED incident — `session-audit.sh` printed the operational log's whole

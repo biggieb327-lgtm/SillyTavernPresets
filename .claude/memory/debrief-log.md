@@ -49,3 +49,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | date | head | commits since previous | notes |
 |---|---|---|---|
 | 2026-08-11 | d3fa2b1 | 28 (first row — counted from 3ecd5db, the session's starting point) | first run of the skill, on the session that produced it; C23 minted, C22 → 7, 4 Minor entries retired |
+| 2026-08-21 | 87f6b83 | 174 | **First run reached by `debrief-nudge.sh` rather than by asking** — the hook shipped this session and fired on its own first live stop. Found the session's biggest defect *during* the harvest, not before it: 12 of 15 evals reported PASS on a dead parser. C13 → 9, C14 → 5, 3 Minor entries, 5 evals added (41 → 46). |
