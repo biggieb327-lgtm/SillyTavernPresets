@@ -25,6 +25,8 @@ All under `telegram-companion-bot/` unless noted:
 - `SETUP_GUIDE.md` — standing up a new instance (or use `new-bot.sh`).
 - `.env.example` — every variable bot.py reads, documented with defaults.
 - `.claude/memory/operational-log.md` — one row per failure that changed the system.
+- `.claude/memory/mycelium.md` — messages between sessions (findings, dead ends,
+  partial handoffs, heads-ups). `session-audit.sh` surfaces open entries at startup.
 
 ## Operating rule
 

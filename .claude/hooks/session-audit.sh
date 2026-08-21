@@ -53,6 +53,14 @@ if [ -f .claude/memory/debrief-log.md ]; then
     echo "[session-audit] last session-debrief: ${ldate} (${lsha}), ${since} commit(s) ago — \`bash .claude/tools/debrief-check.sh\` when this session reaches a stopping point"
   fi
 fi
+# Mycelium — open messages from previous sessions. The count tells the session to
+# read the file; the entries themselves live there, not here.
+if [ -f .claude/memory/mycelium.md ]; then
+  open_count=$(grep '^### 20' .claude/memory/mycelium.md 2>/dev/null | grep -c '| status: open$' || echo 0)
+  if [ "${open_count}" != "0" ]; then
+    echo "[session-audit] MYCELIUM: ${open_count} open message(s) from previous sessions — read .claude/memory/mycelium.md"
+  fi
+fi
 echo "[session-audit] standing rules: read telegram-companion-bot/CHANGELOG.md before bot changes; bot.py changes need BOT_VERSION bump + changelog entry (delivery gate blocks otherwise); run .claude/evals/run-evals.sh before claiming done."
 echo "[session-audit] NOTION: Fleet Knowledge Base (database 89c9e767576149a480221c10d7a97f47, data-source 2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f) — before non-trivial work, search it for Status=current entries relevant to your task. Write findings, decisions, and state changes back when you produce them."
 if [ "${dirty}" != "0" ]; then
