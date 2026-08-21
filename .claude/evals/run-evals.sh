@@ -171,7 +171,7 @@ fi
 # that only exists when the call is already wrapped, so deleting an opt-out collapsed
 # the call to one line and dropped BOTH counts — it passed on the very regression it
 # pins (C13, caught by the break-test). Walk the AST instead.
-doc_unguarded=$(python3 - "$BOT" <<'PYEOF'
+if ! doc_unguarded=$(python3 - "$BOT" 2>&1 <<'PYEOF'
 import ast, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 bad = []
@@ -190,7 +190,9 @@ for node in ast.walk(ast.parse(src)):
         bad.append(str(node.lineno))
 print(",".join(bad))
 PYEOF
-)
+); then
+  doc_unguarded="the parser itself exited non-zero: ${doc_unguarded:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$doc_unguarded" ]; then
   ok "document-reply-leak-guard-optout: every DOCUMENT_MODEL reply site opts out of the reasoning-leak guard"
 else
@@ -222,7 +224,7 @@ fi
 # commands get copied from, so a stale one is an outage waiting for someone to trust it.
 # Runnable = the line starts with curl/wget or assigns a BASE/REPO var. Annotated
 # history is fine: mark the block DEAD, Historical, or Superseded within 3 lines above.
-raw_stale=$(python3 - <<'PY'
+if ! raw_stale=$(python3 - 2>&1 <<'PY'
 import pathlib, re
 bad = []
 skip = ("CHANGELOG.md", "constraints.md", "operational-log.md")
@@ -253,7 +255,9 @@ for p in sorted(pathlib.Path(".").rglob("*.md")):
         bad.append(f"{s}:{i+1}")
 print(" ".join(bad))
 PY
-)
+); then
+  raw_stale="the parser itself exited non-zero: ${raw_stale:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$raw_stale" ]; then
   ok "no-live-raw-urls: no runnable raw.githubusercontent command left unannotated"
 else
@@ -404,7 +408,7 @@ fi
 # surface is invisible in exactly the situation it was added for. Every key must be
 # either rendered by audit_cmd or listed as API-only below.
 api_only='away_users config_warnings llm_stats card_fields preset_override token_calibration memory_review_pending'
-unrendered=$(python3 - "$BOT" "$api_only" <<'PYEOF'
+if ! unrendered=$(python3 - "$BOT" "$api_only" 2>&1 <<'PYEOF'
 import re, sys, pathlib
 src = pathlib.Path(sys.argv[1]).read_text()
 allowed = set(sys.argv[2].split())
@@ -418,7 +422,9 @@ else:
     missing = sorted(k for k in keys - allowed if k not in body)
     print(" ".join(missing))
 PYEOF
-)
+); then
+  unrendered="the parser itself exited non-zero: ${unrendered:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ "$unrendered" = "PARSE-FAIL" ]; then
   bad "audit-keys-rendered" "could not locate gather_audit_data/audit_cmd — the eval needs updating, not the code"
 elif [ -z "$unrendered" ]; then
@@ -433,7 +439,7 @@ fi
 # BOT_TIMEZONE, which was documented as THE timezone setting while the clock actually
 # came from TIMEZONE. Every var bot.py reads must now be either documented as settable
 # (`NAME=` line) or named in the "Internal knobs" section.
-env_drift=$(python3 - "$BOT" "$(dirname "$BOT")/.env.example" <<'PYEOF'
+if ! env_drift=$(python3 - "$BOT" "$(dirname "$BOT")/.env.example" 2>&1 <<'PYEOF'
 import re, sys, pathlib
 bot = pathlib.Path(sys.argv[1]).read_text()
 env = pathlib.Path(sys.argv[2]).read_text()
@@ -455,7 +461,9 @@ if dead:    out.append("documented but never read: " + ", ".join(dead))
 if missing: out.append("read but undocumented: " + ", ".join(missing))
 print(" | ".join(out))
 PYEOF
-)
+); then
+  env_drift="the parser itself exited non-zero: ${env_drift:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$env_drift" ]; then
   ok "env-vars-documented: .env.example accounts for every var bot.py reads"
 else
@@ -471,7 +479,7 @@ fi
 # on 2026-07-28. Both failed safe (skipped, never green) so nothing ever alerted.
 # Removing hygiene check #4 also removed the only automatic Routine-drift detector, so
 # this eval guards the file instead.
-routine_dead=$(python3 - <<'PYEOF'
+if ! routine_dead=$(python3 - 2>&1 <<'PYEOF'
 import re, pathlib
 p = pathlib.Path('.claude/operating/routines.md')
 if not p.exists():
@@ -492,7 +500,9 @@ for sec in re.split(r'\n## ', src):
             problems.append(f'{name}: prompt calls list_triggers (fired sessions carry no MCP)')
 print(" | ".join(problems))
 PYEOF
-)
+); then
+  routine_dead="the parser itself exited non-zero: ${routine_dead:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$routine_dead" ]; then
   ok "routine-prompts-runnable: no Routine prompt depends on MCP-only or private-repo access"
 else
@@ -513,7 +523,7 @@ fi
 # Scoped to the LAST cell of table rows only — the file's own prose explains the grill-me
 # incident by name and must stay legal (C14: a scanner cannot tell "does the bad thing"
 # from "explains it").
-skill_index=$(python3 - <<'PYEOF'
+if ! skill_index=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -572,7 +582,9 @@ if re.search(r"[Pp]reloaded always", router.read_text(encoding="utf-8")):
 
 print(" | ".join(problems))
 PYEOF
-)
+); then
+  skill_index="the parser itself exited non-zero: ${skill_index:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$skill_index" ]; then
   ok "skill-index-integrity: skill-router's table and .claude/skills/ agree, both directions"
 else
@@ -589,7 +601,7 @@ fi
 # Both sides are single declared values, so this is decidable without reading prose (C14):
 # CLAUDE.md's Stack bullet vs. the workflow's python-version. A MISSING anchor fails too —
 # a check that silently passes when it can't find what it measures is not a check (C13).
-runtime_pin=$(python3 - <<'PYEOF'
+if ! runtime_pin=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -625,7 +637,9 @@ if declared and ci and declared != ci:
 
 print(" | ".join(problems))
 PYEOF
-)
+); then
+  runtime_pin="the parser itself exited non-zero: ${runtime_pin:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$runtime_pin" ]; then
   ok "runtime-version-pinned: CI's Python matches the runtime CLAUDE.md declares"
 else
@@ -642,7 +656,7 @@ fi
 # they are gone or must never be committed. That exemption list is this check's C14 escape
 # hatch: a scanner cannot tell "references a dead file" from "documents that it died", so
 # the distinction is made by hand, here, where it is visible.
-md_refs=$(python3 - <<'PYEOF'
+if ! md_refs=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -681,7 +695,9 @@ if missing:
           " — rename, delete the reference, or add it to EXEMPT if the doc's point is "
           "that the file is gone")
 PYEOF
-)
+); then
+  md_refs="the parser itself exited non-zero: ${md_refs:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$md_refs" ]; then
   ok "claude-md-refs-resolve: every repo path CLAUDE.md names still exists"
 else
@@ -696,7 +712,7 @@ fi
 # second occurrence: prose about the system is a claim about when it was written.
 # Decidable half only: a doc naming a ROADMAP item AND a staleness word near it, where
 # ROADMAP.md's heading for that item is struck through or ticked.
-roadmap_stale=$(python3 - <<'PYEOF'
+if ! roadmap_stale=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -735,7 +751,9 @@ if problems:
           "\n  — the doc describes the system as it was when written; re-read the thing "
           "that executes it and correct the claim")
 PYEOF
-)
+); then
+  roadmap_stale="the parser itself exited non-zero: ${roadmap_stale:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$roadmap_stale" ]; then
   ok "roadmap-claims-current: no doc calls a shipped ROADMAP item unshipped"
 else
@@ -781,7 +799,7 @@ fi
 #
 # Found on its first run: voicekit-work cited `templates/voice_profile_template.json`,
 # which lives at voicekit-starter/src/voicekit/templates/. Fixed in the same commit.
-skill_refs=$(python3 - <<'PYEOF'
+if ! skill_refs=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 ROOTS = ["", "telegram-companion-bot", ".claude", "voicekit-starter"]
@@ -810,7 +828,9 @@ if not skills:
 elif missing:
     print("skills name paths that do not exist: " + ", ".join(missing))
 PYEOF
-)
+); then
+  skill_refs="the parser itself exited non-zero: ${skill_refs:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$skill_refs" ]; then
   ok "skill-refs-resolve: every repo path a SKILL.md names still exists"
 else
@@ -854,7 +874,7 @@ fi
 # two tests "covering" it stayed green (v2026-08-02.14). The delivery gate enforces this for
 # handlers a diff touches; this pins the ones already paid for, so deleting the behavioural
 # tests reds CI instead of quietly restoring the blind spot.
-exercised=$(python3 - <<'PYEOF'
+if ! exercised=$(python3 - 2>&1 <<'PYEOF'
 import sys
 sys.path.insert(0, ".claude/tools")
 import sweep
@@ -871,7 +891,9 @@ if missing:
           " — a test that reads a handler's source cannot fail for the reason the "
           "handler exists; drive it with fake Telegram objects instead")
 PYEOF
-)
+); then
+  exercised="the parser itself exited non-zero: ${exercised:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$exercised" ]; then
   ok "handlers-exercised: the handlers that shipped broken are driven by tests, not grepped"
 else
@@ -924,6 +946,62 @@ if [ -z "$hooks_wired" ]; then
   ok "hooks-wired: every .claude/hooks/*.sh is registered in settings.json, and every registered hook exists"
 else
   bad "hooks-wired" "$hooks_wired"
+fi
+
+# --- eval-parsers-fail-loudly -------------------------------------------------------------
+# Most checks in this file are a shell capture of a python heredoc, where an empty result
+# means PASS. If the parser dies, its traceback goes to stderr, the captured string is
+# empty, and the check reports PASS — against whatever it was supposed to catch.
+#
+# Found 2026-08-21 by grepping for a mistake made three times in one session: **12 of the
+# 15 captures in this file had it**, every one of them reporting PASS on a dead parser.
+# Demonstrated, not assumed — a `raise` injected at the top of `claude-md-refs-resolve`'s
+# parser printed `PASS  claude-md-refs-resolve: every repo path CLAUDE.md names still
+# exists`. That is C13's exact shape (a verification that cannot fail is not verification)
+# multiplied across most of the suite, and the gate-corpus finding — the delivery gate
+# passing silently whenever sweep.py raised — arrived at from the opposite direction.
+#
+# Required shape, both halves:
+#   if ! var=$(python3 - … 2>&1 <<'PYEOF'   ->  stderr captured AND exit status tested
+#   ); then var="…parser died…"; fi
+#
+# Matches the shell construct, never prose, so a comment explaining the trap cannot trip
+# it (C14 — which this session hit twice writing other scanners).
+if ! parsers=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+lines = Path(".claude/evals/run-evals.sh").read_text(encoding="utf-8").split("\n")
+CAP = re.compile(r"^\s*(if ! )?(\w+)=\$\(python3 - ?(.*?)<<'\w+'\s*$")
+bad = []
+total = 0
+for n, line in enumerate(lines, 1):
+    m = CAP.match(line)
+    if not m:
+        continue
+    total += 1
+    guarded, name, args = m.group(1), m.group(2), m.group(3)
+    missing = []
+    if "2>&1" not in args:
+        missing.append("no 2>&1 (stderr discarded)")
+    if not guarded:
+        missing.append("no `if !` (exit status untested)")
+    if missing:
+        bad.append(f"line {n} ({name}): " + " and ".join(missing))
+if total == 0:
+    print("found 0 python-heredoc captures — the scan matched nothing, which is not the "
+          "same as a clean result")
+elif bad:
+    print(f"{len(bad)} of {total} check(s) report PASS when their own parser dies: " +
+          "; ".join(bad) + " — wrap as `if ! var=$(python3 - … 2>&1 <<'PYEOF'` and set "
+          "var to a failure message in the `; then` branch")
+PYEOF
+); then
+  parsers="the parser itself exited non-zero: ${parsers:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$parsers" ]; then
+  ok "eval-parsers-fail-loudly: every python-heredoc check captures stderr and tests its parser's exit status"
+else
+  bad "eval-parsers-fail-loudly" "$parsers"
 fi
 
 # --- oplog-rows-are-index ---------------------------------------------------------------
@@ -1003,7 +1081,7 @@ fi
 # The `$(` requirement also fixed a false negative found the same minute: an earlier
 # `[^|]*` between `-c` and `||` could not cross the pipe inside `grep -c '| status: open$'`,
 # so the exact line that shipped the bug would have passed. `.*` crosses it.
-gcf=$(python3 - <<'PYEOF'
+if ! gcf=$(python3 - 2>&1 <<'PYEOF'
 import re, subprocess
 from pathlib import Path
 # Same shape via `|| true` counts too — it leaves the stray "0" line just as surely.
@@ -1025,7 +1103,9 @@ elif hits:
           " — grep -c already prints 0 on no matches and exits 1, so the fallback appends "
           "a second line; use `x=$(grep -c … 2>/dev/null); x=${x:-0}`")
 PYEOF
-)
+); then
+  gcf="the parser itself exited non-zero: ${gcf:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$gcf" ]; then
   ok "grep-c-fallback: no shell script stacks a fallback onto grep -c (C23)"
 else

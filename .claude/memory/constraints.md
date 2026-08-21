@@ -480,8 +480,30 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 8** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21)
+**seen: 9** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21 ×2)
 — *promoted from the Minor log on the third occurrence, as that entry said it should be.*
+
+**Ninth (2026-08-21, same session as the eighth): the shape was not mine, it was the
+suite's.** Having written it three times in one day — once shipped, twice caught while
+writing — I finally grepped for it instead of only fixing my own instances. **12 of the 15
+python-heredoc captures in `run-evals.sh` discarded stderr, and every one treated empty as
+PASS.** Demonstrated rather than inferred: a `raise` injected at the top of
+`claude-md-refs-resolve`'s parser produced `PASS  claude-md-refs-resolve: every repo path
+CLAUDE.md names still exists`. Most of the repo's guard layer would have reported green on
+a dead parser, and had done for as long as those checks existed.
+
+The lesson is not "capture stderr" — the eighth occurrence already said that. It is that
+**writing the same mistake three times is evidence about the codebase, not just about
+me.** Two of the three were self-caught, which felt like diligence and was actually the
+signal: a shape that keeps suggesting itself is a shape already in the file, being copied.
+The grep that found the class cost one command and came after three fixes, not before.
+
+**Graduated → `eval-parsers-fail-loudly`** (2026-08-21): every python-heredoc capture in
+`run-evals.sh` must carry `2>&1` and be wrapped `if ! var=$(…)`. Break-tested RED against a
+capture reverted wholly to the pre-fix form. A first attempt at that break-test was
+invalid — dropping `if !` while leaving `); then` in place breaks shell syntax, so the
+suite died instead of reporting, and the PASS that followed proved nothing (C18). The
+valid injection reverts both halves together.
 
 **Eighth (2026-08-21): a check that goes green whenever its own parser dies.** The new
 `mycelium-format` eval captured only stdout from its `python3` heredoc. A bad argument
@@ -623,8 +645,21 @@ rewritten to run from the checkout, and the phone-era remainder is annotated.
 ---
 
 ### C14 — A scanner cannot tell "this file does the bad thing" from "this file explains it"
-**seen: 3** (2026-07-29 ×3) — *promoted immediately: two fresh occurrences in one session,
-and `sweep.py constraints-drift` then surfaced a third already in the Minor log.*
+**seen: 5** (2026-07-29 ×3, 2026-08-21 ×2) — *promoted immediately: two fresh occurrences in
+one session, and `sweep.py constraints-drift` then surfaced a third already in the Minor log.*
+
+**Fourth and fifth (2026-08-21), both on the first run of a scanner written that hour.**
+`mycelium-format` flagged the header example inside `mycelium.md`'s own Entry-format code
+fence; `grep-c-fallback` flagged its own error message, which quotes the very pattern it
+hunts. Both were caught by running the check on a clean tree — the cheapest possible
+detection, and the reason to run a new scanner before believing its first green as much as
+its first red. The fixes differ and the difference is the useful part: the first skips
+fenced blocks (the prose is *inside* a marked region), the second narrows the match to the
+defect's real shape, a command substitution (the prose cannot contain one). **Narrowing to
+the actual defect beat excluding the explanation** — it also fixed a false negative the
+broader pattern would have shipped, since `[^|]*` could not cross the pipe inside
+`grep -c '| status: open$'`, the exact line that carried the bug.
+
 Three times a checker confused executable text with the prose documenting it:
 1. An extraction assertion asserted `'list_triggers' not in prompt` — and tripped on the
    new paragraph that *explains* `list_triggers` is unavailable.
@@ -1028,6 +1063,30 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-21 — **Invented a GitHub Actions run ID and called a tool with it.** Wanting the
+  job detail for a run I had just triggered, I passed `32535225614` to
+  `list_workflow_jobs`; it 404'd because I had made the number up from the shape of a
+  neighbouring ID rather than reading it from a listing. Harmless here because the API
+  rejected it — but the same reflex against an ID that happens to exist reports on the
+  wrong object with full confidence. → **An identifier either came from a result you read
+  this turn, or you do not have it.** Never pattern-match one into existence; pay for the
+  listing call.
+- 2026-08-21 — **Applied a text transformation file-wide whose correctness depended on a
+  per-line property I had not checked.** Escaping pipes inside backticks across all 67
+  operational-log rows fixed the three intended rows and silently damaged a fourth: that
+  row contains a triple backtick, so its backtick count is odd, and pairing ran past a
+  genuine column separator and escaped it. Caught within the minute because the same
+  script asserted every row still splits into six cells. → **When a fix is applied by a
+  rule rather than by hand, state the rule's precondition and test it per item** — here,
+  an even backtick count. The verification that caught it was already written, which is
+  the only reason this was a minute and not a corrupted record.
+- 2026-08-21 — **`pip install -r requirements.txt` as root turned a truthful SKIP into a
+  misleading FAIL.** `bot-imports` had been skipping for a missing dependency and saying
+  so correctly; installing into the system interpreter surfaced a broken Debian
+  `cryptography` (pyo3 panic) and the eval then reported bot.py as crashing on import. The
+  eval's own message said which reading was which, so it cost minutes rather than a wrong
+  diagnosis. → **Changing the environment to make a check runnable is a change to the
+  system under test.** Re-read what the check says after, not just whether it is green.
 - 2026-08-12 (**second occurrence, same session**) — Did it again in the very next
   release: wrote "10 new tests … Total: 1,273" into the v2026-08-12.2 changelog while
   drafting; `verify.sh` said 1267, and the real count was 4 (I had counted six DEFAULTS
