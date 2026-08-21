@@ -878,6 +878,54 @@ else
   bad "handlers-exercised" "$exercised"
 fi
 
+# --- grep-c-fallback --------------------------------------------------------------------
+# C23, fourth occurrence. `grep -c` prints "0" AND exits 1 when there are no matches, so
+# `x=$(grep -c … || echo 0)` stacks a second line onto output that already succeeded — x
+# becomes "0\n0". It reads perfectly well, which is why it keeps coming back: written into
+# debrief-check.sh 2026-08-11 (caught, fixed, left as a comment), then into session-audit.sh
+# and this eval file, where it shipped a hook that announced "MYCELIUM: 0\n0 open message(s)"
+# precisely when nothing was waiting.
+#
+# A comment in one file could not stop it recurring in three others. This is that comment,
+# made mechanical. Correct form: `x=$(grep -c … 2>/dev/null); x=${x:-0}`.
+#
+# C14, twice over: the check must not flag the comments explaining the trap, nor its own
+# error message quoting it. Comment lines are skipped, and the match requires a command
+# substitution — the defect only exists when the stray line is being CAPTURED. Prose that
+# names the pattern has no `$(`.
+#
+# The `$(` requirement also fixed a false negative found the same minute: an earlier
+# `[^|]*` between `-c` and `||` could not cross the pipe inside `grep -c '| status: open$'`,
+# so the exact line that shipped the bug would have passed. `.*` crosses it.
+gcf=$(python3 - <<'PYEOF'
+import re, subprocess
+from pathlib import Path
+# Same shape via `|| true` counts too — it leaves the stray "0" line just as surely.
+BAD = re.compile(r"grep\s+-c\b.*\|\|\s*(echo|true)")
+hits = []
+files = subprocess.run(["git", "ls-files", "*.sh", "*.bash"],
+                       capture_output=True, text=True).stdout.split()
+for f in files:
+    for n, line in enumerate(Path(f).read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if line.lstrip().startswith("#") or "$(" not in line:
+            continue
+        if BAD.search(line):
+            hits.append(f"{f}:{n}")
+if not files:
+    print("git ls-files matched no shell scripts — the scan found nothing because it "
+          "looked nowhere, which is not the same as a clean result")
+elif hits:
+    print("`grep -c … || echo/true` at " + ", ".join(hits) +
+          " — grep -c already prints 0 on no matches and exits 1, so the fallback appends "
+          "a second line; use `x=$(grep -c … 2>/dev/null); x=${x:-0}`")
+PYEOF
+)
+if [ -z "$gcf" ]; then
+  ok "grep-c-fallback: no shell script stacks a fallback onto grep -c (C23)"
+else
+  bad "grep-c-fallback" "$gcf"
+fi
+
 # --- mycelium-format --------------------------------------------------------------------
 # session-audit.sh tells each new session how many mycelium messages are waiting, by
 # grepping the entry header. A drifted header — renamed status, trailing space, missing
@@ -892,8 +940,14 @@ if [ ! -f "$myc" ]; then
   bad "mycelium-format" "$myc missing — session-audit.sh will silently stop reporting cross-session messages"
 else
   # The hook's counter, character-for-character as session-audit.sh runs it.
-  hook_open=$(grep '^### 20' "$myc" 2>/dev/null | grep -c '| status: open$' || echo 0)
-  myc_err=$(python3 - "$myc" "$hook_open" <<'PYEOF'
+  # NOT `|| echo 0` — grep -c prints "0" and exits 1 on no matches, so the fallback stacks
+  # a second line and the parser below dies on int("0\n0"). Which it did, silently: with
+  # only stdout captured, a crashing parser produced an empty error string and this check
+  # reported PASS against a real violation. That is the gate-corpus finding (the delivery
+  # gate passed whenever sweep.py raised) reproduced inside a new check, and it is why the
+  # python call below is invoked with 2>&1 and its exit status tested.
+  hook_open=$(grep '^### 20' "$myc" 2>/dev/null | grep -c '| status: open$'); hook_open=${hook_open:-0}
+  if ! myc_err=$(python3 - "$myc" "$hook_open" 2>&1 <<'PYEOF'
 import re, sys
 path, hook_open = sys.argv[1], int(sys.argv[2])
 HEADER = re.compile(
@@ -930,7 +984,9 @@ else:
         print(f"the hook counts {hook_open} open entr(ies), an independent parse finds "
               f"{parsed_open} — session-audit.sh and {path} disagree about the format")
 PYEOF
-)
+  ); then
+    myc_err="the parser itself exited non-zero: ${myc_err:-(no output)} — a check that goes green when its own parser dies is not a check"
+  fi
   if [ -z "$myc_err" ]; then
     ok "mycelium-format: every entry header is countable, and the hook's count matches an independent parse"
   else

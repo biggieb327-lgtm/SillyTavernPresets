@@ -480,8 +480,20 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 7** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10) — *promoted
-from the Minor log on the third occurrence, as that entry said it should be.*
+**seen: 8** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21)
+— *promoted from the Minor log on the third occurrence, as that entry said it should be.*
+
+**Eighth (2026-08-21): a check that goes green whenever its own parser dies.** The new
+`mycelium-format` eval captured only stdout from its `python3` heredoc. A bad argument
+killed the parser before it read a line; the error went to stderr, the captured string was
+empty, and empty means pass — so the check printed PASS against an entry header that was
+genuinely malformed. **This is the gate-corpus finding rebuilt from scratch**: 14 of the
+first 34 corpus cases deviated, including the delivery gate passing silently whenever
+`sweep.py` raised, and that is written down in CLAUDE.md. Reading it did not stop me
+writing the same shape into a new check the same day. Any check that shells out must test
+the exit status and capture stderr — `if err=$(cmd 2>&1); then … else err="parser died: $err"; fi`
+— because "produced no complaint" and "could not run" are the same string otherwise.
+Caught only by break-testing; the check had passed cleanly a minute earlier.
 
 **Fifth and sixth (2026-08-03), both in one release, both in *authored checks* rather
 than run commands — the new shape.** Writing the reasoning-leak guard I produced (a) a
@@ -929,8 +941,8 @@ mechanisation for the reason rule 4 allows prose: nothing in the diff distinguis
 that would have made the difference leaves no trace in the repo.
 
 ### C23 — The shell evaluated something the command text does not show
-**seen: 3** (2026-08-10 ×2, 2026-08-11) — *promoted from the Minor log 2026-08-11; all
-three entries deleted.*
+**seen: 4** (2026-08-10 ×2, 2026-08-11, 2026-08-21) — *promoted from the Minor log
+2026-08-11; all three entries deleted.*
 Three failures in one session, three different constructs, one cause: **what the shell
 actually did depended on something the written command does not display.**
 
@@ -939,6 +951,19 @@ actually did depended on something the written command does not display.**
 | `grep -m1 X f \| cut -d= -f2- \|\| echo '(absent)'` | fallback when grep finds nothing | `\|\|` tests **`cut`**, which returns 0 either way — the fallback can never fire, and "absent" is indistinguishable from "empty" |
 | `git commit -m "…\`git show HEAD:\`…"` | a literal message | backticks **executed**; a repo directory listing landed in the commit body |
 | `python3 - <<PY` reading `.claude/memory/…` | a repo-root path | resolved under a `cd` from an **earlier tool call** — this shell persists cwd |
+| `x=$(grep -c X f \|\| echo 0)` | 0 when nothing matches | `grep -c` **already printed** "0" and exits 1, so the fallback fires **on success** and `x` becomes `"0\n0"` (2026-08-21) |
+
+The fourth (2026-08-21) is the same `\|\|` misreading as the first, inverted: there the
+fallback could never fire, here it fires on a command that had already done its job. Both
+come from reading `\|\|` as "if that didn't work" rather than as a test on an exit status
+whose meaning is the command's own. `grep -c`'s exit status reports *whether it matched*,
+not whether it ran.
+
+It cost three sites and shipped one: `session-audit.sh` told every session
+`MYCELIUM: 0\n0 open message(s)` exactly when nothing was waiting. The repo had already
+paid for this shape once and left the lesson as a comment in `debrief-check.sh` — which
+did not stop it being written into three more files, one of them the eval built to guard
+the very feature it broke.
 
 Each was self-inflicted twice over: the `\|\|` shape was its **third** occurrence that day
 and I had written the corrected form and explained the binding to the owner hours earlier;
@@ -952,6 +977,11 @@ about an hour earlier while graduating it.
 - pass multi-line or punctuation-bearing text through a **file** (`git commit -F`,
   heredocs with quoted delimiters), never through a double-quoted `-m`;
 - use absolute paths, or `cd` inside the same invocation — cwd is *session* state.
+
+**Graduated → `.claude/evals/run-evals.sh` `grep-c-fallback`** (2026-08-21) for the fourth
+shape. A PreToolUse hook cannot see it — the bug is written into a file by Edit, not run as
+a command — so the guard is a repo-wide scan of committed shell scripts instead. Prose had
+already failed at this exact job once.
 
 **Graduated → `.claude/hooks/shell-semantics-guard.sh`** for the two shapes a PreToolUse
 hook can see: a `||` fallback whose left side ends in a pipe, and `git commit -m` carrying

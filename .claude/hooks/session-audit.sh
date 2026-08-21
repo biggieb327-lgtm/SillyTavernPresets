@@ -24,7 +24,9 @@ fi
 # Surface the repeat offenders (seen: 2+) by name — those are the ones prose has
 # already failed to prevent at least once.
 if [ -f .claude/memory/constraints.md ]; then
-  total=$(grep -c '^### C' .claude/memory/constraints.md 2>/dev/null || echo 0)
+  # NOT `|| echo 0` — see the note in .claude/tools/debrief-check.sh. `grep -c` prints
+  # "0" AND exits 1 on no matches, so the fallback stacks a second line onto real output.
+  total=$(grep -c '^### C' .claude/memory/constraints.md 2>/dev/null); total=${total:-0}
   repeats=$(grep -B1 '^\*\*seen: [2-9]' .claude/memory/constraints.md 2>/dev/null \
             | grep '^### C' | sed 's/^### //' | paste -sd '|' - | sed 's/|/ · /g')
   echo "[session-audit] constraints (.claude/memory/constraints.md): ${total} active"
@@ -66,7 +68,11 @@ fi
 # Mycelium — open messages from previous sessions. The count tells the session to
 # read the file; the entries themselves live there, not here.
 if [ -f .claude/memory/mycelium.md ]; then
-  open_count=$(grep '^### 20' .claude/memory/mycelium.md 2>/dev/null | grep -c '| status: open$' || echo 0)
+  # `|| echo 0` here shipped a hook that said "MYCELIUM: 0\n0 open message(s)" whenever the
+  # file was fully acked — announcing waiting messages precisely when there were none.
+  # Same trap as the constraints count above; caught 2026-08-21 by break-testing the eval.
+  open_count=$(grep '^### 20' .claude/memory/mycelium.md 2>/dev/null | grep -c '| status: open$')
+  open_count=${open_count:-0}
   if [ "${open_count}" != "0" ]; then
     echo "[session-audit] MYCELIUM: ${open_count} open message(s) from previous sessions — read .claude/memory/mycelium.md"
   fi

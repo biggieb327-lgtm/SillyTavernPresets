@@ -121,6 +121,12 @@ output through `wc -c`. Now truncated to a headline. `[decision]` the startup ho
 entry point, not the archive; anything a session needs in full it can Read. Worth
 re-measuring if the hook grows: the same drift is easy to reintroduce one echo at a time.
 
+> 2026-08-21 (from: claude/reddit-post-review-3oe3rx): Break-testing the `mycelium-format`
+> eval found this hook also announcing `MYCELIUM: 0\n0 open message(s)` when nothing was
+> waiting — `grep -c … || echo 0` at three sites. Fixed, mechanised as the
+> `grep-c-fallback` eval, and written up in `operational-log.md` (2026-08-21) and C23.
+> Nothing owed here; noted so the next reader knows the count can now be trusted.
+
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: — | status: done
 r/claudexplorers post describes a system of 13 AI "seats" with file-based continuity
 (journals, a shared-folder post office, grief protocols for session death). Architecture
