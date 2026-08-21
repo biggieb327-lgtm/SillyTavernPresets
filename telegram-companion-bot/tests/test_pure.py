@@ -11009,3 +11009,33 @@ class TestCrimeFeatureRegistered:
     def test_crime_in_features(self):
         assert "crime" in bot._FEATURES
         assert bot._FEATURES["crime"][0] == "CRIME_ALERTS"
+
+
+class TestFormatDispatch:
+    def test_basic_formatting(self):
+        call = {
+            "initial_call_type": "BURGLARY",
+            "priority": "2",
+            "dispatch_beat": "K1",
+            "dispatch_sector": "K",
+            "dispatch_precinct": "W",
+            "original_time_queued": "2026-08-21T09:15:00",
+        }
+        text = bot._format_dispatch(call)
+        assert "BURGLARY" in text
+        assert "priority 2" in text
+        assert "K1" in text
+
+    def test_priority_icons(self):
+        for p, icon in bot._DISPATCH_PRIORITY_ICON.items():
+            text = bot._format_dispatch({"priority": p})
+            assert icon in text
+
+    def test_missing_fields_do_not_crash(self):
+        text = bot._format_dispatch({})
+        assert "Unknown" in text
+
+    def test_final_call_type_used_as_fallback(self):
+        call = {"final_call_type": "DISTURBANCE"}
+        text = bot._format_dispatch(call)
+        assert "DISTURBANCE" in text

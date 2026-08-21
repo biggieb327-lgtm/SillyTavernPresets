@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-21.2 — /dispatch command: 911 dispatch calls near you (Seattle)
+
+New feature: `/dispatch` shows recent 911 dispatch calls near the user's shared location,
+pulled from SPD Call Data on data.seattle.gov (updated daily, same-day coverage). Uses the
+same location, radius, and kill switch (`CRIME_ALERTS`) as `/crime`.
+
+Configurable via env: `DISPATCH_HOURS` (lookback window, default 24), `DISPATCH_LIMIT`
+(max results, default 10). Calls are shown with initial/final call type, priority
+(color-coded 1–4/9), beat/sector/precinct, and timestamp. Shares `_in_seattle()` bounds
+check and `CRIME_RADIUS_MILES` radius with `/crime`.
+
+The location share acknowledgment already mentions `/crime` and `/dispatch` (added in
+v2026-08-21.1). Help text updated to list both commands under "Crime alerts (Seattle)".
+
 ## v2026-08-21.1 — /crime command: nearby crime reports from Seattle PD open data
 
 New feature: `/crime` shows recent crime reports near the user's shared location, pulled

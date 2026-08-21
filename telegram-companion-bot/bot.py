@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-21.1"
+BOT_VERSION = "2026-08-21.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2780,7 +2780,10 @@ CRIME_ALERTS = _env_bool("CRIME_ALERTS", True)
 CRIME_RADIUS_MILES = _env_float("CRIME_RADIUS_MILES", "0.5")
 CRIME_DAYS = _env_int("CRIME_DAYS", "7")
 CRIME_LIMIT = _env_int("CRIME_LIMIT", "10")
+DISPATCH_HOURS = _env_int("DISPATCH_HOURS", "24")
+DISPATCH_LIMIT = _env_int("DISPATCH_LIMIT", "10")
 _SEATTLE_CRIME_URL = "https://data.seattle.gov/resource/tazs-3rd5.json"
+_SEATTLE_DISPATCH_URL = "https://data.seattle.gov/resource/33kz-ixgy.json"
 _SEATTLE_BOUNDS = {"lat_min": 47.49, "lat_max": 47.74, "lon_min": -122.44, "lon_max": -122.24}
 
 # --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
@@ -8213,6 +8216,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         "*Crime alerts (Seattle)*",
         "/crime — recent crime reports near your shared location",
+        "/dispatch — recent 911 dispatch calls near your shared location",
         "",
         "*Maps (routing & places)*",
         "/route <from> to <dest> — travel time & distance",
@@ -14594,12 +14598,12 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if TRAFFIC_ENABLED:
             cmds += ["/traffic", "/incidents"]
         if CRIME_ALERTS:
-            cmds.append("/crime")
+            cmds += ["/crime", "/dispatch"]
         if loc.live_period and TRAFFIC_ENABLED:
             await update.message.reply_text(
                 "📍 Got your live location. I'll keep an eye on traffic around you "
                 "and give you a heads-up if anything pops up nearby."
-                + (" Use /crime to check recent crime reports." if CRIME_ALERTS else "")
+                + (" Use /crime or /dispatch for nearby reports." if CRIME_ALERTS else "")
             )
         else:
             await update.message.reply_text(
@@ -14861,6 +14865,94 @@ async def crime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (f"\U0001f6a8 Recent reports within {CRIME_RADIUS_MILES:.1f} mi "
               f"(last {CRIME_DAYS} days)")
     footer = f"\n\nSource: Seattle Police Dept via data.seattle.gov"
+    text = f"{header}\n\n" + "\n\n".join(lines) + footer
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    await update.message.reply_text(text)
+
+
+def _fetch_seattle_dispatch(lat: float, lon: float) -> list:
+    radius_m = CRIME_RADIUS_MILES * 1609.34
+    cutoff = datetime.fromtimestamp(
+        time.time() - DISPATCH_HOURS * 3600
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    params = {
+        "$where": (
+            f"within_circle(dispatch_latitude, dispatch_longitude, {lat}, {lon}, {radius_m}) "
+            f"AND original_time_queued > '{cutoff}'"
+        ),
+        "$order": "original_time_queued DESC",
+        "$limit": str(DISPATCH_LIMIT),
+    }
+    try:
+        r = _get_session().get(_SEATTLE_DISPATCH_URL, params=params, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning("[crime] Seattle dispatch fetch failed: %s",
+                    _classify_fetch_error_by_type(e))
+        return []
+
+
+_DISPATCH_PRIORITY_ICON = {"1": "\U0001f534", "2": "\U0001f7e0", "3": "\U0001f7e1",
+                           "4": "\U0001f7e2", "9": "⚪"}
+
+
+def _format_dispatch(d: dict) -> str:
+    call_type = d.get("initial_call_type") or d.get("final_call_type") or "Unknown"
+    priority = str(d.get("priority", ""))
+    icon = _DISPATCH_PRIORITY_ICON.get(priority, "⚠️")
+    beat = d.get("dispatch_beat", "")
+    sector = d.get("dispatch_sector", "")
+    precinct = d.get("dispatch_precinct", "")
+    dt_raw = d.get("original_time_queued", "")
+    dt_str = ""
+    if dt_raw:
+        try:
+            dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            dt_str = dt.strftime("%b %d %I:%M %p")
+        except (ValueError, TypeError):
+            dt_str = dt_raw[:16]
+    line = f"{icon} {call_type}"
+    if priority:
+        line += f" (priority {priority})"
+    loc_parts = [p for p in [beat, sector, precinct] if p]
+    if loc_parts:
+        line += f"\n   \U0001f4cd {' / '.join(loc_parts)}"
+    if dt_str:
+        line += f"\n   \U0001f553 {dt_str}"
+    return line
+
+
+async def dispatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CRIME_ALERTS:
+        await update.message.reply_text(_feature_off_reason(
+            "crime", "Crime alerts aren't set up.",
+            "Crime alerts are"))
+        return
+    chat_id = update.effective_chat.id
+    loc = user_location.get(chat_id)
+    if not loc:
+        await update.message.reply_text(
+            "Share your location first so I can check what's around you.")
+        return
+    lat, lon = loc["lat"], loc["lon"]
+    if not _in_seattle(lat, lon):
+        await update.message.reply_text(
+            "Dispatch data is only available for Seattle right now. "
+            "Your location doesn't appear to be in the coverage area.")
+        return
+    await update.message.reply_text("\U0001f50d Checking recent dispatch calls nearby...")
+    calls = await asyncio.to_thread(_fetch_seattle_dispatch, lat, lon)
+    if not calls:
+        await update.message.reply_text(
+            f"\U0001f6e1️ No dispatch calls within {CRIME_RADIUS_MILES:.1f} mi "
+            f"in the last {DISPATCH_HOURS}h.")
+        return
+    lines = [_format_dispatch(c) for c in calls]
+    header = (f"\U0001f6a8 Recent 911 dispatch within {CRIME_RADIUS_MILES:.1f} mi "
+              f"(last {DISPATCH_HOURS}h)")
+    footer = "\n\nSource: SPD Call Data via data.seattle.gov (updated daily)"
     text = f"{header}\n\n" + "\n\n".join(lines) + footer
     if len(text) > 4000:
         text = text[:3997] + "..."
@@ -15943,6 +16035,7 @@ _MAPS_COMMANDS = [
     BotCommand("place", "Look up an address or business"),
     BotCommand("food", "Restaurants near your shared location"),
     BotCommand("crime", "Recent crime reports near your location (Seattle)"),
+    BotCommand("dispatch", "Recent 911 dispatch calls near you (Seattle)"),
 ]
 
 # Traffic handlers register only when WSDOT_API_KEY is set, so the menu mirrors that.
@@ -16223,6 +16316,7 @@ def main():
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
     app.add_handler(CommandHandler("crime", crime_cmd))
+    app.add_handler(CommandHandler("dispatch", dispatch_cmd))
     # Registered whenever credentials exist (even if the kill switch is off or the library
     # is missing) so the commands can explain WHY they're inert — an unregistered command
     # gives no response at all, which is undiagnosable from the user side.
