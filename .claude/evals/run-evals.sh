@@ -878,6 +878,64 @@ else
   bad "handlers-exercised" "$exercised"
 fi
 
+# --- oplog-rows-are-index ---------------------------------------------------------------
+# operational-log.md says of itself: "Format is fixed... nothing else. No narration, no
+# diary... this file is the index of what the system learned." It had stopped being that.
+# Nine rows had grown past 3,000 characters, the largest 7,724, because a live
+# investigation kept appending to the row — and one of them was being reprinted in full
+# into every session's startup context. The appended corrections were the valuable part;
+# they now live in incidents/<date>-<slug>.md and the row links to them.
+#
+# Two things are checked, because the row shape has two ways to go wrong:
+#   1. length — a row over the cap is an investigation that should have been archived
+#   2. cell count — pipes inside inline code must be escaped `\|`, or markdown reads them
+#      as separators. Three rows rendered with 7, 7 and 11 cells for weeks; nothing noticed
+#      because a malformed table row still displays, just wrongly.
+#
+# 2>&1 and the exit-status test are not decoration: C13's eighth occurrence, hours before
+# this check was written, was a sibling eval that captured only stdout and so reported PASS
+# whenever its own parser died.
+CAP=3000
+if ! oplog=$(python3 - "$CAP" 2>&1 <<'PYEOF'
+import re, sys
+cap = int(sys.argv[1])
+path = ".claude/memory/operational-log.md"
+SPLIT = re.compile(r'(?<!\\)\|')          # a separator is a pipe that is not escaped
+rows, long_rows, malformed = 0, [], []
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    if not line.startswith("| 20"):
+        continue
+    rows += 1
+    date = line[2:12]
+    if len(line) > cap:
+        long_rows.append(f"line {n} ({date}): {len(line)} chars")
+    parts = [p for p in SPLIT.split(line)]
+    if parts and parts[0].strip() == "": parts = parts[1:]
+    if parts and parts[-1].strip() == "": parts = parts[:-1]
+    if len(parts) != 6:
+        malformed.append(f"line {n} ({date}): {len(parts)} cells")
+if rows == 0:
+    print("parsed 0 rows out of the log — the parser broke, which is the silent-green "
+          "shape this check exists for")
+elif malformed:
+    print("row(s) not splitting into 6 cells: " + "; ".join(malformed) +
+          " — escape pipes inside inline code as '\\|'; markdown reads a bare one as a "
+          "column separator")
+elif long_rows:
+    print(f"row(s) over {cap} chars: " + "; ".join(long_rows) +
+          " — move the full record to .claude/memory/incidents/<date>-<slug>.md and leave "
+          "an index row linking to it (see the header of operational-log.md)")
+PYEOF
+); then
+  oplog="the parser itself exited non-zero: ${oplog:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$oplog" ]; then
+  ok "oplog-rows-are-index: every operational-log row is 6 cells and under ${CAP} chars"
+else
+  bad "oplog-rows-are-index" "$oplog"
+fi
+
 # --- grep-c-fallback --------------------------------------------------------------------
 # C23, fourth occurrence. `grep -c` prints "0" AND exits 1 when there are no matches, so
 # `x=$(grep -c … || echo 0)` stacks a second line onto output that already succeeded — x
