@@ -12,6 +12,12 @@ model: haiku
 - Operational log entries follow the format **Date | failure | root cause | system patch | eval | next** — reformat drift, delete narration, merge duplicates.
 - CLAUDE.md claims vs reality: when a doc names a file, path, or command, check it exists as described. Report mismatches; this repo has been burned by stale docs before (see changelog v2026-07-05.10).
 - Delete `.claude/.runtime/` files older than 14 days.
+- Prune `.claude/memory/mycelium.md`: `done` older than 14 days, `ack` older than 30. Never
+  an `open` entry — those wait however long it takes. Never a dead end that has no
+  permanent home yet: the file's own "Dead ends need a permanent home" section says where
+  it goes first, and pruning one before that is how a walked road gets walked again.
+  Replies are part of the entry — prune the entry whole or leave it whole, never trim a
+  reply off a live entry, and never rewrite an entry's body to its conclusion.
 
 **Required evidence:** for every deletion or reformat, the before-state (quote it) so nothing is silently lost.
 
