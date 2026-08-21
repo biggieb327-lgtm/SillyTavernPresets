@@ -7744,6 +7744,7 @@ class TestEveryBooleanFlagDefault:
         "ADMIN_API_ENABLED": False,
         "BB_ALERTS": True,
         "CLOSENESS_ENABLED": False,
+        "CRIME_ALERTS": True,
         "DAY_MOOD_RESIDUE": True,
         "DEVICE_RENDER": False,
         "DIRECTIVE_LEAK_GUARD": True,
@@ -9855,16 +9856,17 @@ class TestHandleLocationNamesThePlace:
 
     def setup_method(self):
         self._saved = (bot.LOCATION_PLACE, bot.TOMTOM_ENABLED, bot.TRAFFIC_ENABLED,
-                       bot.save_state)
+                       bot.CRIME_ALERTS, bot.save_state)
         bot.LOCATION_PLACE = True
         bot.TOMTOM_ENABLED = True
         bot.TRAFFIC_ENABLED = False        # else the handler tries to reply
+        bot.CRIME_ALERTS = False           # else the handler tries to reply
         bot.save_state = lambda: None
         bot.user_location.pop(self.CHAT, None)
 
     def teardown_method(self):
         (bot.LOCATION_PLACE, bot.TOMTOM_ENABLED, bot.TRAFFIC_ENABLED,
-         bot.save_state) = self._saved
+         bot.CRIME_ALERTS, bot.save_state) = self._saved
         bot.user_location.pop(self.CHAT, None)
 
     def _share(self, lat, lon, *, live=False, initial=True):
@@ -10959,3 +10961,51 @@ class TestWeatherFailureBacksOff:
         bot._weather_cache["ts"] = time.time() - (bot.WEATHER_TTL + 1)
         self._run(monkeypatch, [RuntimeError("429")])
         assert bot._weather_cache["text"] == "70°F, clear"
+
+
+# ── Seattle Crime Alerts ─────────────────────────────────────────────────────
+
+
+class TestSeattleCrimeBounds:
+    def test_inside_seattle(self):
+        assert bot._in_seattle(47.61, -122.33) is True
+
+    def test_outside_seattle(self):
+        assert bot._in_seattle(45.0, -122.33) is False
+        assert bot._in_seattle(47.61, -121.0) is False
+
+    def test_edge_of_bounds(self):
+        b = bot._SEATTLE_BOUNDS
+        assert bot._in_seattle(b["lat_min"], b["lon_min"]) is True
+        assert bot._in_seattle(b["lat_max"], b["lon_max"]) is True
+        assert bot._in_seattle(b["lat_min"] - 0.01, b["lon_min"]) is False
+
+
+class TestFormatCrime:
+    def test_basic_formatting(self):
+        report = {
+            "offense": "THEFT",
+            "offense_parent_group": "LARCENY-THEFT",
+            "_100_block_address": "100 BLOCK OF PIKE ST",
+            "offense_start_datetime": "2026-08-20T14:30:00",
+            "crime_against_category": "PROPERTY",
+        }
+        text = bot._format_crime(report)
+        assert "THEFT" in text
+        assert "LARCENY-THEFT" in text
+        assert "100 BLOCK OF PIKE ST" in text
+
+    def test_person_crime_gets_red_icon(self):
+        report = {"offense": "ASSAULT", "crime_against_category": "PERSON"}
+        text = bot._format_crime(report)
+        assert "\U0001f534" in text
+
+    def test_missing_fields_do_not_crash(self):
+        text = bot._format_crime({})
+        assert "Unknown" in text
+
+
+class TestCrimeFeatureRegistered:
+    def test_crime_in_features(self):
+        assert "crime" in bot._FEATURES
+        assert bot._FEATURES["crime"][0] == "CRIME_ALERTS"

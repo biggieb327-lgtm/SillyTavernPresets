@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-15.1"
+BOT_VERSION = "2026-08-21.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2774,6 +2774,14 @@ TRAFFIC_RADIUS_MILES = _env_float("TRAFFIC_RADIUS_MILES", "10")
 TRAFFIC_POLL_MINUTES = _env_int("TRAFFIC_POLL_MINUTES", "10")
 _WSDOT_ALERTS_URL   = "https://www.wsdot.wa.gov/Traffic/api/HighwayAlerts/HighwayAlertsREST.svc/GetAlertsAsJson"
 _WSDOT_TIMES_URL    = "https://www.wsdot.wa.gov/Traffic/api/TravelTimes/TravelTimesREST.svc/GetTravelTimesAsJson"
+
+# --- Seattle Crime Alerts (data.seattle.gov open data, no key required) ---
+CRIME_ALERTS = _env_bool("CRIME_ALERTS", True)
+CRIME_RADIUS_MILES = _env_float("CRIME_RADIUS_MILES", "0.5")
+CRIME_DAYS = _env_int("CRIME_DAYS", "7")
+CRIME_LIMIT = _env_int("CRIME_LIMIT", "10")
+_SEATTLE_CRIME_URL = "https://data.seattle.gov/resource/tazs-3rd5.json"
+_SEATTLE_BOUNDS = {"lat_min": 47.49, "lat_max": 47.74, "lon_min": -122.44, "lon_max": -122.24}
 
 # --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
 # Fail-closed on credentials like WSDOT above (no creds => inert), but the kill switch is
@@ -8203,6 +8211,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/traffic — current congestion (near you if location shared)",
         "/incidents — active incidents (near you if location shared)",
         "",
+        "*Crime alerts (Seattle)*",
+        "/crime — recent crime reports near your shared location",
+        "",
         "*Maps (routing & places)*",
         "/route <from> to <dest> — travel time & distance",
         "/nearby <thing> — places near your shared location",
@@ -12561,6 +12572,7 @@ _FEATURES = {
     "mapintent":       ("MAP_INTENT",       lambda: bool(TOMTOM_API_KEY), None),
     "foodsuggestions": ("FOOD_SUGGESTIONS", lambda: bool(TOMTOM_API_KEY), None),
     "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD), None),
+    "crime":   ("CRIME_ALERTS",   lambda: True, None),
 }
 FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"
 feature_prefs = {}
@@ -14577,15 +14589,22 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if LOCATION_PLACE and TOMTOM_ENABLED and update.message:
         asyncio.create_task(_name_the_place(chat_id, entry["ts"], loc.latitude, loc.longitude))
 
-    if TRAFFIC_ENABLED and update.message:  # only reply on the initial share, not every live update
-        if loc.live_period:
+    if update.message and (TRAFFIC_ENABLED or CRIME_ALERTS):
+        cmds = []
+        if TRAFFIC_ENABLED:
+            cmds += ["/traffic", "/incidents"]
+        if CRIME_ALERTS:
+            cmds.append("/crime")
+        if loc.live_period and TRAFFIC_ENABLED:
             await update.message.reply_text(
                 "📍 Got your live location. I'll keep an eye on traffic around you "
                 "and give you a heads-up if anything pops up nearby."
+                + (" Use /crime to check recent crime reports." if CRIME_ALERTS else "")
             )
         else:
             await update.message.reply_text(
-                "📍 Got it. Use /traffic or /incidents to check what's around there."
+                "📍 Got it. Use " + " or ".join(cmds)
+                + " to check what's around there."
             )
 
 
@@ -14756,6 +14775,96 @@ async def traffic_poll_job(context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             log.warning("[traffic] alert send failed for %s: %s", chat_id, e)
+
+
+# --- Seattle Crime Alerts ---
+
+def _in_seattle(lat: float, lon: float) -> bool:
+    b = _SEATTLE_BOUNDS
+    return b["lat_min"] <= lat <= b["lat_max"] and b["lon_min"] <= lon <= b["lon_max"]
+
+
+def _fetch_seattle_crime(lat: float, lon: float) -> list:
+    radius_m = CRIME_RADIUS_MILES * 1609.34
+    cutoff = datetime.fromtimestamp(
+        time.time() - CRIME_DAYS * 86400
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    params = {
+        "$where": (
+            f"within_circle(latitude, longitude, {lat}, {lon}, {radius_m}) "
+            f"AND offense_start_datetime > '{cutoff}'"
+        ),
+        "$order": "offense_start_datetime DESC",
+        "$limit": str(CRIME_LIMIT),
+    }
+    try:
+        r = _get_session().get(_SEATTLE_CRIME_URL, params=params, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning("[crime] Seattle crime fetch failed: %s",
+                    _classify_fetch_error_by_type(e))
+        return []
+
+
+def _format_crime(c: dict) -> str:
+    offense = c.get("offense", "Unknown")
+    parent = c.get("offense_parent_group", "")
+    block = c.get("_100_block_address", "")
+    dt_raw = c.get("offense_start_datetime", "")
+    against = c.get("crime_against_category", "")
+    icon = {"PERSON": "\U0001f534", "PROPERTY": "\U0001f7e0",
+            "SOCIETY": "\U0001f7e1"}.get(against, "⚠️")
+    dt_str = ""
+    if dt_raw:
+        try:
+            dt = datetime.fromisoformat(dt_raw.replace("Z", "+00:00"))
+            dt_str = dt.strftime("%b %d %I:%M %p")
+        except (ValueError, TypeError):
+            dt_str = dt_raw[:16]
+    line = f"{icon} {offense}"
+    if parent and parent.lower() != offense.lower():
+        line += f" ({parent})"
+    if block:
+        line += f"\n   \U0001f4cd {block}"
+    if dt_str:
+        line += f"\n   \U0001f553 {dt_str}"
+    return line
+
+
+async def crime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CRIME_ALERTS:
+        await update.message.reply_text(_feature_off_reason(
+            "crime", "Crime alerts aren't set up.",
+            "Crime alerts are"))
+        return
+    chat_id = update.effective_chat.id
+    loc = user_location.get(chat_id)
+    if not loc:
+        await update.message.reply_text(
+            "Share your location first so I can check what's around you.")
+        return
+    lat, lon = loc["lat"], loc["lon"]
+    if not _in_seattle(lat, lon):
+        await update.message.reply_text(
+            "Crime data is only available for Seattle right now. "
+            "Your location doesn't appear to be in the coverage area.")
+        return
+    await update.message.reply_text("\U0001f50d Checking recent reports nearby...")
+    reports = await asyncio.to_thread(_fetch_seattle_crime, lat, lon)
+    if not reports:
+        await update.message.reply_text(
+            f"\U0001f6e1️ No reported incidents within {CRIME_RADIUS_MILES:.1f} mi "
+            f"in the last {CRIME_DAYS} days.")
+        return
+    lines = [_format_crime(c) for c in reports]
+    header = (f"\U0001f6a8 Recent reports within {CRIME_RADIUS_MILES:.1f} mi "
+              f"(last {CRIME_DAYS} days)")
+    footer = f"\n\nSource: Seattle Police Dept via data.seattle.gov"
+    text = f"{header}\n\n" + "\n\n".join(lines) + footer
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    await update.message.reply_text(text)
 
 
 # --- Self-audit ---
@@ -15833,6 +15942,7 @@ _MAPS_COMMANDS = [
     BotCommand("nearby", "Places near your shared location"),
     BotCommand("place", "Look up an address or business"),
     BotCommand("food", "Restaurants near your shared location"),
+    BotCommand("crime", "Recent crime reports near your location (Seattle)"),
 ]
 
 # Traffic handlers register only when WSDOT_API_KEY is set, so the menu mirrors that.
@@ -16112,6 +16222,7 @@ def main():
     if WSDOT_API_KEY:
         app.add_handler(CommandHandler("traffic", traffic_cmd))
         app.add_handler(CommandHandler("incidents", incidents_cmd))
+    app.add_handler(CommandHandler("crime", crime_cmd))
     # Registered whenever credentials exist (even if the kill switch is off or the library
     # is missing) so the commands can explain WHY they're inert — an unregistered command
     # gives no response at all, which is undiagnosable from the user side.

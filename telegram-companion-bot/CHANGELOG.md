@@ -7,6 +7,21 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-21.1 — /crime command: nearby crime reports from Seattle PD open data
+
+New feature: `/crime` shows recent crime reports near the user's shared location, pulled
+from Seattle PD's public dataset on data.seattle.gov (Socrata API, no API key required).
+Coverage is City of Seattle only — locations outside the bounding box get a clear message.
+
+Configurable via env: `CRIME_ALERTS` (kill switch, default ON), `CRIME_RADIUS_MILES`
+(default 0.5), `CRIME_DAYS` (lookback window, default 7), `CRIME_LIMIT` (max results,
+default 10). Registered in `/features` as `crime` for runtime toggle. Reports show
+offense type, category, approximate address, and timestamp, color-coded by
+crime-against category (person/property/society).
+
+The location share acknowledgment now mentions `/crime` alongside `/traffic` and
+`/incidents` when crime alerts are enabled.
+
 ## v2026-08-15.1 — mes_example reached the model raw; the 2026-07-20 Jules fix was one card, not the code path
 
 **Root cause: `load_character` dumped `mes_example` verbatim, `<START>` markers and
