@@ -9872,7 +9872,11 @@ class TestHandleLocationNamesThePlace:
     def _share(self, lat, lon, *, live=False, initial=True):
         loc = SimpleNamespace(latitude=lat, longitude=lon,
                               live_period=3600 if live else None)
-        msg = SimpleNamespace(location=loc)
+
+        async def _noop_reply(text):
+            pass
+
+        msg = SimpleNamespace(location=loc, reply_text=_noop_reply)
         update = SimpleNamespace(
             effective_chat=SimpleNamespace(id=self.CHAT),
             message=msg if initial else None,
@@ -9900,9 +9904,14 @@ class TestHandleLocationNamesThePlace:
 
         monkeypatch.setattr(bot, "_tomtom_reverse_geocode", _slow)
         loc = SimpleNamespace(latitude=47.6685, longitude=-122.3830, live_period=None)
+
+        async def _noop_reply(text):
+            pass
+
         update = SimpleNamespace(
             effective_chat=SimpleNamespace(id=self.CHAT),
-            message=SimpleNamespace(location=loc), edited_message=None)
+            message=SimpleNamespace(location=loc, reply_text=_noop_reply),
+            edited_message=None)
 
         async def _go():
             t0 = time.monotonic()

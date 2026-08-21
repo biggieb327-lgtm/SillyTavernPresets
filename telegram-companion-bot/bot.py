@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-21.2"
+BOT_VERSION = "2026-08-21.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -14593,21 +14593,24 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if LOCATION_PLACE and TOMTOM_ENABLED and update.message:
         asyncio.create_task(_name_the_place(chat_id, entry["ts"], loc.latitude, loc.longitude))
 
-    if update.message and (TRAFFIC_ENABLED or CRIME_ALERTS):
+    if update.message and (TRAFFIC_ENABLED or TOMTOM_ENABLED or CRIME_ALERTS):
         cmds = []
         if TRAFFIC_ENABLED:
             cmds += ["/traffic", "/incidents"]
+        if TOMTOM_ENABLED:
+            cmds += ["/nearby", "/food"]
         if CRIME_ALERTS:
             cmds += ["/crime", "/dispatch"]
+        extra = " You can also use " + ", ".join(cmds[1:]) + "." if len(cmds) > 1 else ""
         if loc.live_period and TRAFFIC_ENABLED:
             await update.message.reply_text(
                 "📍 Got your live location. I'll keep an eye on traffic around you "
                 "and give you a heads-up if anything pops up nearby."
-                + (" Use /crime or /dispatch for nearby reports." if CRIME_ALERTS else "")
+                + extra
             )
         else:
             await update.message.reply_text(
-                "📍 Got it. Use " + " or ".join(cmds)
+                "📍 Got it. Use " + ", ".join(cmds)
                 + " to check what's around there."
             )
 

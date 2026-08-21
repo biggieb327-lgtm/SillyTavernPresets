@@ -7,6 +7,13 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-21.3 — location acknowledgment lists all location-based commands
+
+The message shown after sharing a location only mentioned `/traffic`, `/incidents`,
+`/crime`, and `/dispatch`. Missing were `/nearby` and `/food` (TomTom-gated). Now every
+enabled location-based command appears in the acknowledgment, and the live-location
+variant lists the commands not already covered by its traffic prose.
+
 ## v2026-08-21.2 — /dispatch command: 911 dispatch calls near you (Seattle)
 
 New feature: `/dispatch` shows recent 911 dispatch calls near the user's shared location,
