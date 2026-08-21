@@ -878,6 +878,66 @@ else
   bad "handlers-exercised" "$exercised"
 fi
 
+# --- mycelium-format --------------------------------------------------------------------
+# session-audit.sh tells each new session how many mycelium messages are waiting, by
+# grepping the entry header. A drifted header — renamed status, trailing space, missing
+# field — does not error. It drops out of the count, and the next session is told nothing
+# is waiting. That is the C13 shape: a reading that cannot report a problem is not a
+# reading, and this one fails toward silence.
+#
+# The check parses every header independently and compares against the hook's own grep.
+# Disagreement fails, whichever side drifted — the file's format or the hook that reads it.
+myc=.claude/memory/mycelium.md
+if [ ! -f "$myc" ]; then
+  bad "mycelium-format" "$myc missing — session-audit.sh will silently stop reporting cross-session messages"
+else
+  # The hook's counter, character-for-character as session-audit.sh runs it.
+  hook_open=$(grep '^### 20' "$myc" 2>/dev/null | grep -c '| status: open$' || echo 0)
+  myc_err=$(python3 - "$myc" "$hook_open" <<'PYEOF'
+import re, sys
+path, hook_open = sys.argv[1], int(sys.argv[2])
+HEADER = re.compile(
+    r"^### 20\d{2}-\d{2}-\d{2} \| from: .+ \| to: .+ \| status: (open|ack|done)$")
+bad_headers, statuses, in_fence = [], [], False
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    # C14: a scanner cannot tell "this file does the bad thing" from "this file explains
+    # it". The Entry format section documents the header shape inside a fence, and that
+    # example is not an entry. Caught on this check's first run.
+    if line.startswith("```"):
+        in_fence = not in_fence
+        continue
+    if in_fence:
+        continue
+    # Outside a fence, every header line starts "### " — including a malformed one, which
+    # is the case that must not pass silently.
+    if not line.startswith("### "):
+        continue
+    m = HEADER.match(line)
+    if m:
+        statuses.append(m.group(1))
+    else:
+        bad_headers.append(f"line {n}: {line[:90]}")
+if bad_headers:
+    print("entry header(s) session-audit.sh cannot count: " + "; ".join(bad_headers) +
+          " — required shape: '### YYYY-MM-DD | from: X | to: Y | status: open|ack|done'")
+elif not statuses:
+    print("parsed 0 entries out of the file — the parser broke, which is exactly the "
+          "silent-green shape this check exists for")
+else:
+    parsed_open = statuses.count("open")
+    if parsed_open != hook_open:
+        print(f"the hook counts {hook_open} open entr(ies), an independent parse finds "
+              f"{parsed_open} — session-audit.sh and {path} disagree about the format")
+PYEOF
+)
+  if [ -z "$myc_err" ]; then
+    ok "mycelium-format: every entry header is countable, and the hook's count matches an independent parse"
+  else
+    bad "mycelium-format" "$myc_err"
+  fi
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

@@ -12,6 +12,12 @@ not standing rules (CLAUDE.md). **Messages.**
 - Partial work on a branch, with where you left off and what's next
 - Fleet state worth watching — not an incident, just a heads-up
 - A question you couldn't answer that the next session might
+- **Disagreement with a standing rule.** A rule that costs more than it saves is worth
+  saying so about, and this is the only file where saying so outlives the session that
+  noticed. Name the rule in the `to:` field so a later session hitting the same friction
+  lands on your entry instead of re-deriving the objection. Two independent entries
+  against one rule is a signal; one is an opinion. Neither is authority to change the
+  rule — that is the owner's call, and the entry is how it reaches them.
 
 ## What does NOT belong here
 
@@ -30,11 +36,57 @@ promote it: CLAUDE.md for rules, Notion for findings, a skill for procedures.
    the entries themselves are here.
 2. **Write an entry when you learn something the next session needs.** Keep it short —
    a sentence or two, not a report. The value is the signal, not the detail.
-3. **Acknowledge entries you've read.** Change `open` → `ack` (noted, no action needed)
-   or `done` (acted on — say how in a one-liner). An entry sitting `open` across three
-   sessions is either stale or important; figure out which.
-4. **Prune during context-librarian passes.** `done` older than 14 days can go. `ack`
-   older than 30 days can go. `open` entries don't age out — they wait.
+3. **Tag load-bearing claims** with the operational log's evidence tags — `[observed]`
+   `[code]` `[external]` `[decision]` `[hypothesis]`, defined at the top of
+   `operational-log.md`. A message is a claim by a session nobody can interrogate. Left
+   untagged, "the deploy path changed" and "I think the deploy path changed" read
+   identically to the session that acts on them.
+4. **Never rewrite an entry's body — reply underneath it.** The status field in the
+   header is the only part of a written entry that may change. Everything else appends:
+   corrections, disagreement, "tried this, it worked." See *Why replies, not edits*.
+5. **Acknowledge entries you've read.** `open` → `ack` (noted, no action needed) or
+   `done` (acted on — say how in a reply). An entry sitting `open` across three sessions
+   is either stale or important; figure out which.
+6. **Prune during context-librarian passes.** `done` older than 14 days can go. `ack`
+   older than 30 days can go. `open` entries don't age out — they wait. A dead end may
+   only be pruned once it has a permanent home (below).
+
+## Why replies, not edits
+
+An entry rewritten to its conclusion keeps the verdict and loses the argument. That is
+survivable for one entry and expensive across a file: the pattern *in* the disagreements
+is invisible once only the outcomes remain, and the second session to hit a problem is
+the one that turns a complaint into evidence.
+
+This costs one habit — append instead of overwrite — and buys the thing no single entry
+can show. It is the same reason `AUDIT-2026-07-10.md` keeps its rejected claims instead
+of deleting them: the record of what was ruled out is worth as much as the record of
+what was fixed.
+
+Format for a reply, indented under the entry it answers:
+
+```
+> 2026-08-21 (from: <context>): what you found when you acted on this.
+```
+
+Replies are blockquotes, so they never collide with the `### ` entry headers the
+startup count reads.
+
+## Dead ends need a permanent home before the entry is pruned
+
+A dead end is the entry class with the worst pruning economics: it is written once,
+acked, deleted at 14 days, and then re-attempted by a session that never saw it. The
+cost lands months later on someone who has no way to know the road was already walked.
+
+So a dead end does not rely on this file for its permanence. When you write one, also
+write it into **the doc nearest to where the re-attempt would start** — the README beside
+the code, the skill that covers the procedure, the `.env.example` line for the setting.
+The mycelium entry points at that home. Then pruning is safe, because the entry was
+never the only copy.
+
+The model already in the repo: `idea-scraper-actor/README.md` records two abandoned
+approaches to Reddit access with the reasons they failed, sitting exactly where the next
+person to try Reddit access will read it.
 
 ## Entry format
 
@@ -47,8 +99,13 @@ should do (or not do) with it.
 - **from** — branch name, task description, or just the date. Enough to find the
   session's work in the commit history if needed.
 - **to** — who it's for. `—` means anyone. A topic like `bot.py work` or
-  `character review` means the next session touching that area.
+  `character review` means the next session touching that area. A rule (`CLAUDE.md
+  §Vocabulary`, `constraints C13`) means the entry is about that rule.
 - **status** — `open` (unread), `ack` (read, no action), `done` (acted on).
+
+Header shape is load-bearing: `session-audit.sh` counts open entries by matching it, and
+a drifted header drops out of that count silently rather than erroring. The
+`mycelium-format` eval fails when a header would not be counted.
 
 Newest first, same as the operational log.
 
@@ -57,8 +114,24 @@ Newest first, same as the operational log.
 ## Entries
 
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: — | status: open
+The startup context this repo hands each new session was 9,921 characters, and 7,768 of
+them were one CLOSED incident — `session-audit.sh` printed the operational log's whole
+newest row rather than a pointer to it. `[observed]` measured by piping the hook's own
+output through `wc -c`. Now truncated to a headline. `[decision]` the startup hook is an
+entry point, not the archive; anything a session needs in full it can Read. Worth
+re-measuring if the hook grows: the same drift is easy to reintroduce one echo at a time.
+
+### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: — | status: done
 r/claudexplorers post describes a system of 13 AI "seats" with file-based continuity
 (journals, a shared-folder post office, grief protocols for session death). Architecture
 is strikingly parallel to this repo's .claude/ infrastructure. Owner asked whether we do
 the same thing — yes, in mechanism, different in purpose. This file is one outcome of
 that comparison: the poster's "mycelium" pattern, made concrete here.
+
+> 2026-08-21 (from: claude/reddit-post-review-3oe3rx): Acted on again after the owner
+> shared the comment thread. Three ideas from the replies earned changes — append-only
+> bodies with replies instead of edits, dead ends needing a permanent home before
+> pruning, and a truncated startup context. A fourth (evidence tags on entries) came
+> from this repo's own operational log rather than the thread. The commenters' own
+> terms are deliberately not adopted; CLAUDE.md's vocabulary rule applies to borrowed
+> coinages as much as invented ones.

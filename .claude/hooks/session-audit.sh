@@ -5,10 +5,20 @@ cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no-git")
 dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-last_log=$(grep -m1 '^| 20' .claude/memory/operational-log.md 2>/dev/null || echo "none")
+# The startup context is an entry point, not the archive. Printing the WHOLE newest row
+# put 7,725 characters of one closed 2026-08-10 incident into every session — 78% of this
+# hook's entire output — to deliver a pointer that needs a date and a headline. The row is
+# one Read away; what belongs here is the fact that it exists. Re-measure with
+# `bash .claude/hooks/session-audit.sh | wc -c` if this hook grows: the same drift comes
+# back one echo at a time.
+last_log=$(grep -m1 '^| 20' .claude/memory/operational-log.md 2>/dev/null | cut -c1-180)
 
 echo "[session-audit] branch=${branch} uncommitted_files=${dirty}"
-echo "[session-audit] last operational-log entry: ${last_log}"
+if [ -n "${last_log}" ]; then
+  echo "[session-audit] last operational-log entry: ${last_log}… (truncated — full row in .claude/memory/operational-log.md)"
+else
+  echo "[session-audit] last operational-log entry: none"
+fi
 
 # Constraints are only worth keeping if they are read BEFORE the same mistake recurs.
 # Surface the repeat offenders (seen: 2+) by name — those are the ones prose has
