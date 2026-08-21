@@ -50,9 +50,15 @@ if [ "${branch}" != "main" ] && git rev-parse --verify -q origin/main >/dev/null
     fi
   fi
 fi
-# How long since the last recorded session-debrief, in commits of real work. Surfaced HERE
-# because SessionStart is the only moment it is actionable — by the end of a session the
-# context that would have been harvested is already being compacted away.
+# How long since the last recorded session-debrief, in commits of real work.
+#
+# This line used to end with "run debrief-check.sh when this session reaches a stopping
+# point", on the reasoning that SessionStart was the only actionable moment. 170 commits
+# and one ledger row later, that reasoning is falsified: a request delivered at the START
+# about something to do at the END is gone by the time it applies. The ASK moved to
+# .claude/hooks/debrief-nudge.sh (Stop), which fires once per session at a clean tree.
+# The NUMBER stays here, where it is useful as context for the session about to start.
+#
 # Reports the number and does not judge it: one data point is not a distribution, and
 # inventing a "debrief every N commits" threshold from it is the estimate-as-fact trap
 # (C8). Add the threshold once .claude/memory/debrief-log.md has enough rows to show one.
@@ -62,7 +68,7 @@ if [ -f .claude/memory/debrief-log.md ]; then
   ldate=$(printf '%s' "$last" | awk '{print $2}')
   if [ -n "${lsha:-}" ] && git cat-file -e "${lsha}^{commit}" 2>/dev/null; then
     since=$(git rev-list --count "${lsha}..HEAD" 2>/dev/null || echo '?')
-    echo "[session-audit] last session-debrief: ${ldate} (${lsha}), ${since} commit(s) ago — \`bash .claude/tools/debrief-check.sh\` when this session reaches a stopping point"
+    echo "[session-audit] last session-debrief: ${ldate} (${lsha}), ${since} commit(s) ago (debrief-nudge.sh will ask at this session's stopping point)"
   fi
 fi
 # Mycelium — open messages from previous sessions. The count tells the session to

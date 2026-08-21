@@ -878,6 +878,54 @@ else
   bad "handlers-exercised" "$exercised"
 fi
 
+# --- hooks-wired --------------------------------------------------------------------------
+# A hook file that is not registered in settings.json is inert, and inert looks exactly like
+# working: the file is present, readable, obviously intentional, and never runs. Nothing in
+# the repo would say so. The same shape has already been paid for twice at a different
+# layer — three Routine checks silently un-runnable (2026-07-29), eleven agent contracts
+# gone dormant (2026-07-27) — both found by someone happening to look.
+#
+# Checks both directions, since either is a real defect:
+#   a hook on disk that no event fires  ->  a guard everyone believes is on
+#   a settings.json entry with no file  ->  a Stop chain that errors every turn
+#
+# Only *.sh count as entry points. The .py siblings (claim_guard.py, handoff_guard.py,
+# host_guard.py) are called BY their wrappers and are correctly absent from settings.
+if ! hooks_wired=$(python3 - 2>&1 <<'PYEOF'
+import json, re
+from pathlib import Path
+settings = json.loads(Path(".claude/settings.json").read_text(encoding="utf-8"))
+registered = set()
+for event, matchers in (settings.get("hooks") or {}).items():
+    for m in matchers:
+        for h in m.get("hooks", []):
+            for name in re.findall(r'([A-Za-z0-9_.-]+\.(?:sh|py))', h.get("command", "")):
+                registered.add(name)
+on_disk = {p.name for p in Path(".claude/hooks").glob("*.sh")}
+problems = []
+orphaned = sorted(on_disk - registered)
+if orphaned:
+    problems.append("hook file(s) on disk that settings.json never fires: " +
+                    ", ".join(orphaned) + " — wire it into the right event, or delete it; "
+                    "an unregistered hook is a guard everyone believes is on")
+missing = sorted(n for n in registered
+                 if n.endswith((".sh", ".py")) and not (Path(".claude/hooks") / n).exists())
+if missing:
+    problems.append("settings.json fires hook(s) that do not exist: " + ", ".join(missing))
+if not on_disk:
+    problems.append("found 0 hook files — the scan looked in the wrong place, which is not "
+                    "the same as a clean result")
+print("; ".join(problems))
+PYEOF
+); then
+  hooks_wired="the parser itself exited non-zero: ${hooks_wired:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$hooks_wired" ]; then
+  ok "hooks-wired: every .claude/hooks/*.sh is registered in settings.json, and every registered hook exists"
+else
+  bad "hooks-wired" "$hooks_wired"
+fi
+
 # --- oplog-rows-are-index ---------------------------------------------------------------
 # operational-log.md says of itself: "Format is fixed... nothing else. No narration, no
 # diary... this file is the index of what the system learned." It had stopped being that.
