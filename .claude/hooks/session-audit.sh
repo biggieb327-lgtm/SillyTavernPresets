@@ -20,17 +20,66 @@ else
   echo "[session-audit] last operational-log entry: none"
 fi
 
-# Constraints are only worth keeping if they are read BEFORE the same mistake recurs.
-# Surface the repeat offenders (seen: 2+) by name — those are the ones prose has
-# already failed to prevent at least once.
+# Constraints are only worth keeping if they are read BEFORE the same mistake recurs — but
+# WHICH ones are worth 1,100 characters of every session's startup context is a different
+# question, and the old answer was wrong.
+#
+# This line used to name every constraint at `seen: 2+`. That grew to 15 of 23, so a filter
+# admitting two-thirds of its corpus had stopped filtering — and worse, it was selecting the
+# wrong end. All 15 already had a mechanism; a hook or eval catches those whether or not the
+# session read the name. The constraints where reading is the ONLY defence are the
+# prose-only ones, and every one of them sat below the seen: 2 line, invisible.
+#
+# The evidence that the old line did not work is the session that changed it: it named C13,
+# C14, C18 and C3 at startup, and that session then violated C13 three times and C14 twice.
+# What actually fired was machinery — shell-semantics-guard, the delivery gate, a new eval.
+#
+# So: name the unguarded ones, count the rest. ~1,100 characters -> ~200, and a constraint
+# now stays on this line until it earns a mechanism instead of being announced forever after
+# it already has one. `constraints-mechanism-marked` keeps the parse honest; without it a
+# reworded note would silently drop a constraint off this line, which is the failure this
+# line exists to prevent.
 if [ -f .claude/memory/constraints.md ]; then
-  # NOT `|| echo 0` — see the note in .claude/tools/debrief-check.sh. `grep -c` prints
-  # "0" AND exits 1 on no matches, so the fallback stacks a second line onto real output.
-  total=$(grep -c '^### C' .claude/memory/constraints.md 2>/dev/null); total=${total:-0}
-  repeats=$(grep -B1 '^\*\*seen: [2-9]' .claude/memory/constraints.md 2>/dev/null \
-            | grep '^### C' | sed 's/^### //' | paste -sd '|' - | sed 's/|/ · /g')
-  echo "[session-audit] constraints (.claude/memory/constraints.md): ${total} active"
-  [ -n "${repeats}" ] && echo "[session-audit] REPEAT MISTAKES — read these first: ${repeats}"
+  # One python pass rather than a grep pipeline: the two markers are mutually exclusive and
+  # line-anchored, and a substring test gets it wrong — `"graduat" in body` matches
+  # "**Not graduated.**" and reads an unguarded constraint as guarded.
+  cline=$(python3 - 2>/dev/null <<'PYEOF'
+import re
+from pathlib import Path
+blocks = re.split(r'\n### (C\d+) — ',
+                  Path(".claude/memory/constraints.md").read_text(encoding="utf-8"))
+GUARD, NOGUARD = re.compile(r'^\*\*Graduated', re.M), re.compile(r'^\*\*Not graduated', re.M)
+bare, overdue, total = [], [], 0
+for i in range(1, len(blocks), 2):
+    cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
+    total += 1
+    if GUARD.search(body):
+        continue
+    seen = re.search(r'\*\*seen: (\d+)\*\*', body)
+    n = int(seen.group(1)) if seen else 1
+    # Rule 4: at seen 2 a constraint owes a mechanism. Prose-only AND repeating is the most
+    # actionable state in the file, so it gets its own line rather than hiding in the list.
+    (overdue if n >= 2 else bare).append(f"{cid}" + (f" (seen {n})" if n >= 2 else ""))
+guarded = total - len(bare) - len(overdue)
+if total:
+    print(f"{total} active, {guarded} guarded by a mechanism.")
+    if bare:
+        print("PROSE ONLY — nothing mechanical will catch these, reading them is the whole "
+              "defence: " + " · ".join(bare))
+    if overdue:
+        print("OVERDUE A MECHANISM (prose-only and already repeating — constraints.md rule "
+              "4): " + " · ".join(overdue))
+    if not bare and not overdue:
+        print("Every constraint is mechanically guarded — nothing here needs reading first.")
+PYEOF
+)
+  if [ -n "${cline}" ]; then
+    printf '[session-audit] constraints (.claude/memory/constraints.md): %s\n' "$(printf '%s' "${cline}" | head -1)"
+    printf '%s\n' "${cline}" | tail -n +2 | sed 's/^/[session-audit] /'
+  else
+    # Never go quiet: an empty result means the parse broke, not that there is nothing to say.
+    echo "[session-audit] constraints: could not read .claude/memory/constraints.md — read it by hand"
+  fi
 fi
 # C22: working off a stale branch is invisible until the push is rejected — a merge-base
 # EXISTING is not the same as it being recent enough to trust. One session spent four

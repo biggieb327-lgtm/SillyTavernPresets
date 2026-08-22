@@ -580,6 +580,31 @@ if re.search(r"[Pp]reloaded always", router.read_text(encoding="utf-8")):
         "skill-router claims something is 'preloaded always' — nothing is; that claim "
         "suppressed loading of artifact-first-delivery and repo-validation-gate")
 
+# Instance (3) of the 2026-07-30 audit, the one left unmechanised: CLAUDE.md carried a
+# divergent 8-row copy of the routing table. It was deleted and replaced with a prose rule
+# — "Do not re-add a 'quick reference' copy of that table here" — which the same paragraph
+# admits "no check catches". This is that check.
+#
+# The discriminator is the FIRST cell, not the presence of skill names. CLAUDE.md
+# legitimately has a table (the sanctioned-shorthand vocabulary table) whose cells cite
+# owning skills, so "no skill names in a CLAUDE.md table" would flag it immediately — the
+# C14 trap this file has hit twice. A routing table is keyed BY skill; the vocabulary table
+# is keyed by term ("the fleet", "break-test"). Measured 2026-08-21: 18 table rows, zero
+# first-cell collisions with the 24 skill directories.
+claude_md = Path("CLAUDE.md")
+if claude_md.is_file():
+    for n, line in enumerate(claude_md.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if not s.startswith("|") or set(s) <= set("|- :"):
+            continue
+        first = re.sub(r"[`*_]", "", s.strip("|").split("|")[0]).strip()
+        if first in on_disk:
+            problems.append(
+                f"CLAUDE.md:{n} has a table row keyed by the skill `{first}` — that is a "
+                f"routing table, and the last one drifted, omitted seven skills and "
+                f"misrouted a session (2026-07-30). skill-router is the index; CLAUDE.md "
+                f"points at it")
+
 print(" | ".join(problems))
 PYEOF
 ); then
@@ -946,6 +971,56 @@ if [ -z "$hooks_wired" ]; then
   ok "hooks-wired: every .claude/hooks/*.sh is registered in settings.json, and every registered hook exists"
 else
   bad "hooks-wired" "$hooks_wired"
+fi
+
+# --- constraints-mechanism-marked ----------------------------------------------------------
+# session-audit.sh selects what it shows at startup by reading this file's graduation
+# markers. That makes a prose file load-bearing for a hook, and prose drifts: reword one
+# note and a constraint silently changes category. The dangerous direction is a prose-only
+# constraint reading as guarded, because it then vanishes from the one line that surfaces it
+# — a filter that quietly selects nothing, which is C13's shape at the startup layer.
+#
+# Written after the loose version of this parse got it wrong: `"graduat" in body` matches
+# **Not graduated.** and counted C9/C10/C11/C20 as mechanised when they say the opposite.
+# The rule is line-anchored and the two markers are mutually exclusive.
+#
+# Sibling of `claude-md-no-routing-table` in skill-index-integrity: both guard a prose file
+# that something reads to decide what a session is handed, where drift has no symptom.
+if ! cmark=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+txt = Path(".claude/memory/constraints.md").read_text(encoding="utf-8")
+blocks = re.split(r'\n### (C\d+) — ', txt)
+GUARD   = re.compile(r'^\*\*Graduated', re.M)
+NOGUARD = re.compile(r'^\*\*Not graduated', re.M)
+unmarked, ambiguous, total = [], [], 0
+for i in range(1, len(blocks), 2):
+    cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
+    total += 1
+    g, n = bool(GUARD.search(body)), bool(NOGUARD.search(body))
+    if g and n:      ambiguous.append(cid)
+    elif not g and not n: unmarked.append(cid)
+problems = []
+if total == 0:
+    problems.append("parsed 0 constraints — the split pattern broke, and session-audit.sh "
+                    "would show an empty list rather than fail")
+if unmarked:
+    problems.append("constraint(s) with neither marker: " + ", ".join(unmarked) +
+                    " — every constraint needs a line starting `**Graduated` (naming the "
+                    "hook/eval/scanner) or `**Not graduated` (saying why nothing mechanical "
+                    "would see it); session-audit.sh cannot categorise an unmarked one")
+if ambiguous:
+    problems.append("constraint(s) with BOTH markers: " + ", ".join(ambiguous) +
+                    " — they are mutually exclusive; the startup line would report it twice")
+print("; ".join(problems))
+PYEOF
+); then
+  cmark="the parser itself exited non-zero: ${cmark:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$cmark" ]; then
+  ok "constraints-mechanism-marked: every constraint states whether a mechanism guards it"
+else
+  bad "constraints-mechanism-marked" "$cmark"
 fi
 
 # --- eval-parsers-fail-loudly -------------------------------------------------------------

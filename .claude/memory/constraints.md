@@ -232,6 +232,11 @@ string contains none of those words. The scanner found it immediately.
 **Constraint:** grep for the *mechanism* (the shape of the defect), not the words you
 remember writing. If a mechanical scan is possible, write it instead of grepping.
 
+**Not graduated.** The failure is a search that returned too little, which is byte-identical
+to a search over a clean tree — nothing can flag an absence it cannot distinguish from a
+genuine zero. This constraint's real output is the `sweep.py` scanners it keeps producing;
+each of those is mechanical, the habit of writing them is not.
+
 ### C5 — Label a theory as a theory until evidence arrives
 **seen: 1** (2026-07-26)
 Asserted that `watchdog.sh` was running from cron and that this explained bonnie's
@@ -241,6 +246,11 @@ question irrelevant. The wrong frame was stated as fact in the middle of an inci
 **Constraint:** while diagnosing, mark unconfirmed causes as unconfirmed, and say what
 evidence would settle them. Confidence follows evidence, not fluency.
 
+**Not graduated.** No hook can read the confidence of a sentence, and the damage is done in
+live diagnosis rather than in a committed file. The operational log's `[hypothesis]` tag is
+the closest thing to a mechanism and it is a writing convention, not a check — it governs
+rows written *after* the incident, not the claim made during it.
+
 ### C6 — A migration invalidates assertions, not just docs
 **seen: 1** (2026-07-26)
 After the VPS cutover, a *test* still asserted phone-era behaviour as correct
@@ -249,6 +259,14 @@ SIGTERM"), and an operator-facing alert still pointed at `bot.log` and the Andro
 phantom killer. Three stale assumptions in one function.
 **Constraint:** after any platform change, sweep tests and user-facing strings, not
 only documentation. An assertion is a claim about the world too.
+
+**Not graduated**, with a caveat worth stating rather than hiding: the *sweep* is
+mechanizable per platform, and phone-era vocabulary is already partly covered by existing
+scanners. What is not observable from the repo is the **trigger** — "a platform change just
+happened" — so a standing check would either run always (and flag deliberate historical
+references) or never fire at the moment it matters. Revisit if a second platform change
+arrives; the right mechanism is probably a one-off sweep written as part of that migration,
+not a permanent eval.
 
 ### C7 — Anchor edits on content, not position
 **seen: 5** (2026-07-26, 2026-07-27, 2026-08-02 ×3) — *promoted from the Minor log by

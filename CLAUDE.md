@@ -122,9 +122,11 @@ or gets said in plain words.
 **`.claude/skills/skill-router/SKILL.md` is the routing table — read it, don't guess.**
 
 **Do not re-add a "quick reference" copy of that table here.** The last one drifted,
-omitted seven skills, and misrouted a session (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`);
-no check catches a new one. A one-line description of every skill already reaches you for
-free and cannot go stale.
+omitted seven skills, and misrouted a session (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`).
+A one-line description of every skill already reaches you for free and cannot go stale.
+**`skill-index-integrity` now enforces this** (2026-08-21): a table row here keyed by a
+skill name fails the eval. The vocabulary table below is keyed by *term*, which is what
+keeps it legal — that difference is the check, so don't key a table here by skill.
 
 Two composition facts the per-skill descriptions can't tell you:
 
