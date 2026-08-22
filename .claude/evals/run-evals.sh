@@ -1288,6 +1288,20 @@ PYEOF
   fi
 fi
 
+# --- fleet-config-drift -----------------------------------------------------------------
+# All 7 instances share one bot.py but differ in context files, cards, and preset layers.
+# Drift accumulates silently — a new context file added to 4 instances but not the other
+# 3, or a card key present on 2 instances but not the rest. fleet-config-check.py catches
+# this by majority rule: if 4+ instances have something, the ones that don't are flagged.
+#
+# The checker exits 1 when issues exist. The eval captures its output and reports it.
+if ! fcd=$(python3 .claude/tools/fleet-config-check.py 2>&1); then
+  fcd_msg=$(echo "$fcd" | grep -v '^fleet-config-check:')
+  bad "fleet-config-drift" "$fcd_msg"
+else
+  ok "fleet-config-drift: all 7 instances consistent (file presence, card schema, preset layers)"
+fi
+
 echo
 if [ "$skipped" -gt 0 ]; then
   echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"

@@ -92,6 +92,18 @@
           },
           {
             "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/theory-guard.sh\"",
+            "timeout": 10,
+            "statusMessage": "Theory guard (C5)"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/prose-constraint-check.sh\"",
+            "timeout": 10,
+            "statusMessage": "Prose constraint check"
+          },
+          {
+            "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"

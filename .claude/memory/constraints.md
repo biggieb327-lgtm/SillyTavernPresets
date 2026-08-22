@@ -261,18 +261,15 @@ to the owner, in the assertive voice. **Reading source tells you what code says;
 running it tells you what it produces.** A behavioural claim about a pure function costs one
 command to test.
 
-**Not graduated**, and the near-miss is worth recording: `claim-guard.sh` DID fire on this
-sentence, but by its own stated scope it catches "two artifacts claimed identical on
-metadata rather than a hash" — not this. It matched on vocabulary overlap (dimensions, "the
-shorter vector") and was right by accident. That is a lucky catch, not coverage, so it does
-not count as a mechanism here; treating it as one would drop this constraint off the
-startup line it belongs on. No hook can tell an asserted behavioural claim from a described
-one.
+Near-miss worth recording: `claim-guard.sh` DID fire on the second occurrence, but by its
+own stated scope it catches "two artifacts claimed identical on metadata rather than a hash"
+— not this. It matched on vocabulary overlap and was right by accident.
 
-**Not graduated.** No hook can read the confidence of a sentence, and the damage is done in
-live diagnosis rather than in a committed file. The operational log's `[hypothesis]` tag is
-the closest thing to a mechanism and it is a writing convention, not a check — it governs
-rows written *after* the incident, not the claim made during it.
+**Graduated** to `.claude/hooks/theory-guard.sh` + `.claude/hooks/theory_guard.py` — a Stop
+hook that catches one slice: asserting what a named function returns/produces/causes without
+hedging. The general case (diagnosing an incident and stating a cause as fact) still has no
+mechanical signature, same as C8's uncovered half. Escape hatch: `# theory-ok` or any hedge
+word ("probably", "I think", "[hypothesis]").
 
 ### C6 — A migration invalidates assertions, not just docs
 **seen: 1** (2026-07-26)
