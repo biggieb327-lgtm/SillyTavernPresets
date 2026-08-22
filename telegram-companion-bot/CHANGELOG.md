@@ -1,3 +1,56 @@
+## v2026-08-21.4 — Embedding failures: retried, counted, and repaired instead of permanent
+
+**Root cause: an embedding failure was both invisible and, on the write path,
+permanent.** `_embed_text` returned `None` on any failure with a single `log.debug` as
+its only trace — and the configured level is `INFO` (bot.py:135), so that line cannot
+emit. No `_count_error` category covered it either. A fleet-wide embedding outage
+therefore produced no log line, no counter and no `/audit` field; the sole symptom would
+arrive days later as "she doesn't seem to remember things as well."
+
+Worse than the blindness: `_embed_memory_line` returns silently when the embed fails, so
+the memory lands in `memories.txt` with no vector. `_semantic_recall_vec` only scores
+entries that already have one, and nothing ever revisited them — **every memory written
+during an outage was invisible to semantic recall forever.** A failed read costs one
+turn; a failed write cost that memory permanently.
+
+**Considered and rejected: a fallback embedding model.** Vectors from different models
+are not comparable, which v2026-08-04.7 already established when it added the `.model`
+sidecar guards for exactly this reason. Measured here to check what the failure actually
+looks like: unit-normalised vectors of mismatched dimension through the real
+`_cosine_sim` score mean +0.0002, max +0.055 over 400 trials — far below the 0.3
+threshold in `triggered_memories`. So a fallback model does not produce *wrong* memories,
+it produces *no* matches, while the `_load_embeddings` guard would also discard the whole
+cache on the model change. It would look like insurance and provide none.
+
+**What shipped:**
+- `_embed_text` retries (`EMBED_RETRIES`, default 2 attempts; `1` is the kill switch),
+  but **only on a fast failure**. Past `EMBED_RETRY_BUDGET_S` (8s) it gives up: a slow
+  failure means the caller's budget is likely spent, and `asyncio.to_thread` threads
+  cannot be cancelled, so retrying one keeps an abandoned thread alive with nobody
+  waiting. The live read path's own `asyncio.wait_for(..., MEMORY_QUERY_EMBED_TIMEOUT)`
+  still caps it, so worst-case reply latency is unchanged — invariant 3 is not touched
+  (this is the approved embedding carve-out, and no new call is added per message).
+- Total failure now calls `_count_error("embed")` once (not per attempt) and logs through
+  `_log_operational`, throttled — during an outage this fires on every reply *and* every
+  memory write, which is the storm shape that put 767 identical tracebacks in jules's
+  `errors.log` (v2026-08-10.12). The category surfaces in `/audit` and `/errors` with no
+  render change, since both iterate `_error_counts` generically.
+- `_embed_backfill_job` re-embeds unvectorised memories every `EMBED_BACKFILL_INTERVAL_S`
+  (900s), `EMBED_BACKFILL_BATCH` (20) at a time, `EMBED_BACKFILL=0` to disable. This is
+  the part that makes an outage self-healing rather than permanent. HTTP runs off-loop via
+  `asyncio.to_thread`; `_embed_lines_offloop` deliberately returns pairs instead of
+  touching `_embeddings_cache`, because mutating a live dict from a worker thread is
+  invariant 7 — the caller assigns on the loop.
+
+**Verification:** `TestEmbedRetryAndBackfill`, 9 tests driving the real functions through
+a fake HTTP session (retry-then-succeed, give-up-and-count-once, both kill switches, slow
+failure not retried, backfill caching, backfill bounded per run, backfill surviving a
+still-failing provider). Break-tested RED per assertion.
+
+**Not addressed, deliberately:** the backfill covers `memories.txt` only. Facts share
+`_embeddings_cache` through `_embed_and_cache` but come from a different collection;
+extending it there is a separate change rather than widening this one.
+
 # Changelog — telegram-companion-bot
 
 Read this before making changes; add an entry after shipping one. See `CLAUDE.md` for

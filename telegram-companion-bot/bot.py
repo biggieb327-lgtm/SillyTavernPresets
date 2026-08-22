@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-21.3"
+BOT_VERSION = "2026-08-21.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2076,6 +2076,23 @@ EMBEDDINGS_MODEL_FILE = BASE_DIR / ".embeddings.model"
 # unlike memories.txt/facts (already capped and consolidated), this cache keeps every
 # distinct text ever embedded, including lines later replaced during consolidation.
 EMBEDDINGS_MAX = _env_int("EMBEDDINGS_MAX", "5000")
+# Retry: an embed that fails on the WRITE path costs that memory permanently -- the line
+# stays in memories.txt with no vector, and _semantic_recall_vec only scores entries that
+# already have one, so it is invisible to semantic recall forever. A read-path failure
+# costs one turn. Both go through _embed_text, so one retry serves both.
+# EMBED_RETRIES=1 is the kill switch (unset = 2 attempts).
+EMBED_RETRIES = _env_int("EMBED_RETRIES", "2")
+# Only retry a FAST failure. A transient (connection reset, 429, 5xx) fails in
+# milliseconds; a 30s read timeout means the provider is slow, the caller's own budget is
+# probably already spent, and asyncio.to_thread threads cannot be cancelled -- so retrying
+# a slow failure would keep an abandoned thread alive for another timeout with nobody
+# waiting for it. Elapsed past this budget: give up rather than retry.
+EMBED_RETRY_BUDGET_S = _env_float("EMBED_RETRY_BUDGET_S", "8.0")
+# Backfill: makes an embedding outage self-healing instead of permanent. Bounded per run
+# so a fleet-wide outage recovery cannot hammer the provider. EMBED_BACKFILL=0 disables.
+EMBED_BACKFILL = _env_bool("EMBED_BACKFILL", True)
+EMBED_BACKFILL_INTERVAL_S = _env_int("EMBED_BACKFILL_INTERVAL_S", "900")
+EMBED_BACKFILL_BATCH = _env_int("EMBED_BACKFILL_BATCH", "20")
 _embeddings_cache: dict[str, list[float]] = {}
 _embeddings_dirty = False
 
@@ -2154,18 +2171,45 @@ def _save_embeddings():
 
 
 def _embed_text(text: str) -> list[float] | None:
-    try:
-        resp = _get_session().post(
-            f"{NANOGPT_BASE_URL}/embeddings",
-            headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
-            json={"model": EMBEDDING_MODEL, "input": text[:8000]},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
-    except Exception as e:
-        log.debug("[embeddings] embed failed: %s", e)
-        return None
+    """Embed one string, with a bounded retry on fast failures.
+
+    Returns None when every attempt fails, and COUNTS that -- before v2026-08-21.4 the
+    only trace was a log.debug, and the configured level is INFO, so a fleet-wide
+    embedding outage produced no log line, no counter, and no /audit field. The bots
+    would simply remember less well, with the sole symptom arriving days later as
+    "she doesn't seem to remember things".
+
+    Never raises: every caller treats None as "no vector" and degrades to keyword-only.
+    """
+    attempts = max(1, EMBED_RETRIES)
+    started = time.time()
+    last = None
+    for n in range(1, attempts + 1):
+        try:
+            resp = _get_session().post(
+                f"{NANOGPT_BASE_URL}/embeddings",
+                headers={"Authorization": f"Bearer {NANOGPT_API_KEY}"},
+                json={"model": EMBEDDING_MODEL, "input": text[:8000]},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+        except Exception as e:
+            last = e
+            elapsed = time.time() - started
+            # Slow failure: the caller's budget is likely gone and this thread cannot be
+            # cancelled, so a retry would run on with nobody waiting. Stop.
+            if n >= attempts or elapsed >= EMBED_RETRY_BUDGET_S:
+                break
+            time.sleep(0.4 * n)
+    _count_error("embed")
+    # Throttled: during a provider outage this fires on every reply AND every memory
+    # write, which is the storm shape that filled jules's errors.log with 767 identical
+    # tracebacks (v2026-08-10.12). Keep the count, drop the repetition.
+    _log_operational("embed_failed",
+                     "[embeddings] embed failed after %d attempt(s): %s: %s",
+                     attempts, type(last).__name__, last)
+    return None
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -2201,6 +2245,57 @@ def _embed_and_cache(text: str) -> list[float] | None:
         _embeddings_cache[key] = vec
         _embeddings_dirty = True
     return vec
+
+
+def _unvectorised_memories() -> list[str]:
+    """Memory lines that have no cached embedding.
+
+    These are invisible to semantic recall: `_semantic_recall_vec` only scores entries
+    already in `_embeddings_cache`. `_embed_memory_line` returns silently when the embed
+    fails, so any memory written during an embedding outage lands here permanently —
+    nothing re-tried it before v2026-08-21.4.
+    """
+    return [ln for ln in _read_memories() if ln.strip() not in _embeddings_cache]
+
+
+def _embed_lines_offloop(lines: list[str]) -> list[tuple[str, list[float]]]:
+    """Embed lines in a worker thread and RETURN the pairs — deliberately does not touch
+    `_embeddings_cache`, because mutating a live dict off the event loop is invariant 7.
+    The caller assigns on the loop."""
+    out = []
+    for ln in lines:
+        vec = _embed_text(ln.strip())
+        if vec:
+            out.append((ln.strip(), vec))
+    return out
+
+
+async def _embed_backfill_job(context: ContextTypes.DEFAULT_TYPE):
+    """Re-embed memories that have no vector, a bounded batch at a time.
+
+    This is what makes an embedding outage self-healing rather than permanent. A failed
+    read costs one turn; a failed WRITE costs that memory forever, because nothing else
+    in the system ever looks at it again. Bounded per run so recovering from a long
+    outage cannot turn into a burst against the provider.
+    """
+    if not EMBED_BACKFILL:
+        return
+    try:
+        missing = _unvectorised_memories()
+        if not missing:
+            return
+        pairs = await asyncio.to_thread(_embed_lines_offloop, missing[:EMBED_BACKFILL_BATCH])
+        if not pairs:
+            return                      # still failing; _embed_text already counted it
+        global _embeddings_dirty
+        for key, vec in pairs:          # on the loop: safe to mutate
+            _embeddings_cache[key] = vec
+        _embeddings_dirty = True
+        _save_embeddings()
+        log.info("[embeddings] backfilled %d memor(ies); %d still unvectorised",
+                 len(pairs), len(missing) - len(pairs))
+    except Exception as e:
+        log.warning("[embeddings] backfill failed: %s", type(e).__name__)
 
 
 def _semantic_recall_vec(q_vec: list[float], entries: list[str],
@@ -16428,6 +16523,13 @@ def main():
         log.info("Self-audit: every 30 minutes.")
         app.job_queue.run_repeating(_touch_alive, interval=60, first=5)
         log.info("Alive heartbeat: every 60s (for watchdog.sh, if present).")
+        if EMBED_BACKFILL:
+            # first=120: after startup settles, so a restart during an outage still gets
+            # a repair pass in without competing with the load/greeting work.
+            app.job_queue.run_repeating(_embed_backfill_job,
+                                        interval=EMBED_BACKFILL_INTERVAL_S, first=120)
+            log.info("Embedding backfill: every %ds, up to %d memor(ies) per run.",
+                     EMBED_BACKFILL_INTERVAL_S, EMBED_BACKFILL_BATCH)
         if MEMORY_SEMANTIC_LIVE and LORE:
             app.job_queue.run_once(_embed_lore_job, when=20)
             log.info("Lore embedding: warming semantic lorebook cache shortly after start.")
