@@ -124,6 +124,21 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/memory/` | status: open
+**Dead end — do not rebuild: semantic/vector search over the operational log.** `[observed]`
+tested against 71 rows with queries and ground truth committed before the run: plain grep
+using only words from the question finds the right row **9 times in 10**, so there is
+almost no recall headroom for any better retrieval. The real cost is precision — a grep hit
+means reading 8.9 rows on average, worst 21. `[observed]` BM25 went 5/10 → 7/10 purely by
+splitting rows into cells, so **chunk size mattered more than the algorithm**, and that
+lever is document structure, which the same day's `incidents/` split already pulled.
+`[decision]` not building it. Full record, including the numbers and the four stated
+limits: `.claude/experiments/2026-08-21-oplog-retrieval/RESULTS.md`. **One caveat that
+keeps this honest:** the embedding arm never ran (HuggingFace 403 through the egress proxy,
+no API key in-container), so the claim is "lexical leaves little headroom", not "embeddings
+would not help". If someone revisits with a working embedding model, the protocol and
+queries are frozen in that directory and can be re-run as-is.
+
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/evals/run-evals.sh` | status: done
 `[observed]` 12 of 15 checks in `run-evals.sh` reported PASS whenever their own parser
 died; all fixed, and `eval-parsers-fail-loudly` now blocks the shape. **What the next
