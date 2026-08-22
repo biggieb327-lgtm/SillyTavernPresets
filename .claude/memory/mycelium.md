@@ -124,7 +124,7 @@ Newest first, same as the operational log.
 
 ## Entries
 
-### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/evals/run-evals.sh` | status: open
+### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/evals/run-evals.sh` | status: done
 `[observed]` 12 of 15 checks in `run-evals.sh` reported PASS whenever their own parser
 died; all fixed, and `eval-parsers-fail-loudly` now blocks the shape. **What the next
 session should not redo:** the sweep of the other 19 shell files under `.claude/tools/`
@@ -137,6 +137,16 @@ of the startup context's 2,436 characters and fifteen names is past the point of
 read — showing the top five by `seen` would keep the signal, but what a session sees first
 is an owner call. And nothing detects `CLAUDE.md`↔`skill-router` divergence, inherited
 open from the 2026-07-30 row and still true.
+
+> 2026-08-21 (from: claude/reddit-post-review-3oe3rx): Both closed, owner approved. The
+> startup line now names the 7 prose-only constraints instead of the 15 guarded ones
+> (2,436 → 1,668 characters), and `skill-index-integrity` enforces the CLAUDE.md
+> routing-table rule that its own paragraph admitted nothing caught. `[decision]` the
+> `seen: 2` filter is gone deliberately — it selected the constraints a mechanism already
+> catches. **A correction worth carrying forward:** the "all 15 already have a mechanism"
+> figure in the recommendation that produced this was wrong — `"graduat" in body`
+> substring-matches "Not graduated." The real split is 16 guarded, 7 prose-only, and C8 is
+> at seen 8 for it.
 
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: — | status: open
 The startup context this repo hands each new session was 9,921 characters, and 7,768 of

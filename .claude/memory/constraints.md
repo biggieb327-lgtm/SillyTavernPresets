@@ -313,8 +313,25 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 7** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10) — *promoted by check 6 of the
+**seen: 8** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Eighth (2026-08-21), and it reached the owner as a finding.** Asked to recommend what to
+do about the startup line, I classified every constraint by whether it had a mechanism
+using `"graduat" in body` — which substring-matches **"Not graduated."**. So C9, C10, C11
+and C20, which say in as many words that nothing mechanical can see them, were counted as
+guarded, and I reported "all 15 already have a mechanism" as the load-bearing fact behind a
+recommendation. The real split is 16 guarded, 7 prose-only; the recommendation survived,
+its headline number did not.
+
+`in` is a membership test on characters, not a claim about meaning: **`"X" in text` answers
+"do these letters occur", never "does this text assert X"** — and negations are the case
+where those two answers differ. Caught only because implementing the recommendation
+required the same parse to be exact, so the fix ran into the four constraints whose text
+contradicted the tally. **Graduated → `constraints-mechanism-marked`**, which uses
+line-anchored mutually-exclusive markers and additionally resolves the paths a graduation
+line names, so the categorisation the startup line depends on cannot drift silently.
+
 Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
   changed since, and a test recommendation was built on it — **stale**
