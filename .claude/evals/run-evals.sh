@@ -1012,6 +1012,28 @@ if unmarked:
 if ambiguous:
     problems.append("constraint(s) with BOTH markers: " + ", ".join(ambiguous) +
                     " — they are mutually exclusive; the startup line would report it twice")
+
+# The startup line TRUSTS a `**Graduated` marker: claiming one takes a constraint off the
+# list of things a session must read. So the claim has to be true. A mechanism deleted
+# along with its settings.json entry passes `hooks-wired` and leaves this claim standing,
+# which silently hides an unguarded constraint — the exact direction that matters.
+#
+# Only tokens containing "/" count, the same narrowing `skill-refs-resolve` uses: a bare
+# name in prose (`grep-c-fallback`, `roadmap-claims-current`) is an eval's name, not a path
+# claim, and resolving those against candidate roots is how that check got 16 false
+# positives on its first run.
+for i in range(1, len(blocks), 2):
+    cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
+    for line in GUARD.findall(body) and [l for l in body.splitlines()
+                                         if l.startswith("**Graduated")]:
+        for tok in re.findall(r"`([^`]+)`", line):
+            if "/" not in tok:
+                continue
+            if not Path(tok.strip().rstrip(".,;:")).exists():
+                problems.append(
+                    f"{cid} claims it graduated to `{tok}`, which does not exist — either "
+                    f"the mechanism was deleted (so the constraint is unguarded and must "
+                    f"go back on the startup line) or the path is wrong")
 print("; ".join(problems))
 PYEOF
 ); then

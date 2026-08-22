@@ -929,7 +929,7 @@ say so to the owner as a gap rather than filling the slot with something immune 
 wrong. **And never write the fallback up as a policy in a header comment** — that is how
 one judgement call became the default for the next file.
 
-**Graduated → `tools/atlas_suggest.py` and the two header comments.** The mechanism
+**Graduated → `telegram-companion-bot/tools/atlas_suggest.py` and the two header comments.** The mechanism
 already existed and I did not reach for it: `atlas_suggest.py` proposes real nearby places
 *by kind*, which is exactly the function-first search this constraint asks for, and it
 was written earlier the same day. Both atlas headers now record which entries are unnamed
