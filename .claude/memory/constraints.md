@@ -1121,6 +1121,18 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-22 — **Read a deliberate owner action as a system fault, and led with it.** Every
+  Routine's `next_run_at` was in the past and `ops-brief-daily` had not fired in a week, so
+  I reported the scheduled layer as stopped and "more urgent than dormancy". The owner had
+  paused them on purpose. The discriminator was in my own output and I walked past it: all
+  seven `updated_at` values were **identical** (`2026-08-15T23:30`), which is what one
+  deliberate bulk action looks like — a failure staggers, an intent does not. I hedged the
+  *cause* correctly ("I can't see an enabled field") and then framed the *finding*
+  assertively, which is C8's own recorded shape from 2026-08-01: the hedge in the body, the
+  claim in the headline. → **Before reporting absent activity as breakage, ask whether the
+  evidence distinguishes broken from switched-off.** Where it cannot, the finding is "this
+  is off and I cannot tell why", and that belongs in the headline, not the caveat.
+
 - 2026-08-21 — **Invented a GitHub Actions run ID and called a tool with it.** Wanting the
   job detail for a run I had just triggered, I passed `32535225614` to
   `list_workflow_jobs`; it 404'd because I had made the number up from the shape of a
