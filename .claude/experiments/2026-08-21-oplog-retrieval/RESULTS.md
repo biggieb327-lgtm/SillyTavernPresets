@@ -57,6 +57,23 @@ stdlib BM25 over row cells and could become `.claude/tools/oplog-search.sh` — 
 dependency, no key, no network, runs in milliseconds. That is the whole proposal, and it
 is a fraction of what a vector index would cost.
 
+## Addendum: a fresh query, after the tool was built
+
+`.claude/tools/oplog-search.py` was built from this result. The first query tried on it
+that was **not** in the frozen set — *"an eval passed but it was not actually checking
+anything"*, aimed at the 12-of-15-evals row — **missed, and so did grep.** The row says
+"reported PASS whenever their own parser died"; the query said "passed… checking
+anything". Only `eval` overlaps, and it appears in 39 of 71 rows.
+
+That is a second confirmed C4 instance and the honest ceiling on this tool: **7/10 came
+from queries I wrote, and the first uncontaminated query failed.** It does not reverse
+the build decision — the tool is still cheap and still better than grep on precision when
+both find the row — but it does mean the tool must never be read as "no result = never
+happened". The skill pointer and the tool's own output say so.
+
+It is also the clearest evidence for where an embedding arm would pay: both failures so
+far are jargon gaps, not ranking failures.
+
 ## Limits of this experiment — stated, not buried
 
 - **The embedding arm never ran.** So the honest claim is "lexical retrieval leaves little

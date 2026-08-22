@@ -973,6 +973,56 @@ else
   bad "hooks-wired" "$hooks_wired"
 fi
 
+# --- oplog-search-works --------------------------------------------------------------------
+# A search tool nobody notices has broken is worse than no search tool: an empty result
+# reads as "we have never hit this" rather than "the parser is broken". This repo has paid
+# for the dormancy shape three times (11 agent contracts 2026-07-27, three Routine checks
+# 2026-07-29, the session-debrief skill 2026-08-11) and every one was found by someone
+# happening to look.
+#
+# Two assertions: the tool still returns a known row for a known query (so a log-format
+# change that breaks the row parser reds CI), and it exits NON-ZERO on a corpus it cannot
+# parse rather than printing nothing and exiting 0.
+if ! oplogsearch=$(python3 - 2>&1 <<'PYEOF'
+import subprocess, sys, tempfile, os
+from pathlib import Path
+TOOL = ".claude/tools/oplog-search.py"
+if not Path(TOOL).is_file():
+    print(f"{TOOL} is missing — repo-debugging-playbook points sessions at it"); raise SystemExit(0)
+problems = []
+
+# 1. a known query still finds its row. The 2026-07-19 jules double-poller incident is one
+#    of the oldest rows and its wording has been stable since it was written.
+r = subprocess.run([sys.executable, TOOL, "duplicate process fighting over the same telegram token"],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    problems.append(f"tool exited {r.returncode} on a normal query: {r.stderr.strip()[:200]}")
+elif "2026-07-19" not in r.stdout:
+    problems.append("the double-poller row no longer ranks in the top 5 for its own symptom "
+                    "— either the row was reworded or the ranker broke; re-run "
+                    ".claude/experiments/2026-08-21-oplog-retrieval/ before loosening this")
+
+# 2. an unparseable corpus must FAIL, not return empty. Run in a temp cwd with a log the
+#    row parser cannot read.
+with tempfile.TemporaryDirectory() as d:
+    (Path(d) / ".claude/memory").mkdir(parents=True)
+    (Path(d) / ".claude/memory/operational-log.md").write_text("# no rows here\n", encoding="utf-8")
+    r2 = subprocess.run([sys.executable, os.path.abspath(TOOL), "anything at all"],
+                        capture_output=True, text=True, cwd=d)
+    if r2.returncode == 0:
+        problems.append("tool exited 0 on a log it could not parse — an empty result then "
+                        "reads as 'never happened' instead of 'the parser is broken'")
+print("; ".join(problems))
+PYEOF
+); then
+  oplogsearch="the parser itself exited non-zero: ${oplogsearch:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$oplogsearch" ]; then
+  ok "oplog-search-works: finds a known row for a known symptom, and fails loudly on a corpus it cannot parse"
+else
+  bad "oplog-search-works" "$oplogsearch"
+fi
+
 # --- constraints-mechanism-marked ----------------------------------------------------------
 # session-audit.sh selects what it shows at startup by reading this file's graduation
 # markers. That makes a prose file load-bearing for a hook, and prose drifts: reword one
