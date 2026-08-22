@@ -238,13 +238,36 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 1** (2026-07-26)
+**seen: 2** (2026-07-26, 2026-08-21)
 Asserted that `watchdog.sh` was running from cron and that this explained bonnie's
 resurrection. The interval was consistent with it but never confirmed, and the real
 mechanism (watchdog relaunches on a *missing tmux session*, in any mode) made the cron
 question irrelevant. The wrong frame was stated as fact in the middle of an incident.
 **Constraint:** while diagnosing, mark unconfirmed causes as unconfirmed, and say what
 evidence would settle them. Confidence follows evidence, not fluency.
+
+**Second (2026-08-21): a behavioural claim about code I had read but not run, told to the
+owner as fact.** Arguing against a fallback embedding model, I said mixing vectors from two
+models would make `_cosine_sim` return "a confident-looking number in roughly the right
+range" and surface wrong memories at high scores. I had read the function; I had not run
+it. Running it: unit-normalised vectors of mismatched dimension score **mean +0.0002, max
++0.055 over 400 trials**, far below the 0.3 threshold in `triggered_memories`. The real
+failure is the opposite — cross-model recall matches *nothing*, so it degrades silently to
+keyword-only rather than lying confidently.
+
+The recommendation survived and the reason got better (a fallback model is not dangerous,
+it is inert while looking like insurance) — but I had argued it from the wrong mechanism,
+to the owner, in the assertive voice. **Reading source tells you what code says; only
+running it tells you what it produces.** A behavioural claim about a pure function costs one
+command to test.
+
+**Not graduated**, and the near-miss is worth recording: `claim-guard.sh` DID fire on this
+sentence, but by its own stated scope it catches "two artifacts claimed identical on
+metadata rather than a hash" — not this. It matched on vocabulary overlap (dimensions, "the
+shorter vector") and was right by accident. That is a lucky catch, not coverage, so it does
+not count as a mechanism here; treating it as one would drop this constraint off the
+startup line it belongs on. No hook can tell an asserted behavioural claim from a described
+one.
 
 **Not graduated.** No hook can read the confidence of a sentence, and the damage is done in
 live diagnosis rather than in a committed file. The operational log's `[hypothesis]` tag is
