@@ -24,7 +24,7 @@ Do not create a second quick-reference documentation map. `CLAUDE.md` and the sk
 
 - `.claude/memory/operational-log.md`: bot, deploy, or fleet failures that changed the system.
 - `.claude/memory/constraints.md`: mistakes made while performing the work.
-- `.claude/operating/routines.md`: scheduled routine prompts; keep it synchronized with any live Routine change.
+- `.claude/operating/routines.md`: scheduled routine prompts, **retired 2026-08-22** — a historical record, not synchronized with anything live.
 
 Record durable findings in their owning source, not in this file. Never write secrets or live credentials into repository context files.
 

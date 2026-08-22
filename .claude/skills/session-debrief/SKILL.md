@@ -42,7 +42,7 @@ All four, or it is not one:
 1. `bash .claude/tools/verify.sh` green, output read in this turn.
 2. Work merged to `main` and pushed; CI polled and reported `<sha> | completed | success`.
 3. Everything the user asked for is either done or explicitly named as not-done, with why.
-4. Anything left running (a Routine, a subscription, a background task) is recorded
+4. Anything left running (a PR subscription, a background task, a `/loop`) is recorded
    somewhere durable, not just described in chat.
 
 ## Procedure
@@ -116,7 +116,7 @@ to any defect that only shows up on input shaped differently, which is exactly h
 | a mistake **we** made doing the work | `.claude/memory/constraints.md` (numbered or Minor) | always, including self-corrected |
 | the session-level pattern analysis | `.claude/SESSION-AUTOPSY-<date>.md` | only for long/multi-release sessions |
 | shipped item status | `ROADMAP.md` / `IMPROVEMENTS_PLAN.md` | anything moved |
-| a live Routine created | `.claude/operating/routines.md` | always, same session |
+| a live Routine created | — | n/a: Routines are retired here (2026-08-22); `routines.md` is historical |
 | the fact that a debrief ran | `.claude/memory/debrief-log.md` via `bash .claude/tools/debrief-check.sh --record` | always — it is the only durable trace |
 
 ### 7. Leave the handoff in the repo, not in chat
@@ -144,7 +144,7 @@ data arrives, so it cannot be revised to fit.
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence
 - [ ] Mechanisms grepped for before being proposed
 - [ ] New checks break-tested RED then GREEN; scanners have `gate_corpus` cases
-- [ ] Routines mirrored into `.claude/operating/routines.md`
+- [ ] (Routines retired 2026-08-22 — nothing to mirror)
 - [ ] Everything merged to `main`; CI polled, not assumed
 - [ ] `bash .claude/tools/debrief-check.sh --record` run, and the ledger row given a note
 

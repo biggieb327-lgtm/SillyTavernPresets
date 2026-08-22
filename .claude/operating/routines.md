@@ -1,15 +1,35 @@
-# Scheduled Routines (Claude Code Remote triggers)
+# Scheduled Routines — RETIRED 2026-08-22 (historical record)
 
-Live schedules that act on this repo. Rule: **any change to a live Routine's prompt
-must be mirrored in this file in the same session, and vice versa** — a Routine that
-exists only in the scheduler (or only as prose) is invisible and will drift.
+> **None of these run here any more.** The owner moved the scheduled work to ChatGPT on
+> 2026-08-22 to save tokens in this environment, and paused all seven Claude Code Remote
+> triggers on 2026-08-15 (every `updated_at` carries that timestamp).
+>
+> **The sync rule below is void.** This file is no longer mirrored against anything live,
+> and a future session must not "fix drift" between it and `list_triggers` — the triggers
+> are paused on purpose and the prompts now live elsewhere. Nothing in this repo schedules
+> itself; every remaining automation is a hook or an eval, which run per-turn and per-push.
+>
+> **Kept, not deleted,** because the prompts below are the record of what these jobs
+> actually asked for and what was tried and abandoned getting there — Reddit access via
+> three different paths, the MCP-in-fired-sessions limits, the proposal-only postures. That
+> history is why `idea-scraper-actor/` and `character-review/` exist and it is not
+> recoverable from the scheduler.
+>
+> If scheduled work ever returns here, treat this as a starting draft to re-verify, not as
+> a description of anything running.
 
-Inspect/pause/edit from any Claude Code Remote session on this repo with the
-`list_triggers` / `update_trigger` / `delete_trigger` tools (claude-code-remote MCP).
+The original header follows, preserved for context:
 
-Exempt from this file: `send_later` one-shots (names like `send_later <timestamp>`),
-which are session-bound reminders that self-disable after firing — they may appear
-in `list_triggers` without an entry here and that is not drift.
+> Live schedules that act on this repo. Rule: **any change to a live Routine's prompt
+> must be mirrored in this file in the same session, and vice versa** — a Routine that
+> exists only in the scheduler (or only as prose) is invisible and will drift.
+>
+> Inspect/pause/edit from any Claude Code Remote session on this repo with the
+> `list_triggers` / `update_trigger` / `delete_trigger` tools (claude-code-remote MCP).
+>
+> Exempt from this file: `send_later` one-shots (names like `send_later <timestamp>`),
+> which are session-bound reminders that self-disable after firing — they may appear
+> in `list_triggers` without an entry here and that is not drift.
 
 ---
 

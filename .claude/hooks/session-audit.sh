@@ -93,7 +93,7 @@ if [ "${branch}" != "main" ] && git rev-parse --verify -q origin/main >/dev/null
     behind=$(git rev-list --count "${base}..origin/main" 2>/dev/null || echo 0)
     refage=$(git log -1 --format=%cr origin/main 2>/dev/null || echo "unknown")
     if [ "${behind:-0}" -ge 25 ]; then
-      echo "[session-audit] WARNING: merge-base is ${behind} commits behind origin/main (local ref, last moved ${refage}) — run 'git fetch origin main' and diff before extended work on shared docs (routines.md, CLAUDE.md, constraints.md, operational-log.md)"
+      echo "[session-audit] WARNING: merge-base is ${behind} commits behind origin/main (local ref, last moved ${refage}) — run 'git fetch origin main' and diff before extended work on shared docs (CLAUDE.md, constraints.md, operational-log.md, mycelium.md)"
     else
       echo "[session-audit] merge-base ${behind} commit(s) behind origin/main (local ref, last moved ${refage})"
     fi
