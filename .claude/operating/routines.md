@@ -4,6 +4,16 @@
 > 2026-08-22 to save tokens in this environment, and paused all seven Claude Code Remote
 > triggers on 2026-08-15 (every `updated_at` carries that timestamp).
 >
+> **What `list_triggers` shows now.** Four were deleted on 2026-08-22: `ops-brief-daily`,
+> `hygiene-check-weekly`, `morning-todo`, and the one-shot "Map-intent fire-rate review".
+> Three survive as paused rows — `improvement-loop-monthly`, `character-pass-monthly`,
+> `practice-scan-weekly` — because `delete_trigger` refuses them: they were created
+> through the claude.ai web UI (`created_via: "http_api"`), and the API returns *"Agents
+> can only delete routines they created (via create_trigger), or a routine may delete
+> itself from its own session."* Only the owner can remove them, from the claude.ai
+> Routines UI. **Three paused rows is the expected state, not drift** — do not try to
+> re-delete them and do not read their presence as evidence they still run.
+>
 > **The sync rule below is void.** This file is no longer mirrored against anything live,
 > and a future session must not "fix drift" between it and `list_triggers` — the triggers
 > are paused on purpose and the prompts now live elsewhere. Nothing in this repo schedules
