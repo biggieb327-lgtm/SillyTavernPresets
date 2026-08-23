@@ -232,14 +232,44 @@ string contains none of those words. The scanner found it immediately.
 **Constraint:** grep for the *mechanism* (the shape of the defect), not the words you
 remember writing. If a mechanical scan is possible, write it instead of grepping.
 
+**Not graduated.** The failure is a search that returned too little, which is byte-identical
+to a search over a clean tree — nothing can flag an absence it cannot distinguish from a
+genuine zero. This constraint's real output is the `sweep.py` scanners it keeps producing;
+each of those is mechanical, the habit of writing them is not.
+
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 1** (2026-07-26)
+**seen: 2** (2026-07-26, 2026-08-21)
 Asserted that `watchdog.sh` was running from cron and that this explained bonnie's
 resurrection. The interval was consistent with it but never confirmed, and the real
 mechanism (watchdog relaunches on a *missing tmux session*, in any mode) made the cron
 question irrelevant. The wrong frame was stated as fact in the middle of an incident.
 **Constraint:** while diagnosing, mark unconfirmed causes as unconfirmed, and say what
 evidence would settle them. Confidence follows evidence, not fluency.
+
+**Second (2026-08-21): a behavioural claim about code I had read but not run, told to the
+owner as fact.** Arguing against a fallback embedding model, I said mixing vectors from two
+models would make `_cosine_sim` return "a confident-looking number in roughly the right
+range" and surface wrong memories at high scores. I had read the function; I had not run
+it. Running it: unit-normalised vectors of mismatched dimension score **mean +0.0002, max
++0.055 over 400 trials**, far below the 0.3 threshold in `triggered_memories`. The real
+failure is the opposite — cross-model recall matches *nothing*, so it degrades silently to
+keyword-only rather than lying confidently.
+
+The recommendation survived and the reason got better (a fallback model is not dangerous,
+it is inert while looking like insurance) — but I had argued it from the wrong mechanism,
+to the owner, in the assertive voice. **Reading source tells you what code says; only
+running it tells you what it produces.** A behavioural claim about a pure function costs one
+command to test.
+
+Near-miss worth recording: `claim-guard.sh` DID fire on the second occurrence, but by its
+own stated scope it catches "two artifacts claimed identical on metadata rather than a hash"
+— not this. It matched on vocabulary overlap and was right by accident.
+
+**Graduated** to `.claude/hooks/theory-guard.sh` + `.claude/hooks/theory_guard.py` — a Stop
+hook that catches one slice: asserting what a named function returns/produces/causes without
+hedging. The general case (diagnosing an incident and stating a cause as fact) still has no
+mechanical signature, same as C8's uncovered half. Escape hatch: `# theory-ok` or any hedge
+word ("probably", "I think", "[hypothesis]").
 
 ### C6 — A migration invalidates assertions, not just docs
 **seen: 1** (2026-07-26)
@@ -249,6 +279,14 @@ SIGTERM"), and an operator-facing alert still pointed at `bot.log` and the Andro
 phantom killer. Three stale assumptions in one function.
 **Constraint:** after any platform change, sweep tests and user-facing strings, not
 only documentation. An assertion is a claim about the world too.
+
+**Not graduated**, with a caveat worth stating rather than hiding: the *sweep* is
+mechanizable per platform, and phone-era vocabulary is already partly covered by existing
+scanners. What is not observable from the repo is the **trigger** — "a platform change just
+happened" — so a standing check would either run always (and flag deliberate historical
+references) or never fire at the moment it matters. Revisit if a second platform change
+arrives; the right mechanism is probably a one-off sweep written as part of that migration,
+not a permanent eval.
 
 ### C7 — Anchor edits on content, not position
 **seen: 5** (2026-07-26, 2026-07-27, 2026-08-02 ×3) — *promoted from the Minor log by
@@ -295,8 +333,25 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 7** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10) — *promoted by check 6 of the
+**seen: 8** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Eighth (2026-08-21), and it reached the owner as a finding.** Asked to recommend what to
+do about the startup line, I classified every constraint by whether it had a mechanism
+using `"graduat" in body` — which substring-matches **"Not graduated."**. So C9, C10, C11
+and C20, which say in as many words that nothing mechanical can see them, were counted as
+guarded, and I reported "all 15 already have a mechanism" as the load-bearing fact behind a
+recommendation. The real split is 16 guarded, 7 prose-only; the recommendation survived,
+its headline number did not.
+
+`in` is a membership test on characters, not a claim about meaning: **`"X" in text` answers
+"do these letters occur", never "does this text assert X"** — and negations are the case
+where those two answers differ. Caught only because implementing the recommendation
+required the same parse to be exact, so the fix ran into the four constraints whose text
+contradicted the tally. **Graduated → `constraints-mechanism-marked`**, which uses
+line-anchored mutually-exclusive markers and additionally resolves the paths a graduation
+line names, so the categorisation the startup line depends on cannot drift silently.
+
 Four conclusions were drawn from readings that did not mean what they appeared to:
 - an `/audit` line reporting jules on `mimo-v2.5-pro` was hours old; her model had been
   changed since, and a test recommendation was built on it — **stale**
@@ -480,8 +535,42 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 7** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10) — *promoted
-from the Minor log on the third occurrence, as that entry said it should be.*
+**seen: 9** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21 ×2)
+— *promoted from the Minor log on the third occurrence, as that entry said it should be.*
+
+**Ninth (2026-08-21, same session as the eighth): the shape was not mine, it was the
+suite's.** Having written it three times in one day — once shipped, twice caught while
+writing — I finally grepped for it instead of only fixing my own instances. **12 of the 15
+python-heredoc captures in `run-evals.sh` discarded stderr, and every one treated empty as
+PASS.** Demonstrated rather than inferred: a `raise` injected at the top of
+`claude-md-refs-resolve`'s parser produced `PASS  claude-md-refs-resolve: every repo path
+CLAUDE.md names still exists`. Most of the repo's guard layer would have reported green on
+a dead parser, and had done for as long as those checks existed.
+
+The lesson is not "capture stderr" — the eighth occurrence already said that. It is that
+**writing the same mistake three times is evidence about the codebase, not just about
+me.** Two of the three were self-caught, which felt like diligence and was actually the
+signal: a shape that keeps suggesting itself is a shape already in the file, being copied.
+The grep that found the class cost one command and came after three fixes, not before.
+
+**Graduated → `eval-parsers-fail-loudly`** (2026-08-21): every python-heredoc capture in
+`run-evals.sh` must carry `2>&1` and be wrapped `if ! var=$(…)`. Break-tested RED against a
+capture reverted wholly to the pre-fix form. A first attempt at that break-test was
+invalid — dropping `if !` while leaving `); then` in place breaks shell syntax, so the
+suite died instead of reporting, and the PASS that followed proved nothing (C18). The
+valid injection reverts both halves together.
+
+**Eighth (2026-08-21): a check that goes green whenever its own parser dies.** The new
+`mycelium-format` eval captured only stdout from its `python3` heredoc. A bad argument
+killed the parser before it read a line; the error went to stderr, the captured string was
+empty, and empty means pass — so the check printed PASS against an entry header that was
+genuinely malformed. **This is the gate-corpus finding rebuilt from scratch**: 14 of the
+first 34 corpus cases deviated, including the delivery gate passing silently whenever
+`sweep.py` raised, and that is written down in CLAUDE.md. Reading it did not stop me
+writing the same shape into a new check the same day. Any check that shells out must test
+the exit status and capture stderr — `if err=$(cmd 2>&1); then … else err="parser died: $err"; fi`
+— because "produced no complaint" and "could not run" are the same string otherwise.
+Caught only by break-testing; the check had passed cleanly a minute earlier.
 
 **Fifth and sixth (2026-08-03), both in one release, both in *authored checks* rather
 than run commands — the new shape.** Writing the reasoning-leak guard I produced (a) a
@@ -611,8 +700,21 @@ rewritten to run from the checkout, and the phone-era remainder is annotated.
 ---
 
 ### C14 — A scanner cannot tell "this file does the bad thing" from "this file explains it"
-**seen: 3** (2026-07-29 ×3) — *promoted immediately: two fresh occurrences in one session,
-and `sweep.py constraints-drift` then surfaced a third already in the Minor log.*
+**seen: 5** (2026-07-29 ×3, 2026-08-21 ×2) — *promoted immediately: two fresh occurrences in
+one session, and `sweep.py constraints-drift` then surfaced a third already in the Minor log.*
+
+**Fourth and fifth (2026-08-21), both on the first run of a scanner written that hour.**
+`mycelium-format` flagged the header example inside `mycelium.md`'s own Entry-format code
+fence; `grep-c-fallback` flagged its own error message, which quotes the very pattern it
+hunts. Both were caught by running the check on a clean tree — the cheapest possible
+detection, and the reason to run a new scanner before believing its first green as much as
+its first red. The fixes differ and the difference is the useful part: the first skips
+fenced blocks (the prose is *inside* a marked region), the second narrows the match to the
+defect's real shape, a command substitution (the prose cannot contain one). **Narrowing to
+the actual defect beat excluding the explanation** — it also fixed a false negative the
+broader pattern would have shipped, since `[^|]*` could not cross the pipe inside
+`grep -c '| status: open$'`, the exact line that carried the bug.
+
 Three times a checker confused executable text with the prose documenting it:
 1. An extraction assertion asserted `'list_triggers' not in prompt` — and tripped on the
    new paragraph that *explains* `list_triggers` is unavailable.
@@ -864,7 +966,7 @@ say so to the owner as a gap rather than filling the slot with something immune 
 wrong. **And never write the fallback up as a policy in a header comment** — that is how
 one judgement call became the default for the next file.
 
-**Graduated → `tools/atlas_suggest.py` and the two header comments.** The mechanism
+**Graduated → `telegram-companion-bot/tools/atlas_suggest.py` and the two header comments.** The mechanism
 already existed and I did not reach for it: `atlas_suggest.py` proposes real nearby places
 *by kind*, which is exactly the function-first search this constraint asks for, and it
 was written earlier the same day. Both atlas headers now record which entries are unnamed
@@ -929,8 +1031,8 @@ mechanisation for the reason rule 4 allows prose: nothing in the diff distinguis
 that would have made the difference leaves no trace in the repo.
 
 ### C23 — The shell evaluated something the command text does not show
-**seen: 3** (2026-08-10 ×2, 2026-08-11) — *promoted from the Minor log 2026-08-11; all
-three entries deleted.*
+**seen: 4** (2026-08-10 ×2, 2026-08-11, 2026-08-21) — *promoted from the Minor log
+2026-08-11; all three entries deleted.*
 Three failures in one session, three different constructs, one cause: **what the shell
 actually did depended on something the written command does not display.**
 
@@ -939,6 +1041,19 @@ actually did depended on something the written command does not display.**
 | `grep -m1 X f \| cut -d= -f2- \|\| echo '(absent)'` | fallback when grep finds nothing | `\|\|` tests **`cut`**, which returns 0 either way — the fallback can never fire, and "absent" is indistinguishable from "empty" |
 | `git commit -m "…\`git show HEAD:\`…"` | a literal message | backticks **executed**; a repo directory listing landed in the commit body |
 | `python3 - <<PY` reading `.claude/memory/…` | a repo-root path | resolved under a `cd` from an **earlier tool call** — this shell persists cwd |
+| `x=$(grep -c X f \|\| echo 0)` | 0 when nothing matches | `grep -c` **already printed** "0" and exits 1, so the fallback fires **on success** and `x` becomes `"0\n0"` (2026-08-21) |
+
+The fourth (2026-08-21) is the same `\|\|` misreading as the first, inverted: there the
+fallback could never fire, here it fires on a command that had already done its job. Both
+come from reading `\|\|` as "if that didn't work" rather than as a test on an exit status
+whose meaning is the command's own. `grep -c`'s exit status reports *whether it matched*,
+not whether it ran.
+
+It cost three sites and shipped one: `session-audit.sh` told every session
+`MYCELIUM: 0\n0 open message(s)` exactly when nothing was waiting. The repo had already
+paid for this shape once and left the lesson as a comment in `debrief-check.sh` — which
+did not stop it being written into three more files, one of them the eval built to guard
+the very feature it broke.
 
 Each was self-inflicted twice over: the `\|\|` shape was its **third** occurrence that day
 and I had written the corrected form and explained the binding to the owner hours earlier;
@@ -952,6 +1067,11 @@ about an hour earlier while graduating it.
 - pass multi-line or punctuation-bearing text through a **file** (`git commit -F`,
   heredocs with quoted delimiters), never through a double-quoted `-m`;
 - use absolute paths, or `cd` inside the same invocation — cwd is *session* state.
+
+**Graduated → `.claude/evals/run-evals.sh` `grep-c-fallback`** (2026-08-21) for the fourth
+shape. A PreToolUse hook cannot see it — the bug is written into a file by Edit, not run as
+a command — so the guard is a repo-wide scan of committed shell scripts instead. Prose had
+already failed at this exact job once.
 
 **Graduated → `.claude/hooks/shell-semantics-guard.sh`** for the two shapes a PreToolUse
 hook can see: a `||` fallback whose left side ends in a pipe, and `git commit -m` carrying
@@ -998,6 +1118,42 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-22 — **Read a deliberate owner action as a system fault, and led with it.** Every
+  Routine's `next_run_at` was in the past and `ops-brief-daily` had not fired in a week, so
+  I reported the scheduled layer as stopped and "more urgent than dormancy". The owner had
+  paused them on purpose. The discriminator was in my own output and I walked past it: all
+  seven `updated_at` values were **identical** (`2026-08-15T23:30`), which is what one
+  deliberate bulk action looks like — a failure staggers, an intent does not. I hedged the
+  *cause* correctly ("I can't see an enabled field") and then framed the *finding*
+  assertively, which is C8's own recorded shape from 2026-08-01: the hedge in the body, the
+  claim in the headline. → **Before reporting absent activity as breakage, ask whether the
+  evidence distinguishes broken from switched-off.** Where it cannot, the finding is "this
+  is off and I cannot tell why", and that belongs in the headline, not the caveat.
+
+- 2026-08-21 — **Invented a GitHub Actions run ID and called a tool with it.** Wanting the
+  job detail for a run I had just triggered, I passed `32535225614` to
+  `list_workflow_jobs`; it 404'd because I had made the number up from the shape of a
+  neighbouring ID rather than reading it from a listing. Harmless here because the API
+  rejected it — but the same reflex against an ID that happens to exist reports on the
+  wrong object with full confidence. → **An identifier either came from a result you read
+  this turn, or you do not have it.** Never pattern-match one into existence; pay for the
+  listing call.
+- 2026-08-21 — **Applied a text transformation file-wide whose correctness depended on a
+  per-line property I had not checked.** Escaping pipes inside backticks across all 67
+  operational-log rows fixed the three intended rows and silently damaged a fourth: that
+  row contains a triple backtick, so its backtick count is odd, and pairing ran past a
+  genuine column separator and escaped it. Caught within the minute because the same
+  script asserted every row still splits into six cells. → **When a fix is applied by a
+  rule rather than by hand, state the rule's precondition and test it per item** — here,
+  an even backtick count. The verification that caught it was already written, which is
+  the only reason this was a minute and not a corrupted record.
+- 2026-08-21 — **`pip install -r requirements.txt` as root turned a truthful SKIP into a
+  misleading FAIL.** `bot-imports` had been skipping for a missing dependency and saying
+  so correctly; installing into the system interpreter surfaced a broken Debian
+  `cryptography` (pyo3 panic) and the eval then reported bot.py as crashing on import. The
+  eval's own message said which reading was which, so it cost minutes rather than a wrong
+  diagnosis. → **Changing the environment to make a check runnable is a change to the
+  system under test.** Re-read what the check says after, not just whether it is green.
 - 2026-08-12 (**second occurrence, same session**) — Did it again in the very next
   release: wrote "10 new tests … Total: 1,273" into the v2026-08-12.2 changelog while
   drafting; `verify.sh` said 1267, and the real count was 4 (I had counted six DEFAULTS

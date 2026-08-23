@@ -1,9 +1,12 @@
 # Improvement proposals
 
-Write target of the `improvement-loop-monthly` Routine (schedule + verbatim prompt:
-`.claude/operating/routines.md`). Each run writes **at most one** proposal here as
-`<YYYY-MM>.md`, committed only to the `claude/improvement-loop` branch — never to
-`main` directly.
+**The `improvement-loop-monthly` Routine that wrote here is retired (2026-08-22)** — the
+scheduled work moved to ChatGPT. Nothing writes to this directory any more, and a stale
+directory is now the expected state rather than a missed run.
+
+What is here is that Routine's past output: at most one proposal per run, `<YYYY-MM>.md`,
+originally committed only to the `claude/improvement-loop` branch and never to `main`
+directly. Its prompt is preserved in `.claude/operating/routines.md` (historical).
 
 A proposal must contain: the recurring failure pattern, the ≥2 quoted occurrences
 (with dates/versions) from `.claude/memory/operational-log.md` /

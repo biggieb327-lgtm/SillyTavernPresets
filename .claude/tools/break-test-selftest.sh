@@ -30,8 +30,13 @@ setup() {
 }
 intact() {  # intact <label>
   local now
-  now=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$WORK/mod.py")
-  if [ "$now" = "$ORIG" ]; then ok "$1 — target byte-identical"; else bad "$1 — TARGET CORRUPTED ($(wc -c < "$WORK/mod.py") bytes)"; fi
+  now=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$WORK/mod.py" 2>&1)
+  # Two empty hashes compare EQUAL, so a python that died at both call sites would report
+  # "byte-identical" about a file it never read — fail-open, in the selftest that exists to
+  # make break-tests trustworthy. Found 2026-08-21 sweeping for the run-evals.sh class.
+  if [ -z "$ORIG" ] || [ -z "$now" ]; then
+    bad "$1 — could not hash the target (ORIG='${ORIG}' now='${now}'); this is not evidence of anything"
+  elif [ "$now" = "$ORIG" ]; then ok "$1 — target byte-identical"; else bad "$1 — TARGET CORRUPTED ($(wc -c < "$WORK/mod.py") bytes)"; fi
 }
 expect_rc() {  # expect_rc <want> <got> <label>
   if [ "$2" = "$1" ]; then ok "$3 — exit $2"; else bad "$3 — exit $2, wanted $1"; fi

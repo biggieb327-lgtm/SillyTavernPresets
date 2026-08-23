@@ -1,8 +1,14 @@
 # idea-scraper
 
 An Apify Actor that collects recent posts from Reddit and Substack into one
-normalized dataset, for the `improvement-loop-monthly` and
-`character-pass-monthly` Routines in `.claude/operating/routines.md`.
+normalized dataset.
+
+**Both Routines it was built for — `improvement-loop-monthly` and
+`character-pass-monthly` — are retired here (2026-08-22)**, so nothing in this repo calls
+this Actor. It is still deployed on Apify and still works; whether the ChatGPT-side
+replacements call it is the owner's to confirm. Everything below stays accurate about the
+Actor itself, and the hard-won access notes are the reason to read it before touching
+Reddit access again.
 
 It never runs anyone else's Actor. This account's plan has
 `ACTORS_PUBLIC_ALL` disabled (`GET /v2/users/me` →

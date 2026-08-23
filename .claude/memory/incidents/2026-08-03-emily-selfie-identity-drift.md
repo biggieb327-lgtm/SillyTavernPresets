@@ -1,0 +1,26 @@
+# 2026-08-03 — emily selfie identity drift
+
+Archived from `.claude/memory/operational-log.md` on 2026-08-21, verbatim. The row
+there is the index entry; this is the full record, including every correction
+appended after the fact.
+
+## Failure
+
+**Emily's selfie came back a different, better-looking woman with her glasses gone** (owner-reported, reference photo and drifted selfie pasted side by side). Fifth face-drift report, and the first where none of the four established causes applies — photo attached and resolved, mime sniffed from bytes, instance on Gemini not `flux-kontext`, identity guard already active.
+
+## Root cause
+
+`[observed]` The pair itself: same auburn curls and pale colouring, different bone structure, no freckles, no glasses — the model kept the *describable* traits and rebuilt the face. `[code]` `build_selfie_prompt` put `SELFIE_APPEARANCE` INSIDE the identity sentence (`"...just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}"`), so one sentence supplied both a face to copy and a written spec satisfiable with an invented one; every selfie is a full re-render (pose, framing, setting, clothes all change), and synthesising from words is cheaper than copying from pixels. `[code]` "Keep her face identical" enumerated no part of a face, so nothing contradicted a plausible prettier stranger. `[hypothesis]` That these two shapes produced *this* image — no image was generated from either prompt; this container has no `GEMINI_API_KEY`.
+
+## System patch
+
+v2026-08-03.2: appearance text demoted out of the identity sentence and explicitly ranked below the photo (the words stay — v2026-08-01.9 added them for a reason); `_SELFIE_PRESERVE_RULE` enumerates what gets copied and names the failure mode ("a better-looking one that does not match is wrong"); `_SELFIE_FACE_CLARITY_RULE` worded to contradict none of the framing pools; `_SELFIE_CHANGE_SCOPE` before the scene block; `"New shot:"` → `"Framing:"`. All gated on `_has_base_image()`. Kill switch `SELFIE_FACE_LOCK=0`, separate from `SELFIE_IDENTITY_GUARD` so the de-stacking and tail survive turning it off.
+
+## Eval
+
+`TestSelfieFaceLock`, 8 tests; five assertions break-tested RED one injection at a time. `test_shared_prompt_hardcodes_no_character_specific_feature` **widened** — it read `build_selfie_prompt`'s source only, so a trait in an appended `_SELFIE_*_RULE` constant escaped it; it now scans their values too. No new eval: the failure is a model behaving badly on a prompt, which no runnable check can assert.
+
+## Next
+
+**The real gap is that nobody could read the prompt.** Four releases of face-drift work were argued from generated images and inference, because `build_selfie_prompt`'s output had no surface. `tools/selfie_prompt_preview.py` renders it, face lock off vs on, ready to paste into Gemini with the reference photo — repo-only, `vps-sync.sh` does not copy `tools/`. Two things still unresolved: the fix is unproven until images are generated from both prompts, and the prompt grew 1785 → 2734 chars (+53%), trading a general dilution risk for a specific named constraint. Content follow-up: Emily's `appearance.txt` describes a wardrobe ("Dresses in layered muted greens and greys") while the prompt separately appends `"Wearing {outfit}."` — appearance files should describe a body and a face; the wardrobe rotation owns clothes.  **Reference photo, checked 2026-08-03 on the VPS:** `/opt/telegram-bots/emily/emily_base.png`, sha256 `27ff3293c272f923890077ee3f57eecbf76b3176c12a0a235e2b9b6520fee160`, magic bytes `8950 4e47` (PNG) matching the extension. That rules out the two failure modes it can rule out — `_resolve_base_image()` has exactly one candidate so it cannot return None from ambiguity, and `_sniff_mime` declares `image/png` correctly, so v2026-08-02.2's rejected-reference path is not firing. It does **not** establish that these are the intended bytes: a hash settles nothing without a known-good hash to compare against, and there was none. The value is recorded here so the next session has one — if it differs, the reference photo changed.  **2026-08-03, later: the reference photo is a full-body beach shot** — the owner sent `emily_base.png` when asked for it, and her face is ~8% of the frame height. An edit model given ~100px of face has nothing to copy into a close phone selfie, which explains every symptom the prompt-side theories explained only partly, including the intermittency. It also invalidates the scoring: the grey-hoodie "baseline" used for all 22 A/B images is itself a generated selfie (same Gemini watermark as the outputs), so three rounds measured drift between two generations, not from the reference. Fix is content — `/setbase` a close front-facing crop, sent as a **file** so Telegram does not recompress. Unconfirmed: the uploaded copy hashes `026711a0…` vs the VPS `27ff3293…` and carries JPEG magic under a `.png` name, consistent with upload transcoding but not proof; `sha256sum` on the owner's local file settles it. **Standing gap:** nothing ever showed anyone what the reference photo is — `/audit` names the file, which proves one is in play and never that the face in it is usable. Two releases of prompt tuning went past an image nobody had looked at.
+

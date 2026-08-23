@@ -171,7 +171,7 @@ fi
 # that only exists when the call is already wrapped, so deleting an opt-out collapsed
 # the call to one line and dropped BOTH counts — it passed on the very regression it
 # pins (C13, caught by the break-test). Walk the AST instead.
-doc_unguarded=$(python3 - "$BOT" <<'PYEOF'
+if ! doc_unguarded=$(python3 - "$BOT" 2>&1 <<'PYEOF'
 import ast, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 bad = []
@@ -190,7 +190,9 @@ for node in ast.walk(ast.parse(src)):
         bad.append(str(node.lineno))
 print(",".join(bad))
 PYEOF
-)
+); then
+  doc_unguarded="the parser itself exited non-zero: ${doc_unguarded:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$doc_unguarded" ]; then
   ok "document-reply-leak-guard-optout: every DOCUMENT_MODEL reply site opts out of the reasoning-leak guard"
 else
@@ -222,7 +224,7 @@ fi
 # commands get copied from, so a stale one is an outage waiting for someone to trust it.
 # Runnable = the line starts with curl/wget or assigns a BASE/REPO var. Annotated
 # history is fine: mark the block DEAD, Historical, or Superseded within 3 lines above.
-raw_stale=$(python3 - <<'PY'
+if ! raw_stale=$(python3 - 2>&1 <<'PY'
 import pathlib, re
 bad = []
 skip = ("CHANGELOG.md", "constraints.md", "operational-log.md")
@@ -253,7 +255,9 @@ for p in sorted(pathlib.Path(".").rglob("*.md")):
         bad.append(f"{s}:{i+1}")
 print(" ".join(bad))
 PY
-)
+); then
+  raw_stale="the parser itself exited non-zero: ${raw_stale:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$raw_stale" ]; then
   ok "no-live-raw-urls: no runnable raw.githubusercontent command left unannotated"
 else
@@ -404,7 +408,7 @@ fi
 # surface is invisible in exactly the situation it was added for. Every key must be
 # either rendered by audit_cmd or listed as API-only below.
 api_only='away_users config_warnings llm_stats card_fields preset_override token_calibration memory_review_pending'
-unrendered=$(python3 - "$BOT" "$api_only" <<'PYEOF'
+if ! unrendered=$(python3 - "$BOT" "$api_only" 2>&1 <<'PYEOF'
 import re, sys, pathlib
 src = pathlib.Path(sys.argv[1]).read_text()
 allowed = set(sys.argv[2].split())
@@ -418,7 +422,9 @@ else:
     missing = sorted(k for k in keys - allowed if k not in body)
     print(" ".join(missing))
 PYEOF
-)
+); then
+  unrendered="the parser itself exited non-zero: ${unrendered:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ "$unrendered" = "PARSE-FAIL" ]; then
   bad "audit-keys-rendered" "could not locate gather_audit_data/audit_cmd — the eval needs updating, not the code"
 elif [ -z "$unrendered" ]; then
@@ -433,7 +439,7 @@ fi
 # BOT_TIMEZONE, which was documented as THE timezone setting while the clock actually
 # came from TIMEZONE. Every var bot.py reads must now be either documented as settable
 # (`NAME=` line) or named in the "Internal knobs" section.
-env_drift=$(python3 - "$BOT" "$(dirname "$BOT")/.env.example" <<'PYEOF'
+if ! env_drift=$(python3 - "$BOT" "$(dirname "$BOT")/.env.example" 2>&1 <<'PYEOF'
 import re, sys, pathlib
 bot = pathlib.Path(sys.argv[1]).read_text()
 env = pathlib.Path(sys.argv[2]).read_text()
@@ -455,48 +461,13 @@ if dead:    out.append("documented but never read: " + ", ".join(dead))
 if missing: out.append("read but undocumented: " + ", ".join(missing))
 print(" | ".join(out))
 PYEOF
-)
+); then
+  env_drift="the parser itself exited non-zero: ${env_drift:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$env_drift" ]; then
   ok "env-vars-documented: .env.example accounts for every var bot.py reads"
 else
   bad "env-vars-documented" "$env_drift"
-fi
-
-# Routine prompts must not instruct a fired session to use tooling it cannot have.
-# 2026-07-29: ops-brief-daily's CI check and hygiene-check-weekly's CI + Routine-sync
-# checks had been silently un-runnable. Fired sessions carry NO MCP tools, and in this
-# environment the GitHub REST API is MCP-only — the agent proxy 403s api.github.com with
-# or without a token. The prompts' documented fallback was an unauthenticated WebFetch of
-# api.github.com annotated "(public repo)", which also broke when the repo went private
-# on 2026-07-28. Both failed safe (skipped, never green) so nothing ever alerted.
-# Removing hygiene check #4 also removed the only automatic Routine-drift detector, so
-# this eval guards the file instead.
-routine_dead=$(python3 - <<'PYEOF'
-import re, pathlib
-p = pathlib.Path('.claude/operating/routines.md')
-if not p.exists():
-    print("routines.md missing"); raise SystemExit
-src = p.read_text()
-problems = []
-# Scope every check to the "### Verbatim prompt" fenced blocks. Prose OUTSIDE them
-# documents these dead paths on purpose (why they were removed) and must stay legal —
-# a file-wide match would flag the fix's own changelog.
-for sec in re.split(r'\n## ', src):
-    name = sec.split('\n', 1)[0].strip()
-    for block in re.findall(r'### Verbatim prompt\n\n```\n(.*?)\n```', sec, re.S):
-        if 'api.github.com' in block:
-            problems.append(f'{name}: prompt calls api.github.com (MCP-only; proxy 403s it)')
-        if '(public repo)' in block:
-            problems.append(f'{name}: prompt claims "(public repo)" (private since 2026-07-28)')
-        if re.search(r'if the claude-code-remote MCP list_triggers tool is available', block):
-            problems.append(f'{name}: prompt calls list_triggers (fired sessions carry no MCP)')
-print(" | ".join(problems))
-PYEOF
-)
-if [ -z "$routine_dead" ]; then
-  ok "routine-prompts-runnable: no Routine prompt depends on MCP-only or private-repo access"
-else
-  bad "routine-prompts-runnable" "$routine_dead"
 fi
 
 # --- skill-index-integrity -------------------------------------------------------------
@@ -513,7 +484,7 @@ fi
 # Scoped to the LAST cell of table rows only — the file's own prose explains the grill-me
 # incident by name and must stay legal (C14: a scanner cannot tell "does the bad thing"
 # from "explains it").
-skill_index=$(python3 - <<'PYEOF'
+if ! skill_index=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -570,9 +541,36 @@ if re.search(r"[Pp]reloaded always", router.read_text(encoding="utf-8")):
         "skill-router claims something is 'preloaded always' — nothing is; that claim "
         "suppressed loading of artifact-first-delivery and repo-validation-gate")
 
+# Instance (3) of the 2026-07-30 audit, the one left unmechanised: CLAUDE.md carried a
+# divergent 8-row copy of the routing table. It was deleted and replaced with a prose rule
+# — "Do not re-add a 'quick reference' copy of that table here" — which the same paragraph
+# admits "no check catches". This is that check.
+#
+# The discriminator is the FIRST cell, not the presence of skill names. CLAUDE.md
+# legitimately has a table (the sanctioned-shorthand vocabulary table) whose cells cite
+# owning skills, so "no skill names in a CLAUDE.md table" would flag it immediately — the
+# C14 trap this file has hit twice. A routing table is keyed BY skill; the vocabulary table
+# is keyed by term ("the fleet", "break-test"). Measured 2026-08-21: 18 table rows, zero
+# first-cell collisions with the 24 skill directories.
+claude_md = Path("CLAUDE.md")
+if claude_md.is_file():
+    for n, line in enumerate(claude_md.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if not s.startswith("|") or set(s) <= set("|- :"):
+            continue
+        first = re.sub(r"[`*_]", "", s.strip("|").split("|")[0]).strip()
+        if first in on_disk:
+            problems.append(
+                f"CLAUDE.md:{n} has a table row keyed by the skill `{first}` — that is a "
+                f"routing table, and the last one drifted, omitted seven skills and "
+                f"misrouted a session (2026-07-30). skill-router is the index; CLAUDE.md "
+                f"points at it")
+
 print(" | ".join(problems))
 PYEOF
-)
+); then
+  skill_index="the parser itself exited non-zero: ${skill_index:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$skill_index" ]; then
   ok "skill-index-integrity: skill-router's table and .claude/skills/ agree, both directions"
 else
@@ -589,7 +587,7 @@ fi
 # Both sides are single declared values, so this is decidable without reading prose (C14):
 # CLAUDE.md's Stack bullet vs. the workflow's python-version. A MISSING anchor fails too —
 # a check that silently passes when it can't find what it measures is not a check (C13).
-runtime_pin=$(python3 - <<'PYEOF'
+if ! runtime_pin=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -625,7 +623,9 @@ if declared and ci and declared != ci:
 
 print(" | ".join(problems))
 PYEOF
-)
+); then
+  runtime_pin="the parser itself exited non-zero: ${runtime_pin:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$runtime_pin" ]; then
   ok "runtime-version-pinned: CI's Python matches the runtime CLAUDE.md declares"
 else
@@ -642,7 +642,7 @@ fi
 # they are gone or must never be committed. That exemption list is this check's C14 escape
 # hatch: a scanner cannot tell "references a dead file" from "documents that it died", so
 # the distinction is made by hand, here, where it is visible.
-md_refs=$(python3 - <<'PYEOF'
+if ! md_refs=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -681,7 +681,9 @@ if missing:
           " — rename, delete the reference, or add it to EXEMPT if the doc's point is "
           "that the file is gone")
 PYEOF
-)
+); then
+  md_refs="the parser itself exited non-zero: ${md_refs:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$md_refs" ]; then
   ok "claude-md-refs-resolve: every repo path CLAUDE.md names still exists"
 else
@@ -696,7 +698,7 @@ fi
 # second occurrence: prose about the system is a claim about when it was written.
 # Decidable half only: a doc naming a ROADMAP item AND a staleness word near it, where
 # ROADMAP.md's heading for that item is struck through or ticked.
-roadmap_stale=$(python3 - <<'PYEOF'
+if ! roadmap_stale=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 
@@ -735,7 +737,9 @@ if problems:
           "\n  — the doc describes the system as it was when written; re-read the thing "
           "that executes it and correct the claim")
 PYEOF
-)
+); then
+  roadmap_stale="the parser itself exited non-zero: ${roadmap_stale:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$roadmap_stale" ]; then
   ok "roadmap-claims-current: no doc calls a shipped ROADMAP item unshipped"
 else
@@ -781,7 +785,7 @@ fi
 #
 # Found on its first run: voicekit-work cited `templates/voice_profile_template.json`,
 # which lives at voicekit-starter/src/voicekit/templates/. Fixed in the same commit.
-skill_refs=$(python3 - <<'PYEOF'
+if ! skill_refs=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
 ROOTS = ["", "telegram-companion-bot", ".claude", "voicekit-starter"]
@@ -810,7 +814,9 @@ if not skills:
 elif missing:
     print("skills name paths that do not exist: " + ", ".join(missing))
 PYEOF
-)
+); then
+  skill_refs="the parser itself exited non-zero: ${skill_refs:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$skill_refs" ]; then
   ok "skill-refs-resolve: every repo path a SKILL.md names still exists"
 else
@@ -854,7 +860,7 @@ fi
 # two tests "covering" it stayed green (v2026-08-02.14). The delivery gate enforces this for
 # handlers a diff touches; this pins the ones already paid for, so deleting the behavioural
 # tests reds CI instead of quietly restoring the blind spot.
-exercised=$(python3 - <<'PYEOF'
+if ! exercised=$(python3 - 2>&1 <<'PYEOF'
 import sys
 sys.path.insert(0, ".claude/tools")
 import sweep
@@ -871,11 +877,429 @@ if missing:
           " — a test that reads a handler's source cannot fail for the reason the "
           "handler exists; drive it with fake Telegram objects instead")
 PYEOF
-)
+); then
+  exercised="the parser itself exited non-zero: ${exercised:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
 if [ -z "$exercised" ]; then
   ok "handlers-exercised: the handlers that shipped broken are driven by tests, not grepped"
 else
   bad "handlers-exercised" "$exercised"
+fi
+
+# --- hooks-wired --------------------------------------------------------------------------
+# A hook file that is not registered in settings.json is inert, and inert looks exactly like
+# working: the file is present, readable, obviously intentional, and never runs. Nothing in
+# the repo would say so. The same shape has already been paid for twice at a different
+# layer — three Routine checks silently un-runnable (2026-07-29), eleven agent contracts
+# gone dormant (2026-07-27) — both found by someone happening to look.
+#
+# Checks both directions, since either is a real defect:
+#   a hook on disk that no event fires  ->  a guard everyone believes is on
+#   a settings.json entry with no file  ->  a Stop chain that errors every turn
+#
+# Only *.sh count as entry points. The .py siblings (claim_guard.py, handoff_guard.py,
+# host_guard.py) are called BY their wrappers and are correctly absent from settings.
+if ! hooks_wired=$(python3 - 2>&1 <<'PYEOF'
+import json, re
+from pathlib import Path
+settings = json.loads(Path(".claude/settings.json").read_text(encoding="utf-8"))
+registered = set()
+for event, matchers in (settings.get("hooks") or {}).items():
+    for m in matchers:
+        for h in m.get("hooks", []):
+            for name in re.findall(r'([A-Za-z0-9_.-]+\.(?:sh|py))', h.get("command", "")):
+                registered.add(name)
+on_disk = {p.name for p in Path(".claude/hooks").glob("*.sh")}
+problems = []
+orphaned = sorted(on_disk - registered)
+if orphaned:
+    problems.append("hook file(s) on disk that settings.json never fires: " +
+                    ", ".join(orphaned) + " — wire it into the right event, or delete it; "
+                    "an unregistered hook is a guard everyone believes is on")
+missing = sorted(n for n in registered
+                 if n.endswith((".sh", ".py")) and not (Path(".claude/hooks") / n).exists())
+if missing:
+    problems.append("settings.json fires hook(s) that do not exist: " + ", ".join(missing))
+if not on_disk:
+    problems.append("found 0 hook files — the scan looked in the wrong place, which is not "
+                    "the same as a clean result")
+print("; ".join(problems))
+PYEOF
+); then
+  hooks_wired="the parser itself exited non-zero: ${hooks_wired:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$hooks_wired" ]; then
+  ok "hooks-wired: every .claude/hooks/*.sh is registered in settings.json, and every registered hook exists"
+else
+  bad "hooks-wired" "$hooks_wired"
+fi
+
+# --- oplog-search-works --------------------------------------------------------------------
+# A search tool nobody notices has broken is worse than no search tool: an empty result
+# reads as "we have never hit this" rather than "the parser is broken". This repo has paid
+# for the dormancy shape three times (11 agent contracts 2026-07-27, three Routine checks
+# 2026-07-29, the session-debrief skill 2026-08-11) and every one was found by someone
+# happening to look.
+#
+# Two assertions: the tool still returns a known row for a known query (so a log-format
+# change that breaks the row parser reds CI), and it exits NON-ZERO on a corpus it cannot
+# parse rather than printing nothing and exiting 0.
+if ! oplogsearch=$(python3 - 2>&1 <<'PYEOF'
+import subprocess, sys, tempfile, os
+from pathlib import Path
+TOOL = ".claude/tools/oplog-search.py"
+if not Path(TOOL).is_file():
+    print(f"{TOOL} is missing — repo-debugging-playbook points sessions at it"); raise SystemExit(0)
+problems = []
+
+# 1. a known query still finds its row. The 2026-07-19 jules double-poller incident is one
+#    of the oldest rows and its wording has been stable since it was written.
+r = subprocess.run([sys.executable, TOOL, "duplicate process fighting over the same telegram token"],
+                   capture_output=True, text=True)
+if r.returncode != 0:
+    problems.append(f"tool exited {r.returncode} on a normal query: {r.stderr.strip()[:200]}")
+elif "2026-07-19" not in r.stdout:
+    problems.append("the double-poller row no longer ranks in the top 5 for its own symptom "
+                    "— either the row was reworded or the ranker broke; re-run "
+                    ".claude/experiments/2026-08-21-oplog-retrieval/ before loosening this")
+
+# 2. an unparseable corpus must FAIL, not return empty. Run in a temp cwd with a log the
+#    row parser cannot read.
+with tempfile.TemporaryDirectory() as d:
+    (Path(d) / ".claude/memory").mkdir(parents=True)
+    (Path(d) / ".claude/memory/operational-log.md").write_text("# no rows here\n", encoding="utf-8")
+    r2 = subprocess.run([sys.executable, os.path.abspath(TOOL), "anything at all"],
+                        capture_output=True, text=True, cwd=d)
+    if r2.returncode == 0:
+        problems.append("tool exited 0 on a log it could not parse — an empty result then "
+                        "reads as 'never happened' instead of 'the parser is broken'")
+print("; ".join(problems))
+PYEOF
+); then
+  oplogsearch="the parser itself exited non-zero: ${oplogsearch:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$oplogsearch" ]; then
+  ok "oplog-search-works: finds a known row for a known symptom, and fails loudly on a corpus it cannot parse"
+else
+  bad "oplog-search-works" "$oplogsearch"
+fi
+
+# --- constraints-mechanism-marked ----------------------------------------------------------
+# session-audit.sh selects what it shows at startup by reading this file's graduation
+# markers. That makes a prose file load-bearing for a hook, and prose drifts: reword one
+# note and a constraint silently changes category. The dangerous direction is a prose-only
+# constraint reading as guarded, because it then vanishes from the one line that surfaces it
+# — a filter that quietly selects nothing, which is C13's shape at the startup layer.
+#
+# Written after the loose version of this parse got it wrong: `"graduat" in body` matches
+# **Not graduated.** and counted C9/C10/C11/C20 as mechanised when they say the opposite.
+# The rule is line-anchored and the two markers are mutually exclusive.
+#
+# Sibling of `claude-md-no-routing-table` in skill-index-integrity: both guard a prose file
+# that something reads to decide what a session is handed, where drift has no symptom.
+if ! cmark=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+txt = Path(".claude/memory/constraints.md").read_text(encoding="utf-8")
+blocks = re.split(r'\n### (C\d+) — ', txt)
+GUARD   = re.compile(r'^\*\*Graduated', re.M)
+NOGUARD = re.compile(r'^\*\*Not graduated', re.M)
+unmarked, ambiguous, total = [], [], 0
+for i in range(1, len(blocks), 2):
+    cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
+    total += 1
+    g, n = bool(GUARD.search(body)), bool(NOGUARD.search(body))
+    if g and n:      ambiguous.append(cid)
+    elif not g and not n: unmarked.append(cid)
+problems = []
+if total == 0:
+    problems.append("parsed 0 constraints — the split pattern broke, and session-audit.sh "
+                    "would show an empty list rather than fail")
+if unmarked:
+    problems.append("constraint(s) with neither marker: " + ", ".join(unmarked) +
+                    " — every constraint needs a line starting `**Graduated` (naming the "
+                    "hook/eval/scanner) or `**Not graduated` (saying why nothing mechanical "
+                    "would see it); session-audit.sh cannot categorise an unmarked one")
+if ambiguous:
+    problems.append("constraint(s) with BOTH markers: " + ", ".join(ambiguous) +
+                    " — they are mutually exclusive; the startup line would report it twice")
+
+# The startup line TRUSTS a `**Graduated` marker: claiming one takes a constraint off the
+# list of things a session must read. So the claim has to be true. A mechanism deleted
+# along with its settings.json entry passes `hooks-wired` and leaves this claim standing,
+# which silently hides an unguarded constraint — the exact direction that matters.
+#
+# Only tokens containing "/" count, the same narrowing `skill-refs-resolve` uses: a bare
+# name in prose (`grep-c-fallback`, `roadmap-claims-current`) is an eval's name, not a path
+# claim, and resolving those against candidate roots is how that check got 16 false
+# positives on its first run.
+for i in range(1, len(blocks), 2):
+    cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
+    for line in GUARD.findall(body) and [l for l in body.splitlines()
+                                         if l.startswith("**Graduated")]:
+        for tok in re.findall(r"`([^`]+)`", line):
+            if "/" not in tok:
+                continue
+            if not Path(tok.strip().rstrip(".,;:")).exists():
+                problems.append(
+                    f"{cid} claims it graduated to `{tok}`, which does not exist — either "
+                    f"the mechanism was deleted (so the constraint is unguarded and must "
+                    f"go back on the startup line) or the path is wrong")
+print("; ".join(problems))
+PYEOF
+); then
+  cmark="the parser itself exited non-zero: ${cmark:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$cmark" ]; then
+  ok "constraints-mechanism-marked: every constraint states whether a mechanism guards it"
+else
+  bad "constraints-mechanism-marked" "$cmark"
+fi
+
+# --- eval-parsers-fail-loudly -------------------------------------------------------------
+# Most checks in this file are a shell capture of a python heredoc, where an empty result
+# means PASS. If the parser dies, its traceback goes to stderr, the captured string is
+# empty, and the check reports PASS — against whatever it was supposed to catch.
+#
+# Found 2026-08-21 by grepping for a mistake made three times in one session: **12 of the
+# 15 captures in this file had it**, every one of them reporting PASS on a dead parser.
+# Demonstrated, not assumed — a `raise` injected at the top of `claude-md-refs-resolve`'s
+# parser printed `PASS  claude-md-refs-resolve: every repo path CLAUDE.md names still
+# exists`. That is C13's exact shape (a verification that cannot fail is not verification)
+# multiplied across most of the suite, and the gate-corpus finding — the delivery gate
+# passing silently whenever sweep.py raised — arrived at from the opposite direction.
+#
+# Required shape, both halves:
+#   if ! var=$(python3 - … 2>&1 <<'PYEOF'   ->  stderr captured AND exit status tested
+#   ); then var="…parser died…"; fi
+#
+# Matches the shell construct, never prose, so a comment explaining the trap cannot trip
+# it (C14 — which this session hit twice writing other scanners).
+if ! parsers=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+lines = Path(".claude/evals/run-evals.sh").read_text(encoding="utf-8").split("\n")
+CAP = re.compile(r"^\s*(if ! )?(\w+)=\$\(python3 - ?(.*?)<<'\w+'\s*$")
+bad = []
+total = 0
+for n, line in enumerate(lines, 1):
+    m = CAP.match(line)
+    if not m:
+        continue
+    total += 1
+    guarded, name, args = m.group(1), m.group(2), m.group(3)
+    missing = []
+    if "2>&1" not in args:
+        missing.append("no 2>&1 (stderr discarded)")
+    if not guarded:
+        missing.append("no `if !` (exit status untested)")
+    if missing:
+        bad.append(f"line {n} ({name}): " + " and ".join(missing))
+if total == 0:
+    print("found 0 python-heredoc captures — the scan matched nothing, which is not the "
+          "same as a clean result")
+elif bad:
+    print(f"{len(bad)} of {total} check(s) report PASS when their own parser dies: " +
+          "; ".join(bad) + " — wrap as `if ! var=$(python3 - … 2>&1 <<'PYEOF'` and set "
+          "var to a failure message in the `; then` branch")
+PYEOF
+); then
+  parsers="the parser itself exited non-zero: ${parsers:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$parsers" ]; then
+  ok "eval-parsers-fail-loudly: every python-heredoc check captures stderr and tests its parser's exit status"
+else
+  bad "eval-parsers-fail-loudly" "$parsers"
+fi
+
+# --- oplog-rows-are-index ---------------------------------------------------------------
+# operational-log.md says of itself: "Format is fixed... nothing else. No narration, no
+# diary... this file is the index of what the system learned." It had stopped being that.
+# Nine rows had grown past 3,000 characters, the largest 7,724, because a live
+# investigation kept appending to the row — and one of them was being reprinted in full
+# into every session's startup context. The appended corrections were the valuable part;
+# they now live in incidents/<date>-<slug>.md and the row links to them.
+#
+# Two things are checked, because the row shape has two ways to go wrong:
+#   1. length — a row over the cap is an investigation that should have been archived
+#   2. cell count — pipes inside inline code must be escaped `\|`, or markdown reads them
+#      as separators. Three rows rendered with 7, 7 and 11 cells for weeks; nothing noticed
+#      because a malformed table row still displays, just wrongly.
+#
+# 2>&1 and the exit-status test are not decoration: C13's eighth occurrence, hours before
+# this check was written, was a sibling eval that captured only stdout and so reported PASS
+# whenever its own parser died.
+CAP=3000
+if ! oplog=$(python3 - "$CAP" 2>&1 <<'PYEOF'
+import re, sys
+cap = int(sys.argv[1])
+path = ".claude/memory/operational-log.md"
+SPLIT = re.compile(r'(?<!\\)\|')          # a separator is a pipe that is not escaped
+rows, long_rows, malformed = 0, [], []
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    if not line.startswith("| 20"):
+        continue
+    rows += 1
+    date = line[2:12]
+    if len(line) > cap:
+        long_rows.append(f"line {n} ({date}): {len(line)} chars")
+    parts = [p for p in SPLIT.split(line)]
+    if parts and parts[0].strip() == "": parts = parts[1:]
+    if parts and parts[-1].strip() == "": parts = parts[:-1]
+    if len(parts) != 6:
+        malformed.append(f"line {n} ({date}): {len(parts)} cells")
+if rows == 0:
+    print("parsed 0 rows out of the log — the parser broke, which is the silent-green "
+          "shape this check exists for")
+elif malformed:
+    print("row(s) not splitting into 6 cells: " + "; ".join(malformed) +
+          " — escape pipes inside inline code as '\\|'; markdown reads a bare one as a "
+          "column separator")
+elif long_rows:
+    print(f"row(s) over {cap} chars: " + "; ".join(long_rows) +
+          " — move the full record to .claude/memory/incidents/<date>-<slug>.md and leave "
+          "an index row linking to it (see the header of operational-log.md)")
+PYEOF
+); then
+  oplog="the parser itself exited non-zero: ${oplog:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$oplog" ]; then
+  ok "oplog-rows-are-index: every operational-log row is 6 cells and under ${CAP} chars"
+else
+  bad "oplog-rows-are-index" "$oplog"
+fi
+
+# --- grep-c-fallback --------------------------------------------------------------------
+# C23, fourth occurrence. `grep -c` prints "0" AND exits 1 when there are no matches, so
+# `x=$(grep -c … || echo 0)` stacks a second line onto output that already succeeded — x
+# becomes "0\n0". It reads perfectly well, which is why it keeps coming back: written into
+# debrief-check.sh 2026-08-11 (caught, fixed, left as a comment), then into session-audit.sh
+# and this eval file, where it shipped a hook that announced "MYCELIUM: 0\n0 open message(s)"
+# precisely when nothing was waiting.
+#
+# A comment in one file could not stop it recurring in three others. This is that comment,
+# made mechanical. Correct form: `x=$(grep -c … 2>/dev/null); x=${x:-0}`.
+#
+# C14, twice over: the check must not flag the comments explaining the trap, nor its own
+# error message quoting it. Comment lines are skipped, and the match requires a command
+# substitution — the defect only exists when the stray line is being CAPTURED. Prose that
+# names the pattern has no `$(`.
+#
+# The `$(` requirement also fixed a false negative found the same minute: an earlier
+# `[^|]*` between `-c` and `||` could not cross the pipe inside `grep -c '| status: open$'`,
+# so the exact line that shipped the bug would have passed. `.*` crosses it.
+if ! gcf=$(python3 - 2>&1 <<'PYEOF'
+import re, subprocess
+from pathlib import Path
+# Same shape via `|| true` counts too — it leaves the stray "0" line just as surely.
+BAD = re.compile(r"grep\s+-c\b.*\|\|\s*(echo|true)")
+hits = []
+files = subprocess.run(["git", "ls-files", "*.sh", "*.bash"],
+                       capture_output=True, text=True).stdout.split()
+for f in files:
+    for n, line in enumerate(Path(f).read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if line.lstrip().startswith("#") or "$(" not in line:
+            continue
+        if BAD.search(line):
+            hits.append(f"{f}:{n}")
+if not files:
+    print("git ls-files matched no shell scripts — the scan found nothing because it "
+          "looked nowhere, which is not the same as a clean result")
+elif hits:
+    print("`grep -c … || echo/true` at " + ", ".join(hits) +
+          " — grep -c already prints 0 on no matches and exits 1, so the fallback appends "
+          "a second line; use `x=$(grep -c … 2>/dev/null); x=${x:-0}`")
+PYEOF
+); then
+  gcf="the parser itself exited non-zero: ${gcf:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$gcf" ]; then
+  ok "grep-c-fallback: no shell script stacks a fallback onto grep -c (C23)"
+else
+  bad "grep-c-fallback" "$gcf"
+fi
+
+# --- mycelium-format --------------------------------------------------------------------
+# session-audit.sh tells each new session how many mycelium messages are waiting, by
+# grepping the entry header. A drifted header — renamed status, trailing space, missing
+# field — does not error. It drops out of the count, and the next session is told nothing
+# is waiting. That is the C13 shape: a reading that cannot report a problem is not a
+# reading, and this one fails toward silence.
+#
+# The check parses every header independently and compares against the hook's own grep.
+# Disagreement fails, whichever side drifted — the file's format or the hook that reads it.
+myc=.claude/memory/mycelium.md
+if [ ! -f "$myc" ]; then
+  bad "mycelium-format" "$myc missing — session-audit.sh will silently stop reporting cross-session messages"
+else
+  # The hook's counter, character-for-character as session-audit.sh runs it.
+  # NOT `|| echo 0` — grep -c prints "0" and exits 1 on no matches, so the fallback stacks
+  # a second line and the parser below dies on int("0\n0"). Which it did, silently: with
+  # only stdout captured, a crashing parser produced an empty error string and this check
+  # reported PASS against a real violation. That is the gate-corpus finding (the delivery
+  # gate passed whenever sweep.py raised) reproduced inside a new check, and it is why the
+  # python call below is invoked with 2>&1 and its exit status tested.
+  hook_open=$(grep '^### 20' "$myc" 2>/dev/null | grep -c '| status: open$'); hook_open=${hook_open:-0}
+  if ! myc_err=$(python3 - "$myc" "$hook_open" 2>&1 <<'PYEOF'
+import re, sys
+path, hook_open = sys.argv[1], int(sys.argv[2])
+HEADER = re.compile(
+    r"^### 20\d{2}-\d{2}-\d{2} \| from: .+ \| to: .+ \| status: (open|ack|done)$")
+bad_headers, statuses, in_fence = [], [], False
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    # C14: a scanner cannot tell "this file does the bad thing" from "this file explains
+    # it". The Entry format section documents the header shape inside a fence, and that
+    # example is not an entry. Caught on this check's first run.
+    if line.startswith("```"):
+        in_fence = not in_fence
+        continue
+    if in_fence:
+        continue
+    # Outside a fence, every header line starts "### " — including a malformed one, which
+    # is the case that must not pass silently.
+    if not line.startswith("### "):
+        continue
+    m = HEADER.match(line)
+    if m:
+        statuses.append(m.group(1))
+    else:
+        bad_headers.append(f"line {n}: {line[:90]}")
+if bad_headers:
+    print("entry header(s) session-audit.sh cannot count: " + "; ".join(bad_headers) +
+          " — required shape: '### YYYY-MM-DD | from: X | to: Y | status: open|ack|done'")
+elif not statuses:
+    print("parsed 0 entries out of the file — the parser broke, which is exactly the "
+          "silent-green shape this check exists for")
+else:
+    parsed_open = statuses.count("open")
+    if parsed_open != hook_open:
+        print(f"the hook counts {hook_open} open entr(ies), an independent parse finds "
+              f"{parsed_open} — session-audit.sh and {path} disagree about the format")
+PYEOF
+  ); then
+    myc_err="the parser itself exited non-zero: ${myc_err:-(no output)} — a check that goes green when its own parser dies is not a check"
+  fi
+  if [ -z "$myc_err" ]; then
+    ok "mycelium-format: every entry header is countable, and the hook's count matches an independent parse"
+  else
+    bad "mycelium-format" "$myc_err"
+  fi
+fi
+
+# --- fleet-config-drift -----------------------------------------------------------------
+# All 7 instances share one bot.py but differ in context files, cards, and preset layers.
+# Drift accumulates silently — a new context file added to 4 instances but not the other
+# 3, or a card key present on 2 instances but not the rest. fleet-config-check.py catches
+# this by majority rule: if 4+ instances have something, the ones that don't are flagged.
+#
+# The checker exits 1 when issues exist. The eval captures its output and reports it.
+if ! fcd=$(python3 .claude/tools/fleet-config-check.py 2>&1); then
+  fcd_msg=$(echo "$fcd" | grep -v '^fleet-config-check:')
+  bad "fleet-config-drift" "$fcd_msg"
+else
+  ok "fleet-config-drift: all 7 instances consistent (file presence, card schema, preset layers)"
 fi
 
 echo

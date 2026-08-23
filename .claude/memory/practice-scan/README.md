@@ -1,8 +1,11 @@
 # practice-scan
 
-Weekly output of the `practice-scan-weekly` Routine (see
-`.claude/operating/routines.md`). One file per firing, named for the date it ran:
-`<YYYY-MM-DD>.md`.
+**The `practice-scan-weekly` Routine that wrote here is retired (2026-08-22)** — the
+scheduled work moved to ChatGPT. Nothing writes to this directory any more.
+
+What is here is that Routine's past output, one file per firing named for the date it
+ran (`<YYYY-MM-DD>.md`). Kept as a record; an empty or stale directory is now the
+expected state, not a sign the scan failed.
 
 Each file holds at most 5 ideas drawn from the two Substack publications the
 Routine owns, every one tagged `[fleet memory]` or `[operating]`, carrying its

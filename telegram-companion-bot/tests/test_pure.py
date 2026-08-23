@@ -7748,6 +7748,10 @@ class TestEveryBooleanFlagDefault:
         "DAY_MOOD_RESIDUE": True,
         "DEVICE_RENDER": False,
         "DIRECTIVE_LEAK_GUARD": True,
+        # v2026-08-21.4. Default-on per the kill-switch policy: it only repairs memories
+        # that already failed to embed, so off means those stay permanently invisible to
+        # semantic recall.
+        "EMBED_BACKFILL": True,
         # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
@@ -11275,3 +11279,124 @@ class TestHelpCmdRuns:
         update = SimpleNamespace(message=SimpleNamespace(reply_text=_reply))
         asyncio.run(bot.help_cmd(update, SimpleNamespace(args=[])))
         assert sent and "/fire" in sent[0]
+
+
+class TestEmbedRetryAndBackfill:
+    """v2026-08-21.4 — an embed failure used to be invisible AND permanent.
+
+    Drives the real functions (not their source): a fake _get_session lets
+    _embed_text's retry loop run for real, and the backfill job is awaited.
+    """
+
+    def setup_method(self):
+        self._cache = dict(bot._embeddings_cache)
+        self._sess = bot._get_session
+        self._errs = {k: list(v) for k, v in bot._error_counts.items()}
+        self._throttle = dict(bot._throttle_state)
+        self._retries = bot.EMBED_RETRIES
+        self._budget = bot.EMBED_RETRY_BUDGET_S
+        self._backfill = bot.EMBED_BACKFILL
+        self._batch = bot.EMBED_BACKFILL_BATCH
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear(); bot._embeddings_cache.update(self._cache)
+        bot._get_session = self._sess
+        bot._error_counts.clear(); bot._error_counts.update(self._errs)
+        bot._throttle_state.clear(); bot._throttle_state.update(self._throttle)
+        bot.EMBED_RETRIES = self._retries
+        bot.EMBED_RETRY_BUDGET_S = self._budget
+        bot.EMBED_BACKFILL = self._backfill
+        bot.EMBED_BACKFILL_BATCH = self._batch
+
+    # --- a fake HTTP session whose /embeddings fails N times then succeeds ---
+    def _session(self, fail_times, vec=(0.1, 0.2), exc=RuntimeError("boom")):
+        state = {"n": 0}
+
+        class _Resp:
+            def raise_for_status(self): pass
+            def json(self): return {"data": [{"embedding": list(vec)}]}
+
+        class _Sess:
+            def post(_s, *a, **k):
+                state["n"] += 1
+                if state["n"] <= fail_times:
+                    raise exc
+                return _Resp()
+
+        bot._get_session = lambda: _Sess()
+        return state
+
+    def test_retries_a_fast_failure_and_succeeds(self):
+        bot.EMBED_RETRIES = 2
+        state = self._session(fail_times=1)
+        assert bot._embed_text("hello") == [0.1, 0.2]
+        assert state["n"] == 2, "should have retried once"
+
+    def test_gives_up_after_the_configured_attempts_and_counts_it(self):
+        bot.EMBED_RETRIES = 2
+        bot._error_counts.pop("embed", None)
+        state = self._session(fail_times=99)
+        assert bot._embed_text("hello") is None
+        assert state["n"] == 2, "must not retry forever"
+        assert len(bot._error_counts.get("embed", [])) == 1, \
+            "a total failure must be counted exactly once, not per attempt"
+
+    def test_retries_disabled_by_kill_switch(self):
+        bot.EMBED_RETRIES = 1                      # the documented kill switch
+        state = self._session(fail_times=99)
+        assert bot._embed_text("hello") is None
+        assert state["n"] == 1
+
+    def test_slow_failure_is_not_retried(self):
+        """A slow failure means the caller's budget is gone and the thread cannot be
+        cancelled — retrying would run on with nobody waiting."""
+        bot.EMBED_RETRIES = 3
+        bot.EMBED_RETRY_BUDGET_S = 0.0             # every failure counts as slow
+        state = self._session(fail_times=99)
+        assert bot._embed_text("x") is None
+        assert state["n"] == 1
+
+    def test_unvectorised_memories_finds_only_the_missing(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["has vec", "no vec"])
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache["has vec"] = [1.0, 0.0]
+        assert bot._unvectorised_memories() == ["no vec"]
+
+    def test_backfill_embeds_the_missing_and_caches_them(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["alpha", "beta"])
+        monkeypatch.setattr(bot, "_save_embeddings", lambda: None)
+        bot._embeddings_cache.clear()
+        self._session(fail_times=0, vec=(0.3, 0.4))
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            bot._embed_backfill_job(None))
+        assert bot._embeddings_cache["alpha"] == [0.3, 0.4]
+        assert bot._embeddings_cache["beta"] == [0.3, 0.4]
+
+    def test_backfill_is_bounded_per_run(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["a", "b", "c", "d"])
+        monkeypatch.setattr(bot, "_save_embeddings", lambda: None)
+        bot._embeddings_cache.clear()
+        bot.EMBED_BACKFILL_BATCH = 2
+        self._session(fail_times=0)
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            bot._embed_backfill_job(None))
+        assert len(bot._embeddings_cache) == 2, "must not drain the whole backlog at once"
+
+    def test_backfill_kill_switch_does_nothing(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["a"])
+        bot._embeddings_cache.clear()
+        bot.EMBED_BACKFILL = False
+        called = []
+        bot._get_session = lambda: called.append(1)
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            bot._embed_backfill_job(None))
+        assert called == [] and bot._embeddings_cache == {}
+
+    def test_backfill_survives_a_still_failing_provider(self, monkeypatch):
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["a"])
+        monkeypatch.setattr(bot, "_save_embeddings", lambda: None)
+        bot._embeddings_cache.clear()
+        self._session(fail_times=99)
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            bot._embed_backfill_job(None))     # must not raise
+        assert bot._embeddings_cache == {}

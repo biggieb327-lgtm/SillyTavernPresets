@@ -25,6 +25,8 @@ All under `telegram-companion-bot/` unless noted:
 - `SETUP_GUIDE.md` — standing up a new instance (or use `new-bot.sh`).
 - `.env.example` — every variable bot.py reads, documented with defaults.
 - `.claude/memory/operational-log.md` — one row per failure that changed the system.
+- `.claude/memory/mycelium.md` — messages between sessions (findings, dead ends,
+  partial handoffs, heads-ups). `session-audit.sh` surfaces open entries at startup.
 
 ## Operating rule
 
@@ -62,8 +64,10 @@ The machinery that enforces this is real, not advisory:
 - **CI** (`.github/workflows/evals.yml`) — same evals + pytest on `main`/`claude/**`.
   `vps-sync.sh` hard-resets the VPS checkout to `origin/main` before copying, so
   **a red run on main is a deploy blocker.**
-- Routines are recorded in `.claude/operating/routines.md` — keep it and the live
-  Routine in sync.
+- **Scheduled Routines are retired here (2026-08-22)** — the work moved to ChatGPT and
+  all seven triggers are paused. `.claude/operating/routines.md` is now a historical
+  record, NOT something to keep in sync with anything live. Every automation that still
+  runs in this repo is a hook or an eval.
 
 Do not load unrelated skills.
 Do not rewrite large files unless the task requires it.
@@ -113,16 +117,18 @@ or gets said in plain words.
 | break-test | proving a check goes RED before trusting its GREEN | `add-regression-eval` |
 | the class | every other place the bug shape you just fixed occurs | `fix-the-class` |
 | kill switch | the env var that disables a default-on feature without a redeploy | `bot-code-invariants` #16 |
-| Routine | a scheduled session that fires with nobody watching | `.claude/operating/routines.md` |
+| Routine | a scheduled session that fires with nobody watching — **retired here 2026-08-22**, kept as a term because the memory layer records them | `.claude/operating/routines.md` |
 
 ## Where things live
 
 **`.claude/skills/skill-router/SKILL.md` is the routing table — read it, don't guess.**
 
 **Do not re-add a "quick reference" copy of that table here.** The last one drifted,
-omitted seven skills, and misrouted a session (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`);
-no check catches a new one. A one-line description of every skill already reaches you for
-free and cannot go stale.
+omitted seven skills, and misrouted a session (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`).
+A one-line description of every skill already reaches you for free and cannot go stale.
+**`skill-index-integrity` now enforces this** (2026-08-21): a table row here keyed by a
+skill name fails the eval. The vocabulary table below is keyed by *term*, which is what
+keeps it legal — that difference is the check, so don't key a table here by skill.
 
 Two composition facts the per-skill descriptions can't tell you:
 
@@ -231,8 +237,8 @@ Full command reference: `OPS_MANUAL.md`.
 Scoping, evidence, uncertainty, and stopping are `.claude/OPERATING_MANUAL.md`'s job — it states
 each with a threshold and a test, so they are not restated here. What is project-specific:
 
-1. **Unattended runs never block on a question.** Routines and loops fire with nobody
-   watching: pick the most reasonable reading, proceed, and record the assumption in the
+1. **Unattended runs never block on a question.** A `/loop`, an overnight run, or any
+   session firing with nobody watching (Routines did this until 2026-08-22): pick the most reasonable reading, proceed, and record the assumption in the
    output. Ask first only when someone is there to answer.
 2. **Out-of-scope smells get surfaced, not fixed** — name them as follow-ups in the
    report, keep them out of the diff.
@@ -329,15 +335,19 @@ above. `ls` it for the rest. The non-obvious bits:
 - `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are phone-era leftovers: they were
   curl-installed onto the phone once, and no VPS deploy path touches them. Editing them
   in-repo ships nothing.
-- `character-review/` (root) is the card inbox for the monthly character pass — the
-  `character-pass-monthly` Routine reads it and writes proposals, never edits (see its
-  README). On-demand reviews and voice-defect triage: the `character-reviewer` agent.
+- `character-review/` (root) is the card inbox for the character pass. The
+  `character-pass-monthly` Routine used to read it and write proposals; that Routine is
+  **retired here (2026-08-22)**, so the pass is now on-demand — ask the
+  `character-reviewer` agent, which also handles voice-defect triage. The existing
+  `PROPOSALS-*.md` files are that Routine's past output, kept.
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
-- `idea-scraper-actor/` (root) is a custom Apify actor the `improvement-loop-monthly`
-  and `character-pass-monthly` Routines call for their Reddit + Substack idea scans
-  (see its README and `.claude/operating/routines.md`). Not deployed by anything in
+- `idea-scraper-actor/` (root) is a custom Apify actor built for the
+  `improvement-loop-monthly` and `character-pass-monthly` Routines' Reddit + Substack
+  idea scans. **Both Routines are retired here (2026-08-22)**, so nothing in this repo
+  calls it; whether the ChatGPT-side replacements still do is the owner's to say (see its
+  README and `.claude/operating/routines.md`, now historical). Not deployed by anything in
   this repo; the owner deploys it to Apify by hand (`apify push`). **Read its README
   before touching Reddit access again** — two other approaches (direct `curl` to
   reddit.com from a fired session; calling `trudax/reddit-scraper-lite` as a public

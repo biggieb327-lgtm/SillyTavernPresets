@@ -26,6 +26,17 @@ Three rounds of speculative fixes once lost to one pasted log line.
      and restart cadence).
    - `/audit` — BOT_VERSION (is it what you think is deployed?), uptime, config.
 
+   **While you wait for that paste, ask whether it has happened before** — the
+   operational log holds 71 incidents and you cannot read it whole:
+   ```bash
+   python3 .claude/tools/oplog-search.py "the symptom in your own words"
+   ```
+   Ranks rows by relevance instead of making you skim a grep's 9-to-21 matches, and
+   prints the `incidents/` link when the row has one. **Not a substitute for grep**
+   when you know the exact string, and measured at 7/10 — it misses when the log's
+   vocabulary and yours differ (it writes "offset-naive", you say "timezone"), which
+   is C4 in miniature. A miss means "search again in other words", never "this is new".
+
 2. **Differential diagnosis.** Which bots are affected, which aren't? The broken
    one's delta (.env, model slots, Emily's integrations, group pilot on priya/jules)
    is usually the answer. All six broken at once = shared cause: bot.py release,
