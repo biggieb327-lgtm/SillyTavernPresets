@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-23.1 — /fire: proactive Seattle Fire real-time 911 alerts
+
+New feature: the first **proactive** crime/safety alert. `/crime` and `/dispatch` are
+pull-only and their data lags (crime days, dispatch ~1 day), so a user who called 911
+today would never be alerted — the feature only ever answered when asked, and the fresh
+data wasn't there anyway. The Seattle **Fire** 911 feed (`kzjm-xkqj`) is the one public
+source that refreshes every ~5 minutes, so it can actually drive a push alert.
+
+`fire_poll_job` polls the feed every `FIRE_POLL_MINUTES` (default 5), fetches recent
+citywide calls once, and DMs each user a call that landed within `FIRE_RADIUS_MILES`
+(default 0.5) of their location — the same client-side haversine filter `traffic_poll_job`
+uses, so one HTTP round trip serves everyone. Alerts fire only while the shared location
+is fresh (`_fresh_location`: live share, or static within 4h) and never while the user is
+`/away`. `/fire` also does an on-demand lookup, like `/crime`.
+
+Coverage is fire/EMS only (medical aid, fires, rescues, accidents) — no police, because
+no free public feed exposes near-real-time police data as structured records; police
+scanner audio would need a paid feed plus a transcription/geocoding pipeline. That
+trade-off is the whole reason this uses the fire feed.
+
+Design notes: separate `FIRE_ALERTS` kill switch (default ON) so the passive push can be
+disabled without losing the pull-only crime commands; registered in `/features` as `fire`.
+Cold-start guard — on the first poll that sees a chat, the job records what's already on
+the board and stays silent, so a restart never dumps the backlog; only calls appearing
+afterward become alerts. Dedup was hardened after a `/code-review` pass on the diff: a
+call with no `incident_number` gets a stable composite key (`_fire_id`) so it can't
+re-alert every poll; the seen-set is dropped when a user goes `/away` or their location
+goes stale, so a return re-seeds silently instead of dumping the accumulated backlog;
+only calls actually sent (capped at `FIRE_LIMIT`) are marked seen, so an overflow burst
+is delivered on later polls rather than silently lost; and the set is intersected with
+the current board each poll to bound its growth. Env: `FIRE_ALERTS`, `FIRE_RADIUS_MILES`,
+`FIRE_POLL_MINUTES`, `FIRE_LIMIT`. The location-share acknowledgment now mentions `/fire`
+and that the bot alerts automatically.
+
+Follow-up (surfaced, not fixed): `fire_poll_job` and `traffic_poll_job` now share the
+same proactive-alert shape (fetch → iterate `user_location` → away/fresh gate → nearby
+filter → seen-set dedup → send). A single helper parameterized by feed, id field, and
+freshness predicate would carry future fixes once; deferred because folding it in would
+touch the working, eval-covered traffic path.
+
 ## v2026-08-21.3 — location acknowledgment lists all location-based commands
 
 The message shown after sharing a location only mentioned `/traffic`, `/incidents`,

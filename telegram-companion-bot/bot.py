@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-21.3"
+BOT_VERSION = "2026-08-23.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2786,6 +2786,18 @@ _SEATTLE_CRIME_URL = "https://data.seattle.gov/resource/tazs-3rd5.json"
 _SEATTLE_DISPATCH_URL = "https://data.seattle.gov/resource/33kz-ixgy.json"
 _SEATTLE_BOUNDS = {"lat_min": 47.49, "lat_max": 47.74, "lon_min": -122.44, "lon_max": -122.24}
 
+# --- Seattle Fire real-time 911 (kzjm-xkqj) — the only near-real-time public feed ---
+# Unlike the crime/dispatch datasets (daily/days lag), this one refreshes every ~5 min,
+# so it drives a PROACTIVE alert: fire_poll_job DMs a user when a new fire/medic call
+# lands within FIRE_RADIUS_MILES of their fresh (live or <4h) shared location. Fire/EMS
+# only — no police — but that is most 911 volume. Separate kill switch from CRIME_ALERTS
+# so the passive push can be turned off without losing the pull-only crime commands.
+FIRE_ALERTS = _env_bool("FIRE_ALERTS", True)
+FIRE_RADIUS_MILES = _env_float("FIRE_RADIUS_MILES", "0.5")
+FIRE_POLL_MINUTES = _env_int("FIRE_POLL_MINUTES", "5")
+FIRE_LIMIT = _env_int("FIRE_LIMIT", "10")
+_SEATTLE_FIRE_URL = "https://data.seattle.gov/resource/kzjm-xkqj.json"
+
 # --- Garmin health feed: she's quietly attuned to how the user is doing physically ---
 # Fail-closed on credentials like WSDOT above (no creds => inert), but the kill switch is
 # separate so the feed can be turned off without deleting credentials (invariant #16).
@@ -3419,6 +3431,7 @@ setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set 
 preset_override: list = []  # preset layer filenames set via /preset; empty = use the .env stack
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
+_fire_seen: dict = {}      # chat_id -> set of Seattle-fire incident_number strings alerted on
 group_cursor: dict = {}    # group chat_id -> byte offset into the shared group ledger
 group_bot_sends_today: dict = {}  # group chat_id -> {"date": str, "count": int} (bot-to-bot budget)
 feedback_log: dict = {}    # chat_id -> [{"emoji": str, "ts": float, "msg_snippet": str}] (capped 50)
@@ -8217,6 +8230,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Crime alerts (Seattle)*",
         "/crime — recent crime reports near your shared location",
         "/dispatch — recent 911 dispatch calls near your shared location",
+        "/fire — recent fire/medic 911 calls near you (I also alert you automatically)",
         "",
         "*Maps (routing & places)*",
         "/route <from> to <dest> — travel time & distance",
@@ -12577,6 +12591,7 @@ _FEATURES = {
     "foodsuggestions": ("FOOD_SUGGESTIONS", lambda: bool(TOMTOM_API_KEY), None),
     "health":  ("GARMIN_ENABLED",  lambda: bool(GARMIN_EMAIL and GARMIN_PASSWORD), None),
     "crime":   ("CRIME_ALERTS",   lambda: True, None),
+    "fire":    ("FIRE_ALERTS",    lambda: True, None),
 }
 FEATURE_PREFS_FILE = BASE_DIR / "feature_prefs.json"
 feature_prefs = {}
@@ -14593,7 +14608,7 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if LOCATION_PLACE and TOMTOM_ENABLED and update.message:
         asyncio.create_task(_name_the_place(chat_id, entry["ts"], loc.latitude, loc.longitude))
 
-    if update.message and (TRAFFIC_ENABLED or TOMTOM_ENABLED or CRIME_ALERTS):
+    if update.message and (TRAFFIC_ENABLED or TOMTOM_ENABLED or CRIME_ALERTS or FIRE_ALERTS):
         cmds = []
         if TRAFFIC_ENABLED:
             cmds += ["/traffic", "/incidents"]
@@ -14601,17 +14616,22 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cmds += ["/nearby", "/food"]
         if CRIME_ALERTS:
             cmds += ["/crime", "/dispatch"]
+        if FIRE_ALERTS:
+            cmds += ["/fire"]
+        # Fire is the only proactive one — say so, since the user gets those unprompted.
+        fire_note = (" I'll also ping you if a 911 fire/medic call comes in near you."
+                     if FIRE_ALERTS else "")
         extra = " You can also use " + ", ".join(cmds[1:]) + "." if len(cmds) > 1 else ""
         if loc.live_period and TRAFFIC_ENABLED:
             await update.message.reply_text(
                 "📍 Got your live location. I'll keep an eye on traffic around you "
                 "and give you a heads-up if anything pops up nearby."
-                + extra
+                + extra + fire_note
             )
         else:
             await update.message.reply_text(
                 "📍 Got it. Use " + ", ".join(cmds)
-                + " to check what's around there."
+                + " to check what's around there." + fire_note
             )
 
 
@@ -14956,6 +14976,177 @@ async def dispatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     header = (f"\U0001f6a8 Recent 911 dispatch within {CRIME_RADIUS_MILES:.1f} mi "
               f"(last {DISPATCH_HOURS}h)")
     footer = "\n\nSource: SPD Call Data via data.seattle.gov (updated daily)"
+    text = f"{header}\n\n" + "\n\n".join(lines) + footer
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    await update.message.reply_text(text)
+
+
+# --- Seattle Fire real-time 911 alerts ---
+
+def _fetch_seattle_fire() -> list:
+    """Most recent citywide fire/medic 911 calls. Fetched once per poll (not per user) and
+    filtered client-side, mirroring traffic_poll_job — one HTTP round trip serves everyone."""
+    params = {"$order": "datetime DESC", "$limit": "200"}
+    try:
+        r = _get_session().get(_SEATTLE_FIRE_URL, params=params, timeout=(10, 30))
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning("[fire] Seattle fire fetch failed: %s",
+                    _classify_fetch_error_by_type(e))
+        return []
+
+
+def _fire_loc(call: dict) -> tuple:
+    """(lat, lon) floats for a fire call, or (None, None) when the record has no usable
+    coordinates. The feed carries both flat `latitude`/`longitude` strings and a nested
+    `report_location`; try the flat pair first, fall back to the point."""
+    try:
+        return float(call["latitude"]), float(call["longitude"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    pt = call.get("report_location") or {}
+    coords = pt.get("coordinates") if isinstance(pt, dict) else None
+    if isinstance(coords, (list, tuple)) and len(coords) == 2:
+        try:
+            return float(coords[1]), float(coords[0])  # GeoJSON is [lon, lat]
+        except (TypeError, ValueError):
+            pass
+    return None, None
+
+
+def _fire_id(call: dict) -> str:
+    """A stable, always-non-empty dedup key for a fire call. `incident_number` is the
+    natural id, but Socrata records can arrive without one — falling back to an empty
+    string would make every id-less call read as 'never seen' and re-alert on every poll,
+    so compose a key from the record's stable fields instead (a nearby call always has
+    coordinates, so this is never empty)."""
+    iid = str(call.get("incident_number") or "").strip()
+    if iid:
+        return iid
+    return "|".join(str(call.get(k, "")) for k in
+                    ("type", "address", "datetime", "latitude", "longitude"))
+
+
+def _fire_nearby(calls: list, lat: float, lon: float, radius: float) -> list:
+    """Fire calls within `radius` miles of (lat, lon). Records with no coordinates drop out
+    rather than count as distance zero."""
+    out = []
+    for c in calls:
+        clat, clon = _fire_loc(c)
+        if clat is not None and _haversine(lat, lon, clat, clon) <= radius:
+            out.append(c)
+    return out
+
+
+def _format_fire(call: dict) -> str:
+    ctype = call.get("type") or "911 call"
+    addr = call.get("address", "")
+    dt_raw = call.get("datetime", "")
+    dt_str = ""
+    if dt_raw:
+        try:
+            # The feed usually sends an ISO floating-timestamp; some exports send an epoch
+            # (seconds or millis). Handle both rather than trust one and show a raw number.
+            if isinstance(dt_raw, (int, float)) or str(dt_raw).isdigit():
+                ts = float(dt_raw)
+                if ts > 1e11:  # milliseconds
+                    ts /= 1000.0
+                dt = datetime.fromtimestamp(ts)
+            else:
+                dt = datetime.fromisoformat(str(dt_raw).replace("Z", "+00:00"))
+            dt_str = dt.strftime("%b %d %I:%M %p")
+        except (ValueError, TypeError, OverflowError, OSError):
+            dt_str = str(dt_raw)[:16]
+    line = f"\U0001f692 {ctype}"
+    if addr:
+        line += f"\n   \U0001f4cd {addr}"
+    if dt_str:
+        line += f"\n   \U0001f553 {dt_str}"
+    return line
+
+
+async def fire_poll_job(context: ContextTypes.DEFAULT_TYPE):
+    """Every FIRE_POLL_MINUTES — proactively DM a user about NEW fire/medic 911 calls near
+    their fresh location. Runs off-loop; only fires while the shared location is live or was
+    shared within _fresh_location's window, and never while the user is /away."""
+    if not FIRE_ALERTS:
+        return
+    calls = await asyncio.to_thread(_fetch_seattle_fire)
+    if not calls:
+        return
+
+    for chat_id, loc in list(user_location.items()):
+        if not _fresh_location(loc) or _is_away(chat_id):
+            # Drop the seen-set for anyone not currently watchable, so a return from
+            # /away or a stale gap re-seeds (silent) instead of dumping the hours-old
+            # backlog as "new", and so the set never lingers for inactive chats.
+            _fire_seen.pop(chat_id, None)
+            continue
+        nearby = _fire_nearby(calls, loc["lat"], loc["lon"], FIRE_RADIUS_MILES)
+        if not nearby:
+            continue
+
+        ids = {_fire_id(c) for c in nearby}
+        if chat_id not in _fire_seen:
+            # First sight of this chat (fresh process, or their first fresh share): remember
+            # what is already on the board and stay silent, so a restart never dumps the
+            # backlog. Only calls that appear AFTER this become alerts.
+            _fire_seen[chat_id] = ids
+            continue
+
+        known = _fire_seen[chat_id]
+        new = [c for c in nearby if _fire_id(c) not in known]
+        if not new:
+            _fire_seen[chat_id] = known & ids  # bound the set to what's still on the board
+            continue
+
+        send = new[:FIRE_LIMIT]
+        # Only the calls actually sent become "seen"; any overflow past FIRE_LIMIT stays
+        # unseen so it alerts on a later poll rather than being silently dropped. Keep the
+        # still-nearby known ids too, and drop ids that aged off the feed (bounds growth).
+        _fire_seen[chat_id] = (known & ids) | {_fire_id(c) for c in send}
+        lines = [_format_fire(c) for c in send]
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(f"\U0001f692 New 911 call(s) within {FIRE_RADIUS_MILES:.1f} mi:\n\n"
+                      + "\n\n".join(lines)
+                      + "\n\nSource: Seattle Fire real-time 911 via data.seattle.gov"),
+            )
+        except Exception as e:
+            log.warning("[fire] alert send failed for %s: %s", chat_id, e)
+
+
+async def fire_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not FIRE_ALERTS:
+        await update.message.reply_text(_feature_off_reason(
+            "fire", "Fire alerts aren't set up.",
+            "Fire alerts are"))
+        return
+    chat_id = update.effective_chat.id
+    loc = user_location.get(chat_id)
+    if not loc:
+        await update.message.reply_text(
+            "Share your location first so I can check what's around you.")
+        return
+    lat, lon = loc["lat"], loc["lon"]
+    if not _in_seattle(lat, lon):
+        await update.message.reply_text(
+            "Fire 911 data is only available for Seattle right now. "
+            "Your location doesn't appear to be in the coverage area.")
+        return
+    await update.message.reply_text("\U0001f50d Checking recent 911 calls nearby...")
+    calls = await asyncio.to_thread(_fetch_seattle_fire)
+    nearby = _fire_nearby(calls, lat, lon, FIRE_RADIUS_MILES) if calls else []
+    if not nearby:
+        await update.message.reply_text(
+            f"\U0001f6e1️ No recent fire/medic 911 calls within {FIRE_RADIUS_MILES:.1f} mi.")
+        return
+    lines = [_format_fire(c) for c in nearby[:FIRE_LIMIT]]
+    header = f"\U0001f692 Recent 911 calls within {FIRE_RADIUS_MILES:.1f} mi"
+    footer = "\n\nSource: Seattle Fire real-time 911 via data.seattle.gov (updated ~5 min)"
     text = f"{header}\n\n" + "\n\n".join(lines) + footer
     if len(text) > 4000:
         text = text[:3997] + "..."
@@ -16039,6 +16230,7 @@ _MAPS_COMMANDS = [
     BotCommand("food", "Restaurants near your shared location"),
     BotCommand("crime", "Recent crime reports near your location (Seattle)"),
     BotCommand("dispatch", "Recent 911 dispatch calls near you (Seattle)"),
+    BotCommand("fire", "Recent fire/medic 911 calls near you (Seattle)"),
 ]
 
 # Traffic handlers register only when WSDOT_API_KEY is set, so the menu mirrors that.
@@ -16320,6 +16512,7 @@ def main():
         app.add_handler(CommandHandler("incidents", incidents_cmd))
     app.add_handler(CommandHandler("crime", crime_cmd))
     app.add_handler(CommandHandler("dispatch", dispatch_cmd))
+    app.add_handler(CommandHandler("fire", fire_cmd))
     # Registered whenever credentials exist (even if the kill switch is off or the library
     # is missing) so the commands can explain WHY they're inert — an unregistered command
     # gives no response at all, which is undiagnosable from the user side.
@@ -16450,6 +16643,10 @@ def main():
             interval = TRAFFIC_POLL_MINUTES * 60
             app.job_queue.run_repeating(traffic_poll_job, interval=interval, first=60)
             log.info("Traffic polling: every %d min.", TRAFFIC_POLL_MINUTES)
+        if FIRE_ALERTS:  # default-on; fire_poll_job re-checks the switch each run so
+            # `/features fire off` stops the alerts at runtime without a restart.
+            app.job_queue.run_repeating(fire_poll_job, interval=FIRE_POLL_MINUTES * 60, first=90)
+            log.info("Seattle fire 911 polling: every %d min.", FIRE_POLL_MINUTES)
         if GROUP_MODE and GROUP_ALLOWED_CHATS:
             # In-process asyncio job (no new PID — phantom-process budget untouched).
             # The ledger poll is the only way this bot hears its peer bots.

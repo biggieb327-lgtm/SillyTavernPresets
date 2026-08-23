@@ -7752,6 +7752,7 @@ class TestEveryBooleanFlagDefault:
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
         "FEEDBACK_REACTIONS": False,
+        "FIRE_ALERTS": True,
         "FLEET_CMD": True,
         "FOLLOWUP_ENABLED": False,
         "FOOD_OPEN_HOURS": True,
@@ -11048,3 +11049,229 @@ class TestFormatDispatch:
         call = {"final_call_type": "DISTURBANCE"}
         text = bot._format_dispatch(call)
         assert "DISTURBANCE" in text
+
+
+class TestFireFeatureRegistered:
+    def test_fire_in_features(self):
+        assert "fire" in bot._FEATURES
+        assert bot._FEATURES["fire"][0] == "FIRE_ALERTS"
+
+
+class TestFireLoc:
+    def test_flat_lat_lon(self):
+        assert bot._fire_loc({"latitude": "47.61", "longitude": "-122.33"}) == (47.61, -122.33)
+
+    def test_report_location_point_fallback(self):
+        # GeoJSON coordinates are [lon, lat]; _fire_loc must return (lat, lon).
+        call = {"report_location": {"coordinates": [-122.33, 47.61]}}
+        assert bot._fire_loc(call) == (47.61, -122.33)
+
+    def test_no_coords_returns_none(self):
+        assert bot._fire_loc({}) == (None, None)
+        assert bot._fire_loc({"latitude": "", "longitude": ""}) == (None, None)
+
+
+class TestFireNearby:
+    def test_filters_by_radius(self):
+        calls = [
+            {"incident_number": "A", "latitude": "47.6062", "longitude": "-122.3321"},  # here
+            {"incident_number": "B", "latitude": "47.9000", "longitude": "-122.0000"},  # far
+            {"incident_number": "C"},                                                   # no coords
+        ]
+        out = bot._fire_nearby(calls, 47.6062, -122.3321, 0.5)
+        ids = [c["incident_number"] for c in out]
+        assert ids == ["A"]
+
+
+class TestFormatFire:
+    def test_basic_formatting(self):
+        call = {"type": "Aid Response", "address": "100 PIKE ST",
+                "datetime": "2026-08-23T14:30:00"}
+        text = bot._format_fire(call)
+        assert "Aid Response" in text
+        assert "100 PIKE ST" in text
+
+    def test_epoch_datetime_parsed(self):
+        # 1_755_960_000 = a 2025 epoch second; must not surface as a raw number.
+        text = bot._format_fire({"type": "Fire", "datetime": "1755960000"})
+        assert "1755960000" not in text
+
+    def test_missing_fields_do_not_crash(self):
+        text = bot._format_fire({})
+        assert "911 call" in text
+
+
+class TestFireCmd:
+    CHAT = 7731
+
+    def setup_method(self):
+        self._fire = bot.FIRE_ALERTS
+        bot.FIRE_ALERTS = True
+        bot.user_location.pop(self.CHAT, None)
+
+    def teardown_method(self):
+        bot.FIRE_ALERTS = self._fire
+        bot.user_location.pop(self.CHAT, None)
+
+    def _run(self, monkeypatch, loc, calls):
+        if loc is not None:
+            bot.user_location[self.CHAT] = loc
+        monkeypatch.setattr(bot, "_fetch_seattle_fire", lambda: calls)
+        sent = []
+
+        async def _reply(text, **kw):
+            sent.append(text)
+
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=self.CHAT),
+            message=SimpleNamespace(reply_text=_reply))
+        asyncio.run(bot.fire_cmd(update, SimpleNamespace(args=[])))
+        return sent
+
+    def test_reports_nearby_call(self, monkeypatch):
+        loc = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        calls = [{"incident_number": "A", "type": "Medic Response",
+                  "address": "1 MAIN ST", "latitude": "47.6062", "longitude": "-122.3321"}]
+        sent = self._run(monkeypatch, loc, calls)
+        assert any("Medic Response" in s for s in sent)
+
+    def test_no_location_prompts_share(self, monkeypatch):
+        sent = self._run(monkeypatch, None, [])
+        assert any("Share your location" in s for s in sent)
+
+    def test_outside_seattle_is_declined(self, monkeypatch):
+        loc = {"lat": 40.0, "lon": -100.0, "ts": time.time()}
+        sent = self._run(monkeypatch, loc, [])
+        assert any("only available for Seattle" in s for s in sent)
+
+
+class TestFirePollJob:
+    CHAT = 7732
+
+    def setup_method(self):
+        self._fire = bot.FIRE_ALERTS
+        self._radius = bot.FIRE_RADIUS_MILES
+        self._limit = bot.FIRE_LIMIT
+        bot.FIRE_ALERTS = True
+        bot.FIRE_RADIUS_MILES = 0.5
+        bot.user_location.pop(self.CHAT, None)
+        bot._fire_seen.pop(self.CHAT, None)
+        bot.away.pop(self.CHAT, None)
+
+    def teardown_method(self):
+        bot.FIRE_ALERTS = self._fire
+        bot.FIRE_RADIUS_MILES = self._radius
+        bot.FIRE_LIMIT = self._limit
+        bot.user_location.pop(self.CHAT, None)
+        bot._fire_seen.pop(self.CHAT, None)
+
+    def _job(self, monkeypatch, calls):
+        monkeypatch.setattr(bot, "_fetch_seattle_fire", lambda: list(calls))
+        sent = []
+
+        async def _send(chat_id, text, **kw):
+            sent.append((chat_id, text))
+
+        ctx = SimpleNamespace(bot=SimpleNamespace(send_message=_send))
+        asyncio.run(bot.fire_poll_job(ctx))
+        return sent
+
+    def test_cold_start_seeds_silently_then_alerts_new(self, monkeypatch):
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        here = {"latitude": "47.6062", "longitude": "-122.3321"}
+        first = [{**here, "incident_number": "A", "type": "Fire", "address": "X"}]
+        # First poll: A is already on the board — seed, no alert.
+        assert self._job(monkeypatch, first) == []
+        # Second poll: B is new — alert on B only, not the pre-existing A. Key on the
+        # addresses (X seeded, Y new): "Fire" also appears in the source-attribution footer.
+        second = first + [{**here, "incident_number": "B", "type": "Aid", "address": "Y"}]
+        sent = self._job(monkeypatch, second)
+        assert len(sent) == 1
+        body = sent[0][1]
+        assert "📍 Y" in body and "📍 X" not in body
+
+    def test_away_user_gets_no_alert(self, monkeypatch):
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        bot.away[self.CHAT] = {"expires": time.time() + 3600}
+        try:
+            here = {"latitude": "47.6062", "longitude": "-122.3321"}
+            self._job(monkeypatch, [{**here, "incident_number": "A", "type": "Fire"}])
+            second = [{**here, "incident_number": "A", "type": "Fire"},
+                      {**here, "incident_number": "B", "type": "Aid"}]
+            assert self._job(monkeypatch, second) == []
+        finally:
+            bot.away.pop(self.CHAT, None)
+
+    def test_stale_location_gets_no_alert(self, monkeypatch):
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321,
+                                        "ts": time.time() - 5 * 3600}  # older than 4h
+        here = {"latitude": "47.6062", "longitude": "-122.3321"}
+        self._job(monkeypatch, [{**here, "incident_number": "A", "type": "Fire"}])
+        second = [{**here, "incident_number": "A", "type": "Fire"},
+                  {**here, "incident_number": "B", "type": "Aid"}]
+        assert self._job(monkeypatch, second) == []
+
+    def test_kill_switch_stops_alerts(self, monkeypatch):
+        bot.FIRE_ALERTS = False
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        here = {"latitude": "47.6062", "longitude": "-122.3321"}
+        assert self._job(monkeypatch, [{**here, "incident_number": "A", "type": "Fire"}]) == []
+
+    def test_id_less_call_does_not_realert_every_poll(self, monkeypatch):
+        # A call with no incident_number must still dedup by a stable composite key, or it
+        # re-alerts on every poll forever (code-review finding, v2026-08-23.1).
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        call = {"latitude": "47.6062", "longitude": "-122.3321",
+                "type": "Aid Response", "address": "5 PINE ST", "datetime": "2026-08-23T10:00:00"}
+        self._job(monkeypatch, [call])            # first poll: seed, silent
+        assert self._job(monkeypatch, [call]) == []   # same call: not re-alerted
+        assert self._job(monkeypatch, [call]) == []   # and still not, poll after poll
+
+    def test_overflow_past_limit_is_delivered_later_not_dropped(self, monkeypatch):
+        # More new calls than FIRE_LIMIT in one poll: send the cap now, the rest on a later
+        # poll — never mark unsent calls as seen (code-review finding, v2026-08-23.1).
+        bot.FIRE_LIMIT = 2
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        here = {"latitude": "47.6062", "longitude": "-122.3321"}
+        seed = [{**here, "incident_number": "S", "type": "Fire", "address": "S"}]
+        self._job(monkeypatch, seed)   # seed the board, silent
+        board = seed + [{**here, "incident_number": i, "type": "Aid", "address": i} for i in "PQR"]
+        first = self._job(monkeypatch, board)
+        assert len(first) == 1  # one message, capped at FIRE_LIMIT calls
+        second = self._job(monkeypatch, board)
+        assert len(second) == 1  # the overflow call comes through on the next poll
+        delivered = first[0][1] + second[0][1]
+        for addr in "PQR":
+            assert f"📍 {addr}" in delivered  # all three eventually delivered, none dropped
+
+    def test_return_after_away_reseeds_no_backlog_dump(self, monkeypatch):
+        # Going /away drops the seen-set; on return the board is re-seeded silently, so
+        # hours-old calls are not dumped as "new" (code-review finding, v2026-08-23.1).
+        bot.user_location[self.CHAT] = {"lat": 47.6062, "lon": -122.3321, "ts": time.time()}
+        here = {"latitude": "47.6062", "longitude": "-122.3321"}
+        self._job(monkeypatch, [{**here, "incident_number": "A", "type": "Fire"}])  # seed
+        bot.away[self.CHAT] = {"expires": time.time() + 3600}
+        try:
+            # Calls accumulate while away; the away branch drops the seen-set.
+            backlog = [{**here, "incident_number": i, "type": "Aid"} for i in "BCD"]
+            assert self._job(monkeypatch, backlog) == []
+        finally:
+            bot.away.pop(self.CHAT, None)
+        # Back now: the accumulated backlog re-seeds silently, not alerted.
+        assert self._job(monkeypatch, backlog) == []
+        # Only a genuinely new call after return alerts.
+        after = backlog + [{**here, "incident_number": "E", "type": "Medic"}]
+        sent = self._job(monkeypatch, after)
+        assert len(sent) == 1 and "Medic" in sent[0][1]
+
+
+class TestHelpCmdRuns:
+    def test_help_lists_fire(self, monkeypatch):
+        sent = []
+
+        async def _reply(text, **kw):
+            sent.append(text)
+
+        update = SimpleNamespace(message=SimpleNamespace(reply_text=_reply))
+        asyncio.run(bot.help_cmd(update, SimpleNamespace(args=[])))
+        assert sent and "/fire" in sent[0]
