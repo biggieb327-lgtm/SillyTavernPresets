@@ -51,18 +51,15 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
-### 2026-08-23 — .claude/tools/*.sh have weaker integrity coverage than hooks/*.sh | status: open
-`shell-scripts-parse` globs only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
-no tool shell script is `bash -n`'d. Most tools/*.sh are exercised by an eval that runs them
-(break-test, verify-can-fail), which would surface a syntax error — but `tools/prose-constraint-check.sh`
-(the logic half of the prose-constraint-check Stop hook) is run by no eval, so its syntax is
-checked by nothing. A syntax error there ships green and breaks the advisory hook at runtime.
-Same family as `hook-python-compiles` / `hook-py-refs-exist`. Not a problem yet — the file is
-valid today.
-**Graduates when:** trivially fixable now — add `.claude/tools/*.sh` to `shell-scripts-parse`'s
-glob (and optionally generalise `hook-py-refs-exist` to `.sh` references so a hook→tool path is
-existence-checked). Do it now if touching the eval suite anyway; otherwise the trigger is any
-tools/*.sh syntax error reaching main.
+### 2026-08-23 — .claude/tools/*.sh have weaker integrity coverage than hooks/*.sh | status: graduated
+`shell-scripts-parse` globbed only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
+no tool shell script was `bash -n`'d; `tools/prose-constraint-check.sh` was run by no eval
+either, so its syntax was checked by nothing.
+**Graduated 2026-08-23:** `shell-scripts-parse` now globs `.claude/tools/*.sh` too, and
+`hook-py-refs-exist` was generalised to `hook-refs-exist` — it checks every
+`.claude/{hooks,tools}/*.{py,sh}` a wrapper invokes exists, so a hook→tool.sh path is now
+existence-checked as well as the .py paths. Break-tested. Kept for the record; prune at the
+next hygiene pass.
 
 ### 2026-08-23 — startup context is creeping back up | status: open
 `session-audit.sh` output measured 1,880 bytes today, up from the ~1,668 the 2026-08-21 trim
