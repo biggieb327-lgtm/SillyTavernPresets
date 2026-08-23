@@ -51,6 +51,39 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
+### 2026-08-23 — .claude/tools/*.sh have weaker integrity coverage than hooks/*.sh | status: open
+`shell-scripts-parse` globs only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
+no tool shell script is `bash -n`'d. Most tools/*.sh are exercised by an eval that runs them
+(break-test, verify-can-fail), which would surface a syntax error — but `tools/prose-constraint-check.sh`
+(the logic half of the prose-constraint-check Stop hook) is run by no eval, so its syntax is
+checked by nothing. A syntax error there ships green and breaks the advisory hook at runtime.
+Same family as `hook-python-compiles` / `hook-py-refs-exist`. Not a problem yet — the file is
+valid today.
+**Graduates when:** trivially fixable now — add `.claude/tools/*.sh` to `shell-scripts-parse`'s
+glob (and optionally generalise `hook-py-refs-exist` to `.sh` references so a hook→tool path is
+existence-checked). Do it now if touching the eval suite anyway; otherwise the trigger is any
+tools/*.sh syntax error reaching main.
+
+### 2026-08-23 — startup context is creeping back up | status: open
+`session-audit.sh` output measured 1,880 bytes today, up from the ~1,668 the 2026-08-21 trim
+brought it to, because this session added the MECHANISM REVIEW and WATCHLIST lines. The
+2026-08-21 mycelium note warned in as many words: "re-measure if the hook grows — the same
+drift comes back one echo at a time." Two useful lines are worth 212 bytes; the point is the
+direction, not this number.
+**Graduates when:** `bash .claude/hooks/session-audit.sh | wc -c` passes ~2,436 (the measured
+"past the point of being read" size that triggered the last trim), or the count/review lines
+start pushing the operational lines out of what gets read first — then consolidate to
+counting-plus-top-N.
+
+### 2026-08-23 — debrief-nudge cadence is still unmeasured | status: open
+`debrief-nudge.sh` (built 2026-08-11) is meant to produce roughly one `debrief-log.md` row per
+working session, but the oplog row that shipped it says a distribution can't be judged from one
+row and deliberately set no threshold. Startup still shows single-digit "commits since last
+debrief", so it's plausibly firing — but nobody has checked the log has grown as designed.
+**Graduates when:** `debrief-log.md` has enough rows to show the per-session rate (promote to a
+cadence check or threshold in session-audit), OR a stretch of working sessions shows no new row
+(the nudge isn't firing — an operational-log incident, the dormancy shape C-class).
+
 ### 2026-08-23 — the MECHANISM REVIEW startup line could grow into wallpaper | status: open
 The new `session-audit.sh` MECHANISM REVIEW line names every guarded constraint whose
 mistake recurred after its guard shipped — today six (C1, C3, C7, C8, C13, C14), and it
