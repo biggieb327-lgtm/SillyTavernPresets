@@ -804,7 +804,7 @@ guessed would fire on every legitimate `replace_all` and get disabled. What is m
 is the assertion inside the script, now the documented shape in `add-regression-eval`.
 
 ### C18 — A break-test proves one assertion, not the check
-**seen: 6** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2) — *promoted
+**seen: 7** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2, 2026-08-23) — *promoted
 from the Minor log; all entries deleted.*
 Four checks passed their break-test and were still dead in ways the break-test could not
 see. Three faults injected **at once**: two tests failed correctly, the third passed for
@@ -856,6 +856,19 @@ The other mechanical descendants stand: `sweep.py`'s `SWEEP_BOT` / `SWEEP_TESTS`
 `SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a deliberately broken
 corpus, and the `source-assertion` scanner was itself break-tested by running it against the
 test suite as it stood *before* the bug it describes shipped.
+
+**Occurrence 7 (2026-08-23) — an injection that went red for the wrong reason.** Break-testing
+the new `mechanism-recurrence-surfaced` eval's undated-detector branch, the first injection was
+`if False and not grad:` — which let an empty `grad` fall through to `max(seen) > min(grad)` and
+crash on `min([])`. The check went RED, but via the fail-loud "parser died / no constraints
+line" guard, not the C83-in-UNDATED assertion it was meant to prove. Recognised and re-injected
+as `pass  # was undated.append(cid)`, which isolated the target and produced the intended
+message. **An injection that changes a second thing (here, introduces a crash) proves the check
+can fail, not that the specific assertion under test can fail.** Re-read against the graduation
+note's scope: `break-test.sh` guards bot.py anchor injections; eval-suite self-tests like this
+one are hand-run and outside its reach, so the "one fault, isolate the assertion under test"
+discipline is still manual there — which is exactly where this slip lived. Self-caught; both
+break-tests ultimately proved RED for the right reason before the eval shipped.
 
 ### C19 — Verifying "not reachable outside dispatch" proves reachability, not which jurisdiction covers the call
 **seen: 1** (2026-08-07)
@@ -1118,6 +1131,20 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-23 — **Nearly dated six graduation lines from `git log --diff-filter=A`, which
+  reported 2026-08-11 for atlas_suggest.py, the C3 skills, and the session-audit merge-base
+  feature alike.** Checked before using them: that commit added 327 files — a bulk import, so
+  its date is when the repo was imported, not when each mechanism shipped. Used the authoritative
+  sources instead (a version tag in the entry, a cross-referenced graduation, the one real
+  post-import commit, entry prose). → git creation date is a *copy's* timestamp; for a "when did
+  this ship" question read the source that records it (C22), and ask what the reading actually
+  measures before concluding from it (C8). Caught before any wrong date shipped.
+- 2026-08-23 — **Almost added "settings.json `.py` hooks aren't existence-checked" to the
+  watchlist, using `agent-authorization.py` (the one guard `.py` no `.sh` invokes) as the
+  example.** Grepped `hooks-wired` first: it already checks every `.sh` OR `.py` registered in
+  settings.json exists. Not a gap. → a finding you generate is not exempt from your own
+  verification protocol (C10); grep the machinery before naming a gap in it, especially while
+  scanning *for* gaps. Caught before it reached the file.
 - 2026-08-23 — **Ran `pip install` (then `--force-reinstall`) as root chasing a green local
   `verify.sh`, when the two failures were a broken cloud interpreter, not my Markdown-only
   change.** `bot-imports` failed with a `pyo3_runtime.PanicException` from system
