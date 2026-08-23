@@ -1288,6 +1288,61 @@ PYEOF
   fi
 fi
 
+# --- mechanism-recurrence-surfaced ------------------------------------------------------
+# The learning layer graduates a repeated mistake into a guard (constraints.md rule 4), but
+# for months nothing asked the next question — did the mistake keep happening AFTER the guard
+# shipped? C8 sat at seen 8 while counted among the guarded constraints, and only a chance
+# substring-bug fix surfaced it (mycelium 2026-08-21). session-audit.sh now prints a
+# MECHANISM REVIEW line for any guard whose newest seen date postdates its earliest dated
+# graduation — a prompt to read the prose, deliberately NOT a verdict that the guard failed
+# (most guards state a half they cannot cover, and a later occurrence there is the guard
+# working as designed; hubris rule 1).
+#
+# This pins that the surfacing still works and stays honest: it exercises the REAL hook
+# (a re-implementation here would test the eval, not the startup code — C8/C22) against a
+# fixture with one flaggable case and two that must not flag, and fails toward LOUD — a dead
+# parser prints no constraints line, which this reads as failure, not as "nothing to review".
+sa=.claude/hooks/session-audit.sh
+if [ ! -f "$sa" ]; then
+  bad "mechanism-recurrence-surfaced" "$sa missing — the startup 'is each guard still earning its place' review is gone"
+else
+  mrs_abs="$PWD/$sa"
+  mrs_tmp=$(mktemp -d)
+  mkdir -p "$mrs_tmp/.claude/memory"
+  # ' — ' below is an em dash: the header-split regex requires it, same as the real file.
+  cat > "$mrs_tmp/.claude/memory/constraints.md" <<'FIX'
+# constraints fixture
+
+### C81 — recurred after a dated guard (must flag)
+**seen: 3** (2026-01-01, 2026-03-01)
+**Graduated 2026-02-01:** guard.sh — a Stop hook.
+
+### C82 — recurred only before its dated guard (must not flag)
+**seen: 2** (2026-01-01, 2026-01-15)
+**Graduated 2026-02-01:** guard.sh — a Stop hook.
+
+### C83 — recurred, but graduation is undated so timing is undecidable (must not flag)
+**seen: 2** (2026-01-01, 2026-03-01)
+**Graduated:** guard.sh — a Stop hook.
+FIX
+  # 2>&1 so a parser death lands in the captured text; the git/mycelium/debrief lines of the
+  # hook noop harmlessly in a bare temp dir.
+  mrs_out=$(CLAUDE_PROJECT_DIR="$mrs_tmp" bash "$mrs_abs" 2>&1)
+  rm -rf "$mrs_tmp"
+  mrs_review=$(printf '%s\n' "$mrs_out" | grep 'MECHANISM REVIEW' || true)
+  if ! printf '%s\n' "$mrs_out" | grep -q 'constraints (.claude/memory/constraints.md)'; then
+    bad "mechanism-recurrence-surfaced" "the hook printed no constraints line for the fixture — its parser died and the review fails toward silence (C13)"
+  elif [ -z "$mrs_review" ]; then
+    bad "mechanism-recurrence-surfaced" "C81 recurred after its dated guard yet no MECHANISM REVIEW line appeared — the post-graduation-recurrence check is dead"
+  elif ! printf '%s' "$mrs_review" | grep -q 'C81'; then
+    bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW omitted C81 (dated guard, later seen date) — recurrence timing is not being compared"
+  elif printf '%s' "$mrs_review" | grep -qE 'C82|C83'; then
+    bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW named C82 (pre-guard) or C83 (undated guard) — flagging cases whose timing is not after a dated mechanism is a false accusation (hubris rule 1)"
+  else
+    ok "mechanism-recurrence-surfaced: session-audit.sh flags guards that recurred after a dated graduation, and only those"
+  fi
+fi
+
 # --- fleet-config-drift -----------------------------------------------------------------
 # All 7 instances share one bot.py but differ in context files, cards, and preset layers.
 # Drift accumulates silently — a new context file added to 4 instances but not the other

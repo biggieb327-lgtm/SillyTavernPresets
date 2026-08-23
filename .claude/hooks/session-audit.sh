@@ -44,16 +44,41 @@ if [ -f .claude/memory/constraints.md ]; then
   # line-anchored, and a substring test gets it wrong — `"graduat" in body` matches
   # "**Not graduated.**" and reads an unguarded constraint as guarded.
   cline=$(python3 - 2>/dev/null <<'PYEOF'
-import re
+import re, datetime
 from pathlib import Path
 blocks = re.split(r'\n### (C\d+) — ',
                   Path(".claude/memory/constraints.md").read_text(encoding="utf-8"))
 GUARD, NOGUARD = re.compile(r'^\*\*Graduated', re.M), re.compile(r'^\*\*Not graduated', re.M)
-bare, overdue, total = [], [], 0
+DATE = re.compile(r'(\d{4})-(\d{2})-(\d{2})')
+
+def dates(text):
+    out = []
+    for y, m, d in DATE.findall(text):
+        try:
+            out.append(datetime.date(int(y), int(m), int(d)))
+        except ValueError:
+            pass  # a malformed date is not a date; do not let it become one
+    return out
+
+bare, overdue, recurred, total = [], [], [], 0
 for i in range(1, len(blocks), 2):
     cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
     total += 1
     if GUARD.search(body):
+        # The mechanism-earning-its-place question: did this constraint recur AFTER its
+        # guard shipped? Only decidable when a **Graduated line carries a date AND the
+        # **seen: line does — an undated graduation is "could not determine", left unflagged
+        # rather than guessed either way (hubris rule 1: unknown is not a negative verdict).
+        # A hit is NOT a verdict that the guard failed: most of these guards state a half
+        # they deliberately cannot cover (the operator's paste, a reading's meaning), and a
+        # later occurrence in that half is the guard working as designed. It is a prompt to
+        # read the prose and decide which half recurred — surfaced, not concluded.
+        grad = dates("\n".join(l for l in body.splitlines() if l.startswith("**Graduated")))
+        seen_line = re.search(r'^\*\*seen:.*', body, re.M)
+        seen = dates(seen_line.group(0)) if seen_line else []
+        if grad and seen and max(seen) > min(grad):
+            n = re.search(r'\*\*seen: (\d+)\*\*', body)
+            recurred.append(f"{cid}" + (f" (seen {n.group(1)})" if n else ""))
         continue
     seen = re.search(r'\*\*seen: (\d+)\*\*', body)
     n = int(seen.group(1)) if seen else 1
@@ -69,6 +94,10 @@ if total:
     if overdue:
         print("OVERDUE A MECHANISM (prose-only and already repeating — constraints.md rule "
               "4): " + " · ".join(overdue))
+    if recurred:
+        print("MECHANISM REVIEW — recurred after its guard shipped; read the prose to see "
+              "whether the guard's covered half failed or its acknowledged prose-only half "
+              "recurred (do not assume the guard failed): " + " · ".join(recurred))
     if not bare and not overdue:
         print("Every constraint is mechanically guarded — nothing here needs reading first.")
 PYEOF
