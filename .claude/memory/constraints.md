@@ -198,7 +198,7 @@ hints survived, one of them user-facing. Earlier the same night, the restart-sto
 turned out to be three phone-era assumptions in one function, not one.
 **Constraint:** write the class in one sentence before claiming done. Then run
 `python3 .claude/tools/sweep.py` and triage every candidate.
-**Graduated:** `.claude/skills/fix-the-class/SKILL.md`; new `install-hint` scanner in
+**Graduated 2026-07-26:** `.claude/skills/fix-the-class/SKILL.md`; new `install-hint` scanner in
 `sweep.py` (v2026-07-26.8).
 
 ### C3 — Prove a check RED before trusting it GREEN
@@ -220,7 +220,7 @@ must be shown capable of producing a signal before it is trusted — run it agai
 deliberately re-injected defect, or for a manual check, state the conditions under which
 the expected output appears and confirm those hold. **"Nothing printed" is a result only
 if something could have printed.**
-**Graduated:** `add-regression-eval` and `fix-the-class` both require it for automated
+**Graduated 2026-07-27:** `add-regression-eval` and `fix-the-class` both require it for automated
 checks. The operator-facing form is new here and is why this entry now names it
 explicitly — a handed-over check is one nobody will break-test unless the author did.
 
@@ -265,7 +265,7 @@ Near-miss worth recording: `claim-guard.sh` DID fire on the second occurrence, b
 own stated scope it catches "two artifacts claimed identical on metadata rather than a hash"
 — not this. It matched on vocabulary overlap and was right by accident.
 
-**Graduated** to `.claude/hooks/theory-guard.sh` + `.claude/hooks/theory_guard.py` — a Stop
+**Graduated 2026-08-22** to `.claude/hooks/theory-guard.sh` + `.claude/hooks/theory_guard.py` — a Stop
 hook that catches one slice: asserting what a named function returns/produces/causes without
 hedging. The general case (diagnosing an incident and stating a cause as fact) still has no
 mechanical signature, same as C8's uncovered half. Escape hatch: `# theory-ok` or any hedge
@@ -736,7 +736,7 @@ check behaves.
 scope the match to it.** If the same string is legal elsewhere in the file, a file-wide
 `in`/`grep` is the wrong instrument. Ask "where would this be *correct*?" — if the answer
 isn't "nowhere", the pattern needs a boundary, not a longer blocklist.
-**Graduated:** the eval now parses `### Verbatim prompt` fenced blocks and only searches
+**Graduated 2026-07-29:** the eval now parses `### Verbatim prompt` fenced blocks and only searches
 inside them (`.claude/evals/run-evals.sh`, `routine-prompts-runnable`), break-tested RED
 on all three branches with the surrounding prose left intact.
 
@@ -966,7 +966,7 @@ say so to the owner as a gap rather than filling the slot with something immune 
 wrong. **And never write the fallback up as a policy in a header comment** — that is how
 one judgement call became the default for the next file.
 
-**Graduated → `telegram-companion-bot/tools/atlas_suggest.py` and the two header comments.** The mechanism
+**Graduated 2026-08-10 → `telegram-companion-bot/tools/atlas_suggest.py` and the two header comments.** The mechanism
 already existed and I did not reach for it: `atlas_suggest.py` proposes real nearby places
 *by kind*, which is exactly the function-first search this constraint asks for, and it
 was written earlier the same day. Both atlas headers now record which entries are unnamed
@@ -1020,7 +1020,7 @@ v2026-07-11 NameError incident, and its comment says so. **The debrief is the hi
 moment for this constraint**, because you are reasoning *about* the machinery instead of
 reading it; `session-debrief` now carries a grep step for that reason.
 
-**Graduated → `.claude/hooks/session-audit.sh`.** It now reports how far the branch's
+**Graduated 2026-08-10 → `.claude/hooks/session-audit.sh`.** It now reports how far the branch's
 merge-base sits behind `origin/main` at every session start and warns past 25 commits,
 which is the one shape here a mechanism can see: the ~150-commit gap was invisible until
 the push was rejected. It reads the **local** `origin/main` ref without fetching, so the

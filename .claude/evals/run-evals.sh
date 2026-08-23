@@ -1330,16 +1330,19 @@ FIX
   mrs_out=$(CLAUDE_PROJECT_DIR="$mrs_tmp" bash "$mrs_abs" 2>&1)
   rm -rf "$mrs_tmp"
   mrs_review=$(printf '%s\n' "$mrs_out" | grep 'MECHANISM REVIEW' || true)
+  mrs_undated=$(printf '%s\n' "$mrs_out" | grep 'UNDATED GRADUATION' || true)
   if ! printf '%s\n' "$mrs_out" | grep -q 'constraints (.claude/memory/constraints.md)'; then
     bad "mechanism-recurrence-surfaced" "the hook printed no constraints line for the fixture — its parser died and the review fails toward silence (C13)"
-  elif [ -z "$mrs_review" ]; then
-    bad "mechanism-recurrence-surfaced" "C81 recurred after its dated guard yet no MECHANISM REVIEW line appeared — the post-graduation-recurrence check is dead"
   elif ! printf '%s' "$mrs_review" | grep -q 'C81'; then
-    bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW omitted C81 (dated guard, later seen date) — recurrence timing is not being compared"
+    bad "mechanism-recurrence-surfaced" "C81 recurred after its dated guard yet MECHANISM REVIEW did not name it — the post-graduation-recurrence check is dead or its timing compare is broken"
   elif printf '%s' "$mrs_review" | grep -qE 'C82|C83'; then
-    bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW named C82 (pre-guard) or C83 (undated guard) — flagging cases whose timing is not after a dated mechanism is a false accusation (hubris rule 1)"
+    bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW named C82 (recurred only before its guard) or C83 (undated guard) — flagging a case whose timing is not after a dated mechanism is a false accusation (hubris rule 1)"
+  elif ! printf '%s' "$mrs_undated" | grep -q 'C83'; then
+    bad "mechanism-recurrence-surfaced" "C83 has an undated graduation yet UNDATED GRADUATION did not name it — an uncheckable guard is being skipped silently, the blind spot this widening closed (C8 at seen 8)"
+  elif printf '%s' "$mrs_undated" | grep -qE 'C81|C82'; then
+    bad "mechanism-recurrence-surfaced" "UNDATED GRADUATION named C81 or C82, which carry dated graduations — the undated detector is misfiring on dated guards"
   else
-    ok "mechanism-recurrence-surfaced: session-audit.sh flags guards that recurred after a dated graduation, and only those"
+    ok "mechanism-recurrence-surfaced: dated recurrence flagged for review, pre-guard/undated kept out of it, and undated graduations surfaced to be dated"
   fi
 fi
 

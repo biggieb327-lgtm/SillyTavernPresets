@@ -60,23 +60,27 @@ def dates(text):
             pass  # a malformed date is not a date; do not let it become one
     return out
 
-bare, overdue, recurred, total = [], [], [], 0
+bare, overdue, recurred, undated, total = [], [], [], [], 0
 for i in range(1, len(blocks), 2):
     cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
     total += 1
     if GUARD.search(body):
         # The mechanism-earning-its-place question: did this constraint recur AFTER its
         # guard shipped? Only decidable when a **Graduated line carries a date AND the
-        # **seen: line does — an undated graduation is "could not determine", left unflagged
-        # rather than guessed either way (hubris rule 1: unknown is not a negative verdict).
-        # A hit is NOT a verdict that the guard failed: most of these guards state a half
-        # they deliberately cannot cover (the operator's paste, a reading's meaning), and a
-        # later occurrence in that half is the guard working as designed. It is a prompt to
-        # read the prose and decide which half recurred — surfaced, not concluded.
+        # **seen: line does. A hit is NOT a verdict that the guard failed: most of these
+        # guards state a half they deliberately cannot cover (the operator's paste, a
+        # reading's meaning), and a later occurrence in that half is the guard working as
+        # designed. It is a prompt to read the prose and decide which half recurred.
         grad = dates("\n".join(l for l in body.splitlines() if l.startswith("**Graduated")))
         seen_line = re.search(r'^\*\*seen:.*', body, re.M)
         seen = dates(seen_line.group(0)) if seen_line else []
-        if grad and seen and max(seen) > min(grad):
+        if not grad:
+            # An undated graduation is a blind spot, not a pass: recurrence cannot be timing-
+            # checked at all, so surface it to be dated rather than skipping it silently (the
+            # silent skip is how C8 sat at seen 8 uncounted). "Could not determine" stays
+            # visible; it is not read as "did not recur" (hubris rule 1).
+            undated.append(cid)
+        elif seen and max(seen) > min(grad):
             n = re.search(r'\*\*seen: (\d+)\*\*', body)
             recurred.append(f"{cid}" + (f" (seen {n.group(1)})" if n else ""))
         continue
@@ -98,6 +102,9 @@ if total:
         print("MECHANISM REVIEW — recurred after its guard shipped; read the prose to see "
               "whether the guard's covered half failed or its acknowledged prose-only half "
               "recurred (do not assume the guard failed): " + " · ".join(recurred))
+    if undated:
+        print("UNDATED GRADUATION — the guard has no dated **Graduated line, so recurrence "
+              "cannot be timing-checked; date it: " + " · ".join(undated))
     if not bare and not overdue:
         print("Every constraint is mechanically guarded — nothing here needs reading first.")
 PYEOF
