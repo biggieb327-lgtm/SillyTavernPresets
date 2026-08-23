@@ -1118,6 +1118,24 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-23 — **Shipped a stateful dedup loop (`fire_poll_job`) whose green 1300-test suite
+  covered only the happy path and cold-start; the mandated step-7 `/code-review` then found
+  four real correctness bugs — id-less records re-alerting forever, backlog dump on
+  return-from-away, unbounded set growth, and alerts dropped past `FIRE_LIMIT`.** The tests
+  I wrote confirmed the behaviour I designed for; none probed the adversarial edges where a
+  dedup/accumulator actually breaks. → For any stateful loop, enumerate the edge cases as
+  test cases from the start — **missing/empty key, cap overflow, and every state-reset path
+  (away, stale, restart)** — instead of relying on the review to find them. The review
+  mechanism (repo-change-control step 7) worked exactly as intended; this is about not
+  making it do the unit tests' job. Same family as the 2026-08-02 `/features` ValueError
+  that green source-reading tests shipped.
+- 2026-08-23 — **Reconstructed the merged CHANGELOG by concatenating my prefix + `origin/main`
+  verbatim, assuming main was well-formed; it wasn't (main had its newest entry above the
+  `# Changelog` preamble), so the result had a duplicated preamble.** Caught one step later
+  by grepping the headings of the file I'd just written. → When rebuilding a file from git
+  objects, don't assume either side is structurally clean — verify the *result* (grep
+  headings, count sentinel lines) before trusting it, the same way a merge needs its output
+  checked, not just its inputs.
 - 2026-08-22 — **Read a deliberate owner action as a system fault, and led with it.** Every
   Routine's `next_run_at` was in the past and `ops-brief-daily` had not fired in a week, so
   I reported the scheduled layer as stopped and "more urgent than dormancy". The owner had
