@@ -209,6 +209,26 @@ if [ -z "$hook_bad" ]; then
 else
   bad "shell-scripts-parse" "syntax errors in:$hook_bad"
 fi
+
+# The other half of the guard layer: the Python files the hook wrappers invoke. bot.py
+# has bot-compiles, sweep.py is import-checked by gate-corpus, and oplog-search.py /
+# fleet-config-check.py are run by their own evals — but the five guard .py under
+# .claude/hooks/ (host_guard, claim_guard, handoff_guard, theory_guard, agent-authorization)
+# were checked by nothing. A wrapper ends `python3 <guard>.py`, so a SyntaxError makes it
+# exit non-zero WITHOUT the guard's block path ever running: the guard fails OPEN, stops
+# enforcing, and ships green (CI runs .sh through bash -n only). That is C13's "inert looks
+# like working" applied to the guards themselves. Scoped to hooks/ deliberately — the
+# gate_corpus fixtures under tools/ are crafted to be malformed and must not be compiled.
+pyhook_bad=""
+for p in .claude/hooks/*.py; do
+  [ -e "$p" ] || continue
+  python3 -m py_compile "$p" 2>/dev/null || pyhook_bad="$pyhook_bad $p"
+done
+if [ -z "$pyhook_bad" ]; then
+  ok "hook-python-compiles: every .claude/hooks/*.py compiles (a broken guard fails open, unnoticed)"
+else
+  bad "hook-python-compiles" "python syntax error(s) in:$pyhook_bad — the guard(s) fail open and stop enforcing while shipping green"
+fi
 if [ -f .claude/settings.json ]; then
   if python3 -m json.tool .claude/settings.json >/dev/null 2>&1; then
     ok "settings-valid-json: .claude/settings.json parses"
