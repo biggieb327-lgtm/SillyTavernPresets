@@ -168,6 +168,16 @@ if [ -f .claude/memory/mycelium.md ]; then
     echo "[session-audit] MYCELIUM: ${open_count} open message(s) from previous sessions — read .claude/memory/mycelium.md"
   fi
 fi
+# Watchlist — low-level observations not yet worth a failure/constraint/finding record.
+# Prints the open count only, like mycelium: the file is consulted (and reviewed at
+# debrief), not nagged item-by-item. Same safe grep -c idiom — never `|| echo 0` (C23).
+if [ -f .claude/memory/watchlist.md ]; then
+  wl_count=$(grep '^### 20' .claude/memory/watchlist.md 2>/dev/null | grep -cE '\| status: (open|watching)$')
+  wl_count=${wl_count:-0}
+  if [ "${wl_count}" != "0" ]; then
+    echo "[session-audit] WATCHLIST: ${wl_count} open item(s) — .claude/memory/watchlist.md (review at debrief)"
+  fi
+fi
 echo "[session-audit] standing rules: read telegram-companion-bot/CHANGELOG.md before bot changes; bot.py changes need BOT_VERSION bump + changelog entry (delivery gate blocks otherwise); run .claude/evals/run-evals.sh before claiming done."
 echo "[session-audit] NOTION: Fleet Knowledge Base (database 89c9e767576149a480221c10d7a97f47, data-source 2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f) — before non-trivial work, search it for Status=current entries relevant to your task. Write findings, decisions, and state changes back when you produce them."
 if [ "${dirty}" != "0" ]; then

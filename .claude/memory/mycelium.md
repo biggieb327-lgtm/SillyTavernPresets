@@ -125,6 +125,16 @@ Newest first, same as the operational log.
 ## Entries
 
 ### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
+`[decision]` New memory file: **`.claude/memory/watchlist.md`** — the parking lot for
+low-level observations that aren't yet a system failure, our mistake, or a finding, but
+would be cheap to lose. Each item names the trigger that graduates it out; reviewed at
+`session-debrief`; open count surfaces at startup. First item is a watch on the new
+MECHANISM REVIEW startup line (it only grows — graduate to counting-plus-top-N if it hits
+~10 names or a session is seen skipping it). Put the next "not a problem yet, but…" there
+instead of here — mycelium is for messages to the next session, the watchlist is for latent
+issues that persist until they graduate or are dismissed.
+
+### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
 `[external]` Benchmarked this repo's self-improvement machinery against the 2026
 literature on self-improving agents (Reflexion/ExpeL, context engineering, reward-hacking
 defenses, spec-driven dev, progressive-disclosure skills). **Finding: the repo already

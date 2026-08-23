@@ -27,6 +27,9 @@ All under `telegram-companion-bot/` unless noted:
 - `.claude/memory/operational-log.md` — one row per failure that changed the system.
 - `.claude/memory/mycelium.md` — messages between sessions (findings, dead ends,
   partial handoffs, heads-ups). `session-audit.sh` surfaces open entries at startup.
+- `.claude/memory/watchlist.md` — low-level observations not yet worth a failure,
+  constraint, or finding record; each names the trigger that graduates it out. Reviewed at
+  debrief; open count surfaces at startup.
 
 ## Operating rule
 
