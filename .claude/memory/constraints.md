@@ -1118,6 +1118,19 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-23 — **Ran `pip install` (then `--force-reinstall`) as root chasing a green local
+  `verify.sh`, when the two failures were a broken cloud interpreter, not my Markdown-only
+  change.** `bot-imports` failed with a `pyo3_runtime.PanicException` from system
+  `cryptography`, and pytest was absent from `/usr/local/bin/python`. The install couldn't
+  fix a Debian-managed interpreter (`Cannot uninstall packaging … RECORD file not found`),
+  only unmasked the crypto panic that PIL's absence had hidden — briefly making the signal
+  look *worse* and nearly muddying a clean merge decision. The `bot-imports` eval's own
+  message already said how to read it: traceback into `dist-packages` ⇒ "the environment's
+  packages are broken, not bot.py". → When local `verify.sh` is red, first classify each
+  failure as environmental vs. change-caused (read the traceback's path; a doc-only diff
+  cannot cause an import error) **before** touching the environment. For a doc-only change,
+  the clean-env CI run is the authoritative gate — read it, don't try to repair the session's
+  interpreter. Same family as C8 (ask what a reading measures) applied to a verify result.
 - 2026-08-23 — **Shipped a stateful dedup loop (`fire_poll_job`) whose green 1300-test suite
   covered only the happy path and cold-start; the mandated step-7 `/code-review` then found
   four real correctness bugs — id-less records re-alerting forever, backlog dump on
