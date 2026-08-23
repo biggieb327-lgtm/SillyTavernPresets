@@ -229,6 +229,22 @@ if [ -z "$pyhook_bad" ]; then
 else
   bad "hook-python-compiles" "python syntax error(s) in:$pyhook_bad — the guard(s) fail open and stop enforcing while shipping green"
 fi
+
+# The companion to the compile check: a wrapper ends `python3 .../<guard>.py`, so if that
+# file is renamed or deleted without updating the wrapper, python3 exits non-zero on a
+# missing path and the guard fails open exactly as a syntax error would — and py_compile,
+# globbing only files that exist, cannot see an absence. hooks-wired checks the .sh are
+# registered; nothing checked the .py they name still exist. Pulls every .claude/hooks/*.py
+# path out of the wrappers and asserts each is present.
+pyref_missing=""
+for r in $(grep -hoE '\.claude/hooks/[A-Za-z0-9_./-]+\.py' .claude/hooks/*.sh 2>/dev/null | sort -u); do
+  [ -f "$r" ] || pyref_missing="$pyref_missing $r"
+done
+if [ -z "$pyref_missing" ]; then
+  ok "hook-py-refs-exist: every .py a hook wrapper invokes is present"
+else
+  bad "hook-py-refs-exist" "hook wrapper(s) invoke missing file(s):$pyref_missing — python3 runs on a nonexistent path, exits nonzero, and the guard fails open"
+fi
 if [ -f .claude/settings.json ]; then
   if python3 -m json.tool .claude/settings.json >/dev/null 2>&1; then
     ok "settings-valid-json: .claude/settings.json parses"
