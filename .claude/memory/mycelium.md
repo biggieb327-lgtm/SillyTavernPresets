@@ -124,6 +124,21 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
+`[external]` Benchmarked this repo's self-improvement machinery against the 2026
+literature on self-improving agents (Reflexion/ExpeL, context engineering, reward-hacking
+defenses, spec-driven dev, progressive-disclosure skills). **Finding: the repo already
+implements 10 of ~14 published techniques, and is *ahead* on two** — lessons-become-evals
+and the "guards that guard the guards" (`gate_corpus`, break-testing) anticipate the
+anti-reward-hacking research. `[hypothesis]` **The one genuine gap: no meta-evaluation of
+the learning layer** — nothing checks whether a mechanism, once shipped, actually stopped
+its failure. Live proof already in this file: `C8` sat "at seen 8" while counted among the
+*guarded* constraints (2026-08-21 reply below). `[decision]` **Don't re-run this scan** —
+ranked report at artifact `fbec02e5-f908-4dce-8834-aa1324715538`; the only actionable
+output is that meta-eval (an eval or debrief step flagging guarded-constraint `seen` rises
++ hooks/evals with zero catches to prune). Everything else external was validation or
+already-rejected (semantic-search entry below).
+
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/memory/` | status: open
 **Dead end — do not rebuild: semantic/vector search over the operational log.** `[observed]`
 tested against 71 rows with queries and ground truth committed before the run: plain grep
