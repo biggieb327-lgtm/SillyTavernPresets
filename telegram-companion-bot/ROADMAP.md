@@ -186,6 +186,21 @@ constraints; check their assumptions before acting on them.
   reports per-instance/provider call counts, outcomes, p50/p95 latency, and fallback
   rates from a bounded journal query. No hosted observability dependency was added.
 
+### 1.10 ~~Incremental transactional machine-state persistence~~ ✅ (shipped v2026-08-24.4)
+- **Evidence:** machine-managed mutable state was spread across whole-document JSON
+  stores. Atomic rename avoids a torn file but does not provide a transactional store,
+  schema namespace, or durable commit boundary for later state migrations.
+- **First slice:** reminders only, selected because they are machine-managed and
+  operationally meaningful without containing character or owner-authored content.
+  One per-instance `machine-state.sqlite3` uses a namespaced key/value schema, WAL, and
+  full synchronous commits. A forced child-process exit before commit leaves the prior
+  value intact in the regression suite.
+- **Migration/rollback:** first startup imports `reminders.json`, retains a dated
+  pre-migration copy, verifies database readback, and continually refreshes the readable
+  JSON export. `REMINDERS_SQLITE=0` is the one-release rollback path. Cards, presets,
+  memories, `people.txt`, `projects.txt`, `schedule.txt`, `life.txt`, and `day.txt` stay
+  file-backed. Future stores migrate separately only after this slice has fleet evidence.
+
 ---
 
 ## Track 2 — Engineering workflow

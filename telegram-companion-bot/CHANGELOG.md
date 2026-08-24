@@ -7,6 +7,28 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.4 — transactional reminder persistence, incrementally
+
+**Root cause: a machine-managed JSON store rewrites its entire document for every
+mutation, so process loss can strand or replace the store outside a database
+transaction.** Reminders are the first deliberately narrow migration to one
+per-instance `machine-state.sqlite3` namespaced key/value store. SQLite runs in WAL
+mode with full synchronous commits; every import and save is read back before it is
+trusted, and config preflight runs `PRAGMA quick_check`.
+
+On first start, a valid `reminders.json` is imported once and preserved as a dated
+`reminders.json.pre-sqlite-*.bak`. The live JSON file remains a current, human-readable
+export, so `/backup` is unchanged and rollback does not require SQLite tooling.
+`REMINDERS_SQLITE=0` restores the legacy JSON-only read/write path for one release.
+If SQLite is unavailable, saves still refresh that export and loads fall back to it
+loudly. No card, preset, memory, people, projects, schedule, life, or day content moves.
+
+The generalized failure class is whole-document mutation of machine-managed state
+without a transactional commit boundary. Tests cover one-time import, dated backup,
+readback, the live rollback export, the kill switch, corrupt-database preflight,
+owner-content non-interference, and a child process exiting inside an uncommitted
+transaction while the prior committed value remains intact.
+
 ## v2026-08-24.3 — structured fleet operation events
 
 **Root cause: the fleet had prose logs at some boundaries and no timing at others, so

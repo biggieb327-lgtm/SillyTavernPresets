@@ -5,6 +5,7 @@ These cover logic where a regression is fleet-breaking and the functions are pur
 """
 import asyncio
 import json
+import os
 import time
 
 import bot
@@ -849,6 +850,101 @@ class TestAtomicWriteText:
         bot._atomic_write_text(p, "complete")
         tmp = p.with_name(p.name + ".tmp")
         assert not tmp.exists()
+
+
+class TestSqliteReminderPersistence:
+    """The first incremental JSON-store migration: reminders only, with rollback."""
+
+    def _isolate(self, tmp_path, monkeypatch, *, enabled=True):
+        monkeypatch.setattr(bot, "REMINDERS_SQLITE", enabled)
+        monkeypatch.setattr(bot, "MACHINE_STATE_DB_FILE", tmp_path / "machine-state.sqlite3")
+        monkeypatch.setattr(bot, "REMINDERS_FILE", tmp_path / "reminders.json")
+        monkeypatch.setattr(bot, "reminders", [])
+
+    def test_legacy_json_import_creates_dated_backup_and_verifies_readback(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        legacy = [{"id": 7, "chat_id": 42, "due": "2026-09-01T09:00:00", "text": "call"}]
+        bot.REMINDERS_FILE.write_text(json.dumps(legacy), encoding="utf-8")
+
+        bot.load_reminders()
+
+        assert bot.reminders == legacy
+        assert bot._sqlite_read_json("reminders", "items") == legacy
+        backups = list(tmp_path.glob("reminders.json.pre-sqlite-*.bak"))
+        assert len(backups) == 1
+        assert json.loads(backups[0].read_text(encoding="utf-8")) == legacy
+
+    def test_save_refreshes_the_human_readable_rollback_export(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        expected = [{"id": 1, "chat_id": 42, "due": "08:30", "text": "meds", "daily": True}]
+        bot.reminders.extend(expected)
+
+        bot.save_reminders()
+
+        assert bot._sqlite_read_json("reminders", "items") == expected
+        assert json.loads(bot.REMINDERS_FILE.read_text(encoding="utf-8")) == expected
+
+    def test_kill_switch_keeps_the_legacy_json_path(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch, enabled=False)
+        expected = [{"id": 2, "chat_id": 42, "due": "09:00", "text": "water", "daily": True}]
+        bot.reminders.extend(expected)
+
+        bot.save_reminders()
+        bot.reminders.clear()
+        bot.load_reminders()
+
+        assert bot.reminders == expected
+        assert not bot.MACHINE_STATE_DB_FILE.exists()
+
+    def test_unavailable_database_loads_and_updates_the_json_rollback(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot.MACHINE_STATE_DB_FILE.mkdir()  # sqlite3 cannot open a directory as a database
+        legacy = [{"id": 4, "chat_id": 42, "due": "11:00", "text": "legacy"}]
+        bot.REMINDERS_FILE.write_text(json.dumps(legacy), encoding="utf-8")
+
+        bot.load_reminders()
+        bot.reminders[0]["text"] = "still writable"
+        bot.save_reminders()
+
+        assert json.loads(bot.REMINDERS_FILE.read_text(encoding="utf-8")) == bot.reminders
+
+    def test_forced_exit_mid_transaction_keeps_the_last_committed_value(
+            self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        before = [{"id": 3, "chat_id": 42, "due": "10:00", "text": "before"}]
+        after = [{"id": 3, "chat_id": 42, "due": "10:00", "text": "after"}]
+        bot._sqlite_write_json("reminders", "items", before)
+
+        pid = os.fork()
+        if pid == 0:
+            conn = bot._open_machine_state_db()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE kv_state SET value_json = ? WHERE namespace = ? AND key = ?",
+                (json.dumps(after), "reminders", "items"),
+            )
+            os._exit(23)  # simulate SIGKILL-equivalent process loss before COMMIT
+        _, status = os.waitpid(pid, 0)
+
+        assert os.waitstatus_to_exitcode(status) == 23
+        assert bot._sqlite_read_json("reminders", "items") == before
+
+    def test_migration_does_not_touch_owner_edited_content(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        owner_files = {
+            name: f"owner content in {name}"
+            for name in ("preset.txt", "people.txt", "projects.txt", "schedule.txt", "life.txt", "day.txt")
+        }
+        for name, text in owner_files.items():
+            (tmp_path / name).write_text(text, encoding="utf-8")
+        bot.REMINDERS_FILE.write_text("[]", encoding="utf-8")
+
+        bot.load_reminders()
+
+        assert {name: (tmp_path / name).read_text(encoding="utf-8")
+                for name in owner_files} == owner_files
 
 
 class TestConfigWarnings:
@@ -2757,6 +2853,11 @@ class TestRunConfigCheck:
                 f.unlink()
             else:
                 f.write_text(orig, encoding="utf-8")
+
+    def test_corrupt_machine_state_database_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "MACHINE_STATE_DB_FILE", tmp_path / "machine-state.sqlite3")
+        bot.MACHINE_STATE_DB_FILE.write_bytes(b"not a sqlite database")
+        assert bot._run_config_check() is False
 
 
 # ── _parse_busy_blocks / _busy_now (ROADMAP 3.6) ─────────────────────────────
@@ -7877,6 +7978,7 @@ class TestEveryBooleanFlagDefault:
         "PROMPT_STATS": True,
         "REACTIONS_AUTO": True,
         "REASONING_LEAK_GUARD": True,
+        "REMINDERS_SQLITE": True,
         "RHR_ALERTS": True,
         "SAFETY_ENABLED": True,
         "SCHED_BUSY": True,
