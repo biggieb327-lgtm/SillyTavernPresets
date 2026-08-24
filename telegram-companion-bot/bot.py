@@ -23,6 +23,8 @@ import base64
 import calendar
 import logging
 import logging.handlers
+import shutil
+import sqlite3
 import tempfile
 import threading
 import secrets
@@ -132,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.3"
+BOT_VERSION = "2026-08-24.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3203,6 +3205,10 @@ except Exception:
 
 # --- One-off reminders ---
 REMINDERS_FILE = BASE_DIR / "reminders.json"
+MACHINE_STATE_DB_FILE = BASE_DIR / "machine-state.sqlite3"
+# First incremental machine-state migration. Off restores the legacy JSON-only path;
+# reminders.json remains a current human-readable export for one-release rollback.
+REMINDERS_SQLITE = _env_bool("REMINDERS_SQLITE", True)
 
 # --- Shared world context (world.txt) — same weather/happenings across all instances ---
 # One instance (WORLD_GENERATOR=1, typically nora) writes world.txt at midnight;
@@ -4477,21 +4483,139 @@ def in_quiet_hours(now=None) -> bool:
 
 # --- One-off reminders: storage + parsing ---
 reminders = []  # {"id":int, "chat_id":int, "due":iso, "text":str}
+_SQLITE_MISSING = object()
+
+
+def _open_machine_state_db() -> sqlite3.Connection:
+    """Open this instance's transactional machine-state store and ensure its schema."""
+    conn = sqlite3.connect(MACHINE_STATE_DB_FILE, timeout=5.0)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS kv_state (
+                   namespace TEXT NOT NULL,
+                   key TEXT NOT NULL,
+                   value_json TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   PRIMARY KEY (namespace, key)
+               )"""
+        )
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def _sqlite_read_json(namespace: str, key: str):
+    conn = _open_machine_state_db()
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM kv_state WHERE namespace = ? AND key = ?",
+            (namespace, key),
+        ).fetchone()
+        return _SQLITE_MISSING if row is None else json.loads(row[0])
+    finally:
+        conn.close()
+
+
+def _sqlite_write_json(namespace: str, key: str, value):
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    updated_at = datetime.now(timezone.utc).isoformat()
+    conn = _open_machine_state_db()
+    try:
+        with conn:
+            conn.execute(
+                """INSERT INTO kv_state (namespace, key, value_json, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(namespace, key) DO UPDATE SET
+                       value_json = excluded.value_json,
+                       updated_at = excluded.updated_at""",
+                (namespace, key, payload, updated_at),
+            )
+    finally:
+        conn.close()
+
+
+def _read_legacy_reminders() -> list:
+    if not REMINDERS_FILE.exists():
+        return []
+    value = json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError("reminders.json root must be a list")
+    return value
+
+
+def _ensure_legacy_reminders_backup():
+    """Keep the pre-migration JSON once; retries reuse it instead of multiplying copies."""
+    if not REMINDERS_FILE.exists():
+        return None
+    existing = sorted(REMINDERS_FILE.parent.glob(
+        REMINDERS_FILE.name + ".pre-sqlite-*.bak"))
+    if existing:
+        return existing[-1]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = REMINDERS_FILE.with_name(
+        f"{REMINDERS_FILE.name}.pre-sqlite-{stamp}.bak")
+    shutil.copy2(REMINDERS_FILE, backup)
+    return backup
+
+
+def _write_reminders_export(value: list):
+    _atomic_write_text(
+        REMINDERS_FILE,
+        json.dumps(value, ensure_ascii=False, indent=2),
+    )
 
 
 def load_reminders():
     global reminders
-    if REMINDERS_FILE.exists():
+    if not REMINDERS_SQLITE:
         try:
-            reminders = json.loads(REMINDERS_FILE.read_text(encoding="utf-8"))
+            reminders = _read_legacy_reminders()
         except Exception as e:
             log.warning("[reminders] load failed: %s", e)
             _count_error("load")
             reminders = []
+        return
+
+    try:
+        stored = _sqlite_read_json("reminders", "items")
+        if stored is _SQLITE_MISSING:
+            _ensure_legacy_reminders_backup()
+            imported = _read_legacy_reminders()
+            _sqlite_write_json("reminders", "items", imported)
+            stored = _sqlite_read_json("reminders", "items")
+            if stored != imported:
+                raise RuntimeError("SQLite import readback did not match reminders.json")
+        if not isinstance(stored, list):
+            raise ValueError("SQLite reminders value must be a list")
+        reminders = stored
+        # This is both a readable export and the one-release rollback source. Refreshing
+        # it on load repairs a stale export after termination between DB COMMIT and export.
+        _write_reminders_export(reminders)
+    except Exception as e:
+        log.warning("[reminders] SQLite load failed; using JSON rollback: %s", e)
+        _count_error("load")
+        try:
+            reminders = _read_legacy_reminders()
+        except Exception as legacy_error:
+            log.warning("[reminders] JSON rollback load failed: %s", legacy_error)
+            reminders = []
 
 
 def save_reminders():
-    _atomic_write_text(REMINDERS_FILE, json.dumps(reminders, indent=2))
+    if REMINDERS_SQLITE:
+        try:
+            _sqlite_write_json("reminders", "items", reminders)
+            if _sqlite_read_json("reminders", "items") != reminders:
+                raise RuntimeError("SQLite save readback did not match live reminders")
+        except Exception as e:
+            # The rollback export still lands even if SQLite becomes unavailable.
+            log.warning("[reminders] SQLite save failed; JSON rollback stays current: %s", e)
+            _count_error("save")
+    _write_reminders_export(reminders)
 
 
 load_reminders()
@@ -16964,6 +17088,19 @@ def _run_config_check() -> bool:
         except (OSError, ValueError):
             check(False, fname, "CORRUPT — the bot would start from empty state; "
                                 "restore it from a backup before launching")
+    if REMINDERS_SQLITE:
+        try:
+            conn = _open_machine_state_db()
+            try:
+                integrity = conn.execute("PRAGMA quick_check").fetchone()
+            finally:
+                conn.close()
+            detail = integrity[0] if integrity else "no result"
+            check(detail == "ok", MACHINE_STATE_DB_FILE.name,
+                  "integrity ok" if detail == "ok" else f"CORRUPT — quick_check: {detail}")
+        except Exception as e:
+            check(False, MACHINE_STATE_DB_FILE.name,
+                  f"UNREADABLE — reminders are using the JSON rollback export: {e}")
     # A corrupt state.json never reaches the loop above: module init quarantines
     # it to state.corrupted (loudly) and starts empty. Surface the quarantine so
     # a preflight can't say "all clear" right after state was lost.

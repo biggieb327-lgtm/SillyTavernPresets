@@ -269,7 +269,7 @@ These files shape what the character knows and references. All are editable from
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats (subscription limits from NanoGPT) |
 | `/chatid` | Show your Telegram user ID |
-| `/backup` | Send state.json, memories.txt, user_notes.txt, setting.txt, reminders.json, payments.json to chat (`.env` excluded) |
+| `/backup` | Send state.json, memories.txt, user_notes.txt, setting.txt, the current human-readable reminders.json export, and payments.json to chat (`.env` excluded) |
 
 ### Operations (admin only — allowlist member or owner)
 | Command | What it does |
@@ -370,6 +370,22 @@ All memory lives in `state.json` in the character's directory. Back it up:
 cp /opt/telegram-bots/nora/state.json /opt/telegram-bots/nora/state.backup.$(date +%Y%m%d).json
 ```
 Or use `/backup` from the chat.
+
+### Reminder persistence and rollback
+
+Reminders are the first machine-managed store in the per-instance
+`machine-state.sqlite3`. On first startup, the bot imports `reminders.json`, keeps a
+dated `reminders.json.pre-sqlite-*.bak`, and verifies the database readback. Every later
+save also refreshes `reminders.json`, so `/backup` stays human-readable and restore does
+not depend on SQLite tooling. Character cards, presets, memories, and owner-edited text
+files remain file-backed.
+
+For immediate rollback, set `REMINDERS_SQLITE=0` in that instance's `.env` and restart;
+the bot resumes JSON-only reads and writes. To rebuild SQLite after repairing/restoring
+the export, stop the instance, rename `machine-state.sqlite3` (and any `-wal`/`-shm`
+sidecars) to dated recovery names, unset the kill switch, and start the instance. The
+startup import will rebuild the database from `reminders.json`. Rename rather than
+delete so the previous database remains recoverable.
 
 ### Automated fleet backup — no VPS equivalent shipped yet
 
@@ -711,6 +727,9 @@ after sending that bot `/audit` (`_self_audit` fires the ping inline with that j
 **Reminders not firing**
 - Requires `python-telegram-bot[job-queue]`: `pip install "python-telegram-bot[job-queue]"`
 - Check that `BOT_TIMEZONE` in `.env` is set correctly (e.g. `America/Chicago`)
+- Run the release preflight; it checks `machine-state.sqlite3` integrity. If SQLite is
+  unreadable, the bot logs the failure and uses the current `reminders.json` rollback
+  export. Set `REMINDERS_SQLITE=0` before restart to stay on that legacy path.
 
 **State file corrupted on startup**
 - The bot renames `state.json` to `state.json.corrupted` and starts fresh
