@@ -7,7 +7,7 @@
 
 release_secure_stores() {
   local base="$1" store owner mode
-  for store in releases venvs; do
+  for store in releases venvs selectors; do
     [ ! -L "$base/$store" ] || {
       echo "[release] FATAL: $base/$store must not be a symlink" >&2
       return 1
@@ -26,6 +26,34 @@ release_secure_stores() {
       return 1
     }
   done
+}
+
+release_secure_selector() {
+  local base="$1" instance="$2" selector_dir owner mode
+  [[ "$instance" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    echo "[release] FATAL: invalid instance selector name: $instance" >&2
+    return 1
+  }
+  release_secure_stores "$base" || return 1
+  selector_dir="$base/selectors/$instance"
+  [ ! -L "$selector_dir" ] || {
+    echo "[release] FATAL: $selector_dir must not be a symlink" >&2
+    return 1
+  }
+  if [ ! -e "$selector_dir" ]; then
+    install -d -o root -g root -m 0755 "$selector_dir" || return 1
+  fi
+  [ -d "$selector_dir" ] || {
+    echo "[release] FATAL: $selector_dir is not a directory" >&2
+    return 1
+  }
+  owner=$(stat -c '%u' "$selector_dir")
+  mode=$(stat -c '%a' "$selector_dir")
+  [ "$owner" = "0" ] && [ "$mode" = "755" ] || {
+    echo "[release] FATAL: $selector_dir must be root-owned mode 755 (got uid $owner mode $mode)" >&2
+    return 1
+  }
+  PREPARED_SELECTOR_DIR="$selector_dir"
 }
 
 release_migrate_writable_state() {
@@ -167,47 +195,81 @@ release_prepare() {
 }
 
 release_activate() {
-  local base="$1" release_dir="$2"
-  local revision current_target link_tmp
+  local pointer_dir="$1" release_dir="$2"
+  local current_target link_tmp
 
-  revision=$(basename "$release_dir")
-  current_target="releases/$revision"
-  if [ -L "$base/current" ] && [ "$(readlink "$base/current")" = "$current_target" ]; then
+  [ -f "$release_dir/.complete" ] || {
+    echo "[release] FATAL: cannot select incomplete release $release_dir" >&2
+    return 1
+  }
+  current_target=$(realpath --relative-to="$pointer_dir" "$release_dir") || return 1
+  if [ -L "$pointer_dir/current" ] && [ "$(readlink "$pointer_dir/current")" = "$current_target" ]; then
     return 0
   fi
-  [ ! -e "$base/current" ] || [ -L "$base/current" ] || {
-    echo "[release] FATAL: $base/current exists and is not a symlink" >&2
+  [ ! -e "$pointer_dir/current" ] || [ -L "$pointer_dir/current" ] || {
+    echo "[release] FATAL: $pointer_dir/current exists and is not a symlink" >&2
     return 1
   }
 
-  if [ -L "$base/current" ]; then
-    link_tmp="$base/.previous.$$"
-    ln -s "$(readlink "$base/current")" "$link_tmp"
-    mv -Tf "$link_tmp" "$base/previous"
+  if [ -L "$pointer_dir/current" ]; then
+    link_tmp="$pointer_dir/.previous.$$"
+    ln -s "$(readlink "$pointer_dir/current")" "$link_tmp"
+    mv -Tf "$link_tmp" "$pointer_dir/previous"
   fi
-  link_tmp="$base/.current.$$"
+  link_tmp="$pointer_dir/.current.$$"
   ln -s "$current_target" "$link_tmp"
-  mv -Tf "$link_tmp" "$base/current"
+  mv -Tf "$link_tmp" "$pointer_dir/current"
 }
 
 release_rollback() {
-  local base="$1" current_target previous_target link_tmp
-  [ -L "$base/current" ] && [ -L "$base/previous" ] || {
-    echo "[release] FATAL: both $base/current and $base/previous must exist" >&2
+  local pointer_dir="$1" current_target previous_target link_tmp
+  [ -L "$pointer_dir/current" ] && [ -L "$pointer_dir/previous" ] || {
+    echo "[release] FATAL: both $pointer_dir/current and $pointer_dir/previous must exist" >&2
     return 1
   }
-  current_target=$(readlink "$base/current")
-  previous_target=$(readlink "$base/previous")
-  [ -f "$base/$previous_target/.complete" ] || {
-    echo "[release] FATAL: previous release is incomplete: $base/$previous_target" >&2
+  current_target=$(readlink "$pointer_dir/current")
+  previous_target=$(readlink "$pointer_dir/previous")
+  [ -f "$pointer_dir/$previous_target/.complete" ] || {
+    echo "[release] FATAL: previous release is incomplete: $pointer_dir/$previous_target" >&2
     return 1
   }
 
-  link_tmp="$base/.current.$$"
+  link_tmp="$pointer_dir/.current.$$"
   ln -s "$previous_target" "$link_tmp"
-  mv -Tf "$link_tmp" "$base/current"
-  link_tmp="$base/.previous.$$"
+  mv -Tf "$link_tmp" "$pointer_dir/current"
+  link_tmp="$pointer_dir/.previous.$$"
   ln -s "$current_target" "$link_tmp"
-  mv -Tf "$link_tmp" "$base/previous"
+  mv -Tf "$link_tmp" "$pointer_dir/previous"
   echo "[release] current -> $previous_target (previous -> $current_target)"
+}
+
+release_select() {
+  local base="$1" instance="$2" release_dir="$3"
+  release_secure_selector "$base" "$instance" || return 1
+  release_activate "$PREPARED_SELECTOR_DIR" "$release_dir"
+}
+
+release_selector_rollback() {
+  local base="$1" instance="$2"
+  release_secure_selector "$base" "$instance" || return 1
+  release_rollback "$PREPARED_SELECTOR_DIR"
+}
+
+release_selected_dir() {
+  local base="$1" instance="$2" selected
+  release_secure_selector "$base" "$instance" || return 1
+  [ -L "$PREPARED_SELECTOR_DIR/current" ] || {
+    echo "[release] FATAL: $instance has no selected release" >&2
+    return 1
+  }
+  selected=$(realpath "$PREPARED_SELECTOR_DIR/current") || return 1
+  case "$selected" in
+    "$base"/releases/*) ;;
+    *) echo "[release] FATAL: $instance selector escapes the release store: $selected" >&2; return 1 ;;
+  esac
+  [ -f "$selected/.complete" ] || {
+    echo "[release] FATAL: $instance selected release is incomplete: $selected" >&2
+    return 1
+  }
+  SELECTED_RELEASE_DIR="$selected"
 }

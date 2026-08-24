@@ -29,7 +29,7 @@ def main() -> int:
     release_lib = (BOT_DIR / "deploy/release-lib.sh").read_text(encoding="utf-8")
     vps_sync = (BOT_DIR / "deploy/vps-sync.sh").read_text(encoding="utf-8")
     installer = (BOT_DIR / "deploy/install-vps.sh").read_text(encoding="utf-8")
-    service = (BOT_DIR / "deploy/bot@.service").read_text(encoding="utf-8")
+    service = (BOT_DIR / "deploy/bot-selector@.service").read_text(encoding="utf-8")
 
     direct_names = {
         _normalized(re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip())
@@ -75,6 +75,11 @@ def main() -> int:
         "release_secure_stores": (
             "must be root-owned mode 755",
             'install -d -o root -g root -m 0755 "$base/$store"',
+            "releases venvs selectors",
+        ),
+        "release_secure_selector": (
+            'selector_dir="$base/selectors/$instance"',
+            'must be root-owned mode 755',
         ),
         "release_migrate_writable_state": (
             'install -d -o "$bot_user" -g "$bot_group" -m 0755 "$base/shared"',
@@ -96,12 +101,20 @@ def main() -> int:
             'chmod -R a-w "$temp_dir"',
         ),
         "release_activate": (
-            'mv -Tf "$link_tmp" "$base/previous"',
-            'mv -Tf "$link_tmp" "$base/current"',
+            'realpath --relative-to="$pointer_dir" "$release_dir"',
+            'mv -Tf "$link_tmp" "$pointer_dir/previous"',
+            'mv -Tf "$link_tmp" "$pointer_dir/current"',
         ),
         "release_rollback": (
-            'mv -Tf "$link_tmp" "$base/current"',
-            'mv -Tf "$link_tmp" "$base/previous"',
+            'mv -Tf "$link_tmp" "$pointer_dir/current"',
+            'mv -Tf "$link_tmp" "$pointer_dir/previous"',
+        ),
+        "release_select": (
+            'release_secure_selector "$base" "$instance"',
+            'release_activate "$PREPARED_SELECTOR_DIR" "$release_dir"',
+        ),
+        "release_selector_rollback": (
+            'release_rollback "$PREPARED_SELECTOR_DIR"',
         ),
     }
     for function_name, fragments in function_contracts.items():
@@ -116,18 +129,28 @@ def main() -> int:
     if "REVISION=$($GIT rev-parse HEAD)" not in vps_sync:
         problems.append("vps-sync does not address releases by the full deployed git SHA")
     for script_name, script in (("vps-sync", vps_sync), ("install-vps", installer)):
-        if 'release_prepare "$SRC"' not in script or "release_activate" not in script:
-            problems.append(f"{script_name} bypasses the shared release prepare/activate path")
+        if 'release_prepare "$SRC"' not in script or "release_select" not in script:
+            problems.append(f"{script_name} bypasses the shared release prepare/select path")
         if "release_migrate_writable_state" not in script:
             problems.append(f"{script_name} does not isolate writable state from release pointers")
-    if 'MODE=rollback' not in vps_sync or 'release_rollback "$BASE"' not in vps_sync:
-        problems.append("vps-sync has no immutable-pointer rollback mode")
+    if 'MODE=rollback' not in vps_sync or 'release_selector_rollback "$BASE" "$INST"' not in vps_sync:
+        problems.append("vps-sync has no per-instance immutable-pointer rollback mode")
+    if 'MODE=promote' not in vps_sync or 'release_select "$BASE" "$name" "$CANARY_RELEASE_DIR"' not in vps_sync:
+        problems.append("vps-sync has no canary promotion mode")
+    if '"$SRC/deploy/bot-selector@.service"' not in vps_sync:
+        problems.append("vps-sync does not install the selector-aware unit template")
+    if '"$INSTALL_DIR/deploy/bot-selector@.service"' not in installer:
+        problems.append("install-vps does not install the selector-aware unit template")
+
+    legacy_service = (BOT_DIR / "deploy/bot@.service").read_text(encoding="utf-8")
+    if "ExecStart=/opt/telegram-bots/current/venv/bin/python" not in legacy_service:
+        problems.append("legacy unit compatibility template no longer protects an in-flight item-1 deploy")
 
     service_required = (
         "Environment=WORLD_FILE=/opt/telegram-bots/world.txt",
         "Environment=GROUP_LEDGER_DIR=/opt/telegram-bots/shared",
-        "ExecStart=/opt/telegram-bots/current/venv/bin/python "
-        "/opt/telegram-bots/current/bot.py /opt/telegram-bots/%i",
+        "ExecStart=/opt/telegram-bots/selectors/%i/current/venv/bin/python "
+        "/opt/telegram-bots/selectors/%i/current/bot.py /opt/telegram-bots/%i",
         "Restart=always",
     )
     for fragment in service_required:
@@ -141,7 +164,7 @@ def main() -> int:
         return 1
     print(
         f"release contract ok: {len(package_blocks)} exact hashed packages; "
-        "CI and VPS share the lock; git-SHA releases and rollback are wired"
+        "CI and VPS share the lock; per-instance git-SHA selectors, promotion, and rollback are wired"
     )
     return 0
 

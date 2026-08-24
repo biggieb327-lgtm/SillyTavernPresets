@@ -173,13 +173,14 @@ Two composition facts the per-skill descriptions can't tell you:
 | `jules` | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
 | `marcus` | `/opt/telegram-bots/marcus/` | `marcus_calder.json` |
 
-All instances select the shared immutable release through `/opt/telegram-bots/current`;
-code releases live at `releases/<full-git-sha>/` and exact dependency layers at
-`venvs/py312-<lock-sha256>/`. Each runs as `bot@<instance>` (unit file
-`deploy/bot@.service`, `WorkingDirectory=/opt/telegram-bots/%i`). `previous` is the
-atomic rollback pointer. Per-instance release pointers are deliberately ROADMAP item 2.
-The root-owned release/pointer layout is not bot-writable; group ledgers live in the
-separate bot-writable `/opt/telegram-bots/shared/` directory.
+Each instance selects its immutable release through the root-owned
+`/opt/telegram-bots/selectors/<instance>/current` pointer, with its own `previous`
+rollback pointer. Code releases live at `releases/<full-git-sha>/` and exact dependency
+layers at `venvs/py312-<lock-sha256>/`. Each runs as `bot@<instance>` (selector-aware
+template `deploy/bot-selector@.service`, installed as `/etc/systemd/system/bot@.service`,
+`WorkingDirectory=/opt/telegram-bots/%i`). The selector layout is
+not bot-writable; group ledgers live in the separate bot-writable
+`/opt/telegram-bots/shared/` directory.
 
 The instance directory is the basename on the `=== STARTUP AUDIT === … Instance:`
 line — **that runtime value is authoritative** if it ever disagrees with this table.
@@ -222,8 +223,8 @@ below). The phone's rollback dirs (`~/<name>-bot.migrated`) were retained throug
 
 All seven instances deploy from `main` via **`deploy/vps-sync.sh`**, one invocation per
 instance. It installs the exact hashed dependency lock into a lock-addressed immutable
-environment, assembles a full-git-SHA code release, atomically updates `current` (keeping
-`previous`), pulls the instance's preset layers and card, normalizes `CHARACTER_CARD`,
+environment, assembles a full-git-SHA code release, atomically updates that instance's
+`current` selector (keeping its `previous`), pulls the instance's preset layers and card, normalizes `CHARACTER_CARD`,
 restarts and enables the unit, then prints release + hash + STARTUP AUDIT verification:
 
 ```bash

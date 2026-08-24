@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-24 — per-instance canary release selectors
+
+**Root cause: immutable releases still had one host-wide selection pointer, so deploying
+or rolling back code changed every bot at once.** Reproducibility reduced uncertainty but
+did not bound blast radius: there was no way to run a new code/dependency release on one
+bot, observe it, and promote the exact tested artifact afterward.
+
+Each instance now has a root-owned `selectors/<instance>/current` and `previous` pair.
+The systemd template resolves `%i` through that selector, a normal `vps-sync.sh <instance>`
+moves only the named bot, and `--rollback <instance>` reverses only that bot. After a
+canary passes `/audit` and journal checks, `--promote <canary>` atomically selects its
+exact immutable code/runtime release for every active instance and restarts them.
+Promotion deliberately does not overwrite mutable cards or preset layers. First migration
+seeds every active selector from the prior host-wide release (or the newly prepared release
+on a legacy host), while selectors and release stores remain non-writable by the bot user.
+The release contract now fails if the per-instance systemd path, root-owned selector
+store, targeted rollback, or canary promotion path drifts.
+
+The committed `deploy/bot@.service` intentionally remains the item-1 compatibility
+template. An item-1 shell process that fetches item 2 keeps executing its already-loaded
+old logic; leaving that filename unchanged prevents it from installing the selector unit
+before selectors exist. The new script installs `deploy/bot-selector@.service` on its next
+invocation and performs the stopped-fleet migration first.
+
 ## 2026-08-24 — exact dependencies and immutable VPS releases
 
 **Root cause: CI and the VPS resolved broad dependency ranges independently, while each

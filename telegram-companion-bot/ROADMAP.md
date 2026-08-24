@@ -164,6 +164,17 @@ constraints; check their assumptions before acting on them.
 - **Boundary:** release selection is still host-wide. Per-instance pointers and canary
   promotion are the next architecture item, not silently folded into this one.
 
+### 1.8 ~~Per-instance canary release selectors~~ ✅ (shipped 2026-08-24)
+- **Evidence:** item 1.7 made code and dependencies reproducible, but one host-wide
+  `current` pointer still moved all seven bots at once. A bad runtime release therefore
+  had no bounded canary blast radius, and rollback necessarily restarted the whole fleet.
+- **Shipped:** root-owned `selectors/<instance>/current` and `previous` pointers;
+  instance-scoped deploy and rollback; explicit `--promote <canary>` for moving the
+  tested immutable code/runtime release to all active bots. The systemd unit resolves
+  `%i` through the selector store, and first migration seeds selectors without exposing
+  them to the bot user. `immutable-release-contract` pins the selector, promotion, and
+  rollback paths.
+
 ---
 
 ## Track 2 — Engineering workflow
@@ -1354,7 +1365,8 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
-| ~~**Next**~~ | ~~1.7 exact dependency lock + immutable releases~~ | ✅ **Shipped 2026-08-24** — CI/VPS share one hashed Python 3.12 lock; deploys select full-git-SHA releases with atomic `current`/`previous` rollback. Per-instance canary pointers remain the next architecture item. |
+| ~~**Next**~~ | ~~1.7 exact dependency lock + immutable releases~~ | ✅ **Shipped 2026-08-24** — CI/VPS share one hashed Python 3.12 lock; deploys select full-git-SHA releases with atomic rollback. Follow-up 1.8 added per-instance canary selectors. |
+| ~~**Next**~~ | ~~1.8 per-instance canary release selectors~~ | ✅ **Shipped 2026-08-24** — each bot has a root-owned `current`/`previous` selector; deploy and rollback are instance-scoped, and a tested canary release can be promoted explicitly to the active fleet. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |

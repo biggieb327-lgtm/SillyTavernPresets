@@ -1121,6 +1121,15 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-24 — Sent a 432,082-byte changelog through a command-output bridge as one
+  base64 string. The tool truncated the output, but the partial bytes still formed a
+  valid Git blob, so `main` moved and CI failed only when the missing release heading
+  made `version-changelog-sync` go red. Restored the file from fixed-size, 3-byte-aligned
+  chunks and verified the returned blob SHA against `git hash-object`. → **When publishing
+  a local tree through a content API, compare every returned blob SHA to the local Git
+  blob SHA before moving a ref; transport success is not content identity.** The CI gate
+  caught this occurrence, and the item-2 publish checklist now includes the hash comparison.
+
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
 they were caught a minute later: a wrong path, a grep for the wrong variable name, a
 broken test harness, a script that didn't parse, an assumption corrected the moment

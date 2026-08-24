@@ -105,7 +105,7 @@ def main() -> None:
             sys.exit(
                 f"cannot import bot.py — {e.name} is missing.\n"
                 f"This tool imports bot.py, so it needs bot.py's dependencies:\n"
-                f"  on the VPS:  /opt/telegram-bots/current/venv/bin/python3 "
+                f"  on the VPS:  /opt/telegram-bots/selectors/<instance>/current/venv/bin/python3 "
                 f"{Path(__file__).resolve()} ...\n"
                 f"  elsewhere:   pip install --require-hashes -r "
                 f"<repo>/telegram-companion-bot/requirements.lock")

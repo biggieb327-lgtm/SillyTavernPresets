@@ -68,7 +68,7 @@ REPO = Path(__file__).resolve().parent.parent
 _MISSING_DEPS = (
     "cannot import bot.py — {mod} is missing.\n"
     "This tool imports bot.py, so it needs bot.py's dependencies:\n"
-    "  on the VPS:  /opt/telegram-bots/current/venv/bin/python3 {script} ...\n"
+    "  on the VPS:  /opt/telegram-bots/selectors/<instance>/current/venv/bin/python3 {script} ...\n"
     "  elsewhere:   pip install --require-hashes -r <repo>/telegram-companion-bot/requirements.lock"
 )
 # Entries read "Name — description of what it means to her". Only the part before the dash

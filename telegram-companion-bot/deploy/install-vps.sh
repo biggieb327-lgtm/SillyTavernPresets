@@ -94,13 +94,11 @@ if [ ! -L "$INSTALL_DIR/current" ] && [ -x "$INSTALL_DIR/venv/bin/python" ] \
   exit 1
 fi
 release_prepare "$SRC" "$INSTALL_DIR" "$REVISION"
-if [ ! -L "$INSTALL_DIR/current" ] \
-   && systemctl list-units 'bot@*.service' --state=active --no-legend --plain | grep -q .; then
-  echo "FATAL: legacy bot units are active; migrate with deploy/vps-sync.sh first." >&2
+if systemctl list-units 'bot@*.service' --state=active --no-legend --plain | grep -q .; then
+  echo "FATAL: bot units are active; update a live fleet with deploy/vps-sync.sh." >&2
   exit 1
 fi
 release_migrate_writable_state "$INSTALL_DIR" "$BOT_USER"
-release_activate "$INSTALL_DIR" "$PREPARED_RELEASE_DIR"
 
 echo "== 4/8: bot system user =="
 if ! id -u "$BOT_USER" >/dev/null 2>&1; then
@@ -160,11 +158,12 @@ while true; do
     fi
   fi
   chown -R "$BOT_USER:$BOT_USER" "$INSTANCE_DIR"
+  release_select "$INSTALL_DIR" "$INSTANCE_NAME" "$PREPARED_RELEASE_DIR"
   CONFIGURED_INSTANCES+=("$INSTANCE_NAME")
 done
 
 echo "== 6/8: systemd unit =="
-cp "$INSTALL_DIR/deploy/bot@.service" /etc/systemd/system/bot@.service
+cp "$INSTALL_DIR/deploy/bot-selector@.service" /etc/systemd/system/bot@.service
 systemctl daemon-reload
 
 echo "== 7/8: enabling instances =="

@@ -11,14 +11,14 @@ created 2026-07-29; the Termux phone is empty). Layout:
 
 | Path | What |
 |---|---|
-| `/opt/telegram-bots/current` | atomic symlink to the selected immutable release |
-| `/opt/telegram-bots/previous` | prior release pointer — the rollback target |
+| `/opt/telegram-bots/selectors/<instance>/current` | that bot's atomic release selector |
+| `/opt/telegram-bots/selectors/<instance>/previous` | that bot's rollback target |
 | `/opt/telegram-bots/releases/<git-sha>/` | immutable code, assets, lock, and venv pointer |
 | `/opt/telegram-bots/venvs/py312-<lock-sha256>/` | exact hashed dependency layer, reused across code-only releases |
 | `/opt/telegram-bots/shared/` | bot-writable group ledgers and the inert `/update` lock; release pointers stay root-owned |
 | `/opt/telegram-bots/<instance>/` | per-instance dir: `.env`, card, state, memory |
 | `/opt/telegram-bots/world.txt` | shared world context (nora writes it) |
-| `/etc/systemd/system/bot@.service` | unit template, `WorkingDirectory=/opt/telegram-bots/%i` |
+| `/etc/systemd/system/bot@.service` | installed from `deploy/bot-selector@.service`; resolves `%i` through its selector |
 
 Each bot is `bot@<instance>` — `bot@nora`, `bot@bonnie`, `bot@cass`, `bot@emily`,
 `bot@priya`, `bot@jules`, `bot@marcus`. The authoritative list is whatever
@@ -79,9 +79,18 @@ AUDIT verification:
 ```
 `/update`, `update-all.sh` and `sync-cards.sh` are phone-era and manage nothing now.
 
-**Rollback:** atomically swaps `current` and `previous`, then restarts every active bot.
+**Canary rollout:** deploy one instance, verify `/audit` and its journal, then promote
+that exact immutable code/runtime release to every active bot. Promotion deliberately
+does not copy mutable cards or preset layers.
 ```bash
-/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --promote nora
+```
+
+**Rollback:** atomically swaps only the named instance's `current` and `previous`, then
+restarts it if it was active.
+```bash
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback nora
 ```
 
 ### File ownership
@@ -454,9 +463,9 @@ containing:
 - `state.json` — conversation history, memory, mood (auto-created)
 - Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `atlas.txt`
 
-The release selected by `/opt/telegram-bots/current` is used by all instances — each
-instance reads and writes only its own directory plus the explicitly shared world/group
-paths in `bot@.service`.
+The release selected by `/opt/telegram-bots/selectors/<instance>/current` is used only
+by that instance. Each bot reads and writes only its own directory plus the explicitly
+shared world/group paths in `bot@.service`.
 
 To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use `/forget` for a clean memory slate.
 
@@ -464,8 +473,8 @@ To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use 
 
 ## Running Multiple Characters
 
-All seven bots share the release selected by `/opt/telegram-bots/current` and run from
-their own directories as systemd unit `bot@<instance>` (see "VPS operations" at the top
+All seven bots have independent root-owned release selectors and run from their own
+directories as systemd unit `bot@<instance>` (see "VPS operations" at the top
 for start/stop/restart and the whole-fleet loop). Instances: `nora`, `bonnie`, `cass`,
 `emily`, `priya`, `jules`, `marcus`.
 
@@ -526,7 +535,8 @@ Emily+Marcus's setup did):
 5. One-time smoke test of the atomicity primitives, on the VPS:
    ```bash
    # host: VPS
-   sudo -u bot /opt/telegram-bots/current/venv/bin/python /opt/telegram-bots/current/bot.py \
+   sudo -u bot /opt/telegram-bots/selectors/priya/current/venv/bin/python \
+     /opt/telegram-bots/selectors/priya/current/bot.py \
      /opt/telegram-bots/priya --claim-test
    ```
    (must print two PASS lines — run it as `bot` so it exercises the real permissions).
@@ -675,7 +685,7 @@ after sending that bot `/audit` (`_self_audit` fires the ping inline with that j
   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
   ```
   If the selected release itself was damaged, remove nothing: use `vps-sync.sh
-  --rollback`, inspect `current`/`previous`, then repair forward on `main`.
+  --rollback nora`, inspect `selectors/nora/current` and `previous`, then repair forward on `main`.
 
 **Model errors / 5xx from the API**
 - Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically

@@ -22,20 +22,22 @@
 #     git@github.com:biggieb327-lgtm/SillyTavernPresets.git
 # See deploy/MIGRATION.md § "Private-repo deploys".
 #
-# Roll back the shared release pointer and restart the whole fleet with:
-#   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
+# Promote one tested instance's immutable release to every active instance with:
+#   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --promote nora
+# Roll back only one instance with:
+#   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback nora
 #
-# The host-wide flock remains necessary: releases and the shared current/previous
-# pointers are host state, while the documented fleet deploy is seven invocations.
+# The host-wide flock remains necessary: releases and the root-owned selector store are
+# shared host state, while promotion updates several per-instance pointers as one operation.
 set -euo pipefail
 
 MODE=deploy
-if [ "${1:-}" = "--rollback" ]; then
-  MODE=rollback
-  INST=""
-else
-  INST="${1:?usage: vps-sync.sh <instance> | vps-sync.sh --rollback}"
-fi
+case "${1:-}" in
+  --rollback) MODE=rollback; INST="${2:?usage: vps-sync.sh --rollback <instance>}" ;;
+  --promote)  MODE=promote;  INST="${2:?usage: vps-sync.sh --promote <canary-instance>}" ;;
+  "") echo "usage: vps-sync.sh <instance> | --promote <instance> | --rollback <instance>" >&2; exit 1 ;;
+  *) INST="$1" ;;
+esac
 BASE=/opt/telegram-bots
 REPO="${STPRESETS_REPO:-$BASE/.repo}"
 SRC="$REPO/telegram-companion-bot"
@@ -52,20 +54,38 @@ flock -n 9 || { echo "[vps-sync] another release operation is running on this ho
 # shellcheck source=release-lib.sh
 source "$SRC/deploy/release-lib.sh"
 
+active_instances() {
+  systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
+    | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
+}
+
 if [ "$MODE" = rollback ]; then
-  release_rollback "$BASE"
-  mapfile -t ACTIVE_INSTANCES < <(
-    systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
-      | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
-  )
+  release_selector_rollback "$BASE" "$INST"
+  if systemctl is-active --quiet "bot@$INST"; then
+    systemctl restart "bot@$INST"
+    echo "[vps-sync] rolled back and restarted $INST"
+  else
+    echo "[vps-sync] rolled back $INST; unit is inactive, so it was not started"
+  fi
+  exit 0
+fi
+
+if [ "$MODE" = promote ]; then
+  release_selected_dir "$BASE" "$INST"
+  CANARY_RELEASE_DIR="$SELECTED_RELEASE_DIR"
+  mapfile -t ACTIVE_INSTANCES < <(active_instances)
   [ "${#ACTIVE_INSTANCES[@]}" -gt 0 ] || {
-    echo "[vps-sync] FATAL: no active bot instances found to restart" >&2
+    echo "[vps-sync] FATAL: no active bot instances found to promote" >&2
     exit 1
   }
   for name in "${ACTIVE_INSTANCES[@]}"; do
+    release_select "$BASE" "$name" "$CANARY_RELEASE_DIR"
+  done
+  for name in "${ACTIVE_INSTANCES[@]}"; do
     systemctl restart "bot@$name"
   done
-  echo "[vps-sync] rolled back and restarted: ${ACTIVE_INSTANCES[*]}"
+  echo "[vps-sync] promoted $(basename "$CANARY_RELEASE_DIR") from $INST to: ${ACTIVE_INSTANCES[*]}"
+  echo "[vps-sync] immutable code/runtime only; instance cards and preset layers were not changed"
   exit 0
 fi
 
@@ -154,42 +174,51 @@ fi
 
 chown -R bot:bot "$BASE/$INST"
 
-# Keep the installed unit in lockstep with the release layout. The first deployment
-# migrates ExecStart from the legacy shared bot.py/venv paths to current/ atomically.
+# Keep the installed unit in lockstep with the release layout. Each root-owned selector
+# has its own current/previous pair, so one instance can canary a release without moving
+# any other bot.
 UNIT_CHANGED=0
-if ! cmp -s "$SRC/deploy/bot@.service" /etc/systemd/system/bot@.service; then
-  install -m 0644 "$SRC/deploy/bot@.service" /etc/systemd/system/bot@.service
+if ! cmp -s "$SRC/deploy/bot-selector@.service" /etc/systemd/system/bot@.service; then
+  install -m 0644 "$SRC/deploy/bot-selector@.service" /etc/systemd/system/bot@.service
   systemctl daemon-reload
   UNIT_CHANGED=1
 fi
 
 MIGRATING_LAYOUT=0
-ACTIVE_INSTANCES=()
-if [ ! -L "$BASE/current" ]; then
-  # The legacy layout made BASE bot-writable because group ledgers lived beside
-  # bot.py. Stop first, move that live state into shared/, then make BASE root-owned
-  # so the service user cannot rewrite current/previous or release stores.
-  mapfile -t ACTIVE_INSTANCES < <(
-    systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
-      | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
-  )
+mapfile -t ACTIVE_INSTANCES < <(active_instances)
+if [ "$UNIT_CHANGED" -eq 1 ] || [ ! -d "$BASE/shared" ] \
+   || compgen -G "$BASE/group_*.jsonl" >/dev/null || [ -e "$BASE/group_claims" ]; then
+  # Stop before moving writable state or changing ExecStart. On an item-1 host, seed
+  # missing selectors from its global current release; on a legacy host use the newly
+  # prepared release. Either way, later deploys move only the named instance.
   for name in "${ACTIVE_INSTANCES[@]}"; do
     systemctl stop "bot@$name"
   done
   release_migrate_writable_state "$BASE" bot
   MIGRATING_LAYOUT=1
 fi
-release_activate "$BASE" "$PREPARED_RELEASE_DIR"
+
+FALLBACK_RELEASE_DIR="$PREPARED_RELEASE_DIR"
+if [ -L "$BASE/current" ]; then
+  LEGACY_SELECTED=$(realpath "$BASE/current")
+  if [ -f "$LEGACY_SELECTED/.complete" ]; then
+    FALLBACK_RELEASE_DIR="$LEGACY_SELECTED"
+  fi
+fi
+for name in "${ACTIVE_INSTANCES[@]}"; do
+  if [ ! -L "$BASE/selectors/$name/current" ]; then
+    release_select "$BASE" "$name" "$FALLBACK_RELEASE_DIR"
+  fi
+done
+release_select "$BASE" "$INST" "$PREPARED_RELEASE_DIR"
+
 if [ "$UNIT_CHANGED" -eq 1 ] || [ "$MIGRATING_LAYOUT" -eq 1 ]; then
   # The first immutable-release migration may begin with one invocation of the old
   # script: that run fetches this script but keeps executing its already-loaded body.
   # Restart every active unit when ExecStart changes so that first instance cannot be
   # left running the legacy /opt/telegram-bots/bot.py path after the fleet loop.
   if [ "$MIGRATING_LAYOUT" -eq 0 ]; then
-    mapfile -t ACTIVE_INSTANCES < <(
-      systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
-        | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
-    )
+    mapfile -t ACTIVE_INSTANCES < <(active_instances)
   fi
   INST_RESTARTED=0
   for name in "${ACTIVE_INSTANCES[@]}"; do
@@ -207,7 +236,7 @@ systemctl enable "bot@$INST" 2>/dev/null || true
 sleep 3
 echo "--- verification ---"
 echo "checkout HEAD:     ${REVISION:0:12}"
-echo "current release:   $(readlink "$BASE/current")"
+echo "instance selector: $(readlink "$BASE/selectors/$INST/current")"
 echo "dependency layer:  $(cat "$PREPARED_RELEASE_DIR/VENV_KEY")"
 echo "bot.py       repo: $(sha256sum "$SRC/bot.py" | cut -d' ' -f1)"
 echo "bot.py    release: $(sha256sum "$PREPARED_RELEASE_DIR/bot.py" | cut -d' ' -f1)"

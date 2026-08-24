@@ -43,6 +43,15 @@ for b in $(systemctl list-units 'bot@*' --no-legend --plain \
 done
 ```
 
+Canary code/runtime rollout:
+```bash
+$REPO/deploy/vps-sync.sh nora          # canary only
+# verify /audit and journalctl, then:
+$REPO/deploy/vps-sync.sh --promote nora
+```
+Promotion selects the canary's immutable release for every active bot; it does not copy
+cards or preset layers.
+
 `.env` change only: edit the file → `systemctl restart bot@<name>` → check `/errors`
 for `[config]` warnings.
 
@@ -88,8 +97,8 @@ journalctl -u bot@<name> --since "-2 min" | grep -c Conflict    # 0 = resolved
 ls -la /opt/telegram-bots/<name>/state.json        # want: bot bot
 chown -R bot:bot /opt/telegram-bots/<name>
 
-# Roll back to the previous immutable release and restart every active bot
-$REPO/deploy/vps-sync.sh --rollback
+# Roll back only one bot to its previous immutable release
+$REPO/deploy/vps-sync.sh --rollback nora
 
 # Disk (state + journals)
 df -h /opt
@@ -105,7 +114,7 @@ df -h /opt
 - `systemctl start` ≠ `enable`. Unenabled units vanish on reboot.
 - `/errors` and `errors.log` are history; a bounded `journalctl` window is *now*.
 - Verify migrated/copied state by **content** (dict entry counts), not size or hash.
-- Rollback: `$REPO/deploy/vps-sync.sh --rollback`.
+- Rollback: `$REPO/deploy/vps-sync.sh --rollback <instance>`.
 
 ## Phone (historical)
 

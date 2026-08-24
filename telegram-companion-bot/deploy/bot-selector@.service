@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram Companion Bot — %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/opt/telegram-bots/%i
+Environment=WORLD_FILE=/opt/telegram-bots/world.txt
+Environment=GROUP_LEDGER_DIR=/opt/telegram-bots/shared
+ExecStart=/opt/telegram-bots/selectors/%i/current/venv/bin/python /opt/telegram-bots/selectors/%i/current/bot.py /opt/telegram-bots/%i
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bot-%i
+
+[Install]
+WantedBy=multi-user.target

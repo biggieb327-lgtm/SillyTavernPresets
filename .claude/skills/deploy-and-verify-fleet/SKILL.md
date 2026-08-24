@@ -35,12 +35,21 @@ and manage nothing now** — do not hand them to the user.
 
 ## Procedure
 
-**One command per instance** — covers code, card, and preset layers together:
+**Start with one canary** — this covers code, card, and preset layers for that instance:
 ```bash
 # host: VPS (as root). NOT curl-piped: the repo is private and raw URLs 404.
 # vps-sync.sh fetches and hard-resets the checkout to origin/main before copying,
 # so running it is correct even when the on-disk checkout looks stale.
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
+```
+Verify `/audit` and a fresh `STARTUP AUDIT` on the canary. For a code/runtime-only
+release, promote that exact tested immutable release to every active bot:
+```bash
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --promote nora
+```
+Promotion does not copy mutable cards or preset layers. If those changed, deploy each
+affected instance explicitly after the canary passes:
+```bash
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh bonnie
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh cass
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh emily
@@ -49,10 +58,10 @@ and manage nothing now** — do not hand them to the user.
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh marcus
 ```
 Only send the instances actually affected — a card-only edit needs just the instance(s)
-using that card; a bot.py change needs all seven. Each invocation prepares an immutable
+using that card; a bot.py change can canary one and use `--promote`. Each invocation prepares an immutable
 code release at `releases/<full-git-sha>` and an exact dependency layer at
 `venvs/py312-<lock-sha256>` (reused when the lock is unchanged), then atomically selects
-it through `current` while retaining `previous`. It copies `preset.txt` + whatever preset
+it through `selectors/<instance>/current` while retaining that instance's `previous`. It copies `preset.txt` + whatever preset
 layers that instance's own `PRESET_FILES` names, normalizes `CHARACTER_CARD` in `.env`,
 restarts + enables the unit, then prints release, hashes, and `STARTUP AUDIT`
 verification. It also reports (never copies) any seed file
@@ -60,9 +69,14 @@ verification. It also reports (never copies) any seed file
 missing on that instance — diff a sibling instance before copying one over, since a
 repo seed file can be an older generation than what's live (jules, 2026-07-29).
 
+`deploy/bot@.service` remains the item-1 compatibility template on purpose. The live
+selector-aware template is `deploy/bot-selector@.service`, which `vps-sync.sh` installs
+as `/etc/systemd/system/bot@.service` only after the new script itself is running. This
+keeps an in-flight old deploy from switching ExecStart before selectors exist.
+
 **The shared operation is locked** (ROADMAP 1.6, shipped 2026-08-01, race-confirmed on
 the real VPS). `vps-sync.sh` takes a non-blocking `flock` on `$BASE/.vps-sync.lock`
-before it prepares releases or changes `current`/`previous`. A concurrent second run
+before it prepares releases or changes selectors. A concurrent second run
 cannot corrupt the rollback point — **it refuses**, prints that another release
 operation is running, and exits 1.
 
@@ -73,13 +87,13 @@ version. The loop below stops on the first non-zero exit, which is what you want
 **Verify:** `/audit` to each synced instance — MUST show the new BOT_VERSION. If it
 still shows the old one, stop: the sync didn't take (see failure modes below).
 
-**Rollback (shared release, all active instances):**
+**Rollback (one instance):**
 ```bash
-/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback nora
 ```
 There is deliberately no Telegram `/rollback` command — a broken bot can't be trusted
-to roll itself back. The host-side mode atomically swaps `current` and `previous`, then
-restarts every active bot. Cards and preset layers remain mutable and aren't part of
+to roll itself back. The host-side mode atomically swaps that instance's `current` and
+`previous`, then restarts it if active. Cards and preset layers remain mutable and aren't part of
 the release pointer; if one needs rolling back, revert it on `main` and re-run
 `vps-sync.sh` for the affected instance.
 
@@ -103,13 +117,13 @@ The key path honours `STPRESETS_DEPLOY_KEY` if that is set. Simpler alternative 
 restart is acceptable: **any `vps-sync.sh <instance>` run does this fetch-and-reset first**,
 so deploying one instance also refreshes the checkout for every tool.
 
-**Running a repo tool on the VPS needs the selected release venv**, not system python — system python
+**Running a repo tool on the VPS needs one instance's selected release venv**, not system python — system python
 has none of `bot.py`'s dependencies and the three tools that import it die on
 `ModuleNotFoundError` (they now name the venv in the error):
 
 ```bash
 # host: vps (as root)
-/opt/telegram-bots/current/venv/bin/python3 \
+/opt/telegram-bots/selectors/priya/current/venv/bin/python3 \
   /opt/telegram-bots/.repo/telegram-companion-bot/tools/atlas_audit.py priya --near "Seattle"
 ```
 
@@ -119,9 +133,9 @@ has none of `bot.py`'s dependencies and the three tools that import it die on
   missing on this host; see the script's own header and `deploy/MIGRATION.md` §
   "Private-repo deploys".
 - `vps-sync.sh` exits while building a dependency layer → the exact hashed lock could
-  not install or `pip check` failed; `current` was not changed. Fix the lock on main.
+  not install or `pip check` failed; the instance selector was not changed. Fix the lock on main.
 - `vps-sync.sh` exits while assembling a release → bot.py/acoustic_ears.py did not
-  compile or an existing SHA directory failed validation; `current` was not changed.
+  compile or an existing SHA directory failed validation; the instance selector was not changed.
 - `/audit` still shows the old BOT_VERSION after a sync reports success → check the
   script's printed checkout HEAD against `git log origin/main`; the push may not have
   actually reached `origin/main`.
@@ -143,8 +157,10 @@ output at each step, and the rollback move — before they started.
 - [ ] Any seed-file gap `vps-sync.sh` reported was triaged (diffed against a sibling),
       not silently copied over
 - [ ] CI green on main before telling the user to deploy
-- [ ] Every instance actually synced — a concurrent run is refused by the `flock`
-      (ROADMAP 1.6), so a rejected one leaves that instance on the OLD version
+- [ ] Canary verified before promotion; promotion used only for immutable code/runtime,
+      not as a substitute for syncing changed cards or preset layers
+- [ ] Every affected instance actually synced — a concurrent run is refused by the
+      `flock` (ROADMAP 1.6), so a rejected one leaves that instance on the old selector
 
 ## Common mistakes
 

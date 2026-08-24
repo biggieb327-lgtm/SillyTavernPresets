@@ -37,9 +37,9 @@ fi
 # the phone's run-bot.sh and watchdog.sh manage nothing. This replaces the retired
 # venv-explicit-python and heartbeat-alive evals, which pinned those dead phone files while
 # bot@.service itself was guarded by nothing (coverage-inversion fix, 2026-08-24).
-SERVICE=telegram-companion-bot/deploy/bot@.service
+SERVICE=telegram-companion-bot/deploy/bot-selector@.service
 svc_problems=""
-grep -q 'ExecStart=/opt/telegram-bots/current/venv/bin/python' "$SERVICE" \
+grep -q 'ExecStart=/opt/telegram-bots/selectors/%i/current/venv/bin/python' "$SERVICE" \
   || svc_problems="ExecStart is not the explicit venv interpreter — bare python crash-loops with ModuleNotFoundError"
 grep -q '^Restart=always' "$SERVICE" \
   || svc_problems="${svc_problems:+$svc_problems; }Restart=always missing — a crashed bot would not be resupervised (systemd is the supervisor now, not the phone watchdog)"
@@ -57,6 +57,11 @@ if release_contract=$(python3 telegram-companion-bot/tools/check_release_contrac
   ok "immutable-release-contract: $release_contract"
 else
   bad "immutable-release-contract" "$release_contract"
+fi
+if selector_behavior=$(bash telegram-companion-bot/tools/test_release_selectors.sh 2>&1); then
+  ok "release-selector-behavior: $selector_behavior"
+else
+  bad "release-selector-behavior" "$selector_behavior"
 fi
 
 # Incident v2026-07-05.5: missing tzdata made ZoneInfo silently fall back, then a
