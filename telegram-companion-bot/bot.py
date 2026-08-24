@@ -31,10 +31,13 @@ import collections
 import http.server
 import html as _html_module
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs, urlparse, unquote
 
 import requests
@@ -99,7 +102,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.1"
+BOT_VERSION = "2026-08-24.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -16463,6 +16466,83 @@ def _acquire_termux_wake_lock():
             log.warning("Could not acquire Termux wake lock: %s", e)
 
 
+@dataclass(frozen=True)
+class CommandSpec:
+    name: str
+    description: str
+    callback: Callable[..., object]
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    schedule: Literal["daily", "once", "repeating"]
+    callback: Callable[..., object]
+    kwargs: tuple[tuple[str, object], ...]
+
+
+def _register_command_specs(application, specs: Iterable[CommandSpec]) -> None:
+    for spec in specs:
+        if spec.enabled:
+            application.add_handler(CommandHandler(spec.name, spec.callback))
+
+
+def _command_menu_entries(specs: Iterable[CommandSpec]) -> list[BotCommand]:
+    return [BotCommand(spec.name, spec.description) for spec in specs if spec.enabled]
+
+
+def _register_job_specs(job_queue, specs: Iterable[JobSpec]) -> None:
+    schedulers = {
+        "daily": job_queue.run_daily,
+        "once": job_queue.run_once,
+        "repeating": job_queue.run_repeating,
+    }
+    for spec in specs:
+        schedulers[spec.schedule](spec.callback, **dict(spec.kwargs))
+
+
+def _health_command_specs(enabled: bool) -> tuple[CommandSpec, ...]:
+    return (
+        CommandSpec("health", "Latest metrics from your watch", health_cmd, enabled),
+        CommandSpec("healthnow", "Pull fresh watch data right now", healthnow_cmd, enabled),
+        CommandSpec("stress", "Recent stress reading", stress_cmd, enabled),
+    )
+
+
+def _health_job_specs() -> tuple[JobSpec, ...]:
+    if not (GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None):
+        return ()
+
+    specs = []
+    for raw_time in GARMIN_TIMES.split(","):
+        raw_time = raw_time.strip()
+        if not raw_time:
+            continue
+        try:
+            hour, minute = (int(x) for x in raw_time.split(":"))
+        except Exception:
+            log.warning("[config] bad GARMIN_TIMES entry %r — skipped", raw_time)
+            continue
+        run_time = dtime(hour, minute, tzinfo=TZ) if TZ else dtime(hour, minute)
+        specs.append(JobSpec("daily", garmin_job, (("time", run_time),)))
+
+    specs.append(JobSpec("once", garmin_job, (("when", 15),)))
+    if STRESS_ALERTS:
+        specs.append(JobSpec(
+            "repeating", stress_monitor_job,
+            (("interval", STRESS_POLL_MIN * 60), ("first", STRESS_POLL_MIN * 60)),
+        ))
+    if BB_ALERTS:
+        specs.append(JobSpec(
+            "repeating", bb_monitor_job,
+            (("interval", STRESS_POLL_MIN * 60), ("first", STRESS_POLL_MIN * 60)),
+        ))
+    if RHR_ALERTS:
+        run_time = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
+        specs.append(JobSpec("daily", rhr_monitor_job, (("time", run_time),)))
+    return tuple(specs)
+
+
 _BASE_COMMANDS = [
     BotCommand("help", "Show all commands"),
     BotCommand("start", "Reset and restart"),
@@ -16581,26 +16661,16 @@ _PRESET_COMMANDS = [
     BotCommand("preset", "Show or switch preset (voice) layers"),
 ]
 
-# Health handlers register only when the Garmin feed is configured, so the menu mirrors that.
-_HEALTH_COMMANDS = [
-    BotCommand("health", "Latest metrics from your watch"),
-    BotCommand("healthnow", "Pull fresh watch data right now"),
-    BotCommand("stress", "Recent stress reading"),
-]
-
-
 def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
                         garmin_enabled: bool = False,
                         preset_enabled: bool = True) -> list:
-    """The autocomplete menu, mirroring which command handlers are actually registered.
-    Hand-kept alongside the handler registrations — keep the two in sync."""
+    """The autocomplete menu, including registry-backed and legacy commands."""
     cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
     if traffic_enabled:
         cmds += _TRAFFIC_COMMANDS
     if payments_enabled:
         cmds += _PAYMENT_COMMANDS
-    if garmin_enabled:
-        cmds += _HEALTH_COMMANDS
+    cmds += _command_menu_entries(_health_command_specs(garmin_enabled))
     if preset_enabled:
         cmds += _PRESET_COMMANDS
     return cmds
@@ -16853,10 +16923,8 @@ def main():
     # Registered whenever credentials exist (even if the kill switch is off or the library
     # is missing) so the commands can explain WHY they're inert — an unregistered command
     # gives no response at all, which is undiagnosable from the user side.
-    if GARMIN_EMAIL and GARMIN_PASSWORD:
-        app.add_handler(CommandHandler("health", health_cmd))
-        app.add_handler(CommandHandler("healthnow", healthnow_cmd))
-        app.add_handler(CommandHandler("stress", stress_cmd))
+    _register_command_specs(
+        app, _health_command_specs(bool(GARMIN_EMAIL and GARMIN_PASSWORD)))
     # Registered unconditionally: when TOMTOM_API_KEY is unset the handlers reply
     # "Maps aren't set up" instead of going silent (an unregistered command gives
     # no response at all, which is undiagnosable from the user side).
@@ -16913,33 +16981,17 @@ def main():
         # own gate when it fires, so registering them whenever the credentials exist makes
         # `/features health off` → `on` live. Gating registration on the switch made "off"
         # a one-way trip until the next restart.
-        if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:
-            for _gt in GARMIN_TIMES.split(","):
-                _gt = _gt.strip()
-                if not _gt:
-                    continue
-                try:
-                    _gh, _gm = (int(x) for x in _gt.split(":"))
-                except Exception:
-                    log.warning("[config] bad GARMIN_TIMES entry %r — skipped", _gt)
-                    continue
-                _gtime = dtime(_gh, _gm, tzinfo=TZ) if TZ else dtime(_gh, _gm)
-                app.job_queue.run_daily(garmin_job, time=_gtime)
-            app.job_queue.run_once(garmin_job, when=15)  # populate shortly after startup
+        health_jobs = _health_job_specs()
+        if health_jobs:
+            _register_job_specs(app.job_queue, health_jobs)
             log.info("Garmin health feed scheduled at %s.", GARMIN_TIMES)
             if STRESS_ALERTS:
-                app.job_queue.run_repeating(stress_monitor_job, interval=STRESS_POLL_MIN * 60,
-                                            first=STRESS_POLL_MIN * 60)
                 log.info("Stress monitoring scheduled (every %d min, threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, STRESS_THRESHOLD)
             if BB_ALERTS:
-                app.job_queue.run_repeating(bb_monitor_job, interval=STRESS_POLL_MIN * 60,
-                                            first=STRESS_POLL_MIN * 60)
                 log.info("Body Battery monitoring scheduled (every %d min, low threshold %d) — follows /features health.",
                          STRESS_POLL_MIN, BB_LOW_THRESHOLD)
             if RHR_ALERTS:
-                _rhtime = dtime(_RHR_H, _RHR_M, tzinfo=TZ) if TZ else dtime(_RHR_H, _RHR_M)
-                app.job_queue.run_daily(rhr_monitor_job, time=_rhtime)
                 log.info("Resting-HR morning check at %s.", RHR_CHECK_TIME)
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)

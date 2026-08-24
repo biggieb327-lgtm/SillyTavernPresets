@@ -5430,8 +5430,8 @@ class TestSelfieCapabilityLineSFWSignal:
 
 
 class TestCommandMenuMirrorsHandlers:
-    """_build_command_menu is hand-kept alongside the CommandHandler registrations in
-    main() (its own docstring says so) -- nothing enforced that until now. Found by
+    """The menu must mirror both legacy direct registrations and declarative specs.
+    Found by
     audit 2026-08-01: 17 unconditionally-registered commands (card, errors, fleet, life,
     meme, note, notes, people, projects, quiet, quietwin, recap, restart, schedule,
     setcard, today, update) were missing from the menu the whole time -- they worked if
@@ -5441,7 +5441,11 @@ class TestCommandMenuMirrorsHandlers:
         import inspect
         import re
         src = inspect.getsource(bot.main)
-        return set(re.findall(r'CommandHandler\("([a-z_]+)"', src))
+        direct = set(re.findall(r'CommandHandler\("([a-z_]+)"', src))
+        registered_specs = {
+            spec.name for spec in bot._health_command_specs(True) if spec.enabled
+        }
+        return direct | registered_specs
 
     def test_every_registered_command_is_in_the_full_menu(self):
         names = self._registered_command_names()
@@ -5455,6 +5459,83 @@ class TestCommandMenuMirrorsHandlers:
         menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
         dead = menu - names
         assert not dead, f"in the menu but no CommandHandler registers it: {sorted(dead)}"
+
+
+class TestHealthRegistries:
+    class _App:
+        def __init__(self):
+            self.handlers = []
+
+        def add_handler(self, handler):
+            self.handlers.append(handler)
+
+    class _Queue:
+        def __init__(self):
+            self.calls = []
+
+        def run_daily(self, callback, **kwargs):
+            self.calls.append(("daily", callback, kwargs))
+
+        def run_once(self, callback, **kwargs):
+            self.calls.append(("once", callback, kwargs))
+
+        def run_repeating(self, callback, **kwargs):
+            self.calls.append(("repeating", callback, kwargs))
+
+    def test_command_specs_drive_handlers_and_menu(self):
+        specs = bot._health_command_specs(True)
+        app = self._App()
+        bot._register_command_specs(app, specs)
+
+        registered = {name for handler in app.handlers for name in handler.commands}
+        menu = {item.command for item in bot._command_menu_entries(specs)}
+        assert registered == menu == {"health", "healthnow", "stress"}
+
+    def test_disabled_command_specs_register_nothing(self):
+        specs = bot._health_command_specs(False)
+        app = self._App()
+        bot._register_command_specs(app, specs)
+
+        assert app.handlers == []
+        assert bot._command_menu_entries(specs) == []
+
+    def test_health_job_specs_preserve_each_schedule_shape(self, monkeypatch):
+        monkeypatch.setattr(bot, "GARMIN_EMAIL", "owner@example.test")
+        monkeypatch.setattr(bot, "GARMIN_PASSWORD", "secret")
+        monkeypatch.setattr(bot, "_Garmin", object())
+        monkeypatch.setattr(bot, "GARMIN_TIMES", "07:30,16:00")
+        monkeypatch.setattr(bot, "STRESS_ALERTS", True)
+        monkeypatch.setattr(bot, "BB_ALERTS", True)
+        monkeypatch.setattr(bot, "RHR_ALERTS", True)
+
+        queue = self._Queue()
+        bot._register_job_specs(queue, bot._health_job_specs())
+
+        kinds = [kind for kind, _, _ in queue.calls]
+        assert kinds.count("daily") == 3
+        assert kinds.count("once") == 1
+        assert kinds.count("repeating") == 2
+        assert {callback for _, callback, _ in queue.calls} == {
+            bot.garmin_job,
+            bot.stress_monitor_job,
+            bot.bb_monitor_job,
+            bot.rhr_monitor_job,
+        }
+        startup = [kwargs for kind, callback, kwargs in queue.calls
+                   if kind == "once" and callback is bot.garmin_job]
+        assert startup == [{"when": 15}]
+        monitors = [kwargs for kind, _, kwargs in queue.calls if kind == "repeating"]
+        assert monitors == [
+            {"interval": bot.STRESS_POLL_MIN * 60, "first": bot.STRESS_POLL_MIN * 60},
+            {"interval": bot.STRESS_POLL_MIN * 60, "first": bot.STRESS_POLL_MIN * 60},
+        ]
+
+    def test_health_job_specs_require_credentials_and_library(self, monkeypatch):
+        monkeypatch.setattr(bot, "GARMIN_EMAIL", "")
+        monkeypatch.setattr(bot, "GARMIN_PASSWORD", "")
+        monkeypatch.setattr(bot, "_Garmin", None)
+
+        assert bot._health_job_specs() == ()
 
 
 class TestModelInfoShowsEveryRole:
@@ -8295,6 +8376,16 @@ class TestEveryCommandHandlerActuallyRuns:
         to check — the distinction v2026-08-02.14 restored."""
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.stress_cmd(u, _cmd_ctx()))
+        assert m.sent and ("off" in m.sent[0].lower() or "set up" in m.sent[0].lower())
+
+    def test_health_cmd_explains_why_it_is_off(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.health_cmd(u, _cmd_ctx()))
+        assert m.sent and ("off" in m.sent[0].lower() or "set up" in m.sent[0].lower())
+
+    def test_healthnow_cmd_explains_why_it_is_off(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.healthnow_cmd(u, _cmd_ctx()))
         assert m.sent and ("off" in m.sent[0].lower() or "set up" in m.sent[0].lower())
 
     # ── ungated ───────────────────────────────────────────────────────────────

@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.2 — declarative health command and job registries
+
+**Root cause: one capability's command names, callbacks, menu descriptions, enablement,
+and scheduled jobs were declared in separate branches, so changing its wiring required
+coordinated edits that source-level parity tests could only partially reconstruct.** The
+health/Garmin family is now the first incremental registry migration: typed immutable
+`CommandSpec` records drive both `CommandHandler` registration and Telegram menu entries,
+while `JobSpec` records preserve its daily, startup, and repeating schedules through one
+registration path.
+
+The migration deliberately leaves the rest of `bot.py` and its direct registrations in
+place. Existing capability semantics are unchanged: credentials register health commands,
+the menu still reflects the health switch at startup, jobs register on capability so
+`/features health` remains live, and the individual alert flags still control their own
+monitors. The generalized failure class is duplicated declarative facts: when one feature's
+wiring is copied across registration, menus, and schedules, one edit can silently update
+only part of the user-visible contract. Tests now derive parity from both legacy handlers
+and registry records and exercise every supported health schedule shape.
+
 ## 2026-08-24 — per-instance canary release selectors
 
 **Root cause: immutable releases still had one host-wide selection pointer, so deploying
