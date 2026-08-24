@@ -1121,6 +1121,18 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-24 — Building 5.9 `/reviewlife`, the `repo-change-control` fresh-container venv
+  failed twice before it worked, wasting a verify cycle. First: created it with bare
+  `python3` (3.11 here) — the repo pins 3.12 and the hashed `requirements.lock` holds only
+  cp312 wheels, so `--require-hashes --only-binary=:all:` matched nothing and silently
+  installed only pytest, then pytest died at collection on `No module named 'requests'`.
+  Second: the `-r telegram-companion-bot/requirements.lock` path was relative and the
+  background shell's cwd wasn't the repo root, so pip reported "Could not open requirements
+  file" — which I only saw after grepping the pip log, because the `&&` chain had masked it.
+  → **build the verify venv with `python3.12` explicitly and pass the lock by absolute
+  path**, and when a pip install "succeeds" but imports fail, read the install log before
+  blaming the code — a hash/interpreter mismatch fails the lock install without failing the
+  command.
 - 2026-08-24 — Shipping the ROADMAP 6.2 hook pre-draft, wrote "redistributes an existing
   call, adds none / zero-net" into the changelog, ROADMAP, code comment and `.env.example`
   before checking it against the call sites. `/code-review` caught it: the old hook call
