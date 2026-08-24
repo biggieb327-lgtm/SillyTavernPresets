@@ -1131,6 +1131,15 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-24 — Wrote the `reviewer-stance-present` eval's error message as
+  `f"...(\"{'\" / \"'.join(missing)}\")..."` — a backslash inside an f-string expression,
+  which only parses on Python 3.12+ (PEP 701). The fleet runs 3.12 and CI pins it, so it
+  would have passed, but a break-test or a session on 3.11 would have hit the "parser
+  itself exited non-zero" branch and the failure would have read as a broken eval, not a
+  quoting slip. Caught before running by re-reading the heredoc. → **keep backslashes out
+  of f-string expression parts** — build the joined string in a plain variable first
+  (`joined = " / ".join(missing)`), then interpolate the name. A heredoc check that must
+  run under an older interpreter than the one you are typing on cannot assume 3.12 syntax.
 - 2026-08-23 — **Nearly dated six graduation lines from `git log --diff-filter=A`, which
   reported 2026-08-11 for atlas_suggest.py, the C3 skills, and the session-audit merge-base
   feature alike.** Checked before using them: that commit added 327 files — a bulk import, so
