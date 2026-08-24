@@ -26,7 +26,7 @@ git clone https://github.com/biggieb327-lgtm/sillytavernpresets.git
 cd sillytavernpresets/telegram-companion-bot
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --only-binary=:all: -r requirements.lock
 cp .env.example .env
 # edit .env with your tokens
 bash run-bot.sh
@@ -40,7 +40,8 @@ bash run-bot.sh
 | `nora.json`, `bonnie.json`, `cass.json`, `emily_harper.json`, `priya.json`, `jules_nakagawa.json` | Example character cards (SillyTavern v2 format) |
 | `preset.txt` | Texting style instructions (injected into every prompt) |
 | `.env.example` | Config template |
-| `requirements.txt` | Python dependencies |
+| `requirements.txt` | Direct dependency ranges (human-edited input) |
+| `requirements.lock` | Exact hashed production/CI dependency contract |
 | `run-bot.sh` | Start/restart any instance (named, or the home instance with no argument) |
 | `update-all.sh` | Pull latest `bot.py`/`run-bot.sh` and restart every configured instance |
 | `SETUP_GUIDE.md` | Full setup walkthrough |

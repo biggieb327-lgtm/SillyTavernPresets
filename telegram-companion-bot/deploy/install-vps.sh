@@ -42,16 +42,16 @@ echo "== 2/8: cloning / updating repo =="
 # in the process, which meant every "re-run" silently did a full re-clone instead).
 REPO_CHECKOUT="$INSTALL_DIR/.repo"
 mkdir -p "$INSTALL_DIR"
-# `-c safe.directory=` on the call, not a global config change: step 4 chowns the whole
-# tree to bot:bot, so root running git in it trips "detected dubious ownership" on every
-# re-run. vps-sync.sh passes the same flag for the same reason.
+# `-c safe.directory=` on the call, not a global config change: legacy installs made
+# the checkout bot-owned, so root can otherwise reject it as "dubious ownership".
+# vps-sync.sh passes the same flag for the same reason.
 if [ -d "$REPO_CHECKOUT/.git" ]; then
   git -c safe.directory="$REPO_CHECKOUT" -C "$REPO_CHECKOUT" pull --ff-only
 else
   git clone "$REPO_URL" "$REPO_CHECKOUT"
 fi
 # The repo's telegram-companion-bot/ subfolder is what actually gets deployed; sync
-# the shared files into INSTALL_DIR's flat bot.py/venv/instances layout every run, so
+# the shared files into INSTALL_DIR's flat config/instances layout every run, so
 # a re-run actually picks up upstream changes instead of only doing this once. Per-
 # character seed folders (nora/, bonnie/, ...) are excluded here — they hold living,
 # hand-editable content (atlas.txt, people.txt, ...), not something to keep overwriting
@@ -73,20 +73,40 @@ for item in "$REPO_CHECKOUT"/telegram-companion-bot/*; do
 done
 shopt -u dotglob
 
-echo "== 3/8: python venv =="
-if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
-  python3 -m venv "$INSTALL_DIR/venv"
+echo "== 3/8: immutable release =="
+# The release layout needs the service identity before it can create the isolated
+# writable shared/ directory. Step 4 still owns the rest of the permission audit.
+if ! id -u "$BOT_USER" >/dev/null 2>&1; then
+  useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$BOT_USER"
 fi
-# Single source of truth for pip installs — never hand-list packages here (a past
-# hand-typed list silently dropped tzdata and broke every timezone-dependent feature).
-"$INSTALL_DIR/venv/bin/pip" install -q --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
+SRC="$REPO_CHECKOUT/telegram-companion-bot"
+REVISION=$(git -c safe.directory="$REPO_CHECKOUT" -C "$REPO_CHECKOUT" rev-parse HEAD)
+# shellcheck source=release-lib.sh
+source "$SRC/deploy/release-lib.sh"
+
+# A manually installed optional package cannot be carried into an exact immutable
+# environment without being declared and locked. Refuse a legacy migration rather
+# than silently disabling the only optional package this repo documents.
+if [ ! -L "$INSTALL_DIR/current" ] && [ -x "$INSTALL_DIR/venv/bin/python" ] \
+   && "$INSTALL_DIR/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1; then
+  echo "FATAL: legacy venv contains garminconnect, but requirements.lock does not." >&2
+  echo "Add it to requirements.txt, regenerate requirements.lock, and re-run." >&2
+  exit 1
+fi
+release_prepare "$SRC" "$INSTALL_DIR" "$REVISION"
+if [ ! -L "$INSTALL_DIR/current" ] \
+   && systemctl list-units 'bot@*.service' --state=active --no-legend --plain | grep -q .; then
+  echo "FATAL: legacy bot units are active; migrate with deploy/vps-sync.sh first." >&2
+  exit 1
+fi
+release_migrate_writable_state "$INSTALL_DIR" "$BOT_USER"
+release_activate "$INSTALL_DIR" "$PREPARED_RELEASE_DIR"
 
 echo "== 4/8: bot system user =="
 if ! id -u "$BOT_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$INSTALL_DIR" --shell /usr/sbin/nologin "$BOT_USER"
 fi
-chown -R "$BOT_USER:$BOT_USER" "$INSTALL_DIR"
+release_migrate_writable_state "$INSTALL_DIR" "$BOT_USER"
 
 echo "== 5/8: configure instances =="
 echo "Enter each instance you want to run. Leave the name blank to stop adding instances."

@@ -1,3 +1,6 @@
+# Direct dependency policy. Production and CI install the generated, hashed
+# requirements.lock; after changing this file regenerate it with the command in the
+# lockfile header. Never hand-edit requirements.lock.
 python-telegram-bot[job-queue]>=21.0,<22.0
 python-dotenv>=1.0,<2.0
 requests>=2.31,<3.0
@@ -17,11 +20,11 @@ numpy>=1.26,<3.0
 # and a venv rebuild shouldn't pull a dep most bots never import. bot.py imports it in a
 # try/except and reports "inert" in /audit when credentials exist without the library.
 #
-# Install into the VENV, not system python — every instance runs
-# /opt/telegram-bots/venv/bin/python, so a bare `pip install` lands somewhere it never
-# looks and /audit keeps saying "inert":
-#     /opt/telegram-bots/venv/bin/pip install garminconnect
-# Then /restart that bot — the import happens once at module load.
+# Immutable release environments cannot carry manually installed packages forward.
+# Before enabling Garmin on the fleet, promote it to a declared requirement here,
+# regenerate requirements.lock, and deploy normally. The first migration refuses to
+# continue if it detects garminconnect in the legacy shared venv, preventing a silent
+# feature loss.
 #
 # Was confirmed installable on Termux under Python 3.14.6 (2026-07-25), despite 0.3.x
 # needing curl_cffi -> cffi; not independently re-confirmed on the VPS's Python 3.12,

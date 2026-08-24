@@ -21,7 +21,8 @@ below are marked **historical** and cannot recur on what is running now.
 - The bug is already understood and reproducible in-repo → `repo-change-control`.
 - Reviewing external audit claims (no live symptom) → `verify-external-audit`.
 - A deploy just happened and something's off → `deploy-and-verify-fleet` first
-  (it covers rollback via `bot.py.bak`); come back here if it's not deploy-caused.
+  (it covers the immutable `current`/`previous` rollback); come back here if it's
+  not deploy-caused.
 
 ## Procedure
 
@@ -57,8 +58,8 @@ below are marked **historical** and cannot recur on what is running now.
    | exit code 143 | SIGTERM the process didn't convert to a clean stop | `journalctl` around the stop timestamp — a `systemctl stop`/`restart` or a deploy usually explains it |
    | exit code 0, no graceful-stop line | **Normal.** `/update` and `/restart` exit via `os._exit(0)` in `_schedule_exit()` and never log a graceful stop. NOT a kill | correlate the timestamps with deploys before investigating further |
    | A bot restarting every few seconds/minutes | systemd `Restart=always` relaunching a bot that keeps crashing at startup | `systemctl status bot@<instance>` (restart count) + `journalctl -u bot@<instance> -n 80` for the crash reason — read this FIRST for any restart loop |
-   | `ModuleNotFoundError` crash-loop | venv broken by a Python minor-version bump, or a missing dependency | `journalctl` names the module; rebuild the shared venv (`/opt/telegram-bots/venv`) from `requirements.txt` |
-   | Startup `TypeError: offset-naive vs offset-aware` | tzdata missing from venv | reinstall tzdata / rebuild venv from requirements.txt |
+   | `ModuleNotFoundError` crash-loop | selected immutable dependency layer is absent/damaged, or the lock omitted a real import | `journalctl` names the module; run `vps-sync.sh --rollback`, then fix `requirements.txt` + regenerate `requirements.lock` on main — never mutate `current/venv` |
+   | Startup `TypeError: offset-naive vs offset-aware` | tzdata missing from the declared/locked environment | roll back, confirm `tzdata` is in both requirements files, then fix forward through `vps-sync.sh` |
    | `httpx.ConnectError` at startup | transient network blip | restart the unit (`systemctl restart bot@<instance>`) |
    | Empty/undiagnosable 400s from the API | a response path skipping the `_do_request` force-read pattern | find the new path |
 
@@ -68,7 +69,7 @@ below are marked **historical** and cannot recur on what is running now.
    fix.
 
 5. **Fix** via `repo-change-control` if it's code; via the user's hands on the VPS if
-   it's host state (venv rebuild, a stuck systemd unit, disk full). Exact live
+   it's host state (a damaged release pointer, a stuck systemd unit, disk full). Exact live
    commands live in `OPS_MANUAL.md`; the phone-era device layer in `termux-device-ops`
    is historical (the phone runs nothing) — read it only for the reasoning behind a
    past Android incident, never for a command to run now.

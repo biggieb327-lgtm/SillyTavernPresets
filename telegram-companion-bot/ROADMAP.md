@@ -5,9 +5,9 @@ changelog, and CLAUDE.md. Each item names its evidence — why it's on the list 
 effort (S/M/L), risk, and what "done" means. Ordered by track, sequenced at the bottom.
 
 **Deliberate non-goal, recorded to prevent future refactor urges:** bot.py stays a
-single file. The entire deploy model (`vps-sync.sh` swapping one shared file across all
-seven instances, `bot.py.bak` rollback) depends on it. The monolith's real cost —
-regressions in pure logic — is covered by Track 2.1 instead.
+single application entrypoint. Immutable releases no longer depend on an in-place file
+swap, but all seven instances still intentionally run the same entrypoint; the monolith's
+real cost — regressions in pure logic — is covered by Track 2.1 instead.
 
 ---
 
@@ -152,6 +152,17 @@ constraints; check their assumptions before acting on them.
   full hash + STARTUP AUDIT verification); `bot.py.bak`'s md5 after the race matched a
   baseline taken *before* the race exactly — proof it holds the genuinely-previous
   version, not a race-corrupted copy of the new code.
+
+### 1.7 ~~Exact dependency lock + immutable releases~~ ✅ (shipped 2026-08-24)
+- **Evidence:** CI and the VPS independently resolved broad ranges, deploys mutated one
+  shared venv, and rollback covered only `bot.py`. The 2026-08-10 numpy incident proved
+  the dependency side could leave default-on features inert fleet-wide.
+- **Shipped:** a Python 3.12 hashed lock shared by CI and VPS; fatal install + `pip check`;
+  lock-addressed immutable dependency layers; full-git-SHA code releases; atomic
+  `current`/`previous` pointers; host-side rollback through `vps-sync.sh --rollback`.
+  `immutable-release-contract` pins the cross-file contract.
+- **Boundary:** release selection is still host-wide. Per-instance pointers and canary
+  promotion are the next architecture item, not silently folded into this one.
 
 ---
 
@@ -1343,6 +1354,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
+| ~~**Next**~~ | ~~1.7 exact dependency lock + immutable releases~~ | ✅ **Shipped 2026-08-24** — CI/VPS share one hashed Python 3.12 lock; deploys select full-git-SHA releases with atomic `current`/`previous` rollback. Per-instance canary pointers remain the next architecture item. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |

@@ -39,7 +39,7 @@ fi
 # bot@.service itself was guarded by nothing (coverage-inversion fix, 2026-08-24).
 SERVICE=telegram-companion-bot/deploy/bot@.service
 svc_problems=""
-grep -q 'ExecStart=/opt/telegram-bots/venv/bin/python' "$SERVICE" \
+grep -q 'ExecStart=/opt/telegram-bots/current/venv/bin/python' "$SERVICE" \
   || svc_problems="ExecStart is not the explicit venv interpreter — bare python crash-loops with ModuleNotFoundError"
 grep -q '^Restart=always' "$SERVICE" \
   || svc_problems="${svc_problems:+$svc_problems; }Restart=always missing — a crashed bot would not be resupervised (systemd is the supervisor now, not the phone watchdog)"
@@ -47,6 +47,16 @@ if [ -z "$svc_problems" ]; then
   ok "deploy-service-launch: bot@.service launches via the venv interpreter and Restart=always"
 else
   bad "deploy-service-launch" "$svc_problems"
+fi
+
+# A mutable shared venv let CI and the VPS resolve different dependency versions, and
+# code-only swaps left no durable release identity. The checker owns the whole class:
+# exact hashed lock, one CI/VPS install contract, git-SHA code releases, atomic pointers,
+# preserved writable shared paths, and a rollback route.
+if release_contract=$(python3 telegram-companion-bot/tools/check_release_contract.py 2>&1); then
+  ok "immutable-release-contract: $release_contract"
+else
+  bad "immutable-release-contract" "$release_contract"
 fi
 
 # Incident v2026-07-05.5: missing tzdata made ZoneInfo silently fall back, then a
@@ -123,7 +133,7 @@ else
   import_exc=$(printf '%s\n' "$import_err" | grep -E '^[A-Za-z_][A-Za-z_0-9.]*(Error|Exception|Warning|Exit)[A-Za-z]*:' | tail -1)
   [ -n "$import_exc" ] || import_exc=$(printf '%s\n' "$import_err" | tail -1)
   if printf '%s' "$import_exc" | grep -q '^ModuleNotFoundError'; then
-    skip "bot-imports" "dependency missing in this environment ($import_exc). Run 'pip install -r telegram-companion-bot/requirements.txt' to make this check runnable — this is NOT a bot.py defect"
+    skip "bot-imports" "dependency missing in this environment ($import_exc). Install telegram-companion-bot/requirements.lock with --require-hashes to make this check runnable — this is NOT a bot.py defect"
   else
     bad "bot-imports" "bot.py crashes on import: $import_exc — if the traceback points into bot.py, this is the v2026-07-11 class (a name used at module level before it's defined); if it points into site-packages/dist-packages, the environment's packages are broken, not bot.py"
   fi
@@ -1631,7 +1641,7 @@ fi
 
 echo
 if [ "$skipped" -gt 0 ]; then
-  echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.txt to run everything locally)"
+  echo "evals: ${pass} passed, ${fail} failed, ${skipped} skipped (skips never happen in CI — install requirements.lock to run everything locally)"
 else
   echo "evals: ${pass} passed, ${fail} failed"
 fi

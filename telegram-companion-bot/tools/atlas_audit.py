@@ -62,14 +62,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # Every tool in tools/ that imports bot.py needs bot.py's dependencies, and the VPS's
-# system python has none of them — the fleet runs from a shared venv. Without this the
+# system python has none of them — the fleet runs from the selected release venv. Without this the
 # failure is a bare `ModuleNotFoundError: No module named 'PIL'` from inside bot.py's
 # import block, which says nothing about which interpreter to use (hit 2026-08-10).
 _MISSING_DEPS = (
     "cannot import bot.py — {mod} is missing.\n"
     "This tool imports bot.py, so it needs bot.py's dependencies:\n"
-    "  on the VPS:  /opt/telegram-bots/venv/bin/python3 {script} ...\n"
-    "  elsewhere:   pip install -r <repo>/telegram-companion-bot/requirements.txt"
+    "  on the VPS:  /opt/telegram-bots/current/venv/bin/python3 {script} ...\n"
+    "  elsewhere:   pip install --require-hashes -r <repo>/telegram-companion-bot/requirements.lock"
 )
 # Entries read "Name — description of what it means to her". Only the part before the dash
 # is a place; the rest is characterisation and would wreck the query. Both the em dash and

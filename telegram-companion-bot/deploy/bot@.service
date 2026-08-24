@@ -8,7 +8,11 @@ Type=simple
 User=bot
 Group=bot
 WorkingDirectory=/opt/telegram-bots/%i
-ExecStart=/opt/telegram-bots/venv/bin/python /opt/telegram-bots/bot.py /opt/telegram-bots/%i
+# bot.py historically derived these shared paths from its own directory. Releases live
+# below /opt/telegram-bots/releases/, so keep writable shared state outside the release.
+Environment=WORLD_FILE=/opt/telegram-bots/world.txt
+Environment=GROUP_LEDGER_DIR=/opt/telegram-bots/shared
+ExecStart=/opt/telegram-bots/current/venv/bin/python /opt/telegram-bots/current/bot.py /opt/telegram-bots/%i
 Restart=always
 RestartSec=2
 StandardOutput=journal

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# vps-sync.sh — sync preset, card, and bot.py from main onto a VPS instance,
-# normalize CHARACTER_CARD to the repo card name, restart + enable the service,
-# and print verification (hashes + the new STARTUP AUDIT line).
+# vps-sync.sh — prepare an immutable release from main, sync one instance's mutable
+# content, select the release, restart + enable the service, and print verification.
 #
 # Usage (on the VPS, as root):
 #   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>
@@ -15,40 +14,60 @@
 # instance with a new bot.py and a stale card.
 #
 # The checkout ALREADY EXISTS — install-vps.sh has maintained one at
-# $INSTALL_DIR/.repo since 2026-07-06 (install-vps.sh:33) and chowns it to bot:bot
-# (line 69). Do not clone a new one. One-time setup is only the SSH key:
+# $INSTALL_DIR/.repo since 2026-07-06. Do not clone a new one. One-time setup is only
+# the SSH key:
 #   ssh-keygen -t ed25519 -f /root/.ssh/stpresets_ro -N ''
 #   # add /root/.ssh/stpresets_ro.pub under the repo's Deploy keys, READ-ONLY
 #   git -C /opt/telegram-bots/.repo remote set-url origin \
 #     git@github.com:biggieb327-lgtm/SillyTavernPresets.git
 # See deploy/MIGRATION.md § "Private-repo deploys".
 #
-# Mirrors /update's safety: bot.py is compile-checked before the swap and the
-# previous copy is kept at bot.py.bak.
+# Roll back the shared release pointer and restart the whole fleet with:
+#   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
 #
-# LOCKED (ROADMAP 1.6, 2026-08-01): bot.py's own concurrent-update bug (v2026-07-25.11,
-# a host-wide flock in perform_self_update) was only half the fix — this script performs
-# the identical swap on the identical shared paths (bot.py, bot.py.bak) with no guard,
-# and the documented deploy is two back-to-back invocations against instances that share
-# a host. Race: fetch -> py_compile -> cp bot.py.bak -> mv bot.py.new -> bot.py. The loud
-# failure is one run's mv deleting the other's bot.py.new. The silent one is worse: if
-# instance B's backup lands after instance A's mv, bot.py.bak becomes a copy of the *new*
-# code, and nothing reports it — the rollback point is gone and looks fine. flock is
-# util-linux, present by default on Ubuntu 24.04 (unlike Termux, which is why bot.py's
-# phone-side guard and watchdog.sh's PID-file guard use different mechanisms — do not
-# unify the three). Only the code swap strictly needs the lock; locking the whole run is
-# simpler and equally correct, since per-instance card/preset/`.env`/unit work never
-# races across instances anyway.
+# The host-wide flock remains necessary: releases and the shared current/previous
+# pointers are host state, while the documented fleet deploy is seven invocations.
 set -euo pipefail
 
-INST="${1:?usage: vps-sync.sh <instance>}"
+MODE=deploy
+if [ "${1:-}" = "--rollback" ]; then
+  MODE=rollback
+  INST=""
+else
+  INST="${1:?usage: vps-sync.sh <instance> | vps-sync.sh --rollback}"
+fi
 BASE=/opt/telegram-bots
 REPO="${STPRESETS_REPO:-$BASE/.repo}"
 SRC="$REPO/telegram-companion-bot"
 GIT_SSH_KEY="${STPRESETS_DEPLOY_KEY:-/root/.ssh/stpresets_ro}"
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "[vps-sync] FATAL: run this as root" >&2
+  exit 1
+fi
+
 exec 9>"$BASE/.vps-sync.lock"
-flock -n 9 || { echo "[vps-sync] another sync is swapping bot.py on this host; retry" >&2; exit 1; }
+flock -n 9 || { echo "[vps-sync] another release operation is running on this host; retry" >&2; exit 1; }
+
+# shellcheck source=release-lib.sh
+source "$SRC/deploy/release-lib.sh"
+
+if [ "$MODE" = rollback ]; then
+  release_rollback "$BASE"
+  mapfile -t ACTIVE_INSTANCES < <(
+    systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
+      | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
+  )
+  [ "${#ACTIVE_INSTANCES[@]}" -gt 0 ] || {
+    echo "[vps-sync] FATAL: no active bot instances found to restart" >&2
+    exit 1
+  }
+  for name in "${ACTIVE_INSTANCES[@]}"; do
+    systemctl restart "bot@$name"
+  done
+  echo "[vps-sync] rolled back and restarted: ${ACTIVE_INSTANCES[*]}"
+  exit 0
+fi
 
 # Card mapping mirrors sync-cards.sh (the authoritative list).
 case "$INST" in
@@ -78,15 +97,15 @@ esac
 
 [ -f "$GIT_SSH_KEY" ] && export GIT_SSH_COMMAND="ssh -i $GIT_SSH_KEY -o IdentitiesOnly=yes"
 
-# `git -c safe.directory=` on every call, not a global config change: install-vps.sh
-# does `chown -R bot:bot $INSTALL_DIR` (line 69), so the checkout is bot-owned while
-# this script runs as root — git refuses that as "dubious ownership". Inline keeps the
-# script working on a fresh host with no prior git setup.
+# `git -c safe.directory=` on every call, not a global config change: legacy installs
+# made the checkout bot-owned, so root can otherwise reject it as "dubious ownership".
+# Inline keeps both legacy and fresh root-owned layouts working without global config.
 GIT="git -c safe.directory=$REPO -C $REPO"
 echo "[vps-sync] fetching main into $REPO..."
 $GIT fetch --quiet origin main
 $GIT reset --quiet --hard origin/main
-echo "[vps-sync] checkout now at $($GIT rev-parse --short HEAD)"
+REVISION=$($GIT rev-parse HEAD)
+echo "[vps-sync] checkout now at ${REVISION:0:12}"
 
 # A file named in .env but absent from the repo is fatal on purpose: continuing would
 # start the bot missing voice rules or its card, which reads as a model regression
@@ -95,17 +114,24 @@ need() {
   [ -f "$SRC/$1" ] || { echo "[vps-sync] FATAL: '$1' is not in the repo" >&2; exit 1; }
 }
 
-echo "[vps-sync] syncing preset.txt, $CARD, bot.py..."
-need preset.txt; need "$CARD"; need bot.py
+need requirements.lock; need bot.py; need acoustic_ears.py
+
+# A manually installed optional package cannot be carried into an exact immutable
+# environment without being declared and locked. Garmin is the only such package the
+# repo has documented. Refuse the first migration instead of silently disabling it.
+if [ ! -L "$BASE/current" ] && [ -x "$BASE/venv/bin/python" ] \
+   && "$BASE/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1; then
+  echo "[vps-sync] FATAL: legacy venv contains garminconnect, but requirements.lock does not." >&2
+  echo "[vps-sync] Add it to requirements.txt, regenerate requirements.lock, and redeploy." >&2
+  exit 1
+fi
+
+release_prepare "$SRC" "$BASE" "$REVISION"
+
+echo "[vps-sync] syncing preset.txt and $CARD..."
+need preset.txt; need "$CARD"
 cp "$SRC/preset.txt" "$BASE/$INST/preset.txt"
 cp "$SRC/$CARD"      "$BASE/$INST/$CARD"
-cp "$SRC/bot.py"     "$BASE/bot.py.new"
-
-# acoustic_ears.py is a vendored module bot.py imports directly (voice-note tone
-# analysis) -- keep it in lockstep with bot.py, same as the main file itself. Shared
-# across instances at $BASE, same as bot.py (not per-instance).
-need acoustic_ears.py
-cp "$SRC/acoustic_ears.py" "$BASE/acoustic_ears.py"
 
 # Preset LAYERS (v2026-07-25.5): copy exactly the layers THIS instance names in its own
 # PRESET_FILES. Self-maintaining — no layer list to keep in sync here.
@@ -118,31 +144,6 @@ for pl in $LAYERS; do
   cp "$SRC/$pl" "$BASE/$INST/$pl"
 done
 
-# Reconcile the shared venv with requirements.txt BEFORE the compile check, so a release
-# that adds a dependency arrives with it. Until 2026-08-10 this script only ever borrowed
-# the venv's python to compile-check; nothing reconciled dependencies, so v2026-08-04.4 and
-# .6 shipped numpy-dependent features that were silently inert on all seven bots for days.
-# The bot warned on every startup and it was invisible in a 1.59 MB errors.log.
-#
-# Deliberately NOT fatal. Every numpy import site is wrapped in try/except and degrades one
-# feature, so a pip failure must not block an urgent bot.py fix — but it must be impossible
-# to miss in the output, which a silent `|| true` would not be. Normally a fast no-op.
-echo "[vps-sync] reconciling venv with requirements.txt..."
-if ! "$BASE/venv/bin/pip" install -q -r "$SRC/requirements.txt"; then
-  echo "[vps-sync] !!  DEPENDENCY INSTALL FAILED — the code below still deploys, but any"
-  echo "[vps-sync] !!  feature needing a missing package will be silently inert. Check with"
-  echo "[vps-sync] !!  /diag on this instance, and rerun:"
-  echo "[vps-sync] !!    $BASE/venv/bin/pip install -r $SRC/requirements.txt"
-fi
-
-"$BASE/venv/bin/python" -m py_compile "$BASE/bot.py.new"
-# Fatal, not `|| true`: this backup IS the rollback path (see OPS_MANUAL.md), so a
-# silently failed backup is a silently gone rollback — the exact failure this script
-# exists to prevent. install-vps.sh seeds bot.py at $BASE before this script ever runs,
-# so bot.py existing here is not an assumption, it's a precondition already established.
-cp "$BASE/bot.py" "$BASE/bot.py.bak"
-mv "$BASE/bot.py.new" "$BASE/bot.py"
-
 # Normalize CHARACTER_CARD to the repo filename — a renamed on-device card copy
 # silently exempts the instance from every future card deploy (jules, 2026-07-19).
 if grep -q '^CHARACTER_CARD=' "$BASE/$INST/.env"; then
@@ -152,13 +153,64 @@ else
 fi
 
 chown -R bot:bot "$BASE/$INST"
-chown bot:bot "$BASE/bot.py"
-systemctl restart "bot@$INST"
+
+# Keep the installed unit in lockstep with the release layout. The first deployment
+# migrates ExecStart from the legacy shared bot.py/venv paths to current/ atomically.
+UNIT_CHANGED=0
+if ! cmp -s "$SRC/deploy/bot@.service" /etc/systemd/system/bot@.service; then
+  install -m 0644 "$SRC/deploy/bot@.service" /etc/systemd/system/bot@.service
+  systemctl daemon-reload
+  UNIT_CHANGED=1
+fi
+
+MIGRATING_LAYOUT=0
+ACTIVE_INSTANCES=()
+if [ ! -L "$BASE/current" ]; then
+  # The legacy layout made BASE bot-writable because group ledgers lived beside
+  # bot.py. Stop first, move that live state into shared/, then make BASE root-owned
+  # so the service user cannot rewrite current/previous or release stores.
+  mapfile -t ACTIVE_INSTANCES < <(
+    systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
+      | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
+  )
+  for name in "${ACTIVE_INSTANCES[@]}"; do
+    systemctl stop "bot@$name"
+  done
+  release_migrate_writable_state "$BASE" bot
+  MIGRATING_LAYOUT=1
+fi
+release_activate "$BASE" "$PREPARED_RELEASE_DIR"
+if [ "$UNIT_CHANGED" -eq 1 ] || [ "$MIGRATING_LAYOUT" -eq 1 ]; then
+  # The first immutable-release migration may begin with one invocation of the old
+  # script: that run fetches this script but keeps executing its already-loaded body.
+  # Restart every active unit when ExecStart changes so that first instance cannot be
+  # left running the legacy /opt/telegram-bots/bot.py path after the fleet loop.
+  if [ "$MIGRATING_LAYOUT" -eq 0 ]; then
+    mapfile -t ACTIVE_INSTANCES < <(
+      systemctl list-units 'bot@*.service' --state=active --no-legend --plain \
+        | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
+    )
+  fi
+  INST_RESTARTED=0
+  for name in "${ACTIVE_INSTANCES[@]}"; do
+    systemctl restart "bot@$name"
+    if [ "$name" = "$INST" ]; then
+      INST_RESTARTED=1
+    fi
+  done
+  [ "$INST_RESTARTED" -eq 1 ] || systemctl restart "bot@$INST"
+else
+  systemctl restart "bot@$INST"
+fi
 systemctl enable "bot@$INST" 2>/dev/null || true
 
 sleep 3
 echo "--- verification ---"
-echo "checkout HEAD:     $($GIT rev-parse --short HEAD)"
+echo "checkout HEAD:     ${REVISION:0:12}"
+echo "current release:   $(readlink "$BASE/current")"
+echo "dependency layer:  $(cat "$PREPARED_RELEASE_DIR/VENV_KEY")"
+echo "bot.py       repo: $(sha256sum "$SRC/bot.py" | cut -d' ' -f1)"
+echo "bot.py    release: $(sha256sum "$PREPARED_RELEASE_DIR/bot.py" | cut -d' ' -f1)"
 echo "preset.txt  repo:  $(sha256sum "$SRC/preset.txt" | cut -d' ' -f1)"
 echo "preset.txt  local: $(sha256sum "$BASE/$INST/preset.txt" | cut -d' ' -f1)"
 echo "$CARD  repo:  $(sha256sum "$SRC/$CARD" | cut -d' ' -f1)"

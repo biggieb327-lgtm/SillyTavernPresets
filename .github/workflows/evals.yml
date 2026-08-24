@@ -27,7 +27,7 @@ jobs:
           # 3.14 after the VPS cutover made it 3.12. The `runtime-version-pinned` eval
           # fails if this line and CLAUDE.md ever disagree again — change both together.
           python-version: "3.12"
-      # No build-dependency step is needed: every package in requirements.txt resolves to
+      # No build-dependency step is needed: every package in requirements.lock resolves to
       # a cp312 manylinux wheel, so pip compiles nothing. Verified 2026-07-31 with
       #   pip download -r telegram-companion-bot/requirements.txt pytest \
       #     --python-version 3.12 --only-binary=:all: --platform manylinux2014_x86_64
@@ -35,8 +35,21 @@ jobs:
       # future pin has no wheel, pip falls back to building and may need headers again —
       # the pre-3.12 workflow installed libjpeg/zlib/freetype purely because Pillow<11
       # ships no cp314 wheel.
+      - name: Verify dependency lock
+        run: |
+          python -m pip install uv==0.11.33
+          uv pip compile telegram-companion-bot/requirements.txt \
+            --python-version 3.12 \
+            --generate-hashes \
+            --custom-compile-command 'uv pip compile telegram-companion-bot/requirements.txt --python-version 3.12 --generate-hashes --output-file telegram-companion-bot/requirements.lock' \
+            --output-file telegram-companion-bot/requirements.lock
+          git diff --exit-code -- telegram-companion-bot/requirements.lock
       - name: Install dependencies
-        run: pip install -r telegram-companion-bot/requirements.txt pytest
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r telegram-companion-bot/requirements.lock
+          python -m pip install pytest==8.4.2
+          python -m pip check
       - name: Run eval suite
         run: bash .claude/evals/run-evals.sh
       - name: Run pytest

@@ -50,8 +50,9 @@ These were asked and answered — don't re-ask, don't re-litigate:
 
 ## Traps verified this session (each cost real time; don't rediscover them)
 
-- Fresh remote container: `pip install -r telegram-companion-bot/requirements.txt
-  pytest` or the `bot-imports` eval fails on missing Pillow. Then, if pytest dies
+- Fresh remote container: install `telegram-companion-bot/requirements.lock` with
+  `--require-hashes`, then `pytest==8.4.2`, or the `bot-imports` eval fails on missing
+  Pillow. Then, if pytest dies
   at collection with `pyo3_runtime.PanicException`, `pip install --upgrade
   cryptography` (broken Debian system package). Neither is a code bug.
 - Container Python is 3.11; phone and CI are 3.13. Local green is evidence; CI on

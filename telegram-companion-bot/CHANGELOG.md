@@ -1,6558 +1,2444 @@
-# Changelog ‚Äî telegram-companion-bot
-
-Read this before making changes; add an entry after shipping one. See `CLAUDE.md` for
-why this file exists and the rule for keeping it updated.
-
-Entries are newest first. Each one names the actual root cause, not just the code diff ‚Äî
-that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
-exactly what this file is meant to prevent.
-
-## v2026-08-24.1 ‚Äî real-world news in the morning briefing
-
-**Root cause: v2026-08-23.2 assembled weather, commute, reminders, and health but had no
-external-news input; the existing `/news` command is the character's fictional life events,
-not current reporting.** The morning briefing now fetches RSS/Atom feeds off the event loop,
-skips malformed, duplicate, and older-than-36-hour items, and selects at most three headlines:
-one Skagit/local item, one Washington-or-national item, and one technology, security, or
-economy item.
-Each includes its source, a short feed summary when present, and the original link. No model
-call or new dependency was added.
-
-Defaults are Skagit County, Washington State Standard, NPR, GeekWire, Ars Technica AI,
-BleepingComputer, and Marketplace Morning Report. `MORNING_NEWS=0` is the kill switch; `MORNING_NEWS_LIMIT`,
-`MORNING_NEWS_MAX_AGE_HOURS`, and the semicolon-separated `MORNING_NEWS_FEEDS` override are
-documented in `.env.example`. One broken source is logged and skipped; only an all-source
-failure increments the `news` error category.
-
-## v2026-08-23.2 ‚Äî weekday morning briefing
-
-**Root cause: the bot had the individual data sources but no deterministic daily message that assembled them.** A new default-on `MORNING_BRIEFING` job sends the owner weather, TomTom live-traffic commute, same-day reminders, and the existing Garmin snapshot on configured workdays. `MORNING_BRIEFING=0` disables it; address, days, send time, and arrival target stay per-instance in the untracked `.env`.
-
-## v2026-08-23.1 ‚Äî /fire: proactive Seattle Fire real-time 911 alerts
-
-New feature: the first **proactive** crime/safety alert. `/crime` and `/dispatch` are
-pull-only and their data lags (crime days, dispatch ~1 day), so a user who called 911
-today would never be alerted ‚Äî the feature only ever answered when asked, and the fresh
-data wasn't there anyway. The Seattle **Fire** 911 feed (`kzjm-xkqj`) is the one public
-source that refreshes every ~5 minutes, so it can actually drive a push alert.
-
-`fire_poll_job` polls the feed every `FIRE_POLL_MINUTES` (default 5), fetches recent
-citywide calls once, and DMs each user a call that landed within `FIRE_RADIUS_MILES`
-(default 0.5) of their location ‚Äî the same client-side haversine filter `traffic_poll_job`
-uses, so one HTTP round trip serves everyone. Alerts fire only while the shared location
-is fresh (`_fresh_location`: live share, or static within 4h) and never while the user is
-`/away`. `/fire` also does an on-demand lookup, like `/crime`.
-
-Coverage is fire/EMS only (medical aid, fires, rescues, accidents) ‚Äî no police, because
-no free public feed exposes near-real-time police data as structured records; police
-scanner audio would need a paid feed plus a transcription/geocoding pipeline. That
-trade-off is the whole reason this uses the fire feed.
-
-Design notes: separate `FIRE_ALERTS` kill switch (default ON) so the passive push can be
-disabled without losing the pull-only crime commands; registered in `/features` as `fire`.
-Cold-start guard ‚Äî on the first poll that sees a chat, the job records what's already on
-the board and stays silent, so a restart never dumps the backlog; only calls appearing
-afterward become alerts. Dedup was hardened after a `/code-review` pass on the diff: a
-call with no `incident_number` gets a stable composite key (`_fire_id`) so it can't
-re-alert every poll; the seen-set is dropped when a user goes `/away` or their location
-goes stale, so a return re-seeds silently instead of dumping the accumulated backlog;
-only calls actually sent (capped at `FIRE_LIMIT`) are marked seen, so an overflow burst
-is delivered on later polls rather than silently lost; and the set is intersected with
-the current board each poll to bound its growth. Env: `FIRE_ALERTS`, `FIRE_RADIUS_MILES`,
-`FIRE_POLL_MINUTES`, `FIRE_LIMIT`. The location-share acknowledgment now mentions `/fire`
-and that the bot alerts automatically.
-
-Follow-up (surfaced, not fixed): `fire_poll_job` and `traffic_poll_job` now share the
-same proactive-alert shape (fetch ‚Üí iterate `user_location` ‚Üí away/fresh gate ‚Üí nearby
-filter ‚Üí seen-set dedup ‚Üí send). A single helper parameterized by feed, id field, and
-freshness predicate would carry future fixes once; deferred because folding it in would
-touch the working, eval-covered traffic path.
-
-## v2026-08-21.4 ‚Äî Embedding failures: retried, counted, and repaired instead of permanent
-
-**Root cause: an embedding failure was both invisible and, on the write path,
-permanent.** `_embed_text` returned `None` on any failure with a single `log.debug` as
-its only trace ‚Äî and the configured level is `INFO` (bot.py:135), so that line cannot
-emit. No `_count_error` category covered it either. A fleet-wide embedding outage
-therefore produced no log line, no counter and no `/audit` field; the sole symptom would
-arrive days later as "she doesn't seem to remember things as well."
-
-Worse than the blindness: `_embed_memory_line` returns silently when the embed fails, so
-the memory lands in `memories.txt` with no vector. `_semantic_recall_vec` only scores
-entries that already have one, and nothing ever revisited them ‚Äî **every memory written
-during an outage was invisible to semantic recall forever.** A failed read costs one
-turn; a failed write cost that memory permanently.
-
-**Considered and rejected: a fallback embedding model.** Vectors from different models
-are not comparable, which v2026-08-04.7 already established when it added the `.model`
-sidecar guards for exactly this reason. Measured here to check what the failure actually
-looks like: unit-normalised vectors of mismatched dimension through the real
-`_cosine_sim` score mean +0.0002, max +0.055 over 400 trials ‚Äî far below the 0.3
-threshold in `triggered_memories`. So a fallback model does not produce *wrong* memories,
-it produces *no* matches, while the `_load_embeddings` guard would also discard the whole
-cache on the model change. It would look like insurance and provide none.
-
-**What shipped:**
-- `_embed_text` retries (`EMBED_RETRIES`, default 2 attempts; `1` is the kill switch),
-  but **only on a fast failure**. Past `EMBED_RETRY_BUDGET_S` (8s) it gives up: a slow
-  failure means the caller's budget is likely spent, and `asyncio.to_thread` threads
-  cannot be cancelled, so retrying one keeps an abandoned thread alive with nobody
-  waiting. The live read path's own `asyncio.wait_for(..., MEMORY_QUERY_EMBED_TIMEOUT)`
-  still caps it, so worst-case reply latency is unchanged ‚Äî invariant 3 is not touched
-  (this is the approved embedding carve-out, and no new call is added per message).
-- Total failure now calls `_count_error("embed")` once (not per attempt) and logs through
-  `_log_operational`, throttled ‚Äî during an outage this fires on every reply *and* every
-  memory write, which is the storm shape that put 767 identical tracebacks in jules's
-  `errors.log` (v2026-08-10.12). The category surfaces in `/audit` and `/errors` with no
-  render change, since both iterate `_error_counts` generically.
-- `_embed_backfill_job` re-embeds unvectorised memories every `EMBED_BACKFILL_INTERVAL_S`
-  (900s), `EMBED_BACKFILL_BATCH` (20) at a time, `EMBED_BACKFILL=0` to disable. This is
-  the part that makes an outage self-healing rather than permanent. HTTP runs off-loop via
-  `asyncio.to_thread`; `_embed_lines_offloop` deliberately returns pairs instead of
-  touching `_embeddings_cache`, because mutating a live dict from a worker thread is
-  invariant 7 ‚Äî the caller assigns on the loop.
-
-**Verification:** `TestEmbedRetryAndBackfill`, 9 tests driving the real functions through
-a fake HTTP session (retry-then-succeed, give-up-and-count-once, both kill switches, slow
-failure not retried, backfill caching, backfill bounded per run, backfill surviving a
-still-failing provider). Break-tested RED per assertion.
-
-**Not addressed, deliberately:** the backfill covers `memories.txt` only. Facts share
-`_embeddings_cache` through `_embed_and_cache` but come from a different collection;
-extending it there is a separate change rather than widening this one.
-
-## v2026-08-21.3 ‚Äî location acknowledgment lists all location-based commands
-
-The message shown after sharing a location only mentioned `/traffic`, `/incidents`,
-`/crime`, and `/dispatch`. Missing were `/nearby` and `/food` (TomTom-gated). Now every
-enabled location-based command appears in the acknowledgment, and the live-location
-variant lists the commands not already covered by its traffic prose.
-
-## v2026-08-21.2 ‚Äî /dispatch command: 911 dispatch calls near you (Seattle)
-
-New feature: `/dispatch` shows recent 911 dispatch calls near the user's shared location,
-pulled from SPD Call Data on data.seattle.gov (updated daily, same-day coverage). Uses the
-same location, radius, and kill switch (`CRIME_ALERTS`) as `/crime`.
-
-Configurable via env: `DISPATCH_HOURS` (lookback window, default 24), `DISPATCH_LIMIT`
-(max results, default 10). Calls are shown with initial/final call type, priority
-(color-coded 1‚Äì4/9), beat/sector/precinct, and timestamp. Shares `_in_seattle()` bounds
-check and `CRIME_RADIUS_MILES` radius with `/crime`.
-
-The location share acknowledgment already mentions `/crime` and `/dispatch` (added in
-v2026-08-21.1). Help text updated to list both commands under "Crime alerts (Seattle)".
-
-## v2026-08-21.1 ‚Äî /crime command: nearby crime reports from Seattle PD open data
-
-New feature: `/crime` shows recent crime reports near the user's shared location, pulled
-from Seattle PD's public dataset on data.seattle.gov (Socrata API, no API key required).
-Coverage is City of Seattle only ‚Äî locations outside the bounding box get a clear message.
-
-Configurable via env: `CRIME_ALERTS` (kill switch, default ON), `CRIME_RADIUS_MILES`
-(default 0.5), `CRIME_DAYS` (lookback window, default 7), `CRIME_LIMIT` (max results,
-default 10). Registered in `/features` as `crime` for runtime toggle. Reports show
-offense type, category, approximate address, and timestamp, color-coded by
-crime-against category (person/property/society).
-
-The location share acknowledgment now mentions `/crime` alongside `/traffic` and
-`/incidents` when crime alerts are enabled.
-
-## v2026-08-15.1 ‚Äî mes_example reached the model raw; the 2026-07-20 Jules fix was one card, not the code path
-
-**Root cause: `load_character` dumped `mes_example` verbatim, `<START>` markers and
-`{{user}}:` lines included.** The 2026-07-20 incident (Jules emitted `Her:`/`You:`
-speaker labels and repeated the user's turns) was root-caused to this same dump at
-`bot.py:3264-3265` and fixed by adding an inline anti-label instruction to Jules's own
-card. That closed the symptom for one character. The 2026-08 monthly character pass
-found the same raw shape still present in Nora (4 `<START>` markers), Priya (9
-`{{user}}:` labeled lines), and Marcus (9 `{{user}}:` labeled lines) ‚Äî none of them had
-Jules's inline fix, because the actual defect was never in the code.
-
-**Fix:** `_clean_mes_example()` strips `<START>` separator lines and any line starting
-`{{user}}:` before the block reaches the prompt, so no card needs its own inline
-workaround. `load_character` calls it instead of dumping `data["mes_example"]` raw.
-
-**Eval:** `TestMesExampleCleaning` in `tests/test_pure.py` ‚Äî pins that `<START>` and
-`{{user}}:` lines are stripped, and that `load_character` actually calls the cleaner.
-
-**Root cause 1: v2026-08-10.9 closed the hand-rolled-boolean class against three
-idioms, and there was a fourth.** That release rewrote 53 flags to `_env_bool` and left
-`TestNoHandRolledEnvBooleans` to catch any new one. Both of its regexes require
-`.lower()`. Six flags are written `os.getenv(X, "1").strip() not in ("0", "false",
-"no")` ‚Äî `.strip()`, no `.lower()` ‚Äî so they matched neither shape and were never in the
-count: `MEMORY_AUTO`, `MEMORY_HEDGE`, `MEMORY_AUDIT`, `MEMORY_SEMANTIC_LIVE`,
-`NOTE_RECURRING`, `NOTE_GROUNDED`.
-
-**What that cost: `off` did not turn them off.** The tuple is `("0", "false", "no")`, so
-`MEMORY_AUDIT=off` is not in it and read as **ON** ‚Äî the exact failure v2026-08-10.9
-existed to remove, on the word its own summary advertised as newly working everywhere
-(*"`on` now works everywhere"*). Being case-sensitive without `.lower()`, `False`, `NO`
-and `Off` also read as ON. `NOTE_GROUNDED` is one of invariant #17's three
-extraction-honesty layers, so the fleet had a kill switch for a memory guard that
-silently ignored four of the six ways an operator would write "off".
-
-**The real root cause was not the missing `.lower()` ‚Äî it was that the guard read the
-file line by line.** The first draft of this release migrated those six, widened the
-regexes, and called the class closed. `/code-review` then found two more, and both are
-the reason the class kept surviving: `EPISODIC_RECALL` (bot.py:2081) and
-`PAYMENTS_ENABLED` (bot.py:2865) are **wrapped** ‚Äî
-
-```python
-PAYMENTS_ENABLED = os.getenv(
-    "PAYMENTS_ENABLED", "0" if IS_NAMED_INSTANCE else "1"
-).lower() not in ("0", "false", "no", "off")
-```
-
-‚Äî so no single line holds a whole expression and `_lines()` could not see them whatever
-the regex said. `PAYMENTS_ENABLED` even uses idiom 2 *with* `.lower()`: the original
-guard was supposed to catch it and structurally could not. That is C8 again ‚Äî a clean
-sweep means "my pattern found nothing", never "nothing is there" ‚Äî and it is also why
-the grep that produced "six sites" for this entry's first draft was itself wrong.
-
-**Eight sites now route through `_env_bool`**, defaults derived from the old expression
-rather than retyped (unset ‚Üí `"1" not in (...)` ‚Üí True ‚Üí `_env_bool(X, True)`;
-`PAYMENTS_ENABLED` ‚Üí `not IS_NAMED_INSTANCE`). All eight are pinned in
-`TestEveryBooleanFlagDefault.DEFAULTS`, and `PAYMENTS_ENABLED` joins the default-off
-set ‚Äî being hand-rolled, its instance-dependent default had never been pinned by
-anything.
-
-**The guard is fixed in two ways in the same commit:** `.lower()` is now optional in
-both shapes, and the scan runs over the **whole source** with comment lines blanked
-(offsets preserved, so reported line numbers stay right) instead of line by line. The
-allowlist is now matched against the variable name captured by the regex rather than
-"is this string anywhere on the line", so a nearby allowlisted name can no longer exempt
-a different flag's expression. Break-tested by re-injecting both removed forms ‚Äî the
-single-line `MEMORY_AUDIT` one and, decisively, the wrapped `PAYMENTS_ENABLED` one that
-the old scan passed. The `_env_bool` docstring still explains every idiom with a bare
-unquoted `X`, and the regexes still require a quoted name, so documenting the trap does
-not trip the scanner (C14).
-
-**Root cause 2: `/reviewmem ok` promoted a memory as plain `origin: "auto"`, so the
-weekly audit could propose deleting it.** The listing shows the owner both the claim and
-its `src:` quote before they approve, which makes an `ok` a human entailment judgement
-on exactly the evidence v2026-08-12.1's `unsupported` check uses. Storing it
-indistinguishably from an unreviewed auto-extraction let the audit re-litigate that
-call ‚Äî asking the owner to delete a memory they had just approved. Promotion now records
-`origin: "auto-reviewed"`, which `_audit_source_quote` already excludes (it requires
-`"auto"`), so no new condition was needed. The source quote is kept, so `/sourcemem` is
-unchanged. This mirrors what `memory_audit_seen.json` already does for rejections: an
-owner decision is not re-asked.
-
-**Operator note:** if any instance's `.env` sets one of these to a word the old idiom
-did not recognise, the flag was ON before this release and is OFF after ‚Äî which is what
-the operator wrote. The six `.strip()`-only flags missed `off` and every case variant;
-`EPISODIC_RECALL` missed case variants only; `PAYMENTS_ENABLED`'s vocabulary was already
-complete. Worth checking the seven `.env` files before deploying:
-
-```bash
-# host: VPS (as root)
-grep -nE '^(MEMORY_AUTO|MEMORY_HEDGE|MEMORY_AUDIT|MEMORY_SEMANTIC_LIVE|NOTE_RECURRING|NOTE_GROUNDED|EPISODIC_RECALL)=' /opt/telegram-bots/*/.env
-```
-
-No output means nothing changes for the fleet.
-
-4 new tests, all driving `reviewmem_cmd` itself rather than reading it: promotion
-origin, audit-ineligibility asserted end to end through `_parse_audit_findings`,
-non-auto origin untouched, and missing meta. Six flags were also added to
-`TestEveryBooleanFlagDefault.DEFAULTS` (table rows, not tests). Total: 1,267.
-
-`TestEveryCommandHandlerActuallyRuns` caught the first draft of those tests: they
-stubbed `_load_memory_review`, `_save_memory_review` and `_memory_log`, which named
-three helpers without ever exercising them. They now run for real against the fixture
-instance's own files, and only `_append_memory` is stubbed ‚Äî it reaches
-`_embed_memory_line`, which makes a blocking HTTP call.
-
-## v2026-08-12.1 ‚Äî The grounding guard checked the quote was real, never that the claim followed from it
-
-**Root cause: `_quote_grounded` answers a different question than the one the guard is
-trusted to answer.** It is a substring test ‚Äî is this quote a real, verbatim thing the
-user said? ‚Äî and both extraction callers (`memory_ungrounded`, `note_ungrounded`) treat a
-pass as "this memory is grounded". Those are two different properties and only the first
-was ever enforced. The user says *"I might try that new ramen place sometime"*; the model
-stores *"User loves ramen and eats it weekly"* with `memory_quote` = *"try that new ramen
-place"*. The quote IS a verbatim substring, so `_quote_grounded` returns True,
-`memory_ungrounded` never fires, and a fabricated preference lands in `memories.txt` with
-a real quote attached to it. Nothing downstream can tell it from a well-founded memory ‚Äî
-`/sourcemem` shows a genuine quote, and the confidence gate sees a confident extraction.
-
-**Fix: a fourth finding type in the weekly audit, not a stricter write-time guard.** The
-`MEMORY_AUDIT` pass already reads `memories.txt` with a cheap model once a week, off the
-message path, and routes proposals through `/reviewmem` where the owner approves every
-mutation. `unsupported` joins contradiction/superseded/stale there. Each entry's stored
-grounding quote is now passed to the audit prompt alongside the claim (`src:` line) ‚Äî the
-model had no way to judge entailment before, since the quote was never in the prompt at
-all. **Zero new LLM calls** (invariant #3): same weekly call, longer prompt.
-
-**Why not tighten the write-time guard instead:** rejecting at extraction trades a
-silent-bad-memory problem for a silent-lost-memory problem with no human in the loop, and
-an entailment check inside `_quote_grounded` would put a model round-trip on the reply
-path for every extraction. Invariant #17's three layers are untouched; this is a fourth,
-after the fact, with the owner in it by construction.
-
-**The eligibility rule is `origin == "auto"`, and "has a source" would have been the
-wrong test.** Three other origins carry a `source` that must never be judged for
-entailment: `/editmem` (`manual-edit`) **inherits the original quote onto text the owner
-deliberately rewrote**, an audit merge stores a `"merged: a | b"` trail rather than
-anything a user said, and `/remember` (`manual`) has no source at all. Proposing deletion
-of memories the owner entered by hand is the worst failure this feature could have, so it
-is closed twice: `_audit_source_quote` returns `""` for those origins, which both hides
-the `src:` line from the prompt and makes `_parse_audit_findings` drop an `unsupported`
-finding that names them anyway.
-
-**Fail-closed on the validation side.** `_parse_audit_findings` takes `meta` as an
-optional 4th argument; omitted, no entry has a known quote and every `unsupported`
-finding is dropped. A caller that forgets to pass it loses the feature rather than
-proposing deletions it could not check. `unsupported` is also delete-only ‚Äî merging an
-unsupported claim into a neighbouring entry propagates the fabrication instead of
-removing it ‚Äî and the review item is labelled `AUDIT delete (unsupported):` so the owner
-can tell "this stale detail" from "this claim your own words do not support".
-
-**`MEMORY_AUDIT_UNSUPPORTED`** (default ON, invariant #16): `0` drops the type from the
-prompt AND from validation, so a bad week costs no redeploy.
-
-**Caught by `/code-review` before merge:** a stored quote can contain newlines ‚Äî
-Telegram messages do, and `_quote_grounded` normalizes before comparing, so a multi-line
-quote passes the write-time guard and is stored verbatim. Rendered into the audit prompt
-it emitted a bare unnumbered line inside the numbered list the model reads its 1-based
-`lines` indices out of. `_audit_source_quote` now collapses whitespace, the way
-`_audit_pair_key` already did.
-
-18 new tests: `_audit_source_quote` (including the multi-line case), the prompt payload's
-`src:` lines and an assertion that every rendered line is numbered or a `src:` line, the
-ramen case end to end, every owner-entered origin, the kill switch, a mixed batch where
-one ineligible finding must not drop the eligible one, and one pinning `_quote_grounded`'s
-documented limit so the gap is not later mistaken for a bug in it. Total: 1,263.
-
-Five guards break-tested RED‚ÜíGREEN via `.claude/tools/break-test.sh`: the origin
-eligibility rule, the parser's eligibility check, delete-only, the kill switch, and the
-prompt's `src:` line.
-
-## v2026-08-10.12 ‚Äî A seven-hour poller fight was filed as 767 code crashes
-
-**Root cause: `Conflict` and `Forbidden` are `TelegramError` but not `NetworkError`.**
-`on_error` tests `BadRequest`, then `(NetworkError, TimedOut)`, then treats everything
-else as an unhandled crash. Verified against PTB 21.11.1: seven error classes fall
-through to that catch-all, and the two common ones are not crashes at all ‚Äî
-**`Conflict`** is two processes polling one token (an operations problem: a stray poller,
-a half-finished migration, a supervisor that respawned) and **`Forbidden`** is a user
-blocking the bot or removing it from a group (not a fault; no code change can prevent it).
-
-This is the same defect **v2026-07-25.5** fixed one layer over, where `BadRequest` was
-absorbed into `network` and, in that entry's words, *"reads as ambient phone flakiness and
-gets ignored."*
-
-**The cost is worse than a wrong label ‚Äî it destroys evidence.** Investigating jules's
-`unhandled` counter produced the full picture from her `errors.log`:
-
-| what the record said | what the log shows |
-|---|---|
-| operational log: *"Conflict for ~15 min"* | **11:00 ‚Üí 17:56 on 2026-07-19, ~7 hours** |
-| `state.json` retained 200, oldest 16:29 | first `[unhandled]` at **16:00:08**, ~33s apart |
-| ‚Äî | **767** `telegram.error.Conflict` occurrences |
-
-The 200-entry cap kept the last 87 minutes of a seven-hour incident: **~74% of it was
-evicted, including the start**. Because Conflict shared the `unhandled` category, any
-genuine crash on jules that week was pushed out too, and is unrecoverable. That is the
-argument for the split ‚Äî not tidiness.
-
-**Fix 1: `conflict` and `forbidden` get their own branches and counters.** A poller fight
-can no longer hide inside, or evict, a real crash. The other five (`RetryAfter`,
-`ChatMigrated`, `InvalidToken`, `EndPointNotFound`, `PassportDecryptionError`) stay in
-`unhandled` for now ‚Äî none has been observed, and inventing categories for unobserved
-conditions is how the roster goes stale.
-
-**Fix 2: `_log_operational` throttles expected conditions to one line per
-`ERROR_LOG_THROTTLE_S` (default 60), carrying the count it stands for.** Those 767
-tracebacks were ~4,600 lines ‚Äî most of `errors.log`'s 2 MB rotation budget spent on one
-fact repeated, which is why a log covering three weeks held one afternoon. **Rotation was
-never the problem** (`RotatingFileHandler(maxBytes=2_000_000, backupCount=3)` has been
-configured all along); the problem is that a storm fills the budget and evicts everything
-else, exactly as a saturated category evicts the counter. Same fix both times: keep the
-count, drop the repetition. `ERROR_LOG_THROTTLE_S=0` disables it (invariant #16).
-
-**Genuinely unhandled exceptions are never throttled** ‚Äî each may differ and the traceback
-is the evidence. A test drives 20 identical `ValueError`s through `on_error` and requires
-20 full tracebacks.
-
-10 tests, including one that asserts PTB still keeps `Conflict` outside `NetworkError`, so
-a future reparenting fails loudly instead of the counter going quiet. Four break-tests ‚Äî
-Conflict branch removed (2 red), Forbidden branch removed (1 red), suppressed count
-dropped (1 red), kill switch ignored (1 red) ‚Äî injection verified on each.
-
-**Also caught here: `python3 -m py_compile` passed on a module that could not import.**
-`_ERROR_LOG_THROTTLE_S` was written above `_env_int`'s definition; compiling checks syntax,
-not name resolution at module exec. Only running the suite found it. The constant now sits
-below the env helpers with a comment saying why.
-
-## v2026-08-10.11 ‚Äî "Errors (total): 415" was not a total, not since boot, and not bounded
-
-**Root cause: one label making three false claims, and the number sat undiagnosed for a
-day because of it.** jules reported `Errors (total): 415` beside `Uptime: 0.0h`. Each
-part of that is misleading:
-
-- **Not since boot.** `_error_counts` is persisted into `state.json` and restored on load
-  (`bot.py:3373`), so a freshly restarted process legitimately reports hundreds. The
-  juxtaposition with a 0.0h uptime reads as a crisis and isn't one.
-- **Not a total.** `_count_error` keeps only the last 200 timestamps per category, and
-  load re-applies the same trim. A saturated category makes the sum a **floor**; the real
-  count is unknowable.
-- **Not bounded in time.** Only `errors_last_hour` filters by age. `total_all` is `len()`
-  over every retained timestamp, which can be arbitrarily old.
-
-The operational log had carried "415 real counted errors on jules remains uninvestigated"
-since v2026-08-10.5 ‚Äî a day spent unable to act on a number nobody could interpret.
-
-**The owner's `state.json` breakdown settled it**, and the shape is why the label mattered:
-`network` 200 (2026-07-17 ‚Üí today, **capped**) ¬∑ `unhandled` 200 (**all inside 87 minutes**
-on 2026-07-19, capped) ¬∑ `memory_ungrounded` 8 ¬∑ `api` 4 ¬∑ `fallback`, `heartbeat`,
-`note_ungrounded` 1 each. Two of seven categories are saturated, so 415 is a floor over an
-unknown real count, and the two big ones are entirely different problems ‚Äî one ongoing at
-roughly 8/day, one a burst that stopped three weeks ago.
-
-**Fix: the line says what the number is.**
-
-```
-Errors (retained): 415 ‚Äî across 7 categories, oldest 24.0d ago, survives restarts
-  ‚Äî 2 at the 200/category cap (network, unhandled), so the real count is HIGHER
-```
-
-`_error_retention()` returns the facts as data (retained, categories, saturated list,
-oldest age) and `_error_retention_summary()` renders the qualifier. The count itself stays
-in `errors_total` for the admin HTTP API ‚Äî the summary deliberately carries no count of
-its own, because two copies drift. `_self_audit`'s log line changes `total=` to
-`retained=` for the same reason.
-
-**The 200 became `_ERROR_KEEP_PER_CAT`**, used by the trim, the load path, and the summary
-that describes it. A label naming a cap the code no longer enforces is the same defect one
-level up, and a test pins that the cap named is the cap applied.
-
-6 tests, built on jules's real category shape rather than invented numbers. Three
-break-tests: the old label restored (1 red), saturation flagging removed so 415 reads as a
-total again (2 red), and the cap hardcoded to 999 so it drifts from the trim (1 red).
-**The third refused to inject on the first attempt** ‚Äî 0 anchor matches ‚Äî and the injector
-said so instead of reporting a green; that guard is this session's own lesson from two
-break-tests that silently injected nothing.
-
-## v2026-08-10.10 ‚Äî The map-intent over-firing watch had nothing to watch with
-
-**Root cause: a deferred follow-up whose trigger condition was never observable.** ROADMAP
-3.5 phase 2 parked a per-chat cooldown as conditional ‚Äî *"if the `[map]` log line ever
-shows over-firing"* ‚Äî and the only instrument was `log.info("[map] intent=‚Ä¶")`, which means
-grepping journalctl on the VPS. Until v2026-08-10.8 that cost nothing, because `MAP_INTENT`
-was off on all seven so the line never appeared. It now fires on every instance, and the
-condition that decides whether to build the cooldown is still unreadable from `/audit`.
-
-Same shape as v2026-08-10.4, .5, .6 and .8 ‚Äî a signal that exists but reaches no surface.
-Four of those in one week is the argument for building the instrument before the feature
-that needs it.
-
-**Fix: `/audit` gets a `Map intent:` line carrying the rate, not a count.**
-`_track_map_intent` wraps the detector call inside the dispatch condition and counts every
-message that reached it, so the report reads `2/9 messages (22%) ‚Äî 1 route, 1 nearby`
-rather than a bare fire count. **The denominator is the point**: a count alone cannot
-distinguish a busy day from an over-firing detector, which is exactly the question the
-deferred cooldown turns on. Counters reset daily, because a lifetime-cumulative rate
-answers nothing about now (C8, wrong currency).
-
-No-pin fires are counted separately. Those produce a share-a-pin nudge rather than map
-data, and a high share of them is a different problem wanting a different fix ‚Äî it is the
-outcome that prompted the owner's *"what is the point of this feature?"* about jules on
-2026-08-10.
-
-**The cooldown itself stays unbuilt, deliberately.** ROADMAP conditions it on evidence;
-this is the instrument that produces the evidence, and building the remedy first would be
-guessing at a rate nobody has seen.
-
-`_map_intent` stays pure ‚Äî the wrapper counts at the call site rather than inside the
-detector, whose negatives are test-pinned and whose tests should not have to care about
-ordering.
-
-8 tests. Three break-tests: the wrapper swallowing its return value (1 red ‚Äî it sits inside
-a walrus, so altering the value changes which branch runs), the daily reset removed (1 red),
-and the denominator dropped from the summary (2 red). **Two of those three failed to inject
-on the first attempt** ‚Äî anchors matching 4 times and 0 times ‚Äî and the resulting greens
-were recorded as proving nothing until the anchors were made unique (C17, C18).
-
-## v2026-08-10.9 ‚Äî Every on/off env var accepted a different set of words
-
-**The class, in one sentence: an on/off env var parsed by a hand-rolled string comparison,
-so which words it accepts depends on which default it happens to have.** v2026-08-10.8
-fixed two instances of this and named the rest as a follow-up. This is the follow-up: all
-53 remaining sites, plus two more the first sweep missed.
-
-**Three idioms, three vocabularies, all silent.**
-
-| idiom | written as | trap |
-|---|---|---|
-| default-off | `os.getenv(X, "0").lower() in ("1", "true", "yes")` | `X=on` reads **off** |
-| default-on | `os.getenv(X, "1").lower() not in ("0", "false", "no", "off")` | `X=maybe` reads **on** |
-| strict | `os.getenv(X, "false").lower() == "true"` | `X=1` reads **off** |
-
-`GROUP_MODE=on` was off. `FOLLOWUP_ENABLED=1` was off ‚Äî and `.env.example` documented that
-as a quirk to work around (*"note: this one is `true`/`false`, not 1/0"*) rather than as
-the defect it was. `DEVICE_RENDER=maybe` was on. Every one of these fails silently: the
-owner writes a perfectly reasonable value, the bot reads the opposite, and nothing says so.
-
-**The strict idiom was not in the original count.** v2026-08-10.8 said "~20 hand-rolled
-copies"; the real number was 53, and the two `== "true"` sites (`INNER_VOICE_ENABLED`,
-`FOLLOWUP_ENABLED`) matched none of the patterns that produced that estimate. They are the
-sharpest instances ‚Äî accepting exactly one word ‚Äî and they were found only by widening the
-grep after the first pass reported clean.
-
-**Fix: all 55 boolean flags route through `_env_bool`.** One vocabulary
-(`1/true/yes/on` ‚Üî `0/false/no/off`, case-insensitive, whitespace-trimmed), blank or absent
-takes the default, anything else warns via `_CONFIG_WARNINGS` and falls back to the default
-‚Äî never silently to off (idioms 1 and 3) or to on (idiom 2).
-
-**No default moved.** Each replacement's default was derived from the old expression rather
-than retyped: for `in (...)` the default is `<literal> in <tuple>`, for `not in (...)` it is
-`<literal> not in <tuple>`. Every flag's import-time value was snapshotted before the
-rewrite and compared after ‚Äî 53 flags, zero changes, then 2 more added with the same result.
-
-**What does change is what a *set* value means**, and only in the directions above: `on`
-now works everywhere, `1` now works everywhere, and junk now warns instead of picking a
-side. `ADMIN_API_ENABLED=on` now enables the admin API where it previously did nothing,
-which is worth knowing before setting it.
-
-**Guards, both generalized rather than point assertions.** `TestNoHandRolledEnvBooleans`
-re-derives the offender list from bot.py source for all three shapes and fails on any new
-one, with a two-entry allowlist (`GIF_SAFETY`, `TOMTOM_TRAVEL_MODE` ‚Äî named values, not
-switches) that carries a reason each and a second test that fails when an allowlist entry
-goes stale. `TestEveryBooleanFlagDefault` pins all 55 defaults in a table, asserts the table
-and the source agree in *both* directions, and separately pins which twelve flags are
-off ‚Äî so a table regenerated from broken source would still fail.
-
-6 new tests (the suite goes 1215 ‚Üí 1221; `TestEnvBoolVocabulary`'s 5 shipped in .8).
-Three break-tests: a hand-rolled idiom re-injected (2 red), one default flipped (1 red),
-and the equality shape specifically (1 red), each restored and re-run green.
-
-## v2026-08-10.8 ‚Äî MAP_INTENT was off on all seven bots and no status surface could say so
-
-**Root cause: a pilot flag that nobody ever un-piloted, and nothing that could report it.**
-`MAP_INTENT` shipped default-off (`os.getenv("MAP_INTENT", "0")`) as a per-instance pilot.
-Weeks later a fleet-wide `.env` sweep found it unset on **all seven** ‚Äî including nora,
-emily and priya, the three it was piloted on. Every bot therefore improvised distances and
-"is there a X nearby" answers it had a real TomTom API for. All seven have had keys since
-2026-08-10, so `/route`, `/nearby` and `/place` worked the whole time; only the
-conversational half was dark.
-
-**It stayed dark because it was unreadable.** `MAP_INTENT` appeared in exactly two places
-in bot.py: its definition and its one use site. It was not in `_FEATURES`, so `/features`
-could not list it and `/audit` could not summarize it; it was not in the `=== STARTUP
-AUDIT ===` line either. The audit's `Maps:` field reports `_tomtom_mode()` gated on
-`TOMTOM_ENABLED` ‚Äî the key and the travel mode, not this flag. The only way to learn the
-state of the feature was to read seven `.env` files by hand, which is what finally found
-it. **Third time this week the root cause was "nobody could see the input"** (v2026-08-10.5
-inert features, .6 the Garmin monitors).
-
-**Fix, three parts.**
-
-1. **`MAP_INTENT` defaults ON**, matching the new-feature policy (owner 2026-07-18,
-   `bot-code-invariants` #16). Unset = active, `0` = off. Still gated on `TOMTOM_ENABLED`,
-   so a keyless instance is untouched. No `.env` edit is needed on any instance.
-2. **`mapintent` and `foodsuggestions` are `_FEATURES` entries**, so both now appear in
-   `/audit`'s summary and `/features`, and both are flippable at runtime with
-   `/features <name> on|off` ‚Äî the no-restart kill switch #16 requires. They are separate
-   entries rather than folded into `maps` because they are separate switches that fail
-   differently: `maps` is the key and gates the three commands, these two gate whether an
-   ordinary message ever gets real map data attached. Capability for both is the key, so a
-   keyless instance reads `n/a` (edit a `.env`) rather than `off` (flip a switch) ‚Äî the
-   distinction `_feature_off_reason` exists to keep.
-3. **`_env_bool(name, default)`**, because the two flags disagreed about what "on" means.
-   bot.py had grown two hand-rolled boolean idioms: default-off flags read
-   `in ("1", "true", "yes")` and default-on flags read `not in ("0", "false", "no", "off")`.
-   **They do not accept the same words.** `FOOD_SUGGESTIONS=on` evaluates FALSE under the
-   first ‚Äî "on" is simply not in its list ‚Äî so the most natural possible value silently
-   disables the feature. The second reads unrecognized junk as ON. One helper, one
-   vocabulary (`1/true/yes/on` and `0/false/no/off`), and anything else warns and falls
-   back to the default the way `_env_int` does (#15).
-
-`FOOD_SUGGESTIONS` deliberately stays default-off: it attaches authoritative open/closed
-claims to named restaurants, so it remains a per-character decision. Only its parsing
-changed.
-
-**Scope note:** only these two flags route through `_env_bool`. About twenty other
-hand-rolled copies remain and are a follow-up, not this diff ‚Äî `FOOD_SUGGESTIONS=on`
-reading as off is a live trap wherever a default-off flag exists.
-
-16 tests. Four break-tests, each pinning a different claim: the default reverted to off
-(red), the `_FEATURES` entry removed (8 red), `"on"` dropped from the true vocabulary
-(2 red), and junk falling back to off instead of the default (red).
-
-## v2026-08-10.7 ‚Äî One weather 429 became a hot loop that sustained the 429
-
-**Root cause: `ensure_weather` recorded successes and nothing else.** Its guard is
-`if _weather_cache["text"] and now - _weather_cache["ts"] < WEATHER_TTL`, and a failed fetch
-updated neither field ‚Äî so after any failure the guard stayed false and **every subsequent
-call retried immediately**. There are 13 `ensure_weather()` call sites: every message, every
-selfie, every scheduled job. A single 429 from open-meteo therefore produced a burst of
-fresh requests, which kept the 429 alive.
-
-**All seven instances share the VPS's IP**, so one bot stuck in that state can rate-limit
-weather for the whole fleet. Observed on jules at 16:00 on 2026-08-10, minutes after her
-coordinates were corrected ‚Äî the log line carries `latitude=48.7519&longitude=-122.4787`,
-which is how we know the `.env` fix had landed.
-
-**Fix: `fail_ts` and a `WEATHER_RETRY_S` (300s) backoff.** A failure is now remembered, so
-it costs one attempt per five minutes instead of one per call. Success clears the marker.
-Deliberately far shorter than the 1h success TTL ‚Äî a transient blip should cost minutes of
-stale weather, not an hour ‚Äî and **good cached weather is never discarded on a failure**: a
-stale reading beats none, and a test pins that.
-
-The old behaviour is the shape a retry loop takes when only the happy path is recorded. The
-success guard could never do this job; it tests the two fields a failure does not touch.
-
-6 tests, the backoff break-tested RED ‚Äî without it, five failing calls make five requests
-instead of one.
-
-## v2026-08-10.6 ‚Äî /diag reported three health monitors running on a bot with no Garmin
-
-**Root cause: `diag_cmd` read `STRESS_ALERTS`/`RHR_ALERTS`/`BB_ALERTS` bare, and those are
-preferences that only mean anything while the parent feed is live.** On jules ‚Äî no Garmin
-credentials ‚Äî `/diag` printed `‚Äî garmin   ‚úÖ stress   ‚úÖ resting-HR   ‚úÖ body-battery`:
-three monitors reported as running that cannot fire. Owner-spotted.
-
-`_alerts_on(flag)` exists for precisely this and returns `GARMIN_ENABLED and flag`. Its own
-docstring says *"Every STRESS_ALERTS / BB_ALERTS / RHR_ALERTS read goes through this ‚Äî a
-bare read is the bug it exists to prevent."* Every read did, except this one.
-
-**Checked for the class, and there isn't one.** The other bare reads (`main()`'s job
-scheduling) sit inside `if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:`, so
-they are already gated and correct. One site, fixed; nothing else to chase.
-
-Display only ‚Äî no monitor behaviour changes, because none of them could run anyway. That is
-the point: the report was wrong, not the system. Three tests, break-tested RED.
-
-## v2026-08-10.5 ‚Äî Three features were inert on all seven bots and the warning was in plain sight
-
-**Root cause: nothing reconciles the shared venv with `requirements.txt`, and the warning
-that said so was buried under routine log noise.** `numpy>=1.26,<3.0` is a hard requirement
-‚Äî its own comment in `requirements.txt` calls it "a real dependency, not
-commented-out-optional" ‚Äî and it was never installed into `/opt/telegram-bots/venv/`. The
-venv is shared, so this was fleet-wide:
-
-| Feature | State |
-|---|---|
-| `EPISODIC_RECALL` | inert ‚Äî every path guards on `_np is None` |
-| `ONTHISDAY_ENABLED` | inert ‚Äî gated on `EPISODIC_RECALL` |
-| `VOICE_TONE_ENABLED` | inert ‚Äî `acoustic_ears` import fails without numpy |
-
-All three default **on**, and all three have been dead since v2026-08-04.4 and .6 shipped
-them. The bot logged `EPISODIC_RECALL is set but numpy is missing` on **every single
-startup**, with the exact install command in the message. Nobody saw it.
-
-**Two independent fixes, because there were two independent failures.**
-
-**1. `vps-sync.sh` now reconciles the venv** (`pip install -q -r requirements.txt`) before
-the compile check. The script had only ever *borrowed* the venv's python to compile-check;
-nothing ever checked that the venv could satisfy the code being deployed, so a release
-adding a dependency shipped broken with no signal at deploy time. Deliberately **not
-fatal** ‚Äî every numpy import site is wrapped and degrades one feature, so a pip failure must
-not block an urgent `bot.py` fix ‚Äî but it prints a four-line banner that cannot be missed,
-where a silent `|| true` was how this happened.
-
-**2. `/errors` hides routine notices.** The STARTUP AUDIT banner and graceful stops log at
-WARNING so they reach `errors.log`, which is right: the banner is how you learn which
-version was running when something broke, and `_tally_unexpected_restarts` keys on the
-graceful-stop line to tell a deploy from a crash. But at four lines per restart in a 1.59 MB
-file, they buried the numpy warning completely. They are now prefixed `[notice]` and
-filtered from `/errors` by default, **with the hidden count shown** ‚Äî `12 routine notice(s)
-hidden (/errors all)`. Hiding without saying so would just be a quieter version of the same
-bug.
-
-Filtering happens in `tail_error_lines`, not in the file, so `_count_recent_restarts` keeps
-reading the complete log. The prefix goes on the *message*, after the timestamp and level,
-so `line[:19]` date parsing and the substring matches in `_tally_unexpected_restarts` both
-still work ‚Äî an invisible coupling that would have failed as a silently miscounted restart
-storm, so three tests pin it.
-
-**Corrected from my own report an hour earlier:** I told the owner that `Errors (total): 415`
-was inflated by routine WARNING lines. It is not. `errors.log` and `_error_counts` are
-entirely separate mechanisms ‚Äî the count comes only from explicit `_count_error()` calls and
-the audit banner never touched it. 415 is 415 real counted errors, and dismissing it was
-wrong.
-
-## v2026-08-10.4 ‚Äî Jules has been getting Seattle's weather since the day she was created
-
-**Root cause: `WEATHER_LOCATION` is a label and `WEATHER_LAT`/`WEATHER_LON` are the data,
-they default independently, and nothing ever compared them.** Jules's `.env` sets
-`WEATHER_LOCATION=Bellingham` and no coordinates, so they fell back to `47.6062, -122.3321`
-‚Äî downtown Seattle, **87 miles south**. Every weather reading she has ever fetched was
-Seattle's, which also drives her selfie clothing, the "it is NOT raining" negative, and the
-warm/cold scene filtering.
-
-**How it finally surfaced, which is the part worth keeping.** Not from weather looking
-wrong ‚Äî a rainy Puget Sound city standing in for another rainy Puget Sound city is
-invisible. It surfaced because v2026-08-10.3 put **distances** on `/place` results: the
-header said "near Bellingham" and every result was 6‚Äì8 miles from Burien. The label and the
-data had disagreed for weeks and the only thing that ever caught it was an unrelated feature
-printing a number that made the anchor visible.
-
-**Fix ‚Äî make the disagreement impossible to miss, twice over:**
-
-- `_weather_config_warning` fires when `WEATHER_LOCATION` is set away from its default while
-  the coordinates are still at theirs. Joins the existing `_CONFIG_WARNINGS` list that
-  `/audit` already prints, next to the group-config warnings that exist for the same reason.
-- `/audit`'s Location line now carries the coordinates: `Bellingham (47.6062, -122.3321)` is
-  self-evidently wrong at a glance where `Bellingham` alone is not.
-
-**The check is deliberately narrow.** It cannot tell whether coordinates that *are* set
-match their label ‚Äî that needs a geocode, and geocoding a label is what this release proves
-nobody should rely on. It answers one question: did someone rename the place and forget the
-data? Run against the whole fleet as it stood on 2026-08-10 it returns **exactly one
-instance, jules**, and a test pins that matrix ‚Äî nora/cass/priya all-default, bonnie
-Burlington with real coordinates, emily and marcus Olympia with real coordinates.
-
-**Not fixed here, because it is not a code bug:** priya's label says Seattle while her
-`setting.txt` and atlas are Bellevue. Her coordinates and label agree, so this check stays
-quiet, correctly ‚Äî that one is a content/config decision.
-
-## v2026-08-10.3 ‚Äî /place searched the whole country because it only knew where YOU were
-
-**Root cause: `/place` anchored on the user's shared pin and had no other idea where to
-look.** No pin shared with that instance meant `lat`/`lon` were `None`, and `radius_m` was
-`None` even when a pin existed ‚Äî so a soft bias at best, a nationwide search at worst.
-Owner-reported: `/place Boulevard Park` on jules, who lives in Bellingham, returned Lake
-Mead Recreation Area (Henderson NV) and Castner Range National Monument (El Paso TX).
-
-**She always has coordinates; the user only sometimes does.** Every instance sets
-`WEATHER_LAT`/`WEATHER_LON`, and every other TomTom path here is about her world. So
-`_place_anchor` is **her-first**: her city by default, overridden by a pin shared in the
-last 4 hours ‚Äî that is the user standing somewhere specific and asking about it, which
-beats a static home. A stale pin no longer wins.
-
-- **Distance-labelled**, so a result a thousand miles away says so. The reply had listed a
-  Nevada and a Texas result under a Washington one with nothing to tell them apart but an
-  address line you had to read closely.
-- **Deliberately NOT distance-sorted**, which is where `/place` differs from `/nearby`:
-  `/nearby coffee` wants the closest, `/place Mount Baker` wants the mountain.
-
-Kill switch `PLACE_ANCHOR_HER=0` restores the old behavior exactly ‚Äî the user's pin at any
-age, unanchored without one.
-
-**Three things `/code-review` caught, all in the first draft of this release, all removed
-rather than patched.** The draft passed a 50km radius and widened on an empty result set.
-TomTom applies a radius as a **hard cut**, so any handful of poor local fuzzy matches would
-have suppressed the correct distant one with no widening and no signal ‚Äî `/place Boulevard
-Park` from a Seattle-anchored instance would return Seattle junk. The draft also re-sorted
-all five results by distance before truncating to three, which drops the exact match for a
-nearer theatre and a nearer street. And the second request doubled the worst-case blocking
-window on a bot with no `concurrent_updates`. Anchoring **biases** the search and the
-distance label makes a far result visible; that is the whole job, in one request.
-
-**A false claim in this entry's first draft, corrected:** it stated `nearby_cmd` "had always
-gated on freshness". It does not ‚Äî `_fresh_location` has exactly three callers
-(`FOOD_SUGGESTIONS`, `MAP_INTENT`, `_place_anchor`) and `/nearby` is not among them. `/nearby`
-still accepts a pin of any age. The asymmetry is real and now recorded the right way round.
-
-**Two parked items ride along, which is what they were parked for.**
-
-- **ROADMAP 2.5** ‚Äî the TomTom section header named "Nora, Emily, Priya" and went stale the
-  day the other four were provisioned. Now names no instances at all: which ones hold a key
-  is per-instance and changes without a code deploy, so the comment points at each `.env`
-  and the `maps=` field in `/audit`. A roster that cannot go stale beats one that is correct
-  today.
-- **ROADMAP 3.17** ‚Äî `_SELFIE_PRESERVE_RULE` had a dedicated clause for eyewear and nothing
-  for any other worn face item, so priya's bindi survived in about half of six selfies.
-  Extended to the category ‚Äî *"anything small she wears on her face, ears or hair ‚Äî a
-  forehead mark, a stud, a hoop, a clip"* ‚Äî stated conditionally both ways like the eyewear
-  clause, naming no character's trait. A test pins both halves and the character-neutrality.
-  **Its effect is unverified**: no session can generate an image, and priya runs
-  `gemini-3-pro-image-preview`, which no face-lock A/B has ever been run against. The
-  mechanism matches the one that worked for Emily's glasses; that is the whole claim.
-
-**Theme mixing, stated rather than hidden:** repo-change-control asks for one theme per
-release, and a selfie-prompt change in a maps release is two. Taken deliberately ‚Äî 3.17 was
-parked *specifically* to avoid a seven-instance deploy for one clause, and this is the
-carrier it was waiting for. The selfie half is revertible on its own via `SELFIE_FACE_LOCK=0`,
-though that is coarse: it disables the whole face lock, not just this clause.
-
-## v2026-08-10.2 ‚Äî A place name with a slash in it 404s every TomTom lookup
-
-**Root cause: `quote(query)` leaves `/` unescaped, and the query is interpolated INTO a URL
-path segment.** `urllib.parse.quote` keeps `/` by default because it is normally escaping a
-whole path; here `_TOMTOM_SEARCH_URL` and `_TOMTOM_GEOCODE_URL` both put the query *inside*
-one segment, so `Boulevard Park / Taylor Dock` became three segments and TomTom answered
-HTTP 404. Fixed with `safe=""` at **both** call sites ‚Äî the geocode one never failed
-visibly, but it backs `/route`, `MAP_INTENT` destinations and the atlas tools' anchor, and
-fixing only the site that happened to break is how a class becomes two incidents.
-
-**Found by `tools/atlas_audit.py`, which is the point of it.** Jules's atlas carries
-`Boulevard Park / Taylor Dock` and `Mt. Baker Highway / Artist Point`; both returned 404
-where every other entry searched fine. No user had reported it, and nothing else in the
-system would have surfaced it ‚Äî a 404 on a place lookup degrades to "no results", which is
-indistinguishable from a place that genuinely is not there.
-
-**User-visible before this fix:** any `/place`, `/nearby` or `/food` argument containing a
-slash, and any destination the model extracted with one, silently returned nothing.
-
-4 tests, both call sites break-tested RED together.
-
-## 2026-08-10 ‚Äî 89% of the test suite's runtime was one line, twice
-
-Tests only ‚Äî no `bot.py` change, so no `BOT_VERSION` bump.
-
-**Root cause: an expensive function called from a generator's condition, where it re-runs
-per item.** Asked to audit whether 1142 tests could be consolidated for speed, the profile
-answered a different question:
-
-```
-37.43s  TestEveryCommandHandlerActuallyRuns::test_the_backlog_stays_empty
-37.08s  TestTheSecondBacklogDriven::test_the_second_backlog_stays_empty
- ~9.4s  the other 1140 tests, all of them
-```
-
-Both tests were written as:
-
-```python
-stranded = sorted(n for n in sweep._handler_coverage()[0]
-                  if n not in sweep._handler_coverage()[1])
-```
-
-The iterable is evaluated once; **the condition is evaluated per item.**
-`sweep._handler_coverage()` AST-parses `bot.py` and this 9,400-line test file ‚Äî 0.571s a
-call ‚Äî and there are 63 handlers. 64 calls √ó 0.571s = 36.5s, against 37.4s observed. Binding
-both halves from one call is the whole fix.
-
-**And the second test was a duplicate.** Its docstring justified itself as the same check
-"run again after the direct calls above, proving they register as CALLS to the scanner, not
-just more mentions". That cannot be true: `_handler_coverage()` is static AST analysis of
-files on disk, so no amount of test execution changes its answer and the ordering is
-meaningless. It computed an identical value by identical means ‚Äî 37s for false assurance.
-Deleted; the coverage assertion lives once, in `TestEveryCommandHandlerActuallyRuns`. The
-tests around it that genuinely drive `save_state`/`send_gif`/`send_meme`/`send_selfie` stay.
-
-**Result: 83.9s ‚Üí 8.8s, 1141 tests, same coverage.** This runs on every push through
-`.github/workflows/evals.yml` and before every claimed-done change through `verify.sh`.
-
-**The consolidation the audit was actually asked for: there is nothing worth doing.** With
-the hot spot gone the suite averages ~8ms a test, and the structure is already well
-factored ‚Äî 222 classes, median 3‚Äì5 tests each, largest 15 tests / 209 lines, no monster
-class, and the five zero-test classes are all legitimate fixtures (`_CmdMsg`,
-`_PresetFixture`, `_CalFixture`, `_CmdQuery`, `_CmdBot`). Merging tests now would trade
-readable per-incident cases for a saving measured in milliseconds, against a file whose
-docstrings are the repo's record of what each check is for.
-
-## v2026-08-10.1 ‚Äî She recommended restaurants without knowing whether any were open
-
-**Root cause: `FOOD_SUGGESTIONS` pre-fetched real nearby restaurants and handed them to the
-model with no hours attached.** At 11pm she could name a place that shut at nine, which is
-the difference between knowing a neighbourhood and reading a directory out loud.
-`openingHours=nextSevenDays` is a parameter on the search endpoint `_fetch_tomtom_search`
-already calls ‚Äî no new endpoint, no new LLM call.
-
-**Opt-in per call.** `/place`, `/nearby` and the atlas tools never read hours, so they don't
-request them and don't pay for the larger response. Only the two food paths pass it.
-
-### The two-round-trip detour, recorded so nobody repeats it
-
-**The MCP connector cannot see this field.** Twelve POIs across two queries (two independent
-caf√©s, ten Starbucks), `response_detail=full`, parameter accepted without error ‚Äî and no
-`openingHours` on any of them, while `entryPoints`, `brands`, `extendedPostalCode` and
-`localizedCategories` all came through. The same silent absence `timeZone=iana` shows. One
-`curl` against the raw endpoint with the fleet key returned the field immediately. **The MCP
-tools are not a reliable probe for what the fleet's own key can fetch** ‚Äî a field missing
-there says nothing about the REST API.
-
-**ROADMAP 3.18's proposed design was wrong, and the first real response is what showed it.**
-That entry proposed deciding "today" as *the earliest date in the payload*, reasoning that
-`nextSevenDays` starts with the POI's local today ‚Äî read off the MCP tool's parameter
-description.
-
-**Correction (2026-08-10): the disproof claimed here is itself unsound.** The first real
-response showed an earliest date of `2026-08-10` and this was read as *tomorrow* by
-comparing it against a session date of `2026-08-09` ‚Äî two dates in unestablished timezones.
-The VPS was plausibly already past local midnight, in which case `2026-08-10` was simply
-today and the premise held. **Nobody knows which, and the payload is not evidence either
-way without the local time it was fetched at.** The premise remains unverified, as it was
-when first written down ‚Äî it was never confirmed, and it has not now been refuted.
-
-**What shipped instead needs no notion of "today".** `_poi_hours_note` asks one question:
-does any range bracket now? Ordering and which-date-is-today stop mattering.
-
-The timezone problem is real and unsolved ‚Äî hours are POI-local, the bot knows only its own
-`TZ` ‚Äî so it is *gated*, not guessed: a verdict is emitted only when some range falls on the
-instance's local date. Share a location in another timezone and places go unmarked instead
-of wrongly marked. Within a matching date the comparison is ordinary, and the case the
-feature exists for (11pm, kitchen shut at nine) is squarely inside it.
-
-**A bug the tests caught before it shipped:** the date gate first tested only each range's
-*start*, so a bar open 18:00‚Äì02:00 was called unknown at 00:30 ‚Äî open, and reported as
-nothing. It now accepts a range whose start **or** end falls on our date. Every late-night
-place would have been silently unmarked.
-
-The prompt line distinguishes all three states rather than two: `closed now` means don't
-send them there, `open until` is a closing time she can mention, and a place with neither is
-one we have no hours for ‚Äî recommendable, just not as "open".
-
-### `/code-review` findings ‚Äî four fixed, one open and it matters
-
-- **An always-open POI was given an invented closing time.** `nextSevenDays` returns a 24/7
-  place as ONE range spanning the week, and printing its end hour rendered "open until
-  00:00" for somewhere that never closes. A clock time is now only printed when the range
-  ends on our date; otherwise "open now".
-- **The date gate does not make this timezone-correct, and the docstring said it did.**
-  Calendar dates coincide across most zones for most of the day, so a New York POI seen from
-  a Los Angeles instance passes the gate and can be told "open until 21:00" at 22:00 New
-  York time. The gate only catches a payload with *nothing* for our date. The docstring now
-  says exactly that; the residual error is bounded to a user who has shared a pin in another
-  timezone. `timeZone=iana` is the real fix and is untested against raw REST.
-- **`FOOD_SUGGESTIONS` never checked location freshness** ‚Äî `MAP_INTENT` beside it always
-  has. Harmless while it only listed names; not harmless once authoritative open/closed
-  claims ride along, since a weeks-old pin would attach them to restaurants in a city they
-  have left. Now gated on `_fresh_location`, so a stale pin falls through to the
-  share-a-pin nudge. **This changes existing `FOOD_SUGGESTIONS` behavior**, deliberately.
-- **The hours legend was appended unconditionally**, so `FOOD_OPEN_HOURS=0` still shipped
-  prompt text describing markers that could never appear. Now only when one is present.
-
-**Open, and it may undercut the feature's main case.** "closed now" is only reachable while
-the payload still carries a range dated today. The observation that prompted this release's
-redesign ‚Äî the first real response's earliest date was *tomorrow* ‚Äî is equally consistent
-with TomTom **dropping elapsed ranges**. If it does, then at 23:00 with the kitchen shut at
-21:00 there is no range for today, the gate fires, and the result is `""` rather than
-"closed now" ‚Äî exactly the case the feature was built for. The tests cannot tell: they use
-synthetic payloads that retain today's elapsed range.
-
-**The check, and it must run in the evening** (host: VPS, as root ‚Äî before dawn or midday it
-proves nothing, because the elapsed-range question only exists once ranges have elapsed):
-
-```bash
-KEY=$(grep -oP '^TOMTOM_API_KEY=\K.*' /opt/telegram-bots/priya/.env)
-curl -sS "https://api.tomtom.com/search/2/search/restaurant.json?key=$KEY&lat=47.6062&lon=-122.3321&radius=2000&limit=3&openingHours=nextSevenDays" \
-  | python3 -c "import json,sys;[print(f['poi']['name'], f.get('openingHours',{}).get('timeRanges',[{}])[0].get('startTime')) for f in json.load(sys.stdin)['results']]"
-```
-
-If the first `startTime` for a place that opened this morning still shows **today's** date,
-"closed now" works as shipped. If they have all rolled to tomorrow, the closed branch is
-dead and this needs a different approach ‚Äî most likely asking for a wider window and
-reconstructing today from it.
-
-Shipping ahead of that answer is deliberate: the failure mode is a *missing* hint, never a
-wrong one. "open until" works either way, and a place with no marker is explicitly not to be
-claimed open.
-
-Kill switch `FOOD_OPEN_HOURS=0`. Closes ROADMAP 3.18 and the `/food` "open now" follow-up
-parked in 3.5 since v2026-07-11.13.
-
-## v2026-08-09.2 ‚Äî She has held your coordinates for a month and could never say where that is
-
-**Root cause: `user_location` stores lat/lon and nothing ever turned it into a word.** The
-traffic feature has stored `{lat, lon, ts, live_until}` per chat since it shipped, and
-`FOOD_SUGGESTIONS` and `MAP_INTENT` both consume it ‚Äî but only as *numbers*, to search or
-route with. So when someone drops a pin, she can find restaurants near it and cannot say
-"wait, you're in Ballard?". A person reacts to the place; she had no way to know its name.
-
-**Fix: one reverse-geocode per share, one reaction per share.**
-
-- `_tomtom_reverse_geocode` on the initial share only ‚Äî **never on a live-position ping.**
-  A live share re-enters `handle_location` on every update, and geocoding each one spends
-  quota re-learning the same answer. On a live update the existing label is carried while
-  they are within `LOCATION_PLACE_MILES` (0.6mi) of where it was computed, and **dropped**
-  past that: telling her they are somewhere they have left is worse than saying nothing.
-- `_place_label` reads `neighbourhood`, then `municipalitySubdivision`, then `municipality`.
-  Not defensive padding ‚Äî TomTom names that field differently across API generations and an
-  instance's key may be provisioned against either. `municipality` last so a rural share
-  still names the town instead of degrading to nothing.
-- `_tomtom_reverse_geocode` **never raises**, unlike every other TomTom fetch here. Its
-  caller is the location handler, where there is no degraded answer to fall back to ‚Äî the
-  feature simply does not happen.
-- `_place_note` is one-shot: it returns the prompt line *and consumes the flag*. A bot that
-  reopens "you're in Ballard?" on every message for the 4-hour freshness window is the
-  failure mode, not the feature.
-
-No fetch on the reply path, so the call budget is untouched (invariants #3, #8). It collects
-nothing new ‚Äî it names coordinates already stored. Kill switch `LOCATION_PLACE=0`.
-
-**`_place_note` was split out of the message path for a reason worth recording.** That path
-has no test harness at all: the `FOOD_SUGGESTIONS` and `MAP_INTENT` injections beside it are
-pinned by nothing, and `grep` finds neither in `tests/`. Adding a third untestable branch is
-how the `/features` `ValueError` survived four releases. The extraction is the whole reason
-the one-shot behavior is provable.
-
-### New: `tools/atlas_audit.py` ‚Äî are her local places real, and near her?
-
-`atlas.txt` is injected into every prompt as "Real spots {NAME} knows" and drawn from for
-selfie backgrounds, and **nothing has ever checked those places exist.** A fabricated cafe
-and a real one forty miles away read identically in the file and identically in her voice.
-Same shape as the reference-photo gap: invisible until a human who knows the city happens to
-read a reply.
-
-**The obvious implementation is wrong, and quietly ‚Äî this was found by running it, not by
-reasoning about it.** Geocoding `"<place>, <city>"` looks right and silently launders bad
-data: asked for `Meydenbauer Bay Park, Seattle` (right park, wrong city) TomTom returns
-`Bay Terrace Road, Seattle` with no error and no warning. A fuzzy matcher never says "does
-not exist"; it returns the nearest plausible thing, and an audit built on it marks a broken
-atlas clean.
-
-Position-biased **POI search** discriminates properly, verified live: the real park comes
-back as a POI named `Meydenbauer Bay Park` in Bellevue, and an invented business
-("The Gilded Otter Coffee Roasters") returns zero results. So the tool queries the bare name
-biased at the anchor ‚Äî **never `name, city`** ‚Äî requires a POI rather than a street, and
-requires the found name to resemble what was asked for. A near-miss is `NOT FOUND`, not a
-pass; `name_matches` pins exactly the Bay-Terrace-Road case.
-
-Repo-only, like `selfie_prompt_preview.py` ‚Äî `vps-sync.sh` does not copy `tools/`. Exits
-non-zero when anything is flagged so a character-pass Routine can gate on it.
-
-**Six defects `/code-review` found on this diff; five fixed, one accepted.**
-
-- **The lookup was awaited inside `handle_location`.** `main()` builds PTB with no
-  `concurrent_updates`, so its default processor handles one update at a time ‚Äî a 30s
-  reverse-geocode stalled *every* update for that instance and delayed the existing
-  "üìç Got it" ack by the same amount. Now `_name_the_place` runs as a task: the location is
-  stored and acknowledged immediately, and the label lands when it lands. The task carries a
-  staleness guard ‚Äî if a newer share arrived while the lookup was out, it drops the answer
-  rather than caption the new position with the old neighbourhood, which is the same lie the
-  live-update branch already refused to tell. A test asserts the handler returns in under
-  200ms against a deliberately slow lookup.
-- **`_place_note` said "just shared" on a share up to four hours old.** `_fresh_location`'s
-  window is right for routing from a pin and wrong for reacting to one. Now gated on
-  `_PLACE_ANNOUNCE_SEC` (15 min) as well; a test pins the gap between the two clocks.
-- **`radius: 100` made the rural fallback unreachable.** The reverse-geocode call pinned a
-  100m radius, so anywhere with nothing inside 100m returned an empty `addresses` array ‚Äî
-  exactly the case `_PLACE_LABEL_FIELDS`' `municipality`-last ordering exists to serve. The
-  parameter contradicted its own comment. Left at TomTom's default now.
-- **`atlas_audit.py` let `_TomTomError` escape** on the anchor geocode, so a transient
-  network failure printed a traceback instead of its own error message. Found by running it.
-- **`--all` was removed rather than fixed.** It reused one `--near` anchor across seven
-  instances that live in different cities, so the docstring's own example flagged priya's
-  entirely-correct Bellevue atlas as FAR wholesale and made the exit code meaningless as a
-  Routine gate. A fleet sweep is seven invocations with seven anchors; that is the honest
-  shape of the job, so the tool now says so instead of pretending otherwise.
-- **Accepted, not fixed:** the one-shot flag is cleared and saved before the reply is
-  generated, so an exception during generation loses that share's reaction permanently. The
-  cost is one missed "you're in Ballard?" on an error path that already sends a failure
-  message; deferring the write until after a successful send means threading the state
-  through the reply path for that. Not worth it ‚Äî recorded so the next reader knows it was
-  weighed rather than missed.
-
-**Found while building it, not fixed here (per-instance `.env`, not code):** priya's
-`setting.txt` and her entire atlas are **Bellevue**, but `/audit` reports
-`Location: Seattle`. `WEATHER_LOCATION` feeds `"She currently lives in {WEATHER_LOCATION} ‚Äî
-ignore any historical or background references to other cities"`, so the prompt actively
-tells the model to discount the city her own setting file is written in, and every selfie
-background is stamped `Seattle` while her places are across the lake. The town tally this
-tool prints per instance exists to surface precisely this.
-
-## v2026-08-09.1 ‚Äî You cannot debug a face lock against a photo nobody can see
-
-**Root cause: the selfie pipeline's strongest identity signal was the one thing the system
-would never show you.** Owner-reported that Priya's selfies drift into a stranger with the
-face lock on. That is the same symptom as v2026-08-03.2, and that investigation ended with
-the finding that matters here: after three A/B rounds and 22 generated images tuning prompt
-text, the actual cause turned out to be the reference photo ‚Äî a standing full-body beach
-shot with Emily's face at roughly **8% of the frame height**, about a hundred pixels. An
-edit model cannot copy a face it cannot see, so it synthesises one. That release wrote the
-gap down and did not close it:
-
-> *"Nothing in the system ever showed anyone what the reference photo **is**. `/audit`
-> reports the filename and provider ‚Äî enough to prove a file is in play, never enough to
-> see that the face in it is unusably small. Two releases were spent tuning prompt text
-> against an image nobody had looked at."*
-
-Nothing since closed it. `/audit` still printed a bare filename; `/setbase` confirmed an
-install with format and KB and never said how big the picture was, let alone how it was
-framed. So the first question any face-drift report raises ‚Äî *what does her reference photo
-actually look like?* ‚Äî had no answer reachable from Telegram, on any of the seven
-instances. Diagnosis required VPS shell access and someone thinking to look.
-
-**Fix: make the reference photo inspectable from the chat it breaks in.**
-
-- **Bare `/setbase` now sends the current reference photo back**, captioned with its
-  filename, pixel dimensions and size, plus what a usable reference looks like. It was
-  previously a usage-text-only reply, which is the one place someone already goes when
-  thinking about the reference photo. `_reply_with_current_base` falls back to sending the
-  caption as text if Telegram rejects the file ‚Äî a reference photo Telegram will not
-  display is itself the answer.
-- **`/audit` and the startup audit line now carry pixel dimensions** (`priya_base.png
-  1024√ó1024`), via `_base_image_dimensions` / `_base_image_size_note`. A file that is not a
-  decodable image reports `(UNREADABLE ‚Äî not a decodable image)` rather than a size.
-- **The install confirmation reports dimensions too**, so a bad reference is visible at the
-  moment it is installed rather than three drifted selfies later.
-
-**Deliberately not built: a face-size metric.** The load-bearing number is what fraction of
-the frame her face fills, and measuring it needs face detection ‚Äî a real dependency in a
-shared venv, for a check a human eye performs instantly and correctly. Worse, a number
-invites trusting it: the beach photo is large and high-resolution and *still* unusable, so
-any dimensions-based verdict would have passed it. Dimensions say how much detail exists at
-all; **the image itself is the check**, and the caption says so in words rather than
-implying a threshold that does not exist. This is C8 applied before the fact ‚Äî ask what a
-reading actually measures ‚Äî instead of after.
-
-`Image.open` reads the header only, so `.size` never decodes a frame and this is cheap
-enough to run on every `/audit`. The except is deliberately broad: PIL raises
-`UnidentifiedImageError`, `OSError` and `DecompressionBombError` here and a truncated file
-raises others still, and a reference photo we cannot measure must degrade to "unknown
-size", never break the audit or a selfie.
-
-**This does not itself fix Priya's face drift, and should not be read as claiming to.** It
-makes the leading hypothesis checkable in one command. Whether her reference is badly
-framed is now a question `/setbase` answers in seconds; if the photo turns out to be a good
-portrait crop, the cause is elsewhere and the prompt layer is back on the table ‚Äî but
-v2026-08-03.2 already showed that tuning it blind costs two releases and settles nothing.
-
-**Two defects `/code-review` caught on this diff, both in the new handler's failure paths.**
-The first: `path.read_bytes()` sat outside the `try`, so an unreadable-but-present reference
-escaped into the generic error handler. That state is live in this deploy model ‚Äî instances
-run as `bot@<instance>` while a photo copied in by hand arrives owned by root ‚Äî and every
-selfie reads the same path, so it is a selfie outage, not a `/setbase` inconvenience; the
-reply now says exactly that. The second: the send-failure path logged without calling
-`_count_error`, unlike the write-failure path beside it. `sendPhoto` caps at 10 MB and
-`/setbase` enforces only an 8 KB floor, so an oversized reference fails on every invocation
-and appeared in neither `/errors` nor `/audit`. Both now counted.
-
-Kill switch `SELFIE_BASE_PREVIEW=0` restores the usage-text-only reply. Prompt assembly is
-untouched, no new LLM calls, no new dependency (Pillow is already required).
-
-## v2026-08-08.2 ‚Äî Repair v2026-08-08.1: unshipped version, leaked inline tag, red tests
-
-**Root cause:** v2026-08-08.1 was committed (`82c88fa`) with the changelog entry written
-but `BOT_VERSION` never bumped, and with two pytest failures left on `main`. Three
-separate problems, one commit:
-
-1. **`BOT_VERSION` stayed `2026-08-07.2`.** The `version-changelog-sync` eval went red on
-   `main`, which is a deploy blocker (`vps-sync.sh` hard-resets the VPS checkout to
-   `origin/main`), and `/audit` ‚Äî the one mechanism that proves a deploy landed ‚Äî would
-   have reported the previous build after a successful deploy.
-2. **The inline `| clothing:` fragment leaked into the image prompt.** `extract_tags`
-   only split the inline form off the selfie hint when no dedicated `[clothing:]` tag was
-   present (`if selfie_hint and clothing_override is None`). With both tags supplied, the
-   dedicated tag correctly won the *value*, but the literal text `| clothing: ...` stayed
-   in `selfie_hint` and was handed to the image model as scene description. Same shape as
-   the unstripped-tag leaks in v2026-07-29.1 and `[setbase: ..]` (2026-08-02), except it
-   reaches the image prompt rather than the chat.
-3. **Two tests were left failing.** `test_dedicated_clothing_wins_over_inline` caught
-   problem 2 and was shipped red. `test_rules_carry_the_constraints_the_image_models_need`
-   asserted `"Fully clothed, SFW."` lived in `_SELFIE_REALISM_RULE`; v2026-08-08.1 split
-   clothing out into `_SELFIE_CLOTHING_SFW`/`_NSFW`, so the assertion pinned a constant
-   that no longer owned the signal.
-4. **The word "SFW" was deleted from the selfie capability line** in `assemble_messages`
-   ‚Äî `"Keep it casual, in-character, SFW, ..."` became `"Keep it casual and
-   in-character, ..."`, unconditionally rather than gated on `SELFIE_NSFW`, and
-   unmentioned in the v2026-08-08.1 changelog. On a default instance (`SELFIE_NSFW`
-   unset) that removed the only SFW instruction the character ever sees. Found by
-   `/code-review` on this release's diff, not by the test suite.
-5. **An empty dedicated tag discarded a populated inline value.** The inline-clothing
-   guard tested `clothing_override is None`, but `[outfit: ]` parses to `""` ‚Äî not
-   `None` ‚Äî so it beat the inline value and then fell through to the default, silently
-   losing the outfit the character actually named.
-
-**Fix:**
-- `BOT_VERSION` ‚Üí `2026-08-08.2`; the v2026-08-08.1 selfie code itself is unchanged and
-  ships as written.
-- `extract_tags` now always splits the inline `| clothing:` form off the hint; the
-  dedicated tag still wins the value, but the inline text always leaves the hint.
-- Re-pointed the realism test at the **assembled prompt** instead of a constant, and
-  widened it to cover both SFW paths ‚Äî the default path (`_SELFIE_CLOTHING_SFW` carries
-  "fully clothed") and the new `[clothing:]` override path (which had no coverage at
-  all). Deliberate widening with rationale, per the "never edit a check to make it pass"
-  rule in `CLAUDE.md`.
-- Restored "SFW" in the selfie capability line, gated on `SELFIE_NSFW` so NSFW instances
-  keep v2026-08-08.1's wording and SFW instances get the instruction back. Pinned by
-  `TestSelfieCapabilityLineSFWSignal` (break-tested: reintroducing the unconditional
-  drop turns it red).
-- The inline-clothing guard now tests falsiness rather than `is None`, so an empty
-  dedicated tag no longer discards a populated inline value.
-
-**Not fixed, flagged for the owner:** on an SFW instance the override path's safety signal
-is `"Keep the overall image tasteful."` rather than an explicit "fully clothed" ‚Äî weaker
-than the pre-refactor wording that the Gemini blacked-out-image guard was written for.
-Whether that is strong enough for Gemini's filter is an empirical question that cannot be
-settled from a test run; it needs a live check against the image provider.
-
-## v2026-08-08.1 ‚Äî Selfie clothing override + SELFIE_NSFW for Grok Imagine
-
-**What:** Selfies can now take an explicit clothing description from the character,
-and a per-instance `SELFIE_NSFW` switch controls whether intimate clothing / nudity is
-allowed by default.
-
-**How to use:**
-- `[selfie: curled up on the couch | clothing: oversized white t-shirt and bare legs]`
-- or a separate `[clothing: ...]` / `[outfit: ...]` tag alongside the selfie tag
-- Set `SELFIE_NSFW=1` in the instance `.env` to allow NSFW defaults and intimate overrides
-
-**Why:** The xAI / Grok Imagine path was already wired; what was missing was a clean way
-for the character to specify clothing without fighting the hard-coded "Fully clothed, SFW"
-line inside `_SELFIE_REALISM_RULE`, and a toggle so NSFW instances can opt in without
-changing SFW ones.
-
-**Changes:**
-- `extract_tags` now returns a 5-tuple including `clothing_override`
-- `build_selfie_prompt(..., clothing_override=)` and `send_selfie(..., clothing_override=)`
-- Split clothing rules out of realism (`_SELFIE_CLOTHING_SFW` / `_SELFIE_CLOTHING_NSFW`)
-- System-prompt selfie instruction documents the new tag syntax
-- `.env.example` documents `SELFIE_NSFW`
-
-## v2026-08-07.2 ‚Äî /code-review caught a group-chat gating regression in v2026-08-07.1
-
-**Root cause: `handle_message` does double duty and the audit treated all 21 sites as
-uniform.** v2026-08-07.1 deleted 21 per-handler `_is_allowed` guards on the theory that
-`_private_gate` (handler group -1) already covers every one of them. True for 20. Not
-true for `handle_message`: it's registered for both private AND group chats and
-branches internally on `chat_id < 0`. `_private_gate` explicitly no-ops for `chat_id <
-0` ("group_guard's jurisdiction ‚Äî untouched here", per its own docstring), and
-`group_guard` only checks chat-level `GROUP_ALLOWED_CHATS` membership, never the
-sender's identity. Deleting the guard removed the ONLY per-user allowlist enforcement
-for group text messages, breaking `GROUP_CHAT_DESIGN.md` ¬ß6's documented invariant:
-"Human gating unchanged... strangers in an allowed group are ignored unless
-`ALLOWED_USERS` is empty." Caught by two independent `/code-review` finder agents
-(cross-file tracer + line-by-line diff scan) before merge; never reached main.
-
-**Fix:** restored `handle_message`'s `_is_allowed` check exactly where it was, with a
-comment distinguishing it from the other 20 (genuinely dead) sites so it isn't
-re-deleted by a future pass over the same class of finding. New
-`TestHandleMessageGroupGating` (2 tests) pins the invariant directly against
-`handle_message`, not just `_private_gate` ‚Äî the gap existed pre-diff too (no test
-anywhere exercised "a non-allowlisted user's text in an allowed group"), so this
-closes a real, previously-untested hole, not just a regression from this release.
-
-**Also reverted:** `schedule_cmd`'s reuse of the `_context_file_cmd` factory (also
-from v2026-08-07.1). Two more `/code-review` findings: the factory closure binds its
-`file` argument by value at the module-import call site, so
-`monkeypatch.setattr(bot, "SCHEDULE_FILE", ...)` silently has no effect ‚Äî confirmed
-against the existing `test_schedule_cmd_shows_the_schedule`, which was passing only
-because its assertion is loose enough not to notice; and turning `schedule_cmd` from
-a `FunctionDef` into a plain assignment drops it out of `sweep.py`'s AST-based
-handler-coverage scan, silently narrowing the delivery gate's future reach for this
-one handler. `schedule_cmd` is back to its original hand-rolled body (same one
-`people_cmd`/`projects_cmd` already accept this tradeoff for, pre-existing and out of
-scope here). This also moots a third, lower-severity finding (the factory's unchunked
-reply could raise on a near-4096-char replacement schedule) since the original body
-never had that shape.
-
-**Verification:** `bash .claude/tools/verify.sh` green: 1064/1064 tests (2 new:
-`TestHandleMessageGroupGating`), 38 evals, 45/45 gate-corpus, sweep 0 candidates.
-
-## v2026-08-07.1 ‚Äî Ponytail-audit cleanup: dead code, duplicated logic, redundant gating
-
-**Root cause: not a bug fix ‚Äî a requested code-simplification pass.** A subagent audit
-under this repo's new `ponytail` skill (lazy-senior-dev lens: unrequested abstractions,
-reinvented logic, dead code ‚Äî see `.claude/skills/ponytail/`) found 6 candidates in
-bot.py. Each was independently verified before fixing; two were rejected after closer
-inspection rather than forced through (see below).
-
-**What shipped:**
-- `schedule_cmd` now reuses the `_context_file_cmd` factory that already backs
-  `people_cmd`/`projects_cmd`, instead of hand-rolling the same view/replace/append
-  shape. (Minor, stated: the replace-confirmation message now echoes the new text,
-  matching people/projects, instead of a bare "Schedule updated.")
-- `stress_monitor_job`/`bb_monitor_job` now share `_run_health_alert_job` (cooldown
-  gate ‚Üí nudge gate ‚Üí off-loop fetch+threshold ‚Üí trigger ‚Üí persist), collapsing two
-  near-identical ~30-line jobs into one. `rhr_monitor_job` stays separate ‚Äî its
-  cooldown is once-per-calendar-day, not elapsed-hours, and it always records history
-  regardless of whether an alert fires, so it doesn't fit the shared shape without
-  bolting on cases the helper would only serve once.
-- Deleted 21 dead per-handler `if not _is_allowed(update.effective_user.id): return`
-  guards (news_cmd, addmem_cmd, handle_voice, handle_message, health_cmd, diag_cmd,
-  and 15 more). `_private_gate` (handler group -1, added specifically to replace this
-  exact per-handler pattern ‚Äî its own docstring names the drift bug it fixed) already
-  stops a disallowed caller before any of these ever runs; confirmed by grep that none
-  of the 21 were ever called outside Telegram dispatch. 4 tests that called these
-  handlers directly to assert the now-removed guard (in `TestNewsCommands`,
-  `TestDiagCmd`, `TestEpisodesCmd`, `TestDupefactsCmd`) were retired with a comment
-  pointing at `TestPrivateGate`, which already covers the gating contract at the one
-  real choke point ‚Äî deliberate widening, not a silent loosening.
-- `export_memory_cmd` and the menu button's `cmd:exportmemory` branch built the same
-  export text independently, ~25 duplicated lines each, with slightly different
-  section labels ("=== LONG-TERM ===" vs "=== LONG-TERM MEMORY ===", "Facts:" vs
-  "Recent facts:" for the recent-facts line). Now share `_memory_export_text`/
-  `_send_memory_export`; both paths use the command's original wording. New
-  `TestExportMemoryCmd` + `TestButtonCallbackExportMemory` ‚Äî `button_callback` had
-  zero test coverage before this.
-- `_wsdot_err_reason`/`_tomtom_err_reason` shared their exception-type fallback
-  (timeout / connection-DNS / exception-class-name) into
-  `_classify_fetch_error_by_type`. Each keeps its own HTTP-status-code handling,
-  which genuinely differs (WSDOT just reports the code; TomTom adds key-rejected /
-  rate-limited / body-detail messages) ‚Äî only the truly identical tail moved.
-
-**Rejected after closer inspection (surfaced, not forced):**
-- The audit flagged pin/boundary/joke/wardrobe/note add-list-remove-by-number as "the
-  same shape 5x." They aren't, underneath: per-chat dict-of-lists (pins, boundaries),
-  a flat list-of-dicts with a persistent id, not a list index (jokes), a flat dict
-  with extra metadata (wardrobe's current/auto/picked), and a flat text file (notes).
-  A shared helper would need more parameters/branches than the code it replaces ‚Äî
-  an unrequested abstraction, not a simplification.
-- The audit also flagged `button_callback`'s other menu branches (pinned/boundaries/
-  jokes/wardrobe/selfimage) as re-deriving what their `_cmd` counterparts compute.
-  Checked: the "duplication" there is a single one-line list comprehension per
-  branch, and the surrounding message text is deliberately shorter for the button UI
-  than the full command's ‚Äî not worth abstracting. Only `cmd:exportmemory` had real
-  (~25-line) duplicated logic, so only that one branch was touched.
-
-**Verification:** `bash .claude/tools/verify.sh` ‚Äî py_compile clean; pytest 1062/1062
-(4 obsolete tests retired, 5 new: `TestExportMemoryCmd` √ó2, `TestButtonCallbackExportMemory`,
-plus the 3 Garmin-source-inspection tests updated to check the composed source); eval
-suite green including `private-gate-registered`; gate-corpus green. `/code-review` run
-on the diff before merge.
-
-## v2026-08-06.1 ‚Äî Add xAI Grok Imagine as a third selfie provider
-
-**Root cause: not a bug fix ‚Äî a requested provider option.** `SELFIE_PROVIDER` already
-switched between "gemini" (Google's Gemini API directly) and "nanogpt" (NanoGPT's image
-endpoint); the owner asked to add xAI's Grok Imagine as a third choice, called directly
-rather than through NanoGPT's proxy.
-
-**What shipped:** `SELFIE_PROVIDER=xai` routes through a new `_generate_selfie_xai`,
-mirroring the shape of the existing Gemini/NanoGPT functions. It calls
-`XAI_IMAGE_URL/edits` when a reference photo is set (`_has_base_image()`, same face-lock
-path the other two providers use) and `XAI_IMAGE_URL/generations` otherwise, defaulting
-to `grok-imagine-image-quality`. `XAI_API_KEY`, `XAI_IMAGE_MODEL`, `XAI_IMAGE_URL` are new
-env vars (all optional except the key, required only when `SELFIE_PROVIDER=xai` ‚Äî same
-fail-fast-at-startup pattern the Gemini path already uses). `SELFIE_SIZE`'s "WxH" pixel
-string is converted to xAI's `aspect_ratio` ratio format via GCD reduction
-(`_xai_aspect_ratio`) rather than a hardcoded lookup table, since any per-instance
-`SELFIE_SIZE` value needs to carry over, not just the couple of sizes already in use.
-xAI's `b64_json` response field has been observed in the wild both as raw base64 and as a
-full `data:image/...;base64,...` URI (the two mirrors of xAI's own docs disagreed, and
-the docs page itself 403s to a plain fetch) ‚Äî decoding strips the `data:` prefix if
-present rather than assuming one shape.
-
-**Verification:** `TestXaiAspectRatio` (4 tests) + `TestGenerateSelfieXai` (6 tests,
-covering both endpoints, the b64_json/data-URI ambiguity, the URL-fallback path, and the
-neither-field error) + `_selfie_provider_label`/`gather_audit_data` cases extended for
-"xai" the same way the existing gemini/nanogpt cases work. `python3 -m py_compile bot.py`
-clean. `bash .claude/tools/verify.sh` ‚Äî see run output in the PR/session record.
-
-## v2026-08-04.7 ‚Äî Model-version guard + cap backported to the memory/lore embedding caches
-
-**Root cause: episodic recall's design was more careful than the caches it sits next
-to.** Comparing episodic recall's (v2026-08-04.6) archive design against the
-pre-existing `_embeddings_cache`/`_lore_embeddings` (memory/lore semantic recall,
-shipped independently on `main` 2026-07-06 ‚Äî a sibling design, not an ancestor of the
-episode code) surfaced a real, live gap: `_load_embeddings`/`_load_lore_embeddings`
-had no model-fingerprint check at all. Changing `EMBEDDING_MODEL` would silently mix
-vectors from different models into the same cosine comparison, producing meaningless
-similarity scores with no error ‚Äî external research on this exact failure mode
-(embedding cache invalidation) confirms it's a well-documented pitfall: degradation is
-gradual and distributional, not a single wrong answer, so it goes unnoticed for days.
-`_embeddings_cache` also had no cap: unlike memories.txt/facts (already bounded and
-consolidated), it keeps every distinct text ever embedded, including lines later
-replaced during consolidation ‚Äî genuinely unbounded growth over the bot's lifetime.
-
-**What shipped:** both caches now write a `.model` sidecar fingerprint file
-(`.embeddings.model`, `.lore_embeddings.model`) on save and check it on load, discarding
-and rebuilding from scratch on mismatch ‚Äî same pattern episodic recall already used for
-`.episodes.model`. `EMBEDDINGS_MAX` (default 5000) caps `_embeddings_cache`, trimming
-to the newest entries by insertion order on both load and save. No cap added to
-`_lore_embeddings`: lore entries are bounded by the character card's lorebook size, not
-organically growing at runtime the way conversational facts are, so a cap there would
-guard against nothing.
-
-**Web research done before writing any code** (per the owner's request, to check for
-better patterns before building): confirmed model-version fingerprinting as the
-critical, well-documented fix; confirmed a flat-JSON cache with a version sidecar is
-itself a legitimate lightweight pattern for a personal-scale system, not something to
-replace with heavier machinery (Redis/LRU libraries, vector DBs) that this system's
-scale doesn't call for. Nothing else in the research suggested a change beyond what
-episodic recall's own design had already demonstrated.
-
-**Verification:** `TestEmbeddingsCacheGuard` + `TestLoreEmbeddingsCacheGuard`
-(12 tests) ‚Äî round-trip, fingerprint discard on mismatch, fingerprint kept on match,
-cap trimming on both load and save, no-op when not dirty, no raw exception in the save
-log (structural check, matching the Garmin/WSDOT convention). Break-tested RED three
-ways (both model-mismatch guards disabled, the load-time cap removed). `bash
-.claude/tools/verify.sh` green: 1051 passed, 38 evals, 45/45 gate-corpus.
-
-## v2026-08-04.6 ‚Äî Episodic recall + on-this-day reminiscing, reimplemented from a deeper dependency chain
-
-**Root cause: the biggest thing on the lost branch, and not a simple port.**
-`9fa21af` (2026-06-29) built episodic recall; `a485b1b` (2026-06-30) built on-this-day
-reminiscing on top of it. Both are from `claude/push-to-repo-7i2f3c` and never merged.
-Unlike the four earlier ports this session, this one could not be a straight
-reimplementation: the abandoned branch's episodic recall was built on that branch's
-OWN embedding infrastructure (`EMBED_MODEL`, a batch `_embed()` call, a numpy-matrix
-vector cache) ‚Äî none of which exists on `main`. Current `main` has a completely
-different, simpler embedding subsystem (`EMBEDDING_MODEL`, single-text `_embed_text`,
-a flat `_embeddings_cache` dict, no numpy at all before this session). This is
-rewritten against `main`'s actual primitives, not ported.
-
-**What it does:** when conversation ages out of the verbatim window (`maintain_memory`
-scroll-off), the dropped turns are chunked (`EPISODE_CHUNK_MSGS`), embedded one at a
-time via the existing `_embed_text`, and archived to `.episodes.jsonl` ‚Äî a numpy
-matrix in RAM for fast cosine similarity (numpy is a real dependency as of
-v2026-08-04.4, no longer a reason to skip this). Each turn, `triggered_episode` reuses
-the query vector already computed for live semantic recall (zero extra per-turn embed
-cost) to pull back the single most relevant past exchange above `EPISODE_MIN_SIM`,
-time-gated by `EPISODE_MIN_AGE_HOURS` so the live window is never echoed back to
-itself. `EPISODE_MAX` caps the archive (~4000 chunks); a model change discards and
-rebuilds it, since cross-model vectors aren't comparable. `/episodes` shows the
-archive size.
-
-On top of that, `onthisday_job` runs once daily: if an archived episode's anniversary
-(~1mo/6mo/1yr ago, `ONTHISDAY_INTERVALS`) lands today, she reaches out unprompted to
-reminisce about it ("hey, remember when...") ‚Äî min-gap and per-episode dedup keep it
-feeling special, not chatty. `/diag` extended to report both toggles and the archive
-count, matching how the abandoned branch itself grew `/diag` incrementally as each
-feature landed.
-
-**Deliberately not ported in this pass:** the branch's two follow-on commits ‚Äî
-`1054506` (archiving sent photos as episodes) and `767aab6` (an optional cross-encoder
-reranker) ‚Äî are enhancements to this subsystem, not required for on-this-day
-reminiscing to work. Flagged as separate follow-ups rather than folded in, keeping
-this release to one theme.
-
-**Verification:** `TestEpisodesCore` + `TestTriggeredEpisode` + `TestOnThisDay` +
-`TestEpisodesCmd` + `TestMaintainMemoryArchivesOnScrollOff` +
-`TestAssembleMessagesEpisodicRecall` + `TestEpisodicConfig` (34 tests) ‚Äî archive
-round-trip, model-change discard, cap trimming, similarity floor, age-gating,
-anniversary-window matching (including "prefers the longer interval" and exclude-ts
-dedup), the `maintain_memory` scroll-off wiring (a real call through `maintain_memory`
-itself, not a source-read), and the new `/episodes` command driven directly. Break-
-tested RED five ways (similarity floor, age gate, anniversary window, scroll-off
-wiring, model-mismatch discard ‚Äî each removed, confirmed the matching test failed,
-reverted). Also fixed two things `verify.sh` caught that weren't part of the plan:
-an eval-pinned optional-block count needed bumping from 7 to 8 (a real new block, not
-a bug), and two hardcoded `pip install` strings needed to go through the existing
-`_pip_hint()` helper instead. `bash .claude/tools/verify.sh` green: 1039 passed, 38
-evals, 45/45 gate-corpus, sweep 0 candidates.
-
-## v2026-08-04.5 ‚Äî /diag: a compact behavior-toggle status command
-
-**Root cause: the fifth thing from the same lost branch, scoped down rather than
-straight-ported.** `71dfa44` (2026-06-29) added `/diag` bundled with log rotation and
-an RHR monitor. The RHR monitor already shipped separately (`RHR_ALERTS` exists on
-`main`). Log rotation was Termux-era (`run-bot.sh` size-check-and-`mv`) ‚Äî the fleet's
-been on systemd since 2026-07-26, and `errors.log` already rotates properly via
-Python's `RotatingFileHandler`, which is strictly better. `/diag`'s own design also
-doesn't fit as-is: its log-error tail duplicates the existing `/errors` command, and
-its flag list (`EPISODIC_RECALL`, `SCENE_CONTINUITY`, `EVENT_REMINDERS`,
-`READING_ENABLED`) names branch features not on `main`.
-
-**What shipped instead:** `/diag` as a compact status line for the toggles this
-session added ‚Äî semantic memory, safety, style mirror, offline life, voice tone,
-garmin/stress/RHR/body-battery ‚Äî a genuinely different axis from `/audit`'s
-`_FEATURES` dict (selfie/meme/gif/voice-backend/traffic/maps/health integrations),
-not a duplicate of it. `_is_allowed`-gated like the original, not admin-only.
-
-**Verification:** `TestDiagCmd` (4 tests) ‚Äî answers, reports the new toggles by name,
-gated for non-allowed users, and an explicit check that the log-error tail stays
-dropped. Break-tested RED two ways (the gate check removed, two toggle lines
-removed). `bash .claude/tools/verify.sh` green: 1009 passed, 38 evals, 45/45
-gate-corpus.
-
-## v2026-08-04.4 ‚Äî Voice-note acoustic tone analysis, reimplemented from the same abandoned branch
-
-**Root cause: a fourth feature from the same lost branch.** `bae2dcb` (2026-07-01,
-`claude/push-to-repo-7i2f3c`) vendored the offline half of `menelly/AI_Ears` (MIT) as
-`acoustic_ears.py` and it never merged either.
-
-**What it does:** `VOICE_TONE_ENABLED` runs a local FFT analysis on every voice note
-(pace, volume, pitch brightness, notable pauses) ‚Äî pure NumPy, no network call, no
-extra API key ‚Äî and folds a short note ("~140 wpm, dynamic volume, warm tone") alongside
-the transcript. `_analyze_voice_tone` kicks off concurrently with the existing NanoGPT
-transcription call in `handle_voice`, so it adds no serial latency; cancelled cleanly if
-transcription fails or comes back empty. `acoustic_ears.py` is vendored unmodified.
-
-**Two things beyond bot.py:** `numpy` added to `requirements.txt` as a real dependency
-(not commented-out-optional like `garminconnect` ‚Äî no risky native build, every instance
-handles voice messages). `deploy/vps-sync.sh` only copies explicitly-named files, not a
-directory sync, so `acoustic_ears.py` needed an explicit sync line next to `bot.py`'s ‚Äî
-without it the feature would have silently never reached any instance, same failure
-shape the abandoned branch's `update-all.sh` fix already worked around once.
-
-**Verification:** `TestAcousticEars` (vendored-module tests against a synthetic WAV:
-tone analysis, empty-audio error path, `describe_acoustic` formatting including wpm/
-pause counts) + `TestAnalyzeVoiceTone` (the bot.py wrapper: missing-output-file
-fail-safe, success path, ffmpeg-exception fail-safe) ‚Äî 10 tests. Break-tested RED three
-ways (the missing-wav-file check removed, `describe_acoustic`'s None-guard removed, the
-pause-count line removed). `bash .claude/tools/verify.sh` green: 1005 passed, 38 evals,
-45/45 gate-corpus.
-
-## v2026-08-04.3 ‚Äî Offline life events, reimplemented from the same abandoned branch
-
-**Root cause: a third feature from the same lost branch.** `b0eb485` (2026-06-29,
-`claude/push-to-repo-7i2f3c`, same branch as the safety detector and style mirroring)
-built offline life events and it never merged either.
-
-**What it does:** `LIFE_SIM_ENABLED` generates ONE concrete event in her own world a
-couple times a day (`LIFE_EVENT_TIMES`, default 13:00/20:30) ‚Äî grounded in her
-schedule/people/projects/life-arc, a cheap chat model call, no embeddings. Stored in
-`life_events.txt` (capped at `LIFE_EVENTS_MAX`), injected into `assemble_messages` as
-"What's been happening in NAME's life" and into `_generate_proactive_hook`'s context,
-so unprompted check-ins carry real news instead of generic small talk. `/news` shows
-recent events, `/newsnow` forces one. All helper functions (`_read_schedule_today`,
-`_read_people`, `_read_projects`, `_read_life_arc`) already existed on `main` ‚Äî
-this port reused them rather than rebuilding anything.
-
-**Verification:** `TestLifeEvents` + `TestAssembleMessagesLifeEvents` +
-`TestNewsCommands` (17 tests) ‚Äî file round-trip, cap enforcement, "none"-response
-filtering, broken-classifier fail-open, the on/off wiring into `assemble_messages`,
-and both new `*_cmd` handlers driven directly (matching the delivery gate's
-call-not-mention requirement). Break-tested RED three ways (cap enforcement removed,
-`assemble_messages` wiring removed, "none" filter removed). `bash
-.claude/tools/verify.sh` green: 995 passed, 38 evals, 45/45 gate-corpus.
-
-## v2026-08-04.2 ‚Äî Adaptive texting-style mirroring, reimplemented from the same abandoned branch
-
-**Root cause: another feature built once and lost.** `a485b1b` (2026-06-30, same
-`claude/push-to-repo-7i2f3c` branch as the safety detector) built `STYLE_MIRROR` and it
-never merged either. Found during a follow-up audit of that branch for other
-unreferenced work, prompted by the owner asking for the rest of what `ROADMAP.md` 3.10
-already flagged as unported.
-
-**What it does:** `_user_style_note` passively reads the user's last `STYLE_SAMPLE`
-messages (default 20, needs at least `STYLE_MIN_MSGS`=6) and nudges her register to
-subtly match ‚Äî message length, emoji use, lowercase habits, exclamation frequency,
-casual textspeak (lol/idk/rn/tbh). **Zero model calls** ‚Äî pure heuristics off the
-in-RAM `conversation_history`, so it adds no per-message LLM cost or latency at all
-(no rule-3 question here, unlike the safety detector). Bracket-tagged synthetic
-entries (`[sent ...]`, heartbeat messages) are excluded from the sample. Injected into
-`assemble_messages` right after the texting-style/preset-layer block. On by default,
-`STYLE_MIRROR=0` disables.
-
-**Verification:** `TestUserStyleNote` (11 tests) ‚Äî each trait heuristic (short/long,
-emoji high/low, lowercase, textspeak), too-few-messages silence, bracket-tag exclusion,
-the on/off wiring into `assemble_messages`. Break-tested RED two ways (the disabled
-early-return skipped, the `assemble_messages` wiring removed). `bash
-.claude/tools/verify.sh` green: 978 passed, 38 evals, 45/45 gate-corpus.
-
-## v2026-08-04.1 ‚Äî Safety: distress detection, reimplemented after being built once and never merged
-
-**Root cause: this feature already existed, once.** `d141e84` ("Add safety: detect
-genuine distress and respond with care", 2026-06-29) built `_assess_safety` and shipped
-it on `claude/push-to-repo-7i2f3c` ‚Äî but that branch diverged from `main` on 2026-06-24
-and was never merged. `main` is 509 commits past that divergence point with no trace of
-it. Not removed after shipping ‚Äî built once, on a branch that got abandoned in favor of
-continued work directly on `main`, and the feature never made the jump. Found via an
-external-improvement-ideas scan that proposed disclosure/dependency safeguards; the
-owner recognized the idea and asked to confirm it wasn't already live. It wasn't.
-
-**Fix:** `_assess_safety` (cheap off-loop classifier, no character/history context) and
-`_safety_prompt` reimplemented against current `bot.py`. `SAFETY_ENABLED` (default on),
-`SAFETY_MODEL`, `SAFETY_RESOURCES` (988 Suicide & Crisis Lifeline by default).
-`assemble_messages`/`assemble_messages_async` gained a `distress` param: when true, the
-performative inner-voice block is skipped and `_safety_prompt` is appended last (highest
-salience), same as the original design. Wired into `handle_message`'s existing
-`parallel` concurrency list alongside inner voice and link fetch, so it costs no serial
-latency. Deliberately independent of `INNER_VOICE_ENABLED` (default off) ‚Äî a safety net
-must not be silently inert because an unrelated cosmetic feature is off. Scope matches
-what the abandoned branch actually shipped: `handle_message` (private text) only, not
-group/voice/photo paths ‚Äî those never had it either.
-
-**bot-code-invariants rule 3 exception (owner-approved 2026-08-04, in the same
-session):** this adds a genuine new per-message LLM side call, which rule 3 bars.
-Approved because it is not the "small cheap call" the rule's common-mistake note warns
-against ‚Äî no character/history context, so it doesn't re-pay the ~17k-token prompt
-rule 3's cost argument is about. Folding it into `post_reply_analysis` (the sanctioned
-extension point) was considered and rejected: that call fires after the reply is
-already sent, so distress on THIS message could only change the NEXT reply ‚Äî one
-message late is a real degradation for a safety feature. Documented as a second
-carve-out in `bot-code-invariants` rule 3, next to the existing `MEMORY_SEMANTIC_LIVE`
-one, so a future session doesn't flag it as a violation.
-
-**Verification:** `TestSafetyClassifier` + `TestAssembleMessagesDistress` (10 tests) ‚Äî
-classifier yes/no parsing, fail-open on a broken classifier, no raw exception in the
-safety log (structural check, matching the Garmin/WSDOT convention), distress
-suppresses inner voice and appends the safety prompt last, no distress by default. All
-break-tested RED (three separate injections: classifier forced False, the
-inner-voice-suppression gate removed, the safety-prompt append removed ‚Äî each
-confirmed the matching test failed, then reverted). `bash .claude/tools/verify.sh`
-green: 967 passed, 38 evals, 45/45 gate-corpus, sweep 0 candidates.
-
-## 2026-08-04 ‚Äî The second source-assertion backlog: 7 helpers with zero real test coverage (no bot.py change, no version bump)
-
-**Root cause:** `sweep.py`'s widened `_handler_coverage()` (2026-08-03) flagged
-`save_feature_prefs`, `save_state`, `save_wardrobe`, `send_gif`, `send_meme`,
-`send_selfie`, and `update_garmin` as mentioned-but-never-called by any test ‚Äî
-`test_the_backlog_stays_empty` had been red on `main`, and CI failing on every push,
-since that scan landed. Three of the seven (`save_state`, `save_wardrobe`,
-`save_feature_prefs`) were deliberately monkeypatched to a no-op in every `*_cmd` test
-that calls them, for filesystem isolation ‚Äî leaving their real write path itself with
-zero coverage. The other four had only `inspect.getsource` structural checks, never a
-real call ‚Äî `send_selfie`, the function at the center of the entire multi-release
-face-drift investigation, had never once actually been invoked by a test.
-
-**Fix:** `TestTheSecondBacklogDriven` in `tests/test_pure.py` drives each of the 7
-directly, with fakes for its I/O (a fake Telegram `bot.*` object, monkeypatched
-Giphy/selfie-image/Garmin calls, `tmp_path`-redirected persistence files). No bot.py
-change ‚Äî this closes a test gap, not a behavior bug; none of the 7 turned out to hide
-an actual defect.
-
-**Verification:** each of the 7 break-tested RED one at a time (an injected early
-`return`, confirmed the matching new test failed, then reverted before the next).
-`bash .claude/tools/verify.sh` green: 957 passed, 38 evals, 45/45 gate-corpus, sweep 0
-candidates.
-
-## v2026-08-03.6 ‚Äî /audit said "gemini" and stopped there
-
-**Root cause: only the NanoGPT branch named its model.** `selfie_provider` rendered
-`nanogpt (flux-kontext)` but plain `gemini` ‚Äî and `GEMINI_IMAGE_MODEL` is per-instance,
-changes with an `.env` edit and a restart rather than a deploy, and is exactly the field you
-check after changing it. With the fleet about to move to `gemini-3-pro-image-preview`, the
-one value worth verifying was the one value not reported.
-
-`_selfie_provider_label()` now renders
-`gemini (gemini-3-pro-image-preview, modalities TEXT+IMAGE)` and keeps
-`nanogpt (flux-kontext)` unchanged. Both `/audit` and the `=== STARTUP AUDIT ===` line call
-it ‚Äî the same function, because those two surfaces disagreed once already (v2026-08-02.1,
-where the startup line had the selfie base and `/audit` did not). The startup line gains a
-`Selfie model:` field it never had.
-
-**Third instance of one class in a single session**, and worth naming as such: the selfie
-prompt had no surface (fixed by `tools/selfie_prompt_preview.py`), the reference photo had no
-surface (still open ‚Äî `/audit` names the file, never what is in it), and the image model had
-no surface. Each was found only when someone needed to check it and could not. The standing
-question for this subsystem is not "does it work" but "can the owner see what it is using".
-
-**One pre-existing test rewritten, not loosened.**
-`test_nanogpt_reports_the_model_too` read `gather_audit_data`'s *source* for the strings
-`SELFIE_MODEL` and `nanogpt`, so it went red the moment that logic moved into the shared
-helper ‚Äî while the behavior it is named for was still correct. Rather than repoint the grep
-at the new function, it now calls `gather_audit_data()` and asserts the rendered value is
-`nanogpt (flux-kontext)`. A source assertion cannot fail for the reason the test exists; that
-is the family that shipped the `/features` `ValueError` past twelve green tests
-(v2026-08-02.4). Break-tested RED against a stubbed-out NanoGPT branch.
-
-**Verification:** `.claude/tools/verify.sh` green. 3 new tests plus one rewritten, all four
-break-tested RED one injection at a time.
-
-## v2026-08-03.5 ‚Äî The selfie model was tunable; what the model demands was not
-
-**Root cause: `GEMINI_IMAGE_MODEL` has been an env var since the Gemini backend landed, but
-`responseModalities` was hardcoded to `["IMAGE"]` in the payload.** `gemini-3-pro-image-preview`
-requires `["TEXT", "IMAGE"]` and rejects IMAGE alone, so "switch the selfie model in .env" ‚Äî
-which every doc implied was a one-line change ‚Äî could not work for the model most worth
-switching to. Asked how to move to Pro, the honest answer was that the knob was only half
-there.
-
-**Fix:** `GEMINI_RESPONSE_MODALITIES`, comma-separated, default `IMAGE` (unchanged behavior).
-`_parse_modalities` normalizes case and whitespace, because `.env` values are hand-typed and
-` text , image ` must not become a 400, and it never returns an empty list ‚Äî an empty
-`responseModalities` is itself a 400.
-
-**Deliberately not sniffed from the model name.** A model string is not a capability, and the
-next image model will not be named after either of the two we know about. `.env.example`
-carries both working pairs instead.
-
-**A text-only answer now says what it said.** With TEXT enabled a refusal comes back as prose
-explaining why, and the parts loop discarded it ‚Äî leaving `no image data`, which is the least
-informative thing the response contained. Non-refusal text alongside an image is still
-ignored; the image wins.
-
-**Two operational facts found while checking the model IDs, both dated 2026-08-03 and both
-worth re-verifying before acting on:**
-- **`gemini-2.5-flash-image` is scheduled to shut down 2026-10-02.** That is the fleet default
-  and what all seven instances run. When it goes, every instance loses selfies at once. This
-  is a deadline, not a preference, and it is bigger than the reason it was found.
-- Pro costs ~$0.134 per 1K/2K image against ~$0.039 for the current flash model ‚Äî roughly
-  3.4x. A `gemini-3.1-flash-image-preview` sits between them at ~$0.067.
-
-**Verification:** `.claude/tools/verify.sh` green. 7 new tests, four assertions break-tested
-RED one injection at a time.
-
-## v2026-08-03.4 ‚Äî A one-second Gemini outage was a failed selfie
-
-**Root cause: `requests` does not raise on a 5xx, and the image retry loop only caught
-transport exceptions.** A 503 came back as an ordinary response object, went straight past
-`except (ConnectionError, Timeout)`, was returned to the caller, and became an error one
-frame later at `raise_for_status()` ‚Äî where nothing retried it. Owner-reported live:
-
-    üì∑ Couldn't make that one: 503 Server Error: Service Unavailable for url:
-    https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent
-
-Gemini's image endpoint returns 503 under load and 429 when rate-limited, and both clear on
-their own within seconds. The retry loop had been in place since the Termux days and read as
-though it covered this; it never did. Same family as v2026-07-26's finding that
-`requests` does not raise on 4xx/5xx, in the one place that lesson had not been applied.
-
-**Fix:**
-- `_image_request_with_retries` ‚Äî one loop for both verbs, retrying transport failures **and**
-  `_IMAGE_RETRY_STATUSES` (429, 500, 502, 503, 504). `_post_with_retries` and
-  `_get_with_retries` are now thin wrappers, so the NanoGPT URL fetch gets the same treatment
-  as the generate call rather than a copy that would drift.
-- **A 4xx that is not 429 is never retried.** A bad prompt or a bad key is ours; retrying only
-  delays the real error by six seconds.
-- `Retry-After` is honored when the server sends a usable one, **capped at 10s** so an absurd
-  or hostile header cannot stall the handler; otherwise the original 2s/4s ramp.
-- The final response is **returned, not raised**, even when it is still a retryable status ‚Äî
-  the caller's `raise_for_status()` stays the single place an HTTP failure becomes an
-  exception.
-- `_media_error_text` gives a transient outage plain words instead of a status line and a
-  URL: *"The image service is busy right now (HTTP 503) ‚Äî I tried 3 times. Ask me again in a
-  minute."* Anything without a recognised transient status keeps the raw text, because an
-  unfamiliar error is exactly when the details matter. Same split as v2026-08-02.9's
-  missing-asset vs switched-off, one layer out.
-
-Kill switch `IMAGE_RETRY_TRANSIENT=0` restores transport-only retries. Runs inside the
-existing `asyncio.to_thread` hop, so the added sleeps do not touch the event loop.
-
-**Verification:** `.claude/tools/verify.sh` green. 10 new tests; five assertions break-tested
-RED one injection at a time, including one that widens `_IMAGE_RETRY_STATUSES` to include 400
-and proves the not-retried test would catch it.
-
-## v2026-08-03.3 ‚Äî The prompt told the model to change her face
-
-**Root cause: `Her mood right now: {mood} ‚Äî let it read in her face.` is the only
-instruction in the entire selfie prompt that tells the model to modify her face, and it sits
-~1500 characters ahead of every rule that says copy it exactly.** It is gated on
-`chat_id is not None`, which production always satisfies, so it has been in every live
-selfie ‚Äî and in none of the 22 A/B images v2026-08-03.2 was judged on, because the preview
-tool passed `chat_id=None`. The owner noticed the gap from the other end: *"the selfies
-seemed better in the test than the actual ones."* The mood line and the scene-dedup block
-are the two things the test prompt was missing.
-
-This is the same shape as the rest of v2026-08-03.2 ‚Äî a contradiction hands an edit model
-latitude ‚Äî except this one is not implicit. `_SELFIE_PRESERVE_RULE` says copy her face out
-of the reference; the mood line says make her face show wistfulness. Both cannot hold.
-
-**Fix:** when a reference photo is attached, the mood reaches the image through the
-expression already drawn above it and through posture, which is where a mood shows in a
-photograph anyway:
-
-    Her mood right now: {mood} ‚Äî let it colour that expression and how she's holding herself.
-
-The mood itself is untouched; the fix is the verb, not the feature, and a test pins that the
-value still reaches the prompt. **Text-only instances keep the old wording** ‚Äî with no
-reference photo there is no preserved face for it to contradict. Reuses the
-`SELFIE_FACE_LOCK` kill switch rather than adding a second one: it is the same feature
-(stop the prompt inviting face edits), and `SELFIE_FACE_LOCK=0` now restores the whole
-v2026-08-03.1 prompt including this line.
-
-**Sequencing, stated plainly:** the reference photo is still the bigger lever. Emily's is a
-full-body beach shot with her face at ~8% of frame height (see v2026-08-03.2 above), and no
-prompt wording recovers identity from ~100px of face. This change is justified on internal
-consistency alone ‚Äî an instruction to alter the face contradicts four appended rules to
-preserve it ‚Äî but if the reference is swapped and this deploys together, neither will be
-attributable. Swap the photo first, watch a few selfies, then deploy.
-
-**Verification:** `.claude/tools/verify.sh` green. 4 new tests, all four break-tested RED one
-injection at a time.
-
-## v2026-08-03.2 ‚Äî Emily's selfie was a better-looking stranger with no glasses
-
-**Root cause: the prompt asked the model to keep her face without ever saying what a face
-is made of, and handed it a written description of her in the same breath as the photo.**
-Owner-reported with a before/after pair: the reference is a freckled woman in oversized
-round glasses; the selfie came back with different bone structure, no freckles and no
-glasses ‚Äî recognisably a different, more conventionally attractive person with the right
-hair colour. The reference photo was attached and correct, so this is none of the earlier
-causes (v2026-08-01.10's missing photo, v2026-08-02.2's rejected mime type,
-v2026-08-02.5's weaker `flux-kontext` ‚Äî Emily is on Gemini).
-
-Two shapes in the prompt, both of which survived v2026-08-01.9:
-
-**1. `SELFIE_APPEARANCE` sat INSIDE the identity sentence.** `bits[0]` ended
-`"...just in a new pose/setting. She's {NAME}, {SELFIE_APPEARANCE}"`, so one sentence gave
-the model a face to copy *and* a written spec ‚Äî "auburn waves, hazel eyes, oversized round
-glasses" ‚Äî that it can satisfy with a face it invents. Every one of these is a full
-re-render (pose, framing, setting and clothes all change), and on a re-render synthesising
-from the words is the cheaper path than copying from the pixels. The paragraph's later
-clauses go first, which is exactly where Emily's glasses are.
-
-This is **not** a reversal of v2026-08-01.9, which added `appearance.txt` files precisely
-so a face had a verbal anchor and not only a photo pointer. The words stay. What changed is
-their rank: they are now introduced as *"Who she is, as context only ‚Äî the photo outranks
-every word of it, and her face is never drawn from this text"*, ahead of the scene block
-rather than fused into the identity claim.
-
-**2. "Keep her face identical" never said which parts of a face.** Nothing in the prompt
-contradicted a plausible, better-boned woman with the right hair. `_SELFIE_PRESERVE_RULE`
-now enumerates what gets copied ‚Äî face shape and bone structure, eyes, nose, mouth, brows,
-skin tone and skin marks, hairline, hair colour and texture, apparent age ‚Äî and names the
-failure directly: *"an ordinary face that matches the reference is right, and a
-better-looking one that does not is wrong."* Image models regress faces toward an
-attractive mean unless told not to.
-
-**Eyewear is stated both ways, never asserted** (*"if she is wearing glasses there she is
-wearing those same glasses here; if she is wearing none, add none"*). Asserting glasses in
-a rule shared by all seven instances is the character-bleed trap of v2026-08-01.8's courier
-jacket and .9's hardcoded freckles, one release later; a test pins it.
-
-**Fix:**
-- `_SELFIE_PRESERVE_RULE` and `_SELFIE_FACE_CLARITY_RULE`, appended next to
-  `_SELFIE_IDENTITY_TAIL` ‚Äî nearest the output is where an edit instruction lands hardest
-  (v2026-08-01.9's finding). The tail keeps the last word; it is the shortest statement of
-  the same constraint.
-- `_SELFIE_CHANGE_SCOPE` ("Everything that follows changes the pose, the setting, her
-  clothes and the camera. None of it changes her.") before the scene block, so ~1000 characters of
-  pose/weather/camera read as an edit spec instead of a description of a photo to produce.
-- `"New shot:"` ‚Üí `"Framing:"` on the edit branch. "New shot" is a generate cue in the one
-  place the model must not generate.
-- The clarity rule is deliberately compatible with every framing in the pools. "Her face is
-  large in frame" would contradict the half-in-frame and wider draws, and a prompt that
-  contradicts itself hands back the latitude this removes ‚Äî a test pins that too.
-- All of it is gated on `_has_base_image()`. "Copy her face out of the reference photo"
-  with no photo attached is an instruction to copy nothing.
-
-Kill switch `SELFIE_FACE_LOCK=0` restores the v2026-08-03.1 prompt. Separate from
-`SELFIE_IDENTITY_GUARD` on purpose: that one also owns the de-stacking and the tail, both
-of which should survive turning this off. Prompt assembly only, no new LLM calls.
-
-**The cost, stated plainly:** the prompt grows 1785 ‚Üí 2734 characters for Emily, +53%.
-More text is itself a dilution risk, and the honest position is that this trades a general
-dilution for a specific, named constraint. It is worth A/B-ing before it is believed.
-
-**New: `tools/selfie_prompt_preview.py`.** Every face-drift release so far has been argued
-from generated images and inference, because nothing could show the prompt itself.
-`python3 tools/selfie_prompt_preview.py emily --diff` renders what an instance would send,
-with the face lock off and on, ready to paste into Gemini with the reference photo. Repo-only
-‚Äî `vps-sync.sh` does not copy `tools/`. It reads the *committed* seed files, so where a live
-instance has diverged the live instance is authoritative (v2026-08-01.10).
-
-**One test widened, with the reason:** `test_shared_prompt_hardcodes_no_character_specific_feature`
-scanned `build_selfie_prompt`'s source only, so a character trait living in one of the
-appended `_SELFIE_*_RULE` constants escaped it ‚Äî and this release adds two more of those.
-It now scans their values alongside the function source. Break-tested by putting "freckles"
-into `_SELFIE_PRESERVE_RULE`: RED.
-
-**Not proven when shipped:** the mechanisms are real and the before/after prompts are
-readable, but no image had been generated from either ‚Äî this container has no
-`GEMINI_API_KEY`. Same caveat v2026-08-01.9 carried, and the preview tool exists so the next
-person does not have to guess.
-
-**A/B result, 2026-08-03 (owner-run, 4 seeds √ó off/on, Gemini + Emily's reference photo).**
-The face lock is closer to the reference in 3 pairs of 4 and worse in 1 ‚Äî a real signal, not
-a settled one. Where it wins it wins in the predicted direction: fuller cheeks, a softer jaw,
-and freckles at the reference's density and distribution instead of a smoother, narrower,
-more conventionally attractive face. The loss (seed 2, `a mirror selfie` + `shot from just
-slightly too close up`) produced a longer, more angular face with the freckles nearly gone,
-so no structural story separates it from the wins ‚Äî that pair drew a soft framing, and so did
-a pair the lock won.
-
-**What the A/B did NOT test, and this is the important part.** Seeds 0‚Äì3 drew
-`a bathroom mirror selfie`, `a selfie with her face half-cut-off the frame`, `a mirror
-selfie` and `a selfie with her face half-cut-off the frame` ‚Äî every one a close or
-partial-face shot. The reported failure was a **wide** shot with the room behind her and the
-face small in frame, and none of the four seeds drew a wide framing at all. Both arms kept
-her glasses in all 8 images, so **the original bug did not reproduce in either arm** ‚Äî this
-test measured the lock's effect on draws that were not failing, not its effect on the draw
-that was. Contiguous seeds sample the pools evenly, which is the wrong sample when hunting
-one draw; `--seeds 4,16,22,26,44` covers the five wide framings, one seed each.
-
-**Round 2 (owner-run, the five wide framings, off/on) ‚Äî the win does not survive it.** The
-lock is clearly closer on 2 pairs (seeds 22 and 44), clearly worse on 1 (seed 4), roughly
-level on 2. Seed 44 is the most informative: it is the wide-with-the-room-behind-her draw
-that most resembles the report, and the unlocked arm came back near-freckleless and
-smoothed ‚Äî the exact regression `_SELFIE_PRESERVE_RULE` names ‚Äî while the locked arm kept
-freckles at the reference's density. Combined across both rounds the lock leads roughly 5‚Äì3
-with 1 level over 9 pairs. That is a mild preference, not a fix, and it should be described
-that way.
-
-**The wide framings never rendered.** Seed 16 asked for `a low-angle selfie from below` and
-came back at eye level; seed 22 asked for `a high-angle selfie looking up at the camera` and
-came back at eye level; seed 26 asked for `a selfie held up high looking down` and came back
-as a third-person kitchen shot with both her hands occupied (the anatomy rule did not hold
-either); seed 44 asked for `a wider selfie with the room visible behind her` and came back
-outdoors at the Capitol. **Gemini is largely ignoring `Framing:`.** So round 2 did not test
-what it was built to test ‚Äî the framing pool was selected on the prompt's text, and the text
-is not what the model drew. Second-order C8, one layer under the first: the sample was
-chosen by a directive the model does not obey.
-
-**Where this points instead.** If framing directives do not render, the "face small in frame"
-condition in the reported image did not come from a random framing draw. That image showed a
-specific narrative moment ‚Äî polaroids spread over the floor ‚Äî which is the shape of a
-`[selfie: ‚Ä¶]` hint written by the model mid-conversation, not of anything in `SELFIE_FRAMINGS`.
-A hint replaces the atlas scene and lands in `Background/setting:`, and it can be far more
-elaborate than any pooled draw. **Reproducing with `--hint` is the next test, and nothing
-before it has actually reproduced the bug.**
-
-**Found while building that test, not fixed here:** `_daypart()` is appended after the hint,
-so a `[selfie: ‚Ä¶ at dusk]` produces `Background/setting: ‚Ä¶ showing dusk, Olympia, WA, in the
-morning.` A user- or model-pinned time of day is silently contradicted by the clock ‚Äî the
-same contradiction-equals-latitude shape this release is about, in a different clause.
-`--location` was added to the preview tool in the same pass: the fake instance has no
-`WEATHER_LOCATION`, so every previewed prompt said "Seattle", which is wrong for all seven
-instances and was landing in the pasted text.
-
-**Round 3 (owner-run, the reported scene via `--hint`, off/on, 2 seeds) ‚Äî clean again, and
-the tool was the reason.** The hint reproduced the scene faithfully: cross-legged on the
-floor, polaroids spread around her, window behind. All four images kept her glasses,
-freckles and hair colour, and the locked arm on seed 44 is the closest match to the
-reference of the 22 images generated so far ‚Äî hair up in the reference's own messy curly
-style. **The bug has now failed to reproduce 22 times out of 22.**
-
-**Root cause of the non-reproduction: `selfie_prompt_preview.py` was not previewing
-production.** It called `build_selfie_prompt(hint, None)`, and `chat_id is None` gates off
-two blocks that every live selfie carries:
-
-1. `Her mood right now: {_mood_vibe(chat_id)} ‚Äî let it read in her face.` ‚Äî an explicit
-   instruction to make her face reflect something, sitting immediately after `Expression:`
-   and ~1500 characters before the identity tail. Nothing else in the prompt tells the model
-   to change her face.
-2. The scene-dedup list, which names other setups ‚Äî the block v2026-08-01.9 already
-   identified as the one appended text that could pull the image away from the reference,
-   and deliberately put the identity tail after.
-
-Three rounds of A/B therefore compared two variants of a prompt **no instance has ever
-sent**, and the one instruction in the live prompt that targets her face was absent from all
-22 images. This is the third C8 recurrence in the same investigation and the worst of them:
-the first two picked the wrong sample, this one used the wrong prompt.
-
-`--mood` and `--recent` render the production shape; `--mood ""` restores the old
-`chat_id=None` behavior and the header now says so explicitly. The live prompt is 1905/2861
-characters, not 1721/2677.
-
-**Not yet tested:** whether the mood line is a drift lever. It is a plausible mechanism, not
-a demonstrated one ‚Äî no image has been generated with it present. Round 4 is that A/B; do
-not treat it as diagnosed before it runs.
-
-### The reference photo is a full-body beach shot, and the "baseline" was never the reference
-
-Asked for `emily_base.png` itself, the owner sent a file that is **a standing full-body
-photo on a beach** ‚Äî sea and sand behind her, half-up curly hair, round glasses, crop top
-and denim shorts. Her face occupies roughly **8% of the frame height**, on the order of a
-hundred pixels tall.
-
-That is very likely the whole story, and it makes every earlier diagnosis secondary:
-
-- **An edit model cannot copy a face it cannot see.** Given a reference with ~100px of face,
-  there is almost no identity information to carry into a close phone selfie, so the model
-  synthesises one. Glasses survive because they are large and high-contrast; bone structure,
-  freckle pattern and jawline do not. That matches every symptom in the original report
-  exactly, and it explains the intermittency the prompt-side theories never did.
-- **The transformation distance is enormous.** Every prompt asks for a close, indoor,
-  handheld phone selfie; the reference is a standing full-body outdoor shot in summer
-  clothes. Pose, distance, lens, lighting and wardrobe all change at once.
-- **The 22 A/B images were scored against the wrong image.** The grey-hoodie portrait the
-  owner has been sending as "the baseline" is itself a *generated selfie* ‚Äî it carries the
-  same Gemini watermark as the outputs. So the comparisons measured drift from one
-  generation to another, not from the reference. Every "closer to baseline" verdict in the
-  three rounds above is weaker than it reads.
-
-**Fix is content, not code:** replace the reference with a close, front-facing portrait crop
-where the face fills much of the frame ‚Äî `/setbase` sent as a **file**, not a photo, so
-Telegram does not recompress it (v2026-08-02.3). The grey-hoodie image is, ironically, a far
-better reference than the actual reference.
-
-**Not established, and it needs one command.** The uploaded copy hashes
-`026711a0‚Ä¶` against the VPS's `27ff3293‚Ä¶`, and arrives with JPEG magic bytes (`ff d8 ff e0`)
-under a `.png` name while the VPS file has genuine PNG magic (`89 50 4e 47`) ‚Äî consistent
-with the upload path transcoding it, but that is an inference, and a hash of a re-encoded
-copy settles nothing. `sha256sum` on the owner's local file, compared against `27ff3293‚Ä¶`,
-is what confirms this beach photo is the one the fleet sends.
-
-**The observability gap this exposes is the same one twice.** Nothing in the system ever
-showed anyone what the reference photo *is*. `/audit` reports the filename and provider ‚Äî
-enough to prove a file is in play, never enough to see that the face in it is unusably
-small. Two releases were spent tuning prompt text against an image nobody had looked at.
-
-**Follow-up, not in this diff:** Emily's `appearance.txt` ends with *"Dresses in layered
-muted greens and greys ‚Äî oversized sweaters, soft and worn-in"*, and the prompt separately
-appends `"Wearing {outfit}."` ‚Äî two clothing instructions in one prompt, which is the
-contradiction-equals-latitude problem in the content layer. Appearance files should describe
-a body and a face, not a wardrobe; the wardrobe rotation owns clothes. Left alone here
-because the repo seed and the live instance can differ and the live one is authoritative.
-
-**Verification:** see the report ‚Äî `.claude/tools/verify.sh`, 8 new tests, five assertions
-break-tested RED one injection at a time.
-
-## v2026-08-03.1 ‚Äî Priya sent her whole deliberation as the reply, in four messages
-
-**Root cause: a thinking model can emit its ENTIRE chain-of-thought as ordinary
-`content`, and every existing chain-of-thought guard keys on a signature that variant
-doesn't have.** On 2026-08-03 priya (`zai-org/glm-5.1:thinking`) answered a quiet
-in-scene message with ~12k chars of her own deliberation ‚Äî "Let me work through this
-step by step: 1. How does Priya feel about what Brian just said?... Let me draft...
-Option 1:..." ‚Äî reasoning openly about her format contract, scene mode, and drafted
-replies, with the real reply buried at the end. It reached Telegram as four chunked
-messages (`send_bubbles` splits at 4096 chars and nothing upstream objected).
-
-This is the third variant of the chain-of-thought leak class, and each earlier guard
-checks for exactly one signature:
-- v2026-07-20.1 blocks `reasoning_content` delivered when `content` is **empty** ‚Äî
-  here `content` was non-empty, so that path never fired (`/errors` showed no
-  `[model] ‚Ä¶ reasoning but no content` warning, which is what confirmed the variant).
-- `_strip_thinking` removes `<think>‚Ä¶</think>` ‚Äî there were no tags.
-- v2026-07-29.1's `_strip_directive_lines` drops ALL-CAPS bracket lines ‚Äî the leak
-  was plain prose.
-
-**Fix: refuse and re-roll, never salvage.** New `_looks_like_reasoning_leak(text,
-name)` detects a reasoning-shaped completion by a conjunction of independent signals ‚Äî
-length ‚â• 2000 chars (far above any real texting-register reply; a reply needing
-Telegram chunking at all is already abnormal) AND ‚â• 3 distinct meta-reasoning marker
-categories ("the user", "let me draft/work through/‚Ä¶", "in/out of character", prompt
-vocabulary like "format contract"/"scene mode", "option N", ‚â•3 numbered analysis
-lines, and the character's **first** name ‚â•3 times ‚Äî a first-person persona almost
-never writes its own name; leaked deliberation is saturated with it. First token
-because the card `name` field is the full name ‚Äî "Emily Harper", "Bonnie
-(Libertarian)" ‚Äî and deliberation writes "Emily", never "Emily Harper"; the
-pre-review draft matched the full string, which left this category inert on five of
-seven instances). Both floors are env-tunable (`REASONING_LEAK_MIN_CHARS`,
-`REASONING_LEAK_MIN_MARKERS`) so a production misfire is fixed by raising a floor,
-not by turning the guard off. A tripped completion is treated exactly like an empty
-one in `call_nanogpt`: retry with backoff, then fall through to the non-thinking
-`FALLBACK_MODEL` where one is configured ‚Äî the main chat path passes it; the
-selfie/meme caption helpers have none and degrade to no caption, as they already did
-for empty completions. The tempting alternative ‚Äî extracting the real reply from the
-tail of the leak ‚Äî is deliberately rejected: there is no reliable boundary between
-deliberation and answer, and a wrong guess ships a fragment of monologue as her.
-
-**What is deliberately NOT a marker.** Adversarial review of the first draft proved
-"let me think", "overthinking this", and "going back and forth" are ordinary texting
-vocabulary on this fleet ‚Äî a long in-character reply weighing life options tripped
-the draft detector on phrasing alone. Those were removed; the shipped marker list is
-vocabulary about *the reply as an artifact*, not deliberation-flavored chat.
-
-**Scope: persona replies only.** `call_nanogpt` grew a `leak_guard` flag (default
-off) that `generate_reply` and `reply_with_typing` pass through (default on), so the
-persona reply sites and caption helpers are guarded while analysis/summary/extraction
-JSON callers are structurally outside (same isolation the directive-leak guard
-keeps). Two deliberate exemptions: the three `DOCUMENT_MODEL` sites in the document
-handlers pass `leak_guard=False`, because the card-review branch *asks* for a long
-critique that discusses prompts and characters ‚Äî review showed a normal card review
-trips every marker the guard looks for, and with no fallback model the trip would
-surface as "‚ùå something broke" ‚Äî and `recap_cmd`, which is owner-invoked and
-legitimately long, third-person, and name-heavy.
-
-Every refusal logs `[reasoning-leak]` at WARNING with the model, length, and head of
-the rejected text, and counts under its own `reasoning_leak` key in `/errors` (not
-just the shared `api` count, so "guard fired" is distinguishable from "API flaked") ‚Äî
-stripping silently would turn a visible model fault into an undiagnosable one, and if
-glm-5.1:thinking does this weekly, that counter is how the model-choice conversation
-starts. Rejected completions still feed `_track_llm_usage`, so a 12k-char burned
-thinking budget shows up in `/audit`'s token figures instead of vanishing. Kill
-switch `REASONING_LEAK_GUARD=0` (default ON, owner policy 2026-07-18). Pinned by
-`TestReasoningLeakGuard` (15 tests; the real leaked transcript is the fixture, and
-the false-positive shapes review found are must-pass fixtures) and the
-`reasoning-leak-guard` eval.
-
-## v2026-08-02.15 ‚Äî /features told you less about features than /audit did
-
-**Root cause: the detail suffix was written into `_features_summary()` ‚Äî the `/audit`
-line ‚Äî and never into the listing.** `/features` showed `voice: on`; `/audit` showed
-`voice=on(inworld)`. So the command *dedicated* to features answered less about them than
-the general audit line, and the question v2026-08-02.10 added those suffixes to answer ‚Äî
-which TTS backend is actually live, since NanoGPT TTS works without Inworld and the
-capability probe can only ever return `True` ‚Äî was reachable only from the other command.
-
-The listing now carries the same three details: the voice backend, the GIF safety level,
-and the selfie provider. Both call sites go through one new `_feature_detail()` rather
-than a second copy of the logic, because a second copy is exactly how the listing drifts
-back to saying less than the line it exists to expand on. `/audit` keeps its packed form
-(`voice=on(inworld)`); the listing spaces it (`voice: on (inworld)`).
-
-**A switched-off feature shows no detail at all** ‚Äî naming a backend beside `off` claims
-something is running that isn't.
-
-**Verification:** 887/887 pytest (2 new), 34/34 evals, `py_compile` clean. Both new tests
-break-tested RED. They drive `features_cmd` with fake Telegram objects rather than reading
-its source ‚Äî the rule v2026-08-02.14 established, and the delivery gate now enforces it
-for any `*_cmd` a diff touches.
-
-## v2026-08-02.14 ‚Äî /features never actually flipped anything, and five more from one review
-
-**Root cause of the batch: the tests for this week's features asserted on handler
-*source* instead of calling the handler.** `features_cmd` ended with
-`_, probe = _FEATURES[name]` ‚Äî a 3-tuple unpacked into two names ‚Äî so **every**
-`/features <name> on|off` raised `ValueError` before reaching the flip. The switch never
-moved, nothing persisted, and the owner got silence, because an exception inside a PTB
-handler is logged and swallowed. The suite was green throughout: one test asserted the
-specs *are* 3-tuples, another read the handler's source for `_is_admin`, and the
-`probe` name the unpack bound was never used, so no linter cared either. This is the fifth
-member of the family v2026-08-02.4 named (C8: reading a function's source proves the code
-exists, never that it runs), and the second to reach the fleet. **Every test added in this
-release exercises the handler.**
-
-The rest of the batch, all from the same review:
-
-- **Proactive messages dropped their GIFs.** `send_triggered` computed `gif_query` and
-  never used it ‚Äî `_deliver` grew the GIF path and this second caller was missed. A
-  tag-only proactive message sent *nothing* and stored an empty assistant turn, putting a
-  blank into history.
-- **`/features health off` didn't stop the health monitors.** `STRESS_ALERTS`,
-  `BB_ALERTS` and `RHR_ALERTS` were computed as `GARMIN_ENABLED and <env>` **at import**,
-  so flipping `GARMIN_ENABLED` at runtime left the monitors reading a frozen copy: alerts
-  kept firing while `/features` and `/audit` both reported `health=off`. They are now the
-  static env preference alone, read through **`_alerts_on()`**, which ANDs the live parent
-  at call time. `_garmin_off_reason()` gained the runtime-switch case for the same reason ‚Äî
-  `/health` and `/healthnow` were answering normally with the feature switched off.
-- **Switching a feature off was a one-way trip until restart.** The Garmin jobs and the
-  traffic poll were *registered* under their switches, so `/features health on` (or
-  `traffic on`) could not start anything that startup had skipped. Both now register on
-  **capability** ‚Äî every one of those jobs already re-checks its own gate when it fires.
-- **"Off" was still being reported as "never configured"** in `send_selfie`, `send_meme`,
-  `/route`, `/nearby`, `/place`, `/food`, `/traffic` and `/incidents` ‚Äî the exact
-  conflation v2026-08-02.9 split `*_capable` from `*_ready` to end. They need different
-  fixes (a `.env` edit or a file, versus one `/features` command), and the old message sent
-  the owner hunting for a reference photo that was already there. New helper
-  **`_feature_off_reason()`**; `send_gif` already did this correctly and was the template.
-  The paths in those messages were phone-era (`~/telegram-bot/‚Ä¶`) and now render from
-  `BASE_DIR` / `MEME_TEMPLATES_DIR`, so they name the file the instance actually reads.
-- **`/setbase` could claim a backup it didn't make.** It decided the
-  "previous kept as `.prev`" suffix by stat-ing the path *after* the write, so a leftover
-  `.prev` from an earlier run made a first-ever install report a backup of a file that had
-  never been there. It now tracks whether the backup branch ran.
-- **`GROUP_CHAT_DESIGN.md` ¬ß3 contradicted itself.** The throttle and budget bullets still
-  said `GROUP_MIN_GAP_SECONDS=20` / `GROUP_DAILY_BOT_BUDGET=30` after v2026-08-02.13 moved
-  them to 8 / 50 ‚Äî the same doc's own table and the code both said the new values. ¬ß3 is
-  the section `group-chat-changes` makes you read before touching any `GROUP_*` code.
-
-**Verification:** 885/885 pytest (18 new), 33/33 evals, `py_compile` clean. Five defects
-break-tested RED by re-injecting the original code; the two that could not be (both
-docs) are covered by the eval suite's own consistency checks. The `/features`,
-`send_triggered` and `/setbase` tests drive the real handlers with fake Telegram objects,
-so they fail on a broken dispatch path rather than on a changed string.
-
-**Not changed, deliberately:** the review also flagged the traffic *poll job* as ignoring
-the switch. It does not ‚Äî `traffic_poll_job` re-checks `TRAFFIC_ENABLED` on every firing
-(the registration asymmetry above was the real defect there, in the opposite direction).
-
-## v2026-08-02.13 ‚Äî the group bots could only ever answer once, and three separate limits said so
-
-**Root cause: the v1 group-chat tuning made a real back-and-forth arithmetically
-impossible, not merely unlikely.** Owner report: "they only reply once per my reply."
-Three defaults compound, and fixing any one alone would have changed nothing:
-
-1. **`GROUP_BOT_CHAIN_MAX=2`** is a hard ceiling on consecutive bot messages since the
-   last human one. Two bots means the best case was always `human ‚Üí A ‚Üí B ‚Üí silence` ‚Äî
-   the third message was never reachable, whatever anyone said.
-2. **`GROUP_BOT_REPLY_PROB=0.35`** flat. So the *second* message only happened about a
-   third of the time when the first bot didn't name the second ‚Äî which is why the
-   observed behaviour was usually one reply, not two.
-3. **`GROUP_MIN_GAP_SECONDS=20`** throttles a bot's own consecutive group messages, and
-   in a live exchange a bot's turns land **~16s apart** (poll ‚â§5s + claim delay 0.5‚Äì3s +
-   generation, twice). The throttle is *inside* that window, so it silently kills
-   alternation. This is the one that matters most: raising the chain cap alone would
-   have hit the throttle instead and produced the same single reply.
-
-None of this was a bug ‚Äî ¬ß3 of `GROUP_CHAT_DESIGN.md` chose these numbers to bound loop
-risk and cost on an unproven pilot. The pilot has now run since 2026-07-28 without a
-runaway, so the trade is being re-struck deliberately.
-
-**Fix ‚Äî `GROUP_BANTER` (default on, `GROUP_BANTER=0` reverts every number below):**
-
-| Knob | v1 | now | why |
-|---|---|---|---|
-| `GROUP_BOT_CHAIN_MAX` | 2 | **6** | a chain of 3+ is reachable at all |
-| `GROUP_BOT_REPLY_PROB` | 0.35 | **0.5** | first comeback is a coin flip, not a third |
-| `GROUP_MIN_GAP_SECONDS` | 20 | **8** | below the ~16s exchange round-trip, so alternation survives |
-| `GROUP_DAILY_BOT_BUDGET` | 30 | **50** | longer chains spend it faster; running dry mid-evening reproduces the original complaint silently |
-| `GROUP_CHAIN_DECAY` | ‚Äî | **0.75** | new |
-
-**The decay is what makes the higher cap safe.** `_should_reply_to_bot` no longer uses a
-flat probability: the chance is multiplied by `GROUP_CHAIN_DECAY ** depth`, where depth
-is how many bot messages deep the exchange already is. A chain typically runs 3‚Äì4
-messages and reaches the 6 cap rarely, so exchanges end by petering out rather than
-stopping mid-sentence at a wall. Expected cost per human beat is a geometric series
-(‚âà3.3 model calls), not the cap (6).
-
-**Being named no longer bypasses the gate** ‚Äî it sets the starting probability to 1.0
-(v1 behaviour for the first comeback) and then decays with everything else. This is a
-*tightening*, and it is load-bearing: naming the peer is the LLM's favourite register in
-these exchanges ("jules, no" / "priya, wrong"), so under the old free pass a higher cap
-would have driven **every** chain to the ceiling ‚Äî precisely where the cost is. The
-claim, the under-lock pre-send cap re-check, the throttle and the daily budget are all
-untouched; ¬ß3's defence-in-depth argument still holds with one more layer.
-
-`/audit`'s group line now reports `banter on|off (decay N)` alongside the existing
-chain/budget counters, so "why did they stop?" stays answerable from Telegram.
-
-**Not changed:** the human-facing path. An addressed human message is still answered
-deterministically by whoever was addressed; an unaddressed one still goes to exactly one
-bot via the claim. `_group_deliver`'s allowlist and `GROUP_ALLOWED_COMMANDS` are
-untouched, so the group‚ÜîDM memory boundary is exactly where it was.
-
-**Tests:** 8 new (867 total), break-tested red ‚Äî with the decay reverted to a flat gate
-the depth tests fail, and with the v1 cap the reachability test fails. Both group evals
-(`group-deliver-clean`, `group-cmd-allowlist`) green and untouched.
-
-## v2026-08-02.12 ‚Äî the seed check looked at a different file than the loader
-
-**Root cause: `_SEED_FILES` hardcoded `"atlas.txt"` while `ATLAS_FILE` makes that name
-configurable.** Any instance pointing the atlas somewhere else would get
-`Seeds: MISSING: atlas.txt` from `/audit` while loading its atlas perfectly well ‚Äî a
-false alarm from the exact line added in v2026-08-02.9 to stop false silence.
-
-Emily was that instance: she had `places.txt` alongside an `ATLAS_FILE` override, which
-is why her Portland‚ÜíOlympia relocation appeared to land in `atlas.txt` and change nothing
-live. The `Seeds:` line could not have caught it, because it was checking a filename
-nobody had told it about. (Her override and the stale `places.txt` are both retired now ‚Äî
-`grep -c 'Portland\|Burnside\|Powell' /opt/telegram-bots/emily/*.txt` returns 0 across
-every file.)
-
-`_seed_paths()` now resolves the atlas through the same global the loader reads, and
-reports whatever filename that turns out to be. The general rule this is an instance of:
-**an audit that checks a different path than the code loads is worse than no audit**, because
-it answers confidently about the wrong thing.
-
-Also removes a duplicated orphan comment block left above `features_cmd` in v2026-08-02.9.
-
-**Verification:** 859/859 pytest, 33/33 evals. 1 new test, break-tested RED (it reported
-`MISSING: atlas.txt` for a present `places.txt` ‚Äî the live failure exactly).
-
-## v2026-08-02.11 ‚Äî life.txt evolves instead of sitting there
-
-**Root cause: nothing ever wrote `life.txt`.** `LIFE_ARC_FILE` was even commented
-`# user-maintained`, `_read_life_arc()` only reads, and `/life` edits by hand ‚Äî so a seeded
-arc stayed frozen indefinitely. The owner noticed Bonnie's hadn't moved in a while; it was
-never going to.
-
-`day.txt` already answers "what happened today" and regenerates nightly. The arc underneath
-‚Äî what she is currently *in* ‚Äî had no equivalent. `_maybe_rotate_life_arc()` now runs from
-the midnight job and acts once every `LIFE_ROTATE_DAYS` (7).
-
-**It evolves rather than regenerates**, which is the whole design:
-- the current arc goes **into** the prompt, so unresolved threads carry over in the same
-  words where nothing about them has changed
-- **exactly one thing** may move per rotation ‚Äî resolve, worsen, or a new thread starts. An
-  arc that turns over completely every week is not an arc, it is a new character weekly
-- the form is pinned: one paragraph, present tense, 40-60 words, and the small grievance she
-  is taking personally is explicitly part of it
-- vague filler is forbidden by name ‚Äî "she has been reflecting on things" is the exact
-  failure mode for this kind of prompt
-- it is fed the last week of `day_*.txt` archives, so the arc moves because of what actually
-  happened rather than drifting on its own
-
-**Cadence uses a stamp file, not a weekday.** A weekday check skips the whole week if the
-bot is down that night; a stamp delays it instead. First run stamps and waits a full period,
-so a freshly seeded arc is not rewritten on its very first midnight.
-
-**Failure is always toward keeping what exists**: a short or empty result leaves the arc
-untouched, the previous version is archived as `life_YYYY-MM-DD.txt`, and `_life_arc_cache`
-is invalidated so the new text takes effect immediately rather than after its 5-minute TTL.
-
-One extra LLM call per week per instance. Invariant #3 governs per-message calls; this is
-weekly, and it runs off the loop.
-
-**Verification:** 858/858 pytest, 33/33 evals. 12 new tests, three break-tested RED ‚Äî
-first-run guard, short-result guard, and whether the midnight job actually calls it. That
-last one matters: a rotation nothing invokes is the same bug as a `life.txt` nothing writes.
-
-## v2026-08-02.10 ‚Äî voice=on told you nothing, and Location was missing
-
-**A fleet-wide `/audit` sweep across all seven exposed two flaws in the audit itself,
-shipped an hour earlier.**
-
-`voice=on` was true on every instance, because the capability probe I wrote was
-`lambda: True` ‚Äî NanoGPT TTS works without an Inworld key, so it could never say anything
-else. It didn't distinguish Emily, the Inworld instance, from the six on the fallback. The
-feature registry now carries an optional **detail probe**, so it reads `voice=on(inworld)`
-or `voice=on(nanogpt)`, `gif=on(high)`, `selfie=on(gemini)`. Details are omitted when a
-feature is off, and a raising probe can't take the summary down with it ‚Äî diagnostic output
-must never be the thing that fails.
-
-`Location:` joins the Owner/TZ line. Its absence was conspicuous: this entire session began
-with a weather bug, `WEATHER_LOCATION` is what drives weather, and nothing reported it.
-
-**What the sweep found in the fleet** (config, not code):
-- **Marcus runs `America/New_York`** while his atlas says Portland, OR and every other
-  instance is Pacific. Three hours off across schedule busy-blocks, midnight rotation, the
-  07:00 wardrobe pick and quiet windows ‚Äî and he shares a group with Emily on Pacific. The
-  `TZ:` line added in v2026-08-02.9 found this on first use.
-- **`setting.txt` is missing on all seven** and exists in no repo seed. `SETTING` has never
-  been populated for anyone.
-- **`life.txt` is missing on priya, marcus and jules**; the other four have one, live-only.
-- **Four instances still load the monolithic `preset.txt`** while marcus/jules/cass are
-  layered. Every per-character layer already exists, and core+rp+explicit+stepped is 33,610
-  bytes against the monolith's 34,241 ‚Äî so this is a `.env` line, not a rewrite.
-- **`DEFAULT_SETTING` is Nora's setting text**, the same home-instance character bleed as
-  `_APPEARANCE_DEFAULT` before v2026-08-01.11. Unreachable on named instances, wrong in the
-  file.
-
-**All five closed 2026-08-02** ‚Äî recorded here because a findings list with no resolution
-reads as current state to the next session. Marcus moved to `America/Los_Angeles` (and to
-Olympia, with Emily, so her WSDOT traffic matches her state); `setting.txt` authored for all
-seven and `life.txt` for the four that lacked one, then made self-evolving in
-v2026-08-02.11; bonnie/emily switched to layered presets in this pass, nora/priya with the
-v2026-08-02.12 deploy, so all seven are layered; `DEFAULT_SETTING` neutralized in code.
-Config remedies are owner-applied and owner-reported verified ‚Äî `.env` files are not in
-this repo, so a per-instance `/audit` is the only reading that settles any of them.
-
-**Verification:** 846/846 pytest, 33/33 evals. 5 new tests, both fixes break-tested RED.
-
-## v2026-08-02.9 ‚Äî /features, and an audit that answers the questions we kept asking
-
-**A systematic pass over what `/audit` could not see**, prompted by three separate blind
-spots in one week that each cost a round trip: four bots with no reference photo, three on
-a weaker image backend, and "I'm not sure if memes are turned on for anyone besides
-Bonnie". The common shape is **per-instance things that fail silently**, so the audit went
-looking for the rest of them rather than waiting for the next one.
-
-**Three new lines:**
-- `Features:` ‚Äî every integration as `on` / `off` / `n/a`, where `n/a` means never
-  configured. **`off` and `never configured` are different problems with different fixes**,
-  and conflating them is precisely what made those three incidents slow.
-- `Seeds:` ‚Äî `all present`, or `MISSING: <files>`. Six files (`atlas` ‚Äî under whatever
-  name `ATLAS_FILE` resolves to, since v2026-08-02.12 ‚Äî `people`,
-  `projects`, `schedule`, `life`, `setting`) are read straight into her prompts, and a
-  missing one costs content with no error whatsoever. jules ran without `atlas.txt` on the
-  VPS for a stretch; `vps-sync.sh` still carries the comment about it.
-- `Owner:` / `TZ:` ‚Äî no owner means nothing proactive can ever fire, and a wrong timezone
-  quietly breaks busy-blocks, midnight rotation and the 07:00 wardrobe pick. Both look like
-  healthy silence.
-
-Voice and traffic were the two credential-gated integrations reporting nothing at all,
-despite maps and health already being covered ‚Äî half the traffic stack was visible and half
-wasn't, which is worse than neither.
-
-**`/features <name> on|off`** flips selfie, meme, gif, voice, traffic, maps or health at
-runtime and persists to `feature_prefs.json`. Each target is a plain module global read at
-call time, so flipping it reaches all 8-10 call sites without touching any of them ‚Äî the
-same mechanism `/setmodel` already uses. It refuses to switch on anything the instance
-isn't capable of, and says why. `selfie_ready`/`meme_ready` split into `*_capable` (assets
-present) and `*_ready` (capable **and** switched on).
-
-**Verification:** 841/841 pytest, 33/33 evals. 10 new tests, three break-tested RED. A
-fourth injection ‚Äî unwiring the switch from `selfie_ready` ‚Äî **passed** its test, because
-the fixture has no selfie assets so `selfie_capable()` was False either way and the
-assertion held for the wrong reason. Hardened to force capability True, then confirmed RED.
-Same masking C13 describes, caught only because the injection was run.
-
-## v2026-08-02.8 ‚Äî How often she reaches for a GIF or a meme
-
-**`GIF_CHANCE` and `MEME_CHANCE` (both 0.35) gate whether she is OFFERED the option in a
-given reply ‚Äî not whether a tag she emitted is honoured.** That distinction is the whole
-design. Dropping a tag after the fact would leave her text referring to an image that never
-arrives ("this is you ‚Üí" with nothing following), so the roll happens when the prompt is
-assembled: some replies simply don't mention that GIFs exist, and she writes normally.
-
-**Asking always works.** If your own message contains "gif"/"jif" or "meme", the option is
-offered regardless of the dice. Being told no because of a coin flip you can't see is the
-worst version of this feature.
-
-**Also: `/audit` gained a `Media:` line** ‚Äî `meme=on/off gif=on/off (safety)`. This is the
-third time the same blind spot has cost a round trip. `Selfie base:` was added when four
-bots turned out to have no reference photo; `via <provider>` when three were silently on a
-weaker backend; and this release began with "I'm not sure if memes are turned on for anyone
-besides Bonnie" ‚Äî a question the bot could not answer about itself.
-
-**Worth recording, since it caused that uncertainty:** `MEME_TEMPLATES_DIR` resolves
-against `bot.py`, not the instance directory, so it is `/opt/telegram-bots/meme_templates/`
-and **shared by all seven**. Meme support is all-or-nothing across the fleet; no single bot
-can have it while others don't. `gifs.txt`, `appearance.txt` and the rest are per-instance ‚Äî
-this one is not, and the asymmetry is easy to misread.
-
-**Verification:** 831/831 pytest, 33/33 evals. 7 new tests; the offer gating and the audit
-line break-tested RED. A test pins that neither send path contains a probability roll, so
-the gate cannot migrate from the offer to the send later.
-
-## v2026-08-02.7 ‚Äî /gif, and the API key that would have leaked into a chat
-
-**`/gif <words>` is the parity command for `/selfie` and `/meme`**, and the reason it
-matters is that every failure on the GIF path is deliberately silent ‚Äî so without it, "she
-never sends GIFs" and "the Giphy call is broken" look identical and you'd wait days to tell
-them apart. Same blind spot as `/audit` not naming the image backend, which cost several
-rounds a day earlier.
-
-It announces what went wrong, and the messages distinguish the cases that need different
-fixes: no `GIPHY_API_KEY`, `GIF_ENABLED=0`, Giphy unreachable, or nothing surviving the
-filter at the current level. The auto path keeps `announce_errors=False` ‚Äî mid-conversation
-a missing GIF must stay invisible.
-
-**Building it surfaced a real leak in v2026-08-02.6.** Giphy takes `api_key` as a **query
-parameter**, so a `requests` exception carries the full URL ‚Äî key included ‚Äî and
-`log.warning("[gif] search failed: %s", e)` wrote that into `errors.log`. `/errors` echoes
-recent errors to the owner in Telegram, so the key had a path from the log into a chat
-message. `_redact_key()` now scrubs `api_key=`/`key=` values from both the search and send
-failure paths before anything is logged, keeping the rest of the URL for diagnosis.
-
-That is a hazard of every key-in-query-string API, not just this one: the secret ends up in
-exception text that error handling then treats as safe to log.
-
-**Verification:** 824/824 pytest, 33/33 evals. 8 new tests; the redaction break-tested RED
-on both paths.
-
-## v2026-08-02.6 ‚Äî GIFs, via Giphy, chosen in her own words
-
-**Tenor was the plan until research killed it.** Google stopped issuing Tenor API keys on
-2026-01-13 and terminated the API entirely on **2026-06-30** ‚Äî a month before this was
-written. Existing keys return errors; Discord, X, Bluesky and WhatsApp all migrated. The
-integration was never started. KLIPY was evaluated next: its content filter is a better
-fit (`high`/`medium`/`low`/`off`, matching the requested knobs exactly) and it is free
-forever, but it **inserts advertisements into search results** and its endpoint takes a
-`CUSTOMER_ID` ‚Äî a per-user identifier handed to an ad network from private chats. Its docs
-were unreadable from this container (403), so the field marking an ad could not be
-identified, and an integration was not built on guesses. Giphy by elimination.
-
-**How it works:** she emits `[gif: a short search phrase]` in her own wording, the phrase
-is searched, candidates are filtered, and one is sent with `send_animation`. **No new LLM
-call** ‚Äî it rides the reply she was already generating, which is what invariant #3
-requires.
-
-**Safety is layered, because Giphy's own filter cannot be trusted alone.** `/gifsafety
-high|medium|low` maps to Giphy's `rating` (`g` / `pg` / `pg-13`) and persists to
-`gif_prefs.json` ‚Äî unlike `/setmodel`, since a safety level silently reverting on restart
-is the wrong failure direction, and an unrecognised persisted value falls back to `high`
-rather than open. Giphy's rating is **cumulative** (`pg-13` also returns `g` and `pg`) and
-its issue tracker carries long-standing reports of mixed ratings coming back regardless,
-so a local deny-list runs at **every** level on each candidate's title and slug. Its
-fourth rating, `r`, is unreachable by construction. The deny-list errs broad on sexual and
-graphic terms ‚Äî a false positive costs one missing GIF ‚Äî but stays narrow on violence,
-since "kill" would eat "killing it".
-
-**In-character selection** comes from two places: her own query wording, and a per-instance
-`gifs.txt` where a leading `-` bans a term and any other line is a term she is scored
-toward. You curate the vocabulary, not the GIFs ‚Äî the same division as `appearance.txt`
-versus the reference photo. Plus a recent-id ring buffer so she doesn't repeat herself.
-
-**The tag is stripped in the same commit that teaches her to emit it.** `extract_tags`
-removes tags by name, so an unregistered one reaches the user verbatim ‚Äî that is
-v2026-07-29.1, and you watched `[setbase: 60¬∞F, clear‚Ä¶]` do it on 2026-08-02. `[gif:]`
-rides alongside `[search:]` rather than extending the pinned 4-tuple contract.
-
-Every failure is silent: no API key, a search timeout, nothing passing the filter, a send
-error. A missing GIF must never surface as an error mid-conversation, and never delays the
-reply it follows.
-
-**Verification:** 816/816 pytest, 33/33 evals. 14 new tests; four break-tested RED ‚Äî the
-tag leak, the deny-list, per-instance bans, and the unknown-value fail-safe. The
-`env-vars-documented` eval caught `GIPHY_SEARCH_URL` undocumented before this shipped.
-
-## v2026-08-02.5 ‚Äî /audit names the image backend
-
-**Root cause of a fleet split nobody could see: `SELFIE_PROVIDER` defaults to `nanogpt`
-unless `GEMINI_API_KEY` is set, and three instances have no key.** `grep -H
-'GEMINI_API_KEY' /opt/telegram-bots/*/.env` returns nothing at all for jules and only
-commented lines for priya and marcus. Those three run NanoGPT's `flux-kontext`; bonnie,
-cass, emily and nora run Gemini.
-
-That maps exactly onto the complaints. Jules's selfie came back as a visibly older,
-differently-boned woman while her reference was correctly attached and correctly cropped ‚Äî
-`/audit` confirmed `Selfie base: jules_base.png`, and the file was 752x1085, one clean
-crop. Priya, also on NanoGPT, was "a bit different". Every bot reported as fine is on
-Gemini. (Nora was the earlier exception and had a separate, established cause: no
-reference photo attached at all until v2026-08-01.10.)
-
-**`/audit` reported which photo was in play but never which backend consumed it**, so a
-three-instance split in image quality was invisible from Telegram ‚Äî the same observability
-gap as the selfie-base one, one layer further down. The `Selfie base:` line now reads
-`<file> via <provider>`, and names the model on NanoGPT since "nanogpt" alone doesn't say
-`flux-kontext`.
-
-**Not a code fix.** `flux-kontext` preserving identity worse than Gemini on an edit is a
-model difference, not a bug ‚Äî the remedy is a `GEMINI_API_KEY` in those three `.env` files,
-which is the owner's to apply.
-
-**Verification:** 802/802 pytest, 33/33 evals. 3 new tests; the render assertion
-break-tested RED, and `audit-keys-rendered` caught the same injection independently, which
-is the eval doing exactly the job it was added for one release ago.
-
-## v2026-08-02.4 ‚Äî /setbase never worked as a caption
-
-**Root cause: PTB's `CommandHandler` matches `message.text` + `message.entities` only.**
-A photo or document caption populates `message.caption` / `caption_entities`, so a
-`/setbase` caption never reached the handler ‚Äî the update fell through to `handle_photo`
-and the model answered it as conversation, inventing a `[setbase: 60¬∞F, clear, wind 3mph,
-summer]` tag by analogy with `[selfie: ‚Ä¶]`. Verified by reading `check_update` in the
-installed wheel, not assumed.
-
-v2026-08-02.3 shipped that path *and documented it as the recommended one* the same day.
-
-**Why the tests were green on a path that could not run:** all eight asserted on the
-handler's **source** ‚Äî that `_is_admin` appears in it, that `CommandHandler("setbase"` is
-in `main()`, that the write is atomic. Not one exercised dispatch. Reading a function's
-source proves the code exists; it proves nothing about whether the framework will ever
-call it. Fourth occurrence of the assert-without-exercising family (C8), and the first to
-reach the fleet.
-
-**Fix:** a `MessageHandler` on `(PHOTO | Document.IMAGE) & CaptionRegex(r"^/setbase\b")`,
-registered **before** `handle_photo` so it wins dispatch. The `CommandHandler` stays for
-the reply-to-a-photo path, which was always fine since that is a text message.
-
-**Verification:** 799/799 pytest, 33/33 evals. 4 new tests, three break-tested RED. One of
-them exercises PTB's `check_update` rather than describing it, so if a future PTB starts
-matching captions the test fails and the extra handler can be reconsidered.
-
-## v2026-08-02.3 ‚Äî /setbase: install a reference photo over Telegram
-
-**Root cause: the only route for getting a reference photo onto an instance was
-phone-local `scp`, and the owner's shell is on the VPS.** Three separate attempts in one
-session went into the wrong shell ‚Äî `termux-setup-storage: command not found`, then two
-`ls /sdcard/...` that matched nothing. That is C1's operator half: the agent can label a
-block, but nothing stops a paste landing in the wrong terminal.
-
-Re-explaining it a fourth time was not going to work, so the transfer is gone instead.
-`/setbase` takes the image over Telegram ‚Äî send it as a **file** with `/setbase` as the
-caption, or reply to one with `/setbase`. A normal photo works too but Telegram
-recompresses those, and the reference is the strongest identity signal in the selfie
-pipeline, so the reply says so explicitly.
-
-Details that matter:
-- **Format checked by magic bytes**, not the filename or Telegram's mime header ‚Äî PNG,
-  JPEG, WebP. Anything else is refused rather than installed.
-- **Writes to `SELFIE_BASE`'s existing name**, so no `.env` edit. Combined with
-  v2026-08-02.2's byte-sniffed mime, a PNG landing at `nora_base.jpg` is now harmless.
-- **Previous photo kept as `<name>.prev`**, because a bad swap should be recoverable
-  without another transfer.
-- **Atomic**: written to `.tmp` and renamed. A half-written reference is worse than a
-  stale one.
-- **Takes effect immediately** ‚Äî `_resolve_base_image()` stats the path per selfie, so
-  there is no restart and no deploy.
-- Admin-gated; it overwrites a file in the instance directory.
-
-**Verification:** 795/795 pytest, 33/33 evals. 8 new tests; the admin gate, handler
-registration and atomic write break-tested RED.
-
-## v2026-08-02.2 ‚Äî The mime type comes from the bytes, not the filename
-
-**Root cause: `_base_image()` derived the mime type from the file extension.** Renaming a
-PNG to `.jpg` ‚Äî routine when swapping reference photos between instances ‚Äî declared PNG
-data as `image/jpeg` to Gemini's `inline_data`. A rejected reference means the face falls
-back to whatever the text says, silently.
-
-Investigated and cleared as the cause of Nora's drift (`ffd8 ffe0`, a genuine JFIF JPEG),
-and deliberately **not** shipped at that point: it fixed nothing observed. Shipping now
-because the owner is about to replace several base photos, which is exactly the operation
-that produces an extension/format mismatch.
-
-`_sniff_mime()` reads the magic bytes ‚Äî PNG signature, JPEG SOI, RIFF/WEBP ‚Äî and falls
-back to the extension for anything unrecognised, so it is never worse than before.
-
-**Verification:** 787/787 pytest, 33/33 evals. 5 new tests including PNG-named-`.jpg`,
-JPEG-named-`.png`, WebP, unrecognised-bytes fallback, and an end-to-end pass through
-`_base_image()`.
-
-**Also, a new eval ‚Äî `audit-keys-rendered`.** v2026-08-02.1 added `selfie_base` to
-`gather_audit_data()` and the startup log line, and the owner was told `/audit` would show
-it; `audit_cmd` builds its own lines and never rendered it. The eval now fails if any key
-in the audit data reaches no user-facing surface, unless listed as API-only. Break-tested
-RED by removing the `Selfie base:` line.
-
-## v2026-08-02.1 ‚Äî /audit reports which reference photo is in play
-
-**Root cause: v2026-08-01.10 added the selfie-base status to the `=== STARTUP AUDIT ===`
-log line, and I told the owner `/audit` would show it. Those are different code paths.**
-Owner checked and it was not there.
-
-`/audit` is the only surface for this that is reachable from Telegram, which matters
-because the question it answers ‚Äî "is this bot actually being sent its own face?" ‚Äî is
-otherwise a `journalctl` away, on a host the owner has to SSH into.
-
-`gather_audit_data()` gained `selfie_base` (shared with the admin HTTP API) and `audit_cmd`
-renders it as a `Selfie base:` line. Same `_base_image_status()` source as the startup line,
-so the two surfaces cannot disagree ‚Äî a test pins that equality.
-
-Also adds `cass/appearance.txt` and `marcus/appearance.txt`, written from the reference
-photos the owner supplied rather than from the cards. Neither instance had one, and with no
-base image either, both were generating from the bare fallback string.
-
-**Two card/photo discrepancies, deliberately resolved toward the photo** ‚Äî the photo is what
-an image edit actually anchors on, so a description that fights it recreates the
-contradiction class this week's releases have been removing:
-- Marcus's card says *"close-cropped hair"* and age **31**. His photo shows a clean-shaven
-  scalp, a full beard going grey, and reads mid-40s. `appearance.txt` describes the photo.
-- Cass's card has no physical block at all, so the photo is the only source for her.
-
-Neither card was edited ‚Äî that is a content decision for the owner, and `edit-cards-and-presets`
-is the right path if the cards should move instead.
-
-**Verification:** 782/782 pytest, 32/32 evals, 3 new tests, the rendered-line assertion
-break-tested RED.
-
-## v2026-08-01.11 ‚Äî Marcus was being drawn as a woman
-
-**Root cause: the shared no-`appearance.txt` fallback hardcoded a sex.** `SELFIE_APPEARANCE`
-read `"an adult woman in her late 20s, the same person as in the reference photo"` for any
-named instance without an `appearance.txt`. Marcus Calder is 31, 6'2", a man ‚Äî and has no
-reference photo on disk, so whatever describes him in an image prompt is that string alone.
-
-Found while auditing `SELFIE_BASE` across the fleet after v2026-08-01.10, which turned up
-how many instances fall back rather than configure. **Third instance of one class**, after
-Ingrid's courier jacket (v2026-08-01.8) and hardcoded "freckles" (v2026-08-01.9): shared
-code asserting one character's traits across all seven. The first two were cosmetic on a
-character who happened not to match. This one changes the person.
-
-**Fix:** both fallbacks are sex-neutral (`"an adult in their late 20s"`), keeping the
-explicit adult age that Gemini's image filter needs to avoid returning blacked-out frames.
-The startup-audit `Selfie base:` field now distinguishes the worst case ‚Äî no reference
-photo *and* no `appearance.txt` reads `TEXT-ONLY, NO APPEARANCE.TXT ‚Äî every selfie is a
-generic stranger`, because that state has nothing describing the character at all.
-
-The real fix for cass and marcus is content, not code: both have no base image on disk, so
-v2026-08-01.10's autodetect cannot help them. They need a reference photo, an
-`appearance.txt`, or both.
-
-**Verification:** 779/779 pytest, 32/32 evals, 3 new tests, the neutrality assertion
-break-tested RED. That test also failed twice before it was right: first it flagged its own
-explanatory comment (C14 ‚Äî a scanner cannot tell doing-the-bad-thing from describing it),
-then `"he "` matched inside `"the "`. Word boundaries and comment stripping, both needed.
-
-## v2026-08-01.10 ‚Äî Nora's reference photo was never being sent
-
-**Root cause: `SELFIE_BASE` defaults to `priya_base.png`, nora's `.env` never set it, and
-her photo is `nora_base.jpg` ‚Äî wrong name and wrong extension.** `_has_base_image()`
-returned False, so every one of her selfies took the text-only branch and no reference
-photo was ever attached to the Gemini call. The file has been sitting in
-`/opt/telegram-bots/nora/` since 27 June.
-
-**Nothing reported it**, which is the part worth fixing. `selfie_ready()` returns True if
-the base image **or** `appearance.txt` exists; she has had an `appearance.txt` since 26
-June, so the check passed and the degradation from image-edit to text-only was completely
-silent. `[observed]` `grep -L SELFIE_BASE /opt/telegram-bots/*/.env` returned exactly one
-instance ‚Äî hers.
-
-This supersedes v2026-08-01.9's diagnosis as the primary cause. That release measured two
-real problems (the identity anchor sat ~1000 characters from the end of the prompt; 29.9%
-of draws stacked a face-obscuring framing on a face-degrading camera) and both fixes stand
-on their own ‚Äî but they were tuning an *edit* prompt for a call that was not editing
-anything. The v2026-08-01.9 analysis assumed a reference photo was attached. It was not.
-
-**Fix:**
-- `_resolve_base_image()` falls back to the single unambiguous `*_base.(png|jpg|jpeg|webp)`
-  in the instance directory when `SELFIE_BASE` names a file that is not there. With two or
-  more candidates it returns None rather than guessing ‚Äî picking between two faces is how
-  you ship the wrong woman.
-- `_base_image()` now takes its mime type from the **resolved** file, not the configured
-  name. A `.jpg` announced as `image/png` is a working photo that still gets rejected.
-- The `=== STARTUP AUDIT ===` line gained `Selfie base:`, reporting the filename in play,
-  `AUTODETECTED (‚Ä¶ set it in .env)`, or `TEXT-ONLY` with the candidates it saw. `/audit`
-  now answers "is she actually being sent her own face?" without a shell.
-- Kill switch `SELFIE_BASE_AUTODETECT=0`.
-
-**Reverted from v2026-08-01.9:** `telegram-companion-bot/nora/appearance.txt`, which that
-release added. Nora already had a real one on the instance, 381 bytes, dated 26 June ‚Äî the
-repo copy was written from her card by this session and had never been compared against it.
-`vps-sync.sh` only copies seed files that are *missing*, so nothing was overwritten, but
-leaving an invented file in the seed directory is the exact divergence trap that script
-warns about (the jules atlas.txt case, 2026-07-29). The live instance is authoritative;
-the fabricated seed and its three tests are removed.
-
-**Verification:** 776/776 pytest, 32/32 evals, 10 new tests. Three assertions break-tested
-RED. The first attempt broke all three at once and the ambiguity test still passed ‚Äî the
-autodetect-off injection masked the guess-the-first-candidate injection, so it was passing
-for the wrong reason. Re-run in isolation, it failed correctly. Break-tests need one
-injection at a time.
-
-**Still open:** the `SELFIE_BASE` values across the fleet were read with `grep -h`, which
-strips filenames, so two instances showing `SELFIE_BASE=nora_base.png` cannot be attributed
-to an instance. If a non-nora instance points at `nora_base.png` and has no such file, it
-is text-only too ‚Äî the new startup audit line will say so on next restart.
-
-## v2026-08-01.9 ‚Äî Sometimes the selfie wasn't her
-
-**Root cause: the identity instruction is the FIRST thing in the image prompt, and two
-releases of appended scene text pushed ~1000 characters after it ‚Äî while 30% of random
-draws stacked a face-obscuring framing on a face-degrading camera.** Owner-reported:
-selfies that don't look like Nora, intermittently. (Same report confirmed v2026-08-01.7's
-weather fix is working.)
-
-`build_selfie_prompt` opens with "Edit the attached photo of this exact woman ‚Äî do not
-generate a new person‚Ä¶" as `bits[0]`, then appends 17 more instructions: pose, expression,
-activity, outfit, outerwear, scene, camera look, the weather clause (which v2026-08-01.7
-made longer), the anatomy rule, the realism rule, and a scene-dedup list naming *other
-setups*. On an image edit the last thing said sits nearest the output; the identity anchor
-was as far from it as it could be.
-
-Compounding that, the framing and camera pools are full of choices that legitimately make
-a candid phone photo ‚Äî mirror shots, half-in-frame crops, motion blur, harsh flash, grainy
-low light, backlit shadow ‚Äî and they were drawn independently. Measured over 2000 seeds:
-**29.9% of prompts drew a face-obscuring framing AND a face-degrading camera**, and only
-16.7% were clean. One soft choice is candid; two leave an edit model enough latitude to
-drift the face into a different woman. ~30% matches "on occasion" well.
-
-A third contributor, specific to Nora: she had **no `appearance.txt`**, so
-`SELFIE_APPEARANCE` fell back to `"an adult woman in her late 20s, the same person as in
-the reference photo"` ‚Äî a *pointer*, not a description. Every verbal identity signal in
-her prompt was a reference to an image. Any draw that weakened the photo's influence left
-nothing behind it.
-
-**Fix:**
-- `_SELFIE_IDENTITY_TAIL` restates the identity constraint as the genuinely last line ‚Äî
-  after the dedup list, deliberately, since that block names other setups.
-- A soft framing now filters soft camera looks out of the pool: stacked draws **29.9% ‚Üí 0%**,
-  with one soft choice still freely available.
-- `telegram-companion-bot/nora/appearance.txt` written from her card's `<physicality>`
-  block, so her face has a verbal anchor and not just a photo pointer.
-- The shared identity line hardcoded **"freckles"** ‚Äî Nora's trait, applied to all seven
-  characters. Now "distinguishing features". Same character-bleed family as the courier
-  jacket in v2026-08-01.8; a test pins the shared prompt against five such traits.
-
-Kill switch `SELFIE_IDENTITY_GUARD=0`. Prompt assembly only, no new LLM calls.
-
-**Verification:** 769/769 pytest, 32/32 evals, 10 new tests. Three load-bearing assertions
-break-tested RED (de-stacking, tail position, trait hardcoding). The tail-position case
-needed *two* tests: with `chat_id=None` there is no dedup block, so the simple "ends with"
-assertion still passed when the tail was moved back above it ‚Äî only the dedup-present test
-caught the regression.
-
-**Not proven:** that this fixes what the owner saw. The mechanisms are real and measured,
-but nothing here confirms which draw produced any particular bad image ‚Äî that needs
-selfies watched over time. Also unconfirmed: whether `SELFIE_BASE` is correctly set for
-each instance. It defaults to `priya_base.png`, so an instance whose `.env` omits it has
-**no** reference photo attached at all and generates from text alone.
-
-## v2026-08-01.8 ‚Äî She dresses once a day, and her jacket exists again
-
-**Three owner-reported items, one subsystem.**
-
-**1. The wardrobe never changed on its own.** `wardrobe["current"]` was only ever set by
-hand via `/outfit`; with nothing set, `build_selfie_prompt` drew a fresh random outfit per
-photo, so she could wear three different things in an hour and nothing in particular on
-any given day. Now `wardrobe_rotate_job` picks one weather-appropriate outfit each morning
-and she wears it all day.
-
-It runs at `WARDROBE_ROTATE_HOUR` (default 07:00 local), **not** at midnight, and re-reads
-the weather first. Picking a day's clothes from midnight's reading is precisely the
-frozen-overnight-snapshot mistake `world.txt` makes and v2026-08-01.7 was written to
-remove ‚Äî rebuilding it one release later in a new place would have been the joke of the
-week. For the same reason, an outfit the *rotation* chose is re-checked against live
-weather at selfie time and dropped if the afternoon outran it; an outfit set *by hand* is
-never second-guessed.
-
-Selection prefers the `/addoutfit` wardrobe and falls back to the built-in pool when it's
-empty, so an instance with no wardrobe history still changes clothes daily. Free-text
-outfits are classified by keyword (`_OUTFIT_WARM_WORDS`/`_OUTFIT_COOL_WORDS`) against
-`SELFIE_WARM_F`/`SELFIE_COLD_F` ‚Äî deterministic, and **no LLM call**. Unknown weather
-suits everything: absent data must never narrow the wardrobe to nothing.
-
-`/outfit` holds for the rest of that day and rotation resumes the next morning (owner
-decision, 2026-08-01) ‚Äî implemented by having `/outfit` claim the day's `picked` stamp,
-which the job's same-day guard then honors without needing a second rule.
-
-**2. Ingrid's courier jacket had never once appeared.** It was gated on
-`SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, which holds only when `not IS_NAMED_INSTANCE`
-‚Äî an unnamed run from the code directory. `deploy/bot@.service` is
-`ExecStart=‚Ä¶ bot.py /opt/telegram-bots/%i`, so every live instance is named and the branch
-was dead on all seven. It is now `OUTDOOR_LAYER`, per-instance env config: a specific
-object, unset by default, added only outdoors and only when it isn't warm. **Nora's
-instance needs `OUTDOOR_LAYER` set in her `.env` for the jacket to come back** ‚Äî this
-release makes it possible, not automatic.
-
-**3. `_APPEARANCE_DEFAULT` described nobody.** A half-shaved head, septum ring and sleeved
-tattoos ‚Äî a relic of a discarded card that made Priya a tattoo artist (owner, 2026-08-01).
-Unreachable on the fleet for the same argv reason, but wrong in the file. Now a neutral
-`"an adult woman in her late 20s."`, keeping the explicit adult age that Gemini's safety
-filter needs.
-
-**Verification:** 19 new tests; four load-bearing assertions break-tested RED
-independently (same-day guard, stale-auto-outfit re-check, warmth gate on outerwear,
-unknown-weather default). 759/759 pytest, 32/32 evals. One existing v2026-08-01.7
-assertion had been silently defanged by `OUTDOOR_LAYER` defaulting to empty ‚Äî its
-"courier jacket" check could no longer fail ‚Äî and was repaired to set the layer explicitly
-(C13).
-
-## v2026-08-01.7 ‚Äî Nora sent a rainy selfie on a sunny day
-
-**Root cause: `build_selfie_prompt` composed the scene from weather-blind random pools,
-then appended the real weather as a trailing hint that told the image model not to render
-it.** Owner-reported: a rainy selfie while Seattle was sunny all day.
-
-The weather data was never wrong, and this is worth stating because it is where the
-investigation would naturally start. `/status` on nora showed `Weather: 70¬∞F, clear,
-wind 11mph`, her day context was the Eastlake bike lane with no rain in it, and she was
-texting about the sun on her neck. Three plausible mechanisms were ruled out by that one
-command: the Open-Meteo fetch had not failed, the cache was not stale, and `world.txt`
-had not seeded a rainy day narrative.
-
-The defect is in prompt assembly. `_weather_outdoor_ok` screens for *precipitation* and
-`_weather_camera_pool` screens *camera presets*, but nothing screened the scene itself
-for **temperature**. `SELFIE_ACTIVITIES` contains "bundled up against the cold",
-`SELFIE_OUTFITS` contains "a beanie and a hoodie", and Ingrid's canvas courier jacket was
-appended to every outdoor shot unconditionally. A rendered prompt at 70¬∞F clear:
-
-> ...She's **bundled up against the cold**. Over that, she's got on Ingrid's **oversized
-> vintage canvas courier jacket**... Somewhere in **Seattle**, in the afternoon...
-> Current weather: 70¬∞F, clear, wind 11mph. Let it read in the lighting, atmosphere, and
-> what she might be wearing ‚Äî **don't describe the weather explicitly, just let it show.**
-
-Four signals say cold-and-grey Seattle; one token says 70¬∞F clear ‚Äî and the final clause,
-phrased for a text model, reads to an image model as *suppress the weather*. The image
-followed the scene. 137 of 300 seeds produced contradictory content at that reading, which
-is why this was intermittent rather than constant.
-
-**Fix:** `_weather_temp_f` parses the air temperature (taking the first `¬∞F` field, never
-"feels like"), and `_weather_scene_pool` drops cold-weather activities and outfits ‚Äî and
-the jacket ‚Äî at or above `SELFIE_WARM_F` (68¬∞F). The weather clause is now directive
-("which the image must match") and a dry reading appends an explicit negative: *no rain,
-wet pavement, puddles, umbrellas, rain-streaked glass*. Clear-sky and no-precipitation are
-asserted separately, so an overcast day never claims "no heavy grey overcast".
-
-Unknown weather is deliberately **not** treated as warm ‚Äî absent data must not strip her
-jacket in January. Kill switch `SELFIE_WEATHER_MATCH=0` restores the previous prompt
-byte-for-byte, pinned by a test. No new LLM calls; prompt assembly only.
-
-**Verification:** at 70¬∞F clear, contradictory content across 300 seeds went 137 ‚Üí 0, and
-the no-rain negative appears in 300/300. Cold and rainy readings are unchanged (winter
-content still appears; the negative never does). 11 new tests; the three load-bearing
-assertions were break-tested RED before being trusted (C3).
-
-**Left open deliberately:** Ingrid's courier jacket ‚Äî a Nora-specific inheritance ‚Äî is
-gated on `SELFIE_APPEARANCE is _APPEARANCE_DEFAULT`, and that default describes a
-half-shaved head, septum ring and sleeved tattoos, which is Priya's look, not Nora's. Any
-instance falling through to the default gets both. Not touched here (out of scope for a
-weather fix), and not yet confirmed against the live instance dirs.
-
-> **Correction (v2026-08-01.8):** the paragraph above is wrong, and the flagged
-> uncertainty is what was wrong. `_APPEARANCE_DEFAULT` is reachable only when
-> `not IS_NAMED_INSTANCE`, i.e. when bot.py runs with no instance-directory argument.
-> `deploy/bot@.service` is `ExecStart=‚Ä¶ bot.py /opt/telegram-bots/%i`, so all seven live
-> instances are named, and neither the tattoo-artist description nor the jacket has ever
-> reached a live selfie. The description was a relic of a discarded card (owner,
-> 2026-08-01); the jacket was unreachable code. Both are fixed in v2026-08-01.8.
-
-## v2026-08-01.6 ‚Äî /dupefacts: a read-only diagnostic for near-duplicate facts
-
-**Not a fix ‚Äî a deliberately narrow tool to gather evidence before writing one.**
-Follow-up to `v2026-08-01.5`'s fusion fix: asked whether embeddings could improve
-memory quality further. They can't fix the fusion bug (that was a generation-quality
-problem; embeddings solve retrieval, and `facts`/`recent_facts` are injected into every
-prompt unconditionally ‚Äî there's no retrieval step for embeddings to improve). But
-`_summarize()`/`_consolidate_facts()`'s own dedup is exact-lowercase-string matching
-only, which would miss a fact reworded across consolidation passes sitting alongside
-its near-twin ‚Äî and semantic dedup already exists for the *other* memory tier
-(`_is_semantic_dup`, gating `/addmem`'s auto path at `MEMORY_DEDUP_SIM`, default 0.92)
-but was never extended to facts.
-
-**Deliberately not auto-merge.** A similarity threshold with no real data behind it
-risks flagging genuinely distinct facts (two different Costco trips, worded
-similarly) as duplicates and silently discarding one ‚Äî a new failure mode introduced
-speculatively rather than fixing an observed one. `/dupefacts` only reports candidate
-pairs for a human to judge; nothing is merged or deleted.
-
-**Shipped:**
-- `_embed_and_cache(text)` ‚Äî like `_embed_memory_line` but returns the vector; shares
-  `_embeddings_cache`/`embeddings.json` with the memories.txt path, so facts get a
-  durable, reusable embedding cache for free.
-- `_find_near_duplicate_pairs(items, vecs, threshold)` ‚Äî pure, the diagnostic sibling
-  of `_is_semantic_dup`: instead of "is this one new item a duplicate of anything,"
-  surfaces every near-duplicate pair already sitting in one list.
-- `/dupefacts` command (`_is_allowed`-gated, same as `/reviewmem`/`/editmem`/
-  `/sourcemem` ‚Äî not admin-only): checks `facts` and `recent_facts` independently,
-  reports pairs at cosine ‚â• `MEMORY_DEDUP_SIM` with their similarity score, or says
-  plainly that none were found. Reuses `MEMORY_DEDUP_SIM` rather than adding a new env
-  var ‚Äî this is explicitly a temporary evidence-gathering tool, not a permanent
-  feature needing its own tunable.
-
-**Tests:** `TestFindNearDuplicatePairs` (pure, synthetic vectors, no network),
-`TestEmbedAndCache` (cache hit/miss/failure via a monkeypatched `_embed_text`), and
-`TestDupefactsCmd` (reports a real pair, says "none" plainly when there are none,
-never mutates `facts`/`recent_facts`, and a disallowed user gets nothing). The
-disallowed-user gate was break-tested RED (temporarily removed the `_is_allowed`
-check, confirmed the test caught it) before being trusted, restored via the Edit tool.
-
-**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 729/729, `run-evals.sh`
-32/32 green.
-
-## v2026-08-01.5 ‚Äî recent-memory facts stopped fusing events with commentary about them
-
-**Root cause: `_summarize()`'s prompt had no instruction against conflating two
-different things into one fact.** Owner reported Priya re-surfacing a two-day-old topic
-as if she'd never been told ‚Äî `/recall costco` turned up the actual culprit: *"Costco
-food court trip: 'in and out like a bad lover'‚ÄîPriya called it self-reporting; Brian
-corrected it was a simile."* That's not one memory, it's three folded into a run-on
-sentence ‚Äî the trip itself, a line Priya said about it, and a separate argument over
-how to categorize her own phrasing.
-
-**Ruled out first, not assumed:** checked whether a weak background model was the
-cause (`v2026-07-29.3`'s `SUMMARY_MODEL`-doing-caption-work bug was the obvious prior).
-It wasn't ‚Äî `priya/.env` has no `SUMMARY_MODEL` override, so `_summarize()` was running
-on her own chat model, `zai-org/glm-5.1:thinking`, a strong reasoning model. A capable
-model still produced this, because nothing in the prompt told it not to: "a curated
-list of specific, meaningful things... a continuous recollection, not a list of events"
-is a compression instruction with no constraint keeping each fact resolvable on its
-own. `bot-code-invariants` #17 already mandates exactly this kind of discipline for
-`user_notes.txt` extraction (confidence gating, quote grounding, null-over-guess) ‚Äî the
-`recent_facts`/summary pipeline had none of it.
-
-**Fix:** both `_summarize()` (writes new facts from scrolled-off messages) and
-`_consolidate_facts()` (merges the list when it passes `RECENT_FACTS_MAX`) now require
-each fact to describe ONE concrete thing, in one plain sentence, resolvable without
-cross-referencing another fact ‚Äî and explicitly forbid fusing an event with separate
-commentary about it (a remark on how something was phrased, categorized, or argued
-over) just because they share a topic. `_consolidate_facts` additionally: if two facts
-don't reduce to one clean sentence without cross-referencing each other, keep them as
-two rather than force a merge ‚Äî since repeated consolidation passes compound this exact
-error over time with no way to re-check against the original messages once they've
-scrolled out of context.
-
-**Prompt-only change, both functions still route through `SUMMARY_MODEL`** ‚Äî no new
-call, no new env var, no kill switch needed (this fixes a defect, it doesn't add
-optional behavior).
-
-**Tests:** `TestFactAtomicity` pins the new constraint text in both function sources.
-Both assertions break-tested RED (temporarily removed each constraint independently,
-confirmed the corresponding test fails) before being trusted, restored via the Edit
-tool directly rather than the fragile string-replace-in-a-heredoc approach tried first,
-which left a syntactically mangled (though still-compiling) intermediate state ‚Äî caught
-by re-reading the diff before trusting it, not shipped.
-
-**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 715/715, `run-evals.sh`
-32/32 green.
-
-**Not yet confirmed:** whether this actually stops the re-surfacing behavior in
-practice ‚Äî the fix targets the mechanism that produced the one bad example we have,
-but there's no way to verify "does Priya stop doing this" without watching her memory
-over the next several days of real conversation.
-
-## v2026-08-01.4 ‚Äî /model shows every model role, not just chat
-
-**Root cause of the request:** while investigating a live memory-quality complaint
-(Priya re-surfacing a two-day-old topic as if it were new), the diagnosis needed to
-know which model was actually running `SUMMARY_MODEL`/`MOOD_MODEL` on that instance ‚Äî
-and there was no cheap way to check. `/model` showed only the chat model.
-`/setmodel` with no args already lists every `MODEL_ROLES` entry, but it also fetches
-the live subscription model list and adds picker/usage framing, so it's not the
-quick glance a live-ops question needs.
-
-**Shipped:** `/model` now lists every role in `MODEL_ROLES` (chat, summary, caption,
-reaction, mood, vision, fallback, visionfallback) with its current effective value,
-reading straight off `globals()[var]` ‚Äî the same mechanism `/setmodel` already writes
-through, so a live override shows up here too, not just the `.env`-loaded default.
-No live API call added; still cheap enough to check on every incident. Can't drift
-from `/setmodel`'s own role list because both read the same `MODEL_ROLES` dict.
-
-**Tests:** `TestModelInfoShowsEveryRole` ‚Äî every role appears in the reply, the actual
-configured value shows (not a placeholder), and a source-level check that no
-subscription-list call was added. Break-tested RED (reverted to the single-model
-version, confirmed the role-coverage assertion fails with the missing role named)
-before being trusted, restored by re-editing per constraints C15.
-
-**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 713/713, `run-evals.sh`
-32/32 green.
-
-## v2026-08-01.3 ‚Äî MEMORY_TOKEN_BUDGET now means real tokens (ROADMAP 4.4, owner-approved)
-
-**What this closes:** since v2026-07-26.2 made every other reported token figure real
-(`usage.prompt_tokens`, per-instance calibration ratio), `MEMORY_TOKEN_BUDGET` was
-deliberately left on the raw `len//4` unit ‚Äî a regression test
-(`test_memory_budget_stays_on_the_raw_unit`) pinned it there specifically so the switch
-couldn't ship as a side effect of some other release. Recalibrating this knob changes how
-much a character actually recalls per reply, which is a product decision, not an
-accounting fix ‚Äî hence owner-gated rather than done the day 4.4 was filed.
-
-**Owner approved 2026-08-01** and supplied each instance's current calibration ratio
-straight from `/audit` (all well past the ~15-call EMA reconvergence point, 46-235
-measured calls each):
-
-| instance | ratio | 300 (old default) √ó ratio |
-|---|---|---|
-| bonnie | 0.91 | 273 |
-| emily | 0.90 | 270 |
-| nora | 0.92 | 276 |
-| priya | 0.92 | 276 |
-| cass | 0.91 | 273 |
-| marcus | 0.91 | 273 |
-| jules | 0.93 | 279 |
-
-**The fleet's ratios cluster tightly (0.90-0.93)** ‚Äî worth recording because it changes
-how much this migration actually matters in practice: no character is far enough off
-from the others for the unit switch to meaningfully redistribute recall between them.
-The risk this item was gated against was real in principle, small in this instance.
-
-**Shipped:** `triggered_memories()`'s budget loop now costs each candidate line with
-`_tokens()` (calibrated) instead of `_est_tokens()` (raw) ‚Äî one line changed, per the
-ROADMAP plan. `TOKEN_CALIBRATION=0` reverts this budget check to the raw unit too,
-same kill switch as every other calibrated figure; no new kill switch needed. The
-regression test was updated in place (renamed, not deleted) to assert the new intended
-behavior, `test_memory_budget_uses_calibrated_units` ‚Äî same guard, opposite direction,
-so a future accidental revert back to raw units gets caught the same way this one
-protected against a future accidental *forward* switch.
-
-**Not yet done ‚Äî this is the step that actually preserves recall volume:** the table
-above assumes every instance is still on the shared 300 default, which was not
-independently confirmed (`/audit` doesn't surface `MEMORY_TOKEN_BUDGET`, and this
-session has no VPS access to grep `.env` directly). **Check each instance's `.env` for
-an existing override before using these numbers** ‚Äî multiply *that* value by the
-instance's ratio instead of 300 if one exists. Assuming the default and being wrong
-would undershoot or overshoot recall by whatever the real prior value was, not just the
-~8-10% the ratio itself accounts for. Once confirmed, set each instance's `.env`:
-```bash
-# host: VPS (as root)
-echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/bonnie/.env
-echo "MEMORY_TOKEN_BUDGET=270" >> /opt/telegram-bots/emily/.env
-echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/nora/.env
-echo "MEMORY_TOKEN_BUDGET=276" >> /opt/telegram-bots/priya/.env
-echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/cass/.env
-echo "MEMORY_TOKEN_BUDGET=273" >> /opt/telegram-bots/marcus/.env
-echo "MEMORY_TOKEN_BUDGET=279" >> /opt/telegram-bots/jules/.env
-```
-then `vps-sync.sh` (or just `/restart`, since these are `.env`-only edits and the code
-is already merged) per instance.
-
-**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710, `run-evals.sh`
-32/32 green. The updated regression test was break-tested RED (reverted to
-`_est_tokens`, confirmed it fails with the expected message) before being trusted, then
-restored by re-editing ‚Äî not `git checkout`, per constraints C15.
-
-## v2026-08-01.2 ‚Äî 17 commands worked if typed but never appeared in Telegram's menu
-
-**Root cause: `_build_command_menu` is hand-kept alongside the `CommandHandler`
-registrations ‚Äî its own docstring says so ‚Äî and nothing enforced that until now.** An
-audit comparing every `app.add_handler(CommandHandler(...))` in `main()` against the
-menu builder's output found 17 unconditionally-registered commands missing from every
-menu list: `card`, `errors`, `fleet`, `life`, `meme`, `note`, `notes`, `people`,
-`projects`, `quiet`, `quietwin`, `recap`, `restart`, `schedule`, `setcard`, `today`,
-`update`. All 17 worked fine if a user typed them manually ‚Äî the handlers were real ‚Äî
-they simply never showed up in Telegram's autocomplete popup, so a user would only find
-them by already knowing they existed (from `OPS_MANUAL.md`, or trial and error).
-
-No dead entries in the other direction ‚Äî nothing in the menu lacked a working handler.
-
-**Fix:** added all 17 to `_BASE_COMMANDS`, grouped near their thematic neighbors
-(`recap`/`card`/`setcard` near `status`; `life`/`people`/`projects`/`schedule`/`today`/
-`note`/`notes` ‚Äî the Context Files group ‚Äî near the memory commands; `quiet`/`quietwin`
-near `nudges`; `meme` near `selfie`; `errors`/`restart`/`update`/`fleet` alongside
-`audit`/`backup`, which were already unconditionally listed). This matches the existing
-convention exactly: `_MAPS_COMMANDS`'s own comment says unconditionally-registered
-handlers belong unconditionally in the menu, same as conditionally-registered ones
-(`traffic`, `payments`, `garmin`, `preset`) already mirror their own kill switches.
-`/update`'s description was written to match its actual current behavior (dead as a
-deploy path on the private repo, replies pointing at `vps-sync.sh`) rather than the
-stale "pull latest bot.py" description it would otherwise have inherited.
-
-**New regression test, `TestCommandMenuMirrorsHandlers`**, extracts every
-`CommandHandler("...")` name from `main()`'s source via `inspect.getsource` + regex and
-asserts it's a two-way match against `_build_command_menu(True, True, True, True)`'s
-full command set ‚Äî both directions (registered-but-missing, and menu-but-dead), so this
-exact class can't recur silently again. Both assertions break-tested RED before being
-trusted: removing one menu entry and adding one fake unregistered entry each failed the
-correct assertion with the correct missing/dead name.
-
-**Self-inflicted near-miss while writing that break-test, logged as constraints C15:**
-reverted one break-test edit with `git checkout -- bot.py`, which restores the file to
-its last *committed* state, not "current minus my last edit" ‚Äî and at that moment
-bot.py held this same commit's uncommitted menu-fix work. All 17 additions were
-silently wiped in one command. Caught immediately by `git diff --stat` showing zero
-changes where 18 lines were expected; the earlier edits were redone from memory rather
-than lost. No broken code shipped, but this is the second time this exact command has
-destroyed real uncommitted work in this repo (the first is `repo-change-control`'s own
-"Common mistakes" entry, "this destroyed ~700 lines once") ‚Äî promoted straight to a
-numbered constraint rather than waiting for a third occurrence.
-
-**Verified:** `python3 -m py_compile bot.py` clean, `pytest` 710/710 passed, `run-evals.sh`
-32/32 green, and the registered/menu name sets diffed programmatically both
-directions (empty both ways) independent of the new pytest coverage.
-
-## 2026-08-01 ‚Äî Chimera's banned-rhetoric block ported to preset-rp.txt, not preset-core.txt (content only, no bot.py change, no version bump)
-
-**ROADMAP 3.14 shipped, but to a different file than the item specified** ‚Äî a roleplay
-simulation before shipping caught that the original plan was wrong, which is the part
-worth recording. `Chimera_v2.json` names four prose constructions as "the loudest
-machine tells" and forbids them outright: contrastive negation (`not X but Y`),
-false-correction/epanorthosis (`It was X. No ‚Äî Y.`), negation-as-atmosphere (`it wasn't
-the wind`), and litotes (`not unkind`). 3.14 planned to port these into
-`preset-core.txt`, reasoned as universal prose hygiene reaching all seven instances via
-3.13's layering.
-
-**The plan was tested, not just reviewed, before anything shipped.** Same message run
-against Priya's actual stack (`core+stepped+priya`, no narration) and Jules's
-(`core+rp+explicit+stepped+jules`, narrates in third person):
-- **Priya:** her natural reply included *"not mad or anything, just tired"* ‚Äî an
-  ordinary first-person texting hedge that happens to share contrastive-negation's
-  surface shape. Under the rule as drafted for `preset-core.txt`, zero tolerance would
-  have forced cutting it ‚Äî sanding a real human speech habit to fix a problem that only
-  exists in narrated prose. Priya never narrates; the rule doesn't apply to her at all,
-  and shipping it to `preset-core.txt` would have applied it anyway, fleet-wide.
-- **Jules:** narration reaching for *"It wasn't nothing, though"* in a restraint beat ‚Äî
-  the actual tell. Rewritten as *"It mattered."* ‚Äî tighter, and more in-character per
-  `preset-jules.txt` (her resolution is never a soft line).
-
-**Root cause of the near-miss:** Chimera's bans describe third-person narrated prose,
-not first-person conversational hedging, and `preset-core.txt` is loaded by narrating
-and non-narrating instances alike. `preset-rp.txt` (the narration layer that 3.13 already
-built) is loaded only by instances that actually narrate ‚Äî nora, bonnie, emily, jules,
-marcus ‚Äî never cass or priya. Targeting `preset-rp.txt` instead gets the correct scoping
-for free from the layer boundary, with no carve-out text needed for the two instances
-where the rule doesn't belong.
-
-**Shipped:** the four-ban paragraph added to `preset-rp.txt`'s `[NARRATION]` section,
-right after the opening paragraph, in the file's existing Bad/Good example style (~60
-tokens). `git diff` confirmed the change is isolated to exactly that insertion.
-Verified: `bash .claude/evals/run-evals.sh` 32/32 green.
-
-**Not yet done:** `vps-sync.sh` re-run on the five instances that load `preset-rp.txt`
-to actually pick this up (see `deploy-and-verify-fleet`) ‚Äî content changes don't bump
-`BOT_VERSION`, so there's no version number to confirm against; the register itself
-(via `/audit`'s `Preset layers:` line, or just talking to the character) is the
-verification.
-
-## 2026-08-01 ‚Äî vps-sync.sh's bot.py swap is now locked (no bot.py change, no version bump)
-
-**Root cause: bot.py's own concurrent-update fix (v2026-07-25.11) covered only one of
-the two places that perform the swap.** `perform_self_update`'s host-wide `flock` fixed
-`/update` racing itself, but `deploy/vps-sync.sh` performs the identical
-fetch‚Üícompile‚Üíbackup‚Üíswap sequence on the identical shared paths
-(`/opt/telegram-bots/bot.py`, `bot.py.bak`) with no guard at all ‚Äî and the documented
-fleet deploy is exactly two-or-more back-to-back invocations against instances that
-share a host (every instance does, since the 2026-07-26 migration). ROADMAP 1.6 named
-this the other half of the class.
-
-**The race, unfixed:** two concurrent runs share the fetch, the compile target, the
-backup, and the final file. The loud failure is one run's `mv` deleting the other's
-`bot.py.new` mid-copy. The silent one is worse and is the real reason this ranked above
-cosmetic work: if instance B's `cp bot.py bot.py.bak` lands *after* instance A's `mv`,
-`bot.py.bak` becomes a copy of the **new** code, not the old ‚Äî the rollback path looks
-intact and is not. Nothing would have reported it; the owner would only find out at the
-moment they actually needed to roll back.
-
-**Fix:** `flock -n` around the whole run, released automatically on exit. `flock` is
-util-linux and present by default on Ubuntu 24.04 ‚Äî Termux's absence of it is exactly
-why bot.py's own phone-side guard and `watchdog.sh`'s PID-file guard already use
-different mechanisms; this is a fourth, VPS-specific one, not a unification of the
-other three. Only the code swap strictly needs covering (card/preset/`.env`/systemd-unit
-work is per-instance and never races across instances), but locking the entire script is
-simpler and equally correct, per the ROADMAP item's own note.
-
-**Also folded in:** the backup `cp` was `2>/dev/null || true` ‚Äî a failed backup died
-silently, which is the same silent-rollback-loss failure mode as the race itself, just
-via a different door. Now unguarded and fatal like every other step. `install-vps.sh`
-seeds `bot.py` at `$BASE` before `vps-sync.sh` can ever run (step 2/8 of the installer),
-so the backup source existing is a precondition already established, not a new
-assumption this fix introduces.
-
-**Verified ‚Äî break-tested, not inspected, per the ROADMAP item's own "done when," in
-two passes.** First, the locking mechanism was extracted and raced in isolation from
-this session (no VPS access here): a held lock's second concurrent `flock -n` attempt
-exits non-zero with the intended message while the first holds it, and a fresh solo run
-acquires the lock normally after release. `bash -n deploy/vps-sync.sh` clean.
-
-Second ‚Äî the real thing, owner-run on the VPS. Round one raced `nora` against `bonnie`
-as the first invocation after merging: both started from the *pre-fix* script (a
-sync's checkout-reset is its own first action, so the very first call after a merge
-necessarily runs from whatever was already on disk), and instead surfaced a genuine
-git-level race ‚Äî `bonnie`'s `git fetch` hit `error: cannot lock ref
-'refs/remotes/origin/main'` against `nora`'s concurrent fetch+reset, and `set -e`
-killed `bonnie`'s run right there, before it touched anything `bonnie`-specific.
-`nora` completed normally. Useful evidence (unguarded concurrent syncs on a shared
-checkout really do collide) but not a test of the fix itself, since neither run had it
-loaded yet.
-
-Round two, now that `nora`'s successful run had pulled the checkout ‚Äî and the script
-that reads it ‚Äî to the fix: raced `bonnie` against `cass`, baseline `bot.py` md5
-captured first. `cass` hit the flock and exited 1 with the intended retry message
-*before its own `git fetch` ever ran*. `bonnie` completed end-to-end ‚Äî fetch, compile,
-backup, swap, restart, full hash + `STARTUP AUDIT` verification. `bot.py.bak`'s md5
-after the race matched the pre-race baseline exactly: the rollback point held the
-genuinely-previous code, not a corrupted copy of the new. ROADMAP 1.6's done-when is
-satisfied and closed.
-
-## v2026-08-01.1 ‚Äî Selfie prompt's fixed rules are findable (refactor, no behavior change)
-
-**Root cause: the two prompt fragments most likely to need editing were the two hardest
-to find.** `build_selfie_prompt` is a ~70-line conditional builder, and every generic
-selfie fragment ‚Äî `SELFIE_EXPRESSIONS`, `SELFIE_FRAMINGS`, `SELFIE_OUTFITS`,
-`SELFIE_ACTIVITIES`, `SELFIE_CAMERA` ‚Äî is hoisted to a module constant with its peers.
-Two were not: the anatomy rule ("exactly two arms... no extra limbs") and the realism/SFW
-rule, appended unconditionally from inline literals mid-function.
-
-Those two are precisely what you reach for when the image model misbehaves ‚Äî extra limbs
-from Flux/Kontext, or Gemini's safety filter returning a blacked-out frame when the SFW
-signal is weak (the same filter that already forced the explicit-adult-age workaround at
-`SELFIE_APPEARANCE`). Image-prompt tuning is recurring work here, and it was starting
-from a code read instead of a grep.
-
-Now `_SELFIE_ANATOMY_RULE` and `_SELFIE_REALISM_RULE`, next to the other `SELFIE_*`
-pools. The conditional appends (weather, wardrobe, mood, scene dedup) are untouched ‚Äî
-conditional assembly is correct and was never the problem.
-
-**No behavior change, proven not assumed:** 640 prompts across 40 seeds √ó both hint
-modes √ó both `chat_id` modes √ó weather present/absent √ó wardrobe set/unset, captured
-before and after ‚Äî byte-for-byte identical. Two new tests pin that both rules reach every
-prompt and that the two constraint phrases survive; both were break-tested RED before
-being trusted (C3).
-
-Prompted by an external commit (`ShopDevX/adeptlydev` b6d7437) that replaced ~30-call
-`lines.push()` chains with template literals. That codebase's problem does not exist
-here ‚Äî static prompt text lives in `preset.txt`, cards, and preset layers ‚Äî so only the
-narrow real instance was taken. **Deliberately not turned into an invariant:** the class
-has zero occurrences in this repo, and `bot-code-invariants` rules are earned by
-incidents, not imported from other people's refactors.
-
-**Built to ride along, not to deploy alone.** No user-visible change, so this is not
-worth a seven-instance deploy on its own; it was parked on
-`claude/github-commit-workflow-integration-ak6ql6` to merge with the next functional
-release. If it reaches `main` under a later `BOT_VERSION`, that is expected.
-
-## 2026-07-29 ‚Äî install-vps.sh could not authenticate to the private repo (no bot.py change)
-
-**Root cause: the private-repo migration was applied to one script and not the other.**
-v2026-07-28.3 switched `install-vps.sh`'s `REPO_URL` to SSH but never wired the deploy
-key, so its `git clone`/`git pull` fell back to root's default identity. Standing up
-Marcus ‚Äî the first `install-vps.sh` run since the repo went private ‚Äî died at step 2/8
-with `git@github.com: Permission denied (publickey)`. `vps-sync.sh` was unaffected: it
-sets `GIT_SSH_COMMAND` from `/root/.ssh/stpresets_ro` (line 62), which is precisely the
-line `install-vps.sh` was missing.
-
-Changing a URL scheme is not the same as changing an auth model; the URL edit *looked*
-like the whole fix because the script it was copied from already had the other half.
-
-Also fixed in the same pass, before it could bite next: both `git` calls now pass
-`-c safe.directory="$REPO_CHECKOUT"`. Step 4/8 chowns the tree to `bot:bot`, so root
-running git there trips "detected dubious ownership" on every re-run ‚Äî the auth failure
-was simply hiding it. `vps-sync.sh` passes the same flag for the same reason.
-
-**Recovery is not circular**, which is worth stating because it looks like it should be:
-the fixed `install-vps.sh` lives in the repo the broken `install-vps.sh` cannot read. But
-`vps-sync.sh` authenticates fine, and it fetches and hard-resets the checkout ‚Äî so running
-it for any existing instance pulls the fix onto the box, and `install-vps.sh` is then run
-from the updated checkout.
-
-Verified: `bash -n` on both deploy scripts, evals 28/28.
-
-## v2026-07-29.3 ‚Äî The character's voice comes from the character's model, on every bot
-
-**Root cause: `SUMMARY_MODEL` was two jobs wearing one name.** Eleven call sites read it.
-Nine are background work ‚Äî rolling summaries, `reflect`, `_consolidate_facts`,
-`_promote_to_long_term`, `_memory_audit_scan`, day events, world text. **Two write
-user-facing prose in the character's voice**: `_selfie_caption` and
-`_generate_meme_captions`.
-
-Nothing announced that. An operator pointing `SUMMARY_MODEL` at a small fast model ‚Äî which
-is exactly what the variable name invites, and what `.env.example` recommended ‚Äî was
-silently handing that model the character's dialogue. Jules ran `glm-4.7-flash` and sent a
-selfie captioned with invented instruction blocks, three people who exist nowhere in her
-card or seeds, and outright word salad. Her `/audit` reported `glm-5.1:thinking` the whole
-time, because that is the *chat* slot, which is why the first two diagnoses this session
-blamed the wrong model.
-
-**New `CAPTION_MODEL` slot, defaulting to `NANOGPT_MODEL`.** Her voice now comes from her
-own model on every instance ‚Äî the uniformity the owner asked for ‚Äî and `SUMMARY_MODEL`
-finally means what its name says, so pointing it at something cheap is safe again. The
-default is the fix; the env var is the per-instance override, no redeploy required
-(invariant #16). Registered in `MODEL_ROLES` as `caption`, so `/setmodel` can reach it
-like every other slot.
-
-**No new LLM calls** (invariant #3) ‚Äî the same two calls, on a different slot.
-
-Verified: `py_compile`, **706 pytest** (702 + 4), evals 28/28. Break-tested by pointing the
-captions back at `SUMMARY_MODEL`: `test_caption_helpers_no_longer_use_the_summary_slot`
-failed, the other three held. One test deliberately pins `_summarize` to `SUMMARY_MODEL`
-so a future "uniformity" pass cannot drag summarisation onto the chat model too.
-
-**Version note:** requested as "28.3", shipped as **2026-07-29.3** ‚Äî `v2026-07-28.3` is
-yesterday's private-repo deploy release, and reusing it would break
-`version-changelog-sync` and make `/audit` ambiguous about what is live.
-
-## v2026-07-29.2 ‚Äî The guard was in the one place the selfie caption never goes
-
-**Root cause: v2026-07-29.1 put the guard in `extract_tags`, and a selfie caption never
-reaches it.** Found by the owner asking whether the vision model was responsible ‚Äî a
-question that forced a proper reading of the image path instead of the assumed one.
-
-There are three model slots near a selfie, and separating them is the answer to the
-question: `VISION_MODEL` (`bot.py:295`) *reads* images the user sends, `SELFIE_MODEL` /
-`GEMINI_IMAGE_MODEL` (`605`, `607`) *generate the picture*, and the chat model writes the
-words. An image model emits pixels and cannot put text in a caption, so the leak was
-always text-side. But **which** text call was wrong in the v2026-07-29.1 entry:
-
-`_selfie_caption` (`bot.py:5629`) is its own LLM call on `SUMMARY_MODEL or NANOGPT_MODEL`,
-and its result goes **straight to `send_photo(caption=...)`** at `5717` without ever
-passing `extract_tags` ‚Äî whose only three call sites are `9171`, `9430`, `9932`. The meme
-caption helper has the same shape. So if the leak came through the caption path, the
-guard shipped an hour earlier would not have caught it.
-
-**`generate_reply` is the real boundary**, and it is a clean one: all twelve
-`reply_with_typing` sites plus both caption helpers reach the model through it, while the
-~10 analysis and extraction paths (`3719`, `3840`, `4175`, `5262`, `5964`, `6005`, `6092`,
-`6179`, `10022`) call `call_nanogpt` directly. Moving the guard there covers every
-user-facing path and still keeps a line-eating regex away from the analysis JSON ‚Äî which
-was the reason for avoiding `_do_request` in the first place. Removed from `extract_tags`
-so there is one home, not two.
-
-**A near-miss worth recording, because the break test is the only reason it isn't in the
-diff.** Moving the guard earlier raised a real-looking risk: an UPPERCASE `[SELFIE: ...]`
-would be stripped before `extract_tags` (which matches tag names case-insensitively) could
-parse it, and the selfie would silently never send. An exemption list for the four real
-tags was written to prevent that ‚Äî then break-tested by neutering it, and **the tests
-still passed**, because the exemption never fired. A tag is `[selfie: value]` with the
-colon *inside* the brackets, and the directive pattern requires `]` immediately after the
-label, so it cannot match a tag in any case. The leaked directives are `[LABEL]: value`,
-colon *outside*. That structural difference is what the guard actually keys on. The
-exemption was deleted rather than left as reassuring dead code; the tests stay, pinning
-the guarantee.
-
-**Correction to v2026-07-29.1's root cause.** That entry attributed the bracket priming to
-the `[selfie: ...]` convention at `bot.py:4459`. That line is in the *main reply* prompt;
-`_selfie_caption` builds its own message list and does not include it. Its bracket priming
-comes from `SYSTEM_PROMPT_RAW` ‚Äî her card's own `[ATTRACTION RULE]` / `[PACE CONTROL]` /
-`[THE FILE]` headers, which is consistent with the two real labels in the leak. Which of
-the two paths actually fired is **still unresolved**: the message read as a full reply
-with narration rather than the "1-2 sentences max, don't describe the photo" that
-`_selfie_caption` asks for, which points at the reply path ‚Äî but that is inference, not
-evidence. The guard now covers both, so the fix does not depend on settling it.
-
-Verified: `py_compile`, **702 pytest** (699 ‚àí 1 replaced + 4), evals 28/28. Break-tested
-twice: neutering the guard fails `test_guard_lives_at_the_generate_reply_choke_point`, and
-neutering the exemption failed nothing, which is how the dead code was found.
-
-## v2026-07-29.1 ‚Äî Jules captioned a selfie with her own planning notes
-
-**Root cause: the reply prompt teaches the model a bracket-tag output format, and
-`extract_tags` only removes the tags it knows by name.** When selfies are available
-bot.py appends `[selfie: a short visual description ‚Äî your pose, expression,
-surroundings]` to the prompt (`bot.py:4459`). That is an instruction to emit
-`[TAG: value]` as *output*. `zai-org/glm-5.1:thinking`, holding `preset.txt`'s
-`[STEPPED THINKING]` block telling it to plan privately, rendered that planning in the
-very syntax it had just been handed:
-
-```
-[ATTRACTION RULE]: Present-tense. Maintain the patronizing "bud."
-[PACE CONTROL]: Mix it with a complaint. Business of the rink.
-[JULES TONE]: Concise, annoyed but using "Sam".
-```
-
-`extract_tags` strips `[react:]`, `[selfie:]`, `[meme:]` and `[search:]` **by name**;
-everything else bracketed went to Telegram verbatim, as the caption on a photo.
-
-**Why the evidence pointed here and not at prompt assembly.** A prompt-assembly leak
-would reproduce her system prompt *verbatim* ‚Äî `[THE FILE]`, `[KINK MECHANICS]`,
-`[CANTONESE FORMS]`. Instead two labels were real headers from her card and four
-(`[JULES TONE]`, `[NO LANGUAGES]`, `[CANON NOTE]`, `[CONTEXT]`) exist nowhere in the
-repo. bot.py cannot invent `[NO LANGUAGES]`. The model borrowed the *style* and wrote
-its own content ‚Äî which also rules out any fix keyed to known header names.
-
-**The guard:** `_strip_directive_lines` drops whole lines that are nothing but an
-ALL-CAPS bracketed label, optionally followed by `": rest of line"`. Runs inside
-`extract_tags`, **after** the named tags, so it can never re-match one. Lowercase is
-excluded deliberately: `[selfie: ...]` is handled above and an in-character `[laughs]`
-must survive. Default ON, kill switch `DIRECTIVE_LEAK_GUARD=0`.
-
-**It logs every strip at WARNING.** Stripping alone would convert a visible model fault
-into an invisible one ‚Äî the guard hides the symptom, not the cause.
-
-**Deliberately NOT in `_do_request`** (invariant #4's choke point): that path also
-carries the post-reply analysis JSON, and a line-eating regex has no business near it.
-This runs on user-facing reply text only.
-
-**What this does not fix.** The same message contained `"Liga Handball refer a 4t 7 my"`
-and three confabulated people (`Sam`, `Chuck`, `Chronicle` ‚Äî zero hits in her card or
-seeds). That is model degeneration, not a formatting bug, and the guard will not touch
-it. If it recurs, the question is `glm-5.1:thinking` and its sampling, not this code.
-The trailing unclosed quote is consistent with the leaked plan burning the 4096-token
-budget and truncating.
-
-**Also found:** her live stack is `preset.txt` (8018t monolith) + `preset-jules.txt`, set
-by a **runtime `/preset` override**, not by `.env` (`preset_override`, `bot.py:2474`) ‚Äî
-which is why the owner had no memory of changing it. Moving her to the recommended
-`core,rp,explicit,stepped,jules` stack is handled separately, so the two changes are not
-confounded.
-
-Verified: `py_compile`, **699 pytest** (691 + 8 new), evals 27/27. The 8 new tests were
-break-tested red by neutering the guard ‚Äî 3 stripping assertions failed, and the 5
-must-not-strip assertions correctly stayed green.
-
-## 2026-07-29 ‚Äî Every doc still told the operator to curl a URL that 404s
-
-**Found by handing the owner a command that could not run.** The deploy instruction in
-CLAUDE.md ‚Äî `curl -fsSL <raw-base>/deploy/vps-sync.sh | bash -s -- emily` ‚Äî failed twice
-over: `<raw-base>` was a literal placeholder, and the URL is dead regardless, because
-**v2026-07-28.3 made the repo private the day before**. That release exists precisely
-because raw URLs 404 on a private repo, and the docs describing how to deploy were never
-updated to match it.
-
-**The class:** an operational command living in prose is a historical claim about how the
-system worked when someone wrote it down. The release changed the mechanism; seven
-documents kept describing the old one, and the one an agent reads first (CLAUDE.md) was
-among them.
-
-Rewritten to run from the checkout that is already on the box ‚Äî `CLAUDE.md`,
-`OPS_MANUAL.md` (deploy + install), `CHEATSHEET.md`, `deploy/MIGRATION.md`, and the
-`deploy-and-verify-fleet` skill, which is what an agent loads when asked to deploy:
-
-```bash
-/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>
-```
-
-The script fetches and hard-resets the checkout to `origin/main` before copying, so
-running the on-disk copy is correct even when the checkout is stale ‚Äî which it was: the
-diff that surfaced this showed `.repo` still holding pre-rename content while the live
-instance had the new.
-
-**Phone-era paths annotated, not rewritten** (`update-all.sh`, `backup-all.sh`, the
-MIGRATION cutover step, all of `SETUP_GUIDE.md`). They target `~/telegram-bot` on a phone
-that has been empty since 2026-07-26 and were already recorded as managing nothing; the
-fix there is a `DEAD` marker so nobody copies them, not a rewrite of dead tooling.
-
-**New eval `no-live-raw-urls`** (26 ‚Üí 27) fails on any `curl`/`wget`/`BASE=` line carrying
-a `raw.githubusercontent` URL unless annotated dead within 6 lines, or its file opens with
-`<!-- evals: raw-urls-historical -->`.
-
-**The first draft of that eval was blind, and the break test is why we know.** It allowed
-a file-level opt-out on any marker word in the first 25 lines ‚Äî and CHEATSHEET.md's header
-*explains* that raw URLs 404, so the whole file was exempt and a re-injected defect passed
-in the file the check most needed to guard. An opt-out matched loosely is an opt-out for
-everything. Now a literal pragma, break-tested red in a file other than the one it was
-developed against.
-
-## 2026-07-28 ‚Äî A seed file can be in the repo and absent from the fleet, forever, silently
-
-**Found by a failing rename, not by a check.** Renaming Jules's dealership manager on the
-VPS returned `sed: can't read /opt/telegram-bots/jules/atlas.txt: No such file or
-directory`. The repo has had `jules/atlas.txt` since the seed folders were added; her live
-instance never got it.
-
-**Root cause: nothing syncs seed files, by design, and nothing reports on them either.**
-`install-vps.sh` seeds a character's `people/projects/schedule/atlas.txt` **once**, at
-first instance creation, and `vps-sync.sh` deliberately does not touch them ‚Äî they are
-living, hand-edited content. Both halves are correct. The gap is what falls between: a
-seed file added to the repo *after* an instance exists has no path to that instance, and
-jules's dir came off the phone in the 2026-07-26 migration rather than through
-`install-vps.sh` seeding at all.
-
-**Why it stayed invisible.** `bot.py:649` reads the atlas once at import and falls back to
-`[]` when the file is absent ‚Äî no warning, no error, and the fallback is correct behaviour
-for a character who has no atlas. `/audit` does not mention seed files. So the only symptom
-is Jules quietly never referencing Bellingham, which reads as a model quirk rather than a
-missing file. Same shape as the GROUP_MODE incident earlier today: **a correct silent
-fallback and a broken deploy are observationally identical** (C8).
-
-**`vps-sync.sh` now reports the gap** in its verification block: seed files present in the
-repo for that instance but missing on it, each with the `cp` that would fix it.
-
-**It reports, it does not copy.** An operator may have deleted a seed file deliberately,
-and an absent file is indistinguishable from an intended absence (C10) ‚Äî auto-seeding
-would silently resurrect it on every deploy. This follows v2026-07-28.2's precedent:
-surface the incoherence, name the fix, leave the decision with the operator.
-
-Three-branch break test (`scratchpad/seedreport-test.sh`, extracting the block verbatim
-from the script rather than a re-typed copy): missing file warns and names it; all-present
-prints an explicit all-clear; no seed folder in the repo says so instead of claiming
-completeness. **All three print something** ‚Äî per C3, "nothing printed" must never be the
-only signal a check can produce. The harness truncated at the first top-level `fi` on the
-first run and reported three false failures; the check was fine.
-
-**Not fixed here:** `/audit` still says nothing about seed files, so this is only visible
-at deploy time. Adding it is a bot.py change (version bump + changelog + delivery gate) and
-is left as a proposal rather than smuggled into a deploy-script fix.
-
-## 2026-07-28 ‚Äî Three Marcuses, one of them keyed into Emily's lorebook (content only)
-
-**Found while drafting Marcus's seed files, and it blocks the planned Emily+Marcus
-group.** Adding a character named Marcus collided with two that already existed:
-
-| where | who | why it matters |
-|---|---|---|
-| `emily_harper.json` lorebook, **key `"Marcus"`** | her work supervisor, forties | keyed on the literal name ‚Äî in a group chat with him, every message naming Marcus injects "Marcus is her supervisor" into Emily's prompt |
-| `emily/people.txt`, `emily/schedule.txt` | remote colleague, primary collaborator | same person, described differently |
-| `jules/people.txt`, `jules/atlas.txt` | sales manager at the dealership | no group planned, but the same trap |
-
-The lorebook one is the sharp edge: a lorebook key is a trigger word, so the collision
-is not cosmetic ‚Äî it would have fired on his own name and taught Emily that her groupmate
-is her boss. This is the group-chat sibling of C11 (a mechanism leaking into the fiction),
-except the mechanism here is the retrieval layer rather than a diagnostic.
-
-**Owner decision (2026-07-28): rename the existing ones**, since the new character's name
-runs through owner-supplied card prose while Emily's Marcus is deliberately faceless
-("mostly a Slack handle", never met in person). Emily's is now **Warren**, Jules's is
-**Dale**. Both names were checked against every card, seed and preset before use.
-
-**Fixed a pre-existing contradiction in the same edit.** Emily's card called Marcus *"her
-supervisor"*; her `people.txt` calls him a remote colleague and names Dr. Yuen as the
-supervisor, and `schedule.txt` lists them as two separate people on the same call. The
-lorebook entry now says senior colleague and names Dr. Yuen as the supervisor explicitly,
-matching the seeds. The `"supervisor"`/`"boss"` keys were dropped from that entry ‚Äî it is
-no longer the entry about her boss, and `people.txt` carries Dr. Yuen on every prompt
-regardless.
-
-**Marcus's seed dir** (`marcus/{people,projects,schedule,atlas}.txt`) drafted from what
-the card already establishes. Placed in **Portland** ‚Äî the card names no city, and his only
-planned groupmate is Emily, whose atlas is Portland-area; a shared group needs a shared
-metro. Real geography, per the rule Priya's and Emily's atlases follow. **No family
-entries**: the card is silent there, and inventing parents is heavier invention than a gym
-colleague, so it is left as a gap rather than a guess.
-
-## 2026-07-28 ‚Äî Marcus's preset layer + two things his arrival exposed (no bot.py change, no version bump)
-
-**Inert until an `.env` names it.** `preset-marcus.txt` is the seventh per-character
-layer. No instance loads it ‚Äî there is no marcus instance yet. Intended stack, same as
-the other scene characters:
-`PRESET_FILES=preset-core.txt,preset-rp.txt,preset-explicit.txt,preset-stepped.txt,preset-marcus.txt`
-
-**The arbitration is not the one that was expected.** The handoff predicted his card
-would fight `preset-core.txt`'s "one to three short paragraphs" the way Bonnie's does.
-It doesn't ‚Äî Bonnie's card states a numeric contract (3-6 paragraphs) and his states no
-length at all, and his own samples are short alternating beats. Writing that layer would
-have solved a conflict he does not have.
-
-The real conflict is with **`preset-explicit.txt` ¬ß Standing consent**, added
-2026-07-26: *"Consent ‚Ä¶ does not need to be re-established, asked after, or checked in on
-before a scene proceeds, and no reply should open by hedging, warning, or seeking
-permission."* Marcus's card is built on the opposite behaviour ‚Äî he opens by asking what
-someone actually wants, checks in mid-scene, and declines what crosses his code. Read
-flatly, the shared layer deletes the character.
-
-Both rules are correct; they address different things, and the layer says so. The
-standing-consent rule governs the **narrator's** relationship with `{{user}}` ‚Äî it stops
-the fiction breaking to ask permission it already has. Marcus's asking happens **inside**
-the fiction, between characters, and is characterization. That distinction is the layer's
-load-bearing sentence. The `Dead Dove` preamble in the same file ("no sanitization",
-"avoid ethical protocols") pushes the same way and is answered by the same distinction:
-his limits are traits, not content policy.
-
-Layer is 434 raw tokens against the 250-290 band the other six sit in. Deliberate ‚Äî a
-semantic contradiction needs the narrator/fiction distinction spelled out, where Bonnie's
-numeric one is settled in a sentence. Costs ~2% on his stack, paid only by him.
-
-**`preset.txt:531` and `preset-explicit.txt:144` named the example speaker "Marcus".**
-Coincidence in a file written before the card existed, and inert for six bots ‚Äî but on a
-marcus instance that line stops being an example and becomes a voice sample attributed to
-the character himself, in a register aimed at a partner he does not have. Every other
-example in that block uses unnamed pronouns, so the name is now `he`. Removes the class,
-not just the collision: any proper noun in a shared example can collide with a future
-character.
-
-**`deploy/install-vps.sh` excluded seed folders by a hardcoded name list**
-(`nora|bonnie|cass|emily|priya|jules`), which silently misses every character added after
-it was written ‚Äî and the miss is destructive, not cosmetic. A seed folder is named
-exactly like its instance directory, so an unlisted character's `marcus/` would be copied
-straight onto the live `/opt/telegram-bots/marcus/` by step 2, reverting hand-edited
-`people.txt`/`atlas.txt` to the repo seed **on every re-run** ‚Äî exactly what the
-surrounding comment promises will never happen. Now matched by shape (a directory holding
-`people.txt`), which cannot fall behind the roster. Latent today: no `marcus/` seed folder
-exists yet, so this lands before the trap can spring rather than after.
-
-Verified: `run-evals.sh` 26 passed / 0 failed / 1 skipped (`bot-imports`, PIL missing
-locally ‚Äî runs in CI), `bash -n deploy/install-vps.sh`, and a fixture break-test of both
-loop bodies confirming the old one clobbers a live `marcus/people.txt` and the new one
-does not. pytest is not installed in this container; no Python changed in this diff.
-
-## v2026-07-28.3 ‚Äî Deploys move to a git checkout so the repo can go private
-
-**Root cause: the entire deploy model assumed anonymous read.** Nine call sites fetch
-from `raw.githubusercontent.com`, including the two that matter ‚Äî `deploy/vps-sync.sh`
-and bot.py's `perform_self_update`. Raw URLs 404 for a private repo and have no way to
-authenticate, so flipping visibility would have broken every deploy path on all six live
-instances simultaneously. Worse, the recovery is circular: the fix that teaches the fleet
-to authenticate would itself have to arrive over the channel that just broke, leaving
-hand-copying files to the VPS as the only way out.
-
-Owner decision (2026-07-28): make the repo private, because character cards were being
-published via raw URLs under a personal GitHub account as a side effect of how deploys
-work.
-
-**`deploy/vps-sync.sh` now syncs from a git checkout** at `/opt/telegram-bots/.repo`,
-cloned once with a **read-only deploy key**. This removes the circularity entirely ‚Äî a
-checkout behaves identically whether the repo is public or private, so it ships and gets
-verified *before* the flip, and the flip then changes nothing. Secondary win: nine fetch
-call sites collapse to one working tree that is fetched and hard-reset to `origin/main`
-in a single step, so a partial deploy can no longer leave an instance with a new `bot.py`
-and a stale card. The script prints the resolved HEAD and compares repo-vs-instance
-hashes, so a stale checkout cannot silently deploy old content. A file named in `.env`
-but absent from the repo stays fatal, same as the old 404-is-fatal rule.
-
-**`/update` cannot be saved and now says so.** Raw URLs can't authenticate, full stop.
-Previously a private repo would have produced `‚ö†Ô∏è Download failed: 404 Client Error` ‚Äî
-naming neither the cause nor the fix, and looking exactly like a network fault, which is
-the "opaque error" the debugging playbook says to instrument before it costs a session.
-`_perform_self_update_locked` now inspects `e.response.status_code` and returns a
-distinct `repo_not_readable` reason for 401/403/404; `update_cmd` gains a matching
-branch that replies with the `vps-sync.sh` command and confirms nothing changed. Note the
-catch-all added in v2026-07-25.11 already prevented silence here ‚Äî this makes the message
-*useful*, not merely present.
-
-**New card: `marcus_calder.json`** (Marcus Calder, `chara_card_v2`). 2,988 always-on
-tokens ‚Äî between Emily (2,308) and Jules (5,290), so no prompt-budget concern. Its
-`character_book` (6 keyword-triggered entries) and `extensions.depth_prompt` are both
-supported by `load_character` (bot.py:2352, 2357); every entry is `constant: false` /
-`selective: false`, so nothing is dropped by the parser's narrower feature set. Card
-added but **no instance exists yet** ‚Äî `vps-sync.sh` gains a `marcus` case so one can be
-stood up, and it stays inert until an instance dir and unit are created.
-
-**Not touched, deliberately:** `update-all.sh`, `sync-cards.sh`, `watchdog.sh`,
-`new-bot.sh`, `backup-all.sh` and `cleanup-all.sh` still carry raw URLs and are now dead
-against a private repo. They are phone-era and already managed nothing after the
-2026-07-26 migration; half-fixing tooling that runs nowhere would add risk for no
-behavior change. Recorded here so their breakage is a known state, not a discovery.
-
-Setup, verification, and the mandatory order of operations: `deploy/MIGRATION.md`
-¬ß "Private-repo deploys".
-
-## v2026-07-28.2 ‚Äî A group instance configured to do nothing looked exactly like a broken one
-
-**Root cause: correct fail-closed silence is indistinguishable from failure.** Priya was
-in the pilot group, running, receiving traffic, with `GROUP_ALLOWED_CHATS` and
-`GROUP_PEERS` both set correctly ‚Äî and `GROUP_MODE` never added. `group_guard`
-(bot.py:9277) requires `GROUP_MODE and chat.id in GROUP_ALLOWED_CHATS` for plain text;
-without it the message is dropped at handler group -1 with **no reply, no log line, no
-error**. That silence is right ‚Äî a non-participating instance must not answer in a group
-it was merely added to (¬ß6) ‚Äî but it means "not configured for this group" and "broken"
-produce byte-identical observable behavior.
-
-Diagnosing it took six rounds of live debugging on 2026-07-28. What made it slow is
-worth recording, because every signal pointed *away* from config: `/chatid` answered
-normally (allowlisted commands return at bot.py:9268, **before** the `GROUP_MODE`
-check), so the bot was demonstrably present and receiving; `@priya_bot` was ignored too,
-which looks like a delivery problem but isn't ‚Äî the @-mention changes Telegram delivery,
-not the guard; and `/errors` was clean, because nothing errored. Jules, correctly
-configured, worked throughout.
-
-**Fix ‚Äî `_group_config_warnings(mode, chats, peers)`**, appended to `_CONFIG_WARNINGS`
-at import, so `/audit` states the incoherence:
-
-| state | warning |
-|---|---|
-| allowlist and/or peers set, `GROUP_MODE` off | *"‚Ä¶ set but GROUP_MODE is off ‚Äî this instance ignores ALL group traffic (it answers only `/chatid` there). Set GROUP_MODE=1 and restart to participate."* |
-| `GROUP_MODE` on, allowlist empty | *"‚Ä¶ the allowlist fails closed, so every group message is still ignored. Add the group's chat id (`/chatid` in the group) and restart."* |
-
-**Both halves of the class, not just the one that bit** (C2): the inverse ‚Äî `GROUP_MODE=1`
-with an empty allowlist ‚Äî is the same defect with the same silent symptom (¬ß6 fail
-closed), and would have been the next incident.
-
-**Deliberately quiet on the three coherent states:** participating (mode on + allowlist
-set), fully unconfigured (the fleet's four non-group bots), and participating without
-peers (one bot + human is a valid group, not an error). A warning firing on every
-`/audit` fleet-wide would be noise, and noise is how the next real warning gets ignored.
-
-**No behavior change.** Nothing about participation, the guard, the ledger, claims, or
-the caps is touched ‚Äî this release only makes an existing state legible.
-`group-deliver-clean` and `group-cmd-allowlist` both green and untouched.
-
-**7 tests** over all four states of a pure helper, including a `test_priyas_actual_broken_config`
-pinning the exact configuration from the incident.
-
-## v2026-07-28.1 ‚Äî Diagnostics couldn't run while the bot was up, and said so dangerously
-
-**Root cause: `_acquire_pid_lock()` is a module-level call, so it beats its own
-exemptions.** `--check-config` and `--claim-test` are dispatched inside `main()`
-(bot.py:12875), but the PID lock runs at *import* (bot.py:2710) ‚Äî long before. Both
-diagnostics therefore aborted whenever the instance's bot was running, which is exactly
-when an operator reaches for them. Found trying to run the group-pilot atomicity smoke
-test (`GROUP_CHAT_DESIGN.md` ¬ß10.5) against a live priya: it refused, and neither
-diagnostic touches Telegram or needs the lock at all ‚Äî `_run_claim_test` reads only
-`GROUP_LEDGER_DIR`, and the instance dir merely decides where `bot.pid` lands.
-
-**The second half is the part that could have cost data.** The refusal printed:
-
-```
-Kill it first: kill 178039
-Or force-remove the lock: rm /opt/telegram-bots/priya/bot.pid
-```
-
-Both are wrong on a systemd host, and the fleet has been 100% systemd since 2026-07-26.
-`Restart=always` undoes the kill within seconds, so it is disruptive *and* futile.
-Removing the lock is worse: it admits a second process polling the same token ‚Äî the
-`telegram.error.Conflict` class that cost hours during the jules and priya cutovers
-(operational log 2026-07-19, 2026-07-25). Generic single-instance advice, written before
-systemd, aged into a recommendation to reproduce a known incident.
-
-**Fix.** A `DIAGNOSTIC_MODE` constant declared beside `BASE_DIR` ‚Äî before both the lock
-and `load_state`, since module-level code consults it:
-
-- `_acquire_pid_lock()` returns early in diagnostic mode. The lock exists to stop a
-  duplicate *poller* fighting for the token, not to serialize filesystem access, so a
-  non-polling mode skipping it removes no protection.
-- The duplicate-instance message now says `systemctl stop bot@<instance>`, names the
-  Conflict risk, points out diagnostics need no stop at all, and notes that a stale lock
-  is already cleared automatically (the `ProcessLookupError` branch), so removing the
-  file by hand should never be necessary.
-- **`load_state` no longer renames a corrupt state file in diagnostic mode.** This is the
-  one destructive path reachable at import: a parse failure moves `state.json` to
-  `.corrupted`. Harmless when the lock guaranteed exclusivity ‚Äî but a diagnostic now runs
-  *beside* the live bot, and must not move that bot's state file out from under it. It
-  logs and continues on empty state; no diagnostic reads state.
-
-**Fixed as a class, not an instance** (C2): the defect was described as being about
-`--claim-test`, but `--check-config` sat behind the identical import-time lock. Both are
-covered, and the flag list is pinned by a test so a third diagnostic flag added without
-listing it fails loudly instead of silently re-colliding.
-
-**Not changed, deliberately:** the three lock mechanisms stay distinct ‚Äî bot.py's
-PID-file guard, `perform_self_update`'s host-wide `flock`, and `watchdog.sh`'s PID file
-were chosen differently per platform, and ROADMAP 1.6 explicitly says not to unify them.
-This release changes *when* the PID guard is taken, never *what* it is.
-
-**8 new tests**, two classes: `TestDiagnosticModesSkipPidLock` (flag coverage, the
-declaration-order requirement that is the actual fix, early return, and the `load_state`
-guard preceding the rename) and `TestDuplicateInstanceAdviceIsSafe`, which fails if
-`Kill it first` or `force-remove the lock` ever returns ‚Äî the same shape as
-`TestRestartStormAdviceIsCorrect`, for the same reason.
-
-## v2026-07-27.1 ‚Äî Memory-loop defaults aligned to the default-on policy (fleet no-op)
-
-> **This entry was rewritten on 2026-07-28. Its original root cause was false.** It
-> claimed all six instances had been running with the memory-hygiene loops inert for two
-> weeks. They had not: every instance's `.env` already set `MEMORY_AUDIT=1`,
-> `MEMORY_HEDGE=1`, `MEMORY_DECAY_HALFLIFE_DAYS=90` explicitly. The claim was an
-> inference from bot.py's defaults plus a commented-out `.env.example`, never a reading
-> of the live files ‚Äî and it was shipped as fact. The original text is preserved only in
-> git history; what follows is what the release actually is. See
-> `.claude/memory/constraints.md` C9.
-
-**What this release actually does.** v2026-07-12.3 shipped three memory-hygiene features
-‚Äî weekly audit, recency decay, confidence hedging ‚Äî default-OFF, correct under the
-convention then in force. v2026-07-18.1 reversed that convention (new features default ON
-with a mandatory kill switch) and nothing swept backwards over features already shipped
-under the old rule. This aligns those three defaults with the standing policy.
-
-**Live impact on the existing fleet: none.** All six `.env` files set all three
-explicitly, and an `.env` value always wins over a bot.py default, so every running
-character behaves exactly as it did before this release. Verified by the owner on the VPS
-2026-07-28, one line per instance per variable. `deploy/vps-sync.sh` cannot have written
-those lines ‚Äî it touches exactly one `.env` key, `CHARACTER_CARD` (vps-sync.sh:55-58).
-
-**Where it does change something:** a *new* instance. `new-bot.sh` / `SETUP_GUIDE.md`
-produce an `.env` from `.env.example`, where all three ship commented out. Before this
-release a new bot silently came up with its memory-maintenance loop disabled and no
-signal that it had; now it inherits the fleet's actual configuration by default. That is
-the whole of the benefit, and it is worth having ‚Äî but it is a provisioning fix, not the
-live-defect fix the original entry claimed.
-
-**The flip.** Three one-line default changes; no logic touched:
-
-| var | was | now | kill switch |
-|---|---|---|---|
-| `MEMORY_DECAY_HALFLIFE_DAYS` | `0` (off) | `90` ‚Äî the value the v2026-07-12.3 entry itself recommended | `=0` |
-| `MEMORY_HEDGE` | `0` | `1` | `=0` |
-| `MEMORY_AUDIT` | `0` | `1` | `=0` |
-
-**Why `MEMORY_AUDIT` defaults on despite invariant #16's higher-cost carve-out.** It adds
-one `SUMMARY_MODEL` call per instance per *week* (not per message ‚Äî the per-message budget
-is untouched) and can put up to `MEMORY_AUDIT_MAX_PROPOSALS` items a week per instance
-into the owner's `/reviewmem` queue. Enabled at the owner's explicit instruction
-(2026-07-27). Note this imposes **no new cost on the existing fleet** ‚Äî all six already
-ran with it on, so that queue was already live; the corrected entry above supersedes the
-original's claim of "18 new items a week." The cost applies only to newly provisioned
-instances. If the queue becomes noise, `MEMORY_AUDIT_MAX_PROPOSALS=1` throttles it before
-the kill switch does. The audit never mutates anything on its own ‚Äî every delete/merge
-needs `/reviewmem ok` and routes through the `_memory_replace` choke point.
-
-**What does not change.** No new per-message LLM call (invariant #3). Recency decay is
-floored at 0.1 so old memories fade in the ranking and never leave it, and entries with no
-recorded `ts` (pre-2026-07 legacy lines) stay at a neutral 1.0 ‚Äî an instance whose
-`memory_meta.json` is sparse sees almost no ranking change. Hedging is display-time only;
-the stored line is untouched.
-
-**Testing note (why no new tests).** The three pure helpers already carry 34 tests from
-v2026-07-12.3, and all of them pass the parameter explicitly rather than reading the
-module global ‚Äî `_recency_weight(ts, now, halflife)`, `_hedge_memory_lines(lines, meta,
-autoconf, enabled)`. The `triggered_memories` ranking tests set no `ts` in `_memory_meta`,
-so the new 90-day default resolves to the neutral 1.0 path and leaves them byte-identical.
-That decoupling is why a default flip needs no test changes ‚Äî and is worth preserving.
-
-**Also in this release (`.claude/` only, no bot impact):** the operational log gains an
-`evidence_kind` tag and `verify-external-audit` gains a verdict/disposition split, both
-lifted from the reviewed protocol. See `REVIEW-SESSIONMEMORY-2026-07-27.md`.
-
-## 2026-07-26 ‚Äî Content: per-character preset layers (no bot.py change, no version bump)
-
-**Inert until an `.env` names them.** Six new files, no instance loads any of them yet.
-Deploy is a `PRESET_FILES` edit per bot ‚Äî or `/preset add <name>` to try one live and
-`/preset reset` to undo, which is what v2026-07-26.1 was built for.
-
-**The finding that shaped these.** The obvious reading of "presets that fit each
-character" is that each bot needs more of its own content. It doesn't ‚Äî the cards already
-carry personality, and carry it well. What the cards *also* carry is a **format contract**,
-and those contracts contradict the one shared `[TEXT DELIVERY]` rule in `preset-core.txt`:
-
-| card says | `preset-core.txt` says |
-|---|---|
-| Bonnie: "3-6 paragraphs, matched to scene energy" | "one to three short paragraphs‚Ä¶ prefer shorter responses" |
-| Priya: "sometimes a reply is two words", "no asterisk actions, no stage direction" | (same paragraph default) |
-| Emily: "third person with italicized action beats" | written throughout for a first-person text thread |
-| Cass: "she texts, doesn't narrate" | `preset-rp.txt`: "describe physical action in simple direct sentences" |
-
-Bonnie's is a flat numeric contradiction ‚Äî 3-6 versus 1-3 with a "prefer shorter" ‚Äî fighting
-on every message she sends. So the per-character layer's job is **arbitration, not
-personality**: say which instruction wins where the shared preset and the card disagree,
-plus the one or two things about that character that are easy to smooth away.
-
-**Six layers, ~250-290 raw tokens each**, deliberately small: `preset-{nora,bonnie,cass,
-emily,priya,jules}.txt`. Each is a format contract plus a "what not to smooth" section ‚Äî
-Bonnie's tender beat must not snap back to goblin mode inside the same message; Jules's
-warmth must never arrive as a soft line; Priya's warmth is closer attention, never an
-affirmation; Nora's grief shows as behaviour, never as narration; Cass names the fix in the
-same message as the problem; Emily's interior runs on biology.
-
-**Recommended stacks** (raw / at the 0.92 calibration measured on cass):
-
-| bot | `PRESET_FILES` | raw | cal | vs today |
-|---|---|---|---|---|
-| cass | core, stepped, cass | 4827 | 4441 | **‚àí3676** |
-| priya | core, stepped, priya | 4830 | 4444 | **‚àí3673** |
-| nora | core, rp, explicit, stepped, nora | 8505 | 7825 | +2 |
-| bonnie | core, rp, explicit, stepped, bonnie | 8521 | 7839 | +18 |
-| emily | core, rp, explicit, stepped, emily | 8501 | 7821 | ‚àí2 |
-| jules | core, rp, explicit, stepped, jules | 8538 | 7855 | +35 |
-
-cass and priya shed ~43%; the four scene characters pay within ¬±35 tokens for a stack that
-actually fits them. This is a fit exercise, not a token-cutting one ‚Äî the saving lands
-exactly where a character cannot use the scene machinery, which is the same shape as the
-v2026-07-25.6 result.
-
-**`preset-explicit.txt` gains a standing-consent block** (~55 tok) ‚Äî the one genuinely new
-rule in the `EveningTruthGLM5.2` preset the owner supplied. The rest of that file was
-checked line by line against the layers and is already covered, in places near-verbatim:
-"{{user}} is imperfect‚Ä¶ factually wrong" is `preset-core.txt:245-246`, OOC handling is
-`:254-255`, non-omniscience is `[EPISTEMIC HORIZON]`, "no melodramatic or clich√© phrases"
-is `[ANTI-SLOP]`, "goals independent of {{user}}" is `[CHARACTER AGENCY]`. Adopting it
-whole would have cost ~650 tokens a message in duplication and imported a
-"never-ending roleplay" frame into what `preset-core.txt` calls a
-`[VOICEPRINT PRESET ‚Äî TELEGRAM SINGLE SLOT]`.
-
-**Not done, deliberately:** no `.env` was changed, so nothing is live. Verified with
-`run-evals.sh` (26/26) and the full pytest suite (670) ‚Äî content-only, so no `BOT_VERSION`
-bump and no delivery-gate entry.
-
-## v2026-07-26.8 ‚Äî Install hints told the operator to run commands that cannot run
-
-**The class, in one sentence:** *an install hint that hardcodes a package manager sends
-the operator to a command that does not exist on the host the bot is actually running
-on.*
-
-**Root cause:** v2026-07-26.6 fixed the garminconnect `pip install` hint by
-interpolating `sys.executable` ‚Äî but that fixed the **instance, not the class**. Three
-more hardcoded hints survived, one of them in a message sent to Telegram:
-
-| site | said | why it fails on the fleet |
-|---|---|---|
-| `bot.py` PDF fallback (user-facing) | `pkg install mupdf-tools` | `pkg` is Termux-only; it does not exist on Ubuntu |
-| `--check-config` timezone preflight | `pkg install tzdata` | same |
-| JobQueue-missing warning | `pip install "python-telegram-bot[job-queue]"` | PEP 668 refuses system-wide pip on Ubuntu 24.04 |
-
-The third was found by the new scanner, not by hand ‚Äî a targeted grep for
-Termux/Android terms missed it because the string names neither.
-
-**Fix ‚Äî one derived helper per package manager, not four point edits:**
-- `_pkg_hint(pkg)` ‚Üí `pkg install ‚Ä¶` under Termux, `sudo apt install ‚Ä¶` otherwise.
-- `_pip_hint(pkg)` ‚Üí `{sys.executable} -m pip install ‚Ä¶`, which is the venv interpreter
-  by construction, so it needs no hardcoded venv path and sidesteps PEP 668.
-- All four sites now route through them, including the garminconnect hints from .6.
-
-**New sweep scanner `install-hint`** (`.claude/tools/sweep.py`) so the class cannot
-return silently: it flags any string literal containing a hardcoded `pkg`/`apt`/`pip
-install`, skipping comments, correct callers, and lines marked `# sweep-ok`. Reviewed
-exceptions carry their reason on the line, per `fix-the-class`. Break-tested: clean
-tree reports 0, re-injecting the exact `pkg install tzdata` defect reports 1.
-
-**Benign hit recorded, not "fixed":** `_acquire_termux_wake_lock()` still calls
-`termux-wake-lock`, guarded by `shutil.which(...)`. On the VPS the binary is absent, so
-the function is silently inert ‚Äî correct as written, and the guard is why.
-
-## v2026-07-26.7 ‚Äî The restart-storm alarm fired on every deploy
-
-**Root cause (owner-reported, 2026-07-26):** `/audit` warned "restarted 4x in the last
-hour ‚Äî something is killing the process" after a night of ordinary maintenance. The
-storm detector excludes starts preceded by a `[restart] requested` or `; restarting`
-marker, which covers `/restart` and `/update` ‚Äî but **not** `systemctl restart` or a
-`vps-sync.sh` deploy. Those stop the bot with SIGTERM, which `post_shutdown` handles
-and logs as a graceful stop, and emit no marker. Since the fleet went 100% systemd on
-2026-07-26 and a fleet deploy is six back-to-back restarts, every deploy tripped the
-alarm.
-
-A test actively encoded the old behaviour ‚Äî `test_graceful_stop_alone_still_counts`,
-justified by "e.g. a battery-manager SIGTERM". That rationale was phone-era: on the
-VPS there is no OEM battery manager, and a graceful SIGTERM means someone (or a
-deploy) asked the bot to stop.
-
-**Fix:**
-- A `[shutdown] graceful stop` line now marks the following start as deliberate.
-  **The direction of the inference matters:** the *presence* of that line proves the
-  process was asked to stop; its *absence* still proves nothing (`/update` and
-  `/restart` exit via `os._exit(0)` without logging one). Anything that kills the
-  process outright ‚Äî SIGKILL, OOM, an unhandled crash ‚Äî leaves no graceful-stop line
-  and is still counted, which is the case the alarm exists for.
-- The alert text was also phone-era and useless on the VPS: it sent the operator to
-  `bot.log`'s `[run-bot] ... exited (code N)` line (that file is 0 bytes under
-  systemd) and blamed the Android phantom-process killer and OEM battery managers.
-  Rewritten for systemd ‚Äî `systemctl status bot@<instance>`, a `journalctl` grep for
-  `Main process exited|Killed|out of memory`, how to read `code=killed/status=9` vs a
-  nonzero exit, and an OOM confirmation via `journalctl -k`. The instance name is
-  interpolated so the commands are copy-pasteable.
-- Tests: the old assertion is inverted with the reason recorded inline, plus
-  `test_sigkill_still_counts` (the guard that matters) and
-  `test_deploy_loop_does_not_alarm` (six back-to-back deploys ‚Üí 0).
-
-**Trade-off, stated deliberately:** a repeated *external* SIGTERM on the VPS would no
-longer alarm. That was a real phone failure mode (battery managers) and is not a
-plausible VPS one; systemd's own logs cover it. Revisit if an instance ever runs
-somewhere with an aggressive process manager again.
-
-## v2026-07-26.6 ‚Äî The library-missing warning named a command that cannot work
-
-**Root cause (hit live, 2026-07-26):** both "garminconnect is missing" messages ‚Äî
-the `/audit` config warning and the health-feed status string ‚Äî told the operator to
-run `pip install garminconnect`. On Ubuntu 24.04 that fails outright with
-`error: externally-managed-environment` (PEP 668), and even where it succeeds it
-installs system-wide, which is not where the bots look: every instance runs from the
-shared venv at `/opt/telegram-bots/venv/`. Since the 2026-07-26 migration the fleet is
-100% VPS, so the suggested command was wrong for **every** instance. `requirements.txt`
-has carried the correct venv-pip invocation in its comments all along; the runtime
-messages simply disagreed with it.
-
-**Fix:** both messages now interpolate `sys.executable`, which *is* the venv's
-interpreter by construction ‚Äî so they render as
-`/opt/telegram-bots/venv/bin/python -m pip install garminconnect` and stay correct on
-any host without hardcoding a path (invariant #2: no hardcoded instance/host paths in
-shared logic).
-
-**Scope:** message text only. No behavior change, no new env var, no kill switch ‚Äî
-"off" would mean restoring a command that cannot succeed.
-
-## v2026-07-26.5 ‚Äî The dead man's switch reported OK while being rejected
-
-**Root cause (found live, 2026-07-26):** `requests` does not raise on 4xx/5xx ‚Äî it
-raises only on connection errors and timeouts. The healthcheck ping was
-
-```python
-await asyncio.to_thread(lambda: _get_session().get(HEALTHCHECK_URL, timeout=10))
-```
-
-with no status check, so a **rejected** ping completed the `try` block normally and
-logged nothing. Every `_self_audit` line read `[audit] OK`.
-
-Discovered while verifying monitoring coverage after the VPS migration: five of six
-instances had a **doubled** URL ‚Äî
-`HEALTHCHECK_URL=https://hc-ping.com/https://hc-ping.com/<uuid>` ‚Äî which hc-ping
-answers with HTTP 400. Byte-identical `.env` files came off the phone in the migration
-tar, so those five had been broken *on the phone too*: the fleet ran for weeks with one
-working dead man's switch out of six, and nothing in any log said so. Only nora's URL
-was well-formed.
-
-This is the same class the streaming path already pins as invariant #5 (force-read the
-body, then `raise_for_status()`), applied to a path nobody had revisited since it was
-written.
-
-**Fix:**
-- `_self_audit` now inspects `resp.status_code`; anything ‚â•400 logs a loud warning
-  naming the code and stating that the switch is NOT working, and counts a
-  `healthcheck_rejected` error so it surfaces in `/audit`'s error breakdown and in the
-  admin API ‚Äî a silent monitor now shows up in the place operators actually look.
-- Connection failures keep their existing warning; the two failure modes are now
-  distinguishable in the log.
-- No kill switch: this adds observability to an existing call. "Off" would mean
-  restoring the silence that hid the bug.
-- `deploy/MIGRATION.md` step 8 no longer shows a literal `<your-jules-uuid>`
-  placeholder inside a copy-pasteable block, and gains a verification step
-  (`curl -fsS` the URL from the instance's own `.env`, plus a distinct-UUID count) ‚Äî
-  a placeholder in a paste-block is a plausible origin for the doubling.
-
-**Verification:** `py_compile`, pytest, `run-evals.sh` (new `healthcheck-status-checked`
-eval, break-tested red-green). Live: all six instances now return HTTP 200 from the URL
-in their own `.env`, six distinct UUIDs.
-
-## v2026-07-26.4 ‚Äî The fleet's voiceprint was addressing `{{char}}`, not the character
-
-**‚ö†Ô∏è CHANGES THE ASSEMBLED PROMPT FOR ALL SIX BOTS.** Not a behaviour flag ‚Äî the preset
-text every instance sends is different after this deploy. Read before shipping.
-
-**Root cause:** `fill()` substitutes `{{char}}`/`{{user}}` into every prose block the bot
-assembles ‚Äî the merged card (`bot.py:4330`), the setting (`:4335`), the lorebook
-(`:4589`), post-history instructions (`:4618`), the greeting (`:6093`, `:7381`) ‚Äî with
-exactly one exception: the preset layers, appended raw at `:4623`. Found while looking at
-the layer files for the per-character preset work, not by any test or error.
-
-So the placeholders reached the model **verbatim**, in the block that defines the voice:
-
-| layer | `{{‚Ä¶}}` occurrences | who loads it |
-|---|---|---|
-| `preset-core.txt` | **66** | cass |
-| `preset.txt` | **88** | the other five |
-| `preset-rp.txt` | 14 | ‚Äî |
-| `preset-closeness.txt`, `preset-stepped.txt` | 3 each | ‚Äî |
-
-Line 3 of `preset-core.txt` arrived as *"You are {{char}} speaking to {{user}} in an
-ongoing exchange."* ‚Äî as did "Preserve {{char}}'s voice", "Respond from {{char}}'s
-motives", "{{char}} knows only what {{char}} has witnessed or been told". The single
-highest-leverage block in the prompt was issuing instructions about a placeholder, and
-the model had to infer the referent from the card block above it.
-
-**Why it never surfaced:** it produces no error and no malformed output. The card names
-the character a few hundred tokens earlier, so a capable model resolves it and replies in
-character ‚Äî the cost is silent, in how binding each rule is. This is the same shape as
-the v2026-07-25.7 Markdown failure: invisible in code review, invisible in every local
-test, visible only in quality.
-
-**Fix:** one line ‚Äî the layer loop now appends `fill(_ltext, NAME, uname)`. Verified it is
-the only injection site; `TEXTING_STYLE` (the joined form) is not used to build prompts
-anywhere, so there is no second path to miss.
-
-**Effect on tokens:** slightly *fewer* ‚Äî `{{char}}` (8 chars) becomes a name (typically
-4‚Äì6). Immaterial next to the effect on instruction clarity.
-
-**Tests:** `TestPresetPlaceholdersAreFilled` ‚Äî the injection applies `fill()`, the shipped
-layers really do contain placeholders (so the guard can't silently protect nothing), and
-substitution works on realistic layer text.
-
-## v2026-07-26.3 ‚Äî One /audit, two sizes for the same file (regression in .2)
-
-**Found by cass's first post-deploy `/audit`**, which reported `preset-core.txt` as
-**~4165t** on the `Prompt:` top-blocks line and **~3839t** on the `Preset layers:` line ‚Äî
-the same file, one screen, an 8% disagreement and nothing saying why.
-
-**Root cause: v2026-07-26.2 calibrated a value that gets STORED.** `_record_prompt_size`
-accumulates across the process lifetime, and .2 pointed it at the calibrated `_tokens()`.
-So each sample froze whichever ratio was live the moment it was taken:
-- the first prompts after a restart are recorded before any API call has been measured,
-  i.e. at ratio 1.0 ‚Äî raw;
-- later samples are recorded at the real ratio ‚Äî calibrated;
-- `sum`/`avg` adds those together, mixing units in a single average;
-- `max_blocks` keeps the ratio from whenever the peak happened to be hit, and a peak set
-  in the first seconds after a restart is *always* the uncalibrated one.
-
-Meanwhile the `Preset layers:` line computes fresh at `/audit` time and is always
-current. Hence two numbers for one file. cass's audit is the textbook case: uptime 0.1h,
-peak recorded during startup at ratio 1.0, then 9 measured calls moved the ratio to 0.92.
-
-**The rule this violated:** a calibrated number is only meaningful against the ratio that
-produced it, so it must never be persisted or accumulated. Raw is the stable unit.
-
-**Fix:** stats are stored raw (`_prompt_token_total_raw`, `_msg_tokens_raw`, and
-`_prompt_top_blocks` back to `_est_tokens`) and the ratio is applied in
-`_prompt_audit_state()` at render. Every historical sample ‚Äî including ones taken before
-the first measurement ‚Äî is now re-expressed in today's unit, and a later ratio change
-retroactively corrects the whole history instead of stranding it.
-
-**Deliberately still calibrated: `_trim_prompt_to_budget`.** It makes a live decision
-against a real ceiling and stores nothing, which is exactly the case calibration is for.
-The split is now explicit: `_prompt_token_total` (calibrated, live decisions) vs
-`_prompt_token_total_raw` (raw, anything accumulated).
-
-**Buckets stay raw and are labelled.** They are counts already binned; history cannot be
-re-binned without the original samples. The edges are deliberately coarse ‚Äî the question
-is "anywhere near a ceiling", not "how big exactly" ‚Äî so the audit now reads
-`spread (raw est):` rather than implying a precision it doesn't have.
-
-**Swept for the class, and it was a class ‚Äî two more instances**, both invisible in the
-reported symptom:
-- **`_card_field_tokens`** is filled once at card load, which is *always* before any API
-  call has been measured, then rendered much later. Every `Card:` line on every instance
-  was therefore frozen at ratio 1.0 while the `Preset layers:` line directly above it was
-  calibrated. Now stored raw, calibrated in `gather_audit_data`.
-- **`_llm_stats["tok_in"]`** had the *opposite* error. It holds the provider's real
-  counts, but .2 left the no-usage fallback adding **raw** estimates into the same sum ‚Äî
-  two units in one total. That sum is rendered as-is and never re-scaled, so the fallback
-  should contribute the best estimate of the real count: it now adds calibrated tokens.
-
-The rule, now stated in the code at both sites: **store raw if the number will be
-re-rendered later; store calibrated if it is consumed immediately and never re-scaled.**
-The two mistakes are mirror images, which is why one sweep found both.
-
-**Tests:** `TestPromptStatsUnits` ‚Äî samples stored raw under a live ratio, render applies
-the current ratio, a pre-calibration sample is re-expressed, the trim budget stays
-calibrated, card fields stored raw and rendered calibrated, the daily sum adds real units
-in both branches, and the regression itself pinned: the same text must not report two
-different sizes in one audit.
-
-## v2026-07-26.2 ‚Äî Token counts are measured, not guessed
-
-**Root cause: every token number this repo has ever reported was `len(text) // 4`.**
-`_est_tokens` is a rule of thumb about English prose, and it was being applied to
-bracketed, bulleted markdown presets ‚Äî which tokenize denser than prose ‚Äî with **one
-constant divisor for six bots running different models with different tokenizers**. It
-could not have been right for more than one of them at a time. Every figure in the
-v2026-07-25.3/.5/.6 analyses, the `/audit` `Preset layers:` and `Card:` lines, `/usage`,
-and the `/preset` deltas shipped hours ago in .1 all inherited it, and all of them
-rendered it as `~Nt`, which reads like rounding rather than like a guess.
-
-**The provider was returning the right answer the whole time, and bot.py threw it away.**
-The response to every chat completion carries a `usage` block ‚Äî `prompt_tokens` counted
-by the real tokenizer for the real model, including the chat-template overhead we cannot
-see. `_do_request` read `resp.json()["choices"][0]` and discarded the rest, so
-`_track_llm_usage` re-derived from characters a number it had just been handed.
-
-**Why not a tokenizer library.** Considered and rejected. `tiktoken` would be the *wrong*
-vocabulary ‚Äî the fleet runs GLM through NanoGPT, not an OpenAI model ‚Äî so it would swap
-one wrong number for a differently wrong one, while adding a binary wheel to a Termux /
-Python 3.14 fleet where cp314 wheels are scarce and anything new compiles from source.
-The provider's count is both more accurate and free.
-
-**What shipped:**
-1. **Real usage is captured and spent.** Non-streaming reads `usage` off the body.
-   Streaming asks for it with `stream_options: {"include_usage": true}` and parses the
-   final chunk. `/usage` and `/audit` now report actual tokens, labelled `measured`,
-   `est`, or `N measured / M est` when a day mixes both.
-2. **The heuristic is calibrated from those measurements.** Each measured call yields an
-   (estimated, actual) pair for the *same text*; the ratio is folded into a persisted
-   per-instance EMA and applied to everything that can only ever be estimated ‚Äî the
-   `/preset` layer costs, `/audit`'s preset and card lines, the prompt-size stats.
-3. **The numbers say which they are.** `/preset` and `/audit` carry
-   `Counts: calibrated x1.28 from 41 measured call(s)` or
-   `Counts: estimate ‚Äî no measured API call yet`. Presenting a guess and a measurement
-   identically was the actual defect.
-
-**Three ways this could have gone wrong, and what stops each:**
-- **The usage chunk has an empty `choices` list.** Read after the existing
-  `chunk["choices"][0]` access it would `IndexError` into the `continue` and be dropped ‚Äî
-  silently discarding the only real count the streaming path ever produces. Parsed
-  before, and pinned by a test asserting the source order.
-- **A provider that rejects `stream_options`.** The existing 400 handler would have
-  concluded "this model can't stream" and disabled streaming for it permanently ‚Äî a
-  latency regression on every future reply, caused by an accounting flag. The 400 path is
-  now narrowest-first: drop `stream_options` (keep streaming), and only then fall back to
-  non-streaming. Separate `_no_usage_stream_models` set, learned at runtime.
-- **A ratio poisoned by calls where it is meaningless.** Vision calls carry image tokens
-  with no characters behind them; tiny prompts are dominated by per-message overhead.
-  Samples are rejected outside 0.5‚Äì3.0 or under 200 estimated tokens, and a saved ratio
-  is re-validated on load so a hand-edited `state.json` cannot put a nonsense multiplier
-  on every number the bot reports.
-
-**Deliberately NOT recalibrated: `MEMORY_TOKEN_BUDGET`.** It is a tuned recall knob, not
-a cost ceiling ‚Äî every value in every `.env` was chosen against the raw 4-chars unit.
-Swapping in calibrated counts would change how many memories six live characters recall:
-a personality change delivered as an accounting fix. It stays on `_est_tokens` with a
-comment saying why, and retuning it in calibrated units is filed as ROADMAP 4.4.
-`CONTEXT_TOKEN_BUDGET` *is* calibrated (it genuinely is a cost ceiling) and defaults to
-0/off, so no instance changes behaviour on this deploy.
-
-**Honest about what is not verified here.** The mechanism is proven end-to-end against a
-simulated NanoGPT response (streaming usage chunk, non-streaming body, stale-usage
-clearing, calibration, reporting). The **actual ratio for the fleet's models is not
-known** ‚Äî this container cannot reach nano-gpt.com, and no BPE vocabulary is obtainable
-offline to estimate it. Each bot measures its own on the first real conversation after
-deploy; `/audit` will show it. Expect it above 1.0 for the markdown-heavy presets, but
-that is a prediction, not a measurement. It also means **historical figures in the docs
-stay in raw units** ‚Äî `preset.txt` is "8,503 raw-estimate tokens", and the calibrated
-number after deploy will differ. That is the numbers getting more correct, not drifting.
-
-**Tests:** 25 new. `TestUsageTokenParsing` (nulls, strings, negatives ‚Üí 0, never raises ‚Äî
-accounting hangs off an already-successful reply), `TestCalibrationSample` /
-`TestCalibrationBlend` (outlier rejection, first sample replaces the seed, convergence),
-`TestCalibratedTokens` (scaling, kill switch, confidence wording, and that the memory
-budget still uses the raw unit), `TestUsageAccounting` (real usage preferred, fallback
-without it, consumed exactly once so one call's count can't be billed to the next,
-calibration updated), `TestUsageCaptureWiring` (usage requested, parsed before the
-`choices` access, both transports, 400 ordering, stale clearing, saved-ratio validation).
-
-## v2026-07-26.1 ‚Äî Switch preset layers from Telegram (`/preset`)
-
-**Not a bug fix ‚Äî a gap.** `PRESET_FILES` (v2026-07-25.5) made the voiceprint layered and
-swappable, but the only way to swap it is to SSH or open Termux, edit an instance `.env`,
-and restart the bot. That cost is why ROADMAP 3.13 ‚Äî the content split that layering was
-built to enable ‚Äî has been open since it shipped: evaluating whether cass reads better
-without `preset-rp.txt` means an edit-and-restart cycle per experiment, per bot, on a
-phone keyboard. The mechanism was there; the feedback loop wasn't.
-
-**Why it's cheap:** `assemble_messages` already re-reads `PRESET_LAYERS` from the module
-global on **every message** (v2026-07-25.5 injects one system block per layer). Rebinding
-that global therefore takes effect on the next reply with no restart, and rebinding is
-atomic ‚Äî a reply already assembling its prompt keeps the list object it started with, so
-no lock is needed. The feature is a command plus persistence, not new prompt machinery.
-
-**What shipped** ‚Äî `/preset`, admin-gated, per-instance:
-
-| form | effect |
-|---|---|
-| `/preset` | active layers, per-layer and total token cost, source (`.env` or override), what's on disk |
-| `/preset core,rp` | replace the stack |
-| `/preset add explicit` / `/preset drop explicit` | adjust one layer |
-| `/preset reset` | back to the `.env` stack, override cleared |
-
-Names resolve loosely (`core` ‚Üí `preset-core.txt`) but **never approximately**: an
-unmatched name is rejected with the available list rather than resolved to a plausible
-neighbour. Every change reports the token delta (`~7102t -> ~11037t (+3935t per
-message)`), because the layers are large enough that a casual swap can quietly triple
-the per-message bill.
-
-**Three refusals, each guarding the failure mode the fallback ladder was built for**
-(v2026-07-25.6 ‚Äî silently dropping voice rules presents as a *model* regression, which is
-the most expensive kind of bug to diagnose here):
-1. A stack is **dry-run resolved before the live one is touched**. If nothing resolves,
-   the current stack stays and the warnings are shown.
-2. An empty stack is refused outright.
-3. On startup, a saved override whose files have vanished (renamed, or an `.env` deployed
-   ahead of its files) reverts to the `.env` baseline and appends a config warning ‚Äî
-   never to the ~250-token built-in stub.
-
-**Persistence and the kill switch.** The choice is saved as `preset_override` in
-`state.json` and re-applied by `apply_overrides()` alongside `/setmodel` and `/settings`.
-`PRESET_COMMAND=0` unregisters the command **and makes startup ignore a saved override** ‚Äî
-that pairing is deliberate and is the recovery path: a stack that ruins a character's
-voice is undone with one `.env` line plus a restart, with no state.json surgery on a
-phone. Default on, per the 2026-07-18 policy.
-
-**Plain text, by construction.** The command interpolates layer filenames and resolver
-warning strings, which is exactly the shape that broke `/audit` in v2026-07-25.7 and the
-11 commands swept in .13 ‚Äî a stray `_` or `[` makes Telegram reject the whole message, so
-the command replies with silence. Pinned by a test rather than left to review; the
-generalised `TestNoUnescapedMarkdownInterpolation` guard also covers it automatically.
-
-**`/audit` now marks an active override** (`Preset layers (via /preset): ‚Ä¶`). Without it,
-an audit showing layers the `.env` doesn't name sends the next reader to the wrong file ‚Äî
-the same class as the mislabelled prompt block corrected in v2026-07-25.5.
-
-**Known limit, not a defect.** `/preset` can only choose layers **on disk in that
-instance directory**. Phone instances have all of them (`sync-cards.sh` copies every
-`preset-*.txt`), so any combination works. On the VPS, `vps-sync.sh` pulls only the layers
-`PRESET_FILES` names ‚Äî deliberate, since v2026-07-25.5 rejected duplicating a layer list
-into the script ‚Äî so **cass and jules can only switch among the layers their `.env`
-already names**. `/preset` with no arguments lists what that instance actually has, so the
-constraint is visible at the point of use rather than surprising. Documented in
-`.env.example`.
-
-**Tests:** 27 across `TestPresetNameNormalization` (loose but never approximate matching),
-`TestPresetArgParsing` (comma/space equivalence, dedup ‚Äî a layer listed twice would
-silently double its cost), `TestPresetSwap` (both globals rebound, dry-run does not
-mutate), `TestPresetOverridePersistence` (re-applied on startup, stranded by the kill
-switch, vanished layers revert to `.env`, serialized into state, flagged in `/audit`), and
-`TestPresetCommandInvariants` (admin gate, plain text, empty-stack refusal, menu mirrors
-the kill switch, no new LLM call). The fixture restores the module-scope stack by
-re-editing, since `test_fixture_falls_back_to_builtin` asserts it.
-
-## v2026-07-25.14 ‚Äî BOT_TIMEZONE never set the timezone (+ audit item 4)
-
-**‚ö†Ô∏è BEHAVIOUR CHANGE ON DEPLOY ‚Äî read before shipping.** Any instance whose `.env` sets
-`BOT_TIMEZONE` has, until now, been ignoring it and running on `America/Los_Angeles`.
-After this release it uses the timezone you actually asked for. If that differs from
-Pacific, **quiet hours, reminders, note follow-ups, schedule windows and midnight day
-rotation all shift accordingly** ‚Äî correct, but a visible change in when things happen.
-Check each instance's `/audit` and `.env` before deploying if that matters.
-
-**Root cause:** two timezone variables, and the documented one was inert.
-- `TIMEZONE` set the clock: `TZ = ZoneInfo(TIMEZONE)`, default `America/Los_Angeles`.
-- `BOT_TIMEZONE` was read in exactly one place ‚Äî inside `--check-config` ‚Äî purely to
-  *label* a warning string.
-- `.env.example` has always documented `BOT_TIMEZONE` as the timezone setting, and the
-  pytest fixture sets it too.
-
-So the variable the docs told you to set did nothing, silently. Worse, the preflight
-check read as a pass: with `BOT_TIMEZONE` set and `TIMEZONE` unset, `TZ` resolves fine
-(to Pacific), so `--check-config` cheerfully reported a working timezone that wasn't the
-one requested.
-
-`BOT_TIMEZONE` now wins, with `TIMEZONE` still honoured so existing `.env` files using it
-are unaffected; setting both to different values warns rather than picking silently.
-
-**How the earlier sweep missed it, worth recording:** v2026-07-25.12's check asked *"is
-this variable read anywhere?"*. `BOT_TIMEZONE` **is** read ‚Äî just not for its documented
-purpose. "Is it read at all" is a strictly weaker test than "does it do what the docs
-claim", and only the second one would have caught this. It surfaced by accident while
-enumerating undocumented variables for item 4.
-
-**Audit item 4 ‚Äî `.env.example` now accounts for every variable bot.py reads.** 194 read;
-177 documented as settable with defaults extracted *from the source*, not typed from
-memory; 17 deliberately listed as internal.
-
-Newly documented, grouped by feature: weather/location, web search, voice & delivery,
-follow-up bubbles, documents/PDFs/images, selfie tuning, TTS, memory & notes, mood &
-reactions, proactive timing, schedules, inner voice, and group-chat tuning. **Reddit link
-reading (`REDDIT_CLIENT_ID`/`SECRET`/`USER_AGENT`) was an entire undocumented feature** ‚Äî
-Reddit puts scraping behind a JS wall, so shared Reddit links silently fail without a
-free OAuth app, and nothing told you that.
-
-The 17 internal ones (`BOT_HOME`, ring-buffer sizes, memory-compaction thresholds, API
-endpoints, the legacy `TIMEZONE` alias) are listed **by name with no example values**, so
-the file is a complete account of what bot.py reads without presenting implementation
-details as a menu to tune.
-
-**New eval `env-vars-documented`**, break-tested: green on the real file, red when a fake
-`os.getenv` is injected into a copy. It fails in both directions ‚Äî documented-but-unread
-and read-but-undocumented ‚Äî so this drift cannot silently return.
-
-**Tests:** `TestBotTimezoneTakesEffect` ‚Äî the fixture's `BOT_TIMEZONE=America/New_York`
-now actually resolves (it would have been Los_Angeles before), the clock is read at
-module scope rather than only in the preflight, the legacy name still works, and the
-conflict warning exists.
-
-## v2026-07-25.13 ‚Äî Audit item 3: no command renders arbitrary content through Markdown
-
-**Root cause:** v2026-07-25.7 fixed `/audit` sending arbitrary diagnostic strings under
-`parse_mode="Markdown"` ‚Äî a stray `_` or unmatched `[` makes Telegram reject the **whole**
-message, so the command replies with silence, which is indistinguishable from a dead bot.
-That fix was point-scoped to `/audit`. The audit sweep asked the obvious follow-up
-question ‚Äî *where else?* ‚Äî and found **13 more sites across 11 commands** interpolating
-values into Markdown outside backticks.
-
-Converted to plain text (matching `/audit` and the pre-existing `memory_cmd`, which
-already documents this exact reasoning):
-
-| command | what it renders |
-|---|---|
-| `/card`, `/setcard` | character-card field contents and the user's new value |
-| `/notes` | the user's own note text |
-| `/status` | outfit, life-arc, day, about-you snippets **and the conversation tail** |
-| `/schedule`, `/people`, `/projects` | user-written file contents |
-| `/vibe`, `/energy`, `/setmodel`, `/settings` | user-supplied names and values |
-| `/model` | `NAME` from the card |
-
-**Latent, not firing.** All four character cards were tested against Markdown parsing
-first ‚Äî balanced brackets, even underscore counts, nothing currently breaks. This is a
-fix for the failure that hadn't happened yet: `/notes` renders text you write and
-`/status` renders conversation content, so a single `_` was all it would take.
-
-**Backticks are not the safe wrapper they look like.** `setcard_cmd` wrapped raw user
-input in a code span (`` `{field}` ``) ‚Äî a backtick *in* that input closes the span early
-and breaks the parse. The scanner had scored backtick-wrapped values as safe; that
-assumption held for model ids and fixed strings but not for arbitrary input. Those two
-sites are now plain text with `{field!r}`.
-
-**Two sites deliberately left on Markdown**, allowlisted in the test with the reason:
-`quietwin_cmd` (an int index, fixed `Mon`‚Äì`Sun` names, `HH:MM` strings) and `fleet_cmd`
-(an int, inside a ``` fence). Neither can carry a metacharacter.
-
-**Test:** `TestNoUnescapedMarkdownInterpolation` is a *generalised* guard, not another
-point fix ‚Äî it re-derives the offender list from source on every run and fails on any new
-one, so the next command that formats arbitrary data is caught at commit time rather than
-by an owner wondering why a command went quiet. A second assertion fails if the two
-allowlisted commands ever stop interpolating provably-safe values, so the allowlist can't
-go stale silently.
-
-## v2026-07-25.12 ‚Äî Audit items 1 & 2: dead env vars, and the group pilot split across hosts
-
-From the three-class audit (shared state / silent replies / doc-vs-reality drift).
-
-**Item 1 ‚Äî `.env.example` documented seven variables bot.py never reads.** A mechanical
-diff of `os.getenv`/`_env_int`/`_env_float` names against the template found 7 documented
-vars with zero readers. Setting any of them was a silent no-op, and the template is what
-`CLAUDE.md` calls the "full documented template":
-- `HEARTBEAT_MIN` / `HEARTBEAT_MAX` ‚Äî **name mismatch**: those are bot.py's internal
-  seconds-valued Python variables; the env vars are `HEARTBEAT_MIN_HOURS` /
-  `HEARTBEAT_MAX_HOURS`.
-- `NUDGE_MAX` ‚Äî **never existed**. The nudge budget is per-chat runtime state (default 3,
-  0 = unlimited) set from Telegram with `/nudges 3`. Documenting it as an env var meant
-  an owner could believe they had capped proactive messages when they had not.
-- `PROACTIVE_HOUR_START` / `PROACTIVE_HOUR_END` ‚Äî never existed. The real control is
-  `QUIET_START` / `QUIET_END`, which are a *suppression* window (so the sense is inverted
-  from the old names) and were themselves undocumented.
-- `CONTEXT_LIMIT` / `SUMMARY_EVERY` ‚Äî never existed. The verbatim window is bounded by
-  hardcoded `MAX_HISTORY=20` / `KEEP_RECENT=10` plus the settable `SHORT_TERM_HOURS`;
-  summarisation is overflow-triggered, so there is no "every N turns" knob at all.
-
-All seven corrected in place with the real names and an explicit note that the old ones
-did nothing. Re-running the check now reports **0** documented-but-unread vars (65 remain
-undocumented in the other direction ‚Äî audit item 4, not addressed here).
-
-**Item 2 ‚Äî the group-chat pilot is split across two hosts.** `GROUP_CHAT_DESIGN.md` ¬ß3
-states the assumption plainly: *"all instances live on one phone"*, *"one ext4 filesystem,
-where flock is reliable"*. Telegram never delivers one bot's messages to another, so the
-shared filesystem **is** the channel. Jules migrated to the VPS on 2026-07-19; Priya
-stayed on the phone. Each host now silently gets its own ledger and claim dir, which
-breaks precisely what the design exists to prevent:
-- `_try_claim` always succeeds on both sides ‚Äî there are no shared claim files to contend
-  for, so both bots answer the same message;
-- `GROUP_BOT_CHAIN_MAX` and `GROUP_DAILY_BOT_BUDGET` are computed from separate ledgers,
-  so the chain cap and alternation penalty do not apply across the pair.
-
-`GROUP_DAILY_BOT_BUDGET` still bounds each bot individually, so a runaway is capped rather
-than infinite ‚Äî but at roughly double the intended volume with no alternation control.
-Contrast `world.txt`, whose equivalent split MIGRATION.md explicitly accepts: that one
-degrades to independent weather, this one degrades to unbounded alternation.
-
-bot.py cannot know where a peer lives, so the fix is a loud startup `_CONFIG_WARNINGS`
-entry whenever `GROUP_MODE` is on with peers configured, printing the **resolved**
-`GROUP_LEDGER_DIR` so the owner can compare it across hosts. Documented in
-`GROUP_CHAT_DESIGN.md` (inline at the assumption itself) and in `deploy/MIGRATION.md`
-alongside the Nora/`world.txt` note, with a verification step for when priya migrates.
-
-**Recommendation while split: `GROUP_MODE=0` on both.** `GROUP_MODE` defaults to 0, so
-this is dormant unless explicitly enabled.
-
-**Tests:** `TestGroupColocationWarning` ‚Äî the warning is gated on `GROUP_MODE and
-GROUP_PEERS`, it names the resolved directory (the owner has to *compare* it, so printing
-it is the point), the fixture stays warning-free, and `GROUP_LEDGER_DIR` still defaults to
-the shared code dir, which is why co-location matters at all.
-
-## v2026-07-25.11 ‚Äî Concurrent /update corrupted the shared code dir
-
-**Root cause:** owner-reported from a VPS bot's `/errors`:
-
-```
-File "/opt/telegram-bots/bot.py", line 11660, in perform_self_update
-File "/usr/lib/python3.12/py_compile.py", line 161, in compile
-FileNotFoundError: [Errno 2] No such file or directory: '/opt/telegram-bots/bot.py.new'
-```
-
-`perform_self_update` writes `bot.py.new`, `bot.py.bak` and `bot.py` into
-`Path(__file__).parent` ‚Äî the **shared** code directory. Every instance on a host shares
-it: `~/telegram-bot` for the four phone bots, `/opt/telegram-bots` for cass and jules. So
-two concurrent `/update` calls operate on the same three paths with no synchronisation:
-
-1. cass writes `bot.py.new`
-2. jules writes `bot.py.new`
-3. cass compiles, then `tmp.replace(target)` ‚Äî which **removes** `bot.py.new`
-4. jules compiles ‚Üí `FileNotFoundError`
-
-**The crash is the good outcome.** The silent variant is worse: the loser reaches
-`bot.py.bak <- target` *after* the winner has already swapped in the new file, so the
-rollback point becomes a copy of the **new** code. You would believe you had a rollback
-and not have one ‚Äî and nothing would tell you.
-
-The documented procedure ("`/update` to ONE bot, then `/restart` the others") avoids this
-by convention. Nothing enforced it, and the phone has the identical exposure.
-
-**Fix:** a host-wide `flock` on `.update.lock` in the code dir, taken **before** the
-download so a refused update does no work at all ‚Äî no request, no temp file, nothing
-touched. A second caller gets `{"reason": "update_in_progress"}` naming the correct
-procedure. The body moved to `_perform_self_update_locked` so the lock and the work are
-separable and testable. Held only inside a sync function invoked via `asyncio.to_thread`
-with no awaits, so invariant #9 does not apply.
-
-**Second defect found while fixing the first:** `update_cmd` matched reasons with an
-if/elif chain and no `else`, so `update_in_progress` ‚Äî and any future reason ‚Äî fell
-through to a bare `return` and **replied nothing at all**. Same class as the `/audit`
-outage in v2026-07-25.7: a command that silently does nothing is indistinguishable from a
-dead bot. There is now a catch-all reply.
-
-**Also:** `.update.lock`, `bot.py.new` and `bot.py.bak` are gitignored. The lock file
-first appeared as an untracked artifact of the very tests written for it.
-
-**Tests:** `TestSelfUpdateLock` holds the lock the way a competing instance would and
-asserts the refusal happens before any network or filesystem work (including that
-`bot.py.new` is untouched ‚Äî the exact file the bug destroyed), that the lock is released
-for the next caller, and that the lock lives outside the extracted body.
-`TestUpdateCmdNeverRepliesSilently` pins the catch-all.
-
-**Operationally:** `/update` on a VPS instance works but is not the documented path ‚Äî
-`deploy/vps-sync.sh` also pulls the card and preset layers and handles the systemd unit.
-Use it for cass and jules.
-
-## v2026-07-25.10 ‚Äî Sanity-check sweep: the wrong triage rule had four more survivors
-
-**Root cause:** v2026-07-25.8 corrected "`STARTUP AUDIT` with no preceding
-`[shutdown] graceful stop` = SIGKILL" in `CLAUDE.md`, the Monitoring section, the
-`repo-debugging-playbook` table, and `_on_shutdown`'s docstring. An explicit sweep found
-it still standing in **four more places** ‚Äî a correction pass that greps only where you
-remember writing something is not a correction pass.
-
-The worst survivor was in `_self_audit`'s **restart-storm DM**: the message the owner
-receives *at the moment they are debugging a restart storm* told them
-`no line = SIGKILL`. Worst possible placement for the one instruction guaranteed to be
-read under pressure. Now points at the exit code (137 / 143 / 0) and explicitly warns
-that the graceful-stop line is not the discriminator.
-
-Also fixed:
-- `CHEATSHEET.md` ‚Äî the phantom-killer check still keyed off the graceful-stop line.
-  Replaced with the exit-code grep, plus the note that `settings` cannot run in Termux
-  (it needs adb) and the process-census one-liner that found the stacked watchdogs.
-- `vault/entities/termux-phone-host.md` ‚Äî a live knowledge entry that past sessions have
-  corrected during incidents. Carried **three** stale facts: the old triage rule, "Python
-  3.13" (it's 3.14.6), and "all six bots" on the phone (it's four; cass and jules are on
-  the VPS).
-- The v2026-07-25.3 entry below still asserted the 4,715-token `ATTRACTION RULE` figure as
-  fact, with only a forward correction in `.5`. Annotated inline so it can't be read in
-  isolation and believed. Deliberately annotated rather than rewritten ‚Äî the mistake, and
-  how a mislabelled diagnostic produced it, are worth keeping legible.
-
-**Test:** `TestRestartStormAdviceIsCorrect` pins the DM to the exit-code rule and asserts
-the old claim is absent, because this specific text has now been wrong through two
-correction passes.
-
-## 2026-07-25 ‚Äî Ops: watchdog.sh single-instance guard (no bot.py change, no version bump)
-
-**Root cause:** `watchdog.sh` supports two install modes ‚Äî `--once` (cron) and a bare
-invocation that enters `while true; do run_checks; sleep $WATCHDOG_INTERVAL; done` and
-never exits. Installed in cron **without** `--once`, every invocation starts another
-immortal loop. Nothing stopped it: the script had no duplicate-instance guard of any kind.
-
-Observed on-device 2026-07-25: **92 `bash` + 91 `sleep` processes**, ~183 of the phone's
-191 Termux-uid processes, against an Android phantom-process limit of 32. Diagnosed by
-grouping `ps -u $(id -u)` by command ‚Äî the paired bash/sleep counts are the signature of
-N shell loops each parked in a sleep.
-
-**The process count was the lesser problem.** Every accumulated watchdog polls the same
-`.alive` heartbeat files, so a single stale heartbeat would produce ~91 simultaneous
-kill-and-relaunch decisions against one bot. That is the 2026-07-05 incident this script
-was written to prevent, multiplied by however many copies have piled up.
-
-**Fix:** a PID-file guard ahead of the mode dispatch. A live owner (`kill -0` succeeds)
-makes the new instance log why and exit; a stale file is cleared and taken over; `trap ‚Ä¶
-EXIT INT TERM` removes it on the way out. PID file rather than `flock` to avoid a
-util-linux dependency on Termux ‚Äî the theoretical race between two simultaneous starts is
-irrelevant against a 5-minute cron cadence.
-
-Break-tested through all four paths: clean start, refusal while a live instance holds the
-file, self-heal from a stale PID, and cleanup on exit.
-
-**`watchdog.sh` is curl-installed and NOT pulled by `update-all.sh`** ‚Äî re-install it by
-hand to get this (command in the script header). Also check `crontab -l`: the cron line
-must include `--once`.
-
-## v2026-07-25.9 ‚Äî A partial Garmin pull explains itself
-
-**Root cause:** on 2026-07-25 `/healthnow` returned only today's step count. The feature
-was working correctly ‚Äî the watch was in battery saver, which disables the optical HR
-sensor, so sleep, resting HR, body battery and stress had never been recorded, while
-steps (accelerometer, phone-side) kept arriving. But **nothing in the product could say
-that.** `/healthnow` printed the phrases it had and stayed silent about the rest, so a
-correct partial pull was indistinguishable from a broken integration.
-
-Worse, the diagnostics existed but were unreachable: `_fetch_garmin` logged per-endpoint
-failures with `print()`, which reaches `bot.log` but **not** `errors.log` ‚Äî so `/errors`
-could not show them and the only route to an answer was a shell. That is the second time
-in one day that diagnosing a freshly shipped feature required device access it shouldn't
-have (see v2026-07-25.7).
-
-**What shipped:**
-- **`_garmin_fields`** is now the single source of truth: payloads ‚Üí ordered
-  `[(metric label, phrase or None)]` for all six metrics. **`_garmin_bits` is a thin
-  wrapper over it**, so the snapshot text and the missing-metric report cannot drift.
-  (The first cut of this release inverted that dependency ‚Äî deriving labels by
-  prefix-matching finished phrases ‚Äî and broke immediately, because `"slept ‚Ä¶"` does not
-  start with `"sleep"`. Caught by the tests; the direction of dependency is the fix.)
-- **`_garmin_missing`** names the metrics with no usable data; **`_garmin_gap_note`**
-  turns that into a plain-text tail on `/health` and `/healthnow` that also states the
-  two usual causes (watch not synced; battery saver holding the HR sensor off, which
-  takes out four metrics at once while steps survive).
-- **Per-endpoint failures now go through `log.warning`**, so they land in `errors.log`
-  and `/errors`, and count an error category. Still only the exception *class* is logged
-  ‚Äî Garmin exceptions can carry the request URL (the v2026-07-20.2 key-leak class).
-- The `"no data for: ‚Ä¶"` summary is logged once per pull at WARNING. Routine, but it must
-  be visible somewhere other than a shell.
-- `missing` is persisted into `.garmin_snapshot` so `/health` (the cached view) is honest
-  too. Snapshots written before this release have no such key and load as `[]`.
-
-**Tests:** `TestGarminFields` (all six labels always reported; empty payloads mean
-everything missing; **the exact battery-saver case** ‚Äî steps present, the five HR-derived
-metrics absent; full payload reports nothing missing; and an agreement test pinning
-`_garmin_fields` against `_garmin_bits`), `TestGarminGapNote` (silent when nothing is
-missing, names the metrics, states the cause, stays plain text), and
-`TestGarminFailuresReachErrors` (no `print` survives in `_fetch_garmin`, the exception
-object itself is never logged, the return contract is `(text, missing)`, and the loader
-tolerates pre-`.9` snapshot files). All 14 original `_garmin_bits` tests pass unchanged,
-which is what demonstrates the wrapper preserved its contract.
-
-## v2026-07-25.8 ‚Äî Client-side API errors stop hiding in the network bucket
-
-**Root cause:** `BadRequest` **subclasses `NetworkError`** in python-telegram-bot
-(verified on 21.11.1: `BadRequest ‚Üí NetworkError ‚Üí TelegramError`). `on_error` tested
-`isinstance(err, (NetworkError, TimedOut))` first, so every 400 from the Bot API ‚Äî
-malformed markup, message-too-long, invalid parameters, bad file ‚Äî was logged as
-`[net] transient: BadRequest: ‚Ä¶` at WARNING and counted under `network`. That bucket reads
-as ambient phone flakiness and is rightly ignored.
-
-**This is how v2026-07-25.5's `/audit` markup bug stayed invisible.** From Emily's
-`errors.log`:
-
-```
-07:38:01 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
-07:46:46 [WARNING] [net] transient: BadRequest: Can't parse entities: ... byte offset 484
-```
-
-Two reproductions of a code defect, presented to the owner in `/audit` as `network: 3`.
-A 400 means *we sent something invalid*; it has nothing to do with the connection, and
-conflating the two removed the only signal that would have named the bug.
-
-**Fix:** `BadRequest` is now tested **before** `NetworkError` (mandatory given the
-inheritance), logged via `log.error` with `[api] bad request ‚Äî client-side defect, not the
-network`, and counted in its own `bad_request` category so it appears as a distinct line
-in `/audit`. Real `NetworkError`/`TimedOut` behaviour is unchanged.
-
-Considered and accepted: a few Bot API 400s are semi-benign (`Message is not modified`,
-`Query is too old`). Those will now log at ERROR. Left unfiltered rather than
-pre-emptively suppressed ‚Äî if one shows up in practice it is a one-line substring filter,
-whereas guessing at the list now risks re-hiding a real defect.
-
-**Also in this release** (deferred from .7 to avoid a redeploy for a comment): the
-`_on_shutdown` docstring stated that a startup audit with no preceding graceful-stop line
-means SIGKILL. That is false ‚Äî `/update` and `/restart` exit via `_schedule_exit()` ‚Üí
-`os._exit(0)`, bypassing `post_shutdown`, so an ordinary deploy logs no graceful stop
-either. Corrected in place to point at the exit code instead (`0` clean, `137` SIGKILL,
-`143` uncaught SIGTERM), matching the CLAUDE.md and `repo-debugging-playbook` fixes made
-alongside it. Reading that comment literally cost two debugging rounds on a bot that had
-had zero unexpected restarts.
-
-**Tests:** `TestBadRequestNotNetwork` ‚Äî asserts the PTB subclass relationship itself (so a
-future PTB fix surfaces as a signal rather than silently making the guard redundant),
-that a `BadRequest` increments `bad_request` and **not** `network`, that genuine
-`NetworkError`/`TimedOut` still count as `network`, that the isinstance ordering is
-explicit in source, and that the branch logs at ERROR rather than WARNING. Driven through
-`on_error` itself, not a source grep.
-
-## v2026-07-25.7 ‚Äî /audit was broken by its own output (regression in .5/.6)
-
-**Root cause:** `audit_cmd` sends with `parse_mode="Markdown"`, and v2026-07-25.5/.6 added
-lines that interpolate **arbitrary diagnostic strings** into it:
-- card field names from the new `Card:` line ‚Äî `system_prompt`, `mes_example`,
-  `post_history_instructions` all contain `_`, which opens italics in Telegram's legacy
-  Markdown;
-- prompt block headings from the `Prompt:` top-blocks line ‚Äî e.g.
-  `[VOICEPRINT PRESET ‚Äî TELEGRAM SINGLE SLOT]`, an unmatched `[` that legacy Markdown
-  parses as the start of a link;
-- and, pre-existing but far rarer, config warnings naming env vars (`STRESS_THRESHOLD`).
-
-Telegram rejects the whole message with `400: can't parse entities`, so nothing sends.
-From the owner's side `/audit` simply does nothing ‚Äî **the command whose entire purpose is
-diagnosing the bot became the thing that silently failed**, on every instance running .5
-or .6, not just the one where it was noticed. Verified by rendering Emily's real audit
-payload and counting the metacharacters: three of the added lines are individually
-unbalanced.
-
-**Fix:** `/audit` now sends **plain text**. The only Markdown it ever used was a bold
-`*Self-Audit*` header, which is not worth a failure mode where the diagnostic is
-un-sendable because of what it found. Escaping was the alternative and was rejected: the
-set of interpolated values is open-ended (field names, headings, file paths, model ids,
-exception class names, future additions), so escaping would need to be remembered forever
-at every new call site, while plain text cannot regress.
-
-**Not affected, and why:** `/errors` never set a `parse_mode`. `/fleet` wraps its table in
-a ``` fence, where `_` and `[` are literal, and only carries version/uptime/error counts.
-Both were checked rather than assumed.
-
-**Eval + tests.** New `audit-plain-text` eval, **break-tested red-green** ‚Äî and the first
-version of it was itself broken: a plain awk range
-`/^async def audit_cmd/,/^async def /` collapses to a single line, because the opening
-line also matches the end pattern, so the check could never fail. Replaced with a
-flag-based scan that skips comment lines (the fix's own comment necessarily mentions
-`parse_mode="Markdown"` to explain the ban). Confirmed 0 on the fixed file and 1 on a copy
-with `parse_mode` re-injected. `TestAuditIsPlainText` pins the same contract in pytest,
-including that the card-field names really do contain underscores ‚Äî so a future reader
-can't mistake the plain-text requirement for cosmetic preference.
-
-**Why an eval for a first occurrence** (the usual bar is twice): the failure is invisible
-in code review and in every local test, produces no user-visible error, and disables the
-fleet's primary diagnostic. The same shape would recur the moment anyone adds a formatted
-line to `/audit`.
-
-## v2026-07-25.6 ‚Äî The preset split, Cass first (+ fallback ladder)
-
-**Content, plus one small bot.py hardening.** v2026-07-25.5 shipped the layering
-mechanism; this carves the actual layers and moves **Cass alone** onto them. `preset.txt`
-is **unchanged**, so the other five bots are byte-identically unaffected until their
-`.env` opts in.
-
-**What the split revealed.** `[CHARACTER AUTHENTICITY]` (2,386 tok ‚Äî the largest section
-in the file) is two unrelated bodies of text concatenated under one heading:
-- ~490 tok of genuinely universal guidance: autistic characters, scientists and
-  professionals rendered as full people; technical vocabulary belongs to the work, not the
-  interior.
-- ~1,900 tok of a Dead Dove content guide + explicit content module ‚Äî anatomical
-  sex-writing mechanics, action-reaction chains, worked examples, a scene-quality checklist.
-
-So **Cass ‚Äî a developmental editor ‚Äî was carrying ~1,900 tokens of explicit scene-writing
-mechanics on every message.** The misleading heading is exactly why it stayed invisible:
-the same failure mode as the `ATTRACTION RULE` mislabel corrected in v2026-07-25.5. The
-section is split at the `### Dead Dove Content Guide` boundary; the universal part keeps
-the heading and goes to core.
-
-**Layers created** (partitioned programmatically, so text is preserved byte-for-byte):
-
-| layer | tok | contents |
-|---|---|---|
-| `preset-core.txt` | 4,166 | voiceprint, priority order, voice, epistemic horizon, anti-slop, character agency, authenticity (universal part), anti-echo, text delivery, repair, self-check |
-| `preset-rp.txt` | 1,680 | narration, NPC management, scene continuity, scene rhythm |
-| `preset-explicit.txt` | 1,930 | the Dead Dove guide + explicit content module |
-| `preset-stepped.txt` | 403 | `[STEPPED THINKING]` ‚Äî coupled to `STEP_INTENT` |
-| `preset-closeness.txt` | 323 | `[RELATIONSHIP STAGE]` ‚Äî coupled to `CLOSENESS_ENABLED`, which **defaults to 0** |
-
-Verified by reconstruction: every section lands in exactly one layer, and the multiset of
-non-whitespace characters across the layers equals the original `preset.txt` ‚Äî no text
-lost, none duplicated (8,502 tok of layers vs 8,503 original, the delta being join
-whitespace in the estimator).
-
-**Measured:**
-| instance | today | layered | layers |
-|---|---|---|---|
-| **cass** | 11,037 | **7,102** (‚àí3,935, ‚àí36%) | core + stepped |
-| jules | 14,425 | 14,099 (‚àí326) | core + rp + explicit + stepped |
-
-Jules's ‚àí326 is the `[RELATIONSHIP STAGE]` section that was dead weight on all six bots.
-Cass sheds the explicit module, the scene machinery, and closeness.
-
-**bot.py change ‚Äî the fallback ladder.** `vps-sync.sh` reads `PRESET_FILES` from the
-instance `.env` to know which layers to pull, so the `.env` edit necessarily precedes the
-file arriving. If nothing resolved, the previous code dropped straight to the ~250-token
-built-in `_DEFAULT_TEXTING_STYLE` ‚Äî silently stripping thousands of tokens of tuned voice
-rules, which presents as a model regression rather than a deploy error. The ladder is now
-**named layers ‚Üí the shared `preset.txt` ‚Üí built-in**, with a warning at each rung.
-Verified: with `.env` naming layers that aren't on disk yet, Cass resolves to
-`preset.txt (fallback)` at 11,037 tok ‚Äî identical to today ‚Äî and logs three diagnosable
-warnings.
-
-Extracted as pure `_resolve_preset_layers(names, read, default_text, warn)` with the reader
-injected, so the ladder is testable without a filesystem. 11 tests in
-`TestResolvePresetLayers`, including that a reader exception's message never reaches the
-warning (paths/credentials stay out of `errors.log`, per the v2026-07-20.2 class) and that
-a resolvable `preset.txt` listed as a normal layer is not relabelled as the fallback rung.
-
-**Not done:** the other five bots stay on the monolithic `preset.txt`. Moving them is a
-one-line `.env` change each (`PRESET_FILES=preset-core.txt,preset-rp.txt,preset-explicit.txt,preset-stepped.txt`)
-once Cass has proven the split in use.
-
-## v2026-07-25.5 ‚Äî Layered presets, and an honest card breakdown (PRESET_FILES)
-
-**Correction to v2026-07-25.3's findings ‚Äî read this before trusting that entry's numbers.**
-That release reported jules carrying "a 4,715-token `ATTRACTION RULE` block". **Wrong.**
-`[ATTRACTION RULE]` is **84 tokens**. The 4,715 was the entire *merged* card block ‚Äî
-`load_character` joins `system_prompt` + boilerplate + `description` (1,762) + `scenario`
-(81) + `mes_example` (1,444) into one system message, and `_prompt_top_blocks` labelled
-each block by its **first line**. Jules's `system_prompt` opens with `[ATTRACTION RULE]`,
-so an 84-token section was credited with a whole card. Jules's `system_prompt` is 1,375
-tokens across seven sections, the largest being `[PACE CONTROL]` at 348.
-
-That was a defect in the diagnostic shipped one release earlier, and it sent a real
-investigation down the wrong path ("move `ATTRACTION RULE` to the lorebook to cut her floor
-by a third" ‚Äî it would have saved 84 tokens). Both halves are fixed here:
-- `_prompt_top_blocks` gives `messages[0]` the fixed label `(card:
-  system_prompt+description+‚Ä¶)` instead of inheriting whatever the card opens with.
-- `load_character` now records a real per-field breakdown (`_card_field_tokens`) *where the
-  fields still exist*, before the merge destroys the structure. `/audit` gains a `Card:`
-  line separating always-on fields from the lorebook (which only costs on a trigger), plus
-  the four biggest fields by name.
-
-**Root cause this release addresses (the actual feature):** one shared `preset.txt` is
-8,503 tokens injected on **every message for every bot**, and by section it is ~1,760
-universal / ~6,020 roleplay-scene machinery / ~727 coupled to features that have their own
-env flags (`[RELATIONSHIP STAGE]` is 323 tokens instructing every bot about
-`CLOSENESS_ENABLED`, which **defaults to 0** ‚Äî dead weight on all six). Cass is a
-developmental editor with no scenes and no NPCs, carrying ~6k tokens of scene-management
-instruction she cannot use. The cost isn't really tokens ‚Äî it's signal-to-noise: ~700
-tokens of live per-turn context (mood, day, schedule, watch metrics, capabilities) were
-competing against 8,500 tokens of largely inapplicable generic instruction, which is the
-same failure mode as the recall bias fixed in v2026-07-25.1.
-
-**What shipped:** `PRESET_FILES` ‚Äî an ordered, comma-separated list of layer files, each
-read from the instance directory and injected as **its own system block** (so `/audit`
-shows what each layer costs, and a layer can be added or dropped without editing a
-monolith). Unset falls back to `PRESET_FILE`, which still defaults to `preset.txt`, so a
-single-layer config produces exactly one block as before and **the fleet's assembled prompt
-is unchanged until an `.env` opts in**. A named-but-missing layer appends a
-`_CONFIG_WARNINGS` entry rather than silently vanishing ‚Äî quietly dropping voice rules
-reads as a model regression, not a deploy error. If no layer resolves at all, the built-in
-`_DEFAULT_TEXTING_STYLE` still applies, and the documented "no preset.txt" case does not
-warn.
-
-**Deploy paths made layer-aware in the same commit**, so the content split can't half-land:
-- `sync-cards.sh` copies every `preset-*.txt` in the repo to every instance (each bot's
-  `PRESET_FILES` decides what it loads). Globs safely when no layers exist yet.
-- `deploy/vps-sync.sh` can't list a remote directory over raw URLs, so it parses the
-  instance's own `PRESET_FILES` and pulls exactly those. Self-maintaining ‚Äî no layer list
-  duplicated in the script. A named layer that 404s is **fatal on purpose**: starting a bot
-  with missing voice rules is worse than a failed deploy.
-
-**Measured with a prototype core/rp/feature split** (not shipped ‚Äî see below):
-| instance | today | layered | layers used |
-|---|---|---|---|
-| cass | 11,031 | **4,758** (‚àí57%) | core |
-| jules | 14,419 | 14,419 | core + rp + feature |
-
-Jules is unchanged *by design* ‚Äî she uses every layer, so there is nothing to drop. The win
-is concentrated exactly where a character doesn't need the roleplay machinery, which is the
-honest shape of this change.
-
-**The content split is deliberately NOT in this release.** `preset.txt` is voice-critical
-and deliberately tuned (see v2026-07-18.1's anti-echo work), and `[CHARACTER AUTHENTICITY]`
-alone is 2,386 tokens. Carving it up is an owner-reviewed content decision, one layer at a
-time, using the new `/audit` numbers as the evidence base. This release ships only the
-mechanism, inert by default. ROADMAP 3.13 tracks the split.
-
-**Tests:** `TestPresetLayers` (layers load, name/text shape, joined `TEXTING_STYLE`
-equivalence, built-in fallback, no spurious warning for a missing default,
-`PRESET_FILE` back-compat, per-layer injection, audit reporting), `TestCardBlockLabelling`
-(the card block gets the fixed label, later blocks keep their headings, and the label leaks
-no card content), `TestCardFieldTokens` (breakdown recorded, empty fields omitted, lorebook
-tracked separately, surfaced in `/audit`). One v2026-07-25.3 test was updated because
-`messages[0]` is now labelled deliberately rather than by its first line.
-
-## v2026-07-25.4 ‚Äî Prompt trimming gives up the right things first
-
-**Root cause this release addresses:** `_trim_history_to_budget` computed
-`protected = system_indices | {final_user}` ‚Äî i.e. **every** system block was exempt and
-only conversation history was droppable. Two consequences, both demonstrated by
-exercising the function rather than reading it:
-
-1. **The priority was inverted.** On the real assembled prompt at a 15,000-token budget it
-   kept 9/9 system blocks and dropped 13/20 conversation turns. It would delete a dozen
-   turns of live conversation to preserve a triggered lorebook entry or a randomly sampled
-   list of local restaurants ‚Äî context the character demonstrably does not need to hold a
-   conversation.
-2. **The budget was unenforceable and silent about it.** Because the protected set could
-   exceed the budget on its own, the loop drained every droppable message and returned
-   over budget anyway. With a 14,000-token system stack and a budget of 8,000: 0 of 40
-   history messages kept, prompt still 14,003, logged as a success. (v2026-07-25.3 made
-   that case log a WARNING; this release makes it rare.)
-
-**What shipped** ‚Äî `_trim_history_to_budget` ‚Üí **`_trim_prompt_to_budget`**, now tiered:
-1. optional system blocks, **largest first** (fewest distinct blocks lost per token freed);
-2. history older than `KEEP_RECENT`, oldest first;
-3. last resort ‚Äî dip below `KEEP_RECENT`, oldest first (a degraded prompt that fits beats
-   a hard context failure);
-4. still over ‚Üí WARNING + `prompt_budget` error, as before.
-
-The final user message and every unmarked system block are never dropped.
-
-**Marking is opt-in and fails safe.** A block is droppable only if built with the new
-`_sys_opt()` helper, which tags it `_tier = _TIER_OPTIONAL`; `_strip_tiers()` removes the
-internal key before the list reaches the API (same reason history's `ts` is dropped when
-copied into the prompt). Seven blocks are marked: `# Relevant background` (lore),
-`# Relevant memories`, `# Inside jokes`, `# Local places`, `# Open threads`,
-`# What's going on today`, and the recent-questions list. Everything else ‚Äî the card, the
-preset, capabilities, post-history instructions, mood, the initiative note ‚Äî stays
-protected **by default**, so a newly added block, or one whose heading someone rewrites,
-cannot silently become droppable. The rejected alternative was classifying by heading
-string at trim time, which reclassifies a block the moment its wording changes.
-
-**Measured effect** (priya, populated with threads/jokes/recent-questions, 20 turns,
-13,005 tokens untrimmed): at a 12,800 budget the tiered trimmer drops 2 optional blocks
-and keeps **18/20** turns. **Honest limit:** the benefit is proportional to how much
-optional context is live. For a card-heavy instance like jules ‚Äî 14,417 tokens of system
-stack that is almost entirely *protected* (preset 8,503 + card 5,224) ‚Äî there is little
-optional context to give up, and a budget below ~14.5k still costs conversation. The only
-real lever there is reducing the protected content itself, which is a content decision
-(see the `Prompt:` top-blocks line added in v2026-07-25.3), not a trimming one. This
-release does not claim to fix that case.
-
-`CONTEXT_TOKEN_BUDGET` still defaults to **0/off** ‚Äî nothing changes for the fleet until
-it is deliberately set, and `.env.example` now says to set it from the `/audit` numbers
-rather than by guessing.
-
-**Pure helpers + tests:** `_sys_opt`, `_strip_tiers`. 25 new tests across `TestSysOpt`,
-`TestStripTiers`, `TestTieredTrimOrder` (optional-before-history, largest-optional-first,
-oldest-history-first with the survivors proven contiguous and newest-ending, last-resort
-dip, final-user survival, protected-block survival, early stop, unfittable warning) and
-`TestOptionalBlocksAreMarked` (the seven blocks carry the marker; `POST_HISTORY_RAW` and
-`TEXTING_STYLE` deliberately do not). The pre-existing `TestTrimPromptToBudget` cases pass
-unchanged after the rename ‚Äî unmarked blocks behave exactly as before.
-
-## v2026-07-25.3 ‚Äî Measure the assembled prompt (PROMPT_STATS)
-
-**Root cause this release addresses:** a question came up about whether large character
-cards were starving other features of prompt attention, and **nothing in the codebase
-could answer it**. `_llm_stats["tok_in"]` accumulates a daily running sum across every LLM
-call (chat, summary, analysis, reaction), so it cannot report the size of a single
-assembled prompt, its maximum, or which block drove it. There is no context-overflow
-detection either. Instrumenting first is this repo's own protocol ("opaque error ‚Üí
-instrument first") and it decides whether the follow-up trimmer work is urgent or
-theoretical. No trimming behaviour changes here.
-
-Measured while diagnosing (recorded so the next session doesn't re-derive it ‚Äî estimates
-via `_est_tokens`, 4 chars/token, on an empty instance with 20 short history messages):
-
-| source | tokens | conditional? |
-|---|---|---|
-| `preset.txt` (shared voiceprint) | **8,503** | no ‚Äî every message, every bot |
-| card's unconditional fields | 1,834 (cass) ‚Üí 5,224 (jules) | no |
-| lorebook | 0 ‚Üí 3,991 (jules) | yes, only on trigger |
-| capabilities / mood / initiative / env / etc. | ~700 | mostly |
-| history (20 short msgs) | 405 | bounded by COUNT, not tokens |
-
-Full assembled prompt: **cass 11,435 ‚Üí jules 14,822**. The headline finding is that
-**card file size is a poor proxy for prompt cost**: jules's card is 5.8√ó cass's on disk
-but her prompt is only 1.3√ó larger, because most of that 52KB is lorebook (conditional)
-and JSON structure. The largest single line item for every bot is the *shared* preset ‚Äî
-77% of cass's system stack, 59% of jules's. Jules's one real outlier is a 4,715-token
-`ATTRACTION RULE` block inside her card, which ships unconditionally every message.
-
-> ‚ö†Ô∏è **The previous sentence is WRONG ‚Äî corrected in v2026-07-25.5.** `[ATTRACTION RULE]`
-> is **84 tokens**. The 4,715 figure is the entire *merged* card block (system_prompt +
-> description + scenario + mes_example); `_prompt_top_blocks` labelled every block by its
-> first line, and jules's card happens to open with that heading. Do not act on the 4,715
-> number. Left in place rather than rewritten so the mistake, and how a mislabelled
-> diagnostic produced it, stay legible.
-
-**What shipped**, behind `PROMPT_STATS` (default **1 = on**; `0` disables the bookkeeping):
-- `_record_prompt_size` at the end of `assemble_messages` ‚Äî count, running sum, max (with
-  timestamp and chat), and a coarse histogram. On-loop and O(messages), the same walk
-  `_track_llm_usage` already does per call. In-memory only, like `_recent_questions`; a
-  restart resets it rather than adding a state-serialization path.
-- On a new maximum it also records the three largest system blocks by heading, so `/audit`
-  says *which* block drove the peak instead of only that a peak happened.
-- `/audit` gains a `Prompt:` line (avg, max, age of max, sample count), a bucket spread,
-  and those top blocks.
-
-**Two logging defects fixed in `_trim_history_to_budget`** (both found by exercising the
-function directly rather than by reading it):
-- The completion line read `"~%dk tokens over budget"` while printing the **final total**,
-  not the overage ‚Äî a successful trim reported itself as an overshoot. Now
-  `"dropped N history msg(s); final ~Xk tokens (budget ~Yk)"`.
-- **The budget was silently unenforceable and said nothing.** Because `protected =
-  system_indices | {final_user}` exempts every system block, once the system blocks alone
-  exceed the budget the function strips the entire conversation and returns over budget
-  anyway. Demonstrated at a 14,000-token system stack: budget 8,000 ‚Üí 0 of 40 history
-  messages kept, prompt still 14,003, logged as success. It now emits a WARNING (so it
-  reaches `errors.log` and `/errors`) and counts a `prompt_budget` error.
-
-`CONTEXT_TOKEN_BUDGET` remains **0/off** and `.env.example` now warns against setting it
-until the trimmer's priority order is fixed ‚Äî with all system blocks protected, a budget
-below the system total destroys the conversation to preserve optional blocks like a
-triggered lorebook entry. That inversion is the next release, deliberately kept separate
-so this one is pure observation.
-
-**Pure helpers + tests:** `_msg_tokens`, `_prompt_token_total`, `_prompt_bucket`,
-`_prompt_top_blocks`. New `TestPromptTokenTotal`, `TestPromptBucket`,
-`TestPromptTopBlocks`, `TestRecordPromptSize`, `TestTrimBudgetLogging`.
-
-## v2026-07-25.2 ‚Äî Garmin health feed ported onto main (GARMIN_FEED)
-
-**Root cause this release addresses:** the owner asked why the bots never bring up Garmin
-data. They never had any. The Garmin health feed was built on
-`origin/claude/push-to-repo-7i2f3c`, and that branch **shares no git history with `main`** ‚Äî
-`git merge-base main origin/claude/push-to-repo-7i2f3c` returns empty, and neither branch is
-an ancestor of the other. It's a separate lineage rooted at `76223f9 2026-04-15 "Add files
-via upload"` (9,101-line `bot.py`, last touched 2026-07-04) while main's is 11,487 lines.
-`main` had **zero** references to Garmin in `bot.py`, `.env.example`, or any doc. Since every
-deploy path (`/update`, `sync-cards.sh`, `vps-sync.sh`) pulls from `main`, no bot ever had
-the feature. Not a prompt-attention problem ‚Äî a missing-code problem.
-
-Because the histories are unrelated, this is a **hand-port, not a cherry-pick** (a merge
-would have dragged in a whole parallel bot.py). Each piece was rewritten against current
-main and its API surface re-verified against the installed library: `Garmin(email,
-password)` positional, `login(tokenstore)`, and `get_sleep_data` / `get_stats` /
-`get_activities` / `get_stress_data` all confirmed present.
-
-**What shipped**, behind `GARMIN_FEED` (default **1 = on**; `0` disables without deleting
-credentials ‚Äî the feed is additionally inert with no credentials, so unset stays a no-op):
-- **Snapshot feed.** `GARMIN_TIMES` (default 07:30,16:00) plus once at startup pulls sleep,
-  resting HR, steps, Body Battery, avg stress, and last workout into one short line, cached
-  to `.garmin_snapshot` and re-read after a restart. Injected as `# How {user} is doing
-  physically today` and told to work it in without ever reciting numbers. Stops being
-  injected past `GARMIN_MAX_AGE_HOURS` (18) so she never speaks to yesterday's body.
-- **Three proactive check-ins**, each with its own persisted cooldown so a restart can't
-  re-fire one: sustained high stress (`STRESS_*`), Body Battery bottomed out (`BB_*`), and
-  resting HR above the user's own rolling median baseline (`RHR_*`).
-- **`/health`, `/healthnow`, `/stress`** ‚Äî registered whenever credentials exist, even when
-  the kill switch is off or the library is missing, so they can explain *why* they're inert
-  (an unregistered command answers nothing, which is undiagnosable from the user side).
-  `/audit` gained a `Health feed (Garmin)` line reporting off / inert / snapshot staleness.
-- **Login-cooldown hardening carried over from the branch:** a failed login persists a
-  `GARMIN_LOGIN_COOLDOWN` (1800s) backoff to `.garmin_cooldown`, because Garmin rate-limits
-  the login endpoint and a restart loop otherwise hammers it. A client that breaks
-  *mid-runtime* is dropped (`_drop_garmin_session`) so the next poll re-logs in instead of
-  retrying a dead session forever.
-
-**Invariants this diff had to satisfy** (each was a real risk here):
-- **#8, no bare blocking calls in async:** garminconnect is blocking `requests` underneath.
-  Every call site goes through `asyncio.to_thread`; pinned by a test that greps all four
-  async entry points.
-- **#3, no new LLM calls:** the snapshot is prompt context and the check-ins reuse the
-  existing `send_triggered` path. Zero completion calls added; pinned by a test.
-- **GROUP_CHAT_DESIGN.md ¬ß5:** watch metrics are private 1:1 state, so the block is gated
-  `GARMIN_ENABLED and not group`, same as `user_notes` and inside jokes. Pinned by a test ‚Äî
-  without this, health data would be narrated to Priya and Jules's group thread.
-- **v2026-07-20.2 key-leak class:** Garmin exceptions can carry the request URL, so no log
-  line interpolates the exception ‚Äî only `type(e).__name__`. Pinned by a test.
-- **#15:** every numeric knob goes through `_env_int`/`_env_float`; a typo warns and falls
-  back instead of bricking the instance.
-- Check-ins go through the same proactive gate as `note_followup_job` (quiet flag, away,
-  quiet hours, per-chat quiet windows) and **consume the shared nudge budget** ‚Äî a health
-  check-in is a nudge and isn't exempt from it. Extracted as `_health_nudge_ok`.
-
-**`garminconnect` is deliberately NOT in `requirements.txt`.** Four of six instances have no
-watch and the phone venv is shared, so a venv rebuild shouldn't pull a dep most bots never
-import. It stays an optional try/except import, documented in `requirements.txt` and
-`.env.example` with the per-instance pip command. Credentials-set-but-library-missing is not
-silent: it appends a `_CONFIG_WARNINGS` entry and shows as `inert` in `/audit`.
-
-**Pure helpers + tests:** `_garmin_bits` (payload ‚Üí phrases, so a Garmin field rename is
-caught by a test rather than by silence), `_stress_sustained` (skips Garmin's -1/-2
-unmeasurable markers; returns `avg=None` for "no data", deliberately distinct from a calm
-average that rounds to 0), `_rhr_baseline` (excludes today so one elevated reading can't
-raise the baseline it's compared against). 45 new tests across `TestGarminBits`,
-`TestStressSustained`, `TestRhrBaseline`, `TestGarminConfig`, `TestGarminInvariants`.
-
-**Not ported from the branch** (out of scope, recorded so it isn't mistaken for an
-oversight): that lineage's on-this-day reminiscing, offline life events, adaptive
-texting-style mirroring, acoustic_ears, and `/diag`. Several overlap features main already
-solved differently. Only the health feed was requested.
-
-## v2026-07-25.1 ‚Äî Topic initiative rebalanced away from recall (PROMPT_BALANCE)
-
-**Root cause this release addresses:** owner-reported symptom was "the bots are too focused
-on bringing up memories and notes and don't bring up things to do with other features". The
-cause is not card size and not context pressure ‚Äî it's an **asymmetry in the directive text**
-of the injected blocks. Of the ~15 system blocks `assemble_messages` appends, exactly two
-carried an explicit instruction to raise their contents ‚Äî `# Things you know {user} has going
-on` ("Ask about these naturally if one fits") and `# Open threads between you two` ("Let them
-surface naturally if one fits"). Both are recall. Meanwhile the live-context blocks were
-either bare statements (`environment_note()`'s time+weather one-liner, `# {NAME}'s schedule
-today`) or **actively suppressed**: `# What's going on today` ended with "don't narrate it
-like a list". So the only sanctioned way for the character to open a topic was to remember
-something, and the block describing her actual present day was the one told to stay in the
-background. The model was following the prompt correctly.
-
-Two things ruled out while diagnosing, recorded so they aren't re-investigated:
-- **Card size is not a factor.** `CONTEXT_TOKEN_BUDGET` defaults to `0`, so
-  `_trim_history_to_budget` returns immediately and nothing is trimmed at all. Even with a
-  budget set, `protected = system_indices | {final_user}` ‚Äî every injected block is exempt
-  and only conversation history is dropped. A 53KB card (jules) costs recent turns, never a
-  feature block.
-- This is the follow-on release v2026-07-18.1 explicitly deferred ("Lore, `memory_block`
-  facts/summaries, `user_notes`, pinned, and `day.txt` ‚Ä¶ injected wholesale (not ranked), so
-  suppression there is a different mechanism ‚Äî left for a future release"). That release
-  fixed *repetition of one ranked memory*; this one fixes *which category of thing she
-  reaches for at all*. Different mechanism, as predicted.
-
-**What shipped**, behind `PROMPT_BALANCE` (default **1 = on**; `0` restores the previous
-prompt text byte-for-byte):
-- New pure `_initiative_note(name, uname)` ‚Üí a `# Bringing things up` block appended after
-  every recall block (so it frames them) and before `POST_HISTORY_RAW` (so the card keeps the
-  last word on voice). It says plainly that recalling is one option among several and not the
-  default, that what she's doing//what's around her/what she noticed today are equally valid
-  openings, and that recalled facts are context rather than a supply of topics to draw down.
-- `user_notes` tail rewritten: still "ask if it fits", now explicitly "not a checklist to work
-  through and not your default way of showing you care. Most messages shouldn't touch it."
-- `open_threads` tail rewritten: adds "don't reach for these just because you have nothing
-  else."
-- `day.txt` tail rewritten: the anti-list guard is kept (it's load-bearing against recitation)
-  but the block now grants initiative ‚Äî "yours to bring up unprompted, the way anyone mentions
-  what they're in the middle of."
-
-**Deliberately unchanged:** no block was removed and none had its content narrowed.
-`user_notes` injection into every 1:1 prompt stays as-is ‚Äî the 2026-07-10 audit already
-rejected "injected into every chat's prompt" as a defect (by design for single-owner bots).
-Ranked-memory suppression (`MEMORY_REPEAT_SUPPRESS_TURNS`) is untouched and orthogonal.
-
-**Pure helper + tests:** `_initiative_note`. New `TestInitiativeNote` (names interpolated,
-states the live-over-recall preference, no leftover "checklist" framing) and
-`TestPromptBalanceTails` (each rewritten tail differs from its legacy string, and the legacy
-string is what the kill switch restores).
-
-## v2026-07-23.2
-
-Anti-hallucination: note confidence gating (article: "Stop AI Hallucinations Before
-They Start"). Root cause class: notes lacked the confidence-gating defense that memories
-already had. A plausible-but-wrong note that passed quote grounding (because the user
-happened to mention the character's event verbatim) was stored as fact. Memories have
-had `memory_confidence` + `MEMORY_AUTOCONF` since v2026-07-10.2; notes had no equivalent.
-
-Changes:
-1. **`user_note_confidence` field** in `post_reply_analysis` ‚Äî the analysis model now
-   self-reports 1-10 confidence on each note extraction, parallel to `memory_confidence`.
-2. **`NOTE_AUTOCONF` env var** (default 3, kill switch 0) ‚Äî deterministic backstop rejects
-   notes below the confidence threshold, even if quote-grounded. Mirrors the article's
-   "supported=true but no evidence ‚Üí blocked" pattern.
-3. **"Null over plausible guess" instruction** ‚Äî explicit language added to the analysis
-   prompt: "When evidence is missing or ambiguous, return null. A missed real event is
-   recoverable; a stored fabrication is not." The existing CRITICAL instruction told the
-   model *what* to extract; this tells it *when not to*.
-4. **Workflow**: OPERATING_MANUAL ¬ß4 updated with explicit false-success prevention
-   ("never report success from intention, memory, or an empty tool response") and eval
-   suite extended with anti-hallucination trap evals.
-
-Deploy: `/update` one bot, `/restart` the rest, verify `/audit` shows 2026-07-23.2.
-
-## v2026-07-23.1
-
-Feature: stepped-thinking "intent" seed (owner request ‚Äî port the idea behind the
-SillyTavern `st-stepped-thinking` extension). That extension improves replies by making
-the model think as the character *before* answering; its native mechanism is one extra
-LLM completion per configured thinking-prompt, per message. That mechanism is a
-non-starter here: invariant #3 forbids per-message side completion calls because six
-bots share one phone radio, and even post-VPS those calls still cost latency on the
-user-facing reply plus money. So the idea is folded into the machinery we already have,
-on **zero extra calls**:
-
-1. **bot.py ‚Äî forward-looking intent, on the existing single call.** The combined
-   `post_reply_analysis` pass now emits one extra JSON key, `"intent"`: a one-line,
-   third-person "frame of mind" note for {{char}} going into her *next* reply (an
-   emotional read / a guard / a small want). It's stored in a new ephemeral
-   `next_intent` dict ‚Äî NOT persisted, NOT written to any user-fact store. Provenance
-   (invariant #10): intent is generated content, so it lives only where mood lives ‚Äî
-   injected into the next reply's system prompt, never into `user_notes`/memory. The
-   next reply builder injects it right after the mood note, freshness-gated by
-   `_step_intent_seed` (pure, unit-tested) so a stale seed (>`STEP_INTENT_TTL_SEC`,
-   default 6h) never resurfaces. Worker‚Üíloop writes go via `call_soon_threadsafe`
-   (invariant #6). Default ON with kill switch `STEP_INTENT` (owner policy 2026-07-18).
-2. **preset.txt ‚Äî `[STEPPED THINKING]` block (fleet-wide, content).** A staged
-   plan-then-write instruction (feel ‚Üí want ‚Üí write) that shapes the hidden reasoning
-   the `:thinking` chat model already produces, at no cost. Mirrors the existing
-   `[SELF-CHECK]` "silently, keep it out of the reply" framing precisely ‚Äî that framing
-   is the guard against the documented planning-leak class (Priya once leaked her
-   planning monologue) on fallback models that don't wrap reasoning in `<think>`.
-
-Two deploy paths: bot.py via `/update` (+ `/restart` the rest, verify `/audit` shows
-2026-07-23.1); preset.txt via `sync-cards.sh` + `/restart` each bot (fleet-wide file).
-
-## 2026-07-20 ‚Äî Ops: reconcile Nora's instance dir in launch/sync scripts (no bot.py change, no version bump)
-
-Root cause: `update-all.sh`, `watchdog.sh`, and `sync-cards.sh` all passed `$BOT_SRC`
-(`~/telegram-bot`, the shared *code* dir) as Nora's *instance* dir, but her instance dir
-is `~/nora-bot` (confirmed on-device 2026-07-11 via the STARTUP AUDIT `Instance:` line;
-recorded in CLAUDE.md, vault/entities/nora.md, SETUP_GUIDE, OPS_MANUAL). This was the
-open item CLAUDE.md flagged ("verify update-all.sh matches on-device") and never closed.
-Latent, not yet fired: `/restart` restarts the running process in place and watchdog only
-relaunches a *down* session, so the wrong dir never executed ‚Äî but the next `update-all.sh`
-full redeploy or post-crash watchdog relaunch would have brought Nora up from `~/telegram-bot`
-(wrong `.env`/token/state), and watchdog's freeze check was already reading the wrong
-`~/telegram-bot/.alive` heartbeat. Fixed all three to use `~/nora-bot`; `$BOT_SRC` stays the
-code dir (run-bot.sh is still invoked from it). Pinned by the new `nora-instance-dir` eval
-(break-tested red-green). Surfaced during the preset.txt deploy-path work below.
-
-## 2026-07-20 ‚Äî Content: preset.txt anti-slop banlist extended, fleet-wide (no bot.py change, no version bump)
-
-Cherry-picked the emotional-narration clich√©s from the Megumin Suite V9 banlist that our
-shared `preset.txt` didn't already cover. Root reason to record: `preset.txt`'s existing
-`[ANTI-SLOP]` list targets structural/assistant tells ("X, not Y" frames, rule of three,
-"a testament to"); Megumin's targets emotional-clich√© phrasing ‚Äî largely non-overlapping,
-so the additions are additive, not redundant. Added to `[ANTI-SLOP]`: three construction
-bullets (action+symbolic-meaning double, mask-drop announcements, feelings-as-machinery
-verbs) and inline phrases ("washed over," "flooded through," "let out a breath she didn't
-know she was holding," "before she could stop herself," "seemed to physically flinch,"
-"hit like a physical blow," "the weight of it" as standalone metaphor). Fleet-wide: all
-six bots read the shared preset. Deploy: `sync-cards.sh` + `/restart` each bot. Note:
-`sync-cards.sh` previously synced only the card + seed files and never touched
-`preset.txt` ‚Äî a shared fleet-wide file with no deploy path ‚Äî so this change adds a
-`preset.txt` pull to it (verified via `--dry-run`). Origin: mobile Tavo port task ‚Äî see
-`megumin-mobile/`; wholesale-merging the port was rejected (it duplicated ~70% of
-preset.txt and carried CYOA/"the PC" vocabulary that doesn't fit a texting companion).
-## 2026-07-20 ‚Äî Fleet preset.txt: three refinements (no bot.py change, no version bump)
-
-From the preset review (`character-review/PROPOSALS-2026-07-presets.md`). All three
-touch `preset.txt`, the shared voiceprint feeding all six bots (fleet-wide):
-1. **Anti-slop "deliberate craft" clause** (mined from Atelier 2.0's No-Slop): the
-   banned-construction list is now explicitly "defaults to avoid, not a checklist to
-   freeze against" ‚Äî a banned move made on purpose because the voice earned it is
-   craft, not slop. Prevents the hard banned-list from stiffening prose into hedged,
-   generic replies.
-2. **Anti-diagnosis register rule** (mined from UnifiedWritersRoom's Reaction
-   Patterns), added to EPISTEMIC HORIZON: {{char}} reads {{user}} but doesn't
-   armchair-diagnose them ("you use humor to deflect") unless literally a therapist ‚Äî
-   voice a read as observation + question, not a packaged verdict.
-3. **"Punchy" wording fix**: TEXT DELIVERY said "prefer shorter, punchier responses"
-   while ANTI-SLOP bans closing on a punchy one-liner; clarified to "brevity, not a
-   dramatic one-liner" so the two sections stop contradicting.
-Root/inbox presets needed no edits (TheAtelierV5 was already replaced; Megumin's
-Arabic CoT is intentional ‚Äî scoped to hidden thinking, output stays English).
-Deploy: `sync-cards.sh` + `/restart` all six bots (preset.txt is fleet-wide).
-
-## 2026-07-20 ‚Äî Content: Priya geography fix + Jules seed files (no bot.py change, no version bump)
-
-From the first character-pass review (proposals in `character-review/PROPOSALS-2026-07.md`
-on `claude/character-review`): the 2026-07 Austin‚ÜíBellevue relocation missed Priya's
-apartment line ‚Äî "small Belltown apartment" (Seattle) survived in both her description
-and the Nimbus lorebook entry, contradicting CLAUDE.md, her atlas, and her Eastside
-habits. Moved to "small apartment in downtown Bellevue" in both places (+ mes_example
-"rent in seattle" ‚Üí "rent in bellevue"). Also created `jules/` seed files
-(people/projects/schedule/atlas, Bellingham-grounded ‚Äî she was the only character
-without any) and corrected the Bonnie personality-order note in CLAUDE.md + the
-edit-cards skill, which had recorded the card's section order reversed since it was
-written. Deploy: `sync-cards.sh` + `/restart` priya and jules.
-
-## v2026-07-20.3 ‚Äî Default MAX_TOKENS 2048 ‚Üí 4096 (headroom for thinking models)
-
-**Root cause:** the whole fleet runs thinking models (`glm-5:thinking` chat,
-often the same for summaries), which spend tokens reasoning *before* the answer. With
-the default cap at 2048 an instance with no `MAX_TOKENS` line (Emily) regularly hit the
-cap mid-reasoning and returned empty content ‚Äî the trigger behind the repeated
-`returned empty content, retry` / `recent fact consolidation ‚Ä¶ empty completion` lines.
-v2026-07-20.1 made that safe (no chain-of-thought leak, falls back), but the empties
-themselves were pure waste.
-
-**Fix:** default `MAX_TOKENS` is now 4096. It's a cap, not a target ‚Äî replies stay short,
-so cost is unaffected for normal turns while thinking models get room to reason and still
-answer. Only streaming calls apply the cap; per-instance `.env` can still override (lower
-it for a non-thinking model to bound cost). `.env.example` updated. No behavior change for
-any instance that already sets `MAX_TOKENS` explicitly.
-
-## v2026-07-20.2 ‚Äî WSDOT traffic errors no longer leak the AccessCode into the log
-
-**Root cause:** `_fetch_wsdot_alerts` / `_fetch_wsdot_times` logged the raw requests
-exception (`log.warning("‚Ä¶ failed: %s", e)`). WSDOT takes its API key as an `AccessCode`
-query-string param, and a requests connection/timeout error's string contains the full
-URL ‚Äî so the key landed in `errors.log` in plaintext and reached a shared paste
-(observed 2026-07-20 on Emily). This is the same class the TomTom path already fixed in
-v2026-07-11.9 (errors made key-free); the WSDOT path predated that discipline.
-
-**Fix:** new `_wsdot_err_reason(e)` classifies the exception by status/type into a short,
-key-free reason ("HTTP 500" / "timed out" / "network/DNS error" / the exception class
-name) ‚Äî never `str(e)`. Both WSDOT fetches log the reason instead of the raw exception,
-mirroring `_tomtom_err_reason`. Pinned by `test_wsdot_err_reason_never_leaks_key` and the
-`wsdot-key-not-logged` eval. (Owners with an exposed AccessCode should rotate it ‚Äî the
-log fix doesn't unspill what already leaked.)
-
-## v2026-07-20.1 ‚Äî Reasoning models no longer leak raw chain-of-thought as the reply
-
-**Root cause:** both model-output paths fell back to `reasoning_content` when `content`
-came back empty (`_extract_content` for non-streaming; the `reasoning_parts` join in
-`_do_request` for streaming). `reasoning_content` is raw chain-of-thought with **no
-`<think>` tags**, so `_strip_thinking` (which only removes `<think>‚Ä¶</think>`) can't
-touch it ‚Äî it went to the user verbatim. This fired when a reasoning model (e.g. the
-default `glm-5:thinking`) spent its whole token budget *thinking* and emitted an empty
-`content`: Priya replied to a normal message with her planning monologue ("Current
-state: ‚Ä¶ I should incorporate the Asha thing naturally ‚Ä¶ maybe"), truncated mid-sentence
-where the token budget ran out. The `reasoning_content` fallback was explicitly called a
-"leak vector" in the 2026-07-10 audit, but that pass only stripped tool-call XML from it,
-never plain reasoning ‚Äî so the hole stayed open.
-
-**Fix:** neither path delivers `reasoning_content` anymore. Empty `content` ‚Üí empty
-string, and `call_nanogpt` now treats an empty completion like a transient miss ‚Äî
-retry, then fall through to the non-thinking `FALLBACK_MODEL` (`magnum-v4-72b`), which
-reliably produces `content`. A one-line `[model] ‚Ä¶ reasoning but no content` warning
-makes the condition visible in `/errors`. Contributing config trigger (handled
-separately, per instance): `MAX_TOKENS` set too low for a thinking model leaves no room
-for a final answer after the reasoning ‚Äî raise it on affected instances. Pinned by
-`test_extract_content_never_returns_reasoning` and the `no-reasoning-content-leak` eval.
-
-## v2026-07-19.2 ‚Äî Note ownership: her events no longer become the user's calendar
-
-**Root cause (owner-reported):** bots brought up events from *their own* fictional
-lives and then asked the owner "how it went" as if it were the owner's plan. Third
-generation of the provenance-leak class (2026-07-10 hallucinated memories,
-v2026-07-12.4 note grounding): the v2026-07-12.4 fix requires `user_note_quote` to
-be a verbatim substring of the *user's* lines ‚Äî a topic gate, not an ownership
-gate. When the character has a scrimmage Saturday and the user replies "good luck
-at the scrimmage," the user's own line states the event verbatim, the note passes
-grounding legitimately, and is stored ownerless. `note_followup_job`'s trigger then
-hard-codes ownership the wrong way ("{user} mentioned this ‚Äî ask how it went"),
-completing the flip. Every guard checked whose *mouth* the words came from; none
-checked whose *life* the event belonged to.
-
-**Fix (prompt-level, both ends of the pipe, zero new LLM calls, no new code paths):**
-- Extraction (`post_reply_analysis`): `user_note` now requires the event to be part
-  of the user's OWN life; the user asking about / reacting to / wishing luck on the
-  character's event is explicitly null. The CRITICAL clause adds the principle:
-  ownership of the event decides, not whose message mentioned it.
-- Follow-up backstop (`note_followup_job` trigger): if a stored note actually
-  describes the character's own event, she must not ask the user how it went ‚Äî she
-  tells them how it went for her instead. This degrades already-polluted notes
-  gracefully instead of gaslighting the owner.
-- No kill switch: pure prompt-text bugfix on existing behavior ‚Äî "off" would mean
-  "keep the bug." Existing polluted entries should be pruned manually via
-  `/notes` + `/notes del <n>` on affected bots; the backstop covers what remains.
-
-## v2026-07-19.1 ‚Äî /fleet: Telegram-native fleet console over the admin API
-
-**Root cause (a gap, not a bug):** fleet visibility required a shell.
-`fleet-status.sh` answers "is everyone up, what version" but only from a terminal
-‚Äî and the VPS migration is exactly when that answer is needed from a phone with
-no SSH at hand: instances now live on two hosts, and the jules pilot's failure
-mode (two hosts polling one token) is the kind of thing a glanceable per-host
-view catches early. The admin API already served all the data
-(`/admin/health`, `/admin/audit`); nothing consumed it from inside Telegram.
-
-**What shipped:**
-- `/fleet` (admin-gated, `_is_admin`): probes every peer in `FLEET_PEERS`
-  concurrently (`asyncio.gather` over `asyncio.to_thread` ‚Äî no bare `requests`
-  in the async handler) and replies with one table: UP/DOWN, version, uptime,
-  and `err:<n>` last-hour error count when the fleet shares one
-  `ADMIN_API_TOKEN` (audit probe degrades to `?` on a token mismatch or older
-  peer). DOWN is labeled as "admin API unreachable", not "bot dead" ‚Äî the
-  common case is `ADMIN_API_ENABLED` unset on a healthy bot.
-- `FLEET_PEERS=name=port,name=host:port,‚Ä¶` ‚Äî host defaults to localhost, so
-  the same config works on-phone now and across the tailnet mid-migration.
-  Parsed by pure `_fleet_parse_peers`; bad entries warn via `_CONFIG_WARNINGS`
-  and are skipped (the .env-typo-must-not-brick rule, v2026-07-10.2).
-- `/admin/health` now includes `instance` and `uptime_hours` (still
-  unauthenticated liveness only) ‚Äî `fleet-status.sh` already tried to read
-  `uptime_hours` and rendered 0.0h for everyone; now it's real.
-- Kill switch `FLEET_CMD` (unset = on, `0` = off) per owner policy 2026-07-18;
-  feature is inert without `FLEET_PEERS` regardless. `FLEET_TIMEOUT` (default
-  4s) bounds each probe. Group-safe automatically: commands in groups are
-  default-deny (`GROUP_ALLOWED_COMMANDS`), untouched.
-
-**Tests:** `TestFleetParsePeers` (5) + `TestFleetFormat` (3) in test_pure.py.
-
-## v2026-07-18.5 ‚Äî /usage speaks NanoGPT's token-based subscription shape
-
-**Root cause:** the v2026-07-18.4 self-describing error did its job ‚Äî the owner's
-very next `/usage` captured the real response. NanoGPT's subscription API is no
-longer daily/monthly request counts; it's **token-based**: top-level per-section
-usage dicts (`weeklyInputTokens`, `dailyInputTokens`, `dailyImages`, each
-`{used, remaining, percentUsed}`) keyed identically to the `limits` dict, plus
-`period.currentPeriodEnd`. Jules's real numbers: 60M weekly input tokens limit,
-`dailyInputTokens` limit null (= uncapped), 100 daily images.
-
-**What shipped:** `_usage_summary` now recognizes the token shape first (sections
-missing their usage dict are skipped; a null limit renders as ‚àû; renewal date
-appended) and falls back to the legacy daily/monthly shape, else None ‚Üí the
-v2026-07-18.4 self-describing path. New pure `_fmt_count` humanizes counts
-(60000000 ‚Üí 60M, 15400 ‚Üí 15.4k). The captured real body is pinned in the tests
-so the next API drift fails loudly against known-good data.
-
-**Tests:** `TestUsageSummaryTokenShape` (4, incl. the real captured body) +
-`TestFmtCount` (2); legacy-shape tests unchanged and still green.
-
-## v2026-07-18.4 ‚Äî /usage no longer crashes on an unexpected API response shape
-
-**Root cause:** `check_usage` trusted the NanoGPT subscription endpoint's response
-shape ‚Äî it gated on `data.get("active")` but then indexed `data["daily"]` /
-`data["monthly"]` / `data["limits"]` directly. On Jules the endpoint returned
-`active` truthy **without** a `daily` key (account tier or API shape change ‚Äî the
-crash destroyed the evidence of which), so `/usage` died with
-`KeyError: 'daily'` and an `[unhandled]` traceback instead of telling anyone what
-the API actually said. Same defect class as the streaming-error-body rule: an
-external response consumed without validation is undiagnosable when it changes.
-
-**What shipped:**
-- New pure `_usage_summary(data)`: validates the daily/monthly/limits shape
-  (returns None on mismatch), tolerates missing inner keys with `?` placeholders.
-- `check_usage` now handles all three failure modes gracefully: non-JSON body
-  (HTTP status to chat, body to log), inactive subscription (unchanged), and
-  active-but-unrecognized shape ‚Äî the reply names the keys the API returned and
-  the full body goes to the log, so the *next* shape change is self-describing
-  (debugging protocol #3) instead of a KeyError.
-- No new env vars; bugfix to an existing command, no kill switch needed.
-
-**Tests:** `TestUsageSummary` (5) ‚Äî full shape, missing/wrong-typed sections,
-missing inner keys, empty response.
-
-## v2026-07-18.3 ‚Äî Social battery + minimal-reply license + day-mood residue (ROADMAP 3.7)
-
-**Root causes this release addresses (three related realism tells, one plumbing area):**
-1. Mood tracks what she feels *about* things, but nothing tracked remaining social
-   capacity ‚Äî a six-hour intense conversation left her exactly as available as minute
-   one. Single-axis mood can't express "great day, no energy left."
-2. Every incoming message earned a full-length reply ‚Äî no real person pads "k" into a
-   paragraph, but the prompt never licensed anything less.
-3. Her generated life (`day.txt`) never colored how she *opened* ‚Äî mood changed ONLY
-   through conversation (`post_reply_analysis` + gap decay in `nudge_mood`), so the
-   flat tire in her day was invisible unless the user happened to ask
-   (`REVIEW-YURALUME-2026-07-18.md`, the one adoption from that review).
-
-**What shipped (zero extra LLM calls; `FATIGUE_STATE=0` / `DAY_MOOD_RESIDUE=0` kill
-switches, default on):**
-- **Social battery:** per-chat `fatigue` 0‚Äì100, persisted with state. Pure
-  `_fatigue_update` runs inside the existing analysis worker on the valence it
-  already extracts: time decay first (`FATIGUE_DECAY_PER_HOUR`, default 10), then
-  |valence| ‚â• 2 ‚Üí +12 (intensity drains regardless of sign ‚Äî a big high costs energy
-  too), calm-positive ‚Üí ‚àí15, else ‚àí5. Worker-thread writes go back via
-  `call_soon_threadsafe`, mirroring the adjacent mood write. `[fatigue]` log line on
-  threshold crossings only.
-- **Read-time decay:** `_fatigue_effective` applies passive decay at prompt-assembly
-  time so a long silent gap recovers her *before* the first reply of a new
-  conversation, not one reply late.
-- **Drained register:** above `FATIGUE_THRESHOLD` (default 70), one system line ‚Äî
-  shorter replies, less patience, winds the chat down; explicitly not
-  BrainEngine's "ego depletion" (losing social regulation was rejected in the
-  review as a liability for a long-running relationship).
-- **Minimal-reply license:** when drained, mid-busy-block (3.6), or in a low mood
-  (‚â§ ‚àí1.2), a system line makes 'k'/'lol'/an emoji a legitimate complete reply.
-  Master switch is `FATIGUE_STATE`.
-- **Day-mood residue:** the midnight day generator now ends with one
-  `MOOD: <label> | <valence>` line. Pure `_split_opening_mood` peels it off BEFORE
-  `day.txt` is written ‚Äî the meta line never reaches prompts or memory ‚Äî and seeds
-  the owner's mood state (on-loop job, direct write is correct there). A model that
-  ignores the instruction degrades to no residue that day. Provenance unaffected:
-  mood is presentation state, not a fact store; the `[own-day]` rule is untouched.
-- `assemble_messages` now reads `schedule.txt` once per assembly (previously the 3.6
-  block re-read it); busy state is shared between the license and the schedule
-  section.
-
-**Config:** `FATIGUE_STATE`, `FATIGUE_THRESHOLD`, `FATIGUE_DECAY_PER_HOUR`,
-`DAY_MOOD_RESIDUE` in `.env.example`; numerics via `_env_float`.
-
-**Pure helpers + tests:** `_fatigue_update`, `_fatigue_effective`,
-`_split_opening_mood`; `TestFatigue` (8) + `TestSplitOpeningMood` (6): drain/recharge
-arithmetic, clamps, gap decay ordering, read-time decay, MOOD-line parse/strip/clamp,
-mid-text immunity, graceful absence.
-
-## v2026-07-18.2 ‚Äî Schedule-driven unavailability (SCHED_BUSY; ROADMAP 3.6)
-
-**Root cause this release addresses:** `schedule.txt` was injected into context every
-turn but nothing **enforced** it behaviorally ‚Äî the character read as always instantly
-available, never mid-anything, never having to leave. The always-on companion is the
-single biggest "puppet" tell (identified in `REVIEW-BRAINENGINE-2026-07-18.md`, the
-one idea from that review worth its weight). Context alone doesn't shift register;
-models treat an injected schedule as trivia unless the prompt states what it means
-*right now*.
-
-**What shipped (zero extra LLM calls):** behind `SCHED_BUSY` (default **on**, `0`
-disables without redeploy):
-- New pure `_parse_busy_blocks(sched_text)`: extracts `(start_min, end_min, activity)`
-  from today's schedule lines carrying an **explicit** `HH:MM-HH:MM` range (hyphen/en
-  dash/em dash). Deliberately conservative ‚Äî loose wording ("morning shift", "gym
-  later") never fires; invalid clock values and overnight ranges (end ‚â§ start) are
-  skipped rather than guessed. `_busy_now(sched_text, now)` returns the activity the
-  current time falls inside, else "".
-- `assemble_messages`: when mid-block, one system line after the schedule ‚Äî she's
-  answering from her phone in stolen moments, shorter replies, and may say she has to
-  get back to it. Logs `[sched-busy] <activity>` per assembly so over-firing is
-  visible in bot.log (the ROADMAP-specified tripwire).
-- Private reply path: compose delay (`_typing_delay_secs`) is multiplied by
-  `SCHED_BUSY_DELAY_MULT` (default 3.0, clamped 1‚Äì10 at use) while busy. The **group
-  path keeps its own timing untouched** ‚Äî no group-behavior change in this release.
-- Proactive sends unchanged: quiet hours + nudge budget stay authoritative; this
-  feature only adds restraint, never sends.
-
-**Config:** `SCHED_BUSY`, `SCHED_BUSY_DELAY_MULT` documented in `.env.example`.
-Numeric parsing via `_env_float` (bad values warn + fall back).
-
-**Pure helpers + tests:** `_parse_busy_blocks`, `_busy_now`; `TestBusyBlocks` (8
-tests: explicit ranges, loose-wording immunity, dash variants, overnight/invalid
-skip, boundary minutes, empty schedule).
-
-## v2026-07-18.1 ‚Äî Stop memory latching (MEMORY_REPEAT_SUPPRESS_TURNS)
-
-**Root cause this release addresses:** `triggered_memories` is deterministic and
-**stateless across turns** ‚Äî every reply it re-scores all of `memories.txt` against the
-recent conversation (keyword overlap + cosine √ó3.0), sorts, and greedily fills the
-300-token budget. Nothing recorded which memories were injected on prior turns, so while
-a conversation stayed on one theme the *same* top-scoring lines won the budget every
-single turn and the character re-told one memory endlessly, reworded each time. It's a
-feedback loop: the memory she mentions lands in the recent-history scan text, which
-re-ranks it to the top again next turn. The repo already solved this exact shape for
-*questions* (`_recent_questions` ‚Üí "don't repeat these") but had no equivalent for
-memories; write-time dedup (`MEMORY_DEDUP_SIM`) only stops *storing* duplicates, not
-re-injecting the same stored line.
-
-**What shipped:** behind `MEMORY_REPEAT_SUPPRESS_TURNS` (default **6 = on**; set 0 to
-disable ‚Äî the first release under the new owner default-on policy, see below), per-chat
-in-memory tracking of recently-injected memory lines, consumed as a score multiplier in
-`triggered_memories`:
-- New pure `_repeat_penalty(last_turn, current_turn, window, floor)`: full penalty
-  (`MEMORY_REPEAT_PENALTY`, default 0.15) the turn right after a line is injected, fading
-  linearly back to 1.0 over `window` turns. A **multiplier, never exclusion** ‚Äî a memory
-  the user directly asks about still outscores the penalty and surfaces.
-- `triggered_memories` gains `chat_id=None`. With a `chat_id` (the live reply path) and
-  the flag on, it increments a per-chat turn counter, down-weights recently-seen lines,
-  and records the winners. `chat_id=None` (e.g. `/recall`) and the flag off are both
-  byte-identical to old behavior, so existing callers/tests are untouched.
-- Trackers (`_mem_inject_turn`, `_mem_last_injected`) are **in-memory only**, matching
-  `_recent_questions` ‚Äî no state-serialization changes, no cross-thread concerns; a
-  restart just clears suppression (worst case: one repeated theme after a restart).
-- A gated one-liner is appended to the `# Relevant memories` block telling the character
-  not to re-raise a memory she's referenced recently unless the user brings it up. The
-  kill switch (0) restores the exact old prompt.
-
-**Policy change (owner, 2026-07-18):** new features now default **ON** with a mandatory
-env kill switch (unset = active, `0` = off), reversing the prior default-off convention.
-The kill switch is now the required safety mechanism rather than the off-by-default state.
-Recorded in `CLAUDE.md`, `bot-code-invariants` #16, and `repo-change-control`. This
-release is the first under it ‚Äî hence `MEMORY_REPEAT_SUPPRESS_TURNS=6` by default.
-
-**Preset (`preset.txt`, ships alongside; content, no BOT_VERSION dependency):** added a
-contrastive `[ANTI-ECHO / NO REHASH]` section and inline bad‚Üígood example pairs under
-several existing abstract rules (narrated emotion, narrator tipping off lies, generic
-voice, repeated sensory detail, NPC servility) ‚Äî bad‚Üígood pairs steer models harder than
-abstract prose. Deploys via the card/seed path (`sync-cards.sh` / curl into instance
-dirs), not `/update`.
-
-**Deliberately out of scope (so it isn't re-litigated):**
-- `MEMORY_DECAY_HALFLIFE_DAYS` (default 0) remains a config-only, orthogonal mitigation
-  for *old* memories dominating ‚Äî it does nothing about within-conversation latching,
-  which is what this release fixes.
-- Lore, `memory_block` facts/summaries, `user_notes`, pinned, and `day.txt` can also
-  carry a latching theme but are injected wholesale (not ranked), so suppression there is
-  a different mechanism ‚Äî left for a future release to keep this diff minimal.
-
-**Pure helper + tests:** `_repeat_penalty`. New `TestRepeatPenalty` and
-`TestTriggeredMemoriesRepeatSuppression` (suppression rotates the winner, fades after the
-window, kill switch and `chat_id=None` preserve old behavior, per-chat isolation).
-
-## v2026-07-17.1 ‚Äî Generalized map intent (MAP_INTENT; ROADMAP 3.5 phase 2)
-
-**Root cause this release addresses:** FOOD_SUGGESTIONS (v2026-07-11.14) proved that
-pre-fetching real TomTom data into the single reply stops the character inventing
-places ‚Äî but only for food. Asked "how far is bellevue square" or "is there a
-pharmacy nearby", she still answered from imagination: fabricated minutes, distances,
-and place names, exactly the hallucination class the food path closed.
-
-**What shipped:** behind `MAP_INTENT=1` (default off; unset = prior behavior), an
-explicit map-shaped ask in a 1:1 chat pre-fetches real data and injects it as the
-same one-turn bracketed note the food path uses, riding the single existing reply:
-- **Route asks** ("how do I get to X", "how far is (it to) X", "directions to X",
-  "how long to bike/drive/walk to X", "what's the commute to X"): geocode the
-  destination, route from the user's stored location with the instance's
-  `TOMTOM_TRAVEL_MODE`, inject a plain `_route_brief` ("drive to X: 18 min, 7.9 mi
-  (incl. +4 min traffic)") with use-ONLY-these-facts phrasing. Max 2 REST calls.
-- **Nearby asks** ("is there a <thing> nearby", "any <thing> around here",
-  "closest/nearest <thing>"): POI search around the user's location (5 km), injected
-  via `_places_brief` (`_restaurants_brief` generalized; the old name delegates so the
-  food path and its tests are untouched). 1 REST call.
-
-**Design decisions (why, so they aren't re-litigated):**
-- **Keyword regex intent, not an LLM classifier** ‚Äî intent runs on every 1:1 message
-  and a per-message LLM side call is banned (bot-code-invariants #3, same reason
-  `_is_food_query` is a regex). The negative space is test-pinned: "how do I get to
-  sleep", "how far is too far", "closest thing to heaven" etc. must never fire; a
-  destination stoplist (`_MAP_DEST_REJECT`) catches figurative objects, \b-anchored
-  so real places ("Knoxville") survive. Misses on creative phrasings are accepted v1
-  cost, same as food.
-- **Location freshness gate** (`_fresh_location`): route origins and nearby centers
-  use the stored location only when <4h old (the photo path's precedent) or inside a
-  live-share window ‚Äî a route from last week's pin would be confidently wrong.
-  Without one she nudges for a pin instead of guessing (food-path pattern).
-- **Un-geocodable destinations fail honestly:** "home"/"work" geocode literally,
-  usually miss, and inject a "you couldn't find it ‚Äî say so, don't invent" note.
-  Resolving them from her memory of the user is a deliberate follow-up
-  (owner-settled 2026-07-17), as is "what's near <remote place>" ‚Äî v1 nearby is
-  user-location-only.
-- **No cooldown/cache** (owner-approved): the precise intent gate is the budget
-  control, matching how FOOD_SUGGESTIONS shipped; a `[map] intent=...` log line
-  instruments the fire rate. If fleet logs show over-firing, a per-chat cooldown is
-  the pre-agreed follow-up.
-- Food wins when both flags fire (elif chain) ‚Äî at most one injection + one TomTom
-  fetch sequence per message. Group chats never reach the block (it lives in the 1:1
-  `handle_message` path); `_TomTomError` anywhere degrades silently to a normal
-  reply; error logging stays key-free via the existing `_tomtom_err_reason` path.
-
-**Pure helpers + tests:** `_map_intent`, `_clean_map_dest`, `_route_brief`,
-`_places_brief`, `_fresh_location`. 17 new tests; `TestRestaurantsBrief` passes
-unmodified against the delegate, proving the refactor is behavior-preserving.
-
-## v2026-07-13.2 ‚Äî Error hygiene + --check-config preflight (R2+R3, operability)
-
-Two small items from the same hardening plan as v2026-07-13.1, shipped together.
-
-**R2 ‚Äî raw exceptions no longer reach chat.** Eight handler sites sent
-`‚ùå Something went wrong: {e}` (and variants) and the global `on_error` sent
-`{type(err).__name__}: {err}` to whatever chat triggered the failure. That leaks
-internals (paths, library errors, provider details) and ‚Äî the sharp edge ‚Äî `on_error`
-would post them into a *group* chat, i.e. to every human in the pilot group. All
-user-facing errors are now a fixed generic line pointing at `/errors` (admin-gated,
-where the detail already lives via the existing `log.error` calls; the one site that
-didn't log, the menu heartbeat button, now does). `on_error` additionally goes silent
-in group chats. Kept as-is: human-authored messages ("file's too big"), and the JSON
-upload parse error now shows only the structured `e.msg`/`e.lineno` from
-JSONDecodeError ‚Äî that's about the user's own file, not internals. Eval-pinned
-(`no-exception-leak`).
-
-**R3 ‚Äî `python bot.py <dir> --check-config`.** No-network preflight for standing up
-an instance: token shape, timezone actually resolving (`BOT_TIMEZONE` set but
-`ZoneInfo` failing = missing tzdata, the silent naive-time failure mode), card
-loaded, instance dir writable, every present state file parses as JSON (a corrupt
-one means silent empty-state startup ‚Äî restore from backup first), owner claimed or
-not, ALLOWED_USERS empty or not, models set. Exit 0 = ready to launch. Missing
-token/key/card already hard-fail at import with actionable messages, so the check
-covers the failures that were previously only discoverable at 3am.
-
-## v2026-07-13.1 ‚Äî Ownership hardening: claim-once owner + private-chat gate (R1, security)
-
-**Root cause (found while fact-checking an external review, confirmed in code):**
-two authorization gaps, one severe.
-
-1. **Ownership takeover via /start.** `set_owner` refused group ids but had no
-   "already claimed" guard ‚Äî it rewrote `owner_chat.txt` on every call whenever
-   `OWNER_CHAT_ID` was unset. Six of its seven call sites wrapped it in
-   `if get_owner() is None:`; the `/start` handler called it bare. Telegram bots are
-   publicly addressable by username, so any stranger who found the bot and sent
-   `/start` silently became the owner ‚Äî heartbeats, note follow-ups, and every
-   proactive message redirected to them, and the real owner got no signal.
-2. **ALLOWED_USERS only half-enforced.** `_is_allowed` was a per-handler check that
-   drifted: media/text handlers had it, `/start` and most of the ~80 commands never
-   got it. With an allowlist configured, a stranger couldn't send a photo but could
-   run `/notes`, `/mems`, `/settings` ‚Äî and `/start`.
-
-**Fixes (both eval-pinned, mirroring how the group boundary is protected):**
-- `set_owner` claims once: first contact binds ownership, chat traffic can never
-  reassign it. Deliberate transfer = edit `owner_chat.txt` on-device or set
-  `OWNER_CHAT_ID` (env stays authoritative). Behavior change to know about: sending
-  /start from a NEW chat no longer moves ownership there.
-- `_private_gate`, a sibling of `group_guard` in handler group -1: when
-  ALLOWED_USERS is set, private-chat updates from anyone else stop at one choke
-  point ‚Äî commands, messages, media, callbacks, and any future update type ‚Äî instead
-  of relying on per-handler checks (which is exactly how the gap formed). The owner
-  always passes even if left out of ALLOWED_USERS (locking the owner out of their
-  own fleet is worse than redundancy). Empty ALLOWED_USERS = today's open behavior;
-  group chats are untouched (group_guard's jurisdiction, GROUP_CHAT_DESIGN.md).
-  Existing per-handler checks stay as defense in depth.
-
-New evals: `owner-claim-once` (set_owner keeps its guard) and
-`private-gate-registered` (the gate stays wired in group -1).
-
-## v2026-07-12.4 ‚Äî User-note quality: grounding, debris sanitation, real dedup, stale-note expiry
-
-**Root cause (owner's live user_notes.txt, reviewed 2026-07-12):** a 15-note file
-where ~12 entries were garbage, four distinct failure modes visible at once:
-
-1. **Character fiction stored as user facts** ("has a husband trapped in the bedroom
-   who is confused by her performance", her own banana bread as *his* baking). The
-   extraction prompt forbids this, but during roleplay scenes the analysis model does
-   it anyway. This is the exact failure class as the 2026-07-10 hallucinated-memories
-   bug ‚Äî and the memory path got quote-grounding as its fix while **the notes path had
-   no grounding check at all**.
-2. **JSON debris in note text**: "mentions his upcoming DOR audit tour‚Ä¶ (valence
-   null)" ‚Äî the model leaks schema fragments into the note string. Worse than
-   cosmetic: a model-emitted "(due ‚Ä¶)" would reach the follow-up parser without
-   passing the caller's date validation.
-3. **Dedup misses obvious duplicates**: "has a call with Yuen in eight minutes" and
-   "has a 2pm call with Yuen" were both stored ‚Äî the 20-char-prefix check can't see
-   past a differing sentence opening.
-4. **Retired notes never leave**: "(asked ‚Ä¶)" lines linger in the prompt block every
-   reply until the 15-note cap happens to evict them.
-
-**Fixes (each with its own kill switch, unset = on):**
-- `user_note_quote` added to the combined analysis JSON (zero new LLM calls); the
-  note is rejected unless the quote is a verbatim substring of the user's own lines
-  (reuses `_quote_grounded`). Rejections logged as `note_ungrounded`. `NOTE_GROUNDED=0`
-  restores old behavior. Prompt also now demands ONE event per note (the "walk thing +
-  Yuen tab" mashup).
-- `_sanitize_note` strips machinery-shaped parentheticals ‚Äî `(due|every|asked|noted|
-  valence|mood|confidence ‚Ä¶)` ‚Äî from model-supplied note text before markers are
-  appended, so stored markers are only ever written by us.
-- `_note_is_dup`: legacy prefix check plus word-containment (shared tokens / smaller
-  set ‚â• `NOTE_DEDUP_SIM`, default 0.8; 0 = prefix-only).
-- `note_followup_job` prunes `(asked ‚Ä¶)` notes older than `NOTE_ASKED_TTL_DAYS`
-  (default 7; 0 = keep forever) in its daily pass.
-
-## v2026-07-12.3 ‚Äî Recurring events from conversation actually recur (and stay in character)
-
-**Root cause (owner-reported):** "recurring event reminders added via conversation get
-logged but never come up naturally ‚Äî just a regular reminder message." Recurring events
-fell into a gap between three disconnected subsystems. (1) The conversation-capture
-path (`post_reply_analysis`) only had a single `user_note_date` ‚Äî "practice every
-Thursday" captured at most the first Thursday, and after `note_followup_job` asked
-about it once, the line was rewritten to `(asked ‚Ä¶)` and retired forever. (2) The only
-recurring machinery, `/setreminder`, delivers through `fire_reminder`'s literal
-`‚è∞ Reminder: <text>` ‚Äî mechanical, no character voice, no LLM involved. (3) The
-natural-delivery machinery (`send_triggered`, used by cron jobs and note follow-ups)
-existed but nothing recurring was ever wired into it.
-
-**Fix ‚Äî wire the existing pieces together, per the owner's chosen split:**
-- `post_reply_analysis` gains a `user_note_recurring` JSON key in the same combined
-  call (zero new LLM calls, per the invariant): `weekly:<day>` / `monthly:<1-31>` /
-  `yearly:<MM-DD>`, null for one-offs and vague cadences.
-- Recurring notes are stored as `<note> (every <rule>) (due <date>)` in
-  user_notes.txt; if the model gave a rule but no date, the first due anchor is the
-  next occurrence. Rules are validated by `_parse_recurrence` ‚Äî anything garbled
-  degrades to a one-off note rather than crashing the pass.
-- `note_followup_job` (already natural, in-character, quiet-hours- and
-  nudge-budget-aware) now rolls a recurring note's due date forward via
-  `_next_recurrence` after asking, instead of retiring it. Next occurrence is
-  computed from *today*, not the stored due date, so a note overdue by weeks (phone
-  off) can't roll to a past date and refire daily while catching up. Overflow days
-  clamp (monthly:31 fires Apr 30).
-- **Deliberately NOT changed:** `/remindme` and `/setreminder` keep the mechanical
-  `‚è∞` format ‚Äî owner-confirmed split. Hard reminders (meds, timers) should be
-  unambiguous and never lost in character flavor; only conversation-captured events
-  go the natural route.
-- Kill switch `NOTE_RECURRING=0` (default on ‚Äî owner requested the behavior;
-  disabling restores exact previous behavior: capture as one-off, `(asked ‚Ä¶)` retire).
-  Cancel a recurring note anytime with `/notes del <n>`.
-
-## v2026-07-12.2 ‚Äî Embeddings that actually recall: live semantic memory + lore, semantic dedup, eviction & provenance fixes
-
-**Root cause (the headline):** every memory write embeds the line via a blocking
-NanoGPT `/embeddings` call, but **those vectors were never read during a live reply.**
-`triggered_memories` skipped semantic scoring whenever it ran on the event loop (a
-guard added so the 30s blocking embed couldn't freeze the loop), and `assemble_messages`
-always runs on the loop ‚Äî so semantic recall only ever fired for the manual `/recall`
-and `[memcheck:]` commands. Normal chat was keyword-only and the `*3.0` semantic
-weight was dead code. We paid the write cost and got almost none of the read benefit.
-
-**Live semantic recall (`MEMORY_SEMANTIC_LIVE`, default on):** the blocking query
-embed is now hoisted into the async handler via a new `assemble_messages_async`
-wrapper ‚Äî `_embed_query_cached` runs `_embed_text` in `asyncio.to_thread` bounded by
-`MEMORY_QUERY_EMBED_TIMEOUT` (3s), with a small LRU so repeated openers don't
-re-embed. The vector is threaded through `assemble_messages` ‚Üí `triggered_memories`,
-which now ranks with a pure-cosine `_semantic_recall_vec` (no HTTP, no event-loop
-skip). Keyword scoring, recency decay, hedging, and the token budget are unchanged ‚Äî
-they finally operate on a real semantic candidate set. On timeout/failure/disable it
-degrades to exactly today's keyword-only behavior.
-
-*Deliberate, recorded decision:* this adds **one embedding round-trip per reply** ‚Äî a
-per-message side call, which the bot-code-invariants caution against for phone
-bandwidth. The owner accepted it explicitly: an embedding is a tiny, fast request (not
-a 150s chat completion), it is cached + timeout-bounded + off-loop, and it has a
-default-on kill switch (`MEMORY_SEMANTIC_LIVE=0`). It is NOT a new LLM analysis call,
-so the "one combined `post_reply_analysis` call" invariant is untouched. Logged in
-`.claude/memory/operational-log.md` so it isn't later flagged as a regression.
-
-**Semantic lorebook matching:** the same per-reply vector now also powers
-`triggered_lore` ‚Äî non-constant lore entries are embedded once into
-`lore_embeddings.json` by a startup job (`_embed_lore_job`, off-loop), and up to
-`MEMORY_LORE_SEMANTIC_TOPK` (3) semantically-close entries above the 0.3 floor are
-added to the keyword hits. A user paraphrasing a topic without hitting a lore keyword
-now surfaces the relevant lore. No extra call ‚Äî reuses the memory query vector.
-
-**Semantic write-dedup (`MEMORY_DEDUP_SIM`, 0.92):** the lexical dedup in
-`_append_memory` missed reworded duplicates ("lives in Seattle" ‚Üí "moved to
-Portland"). The auto path now embeds the entry once (the embed `_memory_replace`
-would do anyway ‚Äî passed through via `precomputed_vec`, so it is not embedded twice)
-and skips it if `_is_semantic_dup` finds a near-duplicate already stored. Manual adds
-and audit-merges are intentional and bypass it.
-
-**Sidecar orphan leak fixed + confidence-aware eviction:** `MEMORIES_MAX` overflow
-used a FIFO slice that dropped lines but **never popped their `memory_meta.json` /
-`embeddings.json` entries** ‚Äî both sidecars grew unbounded and stale meta could shadow
-a new identical line. New pure `_evict_by_value` drops the lowest-value entries
-(confidence, ties broken by oldest ts; legacy no-meta = neutral 5) and the caller pops
-every evicted key from both sidecars ‚Äî so a hand-corrected conf-10 fact now outlives a
-trivial conf-3 one, and R1's "three files stay in sync" holds on the eviction path too.
-
-**Provenance shown to the model:** `_hedge_memory_lines` now appends the recorded
-source snippet to hedged (low-confidence) memories ‚Äî `(unsure) <line> [you recall this
-from: "<source>"]` ‚Äî so the character can self-check a shaky memory against the
-sentence that created it, instead of provenance being admin-only (`/sourcemem`).
-
-27 new tests (semantic recall vec, semantic dedup, value eviction, lore semantic hits,
-provenance hedge, query-embed cache, and a live-path regression proving semantic recall
-now returns a hit that shares no keywords with the query).
-
-## v2026-07-12.1 ‚Äî Memory loops: weekly audit ‚Üí review queue, recency decay, confidence hedging
-
-**Root cause (all three, one theme):** the memory system had a write path with
-provenance (R1) but no *loop* ‚Äî nothing ever went back over what was stored.
-memories.txt was append-only apart from manual `/delmem`/`/editmem`: contradictions
-and superseded facts accumulated until the count cap evicted something arbitrary.
-Recall ranked purely by keyword hits + cosine similarity, so a 6-month-old one-off
-outranked yesterday's correction if it shared a keyword. And a low-confidence memory
-the owner approved from the review queue was asserted at recall with the same
-certainty as a conf-10 quote-grounded fact ‚Äî the meta confidence existed but was
-never consulted at injection.
-
-**Weekly memory audit (`MEMORY_AUDIT`, off by default):** `memory_audit_job` rides
-the nightly `reflection_job` and fires once a week (`MEMORY_AUDIT_WEEKDAY`): one
-batched `SUMMARY_MODEL` call over memories.txt (+ age/conf annotations from
-memory_meta) proposing at most `MEMORY_AUDIT_MAX_PROPOSALS` contradiction/
-superseded/stale findings. Proposals land in the EXISTING `memory_review.json` ‚Üí
-`/reviewmem` flow as `kind: "audit"` items ‚Äî the bot never deletes or merges on its
-own. Approving applies delete/merge through `_memory_replace` (meta+embeddings stay
-in sync; merges get `origin: audit-merge`, min-of-parents confidence, and a
-`merged: a | b` source trail for `/sourcemem`); a target edited since the proposal
-aborts safely ("memory changed since proposed"). Rejecting records an
-order-insensitive pair key in `memory_audit_seen.json` so a declined proposal never
-returns; queue-cap overflow just re-proposes next week (never evicts pending items).
-
-**Recency decay (`MEMORY_DECAY_HALFLIFE_DAYS`, off by default, recommend 90):**
-`triggered_memories` now multiplies the merged keyword+semantic score by
-`_recency_weight` ‚Äî exponential half-life on the memory_meta timestamp, floored at
-0.1 so old memories fade in the ranking but never disappear from it. Entries with
-no recorded ts (legacy, pre-meta) stay at neutral 1.0 ‚Äî never punished.
-
-**Confidence hedging (`MEMORY_HEDGE`, off by default):** at injection,
-`_hedge_memory_lines` prefixes `(unsure)` on recalled memories whose meta
-confidence is below `MEMORY_AUTOCONF` and appends one instruction line telling the
-character to hedge rather than assert. Display-time only; the stored line is
-untouched.
-
-**Invariant compliance:** zero new per-message LLM calls (the audit is a weekly
-scheduled call under `_SUMMARIZE_SEM`, via `asyncio.to_thread`); all mutations go
-through the `_memory_replace` choke point behind the owner's explicit `/reviewmem
-ok`; audit-merged text is labeled provenance (origin + source), honoring the
-generated-content rule. Also fixed in passing: `/reviewmem ok` called
-`_append_memory` directly on the event loop ‚Äî `_memory_replace ‚Üí _embed_memory_line`
-makes a blocking HTTP call (up to 30s stall); now wrapped in `asyncio.to_thread`.
-
-34 new tests (recency weight, hedging, audit parse/dedup/queue/apply).
-
-## 2026-07-12 ‚Äî Ops: eval-fix retry loop (Stop hook) + improvement Routine activated
-
-Not a bot release (bot.py untouched). Two workflow loops from the AI-loops gap
-analysis, `.claude/` only:
-
-**Eval-fix retry loop (`.claude/hooks/eval-gate.sh`, new Stop hook):** the evals
-could fail with nothing feeding the failure back ‚Äî the delivery gate blocks once,
-CI blocks on push, but no mechanism re-presented the failing output for another fix
-round; a session could end its turn with red evals it caused. The new hook runs
-`run-evals.sh` (+ pytest when evals are green) whenever the session has uncommitted
-changes to gated surfaces, and on failure blocks turn-end with the failing lines: 3
-bounded fix rounds, then one escalation block (summarize for the owner, never edit
-an eval to pass), then it stands aside so the turn can always end. Counter in
-gitignored `.claude/.runtime/`, keyed by session id.
-
-**Improvement Routine activated:** CLAUDE.md described a "monthly Routine" that had
-never actually been scheduled ‚Äî the improvement loop existed only as prose. Created
-`improvement-loop-monthly` (cron `0 9 1 * *`, fresh session per firing) and recorded
-its schedule + verbatim prompt in `.claude/operating/routines.md` with a sync rule so
-the live trigger can't silently drift from the repo's record.
-
-## v2026-07-11.15 ‚Äî Two niggles: command menu completeness + restart-storm false alarm
-
-**Command autocomplete menu (`set_my_commands`):** the hand-kept menu list had drifted
-from the actual handler registrations ‚Äî the maps commands (`/route /nearby /place
-/food`) and traffic commands (`/traffic /incidents`) were registered but absent from
-the menu, so they didn't autocomplete. Added them via a testable `_build_command_menu`:
-maps always (those handlers are unconditional), traffic only when `WSDOT_API_KEY` is
-set (mirrors registration), payments as before.
-
-**Restart-storm false alarm:** `_self_audit`'s "restarted Nx in the last hour ‚Äî
-something is killing the process" counted every `STARTUP AUDIT`, including the owner's
-own `/restart` and `/update`. During ordinary maintenance (like this session's rapid
-deploys) that tripped a false alarm. `_tally_unexpected_restarts` (pure, tested) now
-skips any start preceded by a `[restart] requested` or `[update] ‚Ä¶; restarting` marker,
-so only real crashes/kills (SIGKILL, watchdog, battery manager) count ‚Äî a graceful-stop
-with no such marker (a battery-manager SIGTERM) still counts.
-
-8 new tests.
-
-## v2026-07-11.14 ‚Äî In-character restaurant recs (release B; FOOD_SUGGESTIONS)
-
-**What this adds (the "they recommend" layer):** with `FOOD_SUGGESTIONS=1` (+ a
-TomTom key), when the user sends a food-ish message and has shared their location,
-`handle_message` pre-fetches real nearby restaurants and appends them to the user
-content as a bracketed note before `assemble_messages`. The character then
-recommends *those real places in her own voice* ‚Äî no list, no command.
-
-**Invariant compliance (bot-code-invariants):** this rides the **single** existing
-reply call ‚Äî NO new per-message LLM call (#3). The TomTom fetch is off the event
-loop via `asyncio.to_thread` (#8) and wrapped so a failure degrades to a normal
-reply. It reuses the exact one-turn `[Note: ‚Ä¶]` injection pattern the gap-aware and
-lull-detection notes already use. Default off (#16): unset = today's behavior.
-
-**Anti-hallucination:** the injected note says use ONLY the listed places and don't
-invent restaurants. If no location is shared, a different note tells her to ask the
-user to drop a pin rather than name places she can't verify.
-
-**Pure helpers + tests:** `_is_food_query` (keyword heuristic, v1), `_restaurants_brief`
-(plain prompt-format lines). 6 new tests. Trigger is keyword-based for v1 ‚Äî it will
-miss creative phrasings; broadening it is a future tweak.
-
-## v2026-07-11.13 ‚Äî /food: nearby restaurant recommendations (release A of 2)
-
-**What this adds:** `/food [cuisine]` uses the user's shared GPS location to list real
-nearby restaurants (name ¬∑ cuisine ¬∑ distance, nearest first). `/food` alone lists
-restaurants generally; `/food thai` filters by cuisine. Registered unconditionally
-like the other maps commands (replies "Maps aren't set up" without a key); requires a
-shared location. Reuses `_fetch_tomtom_search` (5 km bias). New pure helpers
-`_poi_cuisine` + `_format_restaurants`, 7 tests.
-
-**Deliberately out of v1:** "open now". It needs opening-hours parsing + local-time
-comparison, and this project has a scar from tz-aware-vs-naive `datetime` (fleet
-startup crash, v2026-07-05.5) ‚Äî shipping it correct is a fast follow-up, not a guess.
-
-**This is release A of the owner's "both" choice.** Release B (ROADMAP 3.5) is the
-in-character layer: when a location is shared and the user asks something food-ish,
-pre-fetch nearby restaurants and inject them into the *single* reply so the character
-recommends in her own voice ‚Äî no extra per-message LLM call.
-
-## v2026-07-11.12 ‚Äî /update cache-busts GitHub's raw CDN
-
-**Root cause this release addresses:** `/update` fetches `main/bot.py` from
-`raw.githubusercontent.com`, which Fastly caches for ~5 min. Running `/update` right
-after a push repeatedly fetched the stale prior version, matched it against the
-running version, and reported "already current" ‚Äî the deploy appeared stuck (cost
-real time across this session's rapid releases).
-
-**Fix:** `perform_self_update` now requests the raw URL with a unique `_cb=<ms>` query
-param (Fastly keys its cache on the full URL, so a new param = cache miss = fresh
-fetch) plus `Cache-Control: no-cache` / `Pragma: no-cache` headers. Verified the raw
-host still serves the file with an arbitrary query param. `update-all.sh` (the shell
-deploy path) still hits the plain URL ‚Äî left as a follow-up.
-
-## v2026-07-11.11 ‚Äî TomTom routing: routeType "fastest" (REST spelling, not MCP "fast")
-
-**Root cause this release addresses:** the route call sent `routeType=fast` ‚Üí
-TomTom "HTTP 400 ‚Äî Invalid route type: [fast]" (surfaced by v.10's error-body
-plumbing). `fast` is the *MCP tool's* parameter name; the raw `api.tomtom.com`
-Routing REST API uses **`fastest`**. Same MCP-names-‚â†-REST-names trap that the
-GeoJSON-vs-native response shape hit earlier ‚Äî copying an MCP param value into the
-REST call. Fixed to `fastest`; a test pins the REST spelling so it can't regress.
-
-## v2026-07-11.10 ‚Äî TomTom routing: no traffic= for bike/pedestrian; surface 4xx body
-
-**Root cause this release addresses:** `/route` sent `traffic=true` on *every* route,
-but TomTom's Routing API only accepts that parameter for motorized modes ‚Äî so a
-bicycle (Nora) or pedestrian (Priya) route came back **HTTP 400**. And v.9's key
-redaction had over-corrected: it dropped TomTom's error *body*, so the 400 surfaced
-as a bare "HTTP 400" with no reason.
-
-**Fixes:**
-- `_tomtom_route_params(mode)` adds `traffic=true` only for `_TOMTOM_TRAFFIC_MODES`
-  (car/truck/taxi/bus/van/motorcycle); bicycle/pedestrian omit it. Fixes the 400 for
-  Nora and Priya.
-- `_tomtom_err_detail(resp)` extracts TomTom's human error message from the response
-  body (`detailedError.message` / `error.description` / `message`) and appends it to
-  HTTP-error reasons, so a 400 now reads e.g. "HTTP 400 ‚Äî <TomTom's reason>". The body
-  is key-free (the key is only ever in the query string, which we never log); a guard
-  drops anything containing a `key=` token just in case. 6 new tests.
-
-## v2026-07-11.9 ‚Äî TomTom: honest error messages + key never logged
-
-**Root cause this release addresses (both found during on-device rollout):**
-1. The fetch helpers returned the *same* empty result for a genuine "not found" and
-   for a network/HTTP failure, so `/route` reported "Couldn't find Bellevue" when the
-   real cause was a **401 Unauthorized** (a placeholder key had been pasted into
-   `.env`). The misleading message cost several debugging round-trips.
-2. On failure the helpers logged `str(exception)`, and `requests` puts the API key in
-   the query string ‚Äî so the **full key was written to `bot.log`/`errors.log`** (and
-   thus into any backup or pasted log). A public-repo fleet must never log secrets.
-
-**Fixes:**
-- New `_TomTomError` carries a short, **key-free** reason. Fetch helpers now raise it
-  on a network/HTTP failure and return empty only for a genuine miss. Handlers reply
-  "Maps lookup failed: HTTP 401 ‚Äî key rejected ‚Ä¶" / "rate limited" / "timed out" /
-  "network/DNS error" instead of a misleading "Couldn't find X".
-- `_tomtom_err_reason()` classifies the exception from `response.status_code` / type
-  name and never includes the URL or key; the log line prints only that reason. 7 new
-  tests, incl. one asserting the reason never contains `tomtom.com` or `key=`.
-
-**Doc fix (confirmed on-device):** CLAUDE.md's instance table listed Nora's directory
-as `~/telegram-bot/`, but her running instance is `~/nora-bot/` (the STARTUP AUDIT
-`Instance:` line is authoritative). Corrected the table and `vault/entities/nora.md`.
-
-## v2026-07-11.8 ‚Äî TomTom observability: unsilence disabled state + audit visibility
-
-**Root cause this release addresses:** v.7 registered `/route /nearby /place` only
-when `TOMTOM_API_KEY` was present (the WSDOT pattern). When the key wasn't loaded,
-the commands weren't registered, so Telegram returned **no reply at all** ‚Äî an
-undiagnosable silence. During rollout this made "is the key actually loaded?"
-impossible to answer from the user side (the bot exposed no TomTom state anywhere),
-which cost several debugging round-trips.
-
-**Fixes (observability, no behavior change when a key is set):**
-- `/route /nearby /place` are now registered **unconditionally**; with no key they
-  reply "Maps aren't set up (TOMTOM_API_KEY missing)." instead of going silent.
-- The `STARTUP AUDIT` log line now includes `Maps: <mode>|off`, so a restart shows
-  whether the running process actually loaded the key (and which travel mode).
-- `/audit` and `gather_audit_data()` now report `Maps (TomTom): <mode>|off`.
-
-This is the repo's "opaque error ‚Üí instrument first" rule applied: make the failure
-self-describing rather than guess at it from outside.
-
-## v2026-07-11.7 ‚Äî TomTom Maps: /route, /nearby, /place (gated, default off)
-
-**Root cause this release addresses:** three characters are grounded in real
-geography (Nora bikes Seattle, Emily does western-WA traffic, Priya references real
-Bellevue/Eastside places) but the bot had no way to answer routing, travel-time, or
-"what's near me" questions with real data ‚Äî only WSDOT incident feeds for Emily.
-
-**What shipped (slash commands, phase 1 of 2):** three user-initiated commands,
-registered only when `TOMTOM_API_KEY` is set (fail-closed, same gate shape as WSDOT):
-- `/route <from> to <dest>` ‚Äî geocodes both endpoints, then a traffic-aware TomTom
-  route; reports ETA + distance (+ traffic delay when ‚â•1 min). Travel mode is
-  per-instance via `TOMTOM_TRAVEL_MODE` (validated; bad value warns ‚Üí car).
-- `/nearby <thing>` ‚Äî POI search around the user's shared location, distance-sorted.
-- `/place <name>` ‚Äî geocode/business lookup, location-biased when a location is shared.
-
-**Architecture notes:** bot.py calls the raw `api.tomtom.com` REST endpoints (native
-JSON), not the GeoJSON the Claude MCP connector returns ‚Äî so each bot needs its own
-key (documented in `.env.example`). All parsers are defensive/total (deep `.get()`
-chains; a response-shape change degrades to a message, never a crash), mirroring the
-WSDOT integration's discipline. Network fetches run via `asyncio.to_thread`; no new
-per-message LLM calls, no new processes. Pure parsers/formatters covered by 25 new
-tests; live REST round-trip is verified on-device (needs a real key).
-
-**Deferred to phase 2 (owner-approved "both, slash first"):** an in-character layer
-that lets Nora/Emily/Priya weave map data into conversation via a taught intent tag
-(like `[search:]`), rather than only explicit commands. Tracked in ROADMAP 3.5.
-
-## v2026-07-11.6 ‚Äî R6 evolution experiments (all gated, default off)
-
-**Root cause this release addresses:** the bot had no mechanism for users to
-signal approval/disapproval of individual messages without typing, no derived
-measure of relationship depth to modulate system behavior, `next_goals` was a
-single string that couldn't track parallel conversation threads, and humorous
-callbacks couldn't be surfaced for curation without a dedicated LLM call.
-
-**Reaction feedback (`FEEDBACK_REACTIONS=1`):** registers PTB
-`MessageReactionHandler`; üëç/üëé on bot messages ‚Üí bounded per-chat `feedback_log`
-(capped 50) + ¬±0.3 mood nudge. üëé also injects a one-turn recalibration note
-into the next reply prompt. `allowed_updates` extended to include
-`message_reaction` only when the flag is on.
-
-**Closeness score (`CLOSENESS_ENABLED=1`):** pure `_compute_closeness(days_active,
-message_count, milestones_count, beliefs_count)` ‚Üí (float 0-1, bucket). Buckets:
-"getting to know each other" / "comfortable" / "deeply familiar". Recomputed
-daily at midnight rotation; shown in `/status`; injected as a one-line system
-note in `assemble_messages`. Five new tests pin the formula.
-
-**Open threads (`THREADS_ENABLED=1`):** migrates `next_goals` str ‚Üí per-chat
-`open_threads` list (capped 3) on load. `post_reply_analysis` JSON gains
-`"thread_update"` (add/resolved). Prompt block "Open threads between you two"
-replaces the single next-goal line. When THREADS_ENABLED is off, existing
-next_goals behavior is unchanged.
-
-**Auto inside-joke candidates (`JOKE_CANDIDATES=1`):** `post_reply_analysis` JSON
-gains `"joke_candidate"` ({phrase, meaning, tone} | null). Candidates go to the
-existing `/reviewmem` queue ‚Äî never auto-added to jokes.json.
-
-All four features default off and have zero per-message LLM cost (reactions are
-local, closeness is a formula, threads/jokes piggyback on the existing
-post-reply analysis call that already runs).
-
-## v2026-07-11.5 ‚Äî R5 UX: status tail & recurring quiet windows
-
-**Root cause this release addresses:** `/status` gave no visibility into what was
-just said (you had to scroll up), and suppressing proactive messages on a schedule
-(e.g. every Friday night) required remembering to `/quiet` each week.
-
-**/status tail:** appends the last 3 conversation messages, speaker-labeled and
-truncated to ~80 chars each, so you can see the recent thread at a glance.
-
-**Recurring quiet windows (`/quietwin`):** three subcommands:
-- `/quietwin add Fri 23:00-08:00` ‚Äî adds a weekly quiet window (midnight crossing
-  supported: start > end spans into the next day).
-- `/quietwin list` ‚Äî shows numbered list.
-- `/quietwin del 2` ‚Äî removes by index.
-
-Per-chat state `quiet_windows` (list of `{dow, start, end}`). Checked via pure
-predicate `_in_quiet_window(now, windows)` in the same proactive gates as
-`quiet_until` (heartbeat and note-followup jobs). Twelve new tests cover midnight
-crossing, wrong day, boundary minutes, and multiple windows. `/status` also shows
-active quiet windows inline.
-
-## v2026-07-11.4 ‚Äî R4 prompt hygiene & safety
-
-**Root cause this release addresses:** long conversations could silently exceed the
-model's effective context window (no trimming), `triggered_lore` returned duplicate
-entries when multiple keys in the same lorebook entry matched, models occasionally
-broke character with "as an AI" responses that reached the user unfiltered, and
-multi-chat summarization bursts could stack bandwidth-heavy LLM calls on the phone
-simultaneously.
-
-**Token-budget trimming:** new pure function `_trim_history_to_budget(messages,
-budget)` drops oldest non-system, non-final-user messages until the estimated token
-count is under `CONTEXT_TOKEN_BUDGET` (env, default 0 = disabled; recommended 24000).
-Called at the end of `assemble_messages`. Logs when it trims.
-
-**Lore dedupe:** `triggered_lore` now uses a `seen` set on entry content ‚Äî duplicate
-content from multiple matching keys in the same entry is suppressed.
-
-**Persona-break guardrail:** regex catches first-person AI admissions (`I'm an AI`,
-`as an AI language model`, `large language model`, `I don't have feelings/a body/
-personal experiences`). Applied in `_deliver` and `send_triggered` on the final
-`clean` text: offending sentence is stripped, counted as `persona_break` (visible in
-`/audit`). Third-person references ("my AI coworker") pass through (first-person
-pattern required). Empty result after strip = nothing sent (no auto-regenerate).
-
-**Summarization semaphore:** `_SUMMARIZE_SEM = asyncio.Semaphore(1)` serializes
-summarization across chats in `maintain_memory` and `maintain_long_term_memory` ‚Äî
-prevents multi-chat bursts from stacking on phone bandwidth. Per-chat overlap was
-already prevented by the `summarizing` set.
-
-**/start full:** `/start full` wipes conversation history AND all per-chat memory
-(summaries, facts, recent_summaries, recent_facts, milestones, pinned, moods,
-beliefs) after an inline-button confirmation. Character-level memories
-(memories.txt) are untouched. Normal `/start` behavior unchanged.
-
-## v2026-07-11.3 ‚Äî R3 observability & robustness
-
-**Root cause this release addresses:** restart-storm triage lost its own evidence
-because `_error_counts` was memory-only (wiped on every restart). Bad `.env` values
-were warned only to the log file nobody checks from Telegram. Small-file saves
-(jokes, reminders, cron, payments, wardrobe) used non-atomic writes that could
-truncate on a process death. `/update` and `/restart` could cut a reply mid-stream
-because there was no drain. And there was no visibility into LLM call volume.
-
-**Persist `_error_counts`:** error history now survives restarts ‚Äî serialized into
-`state.json` alongside `_llm_stats`. Restart-storm triage from `/audit` no longer
-loses the evidence it was generated to show.
-
-**Config warnings surfaced:** `_env_int`/`_env_float`/`_parse_id_set` now collect
-warnings into `_CONFIG_WARNINGS` (in addition to logging). `/audit` shows count + first
-3 warnings. All warnings also log at startup in one consolidated message.
-
-**Atomic small-file writes:** new `_atomic_write_text(path, text)` helper (tmp +
-`os.replace`) used by `save_jokes`, `save_reminders`, `save_cron_jobs`,
-`save_payments`, `save_wardrobe`. A death mid-write no longer truncates these files.
-
-**Graceful drain on /restart and /update:** `_schedule_exit` now waits up to 5s for
-`_replies_in_flight == 0` before writing state and exiting. Replies in progress
-complete rather than being cut mid-stream.
-
-**LLM usage counters in /audit:** module dict `_llm_stats` tracks daily calls and
-estimated token counts (via `_est_tokens`). Bumped in `call_nanogpt` on every
-successful call. Persisted in state, resets on date change. `/audit` shows:
-`LLM today: N calls, ~Xk in / ~Yk out (est)`.
-
-**Prune `_last_request`:** `_self_audit` (every 30 min) now drops entries older than
-1h from the rate-limit dict, preventing unbounded growth in long-running instances
-with many unique users.
-
-## v2026-07-11.2 ‚Äî R2 availability awareness: /away, /back, remote-default framing
-
-**Root cause this release addresses:** characters would "walk over to you" or describe
-being in the same room during normal texting ‚Äî there was no framing that the
-conversation is remote by default. Proactive messages (heartbeats, note follow-ups,
-traffic alerts) also had no way to be suppressed when the user is driving, in a
-meeting, or otherwise unavailable without using the heavier /quiet command.
-
-**Remote-default framing:** `assemble_messages` now injects a system note when
-`active_vibe` is not `"in-person"`: "You and {user} are texting from different places ‚Äî
-you're not physically together unless the scene explicitly says so." Kills the class of
-roleplay slips where the character describes physical proximity during texting.
-
-**/away and /back commands:** new `away` state dict persisted in state.json. `/away
-driving` or `/away meeting until 3` stores the reason verbatim and suppresses all
-proactives (heartbeat, note follow-ups, traffic alerts). `/back` clears it manually.
-Any incoming text message auto-clears away status (they're back by definition) and
-injects a one-turn "just got back from: {reason}" prompt note so the character can
-acknowledge naturally.
-
-**Auto-extraction from conversation:** `post_reply_analysis` JSON schema gains an
-`"availability"` field (`"driving"|"working"|"busy"|null`). When the user explicitly
-states availability (e.g. "gotta drive, ttyl"), away is set automatically with
-`origin: auto` and a configurable `AWAY_AUTO_HOURS` (default 3h) expiry as a
-belt-and-suspenders against stuck flags.
-
-**New vibe presets:** `busy`, `working`, `driving` ‚Äî shorter replies, no long questions,
-low-demand register. `driving` is ultra-short and non-initiating.
-
-**Away in /status and /audit:** `/status` shows current away state with reason, duration,
-origin, and expiry. `/audit` includes `away_users` in its data.
-
-## v2026-07-11.1 ‚Äî R1 memory auditor: source-attached memories, quote grounding, review queue
-
-**Root cause this release addresses:** the 2026-07-10 audit found that auto-extracted
-memories had no provenance ‚Äî no way to know where a memory came from, no mechanical
-check that the extraction was grounded in what the user actually said, no way to
-correct a bad memory from Telegram in under a minute. This release makes every memory
-traceable, every extraction grounded, and every correction fast.
-
-**Source-attached memories:** new sidecar `memory_meta.json` stores provenance for each
-memory line: timestamp, chat_id, origin (`auto`/`manual`/`manual-edit`), confidence
-(1-10), and the verbatim source quote from the user's message. New `_memory_replace`
-helper is the single choke point for all memory mutations (add/edit/delete) ‚Äî keeps
-`memories.txt`, `embeddings.json`, and `memory_meta.json` in sync. `/delmem` migrated
-to use it. `/sourcemem <n>` shows stored provenance; pre-2026-07 memories show a
-"no source recorded" fallback.
-
-**Quote grounding (anti-hallucination, mechanical not prompt-hope):** the post-reply
-analysis LLM call now returns `memory_quote` (verbatim substring from the user's
-messages) and `memory_confidence` (1-10). Code-side validation requires the quote to be
-a case/whitespace-normalized substring of the user's actual lines ‚Äî if it fails, the
-memory is rejected and counted as `memory_ungrounded` (visible in `/errors`/`/audit`).
-Pure function `_quote_grounded` with tests (exact match, case tolerance, fabricated
-quote rejection, empty inputs).
-
-**Confidence + review queue:** memories with confidence >= `MEMORY_AUTOCONF` (env,
-default 7) AND grounded are stored directly. Grounded but lower-confidence memories go
-to `memory_review.json` instead (capped at 20, oldest dropped). `/reviewmem` lists
-pending with confidence + source; `/reviewmem ok <n>` promotes, `/reviewmem no <n>`
-drops. `/audit` shows count when nonzero.
-
-**Correction flow (`[memcheck:]` tag):** new capability tag taught to the character:
-when the user disputes a memory ("that never happened"), include
-`[memcheck: what's disputed]`. Tag handling runs existing recall machinery (keyword +
-semantic) over the query, DMs the numbered hits with their sources and exact fix
-commands (`/delmem N`, `/editmem N <text>`). Handled via separate regex in `_deliver`
-only ‚Äî the `extract_tags` 4-tuple contract is untouched.
-
-**`/editmem <n> <new text>`:** replaces a memory line through `_memory_replace`
-(re-embeds, moves meta with `origin: "manual-edit"`, preserves original source).
-
-**Memory audit log:** `memory_log.txt` (append-only) records every mutation:
-`ADD auto/manual`, `EDIT`, `DEL`, `REVIEW-OK`, `REVIEW-NO`, `REVIEW-DROP`,
-`REVIEW-QUEUE`, `MEMCHECK`. Trims to 500 lines when >1000.
-
-New tests: `TestQuoteGrounded` (9 cases), `TestMemoryReplace` (4 cases). Total test
-count: 108 (was 95).
-
-## v2026-07-10.2 ‚Äî audit release: memory hallucination + tool-call leak + concurrency fixes
-
-Triggered by two user-observed symptoms plus an external (Deepseek) audit of bot.py.
-Every audit claim was verified against the code before being fixed ‚Äî 10 of 15 confirmed,
-4 false, 1 by-design. Full triage in `AUDIT-2026-07-10.md`.
-
-**Heartbeat memory hallucination (root cause):** `_rotate_day_context` archived each
-day's `day.txt` ‚Äî the character's own GENERATED fiction ‚Äî into `recent_facts[owner]` as
-a plain `"[Jul 09] ‚Ä¶"` fact. `memory_block` rendered it under "Recent specifics" (read
-by the model as real shared history), weekly promotion folded it into permanent
-long-term facts, and `_todays_memory_note` could flag her own archive as "a significant
-date". Fix: own-day provenance tag (`[own-day ‚Ä¶]`) honored by every consumer ‚Äî separate
-clearly-framed prompt section, never LLM-merged into user facts, never promoted, skipped
-by the date scan, capped at `OWN_DAYS_KEPT=5`; `load_state` migrates legacy entries
-(sparing `[‚Ä¶ ] Voice note:` user content). Extraction prompt also tightened: notes and
-memories only from what the USER said.
-
-**Raw `<tool_call>` XML sent to the user (root cause):** models taught the bracket
-`[search: ‚Ä¶]` tag sometimes emit the intent in their NATIVE function-call XML instead;
-nothing anywhere parsed or stripped that syntax, so it sailed through to Telegram.
-Fix: `_strip_native_tool_calls` at the model-output choke point (both `_do_request`
-return paths, including the `reasoning_content` fallback, itself a leak vector) ‚Äî
-search-like calls become `[search: q]` so `maybe_search` still runs; others stripped.
-
-**Concurrency (audit-confirmed):** state serialization now always happens on the event
-loop (worker-thread saves hand off via `call_soon_threadsafe`; only the file write runs
-in a thread) ‚Äî the old path iterated ~28 live dicts cross-thread (`RuntimeError: dict
-changed size during iteration`). Post-reply analysis snapshots the history tail on the
-loop. Voice/video transcription and `/usage` no longer run bare synchronous `requests`
-calls on the event loop (each froze every chat for up to 60s). `_error_counts`
-iteration snapshotted.
-
-**Smaller confirmed bugs:** `ALLOWED_USERS`/`GROUP_ALLOWED_CHATS` no longer crash the
-import on malformed ids (`--123`); schedule day-headings require the first word to BE a
-day name ("money" is not Monday, "wedding" is not Wednesday); `_extract_json` recovers
-the first balanced object when a stray brace follows; `get_owner` warns loudly on a
-non-numeric `OWNER_CHAT_ID`; `/backup` skips files that vanish mid-run; all 64
-`int()/float()` env parses fall back to defaults with a warning instead of
-crash-looping the bot on a typo'd `.env`; deleted 13 lines of unreachable dead code in
-`_weather_camera_pool`.
-
-## v2026-07-10.1 ‚Äî group chat prototype (GROUP_MODE, Priya + Jules pilot)
-
-**Group chat / bot-to-bot (ROADMAP 3.4):** two character bots + one human in one
-Telegram group, behind `GROUP_MODE=1` + `GROUP_ALLOWED_CHATS` on the pilot instances
-only. Full design + rationale in `GROUP_CHAT_DESIGN.md` ‚Äî it survived four rounds of
-adversarial-critic review before any of this code was written, and the review caught
-real bugs (a poll/live double-answer race, a chain-cap race, and two rounds of missed
-flat-file write paths), so read it before touching this feature.
-
-**The platform fact everything is built around:** Telegram never delivers one bot's
-messages to another bot (API-level anti-loop policy, regardless of privacy mode).
-Bot-to-bot therefore flows through a shared ledger file (`group_<chat_id>.jsonl`
-alongside bot.py, same cross-instance pattern as world.txt): each bot appends what it
-posts, a 5s poll job reads what peers said. Human messages arrive live via Telegram
-(privacy mode must be DISABLED via BotFather for the pilot bots) and are never acted
-on from the ledger ‚Äî acting on both would double-answer every addressed message.
-
-- **Turn-taking:** addressed messages (@mention / first name on word boundary / reply
-  to own message) answered deterministically; unaddressed ones through an atomic claim
-  file (`O_CREAT|O_EXCL`) so exactly one bot answers, with a jittered delay biased
-  toward alternation.
-- **Loop prevention, layered:** every reply to a bot message needs the claim (even
-  when addressed by name ‚Äî the LLM's favorite register is exactly the loop risk);
-  chain cap `GROUP_BOT_CHAIN_MAX=2` re-checked under the ledger lock right before
-  send (generated reply discarded if the chain filled meanwhile); 20s send throttle;
-  30/day bot-to-bot budget.
-- **Fleet-wide fail-closed (deliberate behavior change):** group chats are ignored by
-  every instance unless GROUP_MODE + allowlist say otherwise, and ALL commands except
-  `/chatid` are refused in any group via a single TypeHandler choke point (group -1).
-  Previously any bot added to a random group would execute `/note`, `/backup`, etc.
-  there ‚Äî same latent-bug class as `set_owner` being claimable by a group, which is
-  also fixed (central guard: negative chat_ids can never become the proactive owner).
-- **Memory read-only in groups:** group prompts read the character's life (memories,
-  people, projects, day/world context) but never `user_notes.txt` or inside jokes
-  (private 1:1 state); nothing in a group writes any flat file ‚Äî `_group_deliver` is
-  allowlist-built (no post_reply_analysis, no joke tracking, no TTS/selfie/meme) and
-  the command guard blocks the manual paths. Two new evals pin this boundary in CI
-  (`group-deliver-clean`, `group-cmd-allowlist`).
-- **Cost:** ‚â§2 chat-model calls per human message fleet-wide + amortized summarization
-  (groups summarize half as often); zero side calls in groups.
-- **Ops:** `python bot.py <dir> --claim-test` smoke-tests both atomicity primitives
-  on-device; `/audit` shows ledger size, budget, and chain state per group; new error
-  categories `group_ledger` / `group_claim`.
-
-## v2026-07-07.2 ‚Äî repair server-side mojibake from NanoGPT SSE
-
-**Root cause:** The encoding issue was never on our side. NanoGPT's SSE infrastructure
-decodes model output (UTF-8) as Latin-1 and re-encodes to UTF-8 before sending. By the
-time the bytes reach our socket, they already spell `√¢‚Ç¨‚Ñ¢` instead of `'`. Our previous
-fixes (v2026-07-06.1 `resp.encoding`, v2026-07-07.1 manual `.decode("utf-8")`) correctly
-decoded the wire bytes ‚Äî but those bytes were already wrong.
-
-**Fix:** `_fix_mojibake(text)` reverses the Latin-1 misinterpretation:
-`text.encode("latin-1").decode("utf-8")`. If the text is clean (no mojibake), the
-encode step either round-trips harmlessly or raises `UnicodeEncodeError` (characters
-above U+00FF can't encode to Latin-1), in which case we keep the original. Applied to
-both streaming and non-streaming return paths in `_do_request`.
-
-## v2026-07-07.1 ‚Äî fix SSE mojibake for real (manual UTF-8 decode)
-
-**Root cause:** The v2026-07-06.1 fix (`resp.encoding = "utf-8"`) relied on `requests`'
-`iter_lines(decode_unicode=True)` honoring the encoding override. On the phone's
-`requests` version it didn't ‚Äî the response was still decoded as Latin-1, producing
-double-mojibake (`√É¬¢√Ç√Ç` instead of `'`) as the already-garbled text was re-encoded
-through another layer.
-
-**Fix:** Drop `decode_unicode=True` entirely. Call `resp.iter_lines()` to get raw bytes,
-then decode each line explicitly with `raw.decode("utf-8", errors="replace")`. This
-bypasses `requests`' encoding detection completely ‚Äî no Content-Type header, no
-`apparent_encoding`, no library version variance. The bytes come from the socket and we
-decode them ourselves.
-
-## v2026-07-06.5 ‚Äî semantic memory recall via NanoGPT embeddings
-
-**Semantic recall (ROADMAP 3.3):** memory retrieval now supplements keyword matching with
-cosine-similarity search over NanoGPT embeddings (`text-embedding-3-small` by default,
-configurable via `EMBEDDING_MODEL`).
-
-- **On memory write:** `_append_memory` embeds the new line and caches the vector in
-  `embeddings.json` (sidecar to `memories.txt`). One API call per new memory.
-- **On context assembly:** `triggered_memories` merges keyword hits (existing behavior) with
-  semantic matches (cosine top-k, threshold 0.3). Scores are summed so a line that matches
-  both keyword AND meaning ranks highest.
-- **On /recall:** semantic results (with similarity percentage) appear alongside keyword
-  hits, so paraphrased queries ("remember when we talked about my sister's wedding?")
-  work even when the stored fact uses different words.
-- **Fallback:** any embedding API failure falls back silently to keyword-only ‚Äî the
-  feature is additive, never subtractive.
-
-## v2026-07-06.4 ‚Äî shared world context, test suite, new-bot bootstrap
-
-**Shared world context (ROADMAP 3.2):** all six characters now share the same weather
-and ambient happenings each day. The designated world-generator instance
-(`WORLD_GENERATOR=1`, typically nora) writes `world.txt` at midnight ‚Äî a 2-3 line shared
-backdrop (weather mood, local color). Every instance's `_generate_daily_events` reads it
-as context, so Nora's rainstorm is also Priya's rainstorm. Degrades gracefully: if the
-file is absent (generator not configured, or it failed), behavior is unchanged from
-before ‚Äî each instance generates its own weather independently.
-
-**Test suite (ROADMAP 2.1):** `tests/test_pure.py` (pytest) covering the pure functions
-where a regression is fleet-breaking: `extract_tags` (4-tuple contract), `parse_cron_schedule`/
-`describe_cron_schedule` (roundtrip), `_extract_json` (prose/fence extraction), `parse_when`
-(reminder time parsing), `_est_tokens`, `_count_error` cap. 41 tests. CI workflow updated
-to run pytest after the eval suite. Fixture in `conftest.py` stands up a temporary instance
-directory with a minimal `.env` and character card so bot.py imports cleanly.
-
-**new-bot.sh (ROADMAP 2.2):** interactive bootstrap script for new instances ‚Äî creates the
-directory, prompts for tokens/models, pulls the card and seed files, starts the bot. A
-seventh instance can be stood up in under five minutes.
-
-## v2026-07-06.3 ‚Äî voice reply symmetry + degradation alerts
-
-**Voice symmetry (ROADMAP 3.1):** sending a voice note to a bot with `/voice` on now
-biases toward replying in kind ‚Äî `VOICE_REPLY_TO_VOICE` (default 0.9) replaces the
-ambient `TTS_CHANCE` (default 0.3) when the incoming message is a voice note.
-Implementation: `_deliver` gains a `voice_input` flag; `handle_voice` sets it; the
-TTS probability check picks the higher value. Text messages are unaffected.
-
-**Degradation alerts (ROADMAP 1.4):** `_self_audit` now watches two new signals:
-- *Fallback rate*: a new `"fallback"` error category is incremented each time
-  `call_nanogpt` falls from the primary model to `FALLBACK_MODEL` (budget exceeded or
-  retries exhausted). If fallback fires ‚â•3 times in the last hour, the owner gets a DM
-  (2h cooldown, same pattern as restart-storm alerts).
-- *Monthly spend*: if `USAGE_BUDGET_MONTHLY` is set in `.env`, `_self_audit` hits the
-  NanoGPT subscription/usage API every 30 min and DMs the owner at 80% and 100% of
-  budget (24h cooldown). Inert when unset.
-
-Also in this release: `watchdog.sh`, `fleet-status.sh`, `sync-cards.sh` committed to the
-repo (ROADMAP 1.1, 1.3, 2.3 ‚Äî shell scripts only, no bot.py change for those).
-
-## v2026-07-06.2 ‚Äî fix selfie crash when no base PNG (NanoGPT path)
-
-**Root cause:** `_generate_selfie_nanogpt` unconditionally called `_base_data_url()`,
-which reads `SELFIE_BASE` (e.g. `priya_base.png`) from disk. If no base image exists
-but an `appearance.txt` does, `selfie_ready()` returns True (text-only generation is
-fine), and `build_selfie_prompt` correctly takes the text-only branch ‚Äî but then
-`_generate_selfie_nanogpt` crashes with `FileNotFoundError` because it never checked
-`_has_base_image()` first. The Gemini path already had this guard (line 2778); the
-NanoGPT path was missing it.
-
-**Fix:** Only include `imageDataUrl` in the NanoGPT payload when `_has_base_image()`
-is True, matching the Gemini path's behavior.
-
-## v2026-07-06.1 ‚Äî fix UTF-8 mojibake + suppress "almost did X" model tic
-
-**Mojibake root cause:** `requests`' `iter_lines(decode_unicode=True)` uses the response's
-`Content-Type` charset to decode bytes. NanoGPT's SSE endpoint returns
-`text/event-stream` without an explicit `charset=utf-8`, so `requests` falls back to
-ISO-8859-1 (the HTTP/1.1 default for `text/*`). Any multi-byte UTF-8 character ‚Äî curly
-quotes, em dashes, accented letters ‚Äî gets decoded as Latin-1 garbage (e.g. `'` ‚Üí
-`√¢‚Ç¨‚Ñ¢`). Always latent, but never triggered until GLM 5.2 started using smart
-punctuation instead of ASCII apostrophes.
-
-**Mojibake fix:** Force `resp.encoding = "utf-8"` on the streaming response before
-`iter_lines(decode_unicode=True)` in `_do_request`.
-
-**"Almost texted you" tic:** GLM 5.2 heavily favors narrating actions it almost took
-("almost texted you," "I deleted a whole argument," "was going to send you this") as a
-low-effort way to perform emotional attachment. Added a rule to the default texting style
-calling this out ‚Äî either do it or don't mention it.
-
-## 2026-07-06 ‚Äî ops tooling: fleet backup script, CI evals, secret scan (no bot.py change)
-
-**Not a bot release ‚Äî no BOT_VERSION bump.** (New heading convention, enforced by the
-`version-changelog-sync` eval: only actual bot.py releases get `## v<version>` headings,
-which must match `BOT_VERSION`; ops/docs entries use dated headings like this one.)
-
-- **`backup-all.sh`**: nightly-cronable fleet state backup. Motivation: all character
-  memory/state lives on one phone; `/backup` is manual and per-bot, so a dead phone
-  meant losing everything. Archives each instance's state files (same list as `/backup`,
-  `.env` always excluded) to `~/storage/shared/bot-backups/` (survives Termux
-  uninstall), prunes after 14 days, optional `BACKUP_RCLONE_REMOTE` for off-phone push.
-  Like `watchdog.sh` it must be curl-installed once and is not touched by
-  `update-all.sh`. Setup instructions in the script header and `OPS_MANUAL.md`.
-- **CI** (`.github/workflows/evals.yml`): runs `.claude/evals/run-evals.sh` on every
-  push to `main`/`claude/**` and on PRs. Rationale: bots deploy by curling raw files
-  from `main`, and session-side checks only run when a session runs them ‚Äî a web-UI
-  edit or phone push had no gate at all before this.
-- **Two new evals**: `secret-scan` (token-shaped strings in tracked files ‚Äî Telegram
-  bot tokens, sk- keys, AWS key IDs; this repo is pulled over public raw URLs, so a
-  committed token is instantly public) and `version-changelog-sync` (BOT_VERSION must
-  equal the newest `## v` changelog heading ‚Äî the delivery gate checks both changed,
-  but not that they agree). Both break-it tested.
-
-## v2026-07-05.12 ‚Äî admin HTTP API (Phase 1 of VPS migration)
-
-**New capability, not a bug fix.** Adds an opt-in HTTP admin API that mirrors
-`/audit /errors /backup /update /restart` for non-Telegram clients ‚Äî the motivating
-case is a future native Android control-panel app, which can't just be a second
-Telegram client (only one process can poll a bot token for updates at a time, and
-there's no way to route a "send as the user" reply back to a second client via the
-Bot API). Fully inert unless `ADMIN_API_ENABLED=1` is set ‚Äî existing Termux instances
-that never set it are unaffected.
-
-Refactored `audit_cmd`/`errors_cmd`/`update_cmd`/`_send_backup` so their logic lives in
-plain functions (`gather_audit_data`, `tail_error_lines`, `backup_file_list`,
-`build_backup_zip`, `perform_self_update`) called by both the Telegram handler and the
-matching HTTP route ‚Äî no duplicated logic, and the Telegram-facing output text/format
-is unchanged.
-
-`/update` and `/restart`'s old pattern ‚Äî reply, `_write_state()`, immediate
-`os._exit(0)` ‚Äî doesn't hold for HTTP: `ThreadingHTTPServer` writes its response on the
-same thread handling the request, so an immediate exit right after building the
-response risks killing the process before those bytes reach the socket (the caller
-would see a connection reset instead of the 200 they were just sent). New
-`_schedule_exit()` helper fires `os._exit(0)` from a `threading.Timer` after a short
-delay instead, used by `/update`, `/restart`, and the matching `/admin/update`,
-`/admin/restart` HTTP routes. `threading.Timer` runs on its own thread regardless of
-caller, so this works uniformly from both the asyncio event loop thread (Telegram
-handlers) and an admin API request-handling thread.
-
-Auth: every route except `GET /admin/health` requires `Authorization: Bearer
-<ADMIN_API_TOKEN>`, compared with `secrets.compare_digest`. `/admin/health` is
-deliberately unauthenticated (trivial liveness ping, no sensitive data) so uptime
-monitors and the future app's connectivity check don't need the token wired in.
-`ADMIN_API_BIND` defaults to `127.0.0.1` (fails closed) ‚Äî set it to the host's
-Tailscale IP to actually expose it over the private tailnet; never bind `0.0.0.0`.
-
-Also new: `telegram-companion-bot/deploy/bot@.service` (systemd template unit,
-`Restart=always`, `RestartSec=2`) and `deploy/install-vps.sh` (idempotent VPS
-installer ‚Äî clones/pulls the repo, builds the venv from `requirements.txt` as the
-single source of truth, prompts per-instance for tokens, installs the systemd unit,
-prints Tailscale setup instructions). Confirmed `_PID_FILE`'s stale-lock detection
-(`os.kill(pid, 0)`) and `os._exit(0)` are already compatible with `Restart=always` as-is
-‚Äî `RestartSec=2` exists specifically to make PID-reuse races between an old exiting
-process and systemd's relaunch practically impossible, not to work around a new bug.
-
-## v2026-07-05.11 ‚Äî meme generation (`/meme` + `[meme:]` tag)
-
-**New feature, not a bug fix.** Bots can now make and send a meme via `/meme [hint]`,
-or decide to send one unprompted mid-conversation via a `[meme: top | bottom]` tag ‚Äî
-mirrors exactly how `/selfie`/`[selfie: hint]` already work (same tag-parsing pattern
-in `extract_tags`, same `_deliver`/`send_triggered` wiring, same `_is_allowed` gating,
-same `_keep_uploading`/`BytesIO`/`send_photo` send path).
-
-**Deliberate design choice:** memes are template images + Pillow text overlay, not
-AI-generated. AI image models render text unreliably (garbled/misspelled captions),
-which defeats the entire point of a meme ‚Äî the caption *is* the joke. Templates
-(`meme_templates/*.jpg`) and the font (`fonts/Anton-Regular.ttf`, OFL-licensed) are
-shared assets alongside `bot.py`, not per-instance, and not part of `update-all.sh`'s
-routine pull ‚Äî see `SETUP_GUIDE.md` Step 8 for the one-time fetch.
-
-New: `meme_ready`/`_pick_meme_template` (with per-chat dedup, mirrors
-`_recent_selfie_hints`)/`render_meme` (word-wrap + auto-shrink-to-fit + stroked text)/
-`_generate_meme_captions` (one LLM call, JSON `{"top", "bottom"}`, reuses the existing
-`_extract_json` helper)/`send_meme`/`meme_cmd`. `extract_tags` now returns a 4-tuple
-(`clean_text, reaction, selfie_hint, meme_caption`) instead of 3 ‚Äî both call sites
-(`_deliver`, `send_triggered`) updated; verified via isolated extraction tests since a
-mismatch here would break every message, not just meme ones.
-
-New dependency: `Pillow>=10.0,<11.0`. Termux install can be flaky ‚Äî see the Termux
-quirks note in `CLAUDE.md` for the `pkg install python-pillow` + `--system-site-packages`
-fallback if a source build fails.
-
-BOT_VERSION 2026-07-05.11.
-
-## v2026-07-05.10 ‚Äî repo cleanup: dead launchers, stale docs, Priya's real location
-
-**Not a bug fix ‚Äî a documentation/hygiene pass**, prompted by finding that several files
-in the repo hadn't been touched since before this project's reliability work (this
-session, v2026-07-05.1 through .9) and had drifted into actively misleading territory:
-
-- `run.sh` and `start-bots.sh` both still launched with bare `python` (no supervisor,
-  no crash recovery) ‚Äî the exact `ModuleNotFoundError` crash-loop bug already fixed in
-  `run-bot.sh`. Deleted both; `run-bot.sh` (with no folder argument) and `update-all.sh`
-  already cover everything they did.
-- `PROJECT_CONTEXT.md`/`PROJECT_INSTRUCTIONS.md` were snapshot docs from an earlier,
-  now-superseded session ‚Äî wrong instance list, a stale git branch reference, "as of
-  last session" state. Fully superseded by `CLAUDE.md` + this changelog. Deleted rather
-  than left to be trusted over the real docs by mistake.
-- `Dockerfile`/`docker-compose.yml` were incomplete (no multi-instance/`BOT_HOME`
-  support, single hardcoded `CMD`) and unreferenced by `CLAUDE.md` ‚Äî this project is
-  Termux-first and the Docker path was never actually wired up. Removed; `requirements.txt`
-  is now the single source of truth for pip installs (`SETUP_GUIDE.md`, `CLAUDE.md`'s venv
-  rebuild recipe) instead of being duplicated inline in three places, which is exactly
-  the kind of drift that caused the missing-`tzdata` bug in v2026-07-05.5.
-- `SETUP_GUIDE.md` told users to set `NANOGPT_BASE_URL` ‚Äî the actual code reads
-  `NANOGPT_BASE`; the wrong name would silently do nothing and leave every non-NanoGPT
-  provider setup broken. Fixed, along with the default URL (code default is
-  `https://nano-gpt.com/api/v1`, guide said `https://api.nano-gpt.com/v1`).
-- `DOCUMENT_MODEL`'s code default (`meta-llama/llama-3.3-70b-instruct`) never matched
-  what `CLAUDE.md` documented (`deepseek/deepseek-v4-flash`) or what's actually run in
-  practice. Changed the code default to match.
-- `ATLAS_FILE` default renamed `portland_places.txt` ‚Üí `atlas.txt` (code default and all
-  five character subdirectories) ‚Äî the old name was a copy-paste artifact that was
-  actively wrong for most characters.
-- **Found and fixed a real, pre-existing bug while investigating a Priya relocation
-  request:** `DEFAULT_SETTING` in `bot.py` ‚Äî the fallback setting text for the
-  *unnamed/home instance* (Nora's slot) ‚Äî was hardcoded describing "Priya... Houston,
-  Texas... moved to Portland, Oregon to tattoo at a shop." It never matched Nora (the
-  only character it could actually apply to) and never applied to the real Priya either
-  (named instances don't fall back to `DEFAULT_SETTING` at all unless they lack their
-  own `setting.txt`). Rewritten to actually describe Nora (Chicago South Side ‚Üí Seattle,
-  per her real card) instead of an orphaned, wrong-character placeholder.
-- Priya (the real, deployed `priya.json` ‚Äî Tamil-American software engineer, Rutgers
-  grad) relocated from Austin, TX to Bellevue, WA at the user's request. Updated her
-  card description and rewrote `priya/atlas.txt` with real Eastside/Seattle-area places
-  (Meydenbauer Bay Park, Cougar Mountain, Stone Gardens, etc.), keeping the same
-  personality-revealing-annotation structure as the original. `people.txt`/
-  `projects.txt`/`schedule.txt` needed no changes ‚Äî they had no Austin-specific content.
-  Added Priya's (and Jules's) missing entries to `CLAUDE.md`'s Character notes ‚Äî Priya
-  had never actually had one; the Houston/Portland description some earlier session may
-  have gone by was always `DEFAULT_SETTING` (see above), never a documented fact about her.
-
-## v2026-07-05.9 ‚Äî `.alive` heartbeat for watchdog.sh
-
-**Root cause:** a phone-side script (`~/telegram-bot/watchdog.sh`, not part of this repo)
-restarts any bot whose `.alive` file is older than 300s, treating it as frozen. `bot.py`
-never wrote that file. `watchdog.log` showed every bot flagged `frozen (heartbeat ~70000s
-old)` and relaunched every 5 minutes, forever, on all six bots ‚Äî via `run-bot.sh`'s own
-`kill $OLD_PID`, a real SIGTERM against perfectly healthy processes. This was the actual
-cause of the entire restart-storm saga (v2026-07-05.4 through .8 below); Samsung battery
-settings, Auto Blocker, and the phantom-process-killer fix were all real issues but never
-the cause of *this* pattern.
-
-**Fix:** added `_touch_alive`, a 60s repeating job that touches `BASE_DIR/.alive`,
-matching what `watchdog.sh` expects. Documented the `watchdog.sh`/`.alive` contract in
-CLAUDE.md's Monitoring section, including the one-command diagnostic that would have
-found this immediately: `tail watchdog.log` logs its exact reason (`session down` vs
-`frozen (heartbeat Ns old)`) before every relaunch.
-
-## v2026-07-05.8 ‚Äî dead shutdown signal handler
-
-**Root cause:** `python-telegram-bot`'s `run_polling()` installs its own SIGINT/SIGTERM
-handlers internally, silently overriding whatever `signal.signal()` was registered in
-`main()` beforehand. Our custom `_shutdown` handler (logging "Received signal...") had
-never fired, not once, through any restart all session ‚Äî the entire "no signal line =
-SIGKILL" diagnostic this session's phantom-killer theory was built on was unreliable
-from the start.
-
-**Fix:** replaced the dead `signal.signal()` registration with
-`ApplicationBuilder().post_shutdown(_on_shutdown)` ‚Äî an async hook that runs as part of
-PTB's own already-correct graceful-shutdown sequence regardless of what triggered it.
-Removed the now-unused `signal` import.
-
-## v2026-07-05.7 ‚Äî false-positive restart-storm alerts
-
-**Root cause:** the v2026-07-05.4 restart counter used `time.mktime(time.strptime(...))`
-to parse log timestamps, which depends on the OS's local-time calibration
-(`/etc/localtime`/`TZ`) ‚Äî a different mechanism than Python's `zoneinfo`, but one the
-same `pkg upgrade` (see v.5) evidently also disrupted. All six bots run on the same
-phone, so all of them misjudged old `STARTUP AUDIT` lines as "within the last hour"
-identically, producing a fleet-wide false alarm (~199 restarts reported on healthy bots).
-
-**Fix:** compare naive wall-clock `datetime` objects directly instead of converting
-through Unix epoch ‚Äî only needs "same frame, consistent relative diff," not absolute
-UTC correctness.
-
-## v2026-07-05.6 ‚Äî Python 3.14 asyncio incompatibility
-
-**Root cause:** an unrelated `pkg upgrade` (run to fix an adb/libprotobuf error) landed
-Termux on Python 3.14, which removed the auto-create fallback that
-`asyncio.get_event_loop()` used to provide. `python-telegram-bot` v21's `run_polling()`
-depends on that fallback, so every launch crashed with `RuntimeError: There is no
-current event loop in thread 'MainThread'` before the bot could even start polling.
-
-**Fix:** explicitly create and set an event loop in `main()` before `run_polling()` if
-none exists ‚Äî a no-op on Python versions where the old fallback still works.
-
-## v2026-07-05.5 ‚Äî startup crash from missing `tzdata`
-
-**Root cause:** the same `pkg upgrade` (v.6) bumped Python enough that the venv needed
-rebuilding (see the pre-versioning `dca3c30` fix below), but the rebuild recipe didn't
-include `tzdata`. Termux has no system IANA timezone database, so `zoneinfo.ZoneInfo`
-silently fell back to `TZ = None`. A previously-saved reminder's `due` timestamp was
-still timezone-aware (saved before the break), so comparing it against a now-naive
-`datetime.now()` raised `TypeError: can't compare offset-naive and offset-aware
-datetimes` while re-arming reminders at startup ‚Äî crashing the entire process before it
-could serve Telegram at all.
-
-**Fix:** `schedule_reminder` normalizes mismatched aware/naive timestamps instead of
-crashing; the startup reminder-rearm loop wraps each reminder in try/except so one bad
-entry can't block the rest (or the bot itself). CLAUDE.md's venv rebuild recipe now
-includes `tzdata`.
-
-## v2026-07-05.4 ‚Äî monitoring: restart-storm self-report + dead man's switch
-
-Added `_self_audit` restart counting (buggy until v.7 ‚Äî see above) and `HEALTHCHECK_URL`
-support: when set in an instance's `.env`, the bot pings that URL every 30 min so an
-external service (e.g. healthchecks.io) can alert on silence ‚Äî covers bot-fully-down and
-phone-dead, which nothing on-device can self-report.
-
-## v2026-07-05.3 ‚Äî continuity features
-
-- **Date-aware note follow-ups**: the combined post-reply analysis call now also
-  extracts a date when a user note is datable ("interview Tuesday"); stored as a
-  `(due YYYY-MM-DD)` suffix in `user_notes.txt`. A daily job (`NOTE_FOLLOWUP_TIME`,
-  default 18:00) proactively asks how it went once the date passes, then rewrites the
-  marker to `(asked ...)` so it never re-fires. Respects quiet hours and the nudge
-  budget; max one per day.
-- **Multi-day life threads**: the midnight day-context rotation now feeds yesterday's
-  `day.txt` into today's event generation, so a hanging thread (a plan, an errand, a
-  person) may continue or resolve instead of the character's life resetting daily.
-
-## v2026-07-05.2 ‚Äî ops hardening
-
-- `/backup` and the weekly auto-backup now include `memories.txt`, `user_notes.txt`,
-  `setting.txt` (previously only `state.json`/`reminders.json`/`payments.json` ‚Äî a
-  character's accumulated relationship history was never actually backed up).
-  `.env` stays excluded on purpose.
-- New `_is_admin` gate (allowlist member or owner only) on `/update`, `/restart`,
-  `/errors`, `/audit`, `/backup` ‚Äî previously `_is_allowed` returned true for *anyone*
-  when `ALLOWED_USERS` was unset, so these operational commands were wide open on any
-  instance without an explicit allowlist.
-- `/restart`: clean supervisor restart from Telegram, no shell needed for `.env` edits.
-- Supervisor trims `bot.log` to its last 1 MB once it exceeds 5 MB (previously unbounded;
-  `errors.log` already rotated at 2 MB via `RotatingFileHandler`).
-
-## v2026-07-05.1 ‚Äî self-deploy, consolidated analysis call, leaner supervisor
-
-- **`BOT_VERSION` introduced** ‚Äî shown in `/audit` and the startup log, so "did the
-  update take?" is answerable from Telegram instead of guessed at.
-- **`/update` command**: downloads `bot.py` from `main`, refuses to install anything
-  that doesn't `py_compile`, keeps a `bot.py.bak`, swaps, and restarts via the
-  supervisor. No Termux shell needed for routine deploys.
-- **One combined post-reply analysis call** (`post_reply_analysis`) replaces three
-  separate LLM calls (mood appraisal, user-note extraction, NPC memory extraction) that
-  ran after every message. On a phone connection those side calls competed with the
-  user-facing reply for bandwidth ‚Äî a real driver of Emily's earlier timeout storm (see
-  the pre-versioning entries below). Auto-react also now skips while a reply is
-  in flight.
-- `run-bot.sh`: supervisor logs via `>>` redirect instead of `tee` ‚Äî one fewer process
-  per bot, six fewer toward Android's 32-phantom-process kill limit.
-
-## Pre-versioning fixes (same debugging session, before `BOT_VERSION` existed)
-
-These landed before the version stamp was introduced above; find them by commit message
-via `git log` if you need the exact diff. In the order they were actually found and
-fixed ‚Äî root causes only:
-
-- **`run-bot.sh` launched bare `python`, not the venv's.** Only worked if the venv
-  happened to be on `PATH` when tmux started; otherwise crash-looped on
-  `ModuleNotFoundError: No module named 'requests'`. This exact bug recurred later
-  (unrelated to this fix ‚Äî a `pkg upgrade` broke the venv itself; see v2026-07-05.5)
-  and is a recurring hazard worth checking first on any instance that won't start.
-- **Emily's "Vision API Error: 400 ‚Äî" had an empty body.** The streaming response's
-  `with` block closed the connection before `raise_for_status()`'s error body could be
-  read. Fixed by force-reading `resp.content` on any status ‚â• 400 before raising ‚Äî
-  this pattern must be kept if `_do_request` is ever touched again, or every future
-  4xx/5xx becomes undiagnosable again.
-- **`VISION_MODEL` defaulted to `NANOGPT_MODEL`** (a text-only reasoning model), so any
-  instance without an explicit `VISION_MODEL` in `.env` sent photos to a model that
-  rejects images. Changed the default to `zai-org/glm-4.6v`.
-- **`STREAM_TIMEOUT` (30s) was too tight** for a phone connection running several
-  concurrent side-calls per message; every model, including fast flash-tier ones,
-  timed out constantly. Raised to 90s.
-- **WSDOT `GetAlertsAsJson` returns a bare array**, but the parser called `.get("Alerts")`
-  on it, crashing the traffic poller every 10 minutes (silently, since it was caught and
-  logged, not fatal ‚Äî but `/traffic`/`/incidents` were broken the whole time). Fixed to
-  accept both a bare array and a wrapped object.
-- **Inworld voice IDs sent to NanoGPT's OpenAI-style TTS endpoint 400'd** ‚Äî voice and
-  model must come from the same provider. Added native Inworld TTS support
-  (`INWORLD_API_KEY`/`INWORLD_TTS_MODEL`), auto-selected when the key is set.
-- **Added `/errors` command** ‚Äî tails `errors.log` into chat, so future bug reports
-  carry the actual error text instead of a vague "it's down."
-
-For history before this debugging session (memory system fixes, latency work, thread
-safety, etc.), `git log` is the source of truth ‚Äî those commits predate this file.
+Y™Áäx-ÆÈ‹j◊ù¢Îi∫⁄+äßj[hëÈ‹¢ÈÌ◊é4€ƒËµ©h∫⁄n∂XßzÕH»⁄[ôŸ[Ÿ»8†%[Y‹ò[KX€€\[ö[€ãXõ›ÇîôXY\»ôYõ‹ôHXZ⁄[ô»⁄[ôŸ\Œ»Y[à[ùûHYù\à⁄\[ô»€ôKàŸYH”UQKõYõ‹Çù⁄H\»ö[H^\›»[ôHù[Hõ‹àŸY\[ô»]\]YÇÇë[ùöY\»\ôHô]Ÿ\›ö\ú›àXX⁄€ôHò[Y\»HX›X[õ€›ÿ]\ŸKõ›ù\›H€ŸHYôà8†%ù]	‹»H\ù€‹ùôXY[ô»⁄XŸK⁄[òŸHôKYXY€õ‹⁄[ô»H€€ôYõÿõ[Húõ€Hÿ‹ò]⁄\¬ô^X›H⁄]\»ö[H\»YX[ù»ô]ô[ùÇÇà»»åçãLLç8†%^X›\[ô[ò⁄Y\»[ô[[]]XõHî»ô[X\Ÿ\¬Çääîõ€›ÿ]\ŸNà“H[ôHî»ô\€€ôYúõÿY\[ô[òﬁHò[ôŸ\»[ô\[ô[ùK⁄[HXX⁄ô\ﬁH]]]Y€ôH⁄\ôYô[ùà[ôô\XŸYõ›úX[àXŸKääàH€€[Z]\ôYõ‹ôHYõõ›Y[ùYûHH[ùö\õ€õY[ù]ò[à⁄]\[ô[òﬁH[ú›[òZ[\ôHÿ\»[Xô\ò][Bõõ€ãYò][[ôõ€òX⁄»€›ô\ôY€ôH€ŸHö[Hù]õ›]»\[ô[òﬁHŸ]‹àô[ô‹ôYò\‹Ÿ]ÀàH€\‹»Y[ôXYHõŸXŸYõY]]⁄YH[ô\ùôX]\ô\»⁄[àù[\Hÿ\»X€\ôYòù]XúŸ[ùÇÇòô\]Z\ô[Y[ùÀõÿ⁄ÿõ›»[ú»[Nù[ù[YHX⁄ÿYŸ\»⁄]“KLçMà\⁄\»õ‹à]€àÀåLãÇê“HôYŸ[ô\ò]\»]»ÿ]⁄€›\òŸK€ÿ⁄»öYù[ú›[»]⁄]K\ô\]Z\ôKZ\⁄\ÿ[ôòK[€õKXö[ò\ûX[ôù[ú»\⁄X⁄ÿ»Hî»\Ÿ\»Hÿ[YHò][€€ùòX›à\ﬁ[Y[ùòùZ[»[[]]XõH\[ô[òﬁH^Y\ú»]ô[ùúÀ‹LÃLãOÿ⁄À\⁄LçMèò[ô€ŸHô[X\Ÿ\»]òô[X\Ÿ\Àœù[Y⁄]\⁄Oò[à]€ZXÿ[HYò[òŸ\»›\úô[ù⁄[Hô]Z[ö[ô»ô]ö[›\ÿÇê€ŸK[€õH€€[Z]»ô]\ŸHH\[ô[òﬁH^Y\ãàúÀ\ﬁ[òÀú⁄K\õ€òX⁄ÿ›ÿ\»H€¬ú⁄[ù\ú»[ôô\›\ù»HX›]ôHõY]àHﬁ\›[Y[ö]][ò⁄\»õ›Y⁄›\úô[ù¬úô[X\ŸH⁄[ù\ú»›^Hõ€›[›€ôY⁄[H‹ö]XõH‹õ›\YŸ\ú»[›ôH[ô\à⁄\ôYÿ[ôùH^\›[ô»€‹õö[Hô[XZ[ú»›]⁄YHHô[X\ŸKÇÇò[[]]XõK\ô[X\ŸKX€€ùòX›[ú»H^X›⁄\⁄\À–“K’îÀ‹Ÿ\ùöXŸK‹⁄[ù\à€\‹ÀàBúô[X\ŸHùZ[\àÿ\»^\ò⁄\ŸY[àH\‹‹ÿXõHò\ŸNà^X›[ú›[
+»\⁄X⁄ÿ€ŸK[€õBùô[ùàô]\ŸKõ€ã]‹ö]XõH\ùYòX›ÀX›]ò][€ã[ôõ€òX⁄»[\‹ŸYà\ãZ[ú›[òŸBúô[X\ŸH⁄[ù\ú»ô[XZ[àHô^\ò⁄]X›\ôH][N»›\úô[ù\»[ù[ù[€ò[H⁄\ôYÇÇà»»ååçãLLçåH8†%ôX[]€‹õô]‹»[àH[‹õö[ô»úöYYö[ô¬Çääîõ€›ÿ]\ŸNàååçãLLåÀåà\‹Ÿ[XõYŸX]\ã€€[]]Kô[Z[ô\úÀ[ôX[ù]Yõ¬ô^\õò[[ô]‹»[ú]»H^\›[ô»€ô]‹ÿ€€[X[ô\»H⁄\òX›\â‹»öX›[€ò[YôH]ô[ùÀõõ››\úô[ùô\‹ù[ôÀääàH[‹õö[ô»úöYYö[ô»õ›»ô]⁄\»î‘À–]€HôYY»ŸôàH]ô[ù€‹ú⁄⁄\»X[õ‹õYY\Xÿ]K[ô€\ã][ãLÕãZ›\à][\À[ôŸ[X›»][‹›ôYHXY[ô\ŒÇõ€ôH⁄ÿY⁄]€ÿÿ[][K€ôHÿ\⁄[ô›€ã[‹ã[ò][€ò[][K[ô€ôHX⁄õ€ŸﬁKŸX›\ö]K‹ÇôX€€õ€^H][KÇëXX⁄[ò€Y\»]»€›\òŸKH⁄‹ùôYY›[[X\ûH⁄[àô\Ÿ[ù[ôH‹öY⁄[ò[[öÀàõ»[Ÿ[òÿ[‹àô]»\[ô[òﬁHÿ\»YYÇÇëYò][»\ôH⁄ÿY⁄]€›[ùKÿ\⁄[ô›€à›]H›[ô\ôîãŸYZ’⁄\ôK\ú»X⁄öXÿHRKêõY\[ô–€€\]\ã[ôX\öŸ]XŸH[‹õö[ô»ô\‹ùàS‘ìíSë◊”ëU‘œL\»H⁄[›⁄]⁄»S‘ìíSë◊”ëU‘◊”SRUòS‘ìíSë◊”ëU‘◊”PV–Q—W“’Tîÿ[ôHŸ[ZX€€€ã\Ÿ\\ò]YS‘ìíSë◊”ëU‘◊—ëQQÿ›ô\úöYH\ôBôÿ›[Y[ùY[àô[ùãô^[\Xà€ôHúõ⁄Ÿ[à€›\òŸH\»ŸŸŸY[ô⁄⁄\Y»€õH[à[\€›\òŸBôòZ[\ôH[ò‹ô[Y[ù»Hô]‹ÿ\úõ‹àÿ]Y€‹ûKÇÇà»»ååçãLLåÀåà8†%ŸYZŸ^H[‹õö[ô»úöYYö[ô¬Çääîõ€›ÿ]\ŸNàHõ›YH[ô]öYX[]H€›\òŸ\»ù]õ»]\õZ[ö\›X»Z[HY\‹ÿYŸH]\‹Ÿ[XõY[KääàHô]»Yò][[€àS‘ìíSë◊–îíQQíSëÿõÿàŸ[ô»H›€ô\àŸX]\ã€U€H]ôK]òYôöX»€€[]]Kÿ[YKY^Hô[Z[ô\úÀ[ôH^\›[ô»ÿ\õZ[à€ò\⁄›€à€€ôöY›\ôY€‹öŸ^\ÀàS‘ìíSë◊–îíQQíSëœL\ÿXõ\»]»Yô\‹À^\ÀŸ[ô[YK[ô\úö]ò[\ôŸ]›^H\ãZ[ú›[òŸH[àH[ùòX⁄ŸYô[ùòÇÇà»»ååçãLLåÀåH8†%Ÿö\ôNàõÿX›]ôHŸX]Hö\ôHôX[][YHLLH[\ù¬Çìô]»ôX]\ôNàHö\ú›
+äúõÿX›]ôJäà‹ö[YK‹ÿYô]H[\ùàÿ‹ö[YX[ôŸ\‹]⁄\ôBú[[€õH[ôZ\à]HY‹»
+‹ö[YH^\À\‹]⁄åH^JK€»H\Ÿ\à⁄»ÿ[YLLBùŸ^H€›[ô]ô\àôH[\ùY8†%HôX]\ôH€õH]ô\à[ú›Ÿ\ôY⁄[à\⁄ŸY[ôHúô\⁄ô]Hÿ\€â›\ôH[û]ÿ^KàHŸX]H
+äëö\ôJäàLLHôYY
+ﬁöõK^‹Zò
+H\»H€ôHXõX¬ú€›\òŸH]ôYúô\⁄\»]ô\ûHçHZ[ù]\À€»]ÿ[àX›X[Hö]ôHH\⁄[\ùÇÇòö\ôW‹€⁄õÿò€»HôYY]ô\ûHíTëW‘””RSïUTÿ
+Yò][JKô]⁄\»ôXŸ[ùò⁄]]⁄YHÿ[»€òŸK[ô\»XX⁄\Ÿ\àHÿ[][ôY⁄][àíTëW‘êQUT◊”RSTÿäYò][çJHŸàZ\àÿÿ][€à8†%Hÿ[YH€Y[ù\⁄YH]ô\ú⁄[ôHö[\àòYôöX◊‹€⁄õÿòù\Ÿ\À€»€ôHõ›[ôö\Ÿ\ùô\»]ô\û[€ôKà[\ù»ö\ôH€õH⁄[HH⁄\ôYÿÿ][€Çö\»úô\⁄
+Ÿúô\⁄€ÿÿ][€òà]ôH⁄\ôK‹à›]X»⁄][à
+H[ôô]ô\à⁄[HH\Ÿ\à\¬òÿ]ÿ^XàŸö\ôX[€»Ÿ\»[à€ãY[X[ô€⁄›\ZŸHÿ‹ö[YXÇÇê€›ô\òYŸH\»ö\ôK—ST»€õH
+YYXÿ[ZYö\ô\Àô\ÿ›Y\ÀXÿ⁄Y[ù H8†%õ»€XŸKôXÿ]\ŸBõõ»úôYHXõX»ôYY^‹Ÿ\»ôX\ã\ôX[][YH€XŸH]H\»›ùX›\ôYôX€‹ôŒ»€XŸBúÿÿ[õô\à]Y[»€›[ôYYHZYôYY\»Hò[úÿ‹ö\[€ãŸŸ[ÿ€Ÿ[ô»\[[ôKà]ùòYK[Ÿôà\»H⁄€HôX\€€à\»\Ÿ\»Hö\ôHôYYÇÇë\⁄Y€àõ›\ŒàŸ\\ò]HíTëW–STïÿ⁄[›⁄]⁄
+Yò][”äH€»H\‹⁄]ôH\⁄ÿ[àôBô\ÿXõY⁄]›]‹⁄[ô»H[[€õH‹ö[YH€€[X[ôŒ»ôY⁄\›\ôY[àŸôX]\ô\ÿ\»ö\ôXÇê€€\›\ù›X\ô8†%€àHö\ú›€]ŸY\»H⁄]HõÿàôX€‹ô»⁄]	‹»[ôXYH€ÇùHõÿ\ô[ô›^\»⁄[[ù€»Hô\›\ùô]ô\à[\»HòX⁄€ŸŒ»€õHÿ[»\X\ö[ô¬òYù\ùÿ\ôôX€€YH[\ùÀàY\ÿ\»\ô[ôYYù\àHÿ€ŸK\ô]öY]ÿ\‹»€àHYôéàBòÿ[⁄]õ»[ò⁄Y[ù€ù[Xô\òŸ]»H›XõH€€\‹⁄]HŸ^H
+Ÿö\ôW⁄Y
+H€»]ÿ[â›úôKX[\ù]ô\ûH€»HŸY[ã\Ÿ]\»õ‹Y⁄[àH\Ÿ\à€Ÿ\»ÿ]ÿ^X‹àZ\àÿÿ][€Çô€Ÿ\»›[K€»Hô]\õàôK\ŸYY»⁄[[ùH[ú›XYŸà[\[ô»HXÿ›[][]YòX⁄€ŸŒ¬õ€õHÿ[»X›X[HŸ[ù
+ÿ\Y]íTëW”SRU
+H\ôHX\öŸYŸY[ã€»[à›ô\ôõ›»ù\ú›ö\»[]ô\ôY€à]\à€»ò]\à[à⁄[[ùH‹›»[ôHŸ]\»[ù\úŸX›Y⁄]ùH›\úô[ùõÿ\ôXX⁄€»õ›[ô]»‹õ››à[ùéàíTëW–STïÿíTëW‘êQUT◊”RSTÿòíTëW‘””RSïUTÿíTëW”SRUàHÿÿ][€ã\⁄\ôHX⁄€õ›€Y€Y[ùõ›»Y[ù[€ú»Ÿö\ôXò[ô]Hõ›[\ù»]]€X]Xÿ[KÇÇëõ€›À]\
+›\ôòXŸYõ›ö^Y
+Nàö\ôW‹€⁄õÿò[ôòYôöX◊‹€⁄õÿòõ›»⁄\ôHBúÿ[YHõÿX›]ôKX[\ù⁄\H
+ô]⁄8°§à]\ò]H\Ÿ\ó€ÿÿ][€ò8°§à]ÿ^KŸúô\⁄ÿ]H8°§àôX\òûBôö[\à8°§àŸY[ã\Ÿ]Y\8°§àŸ[ô
+KàH⁄[ô€H[\à\ò[Y]\ö^ôYûHôYYYöY[[ôôúô\⁄ô\‹»ôYXÿ]H€›[ÿ\úûHù]\ôHö^\»€òŸN»Yô\úôYôXÿ]\ŸHõ€[ô»][à€›[ù›X⁄H€‹ö⁄[ôÀ]ò[X€›ô\ôYòYôöX»]ÇÇà»»ååçãLLåKç8†%[XôY[ô»òZ[\ô\Œàô]öYY€›[ùY[ôô\Z\ôY[ú›XYŸà\õX[ô[ùÇääîõ€›ÿ]\ŸNà[à[XôY[ô»òZ[\ôHÿ\»õ›[ùö\⁄XõH[ô€àH‹ö]H]ú\õX[ô[ùääàŸ[XôY›^ô]\õôYõ€ôX€à[ûHòZ[\ôH⁄]H⁄[ô€HŸÀôXùYÿ\¬ö]»€õHòXŸH8†%[ôH€€ôöY›\ôY]ô[\»Sëìÿ
+õ›úNåLÕJK€»][ôHÿ[õõ›ô[Z]àõ»ÿ€›[ùŸ\úõ‹òÿ]Y€‹ûH€›ô\ôY]Z]\ãàHõY]]⁄YH[XôY[ô»›]YŸBù\ôYõ‹ôHõŸXŸYõ»Ÿ»[ôKõ»€›[ù\à[ôõ»ÿ]Y]öY[»H€€Hﬁ[\€H€›[ò\úö]ôH^\»]\à\»ú⁄HŸ\€â›ŸY[H»ô[Y[Xô\à[ô‹»\»Ÿ[àÇÇï€‹úŸH[àHõ[ôô\‹ŒàŸ[XôY€Y[[‹ûW€[ôXô]\õú»⁄[[ùH⁄[àH[XôYòZ[À€¬ùHY[[‹ûH[ô»[àY[[‹öY\Àù⁄]õ»ôX›‹ãà‹Ÿ[X[ùX◊‹ôXÿ[›ôXÿ€õHÿ€‹ô\¬ô[ùöY\»][ôXYH]ôH€ôK[ôõ›[ô»]ô\àô]ö\⁄]Y[H8†%
+äô]ô\ûHY[[‹ûH‹ö][Çô\ö[ô»[à›]YŸHÿ\»[ùö\⁄XõH»Ÿ[X[ùX»ôXÿ[õ‹ô]ô\ãääàHòZ[YôXY€‹›»€ôBù\õé»HòZ[Y‹ö]H€‹›]Y[[‹ûH\õX[ô[ùKÇÇääê€€ú⁄Y\ôY[ôôZôX›YàHò[òX⁄»[XôY[ô»[Ÿ[ääàôX›‹ú»úõ€HYôô\ô[ù[Ÿ[¬ò\ôHõ›€€\\òXõK⁄X⁄ååçãLLç»[ôXYH\›Xõ\⁄Y⁄[à]YYHõ[Ÿ[ú⁄YXÿ\à›X\ô»õ‹à^X›H\»ôX\€€ãàYX\›\ôY\ôH»⁄X⁄»⁄]HòZ[\ôHX›X[Bõ€⁄‹»ZŸNà[ö][õ‹õX[\ŸYôX›‹ú»ŸàZ\€X]⁄Y[Y[ú⁄[€àõ›Y⁄HôX[òÿ€‹⁄[ôW‹⁄[Xÿ€‹ôHYX[à
+ÃåãX^
+ÃåMH›ô\àöX[»8†%ò\àô[›»Hå¬ùô\⁄€[àöYŸŸ\ôY€Y[[‹öY\ÿà€»Hò[òX⁄»[Ÿ[Ÿ\»õ›õŸXŸH
+ù‹õ€ô àY[[‹öY\Àö]õŸXŸ\»
+õõ àX]⁄\À⁄[HH€ÿYŸ[XôY[ô‹ÿ›X\ô€›[[€»\ÿÿ\ôH⁄€BòÿX⁄H€àH[Ÿ[⁄[ôŸKà]€›[€⁄»ZŸH[ú›\ò[òŸH[ôõ›öYHõ€ôKÇÇääï⁄]⁄\YääÇãHŸ[XôY›^ô]öY\»
+SPëQ‘ëUíQTÿYò][à][\Œ»X\»H⁄[›⁄]⁄
+Kàù]
+äõ€õH€àHò\›òZ[\ôJäãà\›SPëQ‘ëUñW–ïQ—U‘ÿ
+ H]⁄]ô\»\àH€›¬àòZ[\ôHYX[ú»Hÿ[\â‹»ùYŸ]\»ZŸ[H‹[ù[ô\ﬁ[ò⁄[Àù◊›ôXYôXY¬àÿ[õõ›ôHÿ[òŸ[Y€»ô]ûZ[ô»€ôHŸY\»[àXò[ô€ôYôXY[]ôH⁄]õÿõŸBàÿZ][ôÀàH]ôHôXY]	‹»›€à\ﬁ[ò⁄[ÀùÿZ]Ÿõ‹äãããQSS‘ñW‘UQTñW—SPëQ’SQS’U
+Xà›[ÿ\»]€»€‹ú›Xÿ\ŸHô\H][òﬁH\»[ò⁄[ôŸY8†%[ùò\öX[ù»\»õ››X⁄Yà
+\»\»H\õ›ôY[XôY[ô»ÿ\ùôK[›][ôõ»ô]»ÿ[\»YY\àY\‹ÿYŸJKÇãH›[òZ[\ôHõ›»ÿ[»ÿ€›[ùŸ\úõ‹äô[XôYäX€òŸH
+õ›\à][\
+H[ôŸ‹»õ›Y⁄à€Ÿ◊€‹\ò][€ò[õ›Y8†%\ö[ô»[à›]YŸH\»ö\ô\»€à]ô\ûHô\H
+ò[ô
+à]ô\ûBàY[[‹ûH‹ö]K⁄X⁄\»H›‹õH⁄\H]]Õç»Y[ùXÿ[òXŸXòX⁄‹»[àù[\…‹¬à\úõ‹úÀõŸÿ
+ååçãLLLåLäKàHÿ]Y€‹ûH›\ôòXŸ\»[àÿ]Y][ôŸ\úõ‹úÿ⁄]õ¬àô[ô\à⁄[ôŸK⁄[òŸHõ›]\ò]HŸ\úõ‹óÿ€›[ùÿŸ[ô\öXÿ[KÇãHŸ[XôYÿòX⁄Ÿö[⁄õÿòôKY[XôY»[ùôX›‹ö\ŸYY[[‹öY\»]ô\ûHSPëQ–êP“—íS“SïTïêS‘ÿà
+L KSPëQ–êP“—íS–êU“
+å
+H]H[YKSPëQ–êP“—íSL»\ÿXõKà\»\¬àH\ù]XZŸ\»[à›]YŸHŸ[ãZX[[ô»ò]\à[à\õX[ô[ùàù[ú»Ÿôã[€‹öXBà\ﬁ[ò⁄[Àù◊›ôXY»Ÿ[XôY€[ô\◊€Ÿôõ€‹[Xô\ò][Hô]\õú»Z\ú»[ú›XYŸÇà›X⁄[ô»Ÿ[XôY[ô‹◊ÿÿX⁄XôXÿ]\ŸH]]][ô»H]ôHX›úõ€HH€‹öŸ\àôXY\¬à[ùò\öX[ù»8†%Hÿ[\à\‹⁄Y€ú»€àH€‹ÇÇääïô\öYöXÿ][€éääà\›[XôYô]ûP[ôòX⁄Ÿö[H\›»ö]ö[ô»HôX[ù[ò›[€ú»õ›Y⁄òHòZŸHŸ\‹⁄[€à
+ô]ûK][ã\›XÿŸYY⁄]ôK]\X[ôX€›[ù[€òŸKõ›⁄[›⁄]⁄\À€›¬ôòZ[\ôHõ›ô]öYYòX⁄Ÿö[ÿX⁄[ôÀòX⁄Ÿö[õ›[ôY\àù[ãòX⁄Ÿö[›\ùö]ö[ô»Bú›[YòZ[[ô»õ›öY\äKàúôXZÀ]\›YëQ\à\‹Ÿ\ù[€ãÇÇääìõ›Yô\‹ŸY[Xô\ò][NääàHòX⁄Ÿö[€›ô\ú»Y[[‹öY\Àù€õKàòX›»⁄\ôBòŸ[XôY[ô‹◊ÿÿX⁄Xõ›Y⁄Ÿ[XôYÿ[ôÿÿX⁄Xù]€€YHúõ€HHYôô\ô[ù€€X›[€é¬ô^[ô[ô»]\ôH\»HŸ\\ò]H⁄[ôŸHò]\à[à⁄Y[ö[ô»\»€ôKÇÇà»»ååçãLLåKå»8†%ÿÿ][€àX⁄€õ›€Y€Y[ù\›»[ÿÿ][€ãXò\ŸY€€[X[ô¬ÇïHY\‹ÿYŸH⁄›€àYù\à⁄\ö[ô»Hÿÿ][€à€õHY[ù[€ôY›òYôöXÿ⁄[ò⁄Y[ùÿòÿ‹ö[YX[ôŸ\‹]⁄àZ\‹⁄[ô»Ÿ\ôH€ôX\òûX[ôŸõ€Ÿ
+€U€KYÿ]Y
+Kàõ›»]ô\ûBô[òXõYÿÿ][€ãXò\ŸY€€[X[ô\X\ú»[àHX⁄€õ›€Y€Y[ù[ôH]ôK[ÿÿ][€Çùò\öX[ù\›»H€€[X[ô»õ›[ôXYH€›ô\ôYûH]»òYôöX»õ‹ŸKÇÇà»»ååçãLLåKåà8†%Ÿ\‹]⁄€€[X[ôàLLH\‹]⁄ÿ[»ôX\à[›H
+ŸX]JBÇìô]»ôX]\ôNàŸ\‹]⁄⁄›‹»ôXŸ[ùLLH\‹]⁄ÿ[»ôX\àH\Ÿ\â‹»⁄\ôYÿÿ][€ãú[Yúõ€H‘ÿ[]H€à]KúŸX]Kô€›à
+\]YZ[Kÿ[YKY^H€›ô\òYŸJKà\Ÿ\»Búÿ[YHÿÿ][€ãòY]\À[ô⁄[›⁄]⁄
+‘íSQW–STïÿ
+H\»ÿ‹ö[YXÇÇê€€ôöY›\òXõHöXH[ùéàT‘U““’Tîÿ
+€⁄ÿòX⁄»⁄[ô›ÀYò][ç
+KT‘U“”SRUäX^ô\›[ÀYò][L
+Kàÿ[»\ôH⁄›€à⁄][ö]X[Ÿö[ò[ÿ[\Kö[‹ö]Bä€€‹ãX€ŸYx†$ÕŒJKôX]‹ŸX›‹ã‹ôX⁄[ò›[ô[Y\›[\à⁄\ô\»⁄[ó‹ŸX]J
+Xõ›[ô¬ò⁄X⁄»[ô‘íSQW‘êQUT◊”RSTÿòY]\»⁄]ÿ‹ö[YXÇÇïHÿÿ][€à⁄\ôHX⁄€õ›€Y€Y[ù[ôXYHY[ù[€ú»ÿ‹ö[YX[ôŸ\‹]⁄
+YY[ÇùååçãLLåKåJKà[^\]Y»\›õ›€€[X[ô»[ô\àê‹ö[YH[\ù»
+ŸX]JHãÇÇà»»ååçãLLåKåH8†%ÿ‹ö[YH€€[X[ôàôX\òûH‹ö[YHô\‹ù»úõ€HŸX]H‹[à]BÇìô]»ôX]\ôNàÿ‹ö[YX⁄›‹»ôXŸ[ù‹ö[YHô\‹ù»ôX\àH\Ÿ\â‹»⁄\ôYÿÿ][€ã[Yôúõ€HŸX]H	‹»XõX»]\Ÿ]€à]KúŸX]Kô€›à
+€ÿ‹ò]HTKõ»THŸ^Hô\]Z\ôY
+KÇê€›ô\òYŸH\»⁄]HŸàŸX]H€õH8†%ÿÿ][€ú»›]⁄YHHõ›[ô[ô»õﬁŸ]H€X\àY\‹ÿYŸKÇÇê€€ôöY›\òXõHöXH[ùéà‘íSQW–STïÿ
+⁄[›⁄]⁄Yò][”äK‘íSQW‘êQUT◊”RSTÿäYò][çJK‘íSQW—VTÿ
+€⁄ÿòX⁄»⁄[ô›ÀYò][ K‘íSQW”SRU
+X^ô\›[ÀôYò][L
+KàôY⁄\›\ôY[àŸôX]\ô\ÿ\»‹ö[YXõ‹àù[ù[YHŸŸ€Kàô\‹ù»⁄›¬õŸôô[úŸH\Kÿ]Y€‹ûK\õﬁ[X]HYô\‹À[ô[Y\›[\€€‹ãX€ŸYûBò‹ö[YKXYÿZ[ú›ÿ]Y€‹ûH
+\ú€€ã‹õ‹\ùK‹€ÿ⁄Y]JKÇÇïHÿÿ][€à⁄\ôHX⁄€õ›€Y€Y[ùõ›»Y[ù[€ú»ÿ‹ö[YX[€ô‹⁄YH›òYôöXÿ[ôò⁄[ò⁄Y[ùÿ⁄[à‹ö[YH[\ù»\ôH[òXõYÇÇà»»ååçãLLMKåH8†%Y\◊Ÿ^[\HôXX⁄YH[Ÿ[ò]Œ»HåçãLÀLåù[\»ö^ÿ\»€ôHÿ\ôõ›H€ŸH]Çääîõ€›ÿ]\ŸNàÿYÿ⁄\òX›\ò[\YY\◊Ÿ^[\Xô\òò][K’TïòX\öŸ\ú»[ôòﬁ›\Ÿ\ü_Nò[ô\»[ò€YYääàHåçãLÀLå[ò⁄Y[ù
+ù[\»[Z]Y\éòÿ[›Nòú‹XZŸ\àXô[»[ôô\X]YH\Ÿ\â‹»\õú Hÿ\»õ€›Xÿ]\ŸY»\»ÿ[YH[\]òõ›úNåÃççLÃççX[ôö^YûHY[ô»[à[õ[ôH[ùK[Xô[[ú›ùX›[€à»ù[\…‹»›€Çòÿ\ôà]€‹ŸYHﬁ[\€Hõ‹à€ôH⁄\òX›\ãàHåçãL[€ùH⁄\òX›\à\‹¬ôõ›[ôHÿ[YHò]»⁄\H›[ô\Ÿ[ù[àõ‹òH
+’TïòX\öŸ\ú Kö^XH
+Bòﬁ›\Ÿ\ü_NòXô[Y[ô\ K[ôX\ò›\»
+Hﬁ›\Ÿ\ü_NòXô[Y[ô\ H8†%õ€ôHŸà[HYíù[\…‹»[õ[ôHö^ôXÿ]\ŸHHX›X[YôX›ÿ\»ô]ô\à[àH€ŸKÇÇääëö^ääàÿ€X[ó€Y\◊Ÿ^[\J
+X›ö\»’TïòŸ\\ò]‹à[ô\»[ô[ûH[ôH›\ù[ô¬òﬁ›\Ÿ\ü_NòôYõ‹ôHHõÿ⁄»ôXX⁄\»Hõ€\€»õ»ÿ\ôôYY»]»›€à[õ[ôBù€‹öÿ\õ›[ôàÿYÿ⁄\òX›\òÿ[»][ú›XYŸà[\[ô»]V»õY\◊Ÿ^[\HóXò]ÀÇÇääë]ò[ääà\›Y\—^[\P€X[ö[ôÿ[à\›À›\›‹\ôKúX8†%[ú»]’Tïò[ôòﬁ›\Ÿ\ü_Nò[ô\»\ôH›ö\Y[ô]ÿYÿ⁄\òX›\òX›X[Hÿ[»H€X[ô\ãÇÇääîõ€›ÿ]\ŸHNàååçãLLLéH€‹ŸYH[ô\õ€YXõ€€X[à€\‹»YÿZ[ú›ôYBöY[€\À[ô\ôHÿ\»Hõ›\ùääà]ô[X\ŸHô]‹õ›HL»õY‹»»Ÿ[ùóÿõ€€[ôYùò\›õ“[ôõ€Y[ùêõ€€X[úÿ»ÿ]⁄[ûHô]»€ôKàõ›Ÿà]»ôYŸ^\»ô\]Z\ôBòõ›Ÿ\ä
+Xà⁄^õY‹»\ôH‹ö][à‹ÀôŸ][ùäåHäKú›ö\
+
+Hõ›[à
+åãôò[ŸHãàõõ»äX8†%ú›ö\
+
+Xõ»õ›Ÿ\ä
+X8†%€»^HX]⁄YôZ]\à⁄\H[ôŸ\ôHô]ô\à[àBò€›[ùàQSS‘ñW–UUÿQSS‘ñW“Q—XQSS‘ñW–UQUQSS‘ñW‘—SPSïP◊”UëXòì’W‘ëP’TîíSëÿì’W—‘ì’SëQÇÇääï⁄]]€‹›àŸôòYõ›\õà[HŸôãääàH\H\»
+åãôò[ŸHãõõ»äX€¬òQSS‘ñW–UQU[Ÿôò\»õ›[à][ôôXY\»
+äì”ääà8†%H^X›òZ[\ôHååçãLLLéBô^\›Y»ô[[›ôK€àH€‹ô]»›€à›[[X\ûHYô\ù\ŸY\»ô]€H€‹ö⁄[ô»]ô\û]⁄\ôBä
+àò€òõ›»€‹ö‹»]ô\û]⁄\ôHääKàôZ[ô»ÿ\ŸK\Ÿ[ú⁄]]ôH⁄]›]õ›Ÿ\ä
+Xò[ŸXìÿò[ôŸôò[€»ôXY\»”ãàì’W—‘ì’SëQ\»€ôHŸà[ùò\öX[ùÃM…‹»ôYBô^òX›[€ãZ€ô\›H^Y\úÀ€»HõY]YH⁄[›⁄]⁄õ‹àHY[[‹ûH›X\ô]ú⁄[[ùHY€õ‹ôYõ›\àŸàH⁄^ÿ^\»[à‹\ò]‹à€›[‹ö]HõŸôàãÇÇääïHôX[õ€›ÿ]\ŸHÿ\»õ›HZ\‹⁄[ô»õ›Ÿ\ä
+X8†%]ÿ\»]H›X\ôôXYBôö[H[ôHûH[ôKääàHö\ú›òYùŸà\»ô[X\ŸHZY‹ò]Y‹ŸH⁄^⁄Y[ôYBúôYŸ^\À[ôÿ[YH€\‹»€‹ŸYàÿ€ŸK\ô]öY]ÿ[àõ›[ô€»[‹ôK[ôõ›\ôBùHôX\€€àH€\‹»Ÿ\›\ùö]ö[ôŒàTT”—P◊‘ëP–S
+õ›úNååJH[ôòVSQSï◊—SêPìQ
+õ›úNåéçJH\ôH
+äù‹ò\Y
+äà8†%Çò]€ÇîVSQSï◊—SêPìQH‹ÀôŸ][ùäàîVSQSï◊—SêPìQãåàYàT◊”êSQQ“Sî’Sê—H[ŸHåHÇäKõ›Ÿ\ä
+Hõ›[à
+åãôò[ŸHãõõ»ãõŸôàäBòÇ∏†%€»õ»⁄[ô€H[ôH€»H⁄€H^ô\‹⁄[€à[ô€[ô\ 
+X€›[õ›ŸYH[H⁄]]ô\ÇùHôYŸ^ÿZYàVSQSï◊—SêPìQ]ô[à\Ÿ\»Y[€Hà
+ù⁄]
+àõ›Ÿ\ä
+XàH‹öY⁄[ò[ô›X\ôÿ\»›\‹ŸY»ÿ]⁄][ô›ùX›\ò[H€›[õ›à]\»ŒYÿZ[à8†%H€X[Çú›ŸY\YX[ú»õ^H]\õàõ›[ôõ›[ô»ãô]ô\àõõ›[ô»\»\ôHà8†%[ô]\»[€»⁄BùH‹ô\]õŸXŸYú⁄^⁄]\»àõ‹à\»[ùûI‹»ö\ú›òYùÿ\»]Ÿ[à‹õ€ôÀÇÇääëZY⁄⁄]\»õ›»õ›]Hõ›Y⁄Ÿ[ùóÿõ€€
+äãYò][»\ö]ôYúõ€HH€^ô\‹⁄[€Çúò]\à[àô]\Y
+[úŸ]8°§àåHàõ›[à
+ããäX8°§àùYH8°§àŸ[ùóÿõ€€
+ùYJX¬òVSQSï◊—SêPìQ8°§àõ›T◊”êSQQ“Sî’Sê—X
+Kà[ZY⁄\ôH[õôY[Çò\›]ô\ûPõ€€X[ëõY—Yò][ëQêUSÿ[ôVSQSï◊—SêPìQõ⁄[ú»HYò][[ŸôÇúŸ]8†%ôZ[ô»[ô\õ€Y]»[ú›[òŸKY\[ô[ùYò][Yô]ô\àôY[à[õôYûBò[û][ôÀÇÇääïH›X\ô\»ö^Y[à€»ÿ^\»[àHÿ[YH€€[Z]ääàõ›Ÿ\ä
+X\»õ›»‹[€ò[[Çòõ›⁄\\À[ôHÿÿ[àù[ú»›ô\àH
+äù⁄€H€›\òŸJäà⁄]€€[Y[ù[ô\»õ[öŸYäŸôúŸ]»ô\Ÿ\ùôY€»ô\‹ùY[ôHù[Xô\ú»›^HöY⁄
+H[ú›XYŸà[ôHûH[ôKàBò[›€\›\»õ›»X]⁄YYÿZ[ú›Hò\öXXõHò[YHÿ\\ôYûHHôYŸ^ò]\à[Çàö\»\»›ö[ô»[û]⁄\ôH€àH[ôHã€»HôX\òûH[›€\›Yò[YHÿ[àõ»€ôŸ\à^[\òHYôô\ô[ùõY…‹»^ô\‹⁄[€ãàúôXZÀ]\›YûHôKZ[öôX›[ô»õ›ô[[›ôYõ‹õ\»8†%Bú⁄[ô€K[[ôHQSS‘ñW–UQU€ôH[ôX⁄\⁄]ô[KH‹ò\YVSQSï◊—SêPìQ€ôH]ùH€ÿÿ[à\‹ŸYàHŸ[ùóÿõ€€ÿ‹›ö[ô»›[^Z[ú»]ô\ûHY[€H⁄]Hò\ôBù[ú][›Y[ôHôYŸ^\»›[ô\]Z\ôHH][›Yò[YK€»ÿ›[Y[ù[ô»Hò\Ÿ\¬õõ›ö\Hÿÿ[õô\à
+ÃM
+KÇÇääîõ€›ÿ]\ŸHéà‹ô]öY]€Y[H⁄ÿõ€[›YHY[[‹ûH\»Z[à‹öY⁄[éàò]]»ò€»BùŸYZ€H]Y]€›[õ‹‹ŸH[][ô»]ääàH\›[ô»⁄›‹»H›€ô\àõ›H€Z[H[ôö]»‹òŒò][›HôYõ‹ôH^H\õ›ôK⁄X⁄XZŸ\»[à⁄ÿH[X[à[ùZ[Y[ùùYŸ[Y[ùõ€à^X›HH]öY[òŸHååçãLLLãåI‹»[ú›\‹ùY⁄X⁄»\Ÿ\Àà›‹ö[ô»]ö[ô\›[ô›Z\⁄XõHúõ€H[à[úô]öY]ŸY]]ÀY^òX›[€à]H]Y]ôK[]Yÿ]H]òÿ[8†%\⁄⁄[ô»H›€ô\à»[]HHY[[‹ûH^HYù\›\õ›ôYàõ€[›[€àõ›»ôX€‹ô¬ò‹öY⁄[éàò]]À\ô]öY]ŸYò⁄X⁄ÿ]Y]‹€›\òŸW‹][›X[ôXYH^€Y\»
+]ô\]Z\ô\¬òò]]»ò
+K€»õ»ô]»€€ô][€àÿ\»ôYYYàH€›\òŸH][›H\»Ÿ\€»‹€›\òŸ[Y[X\¬ù[ò⁄[ôŸYà\»Z\úõ‹ú»⁄]Y[[‹ûWÿ]Y]‹ŸY[ãöú€€ò[ôXYHŸ\»õ‹àôZôX›[€úŒà[Çõ›€ô\àX⁄\⁄[€à\»õ›ôKX\⁄ŸYÇÇääì‹\ò]‹àõ›NääàYà[ûH[ú›[òŸI‹»ô[ùòŸ]»€ôHŸà\ŸH»H€‹ôH€Y[€BôYõ›ôX€Ÿ€ö\ŸKHõY»ÿ\»”àôYõ‹ôH\»ô[X\ŸH[ô\»—ëàYù\à8†%⁄X⁄\»⁄]ùH‹\ò]‹à‹õ›KàH⁄^ú›ö\
+
+X[€õHõY‹»Z\‹ŸYŸôò[ô]ô\ûHÿ\ŸHò\öX[ù¬òTT”—P◊‘ëP–SZ\‹ŸYÿ\ŸHò\öX[ù»€õN»VSQSï◊—SêPìQ	‹»õÿÿXù[\ûHÿ\»[ôXYBò€€\]Kà€‹ù⁄X⁄⁄[ô»HŸ]ô[àô[ùòö[\»ôYõ‹ôH\ﬁZ[ôŒÇÇòò\⁄à»‹›àî»
+\»õ€›
+Bô‹ô\[ëH	◊äQSS‘ñW–UUﬂQSS‘ñW“Q—_QSS‘ñW–UQUQSS‘ñW‘—SPSïP◊”Uë_ì’W‘ëP’TîíSëﬂì’W—‘ì’SëQTT”—P◊‘ëP–S
+OI»€‹›[Y‹ò[KXõ›À ãÀô[ùÇòÇìõ»›]]YX[ú»õ›[ô»⁄[ôŸ\»õ‹àHõY]ÇÇçô]»\›À[ö]ö[ô»ô]öY]€Y[Wÿ€Y]Ÿ[àò]\à[àôXY[ô»]àõ€[›[€Çõ‹öY⁄[ã]Y]Z[ô[Y⁄Xö[]H\‹Ÿ\ùY[ô»[ôõ›Y⁄‹\úŸWÿ]Y]Ÿö[ô[ô‹ÿõõ€ãX]]»‹öY⁄[à[ù›X⁄Y[ôZ\‹⁄[ô»Y]Kà⁄^õY‹»Ÿ\ôH[€»YY¬ò\›]ô\ûPõ€€X[ëõY—Yò][ëQêUSÿ
+XõHõ›‹Àõ›\› Kà›[àKççÀÇÇò\›]ô\ûP€€[X[ô[ô\êX›X[Tù[úÿÿ]Y⁄Hö\ú›òYùŸà‹ŸH\›Œà^Bú›XòôY€ÿY€Y[[‹ûW‹ô]öY]ÿ‹ÿ]ôW€Y[[‹ûW‹ô]öY]ÿ[ô€Y[[‹ûW€Ÿÿ⁄X⁄ò[YYùôYH[\ú»⁄]›]]ô\à^\ò⁄\⁄[ô»[Kà^Hõ›»ù[àõ‹àôX[YÿZ[ú›Hö^\ôBö[ú›[òŸI‹»›€àö[\À[ô€õHÿ\[ô€Y[[‹ûX\»›XòôY8†%]ôXX⁄\¬òŸ[XôY€Y[[‹ûW€[ôX⁄X⁄XZŸ\»Hõÿ⁄⁄[ô»ÿ[ÇÇà»»ååçãLLLãåH8†%H‹õ›[ô[ô»›X\ô⁄X⁄ŸYH][›Hÿ\»ôX[ô]ô\à]H€Z[Hõ€›ŸYúõ€H]Çääîõ€›ÿ]\ŸNà‹][›WŸ‹õ›[ôY[ú›Ÿ\ú»HYôô\ô[ù]Y\›[€à[àH€ôHH›X\ô\¬ùù\›Y»[ú›Ÿ\ãääà]\»H›Xú›ö[ô»\›8†%\»\»][›HHôX[ô\òò][H[ô»Bù\Ÿ\àÿZY»8†%[ôõ›^òX›[€àÿ[\ú»
+Y[[‹ûW›[ô‹õ›[ôYõ›W›[ô‹õ›[ôY
+HôX]Bú\‹»\»ù\»Y[[‹ûH\»‹õ›[ôYãà‹ŸH\ôH€»Yôô\ô[ùõ‹\ùY\»[ô€õHHö\ú›ùÿ\»]ô\à[ôõ‹òŸYàH\Ÿ\àÿ^\»
+àíHZY⁄ûH]ô]»ò[Y[àXŸH€€Y][YHäé»H[Ÿ[ú›‹ô\»
+àï\Ÿ\à›ô\»ò[Y[à[ôX]»]ŸYZ€Häà⁄]Y[[‹ûW‹][›XH
+àùûH]ô]»ò[Y[ÇúXŸHäãàH][›HT»Hô\òò][H›Xú›ö[ôÀ€»‹][›WŸ‹õ›[ôYô]\õú»ùYKòY[[‹ûW›[ô‹õ›[ôYô]ô\àö\ô\À[ôHòXúöXÿ]YôYô\ô[òŸH[ô»[àY[[‹öY\Àù⁄]òHôX[][›H]X⁄Y»]àõ›[ô»›€ú›ôX[Hÿ[à[]úõ€HHŸ[Yõ›[ôYY[[‹ûH8†%ò‹€›\òŸ[Y[X⁄›‹»HŸ[ùZ[ôH][›K[ôH€€ôöY[òŸHÿ]HŸY\»H€€ôöY[ù^òX›[€ãÇÇääëö^àHõ›\ùö[ô[ô»\H[àHŸYZ€H]Y]õ›H›öX›\à‹ö]K][YH›X\ôääàBòQSS‘ñW–UQU\‹»[ôXYHôXY»Y[[‹öY\Àù⁄]H⁄X\[Ÿ[€òŸHHŸYZÀŸôàBõY\‹ÿYŸH][ôõ›]\»õ‹‹ÿ[»õ›Y⁄‹ô]öY]€Y[X⁄\ôHH›€ô\à\õ›ô\»]ô\ûBõ]]][€ãà[ú›\‹ùYõ⁄[ú»€€ùòYX›[€ã‹›\\úŸYY‹›[H\ôKàXX⁄[ùûI‹»›‹ôYô‹õ›[ô[ô»][›H\»õ›»\‹ŸY»H]Y]õ€\[€ô‹⁄YHH€Z[H
+‹òŒò[ôJH8†%Bõ[Ÿ[Yõ»ÿ^H»ùYŸH[ùZ[Y[ùôYõ‹ôK⁄[òŸHH][›Hÿ\»ô]ô\à[àHõ€\]ò[à
+äñô\õ»ô]»Hÿ[ äà
+[ùò\öX[ùÃ Nàÿ[YHŸYZ€Hÿ[€ôŸ\àõ€\ÇÇääï⁄Hõ›Y⁄[àH‹ö]K][YH›X\ô[ú›XYääàôZôX›[ô»]^òX›[€àòY\»Bú⁄[[ùXòY[Y[[‹ûHõÿõ[Hõ‹àH⁄[[ù[‹›[Y[[‹ûHõÿõ[H⁄]õ»[X[à[àH€‹[ôò[à[ùZ[Y[ù⁄X⁄»[ú⁄YH‹][›WŸ‹õ›[ôY€›[]H[Ÿ[õ›[ô]ö\€àHô\Bú]õ‹à]ô\ûH^òX›[€ãà[ùò\öX[ùÃM…‹»ôYH^Y\ú»\ôH[ù›X⁄Y»\»\»Hõ›\ùòYù\àHòX›⁄]H›€ô\à[à]ûH€€ú›ùX›[€ãÇÇääïH[Y⁄Xö[]Hù[H\»‹öY⁄[àOHò]]»ò[ôö\»H€›\òŸHà€›[]ôHôY[àBù‹õ€ô»\›ääàôYH›\à‹öY⁄[ú»ÿ\úûHH€›\òŸX]]\›ô]ô\àôHùYŸYõ‹Çô[ùZ[Y[ùàŸY]Y[X
+X[ùX[YY]
+H
+äö[ö\ö]»H‹öY⁄[ò[][›H€ù»^H›€ô\Çô[Xô\ò][Hô]‹õ›Jäã[à]Y]Y\ôŸH›‹ô\»HõY\ôŸYàHàòòZ[ò]\à[Çò[û][ô»H\Ÿ\àÿZY[ô‹ô[Y[Xô\ò
+X[ùX[
+H\»õ»€›\òŸH][àõ‹‹⁄[ô»[][€ÇõŸàY[[‹öY\»H›€ô\à[ù\ôYûH[ô\»H€‹ú›òZ[\ôH\»ôX]\ôH€›[]ôK€»]ö\»€‹ŸY⁄XŸNàÿ]Y]‹€›\òŸW‹][›Xô]\õú»àòõ‹à‹ŸH‹öY⁄[úÀ⁄X⁄õ›Y\¬ùH‹òŒò[ôHúõ€HHõ€\[ôXZŸ\»‹\úŸWÿ]Y]Ÿö[ô[ô‹ÿõ‹[à[ú›\‹ùYôö[ô[ô»]ò[Y\»[H[û]ÿ^KÇÇääëòZ[X€‹ŸY€àHò[Y][€à⁄YKääà‹\úŸWÿ]Y]Ÿö[ô[ô‹ÿZŸ\»Y]X\»[Çõ‹[€ò[\ô›[Y[ù»€Z]Yõ»[ùûH\»H€õ›€à][›H[ô]ô\ûH[ú›\‹ùYôö[ô[ô»\»õ‹YàHÿ[\à]õ‹ôŸ]»»\‹»]‹Ÿ\»HôX]\ôHò]\à[Çúõ‹‹⁄[ô»[][€ú»]€›[õ›⁄X⁄Àà[ú›\‹ùY\»[€»[]K[€õH8†%Y\ô⁄[ô»[Çù[ú›\‹ùY€Z[H[ù»HôZY⁄õ›\ö[ô»[ùûHõ‹Yÿ]\»HòXúöXÿ][€à[ú›XYŸÇúô[[›ö[ô»]8†%[ôHô]öY]»][H\»Xô[YUQU[]H
+[ú›\‹ùY
+Nò€»H›€ô\Çòÿ[à[ù\»›[H]Z[àúõ€Hù\»€Z[H[›\à›€à€‹ô»»õ››\‹ùãÇÇääòQSS‘ñW–UQU’Sî’T‘ïQ
+äà
+Yò][”ã[ùò\öX[ùÃMäNàõ‹»H\Húõ€HBúõ€\Sëúõ€Hò[Y][€ã€»HòYŸYZ»€‹›»õ»ôY\ﬁKÇÇääêÿ]Y⁄ûHÿ€ŸK\ô]öY]ÿôYõ‹ôHY\ôŸNääàH›‹ôY][›Hÿ[à€€ùZ[àô]€[ô\»8†%ï[Y‹ò[HY\‹ÿYŸ\»À[ô‹][›WŸ‹õ›[ôYõ‹õX[^ô\»ôYõ‹ôH€€\\ö[ôÀ€»H][K[[ôBú][›H\‹Ÿ\»H‹ö]K][YH›X\ô[ô\»›‹ôYô\òò][Kàô[ô\ôY[ù»H]Y]õ€\ö][Z]YHò\ôH[õù[Xô\ôY[ôH[ú⁄YHHù[Xô\ôY\›H[Ÿ[ôXY»]»KXò\ŸYò[ô\ÿ[ôXŸ\»›]Ÿãàÿ]Y]‹€›\òŸW‹][›Xõ›»€€\Ÿ\»⁄]\‹XŸKHÿ^Bòÿ]Y]‹Z\ó⁄Ÿ^X[ôXYHYÇÇåNô]»\›Œàÿ]Y]‹€›\òŸW‹][›X
+[ò€Y[ô»H][K[[ôHÿ\ŸJKHõ€\^[ÿY	‹¬ò‹òŒò[ô\»[ô[à\‹Ÿ\ù[€à]]ô\ûHô[ô\ôY[ôH\»ù[Xô\ôY‹àH‹òŒò[ôKBúò[Y[àÿ\ŸH[ô»[ô]ô\ûH›€ô\ãY[ù\ôY‹öY⁄[ãH⁄[›⁄]⁄HZ^Yò]⁄⁄\ôBõ€ôH[ô[Y⁄XõHö[ô[ô»]\›õ›õ‹H[Y⁄XõH€ôK[ô€ôH[õö[ô»‹][›WŸ‹õ›[ôY	‹¬ôÿ›[Y[ùY[Z]€»Hÿ\\»õ›]\àZ\›ZŸ[àõ‹àHùY»[à]à›[àKçåÀÇÇëö]ôH›X\ô»úôXZÀ]\›YëQ8°§ë‘ëQSàöXHò€]YK›€€ÀÿúôXZÀ]\›ú⁄àH‹öY⁄[Çô[Y⁄Xö[]Hù[KH\úŸ\â‹»[Y⁄Xö[]H⁄X⁄À[]K[€õKH⁄[›⁄]⁄[ôBúõ€\	‹»‹òŒò[ôKÇÇà»»ååçãLLLåLà8†%HŸ]ô[ãZ›\à€\àöY⁄ÿ\»ö[Y\»Õç»€ŸH‹ò\⁄\¬Çääîõ€›ÿ]\ŸNà€€ôõX›[ôõ‹òöY[ò\ôH[Y‹ò[Q\úõ‹òù]õ›ô]€‹ö—\úõ‹òääÇò€óŸ\úõ‹ò\›»òYô\]Y\›[à
+ô]€‹ö—\úõ‹ã[YY›]
+X[àôX]»]ô\û][ô¬ô[ŸH\»[à[ö[ôY‹ò\⁄àô\öYöYYYÿZ[ú›àåKåLKåNàŸ]ô[à\úõ‹à€\‹Ÿ\»ò[ùõ›Y⁄»]ÿ]⁄X[[ôH€»€€[[€à€ô\»\ôHõ›‹ò\⁄\»][8†%ääò€€ôõX›
+äà\»€»õÿŸ\‹Ÿ\»€[ô»€ôH⁄Ÿ[à
+[à‹\ò][€ú»õÿõ[NàH›ò^H€\ãòH[ãYö[ö\⁄YZY‹ò][€ãH›\\ùö\€‹à]ô\‹]€ôY
+H[ô
+äòõ‹òöY[ò
+äà\»H\Ÿ\Çòõÿ⁄⁄[ô»Hõ›‹àô[[›ö[ô»]úõ€HH‹õ›\
+õ›Hò][»õ»€ŸH⁄[ôŸHÿ[àô]ô[ù]
+KÇÇï\»\»Hÿ[YHYôX›
+äùååçãLÀLçKçJäàö^Y€ôH^Y\à›ô\ã⁄\ôHòYô\]Y\›ÿ\¬òXú€‹òôY[ù»ô]€‹öÿ[ô[à][ùûI‹»€‹ôÀ
+àúôXY»\»[XöY[ù€ôHõZ⁄[ô\‹»[ôôŸ]»Y€õ‹ôYàäÇÇääïH€‹›\»€‹úŸH[àH‹õ€ô»Xô[8†%]\›õﬁ\»]öY[òŸKääà[ùô\›Yÿ][ô»ù[\…‹¬ò[ö[ôY€›[ù\àõŸXŸYHù[X›\ôHúõ€H\à\úõ‹úÀõŸÿÇÇü⁄]HôX€‹ôÿZY⁄]HŸ»⁄›‹»üKK_KK_ü‹\ò][€ò[ŸŒà
+àê€€ôõX›õ‹àåMHZ[àäà
+äåLNå8°§àMŒçMà€àåçãLÀLNKç»›\ú äàü›]Köú€€òô]Z[ôYå€\›MéåéHö\ú››[ö[ôYX]
+äåMéåå
+äãåÃ‹»\\ùü8†%
+äçÕç äà[Y‹ò[Kô\úõ‹ãê€€ôõX›ÿÿ›\úô[òŸ\»ÇïHåY[ùûHÿ\Ÿ\H\›»Z[ù]\»ŸàHŸ]ô[ãZ›\à[ò⁄Y[ùà
+äüçÕ	HŸà]ÿ\¬ô]öX›Y[ò€Y[ô»H›\ù
+äãàôXÿ]\ŸH€€ôõX›⁄\ôYH[ö[ôYÿ]Y€‹ûK[ûBôŸ[ùZ[ôH‹ò\⁄€àù[\»]ŸYZ»ÿ\»\⁄Y›]€À[ô\»[úôX€›ô\òXõKà]\»Bò\ô›[Y[ùõ‹àH‹]8†%õ›Y[ô\‹ÀÇÇääëö^Nà€€ôõX›[ôõ‹òöY[òŸ]Z\à›€àúò[ò⁄\»[ô€›[ù\úÀääàH€\àöY⁄òÿ[àõ»€ôŸ\àYH[ú⁄YK‹à]öX›HôX[‹ò\⁄àH›\àö]ôH
+ô]ûPYù\òò⁄]ZY‹ò]Y[ùò[Y⁄Ÿ[ò[ô⁄[ùõ›õ›[ô\‹‹‹ùX‹û\[€ë\úõ‹ò
+H›^H[Çò[ö[ôYõ‹àõ›»8†%õ€ôH\»ôY[àÿúŸ\ùôY[ô[ùô[ù[ô»ÿ]Y€‹öY\»õ‹à[õÿúŸ\ùôYò€€ô][€ú»\»›»Hõ‹›\à€Ÿ\»›[KÇÇääëö^éà€Ÿ◊€‹\ò][€ò[õ›\»^X›Y€€ô][€ú»»€ôH[ôH\ÇòTîì‘ó”—◊’ì’W‘ÿ
+Yò][å
+Kÿ\úûZ[ô»H€›[ù]›[ô»õ‹ãääà‹ŸHÕç¬ùòXŸXòX⁄‹»Ÿ\ôHçå[ô\»8†%[‹›Ÿà\úõ‹úÀõŸÿ	‹»àPàõ›][€àùYŸ]‹[ù€à€ôBôòX›ô\X]Y⁄X⁄\»⁄HHŸ»€›ô\ö[ô»ôYHŸYZ‹»[€ôHYù\õõ€€ãà
+äîõ›][€àÿ\¬õô]ô\àHõÿõ[Jäà
+õ›][ô—ö[R[ô\äX^û]\œLóÃÃòX⁄›\€›[ùL X\»ôY[Çò€€ôöY›\ôY[[€ô N»Hõÿõ[H\»]H›‹õHö[»HùYŸ][ô]öX›»]ô\û][ô¬ô[ŸK^X›H\»Hÿ]\ò]Yÿ]Y€‹ûH]öX›»H€›[ù\ãàÿ[YHö^õ›[Y\ŒàŸY\Bò€›[ùõ‹Hô\]][€ãàTîì‘ó”—◊’ì’W‘œL\ÿXõ\»]
+[ùò\öX[ùÃMäKÇÇääëŸ[ùZ[ô[H[ö[ôY^Ÿ\[€ú»\ôHô]ô\àõ›Y
+äà8†%XX⁄X^HYôô\à[ôHòXŸXòX⁄¬ö\»H]öY[òŸKàH\›ö]ô\»åY[ùXÿ[ò[YQ\úõ‹ò»õ›Y⁄€óŸ\úõ‹ò[ôô\]Z\ô\¬ååù[òXŸXòX⁄‹ÀÇÇåL\›À[ò€Y[ô»€ôH]\‹Ÿ\ù»à›[ŸY\»€€ôõX››]⁄YHô]€‹ö—\úõ‹ò€¬òHù]\ôHô\\ô[ù[ô»òZ[»›YH[ú›XYŸàH€›[ù\à€⁄[ô»]ZY]àõ›\àúôXZÀ]\›»8†%ê€€ôõX›úò[ò⁄ô[[›ôY
+àôY
+Kõ‹òöY[àúò[ò⁄ô[[›ôY
+HôY
+K›\ô\‹ŸY€›[ùôõ‹Y
+HôY
+K⁄[›⁄]⁄Y€õ‹ôY
+HôY
+H8†%[öôX›[€àô\öYöYY€àXX⁄ÇÇääê[€»ÿ]Y⁄\ôNà]€å»[HWÿ€€\[X\‹ŸY€àH[Ÿ[H]€›[õ›[\‹ùääÇò—Tîì‘ó”—◊’ì’W‘ÿÿ\»‹ö][àXõ›ôHŸ[ùó⁄[ù	‹»Yö[ö][€é»€€\[[ô»⁄X⁄‹»ﬁ[ù^õõ›ò[YHô\€€][€à][Ÿ[H^XÀà€õHù[õö[ô»H›Z]Hõ›[ô]àH€€ú›[ùõ›»⁄]¬òô[›»H[ùà[\ú»⁄]H€€[Y[ùÿ^Z[ô»⁄KÇÇà»»ååçãLLLåLH8†%ë\úõ‹ú»
+›[
+NàMHàÿ\»õ›H›[õ›⁄[òŸHõ€›[ôõ›õ›[ôYÇääîõ€›ÿ]\ŸNà€ôHXô[XZ⁄[ô»ôYHò[ŸH€Z[\À[ôHù[Xô\àÿ][ôXY€õ‹ŸYõ‹àBô^HôXÿ]\ŸHŸà]ääàù[\»ô\‹ùY\úõ‹ú»
+›[
+NàMXô\⁄YH\[YNàåàXX⁄ú\ùŸà]\»Z\€XY[ôŒÇÇãH
+äìõ›⁄[òŸHõ€›ääàŸ\úõ‹óÿ€›[ùÿ\»\ú⁄\›Y[ù»›]Köú€€ò[ôô\›‹ôY€àÿYà
+õ›úNåÃÕÃÿ
+K€»Húô\⁄Hô\›\ùYõÿŸ\‹»Y⁄][X][Hô\‹ù»[ôôYÀàBàù^\‹⁄][€à⁄]Hå\[YHôXY»\»H‹ö\⁄\»[ô\€â›€ôKÇãH
+äìõ›H›[ääàÿ€›[ùŸ\úõ‹òŸY\»€õHH\›å[Y\›[\»\àÿ]Y€‹ûK[ôàÿYôKX\Y\»Hÿ[YHö[KàHÿ]\ò]Yÿ]Y€‹ûHXZŸ\»H›[HH
+äôõ€‹ääé»HôX[à€›[ù\»[ö€õ›ÿXõKÇãH
+äìõ›õ›[ôY[à[YKääà€õH\úõ‹ú◊€\›⁄›\òö[\ú»ûHYŸKà›[ÿ[\»[ä
+Xà›ô\à]ô\ûHô]Z[ôY[Y\›[\⁄X⁄ÿ[àôH\òö]ò\ö[H€ÇÇïH‹\ò][€ò[Ÿ»Yÿ\úöYYçMHôX[€›[ùY\úõ‹ú»€àù[\»ô[XZ[ú»[ö[ùô\›Yÿ]YÇú⁄[òŸHååçãLLLçH8†%H^H‹[ù[òXõH»X›€àHù[Xô\àõÿõŸH€›[[ù\úô]ÇÇääïH›€ô\â‹»›]Köú€€òúôXZŸ›€àŸ]Y]
+äã[ôH⁄\H\»⁄HHXô[X]\ôYÇòô]€‹öÿå
+åçãLÀLM»8°§àŸ^K
+äòÿ\Y
+ääH0≠»[ö[ôYå
+
+äò[[ú⁄YH»Z[ù]\ äÇõ€àåçãLÀLNKÿ\Y
+H0≠»Y[[‹ûW›[ô‹õ›[ôY0≠»\X0≠»ò[òX⁄ÿX\ùôX]òõ›W›[ô‹õ›[ôYHXX⁄à€»ŸàŸ]ô[àÿ]Y€‹öY\»\ôHÿ]\ò]Y€»MH\»Hõ€‹à›ô\à[Çù[ö€õ›€àôX[€›[ù[ôH€»öY»€ô\»\ôH[ù\ô[HYôô\ô[ùõÿõ[\»8†%€ôH€ô€⁄[ô»]úõ›Y⁄HŸ^K€ôHHù\ú›]›‹YôYHŸYZ‹»Y€ÀÇÇääëö^àH[ôHÿ^\»⁄]Hù[Xô\à\ÀääÇÇòë\úõ‹ú»
+ô]Z[ôY
+NàMH8†%X‹õ‹‹»»ÿ]Y€‹öY\À€\›çåY€À›\ùö]ô\»ô\›\ù¬à8†%à]Håÿÿ]Y€‹ûHÿ\
+ô]€‹öÀ[ö[ôY
+K€»HôX[€›[ù\»Q“TÇòÇòŸ\úõ‹ó‹ô][ù[€ä
+Xô]\õú»HòX›»\»]H
+ô]Z[ôYÿ]Y€‹öY\Àÿ]\ò]Y\›õ€\›YŸJH[ôŸ\úõ‹ó‹ô][ù[€ó‹›[[X\ûJ
+Xô[ô\ú»H]X[YöY\ãàH€›[ù]Ÿ[à›^\¬ö[à\úõ‹ú◊››[õ‹àHYZ[àTH8†%H›[[X\ûH[Xô\ò][Hÿ\úöY\»õ»€›[ùŸÇö]»›€ãôXÿ]\ŸH€»€‹Y\»öYùà‹Ÿ[óÿ]Y]	‹»Ÿ»[ôH⁄[ôŸ\»›[X¬òô]Z[ôYXõ‹àHÿ[YHôX\€€ãÇÇääïHåôXÿ[YH—Tîì‘ó“—QT‘Tó––U
+äã\ŸYûHHö[KHÿY][ôH›[[X\ûBù]\ÿ‹öXô\»]àHXô[ò[Z[ô»Hÿ\H€ŸHõ»€ôŸ\à[ôõ‹òŸ\»\»Hÿ[YHYôX›€ôBõ]ô[\[ôH\›[ú»]Hÿ\ò[YY\»Hÿ\\YYÇÇçà\›ÀùZ[€àù[\…‹»ôX[ÿ]Y€‹ûH⁄\Hò]\à[à[ùô[ùYù[Xô\úÀàôYBòúôXZÀ]\›ŒàH€Xô[ô\›‹ôY
+HôY
+Kÿ]\ò][€àõYŸ⁄[ô»ô[[›ôY€»MHôXY»\»Bù›[YÿZ[à
+àôY
+K[ôHÿ\\ô€ŸY»NNH€»]öYù»úõ€HHö[H
+HôY
+KÇääïH\ôôYù\ŸY»[öôX›€àHö\ú›][\
+äà8†%[ò⁄‹àX]⁄\»8†%[ôH[öôX›‹ÇúÿZY€»[ú›XYŸàô\‹ù[ô»H‹ôY[é»]›X\ô\»\»Ÿ\‹⁄[€â‹»›€à\‹€€àúõ€H€¬òúôXZÀ]\›»]⁄[[ùH[öôX›Yõ›[ôÀÇÇà»»ååçãLLLåL8†%HX\Z[ù[ù›ô\ãYö\ö[ô»ÿ]⁄Yõ›[ô»»ÿ]⁄⁄]Çääîõ€›ÿ]\ŸNàHYô\úôYõ€›À]\⁄‹ŸHöYŸŸ\à€€ô][€àÿ\»ô]ô\àÿúŸ\ùòXõKääàì–QPTåÀçH\ŸHà\öŸYH\ãX⁄]€€€›€à\»€€ô][€ò[8†%
+àöYàH€X\XŸ»[ôH]ô\Çú⁄›‹»›ô\ãYö\ö[ô»äà8†%[ôH€õH[ú›ù[Y[ùÿ\»ŸÀö[ôõ ñ€X\H[ù[ùx†)àäX⁄X⁄YX[ú¬ô‹ô\[ô»õ›\õò[›€àHîÀà[ù[ååçãLLLé]€‹›õ›[ôÀôXÿ]\ŸHPT“SïSïùÿ\»Ÿôà€à[Ÿ]ô[à€»H[ôHô]ô\à\X\ôYà]õ›»ö\ô\»€à]ô\ûH[ú›[òŸK[ôBò€€ô][€à]X⁄Y\»⁄]\à»ùZ[H€€€›€à\»›[[úôXYXõHúõ€Hÿ]Y]ÇÇîÿ[YH⁄\H\»ååçãLLLççKçà[ôé8†%H⁄Y€ò[]^\›»ù]ôXX⁄\»õ»›\ôòXŸKÇëõ›\àŸà‹ŸH[à€ôHŸYZ»\»H\ô›[Y[ùõ‹àùZ[[ô»H[ú›ù[Y[ùôYõ‹ôHHôX]\ôBù]ôYY»]ÇÇääëö^àÿ]Y]Ÿ]»HX\[ù[ùò[ôHÿ\úûZ[ô»Hò]Kõ›H€›[ùääÇò›òX⁄◊€X\⁄[ù[ù‹ò\»H]X›‹àÿ[[ú⁄YHH\‹]⁄€€ô][€à[ô€›[ù»]ô\ûBõY\‹ÿYŸH]ôXX⁄Y]€»Hô\‹ùôXY»ãŒHY\‹ÿYŸ\»
+åâJH8†%Hõ›]KHôX\òûXúò]\à[àHò\ôHö\ôH€›[ùà
+äïH[õ€Z[ò]‹à\»H⁄[ù
+äéàH€›[ù[€ôHÿ[õõ›ô\›[ô›Z\⁄Hù\ﬁH^Húõ€H[à›ô\ãYö\ö[ô»]X›‹ã⁄X⁄\»^X›HH]Y\›[€àBôYô\úôY€€€›€à\õú»€ãà€›[ù\ú»ô\Ÿ]Z[KôXÿ]\ŸHHYô][YKX›[][]]ôHò]Bò[ú›Ÿ\ú»õ›[ô»Xõ›]õ›»
+Œ‹õ€ô»›\úô[òﬁJKÇÇìõÀ\[àö\ô\»\ôH€›[ùYŸ\\ò][Kà‹ŸHõŸXŸHH⁄\ôKXK\[àùYŸHò]\à[àX\ô]K[ôHY⁄⁄\ôHŸà[H\»HYôô\ô[ùõÿõ[Hÿ[ù[ô»HYôô\ô[ùö^8†%]\»Bõ›]€€YH]õ€\YH›€ô\â‹»
+àù⁄]\»H⁄[ùŸà\»ôX]\ôO»äàXõ›]ù[\»€ÇååçãLLLÇÇääïH€€€›€à]Ÿ[à›^\»[òùZ[[Xô\ò][Kääàì–QPT€€ô][€ú»]€à]öY[òŸN¬ù\»\»H[ú›ù[Y[ù]õŸXŸ\»H]öY[òŸK[ôùZ[[ô»Hô[YYHö\ú›€›[ôBô›Y\‹⁄[ô»]Hò]HõÿõŸH\»ŸY[ãÇÇò€X\⁄[ù[ù›^\»\ôH8†%H‹ò\\à€›[ù»]Hÿ[⁄]Hò]\à[à[ú⁄YHBô]X›‹ã⁄‹ŸHôYÿ]]ô\»\ôH\›\[õôY[ô⁄‹ŸH\›»⁄›[õ›]ôH»ÿ\ôHXõ›]õ‹ô\ö[ôÀÇÇé\›ÀàôYHúôXZÀ]\›ŒàH‹ò\\à›ÿ[›⁄[ô»]»ô]\õàò[YH
+HôY8†%]⁄]»[ú⁄YBòHÿ[ù\À€»[\ö[ô»Hò[YH⁄[ôŸ\»⁄X⁄úò[ò⁄ù[ú KHZ[Hô\Ÿ]ô[[›ôY
+HôY
+Kò[ôH[õ€Z[ò]‹àõ‹Yúõ€HH›[[X\ûH
+àôY
+Kà
+äï€»Ÿà‹ŸHôYHòZ[Y»[öôX›õ€àHö\ú›][\
+äà8†%[ò⁄‹ú»X]⁄[ô»[Y\»[ô[Y\»8†%[ôHô\›[[ô»‹ôY[ú¬ùŸ\ôHôX€‹ôY\»õ›ö[ô»õ›[ô»[ù[H[ò⁄‹ú»Ÿ\ôHXYH[ö\]YH
+ÃMÀÃN
+KÇÇà»»ååçãLLLéH8†%]ô\ûH€ã€Ÿôà[ùàò\àXÿŸ\YHYôô\ô[ùŸ]Ÿà€‹ô¬ÇääïH€\‹À[à€ôHŸ[ù[òŸNà[à€ã€Ÿôà[ùàò\à\úŸYûHH[ô\õ€Y›ö[ô»€€\\ö\€€ãú€»⁄X⁄€‹ô»]XÿŸ\»\[ô»€à⁄X⁄Yò][]\[ú»»]ôKääàååçãLLLéôö^Y€»[ú›[òŸ\»Ÿà\»[ôò[YYHô\›\»Hõ€›À]\à\»\»Hõ€›À]\à[çL»ô[XZ[ö[ô»⁄]\À\»€»[‹ôHHö\ú››ŸY\Z\‹ŸYÇÇääïôYHY[€\ÀôYHõÿÿXù[\öY\À[⁄[[ùääÇÇüY[€H‹ö][à\»ò\üKK_KK_KK_üYò][[Ÿôà‹ÀôŸ][ùäåäKõ›Ÿ\ä
+H[à
+åHãùùYHãûY\»äX[€òôXY»
+äõŸôääàüYò][[€à‹ÀôŸ][ùäåHäKõ›Ÿ\ä
+Hõ›[à
+åãôò[ŸHãõõ»ãõŸôàäX[X^XôXôXY»
+äõ€ääàü›öX›‹ÀôŸ][ùäôò[ŸHäKõ›Ÿ\ä
+HOHùùYHòLXôXY»
+äõŸôääàÇò‘ì’T”S—O[€òÿ\»Ÿôãàì”’’T—SêPìQLXÿ\»Ÿôà8†%[ôô[ùãô^[\Xÿ›[Y[ùY]ò\»H]Z\ö»»€‹ö»\õ›[ô
+
+àõõ›Nà\»€ôH\»ùYXÿò[ŸXõ›KÃääHò]\à[à\¬ùHYôX›]ÿ\ÀàUíP—W‘ëSëTè[X^XôXÿ\»€ãà]ô\ûH€ôHŸà\ŸHòZ[»⁄[[ùNàBõ›€ô\à‹ö]\»H\ôôX›HôX\€€òXõHò[YKHõ›ôXY»H‹‹⁄]K[ôõ›[ô»ÿ^\»€ÀÇÇääïH›öX›Y[€Hÿ\»õ›[àH‹öY⁄[ò[€›[ùääàååçãLLLéÿZYüåå[ô\õ€Yò€‹Y\»é»HôX[ù[Xô\àÿ\»LÀ[ôH€»OHùùYHò⁄]\»
+SìëTó’ì“P—W—SêPìQòì”’’T—SêPìQ
+HX]⁄Yõ€ôHŸàH]\õú»]õŸXŸY]\›[X]Kà^H\ôHBú⁄\ú\›[ú›[òŸ\»8†%XÿŸ\[ô»^X›H€ôH€‹ô8†%[ô^HŸ\ôHõ›[ô€õHûH⁄Y[ö[ô»Bô‹ô\Yù\àHö\ú›\‹»ô\‹ùY€X[ãÇÇääëö^à[MHõ€€X[àõY‹»õ›]Hõ›Y⁄Ÿ[ùóÿõ€€ääà€ôHõÿÿXù[\ûBäK›ùYKﬁY\À€€ò8°•Ÿò[ŸK€õÀ€Ÿôòÿ\ŸKZ[úŸ[ú⁄]]ôK⁄]\‹XŸK]ö[[YY
+Kõ[ö»‹àXúŸ[ùùZŸ\»HYò][[û][ô»[ŸHÿ\õú»öXH–””ëíQ◊’–TìíSë‘ÿ[ôò[»òX⁄»»HYò][∏†%ô]ô\à⁄[[ùH»Ÿôà
+Y[€\»H[ô H‹à»€à
+Y[€HäKÇÇääìõ»Yò][[›ôYääàXX⁄ô\XŸ[Y[ù	‹»Yò][ÿ\»\ö]ôYúõ€HH€^ô\‹⁄[€àò]\Çù[àô]\Yàõ‹à[à
+ããäXHYò][\»]\ò[à[à\Oòõ‹àõ›[à
+ããäX]\¬ò]\ò[àõ›[à\Oòà]ô\ûHõY…‹»[\‹ù][YHò[YHÿ\»€ò\⁄›YôYõ‹ôHBúô]‹ö]H[ô€€\\ôYYù\à8†%L»õY‹Àô\õ»⁄[ôŸ\À[àà[‹ôHYY⁄]Hÿ[YHô\›[ÇÇääï⁄]Ÿ\»⁄[ôŸH\»⁄]H
+úŸ]
+àò[YHYX[ú äã[ô€õH[àH\ôX›[€ú»Xõ›ôNà€òõõ›»€‹ö‹»]ô\û]⁄\ôKXõ›»€‹ö‹»]ô\û]⁄\ôK[ôù[ö»õ›»ÿ\õú»[ú›XYŸàX⁄⁄[ô»Bú⁄YKàQRSó–TW—SêPìQ[€òõ›»[òXõ\»HYZ[àTH⁄\ôH]ô]ö[›\€HYõ›[ôÀù⁄X⁄\»€‹ù€õ›⁄[ô»ôYõ‹ôHŸ][ô»]ÇÇääë›X\ôÀõ›Ÿ[ô\ò[^ôYò]\à[à⁄[ù\‹Ÿ\ù[€úÀääà\›õ“[ôõ€Y[ùêõ€€X[úÿúôKY\ö]ô\»HŸôô[ô\à\›úõ€Hõ›úH€›\òŸHõ‹à[ôYH⁄\\»[ôòZ[»€à[ûHô]¬õ€ôK⁄]H€ÀY[ùûH[›€\›
+“Qó‘–QëUX”U”W’êUëS”S—X8†%ò[YYò[Y\Àõ›ú›⁄]⁄\ H]ÿ\úöY\»HôX\€€àXX⁄[ôHŸX€€ô\›]òZ[»⁄[à[à[›€\›[ùûBô€Ÿ\»›[Kà\›]ô\ûPõ€€X[ëõY—Yò][[ú»[MHYò][»[àHXõK\‹Ÿ\ù»HXõBò[ôH€›\òŸHY‹ôYH[à
+òõ›
+à\ôX›[€úÀ[ôŸ\\ò][H[ú»⁄X⁄Ÿ[ôHõY‹»\ôBõŸôà8†%€»HXõHôYŸ[ô\ò]Yúõ€Húõ⁄Ÿ[à€›\òŸH€›[›[òZ[ÇÇçàô]»\›»
+H›Z]H€Ÿ\»LåMH8°§àLååN»\›[ùêõ€€õÿÿXù[\ûX	‹»H⁄\Y[àé
+KÇïôYHúôXZÀ]\›ŒàH[ô\õ€YY[€HôKZ[öôX›Y
+àôY
+K€ôHYò][õ\Y
+HôY
+Kò[ôH\]X[]H⁄\H‹X⁄YöXÿ[H
+HôY
+KXX⁄ô\›‹ôY[ôôK\ù[à‹ôY[ãÇÇà»»ååçãLLLé8†%PT“SïSïÿ\»Ÿôà€à[Ÿ]ô[àõ›»[ôõ»›]\»›\ôòXŸH€›[ÿ^H€¬Çääîõ€›ÿ]\ŸNàH[›õY»]õÿõŸH]ô\à[ã\[›Y[ôõ›[ô»]€›[ô\‹ù]ääÇòPT“SïSï⁄\YYò][[Ÿôà
+‹ÀôŸ][ùäìPT“SïSïãåäX
+H\»H\ãZ[ú›[òŸH[›ÇïŸYZ‹»]\àHõY]]⁄YHô[ùò›ŸY\õ›[ô][úŸ]€à
+äò[Ÿ]ô[ääà8†%[ò€Y[ô»õ‹òKô[Z[H[ôö^XKHôYH]ÿ\»[›Y€ãà]ô\ûHõ›\ôYõ‹ôH[\õ›ö\ŸY\›[òŸ\»[ôàö\»\ôHHôX\òûHà[ú›Ÿ\ú»]YHôX[€U€HTHõ‹ãà[Ÿ]ô[à]ôHYŸ^\»⁄[òŸBååçãLLL€»‹õ›]X€ôX\òûX[ô‹XŸX€‹öŸYH⁄€H[YN»€õHBò€€ùô\úÿ][€ò[[àÿ\»\öÀÇÇääí]›^YY\ö»ôXÿ]\ŸH]ÿ\»[úôXYXõKääàPT“SïSï\X\ôY[à^X›H€»XŸ\¬ö[àõ›úNà]»Yö[ö][€à[ô]»€ôH\ŸH⁄]Kà]ÿ\»õ›[à—ëPUTëTÿ€»ŸôX]\ô\ÿò€›[õ›\›][ôÿ]Y]€›[õ››[[X\ö^ôH]»]ÿ\»õ›[àHOOH’TïTêUQUOOX[ôHZ]\ãàH]Y]	‹»X\ŒòöY[ô\‹ù»›€]€W€[ŸJ
+Xÿ]Y€Çò”U”W—SêPìQ8†%HŸ^H[ôHò]ô[[ŸKõ›\»õYÀàH€õHÿ^H»X\õàBú›]HŸàHôX]\ôHÿ\»»ôXYŸ]ô[àô[ùòö[\»ûH[ô⁄X⁄\»⁄]ö[ò[Hõ›[ôö]à
+äï\ô[YH\»ŸYZ»Hõ€›ÿ]\ŸHÿ\»õõÿõŸH€›[ŸYHH[ú]ääà
+ååçãLLLçBö[ô\ùôX]\ô\ÀçàHÿ\õZ[à[€ö]‹ú KÇÇääëö^ôYH\ùÀääÇÇåKà
+äòPT“SïSïYò][»”ääãX]⁄[ô»Hô]ÀYôX]\ôH€XﬁH
+›€ô\àåçãLÀLNàõ›X€ŸKZ[ùò\öX[ùÿÃMäKà[úŸ]HX›]ôKHŸôãà›[ÿ]Y€à”U”W—SêPìQà€»HŸ^[\‹»[ú›[òŸH\»[ù›X⁄Yàõ»ô[ùòY]\»ôYYY€à[ûH[ú›[òŸKÇåãà
+äòX\[ù[ù[ôõ€Ÿ›YŸŸ\›[€úÿ\ôH—ëPUTëTÿ[ùöY\ äã€»õ›õ›»\X\à[Çàÿ]Y]	‹»›[[X\ûH[ôŸôX]\ô\ÿ[ôõ›\ôHõ\XõH]ù[ù[YH⁄]àŸôX]\ô\»ò[YOà€üŸôò8†%HõÀ\ô\›\ù⁄[›⁄]⁄ÃMàô\]Z\ô\Àà^H\ôHŸ\\ò]Bà[ùöY\»ò]\à[àõ€Y[ù»X\ÿôXÿ]\ŸH^H\ôHŸ\\ò]H›⁄]⁄\»]òZ[àYôô\ô[ùNàX\ÿ\»HŸ^H[ôÿ]\»HôYH€€[X[ôÀ\ŸH€»ÿ]H⁄]\à[Çà‹ô[ò\ûHY\‹ÿYŸH]ô\àŸ]»ôX[X\]H]X⁄Yàÿ\Xö[]Hõ‹àõ›\»HŸ^K€»BàŸ^[\‹»[ú›[òŸHôXY»ãÿX
+Y]Hô[ùò
+Hò]\à[àŸôò
+õ\H›⁄]⁄
+H8†%Bà\›[ò›[€àŸôX]\ôW€Ÿôó‹ôX\€€ò^\›»»ŸY\ÇåÀà
+äòŸ[ùóÿõ€€
+ò[YKYò][
+X
+äãôXÿ]\ŸHH€»õY‹»\ÿY‹ôYYXõ›]⁄]õ€ààYX[úÀÇàõ›úHY‹õ›€à€»[ô\õ€Yõ€€X[àY[€\ŒàYò][[ŸôàõY‹»ôXYà[à
+åHãùùYHãûY\»äX[ôYò][[€àõY‹»ôXYõ›[à
+åãôò[ŸHãõõ»ãõŸôàäXÇà
+äï^H»õ›XÿŸ\Hÿ[YH€‹ôÀääàì”—‘’Q——T’S”îœ[€ò]ò[X]\»êS—H[ô\àBàö\ú›8†%õ€àà\»⁄[\Hõ›[à]»\›8†%€»H[‹›ò]\ò[‹‹⁄XõHò[YH⁄[[ùBà\ÿXõ\»HôX]\ôKàHŸX€€ôôXY»[úôX€Ÿ€ö^ôYù[ö»\»”ãà€ôH[\ã€ôBàõÿÿXù[\ûH
+K›ùYKﬁY\À€€ò[ôŸò[ŸK€õÀ€Ÿôò
+K[ô[û][ô»[ŸHÿ\õú»[ôò[¬àòX⁄»»HYò][Hÿ^HŸ[ùó⁄[ùŸ\»
+ÃMJKÇÇòì”—‘’Q——T’S”îÿ[Xô\ò][H›^\»Yò][[Ÿôéà]]X⁄\»]]‹ö]]]ôH‹[ãÿ€‹ŸYò€Z[\»»ò[YYô\›]\ò[ùÀ€»]ô[XZ[ú»H\ãX⁄\òX›\àX⁄\⁄[€ãà€õH]»\ú⁄[ô¬ò⁄[ôŸYÇÇääîÿ€‹Hõ›Nääà€õH\ŸH€»õY‹»õ›]Hõ›Y⁄Ÿ[ùóÿõ€€àXõ›]Ÿ[ùH›\Çö[ô\õ€Y€‹Y\»ô[XZ[à[ô\ôHHõ€›À]\õ›\»Yôà8†%ì”—‘’Q——T’S”îœ[€òúôXY[ô»\»Ÿôà\»H]ôHò\⁄\ô]ô\àHYò][[ŸôàõY»^\›ÀÇÇåMà\›Ààõ›\àúôXZÀ]\›ÀXX⁄[õö[ô»HYôô\ô[ù€Z[NàHYò][ô]ô\ùY»ŸôÇäôY
+KH—ëPUTëTÿ[ùûHô[[›ôY
+ôY
+Kõ€àòõ‹Yúõ€HHùYHõÿÿXù[\ûBäàôY
+K[ôù[ö»ò[[ô»òX⁄»»Ÿôà[ú›XYŸàHYò][
+ôY
+KÇÇà»»ååçãLLLç»8†%€ôHŸX]\àéHôXÿ[YHH›€‹]›\›Z[ôYHéBÇääîõ€›ÿ]\ŸNà[ú›\ôW›ŸX]\òôX€‹ôY›XÿŸ\‹Ÿ\»[ôõ›[ô»[ŸKääà]»›X\ô\¬òYà›ŸX]\óÿÿX⁄V»ù^óH[ôõ›»H›ŸX]\óÿÿX⁄V»ù»óH—PUTó’[ôHòZ[Yô]⁄ù\]YôZ]\àöY[8†%€»Yù\à[ûHòZ[\ôHH›X\ô›^YYò[ŸH[ô
+äô]ô\ûH›XúŸ\]Y[ùòÿ[ô]öYY[[YYX][Jäãà\ôH\ôHL»[ú›\ôW›ŸX]\ä
+Xÿ[⁄]\Œà]ô\ûHY\‹ÿYŸK]ô\ûBúŸ[öYK]ô\ûHÿ⁄Y[YõÿãàH⁄[ô€HéHúõ€H‹[ã[Y][»\ôYõ‹ôHõŸXŸYHù\ú›ŸÇôúô\⁄ô\]Y\›À⁄X⁄Ÿ\HéH[]ôKÇÇääê[Ÿ]ô[à[ú›[òŸ\»⁄\ôHHî…‹»T
+äã€»€ôHõ››X⁄»[à]›]Hÿ[àò]K[[Z]ùŸX]\àõ‹àH⁄€HõY]àÿúŸ\ùôY€àù[\»]Méå€àåçãLLLZ[ù]\»Yù\à\Çò€€‹ô[ò]\»Ÿ\ôH€‹úôX›Y8†%HŸ»[ôHÿ\úöY\»]]YOMçÕLNIõ€ô⁄]YOKLLåãçŒÿù⁄X⁄\»›»ŸH€õ›»Hô[ùòö^Y[ôYÇÇääëö^àòZ[›ÿ[ôH—PUTó‘ëUñW‘ÿ
+Ã HòX⁄€ŸôãääàHòZ[\ôH\»õ›»ô[Y[Xô\ôY€¬ö]€‹›»€ôH][\\àö]ôHZ[ù]\»[ú›XYŸà€ôH\àÿ[à›XÿŸ\‹»€X\ú»HX\öŸ\ãÇë[Xô\ò][Hò\à⁄‹ù\à[àHZ›XÿŸ\‹»8†%Hò[ú⁄Y[ùõ\⁄›[€‹›Z[ù]\»ŸÇú›[HŸX]\ãõ›[à›\à8†%[ô
+äô€€ŸÿX⁄YŸX]\à\»ô]ô\à\ÿÿ\ôY€àHòZ[\ôJäéàBú›[HôXY[ô»ôX]»õ€ôK[ôH\›[ú»]ÇÇïH€ôZ]ö[›\à\»H⁄\HHô]ûH€‹ZŸ\»⁄[à€õHH\H]\»ôX€‹ôYàBú›XÿŸ\‹»›X\ô€›[ô]ô\à»\»õÿé»]\›»H€»öY[»HòZ[\ôHŸ\»õ››X⁄ÇÇçà\›ÀHòX⁄€ŸôàúôXZÀ]\›YëQ8†%⁄]›]]ö]ôHòZ[[ô»ÿ[»XZŸHö]ôHô\]Y\›¬ö[ú›XYŸà€ôKÇÇà»»ååçãLLLçà8†%ŸXY»ô\‹ùYôYHX[[€ö]‹ú»ù[õö[ô»€àHõ›⁄]õ»ÿ\õZ[ÇÇääîõ€›ÿ]\ŸNàXY◊ÿ€YôXY’ëT‘◊–STïÿÿíó–STïÿÿêó–STïÿò\ôK[ô‹ŸH\ôBúôYô\ô[òŸ\»]€õHYX[à[û][ô»⁄[HH\ô[ùôYY\»]ôKääà€àù[\»8†%õ»ÿ\õZ[Çò‹ôY[ùX[»8†%ŸXYÿö[ùY8†%ÿ\õZ[à8ß!H›ô\‹»8ß!Hô\›[ôÀRà8ß!HõŸKXò]\ûXÇùôYH[€ö]‹ú»ô\‹ùY\»ù[õö[ô»]ÿ[õõ›ö\ôKà›€ô\ã\‹›YÇÇòÿ[\ù◊€€äõY X^\›»õ‹àôX⁄\Ÿ[H\»[ôô]\õú»–TìRSó—SêPìQ[ôõYÿà]»›€Çôÿ‹›ö[ô»ÿ^\»
+àë]ô\ûH’ëT‘◊–STï»»êó–STï»»íó–STï»ôXY€Ÿ\»õ›Y⁄\»8†%Bòò\ôHôXY\»HùY»]^\›»»ô]ô[ùàäà]ô\ûHôXYY^Ÿ\\»€ôKÇÇääê⁄X⁄ŸYõ‹àH€\‹À[ô\ôH\€â›€ôKääàH›\àò\ôHôXY»
+XZ[ä
+X	‹»õÿÇúÿ⁄Y[[ô H⁄][ú⁄YHYà–TìRSó—SPRS[ô–TìRSó‘T‘’”‘ë[ô—ÿ\õZ[à\»õ›õ€ôNò€¬ù^H\ôH[ôXYHÿ]Y[ô€‹úôX›à€ôH⁄]Kö^Y»õ›[ô»[ŸH»⁄\ŸKÇÇë\‹^H€õH8†%õ»[€ö]‹àôZ]ö[›\à⁄[ôŸ\ÀôXÿ]\ŸHõ€ôHŸà[H€›[ù[à[û]ÿ^Kà]\¬ùH⁄[ùàHô\‹ùÿ\»‹õ€ôÀõ›Hﬁ\›[KàôYH\›ÀúôXZÀ]\›YëQÇÇà»»ååçãLLLçH8†%ôYHôX]\ô\»Ÿ\ôH[ô\ù€à[Ÿ]ô[àõ›»[ôHÿ\õö[ô»ÿ\»[àZ[à⁄Y⁄Çääîõ€›ÿ]\ŸNàõ›[ô»ôX€€ò⁄[\»H⁄\ôYô[ùà⁄]ô\]Z\ô[Y[ùÀù[ôHÿ\õö[ô¬ù]ÿZY€»ÿ\»ù\öYY[ô\àõ›][ôHŸ»õ⁄\ŸKääàù[\OèLKåçãÀå\»H\ôô\]Z\ô[Y[ù∏†%]»›€à€€[Y[ù[àô\]Z\ô[Y[ùÀùÿ[»]òHôX[\[ô[òﬁKõ›ò€€[Y[ùY[›][‹[€ò[à8†%[ô]ÿ\»ô]ô\à[ú›[Y[ù»€‹›[Y‹ò[KXõ›À›ô[ùãÿàBùô[ùà\»⁄\ôY€»\»ÿ\»õY]]⁄YNÇÇüôX]\ôH›]HüKK_KK_üTT”—P◊‘ëP–S[ô\ù8†%]ô\ûH]›X\ô»€à€ú\»õ€ôXü”ïT—VW—SêPìQ[ô\ù8†%ÿ]Y€àTT”—P◊‘ëP–Süì“P—W’”ëW—SêPìQ[ô\ù8†%X€›\›X◊ŸX\úÿ[\‹ùòZ[»⁄]›]ù[\HÇê[ôYHYò][
+äõ€ääã[ô[ôYH]ôHôY[àXY⁄[òŸHååçãLLç[ôçà⁄\Yù[KàHõ›ŸŸŸYTT”—P◊‘ëP–S\»Ÿ]ù]ù[\H\»Z\‹⁄[ôÿ€à
+äô]ô\ûH⁄[ô€Bú›\ù\
+äã⁄]H^X›[ú›[€€[X[ô[àHY\‹ÿYŸKàõÿõŸHÿ]»]ÇÇääï€»[ô\[ô[ùö^\ÀôXÿ]\ŸH\ôHŸ\ôH€»[ô\[ô[ùòZ[\ô\ÀääÇÇääåKàúÀ\ﬁ[òÀú⁄õ›»ôX€€ò⁄[\»Hô[ùääà
+\[ú›[\H\àô\]Z\ô[Y[ùÀù
+HôYõ‹ôBùH€€\[H⁄X⁄ÀàHÿ‹ö\Y€õH]ô\à
+òõ‹úõ›ŸY
+àHô[ùâ‹»]€à»€€\[KX⁄X⁄Œ¬õõ›[ô»]ô\à⁄X⁄ŸY]Hô[ùà€›[ÿ]\ŸûHH€ŸHôZ[ô»\ﬁYY€»Hô[X\ŸBòY[ô»H\[ô[òﬁH⁄\Yúõ⁄Ÿ[à⁄]õ»⁄Y€ò[]\ﬁH[YKà[Xô\ò][H
+äõõ›ôò][
+äà8†%]ô\ûHù[\H[\‹ù⁄]H\»‹ò\Y[ôY‹òY\»€ôHôX]\ôK€»H\òZ[\ôH]\›õõ›õÿ⁄»[à\ôŸ[ùõ›úXö^8†%ù]]ö[ù»Hõ›\ã[[ôHò[õô\à]ÿ[õõ›ôHZ\‹ŸYù⁄\ôHH⁄[[ùùYXÿ\»›»\»\[ôYÇÇääåãàŸ\úõ‹úÿY\»õ›][ôHõ›XŸ\ÀääàH’TïTUQUò[õô\à[ô‹òXŸYù[›‹»Ÿ»]ï–TìíSë»€»^HôXX⁄\úõ‹úÀõŸÿ⁄X⁄\»öY⁄àHò[õô\à\»›»[›HX\õà⁄X⁄ùô\ú⁄[€àÿ\»ù[õö[ô»⁄[à€€Y][ô»úõ⁄ŸK[ô›[W›[ô^X›Y‹ô\›\ùÿŸ^\»€àBô‹òXŸYù[\›‹[ôH»[H\ﬁHúõ€HH‹ò\⁄àù]]õ›\à[ô\»\àô\›\ù[àHKçNHPÇôö[K^Hù\öYYHù[\Hÿ\õö[ô»€€\][Kà^H\ôHõ›»ôYö^Y€õ›XŸWX[ôôö[\ôYúõ€HŸ\úõ‹úÿûHYò][
+äù⁄]HY[à€›[ù⁄›€ääà8†%Làõ›][ôHõ›XŸJ BöY[à
+Ÿ\úõ‹ú»[
+XàY[ô»⁄]›]ÿ^Z[ô»€»€›[ù\›ôHH]ZY]\àô\ú⁄[€àŸàHÿ[YBòùYÀÇÇëö[\ö[ô»\[ú»[àZ[Ÿ\úõ‹ó€[ô\ÿõ›[àHö[K€»ÿ€›[ù‹ôXŸ[ù‹ô\›\ùÿŸY\¬úôXY[ô»H€€\]HŸÀàHôYö^€Ÿ\»€àH
+õY\‹ÿYŸJãYù\àH[Y\›[\[ô]ô[ú€»[ôVŒåNWX]H\ú⁄[ô»[ôH›Xú›ö[ô»X]⁄\»[à›[W›[ô^X›Y‹ô\›\ùÿõ›ú›[€‹ö»8†%[à[ùö\⁄XõH€›\[ô»]€›[]ôHòZ[Y\»H⁄[[ùHZ\ÿ€›[ùYô\›\ùú›‹õK€»ôYH\›»[à]ÇÇääê€‹úôX›Yúõ€H^H›€àô\‹ù[à›\àX\õY\éääàH€H›€ô\à]\úõ‹ú»
+›[
+NàMXùÿ\»[ôõ]YûHõ›][ôH–TìíSë»[ô\Àà]\»õ›à\úõ‹úÀõŸÿ[ôŸ\úõ‹óÿ€›[ùÿ\ôBô[ù\ô[HŸ\\ò]HYX⁄[ö\€\»8†%H€›[ù€€Y\»€õHúõ€H^X⁄]ÿ€›[ùŸ\úõ‹ä
+Xÿ[»[ôùH]Y]ò[õô\àô]ô\à›X⁄Y]àMH\»MHôX[€›[ùY\úõ‹úÀ[ô\€Z\‹⁄[ô»]ÿ\¬ù‹õ€ôÀÇÇà»»ååçãLLLç8†%ù[\»\»ôY[àŸ][ô»ŸX]I‹»ŸX]\à⁄[òŸHH^H⁄Hÿ\»‹ôX]YÇääîõ€›ÿ]\ŸNà—PUTó”––US”ò\»HXô[[ô—PUTó”Uÿ—PUTó””ò\ôHH]Kù^HYò][[ô\[ô[ùK[ôõ›[ô»]ô\à€€\\ôY[Kääàù[\…‹»ô[ùòŸ]¬ò—PUTó”––US”èPô[[ô⁄[X[ôõ»€€‹ô[ò]\À€»^Hô[òX⁄»»ÀçååãLLåãåÃÃåX∏†%›€ù›€àŸX]K
+äé»Z[\»€›]
+äãà]ô\ûHŸX]\àôXY[ô»⁄H\»]ô\àô]⁄Yÿ\¬îŸX]I‹À⁄X⁄[€»ö]ô\»\àŸ[öYH€›[ôÀHö]\»ì’òZ[ö[ô»àôYÿ]]ôK[ôBùÿ\õKÿ€€ÿŸ[ôHö[\ö[ôÀÇÇääí›»]ö[ò[H›\ôòXŸY⁄X⁄\»H\ù€‹ùŸY\[ôÀääàõ›úõ€HŸX]\à€⁄⁄[ô¬ù‹õ€ô»8†%HòZ[ûHYŸ]€›[ô⁄]H›[ô[ô»[àõ‹à[õ›\àòZ[ûHYŸ]€›[ô⁄]H\¬ö[ùö\⁄XõKà]›\ôòXŸYôXÿ]\ŸHååçãLLLå»]
+äô\›[òŸ\ äà€à‹XŸXô\›[ŒàBöXY\àÿZYõôX\àô[[ô⁄[Hà[ô]ô\ûHô\›[ÿ\»∏†$ŒZ[\»úõ€Hù\öY[ãàHXô[[ôBô]HY\ÿY‹ôYYõ‹àŸYZ‹»[ôH€õH[ô»]]ô\àÿ]Y⁄]ÿ\»[à[úô[]YôX]\ôBúö[ù[ô»Hù[Xô\à]XYHH[ò⁄‹àö\⁄XõKÇÇääëö^8†%XZŸHH\ÿY‹ôY[Y[ù[\‹‹⁄XõH»Z\‹À⁄XŸH›ô\éääÇÇãH›ŸX]\óÿ€€ôöY◊›ÿ\õö[ôÿö\ô\»⁄[à—PUTó”––US”ò\»Ÿ]]ÿ^Húõ€H]»Yò][⁄[BàH€€‹ô[ò]\»\ôH›[]Z\úÀàõ⁄[ú»H^\›[ô»–””ëíQ◊’–TìíSë‘ÿ\›]àÿ]Y][ôXYHö[ùÀô^»H‹õ›\X€€ôöY»ÿ\õö[ô‹»]^\›õ‹àHÿ[YHôX\€€ãÇãHÿ]Y]	‹»ÿÿ][€à[ôHõ›»ÿ\úöY\»H€€‹ô[ò]\Œàô[[ô⁄[H
+ÀçååãLLåãåÃÃåJX\¬àŸ[ãY]öY[ùH‹õ€ô»]H€[òŸH⁄\ôHô[[ô⁄[X[€ôH\»õ›ÇÇääïH⁄X⁄»\»[Xô\ò][Hò\úõ›Àääà]ÿ[õõ›[⁄]\à€€‹ô[ò]\»]
+ò\ôJàŸ]õX]⁄Z\àXô[8†%]ôYY»HŸ[ÿ€ŸK[ôŸ[ÿ€Ÿ[ô»HXô[\»⁄]\»ô[X\ŸHõ›ô\¬õõÿõŸH⁄›[ô[H€ãà][ú›Ÿ\ú»€ôH]Y\›[€éàY€€Y[€ôHô[ò[YHHXŸH[ôõ‹ôŸ]Bô]O»ù[àYÿZ[ú›H⁄€HõY]\»]›€Ÿ€àåçãLLL]ô]\õú»
+äô^X›H€ôBö[ú›[òŸKù[\ äã[ôH\›[ú»]X]ö^8†%õ‹òKÿÿ\‹À‹ö^XH[YYò][õ€õöYBêù\õ[ô›€à⁄]ôX[€€‹ô[ò]\À[Z[H[ôX\ò›\»€[\XH⁄]ôX[€€‹ô[ò]\ÀÇÇääìõ›ö^Y\ôKôXÿ]\ŸH]\»õ›H€ŸHùYŒääàö^XI‹»Xô[ÿ^\»ŸX]H⁄[H\ÇòŸ][ôÀù[ô]\»\ôHô[]ùYKà\à€€‹ô[ò]\»[ôXô[Y‹ôYK€»\»⁄X⁄»›^\¬ú]ZY]€‹úôX›H8†%]€ôH\»H€€ù[ùÿ€€ôöY»X⁄\⁄[€ãÇÇà»»ååçãLLLå»8†%‹XŸHŸX\ò⁄YH⁄€H€›[ùûHôXÿ]\ŸH]€õH€ô]»⁄\ôHS’HŸ\ôBÇääîõ€›ÿ]\ŸNà‹XŸX[ò⁄‹ôY€àH\Ÿ\â‹»⁄\ôY[à[ôYõ»›\àYXH⁄\ôH¬õ€⁄Àääàõ»[à⁄\ôY⁄]][ú›[òŸHYX[ù]ÿ€òŸ\ôHõ€ôX[ôòY]\◊€Xÿ\¬òõ€ôX]ô[à⁄[àH[à^\›Y8†%€»H€ŸùöX\»]ô\›Hò][€ù⁄YHŸX\ò⁄]€‹ú›Çì›€ô\ã\ô\‹ùYà‹XŸHõ›[]ò\ô\öÿ€àù[\À⁄»]ô\»[àô[[ô⁄[Kô]\õôYZŸBìYXYôX‹ôX][€à\ôXH
+[ô\ú€€àïäH[ôÿ\›ô\àò[ôŸHò][€ò[[€ù[Y[ù
+[\€»
+KÇÇääî⁄H[ÿ^\»\»€€‹ô[ò]\Œ»H\Ÿ\à€õH€€Y][Y\»Ÿ\Àääà]ô\ûH[ú›[òŸHŸ]¬ò—PUTó”Uÿ—PUTó””ò[ô]ô\ûH›\à€U€H]\ôH\»Xõ›]\à€‹õà€¬ò‹XŸWÿ[ò⁄‹ò\»
+äö\ãYö\ú›
+äéà\à⁄]HûHYò][›ô\úöY[àûHH[à⁄\ôY[àBõ\››\ú»8†%]\»H\Ÿ\à›[ô[ô»€€Y]⁄\ôH‹X⁄YöX»[ô\⁄⁄[ô»Xõ›]]⁄X⁄òôX]»H›]X»€YKàH›[H[àõ»€ôŸ\à⁄[úÀÇÇãH
+äë\›[òŸK[Xô[Y
+äã€»Hô\›[H›\ÿ[ôZ[\»]ÿ^Hÿ^\»€ÀàHô\HY\›YBàô]òYH[ôH^\»ô\›[[ô\àHÿ\⁄[ô›€à€ôH⁄]õ›[ô»»[[H\\ùù][ÇàYô\‹»[ôH[›HY»ôXY€‹Ÿ[KÇãH
+äë[Xô\ò][Hì’\›[òŸK\€‹ùY
+äã⁄X⁄\»⁄\ôH‹XŸXYôô\ú»úõ€H€ôX\òûXÇà€ôX\òûH€ŸôôYXÿ[ù»H€‹Ÿ\›‹XŸH[›[ùòZŸ\òÿ[ù»H[›[ùZ[ãÇÇí⁄[›⁄]⁄P—W–Sê“‘ó“TèLô\›‹ô\»H€ôZ]ö[‹à^X›H8†%H\Ÿ\â‹»[à][ûBòYŸK[ò[ò⁄‹ôY⁄]›]€ôKÇÇääïôYH[ô‹»ÿ€ŸK\ô]öY]ÿÿ]Y⁄[[àHö\ú›òYùŸà\»ô[X\ŸK[ô[[›ôYúò]\à[à]⁄YääàHòYù\‹ŸYHL€HòY]\»[ô⁄Y[ôY€à[à[\Hô\›[Ÿ]Çï€U€H\Y\»HòY]\»\»H
+äö\ô›]
+äã€»[ûH[ôù[Ÿà€‹àÿÿ[ù^ûûHX]⁄\»€›[ö]ôH›\ô\‹ŸYH€‹úôX›\›[ù€ôH⁄]õ»⁄Y[ö[ô»[ôõ»⁄Y€ò[8†%‹XŸHõ›[]ò\ôî\öÿúõ€HHŸX]KX[ò⁄‹ôY[ú›[òŸH€›[ô]\õàŸX]Hù[öÀàHòYù[€»ôK\€‹ùYò[ö]ôHô\›[»ûH\›[òŸHôYõ‹ôHù[òÿ][ô»»ôYK⁄X⁄õ‹»H^X›X]⁄õ‹àBõôX\ô\àX]ôH[ôHôX\ô\à›ôY]à[ôHŸX€€ôô\]Y\››XõYH€‹ú›Xÿ\ŸHõÿ⁄⁄[ô¬ù⁄[ô›»€àHõ›⁄]õ»€€ò›\úô[ù›\]\ÿà[ò⁄‹ö[ô»
+äòöX\Ÿ\ äàHŸX\ò⁄[ôBô\›[òŸHXô[XZŸ\»Hò\àô\›[ö\⁄XõN»]\»H⁄€Hõÿã[à€ôHô\]Y\›ÇÇääêHò[ŸH€Z[H[à\»[ùûI‹»ö\ú›òYù€‹úôX›Yääà]›]YôX\òûWÿ€YöY[ÿ^\¬ôÿ]Y€àúô\⁄ô\‹»ãà]Ÿ\»õ›8†%Ÿúô\⁄€ÿÿ][€ò\»^X›HôYHÿ[\ú¬äì”—‘’Q——T’S”îÿPT“SïSï‹XŸWÿ[ò⁄‹ò
+H[ô€ôX\òûX\»õ›[[€ô»[Kà€ôX\òûXú›[XÿŸ\»H[àŸà[ûHYŸKàH\ﬁ[[Y]ûH\»ôX[[ôõ›»ôX€‹ôYHöY⁄ÿ^Hõ›[ôÇÇääï€»\öŸY][\»öYH[€ôÀ⁄X⁄\»⁄]^HŸ\ôH\öŸYõ‹ãääÇÇãH
+äîì–QPTãçJäà8†%H€U€HŸX›[€àXY\àò[YYìõ‹òK[Z[Kö^XHà[ôŸ[ù›[HBà^HH›\àõ›\àŸ\ôHõ›ö\⁄[€ôYàõ›»ò[Y\»õ»[ú›[òŸ\»][à⁄X⁄€ô\»€HŸ^Bà\»\ãZ[ú›[òŸH[ô⁄[ôŸ\»⁄]›]H€ŸH\ﬁK€»H€€[Y[ù⁄[ù»]XX⁄ô[ùòà[ôHX\œXöY[[àÿ]Y]àHõ‹›\à]ÿ[õõ›€»›[HôX]»€ôH]\»€‹úôX›àŸ^KÇãH
+äîì–QPTÀåM äà8†%‘—SíQW‘ëT—TïëW‘ïSXYHYXÿ]Y€]\ŸHõ‹à^Y]ŸX\à[ôõ›[ô¬àõ‹à[ûH›\à€‹õàòXŸH][K€»ö^XI‹»ö[ôH›\ùö]ôY[àXõ›][àŸà⁄^Ÿ[öY\ÀÇà^[ôY»Hÿ]Y€‹ûH8†%
+àò[û][ô»€X[⁄HŸX\ú»€à\àòXŸKX\ú»‹àZ\à8†%Bàõ‹ôZXYX\öÀH›YH€‹H€\äà8†%›]Y€€ô][€ò[Hõ›ÿ^\»ZŸHH^Y]ŸX\Çà€]\ŸKò[Z[ô»õ»⁄\òX›\â‹»òZ]àH\›[ú»õ›[ô\»[ôH⁄\òX›\ã[ô]]ò[]KÇà
+äí]»YôôX›\»[ùô\öYöYY
+äéàõ»Ÿ\‹⁄[€àÿ[àŸ[ô\ò]H[à[XYŸK[ôö^XHù[ú¬àŸ[Z[öKLÀ\õÀZ[XYŸK\ô]öY]ÿ⁄X⁄õ»òXŸK[ÿ⁄»K–à\»]ô\àôY[àù[àYÿZ[ú›àBàYX⁄[ö\€HX]⁄\»H€ôH]€‹öŸYõ‹à[Z[I‹»€\‹Ÿ\Œ»]\»H⁄€H€Z[KÇÇääï[YHZ^[ôÀ›]Yò]\à[àY[éääàô\ÀX⁄[ôŸKX€€ùõ€\⁄‹»õ‹à€ôH[YH\Çúô[X\ŸK[ôHŸ[öYK\õ€\⁄[ôŸH[àHX\»ô[X\ŸH\»€ÀàZŸ[à[Xô\ò][H8†%ÀåM»ÿ\¬ú\öŸY
+ú‹X⁄YöXÿ[Jà»]õ⁄YHŸ]ô[ãZ[ú›[òŸH\ﬁHõ‹à€ôH€]\ŸK[ô\»\»Bòÿ\úöY\à]ÿ\»ÿZ][ô»õ‹ãàHŸ[öYH[à\»ô]ô\ùXõH€à]»›€àöXH—SíQW—êP—W”–“œLù›Y⁄]\»€ÿ\úŸNà]\ÿXõ\»H⁄€HòXŸHÿ⁄Àõ›ù\›\»€]\ŸKÇÇà»»ååçãLLLåà8†%HXŸHò[YH⁄]H€\⁄[à]»]ô\ûH€U€H€⁄›\Çääîõ€›ÿ]\ŸNà][›J]Y\ûJXX]ô\»ÿ[ô\ÿÿ\Y[ôH]Y\ûH\»[ù\ú€]YSï»HTìú]ŸY€Y[ùääà\õXãú\úŸKú][›XŸY\»ÿûHYò][ôXÿ]\ŸH]\»õ‹õX[H\ÿÿ\[ô»Bù⁄€H]»\ôH’”U”W‘—PTê“’Tì[ô’”U”W——S–”—W’Tìõ›]H]Y\ûH
+ö[ú⁄YJÇõ€ôHŸY€Y[ù€»õ›[]ò\ô\ö»»^[‹àÿ⁄ÿôXÿ[YHôYHŸY€Y[ù»[ô€U€H[ú›Ÿ\ôYíàö^Y⁄]ÿYôOHàò]
+äòõ›
+äàÿ[⁄]\»8†%HŸ[ÿ€ŸH€ôHô]ô\àòZ[Yùö\⁄XõKù]]òX⁄‹»‹õ›]XPT“SïSï\›[ò][€ú»[ôH]\»€€…»[ò⁄‹ã[ôôö^[ô»€õHH⁄]H]\[ôY»úôXZ»\»›»H€\‹»ôX€€Y\»€»[ò⁄Y[ùÀÇÇääëõ›[ôûH€€Àÿ]\◊ÿ]Y]úX⁄X⁄\»H⁄[ùŸà]ääàù[\…‹»]\»ÿ\úöY\¬òõ›[]ò\ô\ö»»^[‹àÿ⁄ÿ[ô]àòZŸ\àY⁄ÿ^H»\ù\›⁄[ù»õ›ô]\õôYù⁄\ôH]ô\ûH›\à[ùûHŸX\ò⁄Yö[ôKàõ»\Ÿ\àYô\‹ùY][ôõ›[ô»[ŸH[àBúﬁ\›[H€›[]ôH›\ôòXŸY]8†%H€àHXŸH€⁄›\Y‹òY\»»õõ»ô\›[»ã⁄X⁄\¬ö[ô\›[ô›Z\⁄XõHúõ€HHXŸH]Ÿ[ùZ[ô[H\»õ›\ôKÇÇääï\Ÿ\ã]ö\⁄XõHôYõ‹ôH\»ö^ääà[ûH‹XŸX€ôX\òûX‹àŸõ€Ÿ\ô›[Y[ù€€ùZ[ö[ô»Bú€\⁄[ô[ûH\›[ò][€àH[Ÿ[^òX›Y⁄]€ôK⁄[[ùHô]\õôYõ›[ôÀÇÇç\›Àõ›ÿ[⁄]\»úôXZÀ]\›YëQŸŸ]\ãÇÇà»»åçãLLL8†%IHŸàH\››Z]I‹»ù[ù[YHÿ\»€ôH[ôK⁄XŸBÇï\›»€õH8†%õ»õ›úX⁄[ôŸK€»õ»ì’’ëTî“S”òù[\ÇÇääîõ€›ÿ]\ŸNà[à^[ú⁄]ôHù[ò›[€àÿ[Yúõ€HHŸ[ô\ò]‹â‹»€€ô][€ã⁄\ôH]ôK\ù[ú¬ú\à][Kääà\⁄ŸY»]Y]⁄]\àLMà\›»€›[ôH€€ú€€Y]Yõ‹à‹YYHõŸö[Bò[ú›Ÿ\ôYHYôô\ô[ù]Y\›[€éÇÇòåÕÀç‹»\›]ô\ûP€€[X[ô[ô\êX›X[Tù[úŒéù\››WÿòX⁄€Ÿ◊‹›^\◊Ÿ[\BåÕÀå»\›TŸX€€ôòX⁄€Ÿ—ö]ô[ééù\››W‹ŸX€€ôÿòX⁄€Ÿ◊‹›^\◊Ÿ[\BàéKç»H›\àLM\›À[Ÿà[BòÇêõ›\›»Ÿ\ôH‹ö][à\ŒÇÇò]€Çú›ò[ôYH€‹ùY
+àõ‹àà[à›ŸY\ó⁄[ô\óÿ€›ô\òYŸJ
+VÃBàYààõ›[à›ŸY\ó⁄[ô\óÿ€›ô\òYŸJ
+VÃWJBòÇïH]\òXõH\»]ò[X]Y€òŸN»
+äùH€€ô][€à\»]ò[X]Y\à][KääÇò›ŸY\ó⁄[ô\óÿ€›ô\òYŸJ
+XT’\\úŸ\»õ›úX[ô\»K[[ôH\›ö[H8†%çMÃ\»Bòÿ[8†%[ô\ôH\ôHå»[ô\úÀàçÿ[»0Â»çMÃ\»HÕãç\ÀYÿZ[ú›ÕÀç»ÿúŸ\ùôYàö[ô[ô¬òõ›[ô\»úõ€H€ôHÿ[\»H⁄€Hö^ÇÇääê[ôHŸX€€ô\›ÿ\»H\Xÿ]Kääà]»ÿ‹›ö[ô»ù\›YöYY]Ÿ[à\»Hÿ[YH⁄X⁄¬àúù[àYÿZ[àYù\àH\ôX›ÿ[»Xõ›ôKõ›ö[ô»^HôY⁄\›\à\»–S»»Hÿÿ[õô\ãõ›öù\›[‹ôHY[ù[€ú»ãà]ÿ[õõ›ôHùYNà⁄[ô\óÿ€›ô\òYŸJ
+X\»›]X»T’[ò[\⁄\»ŸÇôö[\»€à\⁄À€»õ»[[›[ùŸà\›^X›][€à⁄[ôŸ\»]»[ú›Ÿ\à[ôH‹ô\ö[ô»\¬õYX[ö[ô€\‹Àà]€€\]Y[àY[ùXÿ[ò[YHûHY[ùXÿ[YX[ú»8†%Õ‹»õ‹àò[ŸH\‹›\ò[òŸKÇë[]Y»H€›ô\òYŸH\‹Ÿ\ù[€à]ô\»€òŸK[à\›]ô\ûP€€[X[ô[ô\êX›X[Tù[úÿàBù\›»\õ›[ô]]Ÿ[ùZ[ô[Hö]ôHÿ]ôW‹›]XÿŸ[ôŸ⁄YòÿŸ[ô€Y[YXÿŸ[ô‹Ÿ[öYX›^KÇÇääîô\›[àÀé\»8°§àéÀLMH\›Àÿ[YH€›ô\òYŸKääà\»ù[ú»€à]ô\ûH\⁄õ›Y⁄òô⁄]Xã›€‹öŸõ›‹ÀŸ]ò[Àû[[[ôôYõ‹ôH]ô\ûH€Z[YYY€ôH⁄[ôŸHõ›Y⁄ô\öYûKú⁄ÇÇääïH€€ú€€Y][€àH]Y]ÿ\»X›X[H\⁄ŸYõ‹éà\ôH\»õ›[ô»€‹ù⁄[ôÀääà⁄]ùH›‹›€€ôHH›Z]H]ô\òYŸ\»é\»H\›[ôH›ùX›\ôH\»[ôXYHŸ[ôòX›‹ôY8†%ååà€\‹Ÿ\ÀYYX[à¯†$ÕH\›»XX⁄\ôŸ\›MH\›»»åH[ô\Àõ»[€ú›\Çò€\‹À[ôHö]ôHô\õÀ]\›€\‹Ÿ\»\ôH[Y⁄][X]Hö^\ô\»
+–€Y\Ÿÿò‘ô\Ÿ]ö^\ôX–ÿ[ö^\ôX–€Y]Y\ûX–€Yõ›
+KàY\ô⁄[ô»\›»õ›»€›[òYBúôXYXõH\ãZ[ò⁄Y[ùÿ\Ÿ\»õ‹àHÿ]ö[ô»YX\›\ôY[àZ[\ŸX€€ôÀYÿZ[ú›Hö[H⁄‹ŸBôÿ‹›ö[ô‹»\ôHHô\…‹»ôX€‹ôŸà⁄]XX⁄⁄X⁄»\»õ‹ãÇÇà»»ååçãLLLåH8†%⁄HôX€€[Y[ôYô\›]\ò[ù»⁄]›]€õ›⁄[ô»⁄]\à[ûHŸ\ôH‹[ÇÇääîõ€›ÿ]\ŸNàì”—‘’Q——T’S”îÿôKYô]⁄YôX[ôX\òûHô\›]\ò[ù»[ô[ôY[H»Bõ[Ÿ[⁄]õ»›\ú»]X⁄Yääà]L\H⁄H€›[ò[YHHXŸH]⁄]]ö[ôK⁄X⁄\¬ùHYôô\ô[òŸHô]ŸY[à€õ›⁄[ô»HôZY⁄õ›\ö€Ÿ[ôôXY[ô»H\ôX›‹ûH›]›YÇò‹[ö[ô“›\úœ[ô^Ÿ]ô[ë^\ÿ\»H\ò[Y]\à€àHŸX\ò⁄[ô⁄[ùŸô]⁄›€]€W‹ŸX\ò⁄ò[ôXYHÿ[»8†%õ»ô]»[ô⁄[ùõ»ô]»Hÿ[ÇÇääì‹Z[à\àÿ[ääà‹XŸX€ôX\òûX[ôH]\»€€»ô]ô\àôXY›\úÀ€»^H€â›úô\]Y\›[H[ô€â›^Hõ‹àH\ôŸ\àô\‹€úŸKà€õHH€»õ€Ÿ]»\‹»]ÇÇà»»»H€À\õ›[ô]ö\]›\ãôX€‹ôY€»õÿõŸHô\X]»]ÇääïHP‘€€õôX›‹àÿ[õõ›ŸYH\»öY[ääàŸ[ôH“\»X‹õ‹‹»€»]Y\öY\»
+€»[ô\[ô[ùòÿY∞Í\À[à›\òùX⁄‹ Kô\‹€úŸWŸ]Z[Yù[\ò[Y]\àXÿŸ\Y⁄]›]\úõ‹à8†%[ôõ¬ò‹[ö[ô“›\úÿ€à[ûHŸà[K⁄[H[ùûT⁄[ùÿúò[ôÿ^[ôY‹›[€ŸX[ôòÿÿ[^ôYÿ]Y€‹öY\ÿ[ÿ[YHõ›Y⁄àHÿ[YH⁄[[ùXúŸ[òŸH[YVõ€ôOZX[òX⁄›‹Àà€ôBò›\õYÿZ[ú›Hò]»[ô⁄[ù⁄]HõY]Ÿ^Hô]\õôYHöY[[[YYX][Kà
+äïHP‘ù€€»\ôHõ›Hô[XXõHõÿôHõ‹à⁄]HõY]	‹»›€àŸ^Hÿ[àô]⁄
+äà8†%HöY[Z\‹⁄[ô¬ù\ôHÿ^\»õ›[ô»Xõ›]HëT’TKÇÇääîì–QPTÀåN	‹»õ‹‹ŸY\⁄Y€àÿ\»‹õ€ôÀ[ôHö\ú›ôX[ô\‹€úŸH\»⁄]⁄›ŸY]ääÇï][ùûHõ‹‹ŸYX⁄Y[ô»ùŸ^Hà\»
+ùHX\õY\›]H[àH^[ÿY
+ãôX\€€ö[ô»]òô^Ÿ]ô[ë^\ÿ›\ù»⁄]H“I‹»ÿÿ[Ÿ^H8†%ôXYŸôàHP‘€€	‹»\ò[Y]\Çô\ÿ‹ö\[€ãÇÇääê€‹úôX›[€à
+åçãLLL
+NàH\‹õ€Ÿà€Z[YY\ôH\»]Ÿ[à[ú€›[ôääàHö\ú›ôX[úô\‹€úŸH⁄›ŸY[àX\õY\›]HŸàåçãLLL[ô\»ÿ\»ôXY\»
+ù€[‹úõ› àûBò€€\\ö[ô»]YÿZ[ú›HŸ\‹⁄[€à]HŸàåçãLLX8†%€»]\»[à[ô\›Xõ\⁄Y[Y^õ€ô\ÀÇïHî»ÿ\»]\⁄XõH[ôXYH\›ÿÿ[ZYöY⁄[à⁄X⁄ÿ\ŸHåçãLLLÿ\»⁄[\BùŸ^H[ôHô[Z\ŸH[à
+äìõÿõŸH€õ›‹»⁄X⁄[ôH^[ÿY\»õ›]öY[òŸHZ]\Çùÿ^H⁄]›]Hÿÿ[[YH]ÿ\»ô]⁄Y]ääàHô[Z\ŸHô[XZ[ú»[ùô\öYöYY\»]ÿ\¬ù⁄[àö\ú›‹ö][à›€à8†%]ÿ\»ô]ô\à€€ôö\õYY[ô]\»õ›õ›»ôY[àôYù]YÇÇääï⁄]⁄\Y[ú›XYôYY»õ»õ›[€àŸàùŸ^Hãääà‹⁄W⁄›\ú◊€õ›X\⁄‹»€ôH]Y\›[€éÇôŸ\»[ûHò[ôŸHúòX⁄Ÿ]õ›œ»‹ô\ö[ô»[ô⁄X⁄Y]KZ\À]Ÿ^H›‹X]\ö[ôÀÇÇïH[Y^õ€ôHõÿõ[H\»ôX[[ô[ú€€ôY8†%›\ú»\ôH“K[ÿÿ[Hõ›€õ›‹»€õH]»›€Çòò8†%€»]\»
+ôÿ]Y
+ãõ››Y\‹ŸYàHô\ôX›\»[Z]Y€õH⁄[à€€YHò[ôŸHò[»€àBö[ú›[òŸI‹»ÿÿ[]Kà⁄\ôHHÿÿ][€à[à[õ›\à[Y^õ€ôH[ôXŸ\»€»[õX\öŸY[ú›XYõŸà‹õ€ô€HX\öŸYà⁄][àHX]⁄[ô»]HH€€\\ö\€€à\»‹ô[ò\ûK[ôHÿ\ŸHBôôX]\ôH^\›»õ‹à
+L\K⁄]⁄[à⁄]]ö[ôJH\»‹]X\ô[H[ú⁄YH]ÇÇääêHùY»H\›»ÿ]Y⁄ôYõ‹ôH]⁄\YääàH]Hÿ]Hö\ú›\›Y€õHXX⁄ò[ôŸI‹¬äú›\ù
+ã€»Hò\à‹[àNå8†$Ãéåÿ\»ÿ[Y[ö€õ›€à]åÃ8†%‹[ã[ôô\‹ùY\¬õõ›[ôÀà]õ›»XÿŸ\»Hò[ôŸH⁄‹ŸH›\ù
+äõ‹ääà[ôò[»€à›\à]Kà]ô\ûH]K[öY⁄úXŸH€›[]ôHôY[à⁄[[ùH[õX\öŸYÇÇïHõ€\[ôH\›[ô›Z\⁄\»[ôYH›]\»ò]\à[à€Œà€‹ŸYõ›ÿYX[ú»€â›úŸ[ô[H\ôK‹[à[ù[\»H€‹⁄[ô»[YH⁄Hÿ[àY[ù[€ã[ôHXŸH⁄]ôZ]\à\¬õ€ôHŸH]ôHõ»›\ú»õ‹à8†%ôX€€[Y[ôXõKù\›õ›\»õ‹[àãÇÇà»»»ÿ€ŸK\ô]öY]ÿö[ô[ô‹»8†%õ›\àö^Y€ôH‹[à[ô]X]\ú¬ÇãH
+äê[à[ÿ^\À[‹[à“Hÿ\»⁄]ô[à[à[ùô[ùY€‹⁄[ô»[YKääàô^Ÿ]ô[ë^\ÿô]\õú»HçÕ¬àXŸH\»”ëHò[ôŸH‹[õö[ô»HŸYZÀ[ôö[ù[ô»]»[ô›\àô[ô\ôYõ‹[à[ù[àåàõ‹à€€Y]⁄\ôH]ô]ô\à€‹Ÿ\ÀàH€ÿ⁄»[YH\»õ›»€õHö[ùY⁄[àHò[ôŸBà[ô»€à›\à]N»›\ù⁄\ŸHõ‹[àõ›»ãÇãH
+äïH]Hÿ]HŸ\»õ›XZŸH\»[Y^õ€ôKX€‹úôX›[ôHÿ‹›ö[ô»ÿZY]YääÇàÿ[[ô\à]\»€⁄[ò⁄YHX‹õ‹‹»[‹›õ€ô\»õ‹à[‹›ŸàH^K€»Hô]»[‹ö»“HŸY[àúõ€BàH‹»[ôŸ[\»[ú›[òŸH\‹Ÿ\»Hÿ]H[ôÿ[àôH€õ‹[à[ù[åNåà]åéåô]¬à[‹ö»[YKàHÿ]H€õHÿ]⁄\»H^[ÿY⁄]
+õõ›[ô àõ‹à›\à]KàHÿ‹›ö[ô»õ›¬àÿ^\»^X›H]»Hô\⁄YX[\úõ‹à\»õ›[ôY»H\Ÿ\à⁄»\»⁄\ôYH[à[à[õ›\Çà[Y^õ€ôKà[YVõ€ôOZX[òX\»HôX[ö^[ô\»[ù\›YYÿZ[ú›ò]»ëT’ÇãH
+äòì”—‘’Q——T’S”îÿô]ô\à⁄X⁄ŸYÿÿ][€àúô\⁄ô\‹ äà8†%PT“SïSïô\⁄YH][ÿ^\¬à\Àà\õ[\‹»⁄[H]€õH\›Yò[Y\Œ»õ›\õ[\‹»€òŸH]]‹ö]]]ôH‹[ãÿ€‹ŸYà€Z[\»öYH[€ôÀ⁄[òŸHHŸYZ‹À[€[à€›[]X⁄[H»ô\›]\ò[ù»[àH⁄]H^Bà]ôHYùàõ›»ÿ]Y€àŸúô\⁄€ÿÿ][€ò€»H›[H[àò[»õ›Y⁄»Bà⁄\ôKXK\[àùYŸKà
+äï\»⁄[ôŸ\»^\›[ô»ì”—‘’Q——T’S”îÿôZ]ö[‹ääã[Xô\ò][KÇãH
+äïH›\ú»YŸ[ôÿ\»\[ôY[ò€€ô][€ò[Jäã€»ì”—”‘Só“’TîœL›[⁄\Yàõ€\^\ÿ‹öXö[ô»X\öŸ\ú»]€›[ô]ô\à\X\ãàõ›»€õH⁄[à€ôH\»ô\Ÿ[ùÇÇääì‹[ã[ô]X^H[ô\ò›]HôX]\ôI‹»XZ[àÿ\ŸKääàò€‹ŸYõ›»à\»€õHôXX⁄XõH⁄[BùH^[ÿY›[ÿ\úöY\»Hò[ôŸH]YŸ^KàHÿúŸ\ùò][€à]õ€\Y\»ô[X\ŸI‹¬úôY\⁄Y€à8†%Hö\ú›ôX[ô\‹€úŸI‹»X\õY\›]Hÿ\»
+ù€[‹úõ› à8†%\»\]X[H€€ú⁄\›[ùù⁄]€U€H
+äôõ‹[ô»[\ŸYò[ôŸ\ äãàYà]Ÿ\À[à]åŒå⁄]H⁄]⁄[à⁄]]ååNå\ôH\»õ»ò[ôŸHõ‹àŸ^KHÿ]Hö\ô\À[ôHô\›[\»àòò]\à[Çàò€‹ŸYõ›»à8†%^X›HHÿ\ŸHHôX]\ôHÿ\»ùZ[õ‹ãàH\›»ÿ[õõ›[à^H\ŸBúﬁ[ù]X»^[ÿY»]ô]Z[àŸ^I‹»[\ŸYò[ôŸKÇÇääïH⁄X⁄À[ô]]\›ù[à[àH]ô[ö[ô äà
+‹›àîÀ\»õ€›8†%ôYõ‹ôH]€à‹àZY^H]úõ›ô\»õ›[ôÀôXÿ]\ŸHH[\ŸY\ò[ôŸH]Y\›[€à€õH^\›»€òŸHò[ôŸ\»]ôH[\ŸY
+NÇÇòò\⁄í—VOI
+‹ô\[‘	◊ï”U”W–TW“—VOWÀäâ»€‹›[Y‹ò[KXõ›À‹ö^XKÀô[ùäBò›\õ\‘»öŒãÀÿ\Kù€]€Kò€€K‹ŸX\ò⁄Ãã‹ŸX\ò⁄‹ô\›]\ò[ùöú€€è⁄Ÿ^OI—VIõ]MÀçååâõ€èKLLåãåÃÃåIúòY]\œLå	õ[Z]L…õ‹[ö[ô“›\úœ[ô^Ÿ]ô[ë^\»àà]€å»X»ö[\‹ùú€€ãﬁ\Œ÷‹ö[ù
+ñ…‹⁄I◊V…€ò[YI◊KãôŸ]
+	€‹[ö[ô“›\ú…ÀﬂJKôŸ]
+	›[YTò[ôŸ\…ÀﬁﬂWJVÃKôŸ]
+	‹›\ù[YI JHõ‹àà[àú€€ãõÿY
+ﬁ\Àú›[äV…‹ô\›[…◊WHÇòÇíYàHö\ú››\ù[YXõ‹àHXŸH]‹[ôY\»[‹õö[ô»›[⁄›‹»
+äùŸ^I‹ äà]Kàò€‹ŸYõ›»à€‹ö‹»\»⁄\YàYà^H]ôH[õ€Y»€[‹úõ›ÀH€‹ŸYúò[ò⁄\¬ôXY[ô\»ôYY»HYôô\ô[ù\õÿX⁄8†%[‹›ZŸ[H\⁄⁄[ô»õ‹àH⁄Y\à⁄[ô›»[ôúôX€€ú›ùX›[ô»Ÿ^Húõ€H]ÇÇî⁄\[ô»ZXYŸà][ú›Ÿ\à\»[Xô\ò]NàHòZ[\ôH[ŸH\»H
+õZ\‹⁄[ô à[ùô]ô\àBù‹õ€ô»€ôKàõ‹[à[ù[à€‹ö‹»Z]\àÿ^K[ôHXŸH⁄]õ»X\öŸ\à\»^X⁄]Hõ›»ôBò€Z[YY‹[ãÇÇí⁄[›⁄]⁄ì”—”‘Só“’TîœLà€‹Ÿ\»ì–QPTÀåN[ôHŸõ€Ÿõ‹[àõ›»àõ€›À]\ú\öŸY[àÀçH⁄[òŸHååçãLÀLLKåLÀÇÇà»»ååçãLLKåà8†%⁄H\»[[›\à€€‹ô[ò]\»õ‹àH[€ù[ô€›[ô]ô\àÿ^H⁄\ôH]\¬Çääîõ€›ÿ]\ŸNà\Ÿ\ó€ÿÿ][€ò›‹ô\»]€€à[ôõ›[ô»]ô\à\õôY][ù»H€‹ôääàBùòYôöX»ôX]\ôH\»›‹ôY€]€ãÀ]ôW›[ù[X\à⁄]⁄[òŸH]⁄\Y[ôòì”—‘’Q——T’S”îÿ[ôPT“SïSïõ›€€ú›[YH]8†%ù]€õH\»
+õù[Xô\ú ã»ŸX\ò⁄‹Çúõ›]H⁄]à€»⁄[à€€Y[€ôHõ‹»H[ã⁄Hÿ[àö[ôô\›]\ò[ù»ôX\à][ôÿ[õõ›ÿ^BàùÿZ][›I‹ôH[àò[\ô»ãàH\ú€€àôXX›»»HXŸN»⁄HYõ»ÿ^H»€õ›»]»ò[YKÇÇääëö^à€ôHô]ô\úŸKYŸ[ÿ€ŸH\à⁄\ôK€ôHôXX›[€à\à⁄\ôKääÇÇãH›€]€W‹ô]ô\úŸWŸŸ[ÿ€ŸX€àH[ö]X[⁄\ôH€õH8†%
+äõô]ô\à€àH]ôK\‹⁄][€à[ôÀääÇàH]ôH⁄\ôHôKY[ù\ú»[ôW€ÿÿ][€ò€à]ô\ûH\]K[ôŸ[ÿ€Ÿ[ô»XX⁄€ôH‹[ô¬à][›HôK[X\õö[ô»Hÿ[YH[ú›Ÿ\ãà€àH]ôH\]HH^\›[ô»Xô[\»ÿ\úöYY⁄[Bà^H\ôH⁄][à––US”ó‘P—W”RSTÿ
+çõZJHŸà⁄\ôH]ÿ\»€€\]Y[ô
+äôõ‹Y
+äÇà\›]à[[ô»\à^H\ôH€€Y]⁄\ôH^H]ôHYù\»€‹úŸH[àÿ^Z[ô»õ›[ôÀÇãH‹XŸW€Xô[ôXY»ôZY⁄õ›\ö€Ÿ[à][öX⁄\[]T›Xô]ö\⁄[€ò[à][öX⁄\[]XÇàõ›Yô[ú⁄]ôHY[ô»8†%€U€Hò[Y\»]öY[Yôô\ô[ùHX‹õ‹‹»THŸ[ô\ò][€ú»[ô[Çà[ú›[òŸI‹»Ÿ^HX^HôHõ›ö\⁄[€ôYYÿZ[ú›Z]\ãà][öX⁄\[]X\›€»Hù\ò[⁄\ôBà›[ò[Y\»H›€à[ú›XYŸàY‹òY[ô»»õ›[ôÀÇãH›€]€W‹ô]ô\úŸWŸŸ[ÿ€ŸX
+äõô]ô\àòZ\Ÿ\ äã[õZŸH]ô\ûH›\à€U€Hô]⁄\ôKà]¬àÿ[\à\»Hÿÿ][€à[ô\ã⁄\ôH\ôH\»õ»Y‹òYY[ú›Ÿ\à»ò[òX⁄»»8†%BàôX]\ôH⁄[\HŸ\»õ›\[ãÇãH‹XŸW€õ›X\»€ôK\⁄›à]ô]\õú»Hõ€\[ôH
+ò[ô€€ú›[Y\»HõY ãàHõ›]àô[‹[ú»û[›I‹ôH[àò[\ô»à€à]ô\ûHY\‹ÿYŸHõ‹àHZ›\àúô\⁄ô\‹»⁄[ô›»\»BàòZ[\ôH[ŸKõ›HôX]\ôKÇÇìõ»ô]⁄€àHô\H]€»Hÿ[ùYŸ]\»[ù›X⁄Y
+[ùò\öX[ù»ÃÀŒ
+Kà]€€X›¬õõ›[ô»ô]»8†%]ò[Y\»€€‹ô[ò]\»[ôXYH›‹ôYà⁄[›⁄]⁄––US”ó‘P—OLÇÇääò‹XŸW€õ›Xÿ\»‹]›]ŸàHY\‹ÿYŸH]õ‹àHôX\€€à€‹ùôX€‹ô[ôÀääà]]ö\»õ»\›\õô\‹»][àHì”—‘’Q——T’S”îÿ[ôPT“SïSï[öôX›[€ú»ô\⁄YH]\ôBú[õôYûHõ›[ôÀ[ô‹ô\ö[ô»ôZ]\à[à\›ÀÿàY[ô»H\ô[ù\›XõHúò[ò⁄\¬ö›»HŸôX]\ô\ÿò[YQ\úõ‹ò›\ùö]ôYõ›\àô[X\Ÿ\ÀàH^òX›[€à\»H⁄€HôX\€€ÇùH€ôK\⁄›ôZ]ö[‹à\»õ›òXõKÇÇà»»»ô]Œà€€Àÿ]\◊ÿ]Y]úX8†%\ôH\àÿÿ[XŸ\»ôX[[ôôX\à\è¬Çò]\Àù\»[öôX›Y[ù»]ô\ûHõ€\\»îôX[‹›»”êSQ_H€õ›‹»à[ôò]€àúõ€Hõ‹ÇúŸ[öYHòX⁄Ÿ‹õ›[ôÀ[ô
+äõõ›[ô»\»]ô\à⁄X⁄ŸY‹ŸHXŸ\»^\›ääàHòXúöXÿ]YÿYôBò[ôHôX[€ôHõ‹ùHZ[\»]ÿ^HôXYY[ùXÿ[H[àHö[H[ôY[ùXÿ[H[à\àõ⁄XŸKÇîÿ[YH⁄\H\»HôYô\ô[òŸK\›»ÿ\à[ùö\⁄XõH[ù[H[X[à⁄»€õ›‹»H⁄]H\[ú»¬úôXYHô\KÇÇääïHÿùö[›\»[\[Y[ù][€à\»‹õ€ôÀ[ô]ZY]H8†%\»ÿ\»õ›[ôûHù[õö[ô»]õ›ûBúôX\€€ö[ô»Xõ›]]ääàŸ[ÿ€Ÿ[ô»èXŸOã⁄]Oàò€⁄‹»öY⁄[ô⁄[[ùH][ô\ú»òYô]Nà\⁄ŸYõ‹àY^Y[òò]Y\àò^H\öÀŸX]X
+öY⁄\öÀ‹õ€ô»⁄]JH€U€Hô]\õú¬òò^H\úòXŸHõÿYŸX]X⁄]õ»\úõ‹à[ôõ»ÿ\õö[ôÀàHù^ûûHX]⁄\àô]ô\àÿ^\»ôŸ\¬õõ›^\›é»]ô]\õú»HôX\ô\›]\⁄XõH[ôÀ[ô[à]Y]ùZ[€à]X\ö‹»Húõ⁄Ÿ[Çò]\»€X[ãÇÇî‹⁄][€ãXöX\ŸY
+äî“HŸX\ò⁄
+äà\ÿ‹ö[Z[ò]\»õ‹\õKô\öYöYY]ôNàHôX[\ö»€€Y\¬òòX⁄»\»H“Hò[YYY^Y[òò]Y\àò^H\öÿ[àô[]ùYK[ô[à[ùô[ùYù\⁄[ô\‹¬äïH⁄[Y›\à€ŸôôYHõÿ\›\ú»äHô]\õú»ô\õ»ô\›[Àà€»H€€]Y\öY\»Hò\ôHò[YBòöX\ŸY]H[ò⁄‹à8†%
+äõô]ô\àò[YK⁄]X
+äà8†%ô\]Z\ô\»H“Hò]\à[àH›ôY][ôúô\]Z\ô\»Hõ›[ôò[YH»ô\Ÿ[XõH⁄]ÿ\»\⁄ŸYõ‹ãàHôX\ã[Z\‹»\»ì’ì’Sëõ›Bú\‹Œ»ò[YW€X]⁄\ÿ[ú»^X›HHò^KU\úòXŸKTõÿYÿ\ŸKÇÇîô\À[€õKZŸHŸ[öYW‹õ€\‹ô]öY]ÀúX8†%úÀ\ﬁ[òÀú⁄Ÿ\»õ›€‹H€€Àÿà^]¬õõ€ã^ô\õ»⁄[à[û][ô»\»õYŸŸY€»H⁄\òX›\ã\\‹»õ›][ôHÿ[àÿ]H€à]ÇÇääî⁄^YôX›»ÿ€ŸK\ô]öY]ÿõ›[ô€à\»Yôé»ö]ôHö^Y€ôHXÿŸ\YääÇÇãH
+äïH€⁄›\ÿ\»]ÿZ]Y[ú⁄YH[ôW€ÿÿ][€òääàXZ[ä
+XùZ[»à⁄]õ¬à€€ò›\úô[ù›\]\ÿ€»]»Yò][õÿŸ\‹€‹à[ô\»€ôH\]H]H[YH8†%HÃ¬àô]ô\úŸKYŸ[ÿ€ŸH›[Y
+ô]ô\ûJà\]Hõ‹à][ú›[òŸH[ô[^YYH^\›[ô¬àº'‰„H€›]àX⁄»ûHHÿ[YH[[›[ùàõ›»€ò[YW›W‹XŸXù[ú»\»H\⁄ŒàHÿÿ][€à\¬à›‹ôY[ôX⁄€õ›€YŸY[[YYX][K[ôHXô[[ô»⁄[à][ôÀàH\⁄»ÿ\úöY\»Bà›[[ô\‹»›X\ô8†%YàHô]Ÿ\à⁄\ôH\úö]ôY⁄[HH€⁄›\ÿ\»›]]õ‹»H[ú›Ÿ\Çàò]\à[àÿ\[€àHô]»‹⁄][€à⁄]H€ôZY⁄õ›\ö€Ÿ⁄X⁄\»Hÿ[YHYHBà]ôK]\]Húò[ò⁄[ôXYHôYù\ŸY»[àH\›\‹Ÿ\ù»H[ô\àô]\õú»[à[ô\Çàå\»YÿZ[ú›H[Xô\ò][H€›»€⁄›\ÇãH
+äò‹XŸW€õ›XÿZYöù\›⁄\ôYà€àH⁄\ôH\»õ›\à›\ú»€ääàŸúô\⁄€ÿÿ][€ò	‹¬à⁄[ô›»\»öY⁄õ‹àõ›][ô»úõ€HH[à[ô‹õ€ô»õ‹àôXX›[ô»»€ôKàõ›»ÿ]Y€Çà‘P—W–Sìì’Sê—W‘—Pÿ
+MHZ[äH\»Ÿ[»H\›[ú»Hÿ\ô]ŸY[àH€»€ÿ⁄‹ÀÇãH
+äòòY]\ŒàLXYHHù\ò[ò[òX⁄»[úôXX⁄XõKääàHô]ô\úŸKYŸ[ÿ€ŸHÿ[[õôYBàLHòY]\À€»[û]⁄\ôH⁄]õ›[ô»[ú⁄YHLHô]\õôY[à[\HYô\‹Ÿ\ÿ\úò^H8†%à^X›HHÿ\ŸH‘P—W”PëS—íQSÿ	»][öX⁄\[]X[\›‹ô\ö[ô»^\›»»Ÿ\ùôKàBà\ò[Y]\à€€ùòYX›Y]»›€à€€[Y[ùàYù]€U€I‹»Yò][õ›ÀÇãH
+äò]\◊ÿ]Y]úX]’€U€Q\úõ‹ò\ÿÿ\Jäà€àH[ò⁄‹àŸ[ÿ€ŸK€»Hò[ú⁄Y[ùàô]€‹ö»òZ[\ôHö[ùYHòXŸXòX⁄»[ú›XYŸà]»›€à\úõ‹àY\‹ÿYŸKàõ›[ôûHù[õö[ô»]ÇãH
+äòKX[ÿ\»ô[[›ôYò]\à[àö^Yääà]ô]\ŸY€ôHK[ôX\ò[ò⁄‹àX‹õ‹‹»Ÿ]ô[Çà[ú›[òŸ\»]]ôH[àYôô\ô[ù⁄]Y\À€»Hÿ‹›ö[ô…‹»›€à^[\HõYŸŸYö^XI‹¬à[ù\ô[KX€‹úôX›ô[]ùYH]\»\»êTà⁄€\ÿ[H[ôXYHH^]€ŸHYX[ö[ô€\‹»\»Bàõ›][ôHÿ]KàHõY]›ŸY\\»Ÿ]ô[à[ùõÿÿ][€ú»⁄]Ÿ]ô[à[ò⁄‹úŒ»]\»H€ô\›à⁄\HŸàHõÿã€»H€€õ›»ÿ^\»€»[ú›XYŸàô][ô[ô»›\ù⁄\ŸKÇãH
+äêXÿŸ\Yõ›ö^YääàH€ôK\⁄›õY»\»€X\ôY[ôÿ]ôYôYõ‹ôHHô\H\¬àŸ[ô\ò]Y€»[à^Ÿ\[€à\ö[ô»Ÿ[ô\ò][€à‹Ÿ\»]⁄\ôI‹»ôXX›[€à\õX[ô[ùKàBà€‹›\»€ôHZ\‹ŸYû[›I‹ôH[àò[\ô»à€à[à\úõ‹à]][ôXYHŸ[ô»HòZ[\ôBàY\‹ÿYŸN»Yô\úö[ô»H‹ö]H[ù[Yù\àH›XÿŸ\‹Ÿù[Ÿ[ôYX[ú»ôXY[ô»H›]Bàõ›Y⁄Hô\H]õ‹à]àõ›€‹ù]8†%ôX€‹ôY€»Hô^ôXY\à€õ›‹»]ÿ\¬àŸZY⁄Yò]\à[àZ\‹ŸYÇÇääëõ›[ô⁄[HùZ[[ô»]õ›ö^Y\ôH
+\ãZ[ú›[òŸHô[ùòõ›€ŸJNääàö^XI‹¬òŸ][ôÀù[ô\à[ù\ôH]\»\ôH
+äêô[]ùYJäãù]ÿ]Y]ô\‹ù¬òÿÿ][€éàŸX]Xà—PUTó”––US”òôYY»î⁄H›\úô[ùH]ô\»[à’—PUTó”––US”üH8†%öY€õ‹ôH[ûH\›‹öXÿ[‹àòX⁄Ÿ‹õ›[ôôYô\ô[òŸ\»»›\à⁄]Y\»ò€»Hõ€\X›]ô[Bù[»H[Ÿ[»\ÿ€›[ùH⁄]H\à›€àŸ][ô»ö[H\»‹ö][à[ã[ô]ô\ûHŸ[öYBòòX⁄Ÿ‹õ›[ô\»›[\YŸX]X⁄[H\àXŸ\»\ôHX‹õ‹‹»HZŸKàH›€à[H\¬ù€€ö[ù»\à[ú›[òŸH^\›»»›\ôòXŸHôX⁄\Ÿ[H\ÀÇÇà»»ååçãLLKåH8†%[›Hÿ[õõ›XùY»HòXŸHÿ⁄»YÿZ[ú›H›»õÿõŸHÿ[àŸYBÇääîõ€›ÿ]\ŸNàHŸ[öYH\[[ôI‹»›õ€ôŸ\›Y[ù]H⁄Y€ò[ÿ\»H€ôH[ô»Hﬁ\›[Bù€›[ô]ô\à⁄›»[›Kääà›€ô\ã\ô\‹ùY]ö^XI‹»Ÿ[öY\»öYù[ù»H›ò[ôŸ\à⁄]BôòXŸHÿ⁄»€ãà]\»Hÿ[YHﬁ[\€H\»ååçãLLÀåã[ô][ùô\›Yÿ][€à[ôY⁄]ùHö[ô[ô»]X]\ú»\ôNàYù\àôYHK–àõ›[ô»[ôåàŸ[ô\ò]Y[XYŸ\»[ö[ô»õ€\ù^HX›X[ÿ]\ŸH\õôY›]»ôHHôYô\ô[òŸH›»8†%H›[ô[ô»ù[XõŸHôXX⁄ú⁄›⁄][Z[I‹»òXŸH]õ›Y⁄H
+äé	HŸàHúò[YHZY⁄
+äãXõ›]H[ôôY^[Àà[ÇôY][Ÿ[ÿ[õõ›€‹HHòXŸH]ÿ[õõ›ŸYK€»]ﬁ[ù\⁄\Ÿ\»€ôKà]ô[X\ŸH‹õ›HBôÿ\›€à[ôYõ›€‹ŸH]ÇÇèà
+àìõ›[ô»[àHﬁ\›[H]ô\à⁄›ŸY[û[€ôH⁄]HôYô\ô[òŸH›»
+äö\ äãàÿ]Y]èàô\‹ù»Hö[[ò[YH[ôõ›öY\à8†%[õ›Y⁄»õ›ôHHö[H\»[à^Kô]ô\à[õ›Y⁄¬èàŸYH]HòXŸH[à]\»[ù\ÿXõH€X[à€»ô[X\Ÿ\»Ÿ\ôH‹[ù[ö[ô»õ€\^èàYÿZ[ú›[à[XYŸHõÿõŸHY€⁄ŸY]àäÇÇìõ›[ô»⁄[òŸH€‹ŸY]àÿ]Y]›[ö[ùYHò\ôHö[[ò[YN»‹Ÿ]ò\ŸX€€ôö\õYY[Çö[ú›[⁄]õ‹õX][ô–à[ôô]ô\àÿZY›»öY»HX›\ôHÿ\À][€ôH›»]ÿ\¬ôúò[YYà€»Hö\ú›]Y\›[€à[ûHòXŸKYöYùô\‹ùòZ\Ÿ\»8†%
+ù⁄]Ÿ\»\àôYô\ô[òŸH›¬òX›X[H€⁄»ZŸO à8†%Yõ»[ú›Ÿ\àôXX⁄XõHúõ€H[Y‹ò[K€à[ûHŸàHŸ]ô[Çö[ú›[òŸ\ÀàXY€õ‹⁄\»ô\]Z\ôYî»⁄[XÿŸ\‹»[ô€€Y[€ôH[ö⁄[ô»»€⁄ÀÇÇääëö^àXZŸHHôYô\ô[òŸH›»[ú‹X›XõHúõ€HH⁄]]úôXZ‹»[ãääÇÇãH
+äêò\ôH‹Ÿ]ò\ŸXõ›»Ÿ[ô»H›\úô[ùôYô\ô[òŸH›»òX⁄ äãÿ\[€ôY⁄]]¬àö[[ò[YK^[[Y[ú⁄[€ú»[ô⁄^ôK\»⁄]H\ÿXõHôYô\ô[òŸH€⁄‹»ZŸKà]ÿ\¬àô]ö[›\€HH\ÿYŸK]^[€õHô\K⁄X⁄\»H€ôHXŸH€€Y[€ôH[ôXYH€Ÿ\»⁄[Çà[ö⁄[ô»Xõ›]HôYô\ô[òŸH›Àà‹ô\W›⁄]ÿ›\úô[ùÿò\ŸXò[»òX⁄»»Ÿ[ô[ô»Bàÿ\[€à\»^Yà[Y‹ò[HôZôX›»Hö[H8†%HôYô\ô[òŸH›»[Y‹ò[H⁄[õ›à\‹^H\»]Ÿ[àH[ú›Ÿ\ãÇãH
+äòÿ]Y][ôH›\ù\]Y][ôHõ›»ÿ\úûH^[[Y[ú⁄[€ú äà
+ö^XWÿò\ŸKúô¬àLç0ÂÃLç
+KöXHÿò\ŸW⁄[XYŸWŸ[Y[ú⁄[€úÿ»ÿò\ŸW⁄[XYŸW‹⁄^ôW€õ›XàHö[H]\»õ›BàX€ŸXõH[XYŸHô\‹ù»
+SîëPQPìH8†%õ›HX€ŸXõH[XYŸJXò]\à[àH⁄^ôKÇãH
+äïH[ú›[€€ôö\õX][€àô\‹ù»[Y[ú⁄[€ú»€ äã€»HòYôYô\ô[òŸH\»ö\⁄XõH]Bà[€Y[ù]\»[ú›[Yò]\à[àôYHöYùYŸ[öY\»]\ãÇÇääë[Xô\ò][Hõ›ùZ[àHòXŸK\⁄^ôHY]öXÀääàHÿYXôX\ö[ô»ù[Xô\à\»⁄]úòX›[€àŸÇùHúò[YH\àòXŸHö[À[ôYX\›\ö[ô»]ôYY»òXŸH]X›[€à8†%HôX[\[ô[òﬁH[àBú⁄\ôYô[ùãõ‹àH⁄X⁄»H[X[à^YH\ôõ‹õ\»[ú›[ùH[ô€‹úôX›Kà€‹úŸKHù[Xô\Çö[ùö]\»ù\›[ô»]àHôXX⁄›»\»\ôŸH[ôY⁄\ô\€€][€à[ô
+ú›[
+à[ù\ÿXõK€¬ò[ûH[Y[ú⁄[€úÀXò\ŸYô\ôX›€›[]ôH\‹ŸY]à[Y[ú⁄[€ú»ÿ^H›»]X⁄]Z[^\›»]ò[»
+äùH[XYŸH]Ÿ[à\»H⁄X⁄ äã[ôHÿ\[€àÿ^\»€»[à€‹ô»ò]\à[Çö[\Z[ô»Hô\⁄€]Ÿ\»õ›^\›à\»\»Œ\YYôYõ‹ôHHòX›8†%\⁄»⁄]BúôXY[ô»X›X[HYX\›\ô\»8†%[ú›XYŸàYù\ãÇÇò[XYŸKõ‹[òôXY»HXY\à€õK€»ú⁄^ôXô]ô\àX€Ÿ\»Húò[YH[ô\»\»⁄X\ô[õ›Y⁄»ù[à€à]ô\ûHÿ]Y]àH^Ÿ\\»[Xô\ò][HúõÿYàSòZ\Ÿ\¬ò[öY[ùYöYY[XYŸQ\úõ‹ò‘—\úõ‹ò[ôX€€\ô\‹⁄[€êõ€Xë\úõ‹ò\ôH[ôHù[òÿ]Yö[BúòZ\Ÿ\»›\ú»›[[ôHôYô\ô[òŸH›»ŸHÿ[õõ›YX\›\ôH]\›Y‹òYH»ù[ö€õ›€Çú⁄^ôHãô]ô\àúôXZ»H]Y]‹àHŸ[öYKÇÇääï\»Ÿ\»õ›]Ÿ[àö^ö^XI‹»òXŸHöYù[ô⁄›[õ›ôHôXY\»€Z[Z[ô»Àääà]õXZŸ\»HXY[ô»\›\⁄\»⁄X⁄ÿXõH[à€ôH€€[X[ôà⁄]\à\àôYô\ô[òŸH\»òYBôúò[YY\»õ›»H]Y\›[€à‹Ÿ]ò\ŸX[ú›Ÿ\ú»[àŸX€€ôŒ»YàH›»\õú»›]»ôHH€€Ÿú‹ùòZ]‹õ‹Hÿ]\ŸH\»[Ÿ]⁄\ôH[ôHõ€\^Y\à\»òX⁄»€àHXõH8†%ù]ùååçãLLÀåà[ôXYH⁄›ŸY][ö[ô»]õ[ô€‹›»€»ô[X\Ÿ\»[ôŸ]\»õ›[ôÀÇÇääï€»YôX›»ÿ€ŸK\ô]öY]ÿÿ]Y⁄€à\»Yôãõ›[àHô]»[ô\â‹»òZ[\ôH]ÀääÇïHö\ú›à]úôXYÿû]\ 
+Xÿ]›]⁄YHHûX€»[à[úôXYXõKXù]\ô\Ÿ[ùôYô\ô[òŸBô\ÿÿ\Y[ù»HŸ[ô\öX»\úõ‹à[ô\ãà]›]H\»]ôH[à\»\ﬁH[Ÿ[8†%[ú›[òŸ\¬úù[à\»õ›[ú›[òŸOò⁄[HH›»€‹YY[àûH[ô\úö]ô\»›€ôYûHõ€›8†%[ô]ô\ûBúŸ[öYHôXY»Hÿ[YH]€»]\»HŸ[öYH›]YŸKõ›H‹Ÿ]ò\ŸX[ò€€ùô[öY[òŸN»Búô\Hõ›»ÿ^\»^X›H]àHŸX€€ôàHŸ[ôYòZ[\ôH]ŸŸŸY⁄]›]ÿ[[ô¬òÿ€›[ùŸ\úõ‹ò[õZŸHH‹ö]KYòZ[\ôH]ô\⁄YH]àŸ[ô›ÿÿ\»]LPà[ôò‹Ÿ]ò\ŸX[ôõ‹òŸ\»€õH[à–àõ€‹ã€»[à›ô\ú⁄^ôYôYô\ô[òŸHòZ[»€à]ô\ûH[ùõÿÿ][€Çò[ô\X\ôY[àôZ]\àŸ\úõ‹úÿõ‹àÿ]Y]àõ›õ›»€›[ùYÇÇí⁄[›⁄]⁄—SíQW–êT—W‘ëUíQUœLô\›‹ô\»H\ÿYŸK]^[€õHô\Kàõ€\\‹Ÿ[XõH\¬ù[ù›X⁄Yõ»ô]»Hÿ[Àõ»ô]»\[ô[òﬁH
+[›»\»[ôXYHô\]Z\ôY
+KÇÇà»»ååçãLLåà8†%ô\Z\àååçãLLåNà[ú⁄\Yô\ú⁄[€ãXZŸY[õ[ôHYÀôY\›¬Çääîõ€›ÿ]\ŸNääàååçãLLåHÿ\»€€[Z]Y
+òŒòX
+H⁄]H⁄[ôŸ[Ÿ»[ùûH‹ö][Çòù]ì’’ëTî“S”òô]ô\àù[\Y[ô⁄]€»]\›òZ[\ô\»Yù€àXZ[òàôYBúŸ\\ò]Hõÿõ[\À€ôH€€[Z]ÇÇåKà
+äòì’’ëTî“S”ò›^YYåçãLLÀåòääàHô\ú⁄[€ãX⁄[ôŸ[ŸÀ\ﬁ[òÿ]ò[Ÿ[ùôY€ÇàXZ[ò⁄X⁄\»H\ﬁHõÿ⁄Ÿ\à
+úÀ\ﬁ[òÀú⁄\ô\ô\Ÿ]»Hî»⁄X⁄€›]¬à‹öY⁄[ã€XZ[ò
+K[ôÿ]Y]8†%H€ôHYX⁄[ö\€H]õ›ô\»H\ﬁH[ôY8†%€›[à]ôHô\‹ùYHô]ö[›\»ùZ[Yù\àH›XÿŸ\‹Ÿù[\ﬁKÇåãà
+äïH[õ[ôH€›[ôŒòúòY€Y[ùXZŸY[ù»H[XYŸHõ€\ääà^òX››Y‹ÿà€õH‹]H[õ[ôHõ‹õHŸôàHŸ[öYH[ù⁄[àõ»YXÿ]Yÿ€›[ôŒóXY»ÿ\¬àô\Ÿ[ù
+YàŸ[öYW⁄[ù[ô€›[ô◊€›ô\úöYH\»õ€ôX
+Kà⁄]õ›Y‹»›\YYBàYXÿ]YY»€‹úôX›H€€àH
+ùò[YJãù]H]\ò[^€›[ôŒàããò›^YYà[àŸ[öYW⁄[ù[ôÿ\»[ôY»H[XYŸH[Ÿ[\»ÿŸ[ôH\ÿ‹ö\[€ãàÿ[YH⁄\H\¬àH[ú›ö\Y]Y»XZ‹»[àååçãLÀLéKåH[ô‹Ÿ]ò\ŸNàãóX
+åçãLLäK^Ÿ\]àôXX⁄\»H[XYŸHõ€\ò]\à[àH⁄]ÇåÀà
+äï€»\›»Ÿ\ôHYùòZ[[ôÀääà\›ŸYXÿ]Yÿ€›[ô◊›⁄[ú◊€›ô\ó⁄[õ[ôXÿ]Y⁄àõÿõ[Hà[ôÿ\»⁄\YôYà\›‹ù[\◊ÿÿ\úûW›Wÿ€€ú›òZ[ù◊›W⁄[XYŸW€[Ÿ[◊€ôYYà\‹Ÿ\ùYëù[H€›Y—ïÀàò]ôY[à‘—SíQW‘ëPST”W‘ïSX»ååçãLLåH‹]à€›[ô»›][ù»‘—SíQW–”’Së◊‘—ïÿÿ”î—ïÿ€»H\‹Ÿ\ù[€à[õôYH€€ú›[ùà]õ»€ôŸ\à›€ôYH⁄Y€ò[Ççà
+äïH€‹ôî—ï»àÿ\»[]Yúõ€HHŸ[öYHÿ\Xö[]H[ôJäà[à\‹Ÿ[XõW€Y\‹ÿYŸ\ÿà8†%íŸY\]ÿ\›X[[ãX⁄\òX›\ã—ïÀããàòôXÿ[YHíŸY\]ÿ\›X[[ôà[ãX⁄\òX›\ãããàò[ò€€ô][€ò[Hò]\à[àÿ]Y€à—SíQW”î—ïÿ[ôà[õY[ù[€ôY[àHååçãLLåH⁄[ôŸ[ŸÀà€àHYò][[ú›[òŸH
+—SíQW”î—ïÿà[úŸ]
+H]ô[[›ôYH€õH—ï»[ú›ùX›[€àH⁄\òX›\à]ô\àŸY\Ààõ›[ôûBàÿ€ŸK\ô]öY]ÿ€à\»ô[X\ŸI‹»Yôãõ›ûHH\››Z]KÇçKà
+äê[à[\HYXÿ]YY»\ÿÿ\ôYH‹[]Y[õ[ôHò[YKääàH[õ[ôKX€›[ô¬à›X\ô\›Y€›[ô◊€›ô\úöYH\»õ€ôXù]€›]ö]àX\úŸ\»»àò8†%õ›àõ€ôX8†%€»]ôX]H[õ[ôHò[YH[ô[àô[õ›Y⁄»HYò][⁄[[ùBà‹⁄[ô»H›]ö]H⁄\òX›\àX›X[Hò[YYÇÇääëö^ääÇãHì’’ëTî“S”ò8°§àåçãLLåò»HååçãLLåHŸ[öYH€ŸH]Ÿ[à\»[ò⁄[ôŸY[ôà⁄\»\»‹ö][ãÇãH^òX››Y‹ÿõ›»[ÿ^\»‹]»H[õ[ôH€›[ôŒòõ‹õHŸôàH[ù»BàYXÿ]YY»›[⁄[ú»Hò[YKù]H[õ[ôH^[ÿ^\»X]ô\»H[ùÇãHôK\⁄[ùYHôX[\€H\›]H
+äò\‹Ÿ[XõYõ€\
+äà[ú›XYŸàH€€ú›[ù[ôà⁄Y[ôY]»€›ô\àõ›—ï»]»8†%HYò][]
+‘—SíQW–”’Së◊‘—ïÿÿ\úöY\¬àôù[H€›YäH[ôHô]»ÿ€›[ôŒóX›ô\úöYH]
+⁄X⁄Yõ»€›ô\òYŸH]à[
+Kà[Xô\ò]H⁄Y[ö[ô»⁄]ò][€ò[K\àHõô]ô\àY]H⁄X⁄»»XZŸH]\‹»Çàù[H[à”UQKõYÇãHô\›‹ôYî—ï»à[àHŸ[öYHÿ\Xö[]H[ôKÿ]Y€à—SíQW”î—ïÿ€»î—ï»[ú›[òŸ\¬àŸY\ååçãLLåI‹»€‹ô[ô»[ô—ï»[ú›[òŸ\»Ÿ]H[ú›ùX›[€àòX⁄Àà[õôYûBà\›Ÿ[öYPÿ\Xö[]S[ôT—ï‘⁄Y€ò[
+úôXZÀ]\›YàôZ[ùõŸX⁄[ô»H[ò€€ô][€ò[àõ‹\õú»]ôY
+KÇãHH[õ[ôKX€›[ô»›X\ôõ›»\›»ò[⁄[ô\‹»ò]\à[à\»õ€ôX€»[à[\BàYXÿ]YY»õ»€ôŸ\à\ÿÿ\ô»H‹[]Y[õ[ôHò[YKÇÇääìõ›ö^YõYŸŸYõ‹àH›€ô\éääà€à[à—ï»[ú›[òŸHH›ô\úöYH]	‹»ÿYô]H⁄Y€ò[ö\»íŸY\H›ô\ò[[XYŸH\›Yù[àòò]\à[à[à^X⁄]ôù[H€›Yà8†%ŸXZŸ\Çù[àHôK\ôYòX›‹à€‹ô[ô»]HŸ[Z[öHõX⁄ŸY[›]Z[XYŸH›X\ôÿ\»‹ö][àõ‹ãÇï⁄]\à]\»›õ€ô»[õ›Y⁄õ‹àŸ[Z[öI‹»ö[\à\»[à[\\öXÿ[]Y\›[€à]ÿ[õõ›ôBúŸ]Yúõ€HH\›ù[é»]ôYY»H]ôH⁄X⁄»YÿZ[ú›H[XYŸHõ›öY\ãÇÇà»»ååçãLLåH8†%Ÿ[öYH€›[ô»›ô\úöYH
+»—SíQW”î—ï»õ‹à‹õ⁄»[XY⁄[ôBÇääï⁄]ääàŸ[öY\»ÿ[àõ›»ZŸH[à^X⁄]€›[ô»\ÿ‹ö\[€àúõ€HH⁄\òX›\ãò[ôH\ãZ[ú›[òŸH—SíQW”î—ïÿ›⁄]⁄€€ùõ€»⁄]\à[ù[X]H€›[ô»»ùY]H\¬ò[›ŸYûHYò][ÇÇääí›»»\ŸNääÇãH‹Ÿ[öYNà›\õY\€àH€›X⁄€›[ôŒà›ô\ú⁄^ôY⁄]H\⁄\ù[ôò\ôHY‹◊XãH‹àHŸ\\ò]Hÿ€›[ôŒàããóX»€›]ö]àããóXY»[€ô‹⁄YHHŸ[öYHY¬ãHŸ]—SíQW”î—ïœLX[àH[ú›[òŸHô[ùò»[›»î—ï»Yò][»[ô[ù[X]H›ô\úöY\¬Çääï⁄NääàHRH»‹õ⁄»[XY⁄[ôH]ÿ\»[ôXYH⁄\ôY»⁄]ÿ\»Z\‹⁄[ô»ÿ\»H€X[àÿ^Bôõ‹àH⁄\òX›\à»‹X⁄YûH€›[ô»⁄]›]öY⁄[ô»H\ôX€ŸYëù[H€›Y—ï»Çõ[ôH[ú⁄YH‘—SíQW‘ëPST”W‘ïSX[ôHŸŸ€H€»î—ï»[ú›[òŸ\»ÿ[à‹[à⁄]›]ò⁄[ô⁄[ô»—ï»€ô\ÀÇÇääê⁄[ôŸ\ŒääÇãH^òX››Y‹ÿõ›»ô]\õú»HK]\H[ò€Y[ô»€›[ô◊€›ô\úöYXãHùZ[‹Ÿ[öYW‹õ€\
+ããã€›[ô◊€›ô\úöYOJX[ôŸ[ô‹Ÿ[öYJããã€›[ô◊€›ô\úöYOJXãH‹]€›[ô»ù[\»›]ŸàôX[\€H
+‘—SíQW–”’Së◊‘—ïÿ»‘—SíQW–”’Së◊”î—ïÿ
+BãHﬁ\›[K\õ€\Ÿ[öYH[ú›ùX›[€àÿ›[Y[ù»Hô]»Y»ﬁ[ù^ãHô[ùãô^[\Xÿ›[Y[ù»—SíQW”î—ïÿÇà»»ååçãLLÀåà8†%ÿ€ŸK\ô]öY]»ÿ]Y⁄H‹õ›\X⁄]ÿ][ô»ôY‹ô\‹⁄[€à[àååçãLLÀåBÇääîõ€›ÿ]\ŸNà[ôW€Y\‹ÿYŸXŸ\»›XõH]H[ôH]Y]ôX]Y[åH⁄]\»\¬ù[öYõ‹õKääàååçãLLÀåH[]YåH\ãZ[ô\à⁄\◊ÿ[›ŸY›X\ô»€àH[‹ûH]ò‹ö]ò]WŸÿ]X
+[ô\à‹õ›\LJH[ôXYH€›ô\ú»]ô\ûH€ôHŸà[KàùYHõ‹àåàõ›ùùYHõ‹à[ôW€Y\‹ÿYŸXà]	‹»ôY⁄\›\ôYõ‹àõ›ö]ò]HSë‹õ›\⁄]»[ôòúò[ò⁄\»[ù\õò[H€à⁄]⁄Yà‹ö]ò]WŸÿ]X^X⁄]HõÀ[‹»õ‹à⁄]⁄Yå
+ô‹õ›\Ÿ›X\ô	‹»ù\ö\ŸX›[€à8†%[ù›X⁄Y\ôHã\à]»›€àÿ‹›ö[ô K[ôò‹õ›\Ÿ›X\ô€õH⁄X⁄‹»⁄][]ô[‘ì’T–S’—Q–“UÿY[Xô\ú⁄\ô]ô\àBúŸ[ô\â‹»Y[ù]Kà[][ô»H›X\ôô[[›ôYH”ìH\ã]\Ÿ\à[›€\›[ôõ‹òŸ[Y[ùôõ‹à‹õ›\^Y\‹ÿYŸ\ÀúôXZ⁄[ô»‘ì’T–“U—T“Q”ãõY0©Õâ‹»ÿ›[Y[ùY[ùò\öX[ùÇàí[X[àÿ][ô»[ò⁄[ôŸYããà›ò[ôŸ\ú»[à[à[›ŸY‹õ›\\ôHY€õ‹ôY[õ\‹¬òS’—Q’T—Tîÿ\»[\Kààÿ]Y⁄ûH€»[ô\[ô[ùÿ€ŸK\ô]öY]ÿö[ô\àYŸ[ù¬ä‹õ‹‹ÀYö[HòXŸ\à
+»[ôKXûK[[ôHYôàÿÿ[äHôYõ‹ôHY\ôŸN»ô]ô\àôXX⁄YXZ[ãÇÇääëö^ääàô\›‹ôY[ôW€Y\‹ÿYŸX	‹»⁄\◊ÿ[›ŸY⁄X⁄»^X›H⁄\ôH]ÿ\À⁄]Bò€€[Y[ù\›[ô›Z\⁄[ô»]úõ€HH›\àå
+Ÿ[ùZ[ô[HXY
+H⁄]\»€»]\€â›úôKY[]YûHHù]\ôH\‹»›ô\àHÿ[YH€\‹»Ÿàö[ô[ôÀàô]¬ò\›[ôSY\‹ÿYŸQ‹õ›\ÿ][ôÿ
+à\› H[ú»H[ùò\öX[ù\ôX›HYÿZ[ú›ò[ôW€Y\‹ÿYŸXõ›ù\›‹ö]ò]WŸÿ]X8†%Hÿ\^\›YôKYYôà€»
+õ»\›ò[û]⁄\ôH^\ò⁄\ŸYòHõ€ãX[›€\›Y\Ÿ\â‹»^[à[à[›ŸY‹õ›\äK€»\¬ò€‹Ÿ\»HôX[ô]ö[›\€K][ù\›Y€Kõ›ù\›HôY‹ô\‹⁄[€àúõ€H\»ô[X\ŸKÇÇääê[€»ô]ô\ùYääàÿ⁄Y[Wÿ€Y	‹»ô]\ŸHŸàHÿ€€ù^Ÿö[Wÿ€YòX›‹ûH
+[€¬ôúõ€HååçãLLÀåJKà€»[‹ôHÿ€ŸK\ô]öY]ÿö[ô[ô‹ŒàHòX›‹ûH€‹›\ôHö[ô»]¬òö[X\ô›[Y[ùûHò[YH]H[Ÿ[KZ[\‹ùÿ[⁄]K€¬ò[€öŸ^\]⁄úŸ]]äõ›î–“QSW—íSHãããäX⁄[[ùH\»õ»YôôX›8†%€€ôö\õYYòYÿZ[ú›H^\›[ô»\›‹ÿ⁄Y[Wÿ€Y‹⁄›‹◊›W‹ÿ⁄Y[X⁄X⁄ÿ\»\‹⁄[ô»€õBòôXÿ]\ŸH]»\‹Ÿ\ù[€à\»€‹ŸH[õ›Y⁄õ›»õ›XŸN»[ô\õö[ô»ÿ⁄Y[Wÿ€Yúõ€BòHù[ò›[€ëYò[ù»HZ[à\‹⁄Y€õY[ùõ‹»]›]Ÿà›ŸY\úX	‹»T’Xò\ŸYö[ô\ãX€›ô\òYŸHÿÿ[ã⁄[[ùHò\úõ›⁄[ô»H[]ô\ûHÿ]I‹»ù]\ôHôXX⁄õ‹à\¬õ€ôH[ô\ãàÿ⁄Y[Wÿ€Y\»òX⁄»»]»‹öY⁄[ò[[ô\õ€YõŸH
+ÿ[YH€ôBò[‹Wÿ€Yÿõ⁄ôX›◊ÿ€Y[ôXYHXÿŸ\\»òY[Ÿôàõ‹ãôKY^\›[ô»[ô›]ŸÇúÿ€‹H\ôJKà\»[€»[€›»H\ô›Ÿ\ã\Ÿ]ô\ö]Hö[ô[ô»
+HòX›‹ûI‹»[ò⁄[öŸYúô\H€›[òZ\ŸH€àHôX\ãMMãX⁄\àô\XŸ[Y[ùÿ⁄Y[JH⁄[òŸHH‹öY⁄[ò[õŸBõô]ô\àY]⁄\KÇÇääïô\öYöXÿ][€éääàò\⁄ò€]YK›€€À›ô\öYûKú⁄‹ôY[éàLçÃLç\›»
+àô]ŒÇò\›[ôSY\‹ÿYŸQ‹õ›\ÿ][ôÿ
+KŒ]ò[ÀKÕHÿ]KX€‹ú\À›ŸY\ÿ[ôY]\ÀÇÇà»»ååçãLLÀåH8†%€û]Z[X]Y]€X[ù\àXY€ŸK\Xÿ]YŸ⁄XÀôY[ô[ùÿ][ô¬Çääîõ€›ÿ]\ŸNàõ›HùY»ö^8†%Hô\]Y\›Y€ŸK\⁄[\YöXÿ][€à\‹ÀääàH›XòYŸ[ù]Y]ù[ô\à\»ô\…‹»ô]»€û]Z[⁄⁄[
+^ûK\Ÿ[ö[‹ãY]à[úŒà[úô\]Y\›YXú›òX›[€úÀúôZ[ùô[ùYŸ⁄XÀXY€ŸH8†%ŸYHò€]YK‹⁄⁄[À‹€û]Z[ÿ
+Hõ›[ôàÿ[ôY]\»[Çòõ›úKàXX⁄ÿ\»[ô\[ô[ùHô\öYöYYôYõ‹ôHö^[ôŒ»€»Ÿ\ôHôZôX›YYù\à€‹Ÿ\Çö[ú‹X›[€àò]\à[àõ‹òŸYõ›Y⁄
+ŸYHô[› KÇÇääï⁄]⁄\YääÇãHÿ⁄Y[Wÿ€Yõ›»ô]\Ÿ\»Hÿ€€ù^Ÿö[Wÿ€YòX›‹ûH][ôXYHòX⁄‹¬à[‹Wÿ€Yÿõ⁄ôX›◊ÿ€Y[ú›XYŸà[ô\õ€[ô»Hÿ[YHöY]À‹ô\XŸKÿ\[ôà⁄\Kà
+Z[õ‹ã›]YàHô\XŸKX€€ôö\õX][€àY\‹ÿYŸHõ›»X⁄Ÿ\»Hô]»^àX]⁄[ô»[‹K‹õ⁄ôX›À[ú›XYŸàHò\ôHîÿ⁄Y[H\]YàäBãH›ô\‹◊€[€ö]‹ó⁄õÿòÿòó€[€ö]‹ó⁄õÿòõ›»⁄\ôH‹ù[ó⁄X[ÿ[\ù⁄õÿò
+€€€›€Çàÿ]H8°§àùYŸHÿ]H8°§àŸôã[€‹ô]⁄
+›ô\⁄€8°§àöYŸŸ\à8°§à\ú⁄\›
+K€€\⁄[ô»€¬àôX\ãZY[ùXÿ[åÃ[[ôHõÿú»[ù»€ôKàöó€[€ö]‹ó⁄õÿò›^\»Ÿ\\ò]H8†%]¬à€€€›€à\»€òŸK\\ãXÿ[[ô\ãY^Kõ›[\ŸYZ›\úÀ[ô][ÿ^\»ôX€‹ô»\›‹ûBàôYÿ\ô\‹»Ÿà⁄]\à[à[\ùö\ô\À€»]Ÿ\€â›ö]H⁄\ôY⁄\H⁄]›]àõ€[ô»€àÿ\Ÿ\»H[\à€›[€õHŸ\ùôH€òŸKÇãH[]YåHXY\ãZ[ô\àYàõ›⁄\◊ÿ[›ŸY
+\]KôYôôX›]ôW›\Ÿ\ãöY
+Nàô]\õòà›X\ô»
+ô]‹◊ÿ€YYY[Wÿ€Y[ôW›õ⁄XŸK[ôW€Y\‹ÿYŸKX[ÿ€YXY◊ÿ€Yà[ôMH[‹ôJKà‹ö]ò]WŸÿ]X
+[ô\à‹õ›\LKYY‹X⁄YöXÿ[H»ô\XŸH\¬à^X›\ãZ[ô\à]\õà8†%]»›€àÿ‹›ö[ô»ò[Y\»HöYùùY»]ö^Y
+H[ôXYBà›‹»H\ÿ[›ŸYÿ[\àôYõ‹ôH[ûHŸà\ŸH]ô\àù[úŒ»€€ôö\õYYûH‹ô\]õ€ôBàŸàHåHŸ\ôH]ô\àÿ[Y›]⁄YH[Y‹ò[H\‹]⁄à\›»]ÿ[Y\ŸBà[ô\ú»\ôX›H»\‹Ÿ\ùHõ›À\ô[[›ôY›X\ô
+[à\›ô]‹–€€[X[ôÿà\›XY–€Y\›\\€Ÿ\–€Y\›\YòX›–€Y
+HŸ\ôHô]\ôY⁄]H€€[Y[ùà⁄[ù[ô»]\›ö]ò]Qÿ]X⁄X⁄[ôXYH€›ô\ú»Hÿ][ô»€€ùòX›]H€ôBàôX[⁄⁄ŸH⁄[ù8†%[Xô\ò]H⁄Y[ö[ôÀõ›H⁄[[ù€‹Ÿ[ö[ôÀÇãH^‹ù€Y[[‹ûWÿ€Y[ôHY[ùHù]€â‹»€Yô^‹ùY[[‹ûXúò[ò⁄ùZ[Hÿ[YBà^‹ù^[ô\[ô[ùKåçH\Xÿ]Y[ô\»XX⁄⁄]€Y⁄HYôô\ô[ùàŸX›[€àXô[»
+èOOH”ëÀUTìHOOHàú»èOOH”ëÀUTìHQSS‘ñHOOHãëòX›Œààú¬àîôXŸ[ùòX›Œààõ‹àHôXŸ[ùYòX›»[ôJKàõ›»⁄\ôH€Y[[‹ûWŸ^‹ù›^¬à‹Ÿ[ô€Y[[‹ûWŸ^‹ù»õ›]»\ŸHH€€[X[ô	‹»‹öY⁄[ò[€‹ô[ôÀàô]¬à\›^‹ùY[[‹ûP€Y
+»\›ù]€êÿ[òX⁄—^‹ùY[[‹ûX8†%ù]€óÿÿ[òX⁄ÿYàô\õ»\›€›ô\òYŸHôYõ‹ôH\ÀÇãH›‹Ÿ›Ÿ\úó‹ôX\€€òÿ›€]€WŸ\úó‹ôX\€€ò⁄\ôYZ\à^Ÿ\[€ã]\Hò[òX⁄¬à
+[Y[›]»€€õôX›[€ãQî»»^Ÿ\[€ãX€\‹À[ò[YJH[ù¬àÿ€\‹⁄YûWŸô]⁄Ÿ\úõ‹óÿûW›\XàXX⁄ŸY\»]»›€à\›]\ÀX€ŸH[ô[ôÀà⁄X⁄Ÿ[ùZ[ô[HYôô\ú»
+‘—’ù\›ô\‹ù»H€ŸN»€U€HY»Ÿ^K\ôZôX›Y¬àò]K[[Z]Y»õŸKY]Z[Y\‹ÿYŸ\ H8†%€õHHù[HY[ùXÿ[Z[[›ôYÇÇääîôZôX›YYù\à€‹Ÿ\à[ú‹X›[€à
+›\ôòXŸYõ›õ‹òŸY
+NääÇãHH]Y]õYŸŸY[ãÿõ›[ô\ûK⁄õ⁄ŸK›ÿ\ôõÿôK€õ›HY[\›\ô[[›ôKXûK[ù[Xô\à\»ùBàÿ[YH⁄\H^àà^H\ô[â›[ô\õôX]à\ãX⁄]X›[Ÿã[\›»
+[úÀõ›[ô\öY\ KàHõ]\›[ŸãYX›»⁄]H\ú⁄\›[ùYõ›H\›[ô^
+õ⁄Ÿ\ KHõ]X›à⁄]^òHY]Y]H
+ÿ\ôõÿôI‹»›\úô[ùÿ]]À‹X⁄ŸY
+K[ôHõ]^ö[H
+õ›\ KÇàH⁄\ôY[\à€›[ôYY[‹ôH\ò[Y]\úÀÿúò[ò⁄\»[àH€ŸH]ô\XŸ\»8†%à[à[úô\]Y\›YXú›òX›[€ãõ›H⁄[\YöXÿ][€ãÇãHH]Y][€»õYŸŸYù]€óÿÿ[òX⁄ÿ	‹»›\àY[ùHúò[ò⁄\»
+[õôYÿõ›[ô\öY\À¬àõ⁄Ÿ\À›ÿ\ôõÿôK‹Ÿ[ö[XYŸJH\»ôKY\ö]ö[ô»⁄]Z\àÿ€Y€›[ù\ú\ù»€€\]KÇà⁄X⁄ŸYàHô\Xÿ][€àà\ôH\»H⁄[ô€H€ôK[[ôH\›€€\ôZ[ú⁄[€à\Çàúò[ò⁄[ôH›\úõ›[ô[ô»Y\‹ÿYŸH^\»[Xô\ò][H⁄‹ù\àõ‹àHù]€àRBà[àHù[€€[X[ô	‹»8†%õ›€‹ùXú›òX›[ôÀà€õH€Yô^‹ùY[[‹ûXYôX[à
+åçK[[ôJH\Xÿ]YŸ⁄XÀ€»€õH]€ôHúò[ò⁄ÿ\»›X⁄YÇÇääïô\öYöXÿ][€éääàò\⁄ò€]YK›€€À›ô\öYûKú⁄8†%Wÿ€€\[H€X[é»]\›LåãÃLåÇäÿú€€]H\›»ô]\ôYHô]Œà\›^‹ùY[[‹ûP€Y0ÂÃã\›ù]€êÿ[òX⁄—^‹ùY[[‹ûXú\»H»ÿ\õZ[ã\€›\òŸKZ[ú‹X›[€à\›»\]Y»⁄X⁄»H€€\‹ŸY€›\òŸJN»]ò[ú›Z]H‹ôY[à[ò€Y[ô»ö]ò]KYÿ]K\ôY⁄\›\ôY»ÿ]KX€‹ú\»‹ôY[ãàÿ€ŸK\ô]öY]ÿù[Çõ€àHYôàôYõ‹ôHY\ôŸKÇÇà»»ååçãLLãåH8†%YRH‹õ⁄»[XY⁄[ôH\»H\ôŸ[öYHõ›öY\ÇÇääîõ€›ÿ]\ŸNàõ›HùY»ö^8†%Hô\]Y\›Yõ›öY\à‹[€ãääà—SíQW‘ì’íQTò[ôXYBú›⁄]⁄Yô]ŸY[àôŸ[Z[öHà
+€€Ÿ€I‹»Ÿ[Z[öHTH\ôX›JH[ôõò[õŸ‹à
+ò[õ—‘	‹»[XYŸBô[ô⁄[ù
+N»H›€ô\à\⁄ŸY»YRI‹»‹õ⁄»[XY⁄[ôH\»H\ô⁄⁄XŸKÿ[Y\ôX›Búò]\à[àõ›Y⁄ò[õ—‘	‹»õﬁKÇÇääï⁄]⁄\Yääà—SíQW‘ì’íQTè^ZXõ›]\»õ›Y⁄Hô]»ŸŸ[ô\ò]W‹Ÿ[öYWﬁZXõZ\úõ‹ö[ô»H⁄\HŸàH^\›[ô»Ÿ[Z[öK”ò[õ—‘ù[ò›[€úÀà]ÿ[¬òRW“SPQ—W’TìŸY]ÿ⁄[àHôYô\ô[òŸH›»\»Ÿ]
+⁄\◊ÿò\ŸW⁄[XYŸJ
+Xÿ[YHòXŸK[ÿ⁄¬ú]H›\à€»õ›öY\ú»\ŸJH[ôRW“SPQ—W’TìŸŸ[ô\ò][€úÿ›\ù⁄\ŸKYò][[ô¬ù»‹õ⁄ÀZ[XY⁄[ôKZ[XYŸK\]X[]XàRW–TW“—VXRW“SPQ—W”S—SRW“SPQ—W’Tì\ôHô]¬ô[ùàò\ú»
+[‹[€ò[^Ÿ\HŸ^Kô\]Z\ôY€õH⁄[à—SíQW‘ì’íQTè^ZX8†%ÿ[YBôòZ[Yò\›X]\›\ù\]\õàHŸ[Z[öH][ôXYH\Ÿ\ Kà—SíQW‘“VëX	‹»ïﬁà^[ú›ö[ô»\»€€ùô\ùY»RI‹»\‹X›‹ò][ÿò][»õ‹õX]öXH–—ôYX›[€ÇäﬁZWÿ\‹X›‹ò][ÿ
+Hò]\à[àH\ô€ŸY€⁄›\XõK⁄[òŸH[ûH\ãZ[ú›[òŸBò—SíQW‘“VëXò[YHôYY»»ÿ\úûH›ô\ãõ›ù\›H€›\HŸà⁄^ô\»[ôXYH[à\ŸKÇûRI‹»çç⁄ú€€òô\‹€úŸHöY[\»ôY[àÿúŸ\ùôY[àH⁄[õ›\»ò]»ò\ŸMç[ô\»Bôù[]Nö[XYŸKÀããéÿò\ŸMçããòTíH
+H€»Z\úõ‹ú»ŸàRI‹»›€àÿ‹»\ÿY‹ôYY[ôùHÿ‹»YŸH]Ÿ[à‹»»HZ[àô]⁄
+H8†%X€Ÿ[ô»›ö\»H]NòôYö^YÇúô\Ÿ[ùò]\à[à\‹›[Z[ô»€ôH⁄\KÇÇääïô\öYöXÿ][€éääà\›ZP\‹X›ò][ÿ
+\› H
+»\›Ÿ[ô\ò]TŸ[öYVZX
+à\›Àò€›ô\ö[ô»õ›[ô⁄[ùÀHçç⁄ú€€ãŸ]KUTíH[XöY›Z]KHTìYò[òX⁄»][ôBõôZ]\ãYöY[\úõ‹äH
+»‹Ÿ[öYW‹õ›öY\ó€Xô[ÿÿ]\óÿ]Y]Ÿ]Xÿ\Ÿ\»^[ôYõ‹ÇàûZHàHÿ[YHÿ^HH^\›[ô»Ÿ[Z[öK€ò[õŸ‹ÿ\Ÿ\»€‹öÀà]€å»[HWÿ€€\[Hõ›úXò€X[ãàò\⁄ò€]YK›€€À›ô\öYûKú⁄8†%ŸYHù[à›]][àHã‹Ÿ\‹⁄[€àôX€‹ôÇÇà»»ååçãLLç»8†%[Ÿ[]ô\ú⁄[€à›X\ô
+»ÿ\òX⁄‹‹ùY»HY[[‹ûK€‹ôH[XôY[ô»ÿX⁄\¬Çääîõ€›ÿ]\ŸNà\\€ŸX»ôXÿ[	‹»\⁄Y€àÿ\»[‹ôHÿ\ôYù[[àHÿX⁄\»]⁄]»ô^ùÀääà€€\\ö[ô»\\€ŸX»ôXÿ[	‹»
+ååçãLLçäH\ò⁄]ôH\⁄Y€àYÿZ[ú›BúôKY^\›[ô»Ÿ[XôY[ô‹◊ÿÿX⁄Xÿ€‹ôWŸ[XôY[ô‹ÿ
+Y[[‹ûK€‹ôHŸ[X[ùX»ôXÿ[ú⁄\Y[ô\[ô[ùH€àXZ[òåçãLÀLà8†%H⁄Xõ[ô»\⁄Y€ãõ›[à[òŸ\›‹àŸàBô\\€ŸH€ŸJH›\ôòXŸYHôX[]ôHÿ\à€ÿYŸ[XôY[ô‹ÿÿ€ÿY€‹ôWŸ[XôY[ô‹ÿöYõ»[Ÿ[Yö[ôŸ\úö[ù⁄X⁄»][à⁄[ô⁄[ô»SPëQSë◊”S—S€›[⁄[[ùHZ^ùôX›‹ú»úõ€HYôô\ô[ù[Ÿ[»[ù»Hÿ[YH€‹⁄[ôH€€\\ö\€€ãõŸX⁄[ô»YX[ö[ô€\‹¬ú⁄[Z[\ö]Hÿ€‹ô\»⁄]õ»\úõ‹à8†%^\õò[ô\ŸX\ò⁄€à\»^X›òZ[\ôH[ŸBä[XôY[ô»ÿX⁄H[ùò[Y][€äH€€ôö\õ\»]	‹»HŸ[Yÿ›[Y[ùY]ò[àY‹òY][€à\¬ô‹òYX[[ô\›öXù][€ò[õ›H⁄[ô€H‹õ€ô»[ú›Ÿ\ã€»]€Ÿ\»[õõ›XŸYõ‹à^\ÀÇòŸ[XôY[ô‹◊ÿÿX⁄X[€»Yõ»ÿ\à[õZŸHY[[‹öY\ÀùŸòX›»
+[ôXYHõ›[ôY[ôò€€ú€€Y]Y
+K]ŸY\»]ô\ûH\›[ò›^]ô\à[XôYY[ò€Y[ô»[ô\»]\Çúô\XŸY\ö[ô»€€ú€€Y][€à8†%Ÿ[ùZ[ô[H[òõ›[ôY‹õ›››ô\àHõ›	‹»Yô][YKÇÇääï⁄]⁄\Yääàõ›ÿX⁄\»õ›»‹ö]HHõ[Ÿ[⁄YXÿ\àö[ôŸ\úö[ùö[Bäô[XôY[ô‹Àõ[Ÿ[õ‹ôWŸ[XôY[ô‹Àõ[Ÿ[
+H€àÿ]ôH[ô⁄X⁄»]€àÿY\ÿÿ\ô[ô¬ò[ôôXùZ[[ô»úõ€Hÿ‹ò]⁄€àZ\€X]⁄8†%ÿ[YH]\õà\\€ŸX»ôXÿ[[ôXYH\ŸYõ‹Çòô\\€Ÿ\Àõ[Ÿ[àSPëQSë‘◊”PV
+Yò][L
+Hÿ\»Ÿ[XôY[ô‹◊ÿÿX⁄Xö[[Z[ô¬ù»Hô]Ÿ\›[ùöY\»ûH[úŸ\ù[€à‹ô\à€àõ›ÿY[ôÿ]ôKàõ»ÿ\YY¬ò€‹ôWŸ[XôY[ô‹ÿà‹ôH[ùöY\»\ôHõ›[ôYûHH⁄\òX›\àÿ\ô	‹»‹ôXõ€⁄»⁄^ôKõ›õ‹ôÿ[öXÿ[H‹õ›⁄[ô»]ù[ù[YHHÿ^H€€ùô\úÿ][€ò[òX›»\ôK€»Hÿ\\ôH€›[ô›X\ôYÿZ[ú›õ›[ôÀÇÇääïŸXàô\ŸX\ò⁄€ôHôYõ‹ôH‹ö][ô»[ûH€ŸJäà
+\àH›€ô\â‹»ô\]Y\›»⁄X⁄»õ‹Çòô]\à]\õú»ôYõ‹ôHùZ[[ô Nà€€ôö\õYY[Ÿ[]ô\ú⁄[€àö[ôŸ\úö[ù[ô»\»Bò‹ö]Xÿ[Ÿ[Yÿ›[Y[ùYö^»€€ôö\õYYHõ]Rî””àÿX⁄H⁄]Hô\ú⁄[€à⁄YXÿ\à\¬ö]Ÿ[àHY⁄][X]HY⁄ŸZY⁄]\õàõ‹àH\ú€€ò[\ÿÿ[Hﬁ\›[Kõ›€€Y][ô»¬úô\XŸH⁄]X]öY\àXX⁄[ô\ûH
+ôY\À”ïHXúò\öY\ÀôX›‹àú H]\»ﬁ\›[I‹¬úÿÿ[HŸ\€â›ÿ[õ‹ãàõ›[ô»[ŸH[àHô\ŸX\ò⁄›YŸŸ\›YH⁄[ôŸHô^[€ô⁄]ô\\€ŸX»ôXÿ[	‹»›€à\⁄Y€àY[ôXYH[[€ú›ò]YÇÇääïô\öYöXÿ][€éääà\›[XôY[ô‹–ÿX⁄Q›X\ô
+»\›‹ôQ[XôY[ô‹–ÿX⁄Q›X\ôäLà\› H8†%õ›[ô]ö\ö[ôŸ\úö[ù\ÿÿ\ô€àZ\€X]⁄ö[ôŸ\úö[ùŸ\€àX]⁄òÿ\ö[[Z[ô»€àõ›ÿY[ôÿ]ôKõÀ[‹⁄[àõ›\ùKõ»ò]»^Ÿ\[€à[àHÿ]ôBõŸ»
+›ùX›\ò[⁄X⁄ÀX]⁄[ô»Hÿ\õZ[ã’‘—’€€ùô[ù[€äKàúôXZÀ]\›YëQôYBùÿ^\»
+õ›[Ÿ[[Z\€X]⁄›X\ô»\ÿXõYHÿY][YHÿ\ô[[›ôY
+Kàò\⁄ãò€]YK›€€À›ô\öYûKú⁄‹ôY[éàLLH\‹ŸYŒ]ò[ÀKÕHÿ]KX€‹ú\ÀÇÇà»»ååçãLLçà8†%\\€ŸX»ôXÿ[
+»€ã]\ÀY^Hô[Z[ö\ÿ⁄[ôÀôZ[\[Y[ùYúõ€HHY\\à\[ô[òﬁH⁄Z[ÇÇääîõ€›ÿ]\ŸNàHöYŸŸ\›[ô»€àH‹›úò[ò⁄[ôõ›H⁄[\H‹ùääÇòYòLåXYò
+åçãLãLéJHùZ[\\€ŸX»ôXÿ[»MXåXò
+åçãLãLÃ
+HùZ[€ã]\ÀY^Búô[Z[ö\ÿ⁄[ô»€à‹Ÿà]àõ›\ôHúõ€H€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿ[ôô]ô\àY\ôŸYÇï[õZŸHHõ›\àX\õY\à‹ù»\»Ÿ\‹⁄[€ã\»€ôH€›[õ›ôHH›òZY⁄úôZ[\[Y[ù][€éàHXò[ô€ôYúò[ò⁄	‹»\\€ŸX»ôXÿ[ÿ\»ùZ[€à]úò[ò⁄	‹¬ì’”à[XôY[ô»[ôúò\›ùX›\ôH
+SPëQ”S—SHò]⁄Ÿ[XôY
+
+Xÿ[Hù[\K[X]ö^ùôX›‹àÿX⁄JH8†%õ€ôHŸà⁄X⁄^\›»€àXZ[òà›\úô[ùXZ[ò\»H€€\][BôYôô\ô[ù⁄[\\à[XôY[ô»›Xúﬁ\›[H
+SPëQSë◊”S—S⁄[ô€K]^Ÿ[XôY›^òHõ]Ÿ[XôY[ô‹◊ÿÿX⁄XX›õ»ù[\H][ôYõ‹ôH\»Ÿ\‹⁄[€äKà\»\¬úô]‹ö][àYÿZ[ú›XZ[ò	‹»X›X[ö[Z]]ô\Àõ›‹ùYÇÇääï⁄]]Ÿ\Œääà⁄[à€€ùô\úÿ][€àYŸ\»›]ŸàHô\òò][H⁄[ô›»
+XZ[ùZ[ó€Y[[‹ûXúÿ‹õ€[ŸôäKHõ‹Y\õú»\ôH⁄[öŸY
+TT”—W–“Sí◊”T—‘ÿ
+K[XôYY€ôH]Bù[YHöXHH^\›[ô»Ÿ[XôY›^[ô\ò⁄]ôY»ô\\€Ÿ\Àöú€€õ8†%Hù[\BõX]ö^[àêSHõ‹àò\›€‹⁄[ôH⁄[Z[\ö]H
+ù[\H\»HôX[\[ô[òﬁH\»ŸÇùååçãLLçõ»€ôŸ\àHôX\€€à»⁄⁄\\ KàXX⁄\õãöYŸŸ\ôYŸ\\€ŸXô]\Ÿ\¬ùH]Y\ûHôX›‹à[ôXYH€€\]Yõ‹à]ôHŸ[X[ùX»ôXÿ[
+ô\õ»^òH\ã]\õà[XôYò€‹›
+H»[òX⁄»H⁄[ô€H[‹›ô[]ò[ù\›^⁄[ôŸHXõ›ôHTT”—W”RSó‘“SXù[YKYÿ]YûHTT”—W”RSó–Q—W“’Tîÿ€»H]ôH⁄[ô›»\»ô]ô\àX⁄ŸYòX⁄»¬ö]Ÿ[ãàTT”—W”PVÿ\»H\ò⁄]ôH
+ç⁄[ö‹ N»H[Ÿ[⁄[ôŸH\ÿÿ\ô»[ôúôXùZ[»]⁄[òŸH‹õ‹‹À[[Ÿ[ôX›‹ú»\ô[â›€€\\òXõKàŸ\\€Ÿ\ÿ⁄›‹»Bò\ò⁄]ôH⁄^ôKÇÇì€à‹Ÿà]€ù\Ÿ^W⁄õÿòù[ú»€òŸHZ[NàYà[à\ò⁄]ôY\\€ŸI‹»[õö]ô\úÿ\ûBäå[[ÀÕõ[ÀÃ^\àY€À”ïT—VW“SïTïêSÿ
+H[ô»Ÿ^K⁄HôXX⁄\»›][úõ€\Y¬úô[Z[ö\ÿŸHXõ›]]
+ö^Kô[Y[Xô\à⁄[ãããàäH8†%Z[ãYÿ\[ô\ãY\\€ŸHY\ŸY\]ôôY[[ô»‹X⁄X[õ›⁄]KàŸXYÿ^[ôY»ô\‹ùõ›ŸŸ€\»[ôH\ò⁄]ôBò€›[ùX]⁄[ô»›»HXò[ô€ôYúò[ò⁄]Ÿ[à‹ô]»ŸXYÿ[ò‹ô[Y[ù[H\»XX⁄ôôX]\ôH[ôYÇÇääë[Xô\ò][Hõ›‹ùY[à\»\‹ŒääàHúò[ò⁄	‹»€»õ€›À[€à€€[Z]»8†%òLMLò
+\ò⁄]ö[ô»Ÿ[ù›‹»\»\\€Ÿ\ H[ôÕçÿXXçò
+[à‹[€ò[‹õ‹‹ÀY[ò€Ÿ\Çúô\ò[öŸ\äH8†%\ôH[ö[òŸ[Y[ù»»\»›Xúﬁ\›[Kõ›ô\]Z\ôYõ‹à€ã]\ÀY^Búô[Z[ö\ÿ⁄[ô»»€‹öÀàõYŸŸY\»Ÿ\\ò]Hõ€›À]\»ò]\à[àõ€Y[ãŸY\[ô¬ù\»ô[X\ŸH»€ôH[YKÇÇääïô\öYöXÿ][€éääà\›\\€Ÿ\–€‹ôX
+»\›öYŸŸ\ôY\\€ŸX
+»\›€ï\—^X
+¬ò\›\\€Ÿ\–€Y
+»\›XZ[ùZ[ìY[[‹ûP\ò⁄]ô\”€îÿ‹õ€Ÿôò
+¬ò\›\‹Ÿ[XõSY\‹ÿYŸ\—\\€ŸX‘ôXÿ[
+»\›\\€ŸX–€€ôöYÿ
+Õ\› H8†%\ò⁄]ôBúõ›[ô]ö\[Ÿ[X⁄[ôŸH\ÿÿ\ôÿ\ö[[Z[ôÀ⁄[Z[\ö]Hõ€‹ãYŸKYÿ][ôÀò[õö]ô\úÿ\ûK]⁄[ô›»X]⁄[ô»
+[ò€Y[ô»úôYô\ú»H€ôŸ\à[ù\ùò[à[ô^€YK]¬ôY\
+KHXZ[ùZ[ó€Y[[‹ûXÿ‹õ€[Ÿôà⁄\ö[ô»
+HôX[ÿ[õ›Y⁄XZ[ùZ[ó€Y[[‹ûXö]Ÿ[ãõ›H€›\òŸK\ôXY
+K[ôHô]»Ÿ\\€Ÿ\ÿ€€[X[ôö]ô[à\ôX›KàúôXZÀBù\›YëQö]ôHÿ^\»
+⁄[Z[\ö]Hõ€‹ãYŸHÿ]K[õö]ô\úÿ\ûH⁄[ô›Àÿ‹õ€[ŸôÇù⁄\ö[ôÀ[Ÿ[[Z\€X]⁄\ÿÿ\ô8†%XX⁄ô[[›ôY€€ôö\õYYHX]⁄[ô»\›òZ[Yúô]ô\ùY
+Kà[€»ö^Y€»[ô‹»ô\öYûKú⁄ÿ]Y⁄]Ÿ\ô[â›\ùŸàH[éÇò[à]ò[\[õôY‹[€ò[Xõÿ⁄»€›[ùôYYYù[\[ô»úõ€H»»
+HôX[ô]»õÿ⁄Àõ›òHùY K[ô€»\ô€ŸY\[ú›[›ö[ô‹»ôYYY»€»õ›Y⁄H^\›[ô¬ò‹\⁄[ù
+
+X[\à[ú›XYàò\⁄ò€]YK›€€À›ô\öYûKú⁄‹ôY[éàLŒH\‹ŸYŒô]ò[ÀKÕHÿ]KX€‹ú\À›ŸY\ÿ[ôY]\ÀÇÇà»»ååçãLLçH8†%ŸXYŒàH€€\X›ôZ]ö[‹ã]ŸŸ€H›]\»€€[X[ôÇääîõ€›ÿ]\ŸNàHöYù[ô»úõ€HHÿ[YH‹›úò[ò⁄ÿ€‹Y›€àò]\à[Çú›òZY⁄\‹ùYääàÃYòM
+åçãLãLéJHYYŸXYÿù[ôY⁄]Ÿ»õ›][€à[ôò[àíà[€ö]‹ãàHíà[€ö]‹à[ôXYH⁄\YŸ\\ò][H
+íó–STïÿ^\›»€ÇòXZ[ò
+KàŸ»õ›][€àÿ\»\õ]^Y\òH
+ù[ãXõ›ú⁄⁄^ôKX⁄X⁄ÀX[ôX]ò
+H8†%HõY]	‹¬òôY[à€àﬁ\›[Y⁄[òŸHåçãLÀLçã[ô\úõ‹úÀõŸÿ[ôXYHõ›]\»õ‹\õHöXBî]€â‹»õ›][ô—ö[R[ô\ò⁄X⁄\»›öX›Hô]\ãàŸXYÿ	‹»›€à\⁄Y€à[€¬ôŸ\€â›ö]\ÀZ\Œà]»ŸÀY\úõ‹àZ[\Xÿ]\»H^\›[ô»Ÿ\úõ‹úÿ€€[X[ô[ôö]»õY»\›
+TT”—P◊‘ëP–S–—SëW–””ïSïRUXUëSï‘ëSRSëTîÿòëPQSë◊—SêPìQ
+Hò[Y\»úò[ò⁄ôX]\ô\»õ›€àXZ[òÇÇääï⁄]⁄\Y[ú›XYääàŸXYÿ\»H€€\X››]\»[ôHõ‹àHŸŸ€\»\¬úŸ\‹⁄[€àYY8†%Ÿ[X[ùX»Y[[‹ûKÿYô]K›[HZ\úõ‹ãŸôõ[ôHYôKõ⁄XŸH€ôKôÿ\õZ[ã‹›ô\‹À‘íãÿõŸKXò]\ûH8†%HŸ[ùZ[ô[HYôô\ô[ù^\»úõ€Hÿ]Y]	‹¬ò—ëPUTëTÿX›
+Ÿ[öYK€Y[YKŸ⁄Yã›õ⁄XŸKXòX⁄Ÿ[ô›òYôöXÀ€X\À⁄X[[ùY‹ò][€ú Kõõ›H\Xÿ]HŸà]à⁄\◊ÿ[›ŸYYÿ]YZŸHH‹öY⁄[ò[õ›YZ[ã[€õKÇÇääïô\öYöXÿ][€éääà\›XY–€Y
+\› H8†%[ú›Ÿ\úÀô\‹ù»Hô]»ŸŸ€\»ûHò[YKôÿ]Yõ‹àõ€ãX[›ŸY\Ÿ\úÀ[ô[à^X⁄]⁄X⁄»]HŸÀY\úõ‹àZ[›^\¬ôõ‹YàúôXZÀ]\›YëQ€»ÿ^\»
+Hÿ]H⁄X⁄»ô[[›ôY€»ŸŸ€H[ô\¬úô[[›ôY
+Kàò\⁄ò€]YK›€€À›ô\öYûKú⁄‹ôY[éàLH\‹ŸYŒ]ò[ÀKÕBôÿ]KX€‹ú\ÀÇÇà»»ååçãLLç8†%õ⁄XŸK[õ›HX€›\›X»€ôH[ò[\⁄\ÀôZ[\[Y[ùYúõ€HHÿ[YHXò[ô€ôYúò[ò⁄Çääîõ€›ÿ]\ŸNàHõ›\ùôX]\ôHúõ€HHÿ[YH‹›úò[ò⁄ääàòYLôÿò
+åçãLÀLKò€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿ
+Hô[ô‹ôYHŸôõ[ôH[àŸàY[ô[K–RW—X\úÿ
+RU
+H\¬òX€›\›X◊ŸX\úÀúX[ô]ô]ô\àY\ôŸYZ]\ãÇÇääï⁄]]Ÿ\Œääàì“P—W’”ëW—SêPìQù[ú»Hÿÿ[ëï[ò[\⁄\»€à]ô\ûHõ⁄XŸHõ›BäXŸKõ€[YK]⁄úöY⁄ô\‹Àõ›XõH]\Ÿ\ H8†%\ôHù[TKõ»ô]€‹ö»ÿ[õ¬ô^òHTHŸ^H8†%[ôõ€»H⁄‹ùõ›H
+üåM‹K[ò[ZX»õ€[YKÿ\õH€ôHäH[€ô‹⁄YBùHò[úÿ‹ö\àÿ[ò[^ôW›õ⁄XŸW›€ôX⁄X⁄‹»Ÿôà€€ò›\úô[ùH⁄]H^\›[ô»ò[õ—‘ùò[úÿ‹ö\[€àÿ[[à[ôW›õ⁄XŸX€»]Y»õ»Ÿ\öX[][òﬁN»ÿ[òŸ[Y€X[õHYÇùò[úÿ‹ö\[€àòZ[»‹à€€Y\»òX⁄»[\KàX€›\›X◊ŸX\úÀúX\»ô[ô‹ôY[õ[ŸYöYYÇÇääï€»[ô‹»ô^[€ôõ›úNääàù[\XYY»ô\]Z\ô[Y[ùÀù\»HôX[\[ô[òﬁBäõ›€€[Y[ùY[›][‹[€ò[ZŸHÿ\õZ[ò€€õôX›8†%õ»ö\⁄ﬁHò]]ôHùZ[]ô\ûH[ú›[òŸBö[ô\»õ⁄XŸHY\‹ÿYŸ\ Kà\ﬁK›úÀ\ﬁ[òÀú⁄€õH€‹Y\»^X⁄]K[ò[YYö[\Àõ›Bô\ôX›‹ûHﬁ[òÀ€»X€›\›X◊ŸX\úÀúXôYYY[à^X⁄]ﬁ[ò»[ôHô^»õ›úX	‹»8†%ù⁄]›]]HôX]\ôH€›[]ôH⁄[[ùHô]ô\àôXX⁄Y[ûH[ú›[òŸKÿ[YHòZ[\ôBú⁄\HHXò[ô€ôYúò[ò⁄	‹»\]KX[ú⁄ö^[ôXYH€‹öŸY\õ›[ô€òŸKÇÇääïô\öYöXÿ][€éääà\›X€›\›X—X\úÿ
+ô[ô‹ôY[[Ÿ[H\›»YÿZ[ú›Hﬁ[ù]X»–UéÇù€ôH[ò[\⁄\À[\KX]Y[»\úõ‹à]\ÿ‹öXôWÿX€›\›Xÿõ‹õX][ô»[ò€Y[ô»‹K¬ú]\ŸH€›[ù H
+»\›[ò[^ôUõ⁄XŸU€ôX
+Hõ›úH‹ò\\éàZ\‹⁄[ôÀ[›]]Yö[BôòZ[\ÿYôK›XÿŸ\‹»]ôõ\YÀY^Ÿ\[€àòZ[\ÿYôJH8†%L\›ÀàúôXZÀ]\›YëQôYBùÿ^\»
+HZ\‹⁄[ôÀ]ÿ]ãYö[H⁄X⁄»ô[[›ôY\ÿ‹öXôWÿX€›\›Xÿ	‹»õ€ôKY›X\ôô[[›ôYBú]\ŸKX€›[ù[ôHô[[›ôY
+Kàò\⁄ò€]YK›€€À›ô\öYûKú⁄‹ôY[éàLH\‹ŸYŒ]ò[ÀçKÕHÿ]KX€‹ú\ÀÇÇà»»ååçãLLå»8†%Ÿôõ[ôHYôH]ô[ùÀôZ[\[Y[ùYúõ€HHÿ[YHXò[ô€ôYúò[ò⁄Çääîõ€›ÿ]\ŸNàH\ôôX]\ôHúõ€HHÿ[YH‹›úò[ò⁄ääàåXçX
+åçãLãLéKò€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿÿ[YHúò[ò⁄\»HÿYô]H]X›‹à[ô›[HZ\úõ‹ö[ô BòùZ[Ÿôõ[ôHYôH]ô[ù»[ô]ô]ô\àY\ôŸYZ]\ãÇÇääï⁄]]Ÿ\ŒääàQëW‘“SW—SêPìQŸ[ô\ò]\»”ëH€€ò‹ô]H]ô[ù[à\à›€à€‹õBò€›\H[Y\»H^H
+QëW—UëSï’SQTÿYò][LŒåÃååÃ
+H8†%‹õ›[ôY[à\Çúÿ⁄Y[K‹[‹K‹õ⁄ôX›À€YôKX\òÀH⁄X\⁄][Ÿ[ÿ[õ»[XôY[ô‹Àà›‹ôY[ÇòYôWŸ]ô[ùÀù
+ÿ\Y]QëW—UëSï◊”PV
+K[öôX›Y[ù»\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ\¬àï⁄]	‹»ôY[à\[ö[ô»[àêSQI‹»YôHà[ô[ù»ŸŸ[ô\ò]W‹õÿX›]ôW⁄€⁄ÿ	‹»€€ù^ú€»[úõ€\Y⁄X⁄ÀZ[ú»ÿ\úûHôX[ô]‹»[ú›XYŸàŸ[ô\öX»€X[[Àà€ô]‹ÿ⁄›‹¬úôXŸ[ù]ô[ùÀ€ô]‹€õ›ÿõ‹òŸ\»€ôKà[[\àù[ò›[€ú»
+‹ôXY‹ÿ⁄Y[W›Ÿ^Xò‹ôXY‹[‹X‹ôXY‹õ⁄ôX›ÿ‹ôXY€YôWÿ\òÿ
+H[ôXYH^\›Y€àXZ[ò8†%ù\»‹ùô]\ŸY[Hò]\à[àôXùZ[[ô»[û][ôÀÇÇääïô\öYöXÿ][€éääà\›YôQ]ô[ùÿ
+»\›\‹Ÿ[XõSY\‹ÿYŸ\”YôQ]ô[ùÿ
+¬ò\›ô]‹–€€[X[ôÿ
+M»\› H8†%ö[Hõ›[ô]ö\ÿ\[ôõ‹òŸ[Y[ùõõ€ôHã\ô\‹€úŸBôö[\ö[ôÀúõ⁄Ÿ[ãX€\‹⁄YöY\àòZ[[‹[ãH€ã€Ÿôà⁄\ö[ô»[ù»\‹Ÿ[XõW€Y\‹ÿYŸ\ÿò[ôõ›ô]»
+óÿ€Y[ô\ú»ö]ô[à\ôX›H
+X]⁄[ô»H[]ô\ûHÿ]I‹¬òÿ[[õ›[Y[ù[€àô\]Z\ô[Y[ù
+KàúôXZÀ]\›YëQôYHÿ^\»
+ÿ\[ôõ‹òŸ[Y[ùô[[›ôYò\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ⁄\ö[ô»ô[[›ôYõõ€ôHàö[\àô[[›ôY
+Kàò\⁄ãò€]YK›€€À›ô\öYûKú⁄‹ôY[éàNMH\‹ŸYŒ]ò[ÀKÕHÿ]KX€‹ú\ÀÇÇà»»ååçãLLåà8†%Y\]ôH^[ôÀ\›[HZ\úõ‹ö[ôÀôZ[\[Y[ùYúõ€HHÿ[YHXò[ô€ôYúò[ò⁄Çääîõ€›ÿ]\ŸNà[õ›\àôX]\ôHùZ[€òŸH[ô‹›ääàMXåXò
+åçãLãLÃÿ[YBò€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿúò[ò⁄\»HÿYô]H]X›‹äHùZ[’SW”RTîì‘ò[ô]õô]ô\àY\ôŸYZ]\ãàõ›[ô\ö[ô»Hõ€›À]\]Y]Ÿà]úò[ò⁄õ‹à›\Çù[úôYô\ô[òŸY€‹öÀõ€\YûHH›€ô\à\⁄⁄[ô»õ‹àHô\›Ÿà⁄]ì–QPTõYÀåLò[ôXYHõYŸŸY\»[ú‹ùYÇÇääï⁄]]Ÿ\Œääà›\Ÿ\ó‹›[W€õ›X\‹⁄]ô[HôXY»H\Ÿ\â‹»\›’SW‘–STXõY\‹ÿYŸ\»
+Yò][åôYY»]X\›’SW”RSó”T—‘ÿMäH[ôùYŸ\»\àôY⁄\›\à¬ú›XùHX]⁄8†%Y\‹ÿYŸH[ô›[[⁄öH\ŸK›Ÿ\òÿ\ŸHXö]À^€[X][€àúô\]Y[òﬁKòÿ\›X[^‹XZ»
+€⁄YÀ‹õã›ö
+Kà
+äñô\õ»[Ÿ[ÿ[ äà8†%\ôH]\ö\›X‹»ŸôàBö[ãTêSH€€ùô\úÿ][€ó⁄\›‹ûX€»]Y»õ»\ã[Y\‹ÿYŸHH€‹›‹à][òﬁH][äõ»ù[KL»]Y\›[€à\ôK[õZŸHHÿYô]H]X›‹äKàúòX⁄Ÿ]]YŸŸYﬁ[ù]X¬ô[ùöY\»
+‹Ÿ[ùããóXX\ùôX]Y\‹ÿYŸ\ H\ôH^€YYúõ€HHÿ[\Kà[öôX›Y[ù¬ò\‹Ÿ[XõW€Y\‹ÿYŸ\ÿöY⁄Yù\àH^[ôÀ\›[K‹ô\Ÿ][^Y\àõÿ⁄Àà€àûHYò][ò’SW”RTîì‘èL\ÿXõ\ÀÇÇääïô\öYöXÿ][€éääà\›\Ÿ\î›[Sõ›X
+LH\› H8†%XX⁄òZ]]\ö\›X»
+⁄‹ù€€ôÀô[[⁄öHY⁄€›À›Ÿ\òÿ\ŸK^‹XZ K€ÀYô]À[Y\‹ÿYŸ\»⁄[[òŸKúòX⁄Ÿ]]Y»^€\⁄[€ãùH€ã€Ÿôà⁄\ö[ô»[ù»\‹Ÿ[XõW€Y\‹ÿYŸ\ÿàúôXZÀ]\›YëQ€»ÿ^\»
+H\ÿXõYôX\õK\ô]\õà⁄⁄\YH\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ⁄\ö[ô»ô[[›ôY
+Kàò\⁄ãò€]YK›€€À›ô\öYûKú⁄‹ôY[éàMŒ\‹ŸYŒ]ò[ÀKÕHÿ]KX€‹ú\ÀÇÇà»»ååçãLLåH8†%ÿYô]Nà\›ô\‹»]X›[€ãôZ[\[Y[ùYYù\àôZ[ô»ùZ[€òŸH[ôô]ô\àY\ôŸYÇääîõ€›ÿ]\ŸNà\»ôX]\ôH[ôXYH^\›Y€òŸKääàMYN
+êYÿYô]Nà]X›ôŸ[ùZ[ôH\›ô\‹»[ôô\‹€ô⁄]ÿ\ôHãåçãLãLéJHùZ[ÿ\‹Ÿ\‹◊‹ÿYô]X[ô⁄\Yö]€à€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿ8†%ù]]úò[ò⁄]ô\ôŸYúõ€HXZ[ò€àåçãLãLçò[ôÿ\»ô]ô\àY\ôŸYàXZ[ò\»LH€€[Z]»\›]]ô\ôŸ[òŸH⁄[ù⁄]õ»òXŸHŸÇö]àõ›ô[[›ôYYù\à⁄\[ô»8†%ùZ[€òŸK€àHúò[ò⁄]€›Xò[ô€ôY[àò]õ‹àŸÇò€€ù[ùYY€‹ö»\ôX›H€àXZ[ò[ôHôX]\ôHô]ô\àXYHHù[\àõ›[ôöXH[Çô^\õò[Z[\õ›ô[Y[ùZYX\»ÿÿ[à]õ‹‹ŸY\ÿ€‹›\ôKŸ\[ô[òﬁHÿYôY›X\ôŒ»Bõ›€ô\àôX€Ÿ€ö^ôYHYXH[ô\⁄ŸY»€€ôö\õH]ÿ\€â›[ôXYH]ôKà]ÿ\€â›ÇÇääëö^ääàÿ\‹Ÿ\‹◊‹ÿYô]X
+⁄X\Ÿôã[€‹€\‹⁄YöY\ãõ»⁄\òX›\ã⁄\›‹ûH€€ù^
+H[ôò‹ÿYô]W‹õ€\ôZ[\[Y[ùYYÿZ[ú››\úô[ùõ›úXà–QëUW—SêPìQ
+Yò][€äKò–QëUW”S—S–QëUW‘ëT”’Tê—Tÿ
+N›ZX⁄YH	à‹ö\⁄\»Yô[[ôHûHYò][
+KÇò\‹Ÿ[XõW€Y\‹ÿYŸ\ÿÿ\‹Ÿ[XõW€Y\‹ÿYŸ\◊ÿ\ﬁ[òÿÿZ[ôYH\›ô\‹ÿ\ò[Nà⁄[àùYKBú\ôõ‹õX]]ôH[õô\ã]õ⁄XŸHõÿ⁄»\»⁄⁄\Y[ô‹ÿYô]W‹õ€\\»\[ôY\›
+Y⁄\›úÿ[Y[òŸJKÿ[YH\»H‹öY⁄[ò[\⁄Y€ãà⁄\ôY[ù»[ôW€Y\‹ÿYŸX	‹»^\›[ô¬ò\ò[[€€ò›\úô[òﬁH\›[€ô‹⁄YH[õô\àõ⁄XŸH[ô[ö»ô]⁄€»]€‹›»õ»Ÿ\öX[õ][òﬁKà[Xô\ò][H[ô\[ô[ùŸàSìëTó’ì“P—W—SêPìQ
+Yò][ŸôäH8†%HÿYô]Hô]õ]\›õ›ôH⁄[[ùH[ô\ùôXÿ]\ŸH[à[úô[]Y€‹€Y]X»ôX]\ôH\»Ÿôãàÿ€‹HX]⁄\¬ù⁄]HXò[ô€ôYúò[ò⁄X›X[H⁄\Yà[ôW€Y\‹ÿYŸX
+ö]ò]H^
+H€õKõ›ô‹õ›\›õ⁄XŸK‹›»]»8†%‹ŸHô]ô\àY]Z]\ãÇÇääòõ›X€ŸKZ[ùò\öX[ù»ù[H»^Ÿ\[€à
+›€ô\ãX\õ›ôYåçãLL[àHÿ[YBúŸ\‹⁄[€äNääà\»Y»HŸ[ùZ[ôHô]»\ã[Y\‹ÿYŸHH⁄YHÿ[⁄X⁄ù[H»ò\úÀÇê\õ›ôYôXÿ]\ŸH]\»õ›Hú€X[⁄X\ÿ[àHù[I‹»€€[[€ã[Z\›ZŸHõ›Hÿ\õú¬òYÿZ[ú›8†%õ»⁄\òX›\ã⁄\›‹ûH€€ù^€»]Ÿ\€â›ôK\^HHåM⁄À]⁄Ÿ[àõ€\úù[H…‹»€‹›\ô›[Y[ù\»Xõ›]àõ€[ô»][ù»‹›‹ô\Wÿ[ò[\⁄\ÿ
+Hÿ[ò›[€ôYô^[ú⁄[€à⁄[ù
+Hÿ\»€€ú⁄Y\ôY[ôôZôX›Yà]ÿ[ö\ô\»Yù\àHô\H\¬ò[ôXYHŸ[ù€»\›ô\‹»€àT»Y\‹ÿYŸH€›[€õH⁄[ôŸHHëVô\H8†%€ôBõY\‹ÿYŸH]H\»HôX[Y‹òY][€àõ‹àHÿYô]HôX]\ôKàÿ›[Y[ùY\»HŸX€€ôòÿ\ùôK[›][àõ›X€ŸKZ[ùò\öX[ùÿù[HÀô^»H^\›[ô»QSS‘ñW‘—SPSïP◊”UëXõ€ôK€»Hù]\ôHŸ\‹⁄[€àŸ\€â›õY»]\»Hö[€][€ãÇÇääïô\öYöXÿ][€éääà\›ÿYô]P€\‹⁄YöY\ò
+»\›\‹Ÿ[XõSY\‹ÿYŸ\—\›ô\‹ÿ
+L\› H8†%ò€\‹⁄YöY\àY\À€õ»\ú⁄[ôÀòZ[[‹[à€àHúõ⁄Ÿ[à€\‹⁄YöY\ãõ»ò]»^Ÿ\[€à[àBúÿYô]HŸ»
+›ùX›\ò[⁄X⁄ÀX]⁄[ô»Hÿ\õZ[ã’‘—’€€ùô[ù[€äK\›ô\‹¬ú›\ô\‹Ÿ\»[õô\àõ⁄XŸH[ô\[ô»HÿYô]Hõ€\\›õ»\›ô\‹»ûHYò][à[òúôXZÀ]\›YëQ
+ôYHŸ\\ò]H[öôX›[€úŒà€\‹⁄YöY\àõ‹òŸYò[ŸKBö[õô\ã]õ⁄XŸK\›\ô\‹⁄[€àÿ]Hô[[›ôYHÿYô]K\õ€\\[ôô[[›ôY8†%XX⁄ò€€ôö\õYYHX]⁄[ô»\›òZ[Y[àô]ô\ùY
+Kàò\⁄ò€]YK›€€À›ô\öYûKú⁄ô‹ôY[éàMç»\‹ŸYŒ]ò[ÀKÕHÿ]KX€‹ú\À›ŸY\ÿ[ôY]\ÀÇÇà»»åçãLL8†%HŸX€€ô€›\òŸKX\‹Ÿ\ù[€àòX⁄€ŸŒà»[\ú»⁄]ô\õ»ôX[\›€›ô\òYŸH
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇääîõ€›ÿ]\ŸNääà›ŸY\úX	‹»⁄Y[ôY⁄[ô\óÿ€›ô\òYŸJ
+X
+åçãLL HõYŸŸYòÿ]ôWŸôX]\ôW‹ôYúÿÿ]ôW‹›]Xÿ]ôW›ÿ\ôõÿôXŸ[ôŸ⁄YòŸ[ô€Y[YXòŸ[ô‹Ÿ[öYX[ô\]WŸÿ\õZ[ò\»Y[ù[€ôYXù][ô]ô\ãXÿ[YûH[ûH\›8†%ò\››WÿòX⁄€Ÿ◊‹›^\◊Ÿ[\XYôY[àôY€àXZ[ò[ô“HòZ[[ô»€à]ô\ûH\⁄ú⁄[òŸH]ÿÿ[à[ôYàôYHŸàHŸ]ô[à
+ÿ]ôW‹›]Xÿ]ôW›ÿ\ôõÿôXòÿ]ôWŸôX]\ôW‹ôYúÿ
+HŸ\ôH[Xô\ò][H[€öŸ^\]⁄Y»HõÀ[‹[à]ô\ûH
+óÿ€Y\›ù]ÿ[»[Kõ‹àö[\ﬁ\›[H\€€][€à8†%X]ö[ô»Z\àôX[‹ö]H]]Ÿ[à⁄]ûô\õ»€›ô\òYŸKàH›\àõ›\àY€õH[ú‹X›ôŸ]€›\òŸX›ùX›\ò[⁄X⁄‹Àô]ô\àBúôX[ÿ[8†%Ÿ[ô‹Ÿ[öYXHù[ò›[€à]HŸ[ù\àŸàH[ù\ôH][K\ô[X\ŸBôòXŸKYöYù[ùô\›Yÿ][€ãYô]ô\à€òŸHX›X[HôY[à[ùõ⁄ŸYûHH\›ÇÇääëö^ääà\›TŸX€€ôòX⁄€Ÿ—ö]ô[ò[à\›À›\›‹\ôKúXö]ô\»XX⁄ŸàH¬ô\ôX›K⁄]òZŸ\»õ‹à]»K”»
+HòZŸH[Y‹ò[Hõ›äòÿöôX›[€öŸ^\]⁄Yë⁄\K‹Ÿ[öYKZ[XYŸK—ÿ\õZ[àÿ[À\‹]\ôY\ôX›Y\ú⁄\›[òŸHö[\ Kàõ»õ›úBò⁄[ôŸH8†%\»€‹Ÿ\»H\›ÿ\õ›HôZ]ö[‹àùYŒ»õ€ôHŸàH»\õôY›]»YBò[àX›X[YôX›ÇÇääïô\öYöXÿ][€éääàXX⁄ŸàH»úôXZÀ]\›YëQ€ôH]H[YH
+[à[öôX›YX\õBòô]\õò€€ôö\õYYHX]⁄[ô»ô]»\›òZ[Y[àô]ô\ùYôYõ‹ôHHô^
+KÇòò\⁄ò€]YK›€€À›ô\öYûKú⁄‹ôY[éàMM»\‹ŸYŒ]ò[ÀKÕHÿ]KX€‹ú\À›ŸY\òÿ[ôY]\ÀÇÇà»»ååçãLLÀçà8†%ÿ]Y]ÿZYôŸ[Z[öHà[ô›‹Y\ôBÇääîõ€›ÿ]\ŸNà€õHHò[õ—‘úò[ò⁄ò[YY]»[Ÿ[ääàŸ[öYW‹õ›öY\òô[ô\ôYòò[õŸ‹
+õ^Z€€ù^
+Xù]Z[àŸ[Z[öX8†%[ô—SRSíW“SPQ—W”S—S\»\ãZ[ú›[òŸKò⁄[ôŸ\»⁄][àô[ùòY][ôHô\›\ùò]\à[àH\ﬁK[ô\»^X›HHöY[[›Bò⁄X⁄»Yù\à⁄[ô⁄[ô»]à⁄]HõY]Xõ›]»[›ôH»Ÿ[Z[öKLÀ\õÀZ[XYŸK\ô]öY]ÿBõ€ôHò[YH€‹ùô\öYûZ[ô»ÿ\»H€ôHò[YHõ›ô\‹ùYÇÇò‹Ÿ[öYW‹õ›öY\ó€Xô[
+
+Xõ›»ô[ô\ú¬òŸ[Z[öH
+Ÿ[Z[öKLÀ\õÀZ[XYŸK\ô]öY]À[Ÿ[]Y\»V
+“SPQ—JX[ôŸY\¬òò[õŸ‹
+õ^Z€€ù^
+X[ò⁄[ôŸYàõ›ÿ]Y][ôHOOH’TïTUQUOOX[ôHÿ[ö]8†%Hÿ[YHù[ò›[€ãôXÿ]\ŸH‹ŸH€»›\ôòXŸ\»\ÿY‹ôYY€òŸH[ôXYH
+ååçãLLãåKù⁄\ôHH›\ù\[ôHYHŸ[öYHò\ŸH[ôÿ]Y]Yõ›
+KàH›\ù\[ôHÿZ[ú»BòŸ[öYH[Ÿ[òöY[]ô]ô\àYÇÇääï\ô[ú›[òŸHŸà€ôH€\‹»[àH⁄[ô€HŸ\‹⁄[€ääã[ô€‹ùò[Z[ô»\»›X⁄àHŸ[öYBúõ€\Yõ»›\ôòXŸH
+ö^YûH€€À‹Ÿ[öYW‹õ€\‹ô]öY]ÀúX
+KHôYô\ô[òŸH›»Yõ¬ú›\ôòXŸH
+›[‹[à8†%ÿ]Y]ò[Y\»Hö[Kô]ô\à⁄]\»[à]
+K[ôH[XYŸH[Ÿ[Yõõ»›\ôòXŸKàXX⁄ÿ\»õ›[ô€õH⁄[à€€Y[€ôHôYYY»⁄X⁄»][ô€›[õ›àH›[ô[ô¬ú]Y\›[€àõ‹à\»›Xúﬁ\›[H\»õ›ôŸ\»]€‹ö»àù]òÿ[àH›€ô\àŸYH⁄]]\»\⁄[ô»ãÇÇääì€ôHôKY^\›[ô»\›ô]‹ö][ãõ›€‹Ÿ[ôYääÇò\›€ò[õŸ‹‹ô\‹ù◊›W€[Ÿ[›€ÿôXYÿ]\óÿ]Y]Ÿ]X	‹»
+ú€›\òŸJàõ‹àH›ö[ô‹¬ò—SíQW”S—S[ôò[õŸ‹€»]Ÿ[ùôYH[€Y[ù]Ÿ⁄X»[›ôY[ù»H⁄\ôYö[\à8†%⁄[HHôZ]ö[‹à]\»ò[YYõ‹àÿ\»›[€‹úôX›àò]\à[àô\⁄[ùH‹ô\ò]Hô]»ù[ò›[€ã]õ›»ÿ[»ÿ]\óÿ]Y]Ÿ]J
+X[ô\‹Ÿ\ù»Hô[ô\ôYò[YH\¬òò[õŸ‹
+õ^Z€€ù^
+XàH€›\òŸH\‹Ÿ\ù[€àÿ[õõ›òZ[õ‹àHôX\€€àH\›^\›Œ»]ö\»Hò[Z[H]⁄\YHŸôX]\ô\ÿò[YQ\úõ‹ò\›Ÿ[ôH‹ôY[à\›¬äååçãLLãç
+KàúôXZÀ]\›YëQYÿZ[ú›H›XòôY[›]ò[õ—‘úò[ò⁄ÇÇääïô\öYöXÿ][€éääàò€]YK›€€À›ô\öYûKú⁄‹ôY[ãà»ô]»\›»\»€ôHô]‹ö][ã[õ›\ÇòúôXZÀ]\›YëQ€ôH[öôX›[€à]H[YKÇÇà»»ååçãLLÀçH8†%HŸ[öYH[Ÿ[ÿ\»[òXõN»⁄]H[Ÿ[[X[ô»ÿ\»õ›Çääîõ€›ÿ]\ŸNà—SRSíW“SPQ—W”S—S\»ôY[à[à[ùàò\à⁄[òŸHHŸ[Z[öHòX⁄Ÿ[ô[ôYù]òô\‹€úŸS[Ÿ[]Y\ÿÿ\»\ô€ŸY»»íSPQ—HóX[àH^[ÿYääàŸ[Z[öKLÀ\õÀZ[XYŸK\ô]öY]ÿúô\]Z\ô\»»ïVãíSPQ—HóX[ôôZôX›»SPQ—H[€ôK€»ú›⁄]⁄HŸ[öYH[Ÿ[[àô[ùàà8†%ù⁄X⁄]ô\ûHÿ»[\YYÿ\»H€ôK[[ôH⁄[ôŸH8†%€›[õ›€‹ö»õ‹àH[Ÿ[[‹›€‹ùú›⁄]⁄[ô»Àà\⁄ŸY›»»[›ôH»õÀH€ô\›[ú›Ÿ\àÿ\»]H€õÿàÿ\»€õH[Çù\ôKÇÇääëö^ääà—SRSíW‘ëT‘”î—W”S—SUQTÿ€€[XK\Ÿ\\ò]YYò][SPQ—X
+[ò⁄[ôŸYôZ]ö[‹äKÇò‹\úŸW€[Ÿ[]Y\ÿõ‹õX[^ô\»ÿ\ŸH[ô⁄]\‹XŸKôXÿ]\ŸHô[ùòò[Y\»\ôH[ô]\Y[ôò^[XYŸH]\›õ›ôX€€YHH[ô]ô]ô\àô]\õú»[à[\H\›8†%[à[\Bòô\‹€úŸS[Ÿ[]Y\ÿ\»]Ÿ[àHÇÇääë[Xô\ò][Hõ›€öYôôYúõ€HH[Ÿ[ò[YKääàH[Ÿ[›ö[ô»\»õ›Hÿ\Xö[]K[ôBõô^[XYŸH[Ÿ[⁄[õ›ôHò[YYYù\àZ]\àŸàH€»ŸH€õ›»Xõ›]àô[ùãô^[\Xòÿ\úöY\»õ›€‹ö⁄[ô»Z\ú»[ú›XYÇÇääêH^[€õH[ú›Ÿ\àõ›»ÿ^\»⁄]]ÿZYääà⁄]V[òXõYHôYù\ÿ[€€Y\»òX⁄»\»õ‹ŸBô^Z[ö[ô»⁄K[ôH\ù»€‹\ÿÿ\ôY]8†%X]ö[ô»õ»[XYŸH]X⁄X⁄\»HX\›ö[ôõ‹õX]]ôH[ô»Hô\‹€úŸH€€ùZ[ôYàõ€ã\ôYù\ÿ[^[€ô‹⁄YH[à[XYŸH\»›[öY€õ‹ôY»H[XYŸH⁄[úÀÇÇääï€»‹\ò][€ò[òX›»õ›[ô⁄[H⁄X⁄⁄[ô»H[Ÿ[QÀõ›]YåçãLL»[ôõ›ù€‹ùôK]ô\öYûZ[ô»ôYõ‹ôHX›[ô»€éääÇãH
+äòŸ[Z[öKLãçKYõ\⁄Z[XYŸX\»ÿ⁄Y[Y»⁄]›€àåçãLLLãääà]\»HõY]Yò][à[ô⁄][Ÿ]ô[à[ú›[òŸ\»ù[ãà⁄[à]€Ÿ\À]ô\ûH[ú›[òŸH‹Ÿ\»Ÿ[öY\»]€òŸKà\¬à\»HXY[ôKõ›HôYô\ô[òŸK[ô]\»öYŸŸ\à[àHôX\€€à]ÿ\»õ›[ôÇãHõ»€‹›»âåLÕ\àRÀÃí»[XYŸHYÿZ[ú›âåŒHõ‹àH›\úô[ùõ\⁄[Ÿ[8†%õ›Y⁄BàÀçàHŸ[Z[öKLÀåKYõ\⁄Z[XYŸK\ô]öY]ÿ⁄]»ô]ŸY[à[H]âåçÀÇÇääïô\öYöXÿ][€éääàò€]YK›€€À›ô\öYûKú⁄‹ôY[ãà»ô]»\›Àõ›\à\‹Ÿ\ù[€ú»úôXZÀ]\›YîëQ€ôH[öôX›[€à]H[YKÇÇà»»ååçãLLÀç8†%H€ôK\ŸX€€ôŸ[Z[öH›]YŸHÿ\»HòZ[YŸ[öYBÇääîõ€›ÿ]\ŸNàô\]Y\›ÿŸ\»õ›òZ\ŸH€àH^[ôH[XYŸHô]ûH€‹€õHÿ]Y⁄ùò[ú‹‹ù^Ÿ\[€úÀääàHL»ÿ[YHòX⁄»\»[à‹ô[ò\ûHô\‹€úŸHÿöôX›Ÿ[ù›òZY⁄\›ò^Ÿ\
+€€õôX›[€ë\úõ‹ã[Y[›]
+Xÿ\»ô]\õôY»Hÿ[\ã[ôôXÿ[YH[à\úõ‹à€ôBôúò[YH]\à]òZ\ŸWŸõ‹ó‹›]\ 
+X8†%⁄\ôHõ›[ô»ô]öYY]à›€ô\ã\ô\‹ùY]ôNÇÇà<'‰Ì»€›[â›XZŸH]€ôNàL»Ÿ\ùô\à\úõ‹éàŸ\ùöXŸH[ò]òZ[XõHõ‹à\õÇàŒãÀŸŸ[ô\ò]]ô[[ô›XYŸKô€€Ÿ€X\\Àò€€K›åXô]K€[Ÿ[ÀŸŸ[Z[öKLãçKYõ\⁄Z[XYŸNôŸ[ô\ò]P€€ù[ùÇëŸ[Z[öI‹»[XYŸH[ô⁄[ùô]\õú»L»[ô\àÿY[ôéH⁄[àò]K[[Z]Y[ôõ›€X\à€ÇùZ\à›€à⁄][àŸX€€ôÀàHô]ûH€‹YôY[à[àXŸH⁄[òŸHH\õ]^^\»[ôôXY\¬ù›Y⁄]€›ô\ôY\Œ»]ô]ô\àYàÿ[YHò[Z[H\»ååçãLÀLçâ‹»ö[ô[ô»]òô\]Y\›ÿŸ\»õ›òZ\ŸH€àÕ^[àH€ôHXŸH]\‹€€àYõ›ôY[à\YYÇÇääëö^ääÇãH⁄[XYŸW‹ô\]Y\››⁄]‹ô]öY\ÿ8†%€ôH€‹õ‹àõ›ô\òúÀô]ûZ[ô»ò[ú‹‹ùòZ[\ô\»
+äò[ô
+äÇà“SPQ—W‘ëUñW‘’UT—Tÿ
+éKLLãLÀL
+Kà‹‹››⁄]‹ô]öY\ÿ[ôàŸŸ]›⁄]‹ô]öY\ÿ\ôHõ›»[à‹ò\\úÀ€»Hò[õ—‘Tìô]⁄Ÿ]»Hÿ[YHôX]Y[ùà\»HŸ[ô\ò]Hÿ[ò]\à[àH€‹H]€›[öYùÇãH
+äêH]\»õ›éH\»ô]ô\àô]öYYääàHòYõ€\‹àHòYŸ^H\»›\úŒ»ô]ûZ[ô»€õBà[^\»HôX[\úõ‹àûH⁄^ŸX€€ôÀÇãHô]ûKPYù\ò\»€õ‹ôY⁄[àHŸ\ùô\àŸ[ô»H\ÿXõH€ôK
+äòÿ\Y]L äà€»[àXú›\ôà‹à‹›[HXY\àÿ[õõ››[H[ô\é»›\ù⁄\ŸHH‹öY⁄[ò[úÀÕ»ò[\ÇãHHö[ò[ô\‹€úŸH\»
+äúô]\õôYõ›òZ\ŸY
+äã]ô[à⁄[à]\»›[Hô]ûXXõH›]\»8†%àHÿ[\â‹»òZ\ŸWŸõ‹ó‹›]\ 
+X›^\»H⁄[ô€HXŸH[àòZ[\ôHôX€€Y\»[Çà^Ÿ\[€ãÇãH€YYXWŸ\úõ‹ó›^⁄]ô\»Hò[ú⁄Y[ù›]YŸHZ[à€‹ô»[ú›XYŸàH›]\»[ôH[ôBàTìà
+àïH[XYŸHŸ\ùöXŸH\»ù\ﬁHöY⁄õ›»
+L H8†%HöYY»[Y\Àà\⁄»YHYÿZ[à[àBàZ[ù]Kàäà[û][ô»⁄]›]HôX€Ÿ€ö\ŸYò[ú⁄Y[ù›]\»ŸY\»Hò]»^ôXÿ]\ŸH[Çà[ôò[Z[X\à\úõ‹à\»^X›H⁄[àH]Z[»X]\ãàÿ[YH‹]\»ååçãLLãéI‹¬àZ\‹⁄[ôÀX\‹Ÿ]ú»›⁄]⁄Y[Ÿôã€ôH^Y\à›]ÇÇí⁄[›⁄]⁄SPQ—W‘ëUñW’êSî“QSïLô\›‹ô\»ò[ú‹‹ù[€õHô]öY\Ààù[ú»[ú⁄YHBô^\›[ô»\ﬁ[ò⁄[Àù◊›ôXY‹€»HYY€Y\»»õ››X⁄H]ô[ù€‹ÇÇääïô\öYöXÿ][€éääàò€]YK›€€À›ô\öYûKú⁄‹ôY[ãàLô]»\›Œ»ö]ôH\‹Ÿ\ù[€ú»úôXZÀ]\›YîëQ€ôH[öôX›[€à]H[YK[ò€Y[ô»€ôH]⁄Y[ú»“SPQ—W‘ëUñW‘’UT—Tÿ»[ò€YHò[ôõ›ô\»Hõ›\ô]öYY\›€›[ÿ]⁄]ÇÇà»»ååçãLLÀå»8†%Hõ€\€H[Ÿ[»⁄[ôŸH\àòXŸBÇääîõ€›ÿ]\ŸNà\à[€ŸöY⁄õ›Œà€[€ŸH8†%]]ôXY[à\àòXŸKò\»H€õBö[ú›ùX›[€à[àH[ù\ôHŸ[öYHõ€\][»H[Ÿ[»[ŸYûH\àòXŸK[ô]⁄]¬üåML⁄\òX›\ú»ZXYŸà]ô\ûHù[H]ÿ^\»€‹H]^X›Kääà]\»ÿ]Y€Çò⁄]⁄Y\»õ›õ€ôX⁄X⁄õŸX›[€à[ÿ^\»ÿ]\ŸöY\À€»]\»ôY[à[à]ô\ûH]ôBúŸ[öYH8†%[ô[àõ€ôHŸàHåàK–à[XYŸ\»ååçãLLÀåàÿ\»ùYŸY€ãôXÿ]\ŸHHô]öY]¬ù€€\‹ŸY⁄]⁄YSõ€ôXàH›€ô\àõ›XŸYHÿ\úõ€HH›\à[ôà
+àùHŸ[öY\¬úŸY[YYô]\à[àH\›[àHX›X[€ô\ÀàäàH[€Ÿ[ôH[ôHÿŸ[ôKYY\õÿ⁄¬ò\ôHH€»[ô‹»H\›õ€\ÿ\»Z\‹⁄[ôÀÇÇï\»\»Hÿ[YH⁄\H\»Hô\›ŸàååçãLLÀåà8†%H€€ùòYX›[€à[ô»[àY][Ÿ[õ]]YH8†%^Ÿ\\»€ôH\»õ›[\X⁄]à‘—SíQW‘ëT—TïëW‘ïSXÿ^\»€‹H\àòXŸH›]õŸàHôYô\ô[òŸN»H[€Ÿ[ôHÿ^\»XZŸH\àòXŸH⁄›»⁄\›ù[ô\‹Ààõ›ÿ[õõ›€ÇÇääëö^ääà⁄[àHôYô\ô[òŸH›»\»]X⁄YH[€ŸôXX⁄\»H[XYŸHõ›Y⁄Bô^ô\‹⁄[€à[ôXYHò]€àXõ›ôH][ôõ›Y⁄‹›\ôK⁄X⁄\»⁄\ôHH[€Ÿ⁄›‹»[àBú›Ÿ‹ò\[û]ÿ^NÇÇà\à[€ŸöY⁄õ›Œà€[€ŸH8†%]]€€›\à]^ô\‹⁄[€à[ô›»⁄I‹»€[ô»\úŸ[ãÇÇïH[€Ÿ]Ÿ[à\»[ù›X⁄Y»Hö^\»Hô\òãõ›HôX]\ôK[ôH\›[ú»]Bùò[YH›[ôXX⁄\»Hõ€\à
+äï^[€õH[ú›[òŸ\»ŸY\H€€‹ô[ô äà8†%⁄]õ¬úôYô\ô[òŸH›»\ôH\»õ»ô\Ÿ\ùôYòXŸHõ‹à]»€€ùòYX›àô]\Ÿ\»Bò—SíQW—êP—W”–“ÿ⁄[›⁄]⁄ò]\à[àY[ô»HŸX€€ô€ôNà]\»Hÿ[YHôX]\ôBä›‹Hõ€\[ùö][ô»òXŸHY] K[ô—SíQW—êP—W”–“œLõ›»ô\›‹ô\»H⁄€BùååçãLLÀåHõ€\[ò€Y[ô»\»[ôKÇÇääîŸ\]Y[ò⁄[ôÀ›]YZ[õNääàHôYô\ô[òŸH›»\»›[HöYŸŸ\à]ô\ãà[Z[I‹»\»Bôù[XõŸHôXX⁄⁄›⁄]\àòXŸH]é	HŸàúò[YHZY⁄
+ŸYHååçãLLÀåàXõ›ôJK[ôõ¬úõ€\€‹ô[ô»ôX€›ô\ú»Y[ù]Húõ€HåLŸàòXŸKà\»⁄[ôŸH\»ù\›YöYY€à[ù\õò[ò€€ú⁄\›[òﬁH[€ôH8†%[à[ú›ùX›[€à»[\àHòXŸH€€ùòYX›»õ›\à\[ôYù[\»¬úô\Ÿ\ùôH]8†%ù]YàHôYô\ô[òŸH\»›ÿ\Y[ô\»\ﬁ\»ŸŸ]\ãôZ]\à⁄[ôBò]öXù]XõKà›ÿ\H›»ö\ú›ÿ]⁄Hô]»Ÿ[öY\À[à\ﬁKÇÇääïô\öYöXÿ][€éääàò€]YK›€€À›ô\öYûKú⁄‹ôY[ãàô]»\›À[õ›\àúôXZÀ]\›YëQ€ôBö[öôX›[€à]H[YKÇÇà»»ååçãLLÀåà8†%[Z[I‹»Ÿ[öYHÿ\»Hô]\ã[€⁄⁄[ô»›ò[ôŸ\à⁄]õ»€\‹Ÿ\¬Çääîõ€›ÿ]\ŸNàHõ€\\⁄ŸYH[Ÿ[»ŸY\\àòXŸH⁄]›]]ô\àÿ^Z[ô»⁄]HòXŸBö\»XYHŸã[ô[ôY]H‹ö][à\ÿ‹ö\[€àŸà\à[àHÿ[YHúôX]\»H›ÀääÇì›€ô\ã\ô\‹ùY⁄]HôYõ‹ôKÿYù\àZ\éàHôYô\ô[òŸH\»HúôX⁄€Y€€X[à[à›ô\ú⁄^ôYúõ›[ô€\‹Ÿ\Œ»HŸ[öYHÿ[YHòX⁄»⁄]Yôô\ô[ùõ€ôH›ùX›\ôKõ»úôX⁄€\»[ôõ¬ô€\‹Ÿ\»8†%ôX€Ÿ€ö\ÿXõHHYôô\ô[ù[‹ôH€€ùô[ù[€ò[H]òX›]ôH\ú€€à⁄]HöY⁄öZ\à€€›\ãàHôYô\ô[òŸH›»ÿ\»]X⁄Y[ô€‹úôX›€»\»\»õ€ôHŸàHX\õY\Çòÿ]\Ÿ\»
+ååçãLLKåL	‹»Z\‹⁄[ô»›ÀååçãLLãåâ‹»ôZôX›YZ[YH\KùååçãLLãçI‹»ŸXZŸ\àõ^Z€€ù^8†%[Z[H\»€àŸ[Z[öJKÇÇï€»⁄\\»[àHõ€\õ›Ÿà⁄X⁄›\ùö]ôYååçãLLKéNÇÇääåKà—SíQW–TPTêSê—Xÿ]Sî“QHHY[ù]HŸ[ù[òŸKääàö]÷ÃX[ôYòãããöù\›[àHô]»‹ŸK‹Ÿ][ôÀà⁄I‹»”êSQ_K‘—SíQW–TPTêSê—_Hò€»€ôHŸ[ù[òŸHÿ]ôBùH[Ÿ[HòXŸH»€‹H
+ò[ô
+àH‹ö][à‹X»8†%ò]Xù\õàÿ]ô\À^ô[^Y\À›ô\ú⁄^ôYõ›[ôô€\‹Ÿ\»à8†%]]ÿ[àÿ]\ŸûH⁄]HòXŸH][ùô[ùÀà]ô\ûH€ôHŸà\ŸH\»Hù[úôK\ô[ô\à
+‹ŸKúò[Z[ôÀŸ][ô»[ô€›\»[⁄[ôŸJK[ô€àHôK\ô[ô\àﬁ[ù\⁄\⁄[ô¬ôúõ€HH€‹ô»\»H⁄X\\à][à€‹Z[ô»úõ€HH^[ÀàH\òY‹ò\	‹»]\Çò€]\Ÿ\»€»ö\ú›⁄X⁄\»^X›H⁄\ôH[Z[I‹»€\‹Ÿ\»\ôKÇÇï\»\»
+äõõ›
+äàHô]ô\úÿ[ŸàååçãLLKéK⁄X⁄YY\X\ò[òŸKùö[\»ôX⁄\Ÿ[Bú€»HòXŸHYHô\òò[[ò⁄‹à[ôõ›€õHH›»⁄[ù\ãàH€‹ô»›^Kà⁄]⁄[ôŸY\¬ùZ\àò[öŒà^H\ôHõ›»[ùõŸXŸY\»
+àï⁄»⁄H\À\»€€ù^€õH8†%H›»›]ò[ö‹¬ô]ô\ûH€‹ôŸà][ô\àòXŸH\»ô]ô\àò]€àúõ€H\»^äãZXYŸàHÿŸ[ôHõÿ⁄¬úò]\à[àù\ŸY[ù»HY[ù]H€Z[KÇÇääåãàíŸY\\àòXŸHY[ùXÿ[àô]ô\àÿZY⁄X⁄\ù»ŸàHòXŸKääàõ›[ô»[àHõ€\ò€€ùòYX›YH]\⁄XõKô]\ãXõ€ôY€€X[à⁄]HöY⁄Z\ãà‘—SíQW‘ëT—TïëW‘ïSXõõ›»[ù[Y\ò]\»⁄]Ÿ]»€‹YY8†%òXŸH⁄\H[ôõ€ôH›ùX›\ôK^Y\Àõ‹ŸK[›]úõ›‹Àú⁄⁄[à€ôH[ô⁄⁄[àX\ö‹ÀZ\õ[ôKZ\à€€›\à[ô^\ôK\\ô[ùYŸH8†%[ôò[Y\»BôòZ[\ôH\ôX›Nà
+àò[à‹ô[ò\ûHòXŸH]X]⁄\»HôYô\ô[òŸH\»öY⁄[ôBòô]\ã[€⁄⁄[ô»€ôH]Ÿ\»õ›\»‹õ€ôÀàäà[XYŸH[Ÿ[»ôY‹ô\‹»òXŸ\»›ÿ\ô[Çò]òX›]ôHYX[à[õ\‹»€õ›ÀÇÇääë^Y]ŸX\à\»›]Yõ›ÿ^\Àô]ô\à\‹Ÿ\ùY
+äà
+
+àöYà⁄H\»ŸX\ö[ô»€\‹Ÿ\»\ôH⁄H\¬ùŸX\ö[ô»‹ŸHÿ[YH€\‹Ÿ\»\ôN»Yà⁄H\»ŸX\ö[ô»õ€ôKYõ€ôHääKà\‹Ÿ\ù[ô»€\‹Ÿ\»[ÇòHù[H⁄\ôYûH[Ÿ]ô[à[ú›[òŸ\»\»H⁄\òX›\ãXõYYò\ŸàååçãLLKé	‹»€›\öY\ÇöòX⁄Ÿ][ôéI‹»\ô€ŸYúôX⁄€\À€ôHô[X\ŸH]\é»H\›[ú»]ÇÇääëö^ääÇãH‘—SíQW‘ëT—TïëW‘ïSX[ô‘—SíQW—êP—W–”TíUW‘ïSX\[ôYô^¬à‘—SíQW“QSïUW’RS8†%ôX\ô\›H›]]\»⁄\ôH[àY][ú›ùX›[€à[ô»\ô\›à
+ååçãLLKéI‹»ö[ô[ô KàHZ[ŸY\»H\›€‹ô»]\»H⁄‹ù\››][Y[ùŸÇàHÿ[YH€€ú›òZ[ùÇãH‘—SíQW–“Së—W‘–”‘X
+ë]ô\û][ô»]õ€›‹»⁄[ôŸ\»H‹ŸKHŸ][ôÀ\Çà€›\»[ôHÿ[Y\òKàõ€ôHŸà]⁄[ôŸ\»\ãàäHôYõ‹ôHHÿŸ[ôHõÿ⁄À€»åL⁄\òX›\ú»ŸÇà‹ŸK›ŸX]\ãÿÿ[Y\òHôXY\»[àY]‹X»[ú›XYŸàH\ÿ‹ö\[€àŸàH›»»õŸXŸKÇãHìô]»⁄›àò8°§àëúò[Z[ôŒàò€àHY]úò[ò⁄àìô]»⁄›à\»HŸ[ô\ò]H›YH[àH€ôBàXŸHH[Ÿ[]\›õ›Ÿ[ô\ò]KÇãHH€\ö]Hù[H\»[Xô\ò][H€€\]XõH⁄]]ô\ûHúò[Z[ô»[àH€€Ààí\àòXŸH\¬à\ôŸH[àúò[YHà€›[€€ùòYX›H[ãZ[ãYúò[YH[ô⁄Y\àò]‹À[ôHõ€\]à€€ùòYX›»]Ÿ[à[ô»òX⁄»H]]YH\»ô[[›ô\»8†%H\›[ú»]€ÀÇãH[Ÿà]\»ÿ]Y€à⁄\◊ÿò\ŸW⁄[XYŸJ
+Xàê€‹H\àòXŸH›]ŸàHôYô\ô[òŸH›»Çà⁄]õ»›»]X⁄Y\»[à[ú›ùX›[€à»€‹Hõ›[ôÀÇÇí⁄[›⁄]⁄—SíQW—êP—W”–“œLô\›‹ô\»HååçãLLÀåHõ€\àŸ\\ò]Húõ€Bò—SíQW“QSïUW—’PTë€à\ú‹ŸNà]€ôH[€»›€ú»HK\›X⁄⁄[ô»[ôHZ[õ›õŸà⁄X⁄⁄›[›\ùö]ôH\õö[ô»\»Ÿôãàõ€\\‹Ÿ[XõH€õKõ»ô]»Hÿ[ÀÇÇääïH€‹››]YZ[õNääàHõ€\‹õ›‹»MŒH8°§àçÃÕ⁄\òX›\ú»õ‹à[Z[K
+ÕL…KÇì[‹ôH^\»]Ÿ[àH[][€àö\⁄À[ôH€ô\›‹⁄][€à\»]\»òY\»HŸ[ô\ò[ô[][€àõ‹àH‹X⁄YöXÀò[YY€€ú›òZ[ùà]\»€‹ùK–ãZ[ô»ôYõ‹ôH]\»ô[Y]ôYÇÇääìô]Œà€€À‹Ÿ[öYW‹õ€\‹ô]öY]ÀúXääà]ô\ûHòXŸKYöYùô[X\ŸH€»ò\à\»ôY[à\ô›YYôúõ€HŸ[ô\ò]Y[XYŸ\»[ô[ôô\ô[òŸKôXÿ]\ŸHõ›[ô»€›[⁄›»Hõ€\]Ÿ[ãÇò]€å»€€À‹Ÿ[öYW‹õ€\‹ô]öY]ÀúH[Z[HKYYôòô[ô\ú»⁄][à[ú›[òŸH€›[Ÿ[ôù⁄]HòXŸHÿ⁄»Ÿôà[ô€ãôXYH»\›H[ù»Ÿ[Z[öH⁄]HôYô\ô[òŸH›Ààô\À[€õB∏†%úÀ\ﬁ[òÀú⁄Ÿ\»õ›€‹H€€Àÿà]ôXY»H
+ò€€[Z]Y
+àŸYYö[\À€»⁄\ôHH]ôBö[ú›[òŸH\»]ô\ôŸYH]ôH[ú›[òŸH\»]]‹ö]]]ôH
+ååçãLLKåL
+KÇÇääì€ôH\›⁄Y[ôY⁄]HôX\€€éääà\›‹⁄\ôY‹õ€\⁄\ô€Ÿ\◊€õ◊ÿ⁄\òX›\ó‹‹X⁄YöX◊ŸôX]\ôXúÿÿ[õôYùZ[‹Ÿ[öYW‹õ€\	‹»€›\òŸH€õK€»H⁄\òX›\àòZ]]ö[ô»[à€ôHŸàBò\[ôY‘—SíQW ó‘ïSX€€ú›[ù»\ÿÿ\Y]8†%[ô\»ô[X\ŸHY»€»[‹ôHŸà‹ŸKÇí]õ›»ÿÿ[ú»Z\àò[Y\»[€ô‹⁄YHHù[ò›[€à€›\òŸKàúôXZÀ]\›YûH][ô»ôúôX⁄€\»Çö[ù»‘—SíQW‘ëT—TïëW‘ïSXàëQÇÇääìõ›õ›ô[à⁄[à⁄\YääàHYX⁄[ö\€\»\ôHôX[[ôHôYõ‹ôKÿYù\àõ€\»\ôBúôXYXõKù]õ»[XYŸHYôY[àŸ[ô\ò]Yúõ€HZ]\à8†%\»€€ùZ[ô\à\»õ¬ò—SRSíW–TW“—VXàÿ[YHÿ]ôX]ååçãLLKéHÿ\úöYY[ôHô]öY]»€€^\›»€»Hô^ú\ú€€àŸ\»õ›]ôH»›Y\‹ÀÇÇääêK–àô\›[åçãLL»
+›€ô\ã\ù[ãŸYY»0Â»Ÿôã€€ãŸ[Z[öH
+»[Z[I‹»ôYô\ô[òŸH› KääÇïHòXŸHÿ⁄»\»€‹Ÿ\à»HôYô\ô[òŸH[à»Z\ú»Ÿà[ô€‹úŸH[àH8†%HôX[⁄Y€ò[õ›òHŸ]Y€ôKà⁄\ôH]⁄[ú»]⁄[ú»[àHôYX›Y\ôX›[€éàù[\à⁄YZ‹ÀH€Ÿù\àò]Àò[ôúôX⁄€\»]HôYô\ô[òŸI‹»[ú⁄]H[ô\›öXù][€à[ú›XYŸàH€[€›\ãò\úõ›Ÿ\ãõ[‹ôH€€ùô[ù[€ò[H]òX›]ôHòXŸKàH‹‹»
+ŸYYãHZ\úõ‹àŸ[öYX
+»⁄›úõ€Hù\›ú€Y⁄H€»€‹ŸH\
+HõŸXŸYH€ôŸ\ã[‹ôH[ô›[\àòXŸH⁄]HúôX⁄€\»ôX\õH€€ôKú€»õ»›ùX›\ò[›‹ûHŸ\\ò]\»]úõ€HH⁄[ú»8†%]Z\àô]»H€Ÿùúò[Z[ôÀ[ô€»YòHZ\àHÿ⁄»€€ãÇÇääï⁄]HK–àYì’\›[ô\»\»H[\‹ù[ù\ùääàŸYY»8†$Ã»ô]¬òHò]õ€€HZ\úõ‹àŸ[öYXHŸ[öYH⁄]\àòXŸH[ãX›][ŸôàHúò[YXHZ\úõ‹ÇúŸ[öYX[ôHŸ[öYH⁄]\àòXŸH[ãX›][ŸôàHúò[YX8†%]ô\ûH€ôHH€‹ŸH‹Çú\ùX[YòXŸH⁄›àHô\‹ùYòZ[\ôHÿ\»H
+äù⁄YJäà⁄›⁄]Hõ€€HôZ[ô\à[ôBôòXŸH€X[[àúò[YK[ôõ€ôHŸàHõ›\àŸYY»ô]»H⁄YHúò[Z[ô»][àõ›\õ\»Ÿ\ö\à€\‹Ÿ\»[à[[XYŸ\À€»
+äùH‹öY⁄[ò[ùY»Yõ›ô\õŸXŸH[àZ]\à\õJäà8†%\¬ù\›YX\›\ôYHÿ⁄…‹»YôôX›€àò]‹»]Ÿ\ôHõ›òZ[[ôÀõ›]»YôôX›€àHò]¬ù]ÿ\Àà€€ùY›[›\»ŸYY»ÿ[\HH€€»]ô[õK⁄X⁄\»H‹õ€ô»ÿ[\H⁄[à[ù[ô¬õ€ôHò]Œ»K\ŸYY»Mãåãçã€›ô\ú»Hö]ôH⁄YHúò[Z[ô‹À€ôHŸYYXX⁄ÇÇääîõ›[ôà
+›€ô\ã\ù[ãHö]ôH⁄YHúò[Z[ô‹ÀŸôã€€äH8†%H⁄[àŸ\»õ››\ùö]ôH]ääàBõÿ⁄»\»€X\õH€‹Ÿ\à€ààZ\ú»
+ŸYY»åà[ô
+K€X\õH€‹úŸH€àH
+ŸYY
+Kõ›Y⁄Bõ]ô[€àãàŸYY\»H[‹›[ôõ‹õX]]ôNà]\»H⁄YK]⁄]]K\õ€€KXôZ[ôZ\àò]¬ù][‹›ô\Ÿ[Xõ\»Hô\‹ù[ôH[õÿ⁄ŸY\õHÿ[YHòX⁄»ôX\ãYúôX⁄€[\‹»[ôú€[€›Y8†%H^X›ôY‹ô\‹⁄[€à‘—SíQW‘ëT—TïëW‘ïSXò[Y\»8†%⁄[HHÿ⁄ŸY\õHŸ\ôúôX⁄€\»]HôYô\ô[òŸI‹»[ú⁄]Kà€€Xö[ôYX‹õ‹‹»õ›õ›[ô»Hÿ⁄»XY»õ›Y⁄Hx†$Ã¬ù⁄]H]ô[›ô\àHZ\úÀà]\»HZ[ôYô\ô[òŸKõ›Hö^[ô]⁄›[ôH\ÿ‹öXôYù]ÿ^KÇÇääïH⁄YHúò[Z[ô‹»ô]ô\àô[ô\ôYääàŸYYMà\⁄ŸYõ‹àH›ÀX[ô€HŸ[öYHúõ€Hô[›ÿ[ôòÿ[YHòX⁄»]^YH]ô[»ŸYYåà\⁄ŸYõ‹àHY⁄X[ô€HŸ[öYH€⁄⁄[ô»\]Hÿ[Y\òX[ôòÿ[YHòX⁄»]^YH]ô[»ŸYYçà\⁄ŸYõ‹àHŸ[öYH[\Y⁄€⁄⁄[ô»›€ò[ôÿ[YHòX⁄¬ò\»H\ô\\ú€€à⁄]⁄[à⁄›⁄]õ›\à[ô»ÿÿ›\YY
+H[ò]€^Hù[HYõ›€ôZ]\äN»ŸYY\⁄ŸYõ‹àH⁄Y\àŸ[öYH⁄]Hõ€€Hö\⁄XõHôZ[ô\ò[ôÿ[YHòX⁄¬õ›]€‹ú»]Hÿ\]€à
+äëŸ[Z[öH\»\ôŸ[HY€õ‹ö[ô»úò[Z[ôŒòääà€»õ›[ôàYõ›\›ù⁄]]ÿ\»ùZ[»\›8†%Húò[Z[ô»€€ÿ\»Ÿ[X›Y€àHõ€\	‹»^[ôH^ö\»õ›⁄]H[Ÿ[ô]ÀàŸX€€ô[‹ô\àŒ€ôH^Y\à[ô\àHö\ú›àHÿ[\Hÿ\¬ò⁄‹Ÿ[àûHH\ôX›]ôHH[Ÿ[Ÿ\»õ›ÿô^KÇÇääï⁄\ôH\»⁄[ù»[ú›XYääàYàúò[Z[ô»\ôX›]ô\»»õ›ô[ô\ãHôòXŸH€X[[àúò[YHÇò€€ô][€à[àHô\‹ùY[XYŸHYõ›€€YHúõ€HHò[ô€Húò[Z[ô»ò]Àà][XYŸH⁄›ŸYBú‹X⁄YöX»ò\úò]]ôH[€Y[ù8†%€\õ⁄Y»‹ôXY›ô\àHõ€‹à8†%⁄X⁄\»H⁄\HŸàBò‹Ÿ[öYNà8†)óX[ù‹ö][àûHH[Ÿ[ZYX€€ùô\úÿ][€ãõ›Ÿà[û][ô»[à—SíQW—îêSRSë‘ÿÇêH[ùô\XŸ\»H]\»ÿŸ[ôH[ô[ô»[àòX⁄Ÿ‹õ›[ô‹Ÿ][ôŒò[ô]ÿ[àôHò\à[‹ôBô[Xõ‹ò]H[à[ûH€€Yò]Àà
+äîô\õŸX⁄[ô»⁄]KZ[ù\»Hô^\›[ôõ›[ô¬òôYõ‹ôH]\»X›X[Hô\õŸXŸYHùYÀääÇÇääëõ›[ô⁄[HùZ[[ô»]\›õ›ö^Y\ôNääàŸ^\\ù
+
+X\»\[ôYYù\àH[ùú€»H‹Ÿ[öYNà8†)à]\⁄◊XõŸXŸ\»òX⁄Ÿ‹õ›[ô‹Ÿ][ôŒà8†)à⁄›⁄[ô»\⁄À€[\XK–K[àBõ[‹õö[ôÀòH\Ÿ\ãH‹à[Ÿ[\[õôY[YHŸà^H\»⁄[[ùH€€ùòYX›YûHH€ÿ⁄»8†%Búÿ[YH€€ùòYX›[€ãY\]X[À[]]YH⁄\H\»ô[X\ŸH\»Xõ›][àHYôô\ô[ù€]\ŸKÇòK[ÿÿ][€òÿ\»YY»Hô]öY]»€€[àHÿ[YH\‹ŒàHòZŸH[ú›[òŸH\»õ¬ò—PUTó”––US”ò€»]ô\ûHô]öY]ŸYõ€\ÿZYîŸX]Hã⁄X⁄\»‹õ€ô»õ‹à[Ÿ]ô[Çö[ú›[òŸ\»[ôÿ\»[ô[ô»[àH\›Y^ÇÇääîõ›[ô»
+›€ô\ã\ù[ãHô\‹ùYÿŸ[ôHöXHKZ[ùŸôã€€ãàŸYY H8†%€X[àYÿZ[ã[ôùH€€ÿ\»HôX\€€ãääàH[ùô\õŸXŸYHÿŸ[ôHòZ]ù[Nà‹õ‹‹À[YŸŸY€àBôõ€‹ã€\õ⁄Y»‹ôXY\õ›[ô\ã⁄[ô›»ôZ[ôà[õ›\à[XYŸ\»Ÿ\\à€\‹Ÿ\ÀôúôX⁄€\»[ôZ\à€€›\ã[ôHÿ⁄ŸY\õH€àŸYY\»H€‹Ÿ\›X]⁄»BúôYô\ô[òŸHŸàHåà[XYŸ\»Ÿ[ô\ò]Y€»ò\à8†%Z\à\[àHôYô\ô[òŸI‹»›€àY\‹ﬁH›\õBú›[Kà
+äïHùY»\»õ›»òZ[Y»ô\õŸXŸHåà[Y\»›]ŸàåãääÇÇääîõ€›ÿ]\ŸHŸàHõ€ã\ô\õŸX›[€éàŸ[öYW‹õ€\‹ô]öY]ÀúXÿ\»õ›ô]öY]⁄[ô¬úõŸX›[€ãääà]ÿ[YùZ[‹Ÿ[öYW‹õ€\
+[ùõ€ôJX[ô⁄]⁄Y\»õ€ôXÿ]\»ŸôÇù€»õÿ⁄‹»]]ô\ûH]ôHŸ[öYHÿ\úöY\ŒÇÇåKà\à[€ŸöY⁄õ›Œà◊€[€Ÿ›öXôJ⁄]⁄Y
+_H8†%]]ôXY[à\àòXŸKò8†%[à^X⁄]à[ú›ùX›[€à»XZŸH\àòXŸHôYõX›€€Y][ôÀ⁄][ô»[[YYX][HYù\à^ô\‹⁄[€éòà[ôåML⁄\òX›\ú»ôYõ‹ôHHY[ù]HZ[àõ›[ô»[ŸH[àHõ€\[»H[Ÿ[à»⁄[ôŸH\àòXŸKÇåãàHÿŸ[ôKYY\\›⁄X⁄ò[Y\»›\àŸ]\»8†%Hõÿ⁄»ååçãLLKéH[ôXYBàY[ùYöYY\»H€ôH\[ôY^]€›[[H[XYŸH]ÿ^Húõ€HHôYô\ô[òŸKà[ô[Xô\ò][H]HY[ù]HZ[Yù\ãÇÇïôYHõ›[ô»ŸàK–à\ôYõ‹ôH€€\\ôY€»ò\öX[ù»ŸàHõ€\
+äõõ»[ú›[òŸH\»]ô\ÇúŸ[ù
+äã[ôH€ôH[ú›ùX›[€à[àH]ôHõ€\]\ôŸ]»\àòXŸHÿ\»XúŸ[ùúõ€H[ååà[XYŸ\Àà\»\»H\ôŒôX›\úô[òŸH[àHÿ[YH[ùô\›Yÿ][€à[ôH€‹ú›Ÿà[NÇùHö\ú›€»X⁄ŸYH‹õ€ô»ÿ[\K\»€ôH\ŸYH‹õ€ô»õ€\ÇÇòK[[€Ÿ[ôK\ôXŸ[ùô[ô\àHõŸX›[€à⁄\N»K[[€Ÿàòô\›‹ô\»H€ò⁄]⁄YSõ€ôXôZ]ö[‹à[ôHXY\àõ›»ÿ^\»€»^X⁄]KàH]ôHõ€\\»NLKÃéåBò⁄\òX›\úÀõ›MÃåKÃççÕÀÇÇääìõ›Y]\›Yääà⁄]\àH[€Ÿ[ôH\»HöYù]ô\ãà]\»H]\⁄XõHYX⁄[ö\€Kõ›òH[[€ú›ò]Y€ôH8†%õ»[XYŸH\»ôY[àŸ[ô\ò]Y⁄]]ô\Ÿ[ùàõ›[ô\»]K–é»¬õõ›ôX]]\»XY€õ‹ŸYôYõ‹ôH]ù[úÀÇÇà»»»HôYô\ô[òŸH›»\»Hù[XõŸHôXX⁄⁄›[ôHòò\Ÿ[[ôHàÿ\»ô]ô\àHôYô\ô[òŸBÇê\⁄ŸYõ‹à[Z[Wÿò\ŸKúôÿ]Ÿ[ãH›€ô\àŸ[ùHö[H]\»
+äòH›[ô[ô»ù[XõŸBú›»€àHôXX⁄
+äà8†%ŸXH[ôÿ[ôôZ[ô\ã[ã]\›\õHZ\ãõ›[ô€\‹Ÿ\À‹õ‹‹ò[ô[ö[H⁄‹ùÀà\àòXŸHÿÿ›\Y\»õ›Y⁄H
+äé	HŸàHúò[YHZY⁄
+äã€àH‹ô\àŸàBö[ôôY^[»[ÇÇï]\»ô\ûHZŸ[HH⁄€H›‹ûK[ô]XZŸ\»]ô\ûHX\õY\àXY€õ‹⁄\»ŸX€€ô\ûNÇÇãH
+äê[àY][Ÿ[ÿ[õõ›€‹HHòXŸH]ÿ[õõ›ŸYKääà⁄]ô[àHôYô\ô[òŸH⁄]åLŸàòXŸKà\ôH\»[[‹›õ»Y[ù]H[ôõ‹õX][€à»ÿ\úûH[ù»H€‹ŸH€ôHŸ[öYK€»H[Ÿ[àﬁ[ù\⁄\Ÿ\»€ôKà€\‹Ÿ\»›\ùö]ôHôXÿ]\ŸH^H\ôH\ôŸH[ôY⁄X€€ùò\›»õ€ôH›ùX›\ôKàúôX⁄€H]\õà[ôò]€[ôH»õ›à]X]⁄\»]ô\ûHﬁ[\€H[àH‹öY⁄[ò[ô\‹ùà^X›K[ô]^Z[ú»H[ù\õZ][òﬁHHõ€\\⁄YH[‹öY\»ô]ô\àYÇãH
+äïHò[úŸõ‹õX][€à\›[òŸH\»[õ‹õ[›\Àääà]ô\ûHõ€\\⁄‹»õ‹àH€‹ŸK[ô€‹ãà[ô[€ôHŸ[öYN»HôYô\ô[òŸH\»H›[ô[ô»ù[XõŸH›]€‹à⁄›[à›[[Y\Çà€›\Àà‹ŸK\›[òŸK[úÀY⁄[ô»[ôÿ\ôõÿôH[⁄[ôŸH]€òŸKÇãH
+äïHåàK–à[XYŸ\»Ÿ\ôHÿ€‹ôYYÿZ[ú›H‹õ€ô»[XYŸKääàH‹ô^KZ€ŸYH‹ùòZ]Bà›€ô\à\»ôY[àŸ[ô[ô»\»ùHò\Ÿ[[ôHà\»]Ÿ[àH
+ôŸ[ô\ò]YŸ[öYJà8†%]ÿ\úöY\»Bàÿ[YHŸ[Z[öHÿ]\õX\ö»\»H›]]Àà€»H€€\\ö\€€ú»YX\›\ôYöYùúõ€H€ôBàŸ[ô\ò][€à»[õ›\ãõ›úõ€HHôYô\ô[òŸKà]ô\ûHò€‹Ÿ\à»ò\Ÿ[[ôHàô\ôX›[àBàôYHõ›[ô»Xõ›ôH\»ŸXZŸ\à[à]ôXYÀÇÇääëö^\»€€ù[ùõ›€ŸNääàô\XŸHHôYô\ô[òŸH⁄]H€‹ŸKúõ€ùYòX⁄[ô»‹ùòZ]‹õ‹ù⁄\ôHHòXŸHö[»]X⁄ŸàHúò[YH8†%‹Ÿ]ò\ŸXŸ[ù\»H
+äôö[Jäãõ›H›À€¬ï[Y‹ò[HŸ\»õ›ôX€€\ô\‹»]
+ååçãLLãå KàH‹ô^KZ€ŸYH[XYŸH\À\õ€öXÿ[KHò\Çòô]\àôYô\ô[òŸH[àHX›X[ôYô\ô[òŸKÇÇääìõ›\›Xõ\⁄Y[ô]ôYY»€ôH€€[X[ôääàH\ÿYY€‹H\⁄\¬òççÃLXL8†)òYÿZ[ú›Hî…‹»çŸôåÃéL¯†)ò[ô\úö]ô\»⁄]îQ»XY⁄X»û]\»
+ôàôàL
+Bù[ô\àHúôÿò[YH⁄[HHî»ö[H\»Ÿ[ùZ[ôHë»XY⁄X»
+HLHÿ
+H8†%€€ú⁄\›[ùù⁄]H\ÿY]ò[úÿ€Ÿ[ô»]ù]]\»[à[ôô\ô[òŸK[ôH\⁄ŸàHôKY[ò€ŸYò€‹HŸ]\»õ›[ôÀà⁄LçMú›[X€àH›€ô\â‹»ÿÿ[ö[K€€\\ôYYÿZ[ú›çŸôåÃéL¯†)òö\»⁄]€€ôö\õ\»\»ôXX⁄›»\»H€ôHHõY]Ÿ[ôÀÇÇääïHÿúŸ\ùòXö[]Hÿ\\»^‹Ÿ\»\»Hÿ[YH€ôH⁄XŸKääàõ›[ô»[àHﬁ\›[H]ô\Çú⁄›ŸY[û[€ôH⁄]HôYô\ô[òŸH›»
+ö\ ãàÿ]Y]ô\‹ù»Hö[[ò[YH[ôõ›öY\à8†%ô[õ›Y⁄»õ›ôHHö[H\»[à^Kô]ô\à[õ›Y⁄»ŸYH]HòXŸH[à]\»[ù\ÿXõBú€X[à€»ô[X\Ÿ\»Ÿ\ôH‹[ù[ö[ô»õ€\^YÿZ[ú›[à[XYŸHõÿõŸHY€⁄ŸY]ÇÇääëõ€›À]\õ›[à\»Yôéääà[Z[I‹»\X\ò[òŸKù[ô»⁄]
+àëô\‹Ÿ\»[à^Y\ôYõ]]Y‹ôY[ú»[ô‹ô^\»8†%›ô\ú⁄^ôY›ŸX]\úÀ€Ÿù[ô€‹õãZ[àäã[ôHõ€\Ÿ\\ò][Bò\[ô»ïŸX\ö[ô»€›]ö]Kàò8†%€»€›[ô»[ú›ùX›[€ú»[à€ôHõ€\⁄X⁄\»Bò€€ùòYX›[€ãY\]X[À[]]YHõÿõ[H[àH€€ù[ù^Y\ãà\X\ò[òŸHö[\»⁄›[\ÿ‹öXôBòHõŸH[ôHòXŸKõ›Hÿ\ôõÿôN»Hÿ\ôõÿôHõ›][€à›€ú»€›\ÀàYù[€ôH\ôBòôXÿ]\ŸHHô\»ŸYY[ôH]ôH[ú›[òŸHÿ[àYôô\à[ôH]ôH€ôH\»]]‹ö]]]ôKÇÇääïô\öYöXÿ][€éääàŸYHHô\‹ù8†%ò€]YK›€€À›ô\öYûKú⁄ô]»\›Àö]ôH\‹Ÿ\ù[€ú¬òúôXZÀ]\›YëQ€ôH[öôX›[€à]H[YKÇÇà»»ååçãLLÀåH8†%ö^XHŸ[ù\à⁄€H[Xô\ò][€à\»Hô\K[àõ›\àY\‹ÿYŸ\¬Çääîõ€›ÿ]\ŸNàH[ö⁄[ô»[Ÿ[ÿ[à[Z]]»SïTëH⁄Z[ã[Ÿã]›Y⁄\»‹ô[ò\ûBò€€ù[ù[ô]ô\ûH^\›[ô»⁄Z[ã[Ÿã]›Y⁄›X\ôŸ^\»€àH⁄Y€ò]\ôH]ò\öX[ùôŸ\€â›]ôKääà€àåçãLL»ö^XH
+òZK[‹ôÀŸ€KMKåNù[ö⁄[ôÿ
+H[ú›Ÿ\ôYH]ZY]ö[ã\ÿŸ[ôHY\‹ÿYŸH⁄]åLö»⁄\ú»Ÿà\à›€à[Xô\ò][€à8†%ì]YH€‹ö»õ›Y⁄\¬ú›\ûH›\àKà›»Ÿ\»ö^XHôY[Xõ›]⁄]úöX[àù\›ÿZYÀããà]YHòYùããÇì‹[€àNãããàà8†%ôX\€€ö[ô»‹[õHXõ›]\àõ‹õX]€€ùòX›ÿŸ[ôH[ŸK[ôòYùYúô\Y\À⁄]HôX[ô\Hù\öYY]H[ôà]ôXX⁄Y[Y‹ò[H\»õ›\à⁄[öŸYõY\‹ÿYŸ\»
+Ÿ[ôÿùXòõ\ÿ‹]»]Mà⁄\ú»[ôõ›[ô»\›ôX[HÿöôX›Y
+KÇÇï\»\»H\ôò\öX[ùŸàH⁄Z[ã[Ÿã]›Y⁄XZ»€\‹À[ôXX⁄X\õY\à›X\ôò⁄X⁄‹»õ‹à^X›H€ôH⁄Y€ò]\ôNÇãHååçãLÀLååHõÿ⁄‹»ôX\€€ö[ô◊ÿ€€ù[ù[]ô\ôY⁄[à€€ù[ù\»
+äô[\Jäà8†%à\ôH€€ù[ùÿ\»õ€ãY[\K€»]]ô]ô\àö\ôY
+Ÿ\úõ‹úÿ⁄›ŸYõ¬à€[Ÿ[H8†)àôX\€€ö[ô»ù]õ»€€ù[ùÿ\õö[ôÀ⁄X⁄\»⁄]€€ôö\õYYHò\öX[ù
+KÇãH‹›ö\›[ö⁄[ôÿô[[›ô\»[öœ∏†)è›[öœò8†%\ôHŸ\ôHõ»Y‹ÀÇãHååçãLÀLéKåI‹»‹›ö\Ÿ\ôX›]ôW€[ô\ÿõ‹»SP–T»úòX⁄Ÿ][ô\»8†%HXZ¬àÿ\»Z[àõ‹ŸKÇÇääëö^àôYù\ŸH[ôôK\õ€ô]ô\àÿ[òYŸKääàô]»€€⁄‹◊€ZŸW‹ôX\€€ö[ô◊€XZ ^õò[YJX]X›»HôX\€€ö[ôÀ\⁄\Y€€\][€àûHH€€öù[ò›[€àŸà[ô\[ô[ù⁄Y€ò[»8†%õ[ô›8¢iHå⁄\ú»
+ò\àXõ›ôH[ûHôX[^[ôÀ\ôY⁄\›\àô\N»Hô\HôYY[ô¬ï[Y‹ò[H⁄[ö⁄[ô»][\»[ôXYHXõõ‹õX[
+HSë8¢iH»\›[ò›Y]K\ôX\€€ö[ô»X\öŸ\Çòÿ]Y€‹öY\»
+ùH\Ÿ\àãõ]YHòYù›€‹ö»õ›Y⁄¯†)àãö[ã€›]Ÿà⁄\òX›\àãõ€\ùõÿÿXù[\ûHZŸHôõ‹õX]€€ùòX›ã»úÿŸ[ôH[ŸHãõ‹[€ààã8¢iL»ù[Xô\ôY[ò[\⁄\¬õ[ô\À[ôH⁄\òX›\â‹»
+äôö\ú›
+äàò[YH8¢iL»[Y\»8†%Hö\ú›\\ú€€à\ú€€òH[[‹›õô]ô\à‹ö]\»]»›€àò[YN»XZŸY[Xô\ò][€à\»ÿ]\ò]Y⁄]]àö\ú›⁄Ÿ[ÇòôXÿ]\ŸHHÿ\ôò[YXöY[\»Hù[ò[YH8†%ë[Z[H\ú\àãêõ€õöYBäXô\ù\öX[äHà8†%[ô[Xô\ò][€à‹ö]\»ë[Z[Hãô]ô\àë[Z[H\ú\àé»BúôK\ô]öY]»òYùX]⁄YHù[›ö[ôÀ⁄X⁄Yù\»ÿ]Y€‹ûH[ô\ù€àö]ôHŸÇúŸ]ô[à[ú›[òŸ\ Kàõ›õ€‹ú»\ôH[ùã][òXõH
+ëPT””íSë◊”PR◊”RSó–“TîÿòëPT””íSë◊”PR◊”RSó”PTí—Tîÿ
+H€»HõŸX›[€àZ\Ÿö\ôH\»ö^YûHòZ\⁄[ô»Hõ€‹ãõõ›ûH\õö[ô»H›X\ôŸôãàHö\Y€€\][€à\»ôX]Y^X›HZŸH[à[\Bõ€ôH[àÿ[€ò[õŸ‹àô]ûH⁄]òX⁄€Ÿôã[àò[õ›Y⁄»Hõ€ã][ö⁄[ô¬òêSêP“◊”S—S⁄\ôH€ôH\»€€ôöY›\ôY8†%HXZ[à⁄]]\‹Ÿ\»]»BúŸ[öYK€Y[YHÿ\[€à[\ú»]ôHõ€ôH[ôY‹òYH»õ»ÿ\[€ã\»^H[ôXYHYôõ‹à[\H€€\][€úÀàH[\[ô»[\õò]]ôH8†%^òX›[ô»HôX[ô\Húõ€HBùZ[ŸàHXZ»8†%\»[Xô\ò][HôZôX›Yà\ôH\»õ»ô[XXõHõ›[ô\ûHô]ŸY[Çô[Xô\ò][€à[ô[ú›Ÿ\ã[ôH‹õ€ô»›Y\‹»⁄\»HúòY€Y[ùŸà[€õ€Ÿ›YH\»\ãÇÇääï⁄]\»[Xô\ò][Hì’HX\öŸ\ãääàYô\úÿ\öX[ô]öY]»ŸàHö\ú›òYùõ›ôYàõ]YH[ö»ãõ›ô\ù[ö⁄[ô»\»ã[ôô€⁄[ô»òX⁄»[ôõ‹ùà\ôH‹ô[ò\ûH^[ô¬ùõÿÿXù[\ûH€à\»õY]8†%H€ô»[ãX⁄\òX›\àô\HŸZY⁄[ô»YôH‹[€ú»ö\YùHòYù]X›‹à€àò\⁄[ô»[€ôKà‹ŸHŸ\ôHô[[›ôY»H⁄\YX\öŸ\à\›\¬ùõÿÿXù[\ûHXõ›]
+ùHô\H\»[à\ùYòX›
+ãõ›[Xô\ò][€ãYõ]õ‹ôY⁄]ÇÇääîÿ€‹Nà\ú€€òHô\Y\»€õKääàÿ[€ò[õŸ‹‹ô]»HXZ◊Ÿ›X\ôõY»
+Yò][õŸôäH]Ÿ[ô\ò]W‹ô\X[ôô\W›⁄]›\[ôÿ\‹»õ›Y⁄
+Yò][€äK€»Bú\ú€€òHô\H⁄]\»[ôÿ\[€à[\ú»\ôH›X\ôY⁄[H[ò[\⁄\À‹›[[X\ûKŸ^òX›[€Çíî””àÿ[\ú»\ôH›ùX›\ò[H›]⁄YH
+ÿ[YH\€€][€àH\ôX›]ôK[XZ»›X\ôöŸY\ Kà€»[Xô\ò]H^[\[€úŒàHôYH–’SQSï”S—S⁄]\»[àHÿ›[Y[ùö[ô\ú»\‹»XZ◊Ÿ›X\ôQò[ŸXôXÿ]\ŸHHÿ\ô\ô]öY]»úò[ò⁄
+ò\⁄‹ àõ‹àH€ô¬ò‹ö]\]YH]\ÿ›\‹Ÿ\»õ€\»[ô⁄\òX›\ú»8†%ô]öY]»⁄›ŸYHõ‹õX[ÿ\ôô]öY]¬ùö\»]ô\ûHX\öŸ\àH›X\ô€⁄‹»õ‹ã[ô⁄]õ»ò[òX⁄»[Ÿ[Hö\€›[ú›\ôòXŸH\»∏ßc€€Y][ô»úõ⁄ŸHà8†%[ôôXÿ\ÿ€Y⁄X⁄\»›€ô\ãZ[ùõ⁄ŸY[ôõY⁄][X][H€ôÀ\ô\\ú€€ã[ôò[YKZX]ûKÇÇë]ô\ûHôYù\ÿ[Ÿ‹»‹ôX\€€ö[ôÀ[XZ◊X]–TìíSë»⁄]H[Ÿ[[ô›[ôXYŸÇùHôZôX›Y^[ô€›[ù»[ô\à]»›€àôX\€€ö[ô◊€XZÿŸ^H[àŸ\úõ‹úÿ
+õ›öù\›H⁄\ôY\X€›[ù€»ô›X\ôö\ôYà\»\›[ô›Z\⁄XõHúõ€HêTHõZŸYäH8†%ú›ö\[ô»⁄[[ùH€›[\õàHö\⁄XõH[Ÿ[ò][[ù»[à[ôXY€õ‹ÿXõH€ôK[ôYÇô€KMKåNù[ö⁄[ô»Ÿ\»\»ŸYZ€K]€›[ù\à\»›»H[Ÿ[X⁄⁄XŸH€€ùô\úÿ][€Çú›\ùÀàôZôX›Y€€\][€ú»›[ôYY›òX⁄◊€W›\ÿYŸX€»HLöÀX⁄\àù\õôYù[ö⁄[ô»ùYŸ]⁄›‹»\[àÿ]Y]	‹»⁄Ÿ[àöY›\ô\»[ú›XYŸàò[ö\⁄[ôÀà⁄[ú›⁄]⁄ëPT””íSë◊”PR◊—’PTëL
+Yò][”ã›€ô\à€XﬁHåçãLÀLN
+Kà[õôYûBò\›ôX\€€ö[ô”XZ—›X\ô
+MH\›Œ»HôX[XZŸYò[úÿ‹ö\\»Hö^\ôK[ôùHò[ŸK\‹⁄]]ôH⁄\\»ô]öY]»õ›[ô\ôH]\›\\‹»ö^\ô\ H[ôBòôX\€€ö[ôÀ[XZÀY›X\ô]ò[ÇÇà»»ååçãLLãåMH8†%ŸôX]\ô\»€[›H\‹»Xõ›]ôX]\ô\»[àÿ]Y]YÇääîõ€›ÿ]\ŸNàH]Z[›Yôö^ÿ\»‹ö][à[ù»ŸôX]\ô\◊‹›[[X\ûJ
+X8†%Hÿ]Y]õ[ôH8†%[ôô]ô\à[ù»H\›[ôÀääàŸôX]\ô\ÿ⁄›ŸYõ⁄XŸNà€ò»ÿ]Y]⁄›ŸYòõ⁄XŸO[€ä[ù€‹õ
+Xà€»H€€[X[ô
+ôYXÿ]Y
+à»ôX]\ô\»[ú›Ÿ\ôY\‹»Xõ›][H[ÇùHŸ[ô\ò[]Y][ôK[ôH]Y\›[€àååçãLLãåLYY‹ŸH›Yôö^\»»[ú›Ÿ\à8†%ù⁄X⁄»òX⁄Ÿ[ô\»X›X[H]ôK⁄[òŸHò[õ—‘»€‹ö‹»⁄]›][ù€‹õ[ôBòÿ\Xö[]HõÿôHÿ[à€õH]ô\àô]\õàùYX8†%ÿ\»ôXX⁄XõH€õHúõ€HH›\à€€[X[ôÇÇïH\›[ô»õ›»ÿ\úöY\»Hÿ[YHôYH]Z[ŒàHõ⁄XŸHòX⁄Ÿ[ôH“QàÿYô]H]ô[ò[ôHŸ[öYHõ›öY\ãàõ›ÿ[⁄]\»€»õ›Y⁄€ôHô]»ŸôX]\ôWŸ]Z[
+
+Xò]\Çù[àHŸX€€ô€‹HŸàHŸ⁄XÀôXÿ]\ŸHHŸX€€ô€‹H\»^X›H›»H\›[ô»öYù¬òòX⁄»»ÿ^Z[ô»\‹»[àH[ôH]^\›»»^[ô€ãàÿ]Y]ŸY\»]»X⁄ŸYõ‹õBäõ⁄XŸO[€ä[ù€‹õ
+X
+N»H\›[ô»‹XŸ\»]
+õ⁄XŸNà€à
+[ù€‹õ
+X
+KÇÇääêH›⁄]⁄Y[ŸôàôX]\ôH⁄›‹»õ»]Z[][
+äà8†%ò[Z[ô»HòX⁄Ÿ[ôô\⁄YHŸôò€Z[\¬ú€€Y][ô»\»ù[õö[ô»]\€â›ÇÇääïô\öYöXÿ][€éääàÀŒ»]\›
+àô] KÕÃÕ]ò[ÀWÿ€€\[X€X[ãàõ›ô]»\›¬òúôXZÀ]\›YëQà^Hö]ôHôX]\ô\◊ÿ€Y⁄]òZŸH[Y‹ò[HÿöôX›»ò]\à[àôXY[ô¬ö]»€›\òŸH8†%Hù[HååçãLLãåM\›Xõ\⁄Y[ôH[]ô\ûHÿ]Hõ›»[ôõ‹òŸ\»]ôõ‹à[ûH
+óÿ€YHYôà›X⁄\ÀÇÇà»»ååçãLLãåM8†%ŸôX]\ô\»ô]ô\àX›X[Hõ\Y[û][ôÀ[ôö]ôH[‹ôHúõ€H€ôHô]öY]¬Çääîõ€›ÿ]\ŸHŸàHò]⁄àH\›»õ‹à\»ŸYZ…‹»ôX]\ô\»\‹Ÿ\ùY€à[ô\Çäú€›\òŸJà[ú›XYŸàÿ[[ô»H[ô\ãääàôX]\ô\◊ÿ€Y[ôY⁄]òÀõÿôHH—ëPUTëT÷€ò[YWX8†%HÀ]\H[úX⁄ŸY[ù»€»ò[Y\»8†%€»
+äô]ô\ûJäÇòŸôX]\ô\»ò[YOà€üŸôòòZ\ŸYò[YQ\úõ‹òôYõ‹ôHôXX⁄[ô»Hõ\àH›⁄]⁄ô]ô\Çõ[›ôYõ›[ô»\ú⁄\›Y[ôH›€ô\à€›⁄[[òŸKôXÿ]\ŸH[à^Ÿ\[€à[ú⁄YHHÇö[ô\à\»ŸŸŸY[ô›ÿ[›ŸYàH›Z]Hÿ\»‹ôY[àõ›Y⁄›]à€ôH\›\‹Ÿ\ùYBú‹X‹»
+ò\ôJàÀ]\\À[õ›\àôXYH[ô\â‹»€›\òŸHõ‹à⁄\◊ÿYZ[ò[ôBòõÿôXò[YHH[úX⁄»õ›[ôÿ\»ô]ô\à\ŸY€»õ»[ù\àÿ\ôYZ]\ãà\»\»HöYùõY[Xô\àŸàHò[Z[HååçãLLãçò[YY
+ŒàôXY[ô»Hù[ò›[€â‹»€›\òŸHõ›ô\»H€ŸBô^\›Àô]ô\à]]ù[ú K[ôHŸX€€ô»ôXX⁄HõY]à
+äë]ô\ûH\›YY[à\¬úô[X\ŸH^\ò⁄\Ÿ\»H[ô\ãääÇÇïHô\›ŸàHò]⁄[úõ€HHÿ[YHô]öY]ŒÇÇãH
+äîõÿX›]ôHY\‹ÿYŸ\»õ‹YZ\à“QúÀääàŸ[ô›öYŸŸ\ôY€€\]Y⁄Yó‹]Y\ûX[ôàô]ô\à\ŸY]8†%Ÿ[]ô\ò‹ô]»H“Qà][ô\»ŸX€€ôÿ[\àÿ\»Z\‹ŸYàBàYÀ[€õHõÿX›]ôHY\‹ÿYŸHŸ[ù
+õõ›[ô à[ô›‹ôY[à[\H\‹⁄\›[ù\õã][ô»Bàõ[ö»[ù»\›‹ûKÇãH
+äòŸôX]\ô\»X[ŸôòYâ››‹HX[[€ö]‹úÀääà’ëT‘◊–STïÿàêó–STïÿ[ôíó–STïÿŸ\ôH€€\]Y\»–TìRSó—SêPìQ[ô[ùèò
+äò][\‹ù
+äãà€»õ\[ô»–TìRSó—SêPìQ]ù[ù[YHYùH[€ö]‹ú»ôXY[ô»Húõﬁô[à€‹Nà[\ù¬àŸ\ö\ö[ô»⁄[HŸôX]\ô\ÿ[ôÿ]Y]õ›ô\‹ùYX[[Ÿôòà^H\ôHõ›»Bà›]X»[ùàôYô\ô[òŸH[€ôKôXYõ›Y⁄
+äòÿ[\ù◊€€ä
+X
+äã⁄X⁄Së»H]ôH\ô[ùà]ÿ[[YKàŸÿ\õZ[ó€Ÿôó‹ôX\€€ä
+XÿZ[ôYHù[ù[YK\›⁄]⁄ÿ\ŸHõ‹àHÿ[YHôX\€€à8†%à⁄X[[ô⁄X[õ›ÿŸ\ôH[ú›Ÿ\ö[ô»õ‹õX[H⁄]HôX]\ôH›⁄]⁄YŸôãÇãH
+äî›⁄]⁄[ô»HôX]\ôHŸôàÿ\»H€ôK]ÿ^Hö\[ù[ô\›\ùääàHÿ\õZ[àõÿú»[ôBàòYôöX»€Ÿ\ôH
+úôY⁄\›\ôY
+à[ô\àZ\à›⁄]⁄\À€»ŸôX]\ô\»X[€ò
+‹ÇàòYôöX»€ò
+H€›[õ››\ù[û][ô»]›\ù\Y⁄⁄\Yàõ›õ›»ôY⁄\›\à€Çà
+äòÿ\Xö[]Jäà8†%]ô\ûH€ôHŸà‹ŸHõÿú»[ôXYHôKX⁄X⁄‹»]»›€àÿ]H⁄[à]ö\ô\ÀÇãH
+äàìŸôààÿ\»›[ôZ[ô»ô\‹ùY\»õô]ô\à€€ôöY›\ôYääà[àŸ[ô‹Ÿ[öYXŸ[ô€Y[YXà‹õ›]X€ôX\òûX‹XŸXŸõ€Ÿ›òYôöXÿ[ô⁄[ò⁄Y[ùÿ8†%H^X›à€€ôõ][€àååçãLLãéH‹]
+óÿÿ\XõXúõ€H
+ó‹ôXYX»[ôà^HôYYYôô\ô[ùàö^\»
+Hô[ùòY]‹àHö[Kô\ú›\»€ôHŸôX]\ô\ÿ€€[X[ô
+K[ôH€Y\‹ÿYŸHŸ[ùàH›€ô\à[ù[ô»õ‹àHôYô\ô[òŸH›»]ÿ\»[ôXYH\ôKàô]»[\Çà
+äòŸôX]\ôW€Ÿôó‹ôX\€€ä
+X
+äé»Ÿ[ôŸ⁄Yò[ôXYHY\»€‹úôX›H[ôÿ\»H[\]KÇàH]»[à‹ŸHY\‹ÿYŸ\»Ÿ\ôH€ôKY\òH
+ã›[Y‹ò[KXõ›¯†)ò
+H[ôõ›»ô[ô\àúõ€BàêT—W—Tò»QSQW’STUT◊—Tò€»^Hò[YHHö[HH[ú›[òŸHX›X[HôXYÀÇãH
+äò‹Ÿ]ò\ŸX€›[€Z[HHòX⁄›\]Yâ›XZŸKääà]X⁄YYBàúô]ö[›\»Ÿ\\»úô]òà›Yôö^ûH›]Z[ô»H]
+òYù\äàH‹ö]K€»HYù›ô\Çàúô]òúõ€H[àX\õY\àù[àXYHHö\ú›Y]ô\à[ú›[ô\‹ùHòX⁄›\ŸàHö[H]Yàô]ô\àôY[à\ôKà]õ›»òX⁄‹»⁄]\àHòX⁄›\úò[ò⁄ò[ãÇãH
+äò‘ì’T–“U—T“Q”ãõY0©Ã»€€ùòYX›Y]Ÿ[ãääàHõ›H[ôùYŸ]ù[]»›[àÿZY‘ì’T”RSó—–T‘—P””ëœLå»‘ì’T—RSW–ì’–ïQ—ULÃYù\àååçãLLãåL»[›ôYà[H»»L8†%Hÿ[YHÿ…‹»›€àXõH[ôH€ŸHõ›ÿZYHô]»ò[Y\Àà0©Ã»\¬àHŸX›[€à‹õ›\X⁄]X⁄[ôŸ\ÿXZŸ\»[›HôXYôYõ‹ôH›X⁄[ô»[ûH‘ì’T ò€ŸKÇÇääïô\öYöXÿ][€éääàKŒH]\›
+Nô] KÃÀÃÃ»]ò[ÀWÿ€€\[X€X[ãàö]ôHYôX›¬òúôXZÀ]\›YëQûHôKZ[öôX›[ô»H‹öY⁄[ò[€ŸN»H€»]€›[õ›ôH
+õ›ôÿ‹ H\ôH€›ô\ôYûHH]ò[›Z]I‹»›€à€€ú⁄\›[òﬁH⁄X⁄‹ÀàHŸôX]\ô\ÿòŸ[ô›öYŸŸ\ôY[ô‹Ÿ]ò\ŸX\›»ö]ôHHôX[[ô\ú»⁄]òZŸH[Y‹ò[HÿöôX›Àú€»^HòZ[€àHúõ⁄Ÿ[à\‹]⁄]ò]\à[à€àH⁄[ôŸY›ö[ôÀÇÇääìõ›⁄[ôŸY[Xô\ò][NääàHô]öY]»[€»õYŸŸYHòYôöX»
+ú€õÿäà\»Y€õ‹ö[ô¬ùH›⁄]⁄à]Ÿ\»õ›8†%òYôöX◊‹€⁄õÿòôKX⁄X⁄‹»êQëíP◊—SêPìQ€à]ô\ûHö\ö[ô¬äHôY⁄\›ò][€à\ﬁ[[Y]ûHXõ›ôHÿ\»HôX[YôX›\ôK[àH‹‹⁄]H\ôX›[€äKÇÇà»»ååçãLLãåL»8†%H‹õ›\õ›»€›[€õH]ô\à[ú›Ÿ\à€òŸK[ôôYHŸ\\ò]H[Z]»ÿZY€¬Çääîõ€›ÿ]\ŸNàHåH‹õ›\X⁄][ö[ô»XYHHôX[òX⁄ÀX[ôYõ‹ù\ö]Y]Xÿ[Bö[\‹‹⁄XõKõ›Y\ô[H[õZŸ[Kääà›€ô\àô\‹ùàù^H€õHô\H€òŸH\à^Hô\KàÇïôYHYò][»€€\›[ô[ôö^[ô»[ûH€ôH[€ôH€›[]ôH⁄[ôŸYõ›[ôŒÇÇåKà
+äò‘ì’T–ì’–“RSó”PVLò
+äà\»H\ôŸZ[[ô»€à€€úŸX›]]ôHõ›Y\‹ÿYŸ\»⁄[òŸHBà\›[X[à€ôKà€»õ›»YX[ú»Hô\›ÿ\ŸHÿ\»[ÿ^\»[X[à8°§àH8°§àà8°§à⁄[[òŸX8†%àH\ôY\‹ÿYŸHÿ\»ô]ô\àôXX⁄XõK⁄]]ô\à[û[€ôHÿZYÇåãà
+äò‘ì’T–ì’‘ëTW‘ì–èLåÕX
+äàõ]à€»H
+úŸX€€ô
+àY\‹ÿYŸH€õH\[ôYXõ›]Bà\ôŸàH[YH⁄[àHö\ú›õ›Yâ›ò[YHHŸX€€ô8†%⁄X⁄\»⁄HBàÿúŸ\ùôYôZ]ö[›\àÿ\»\›X[H€ôHô\Kõ›€ÀÇåÀà
+äò‘ì’T”RSó—–T‘—P””ëœLå
+äàõ›\»Hõ›	‹»›€à€€úŸX›]]ôH‹õ›\Y\‹ÿYŸ\À[ôà[àH]ôH^⁄[ôŸHHõ›	‹»\õú»[ô
+äüåMú»\\ù
+äà
+€8¢i\»
+»€Z[H[^Hçx†$Ã‹»
+¬àŸ[ô\ò][€ã⁄XŸJKàHõ›H\»
+ö[ú⁄YJà]⁄[ô›À€»]⁄[[ùH⁄[¬à[\õò][€ãà\»\»H€ôH]X]\ú»[‹›àòZ\⁄[ô»H⁄Z[àÿ\[€ôH€›[à]ôH]Hõ›H[ú›XY[ôõŸXŸYHÿ[YH⁄[ô€Hô\KÇÇìõ€ôHŸà\»ÿ\»HùY»8†%0©Ã»Ÿà‘ì’T–“U—T“Q”ãõY⁄‹ŸH\ŸHù[Xô\ú»»õ›[ô€‹úö\⁄»[ô€‹›€à[à[úõ›ô[à[›àH[›\»õ›»ù[à⁄[òŸHåçãLÀLé⁄]›]Búù[ò]ÿ^K€»HòYH\»ôZ[ô»ôK\›ùX⁄»[Xô\ò][KÇÇääëö^8†%‘ì’T–êSïTò
+Yò][€ã‘ì’T–êSïTèLô]ô\ù»]ô\ûHù[Xô\àô[› NääÇÇü€õÿàåHõ›»⁄HüKK_KK_KK_KK_ü‘ì’T–ì’–“RSó”PVà
+äçääàH⁄Z[àŸà »\»ôXX⁄XõH][ü‘ì’T–ì’‘ëTW‘ì–òåÕH
+äåçJäàö\ú›€€YXòX⁄»\»H€⁄[àõ\õ›H\ôü‘ì’T”RSó—–T‘—P””ëÿå
+äé
+äàô[›»HåMú»^⁄[ôŸHõ›[ô]ö\€»[\õò][€à›\ùö]ô\»ü‘ì’T—RSW–ì’–ïQ—UÃ
+äçL
+äà€ôŸ\à⁄Z[ú»‹[ô]ò\›\é»ù[õö[ô»ûHZYY]ô[ö[ô»ô\õŸXŸ\»H‹öY⁄[ò[€€\Z[ù⁄[[ùHü‘ì’T–“RSó—P–VX8†%
+äåçÕJäàô]»ÇääïHXÿ^H\»⁄]XZŸ\»HY⁄\àÿ\ÿYôKääà‹⁄›[‹ô\W›◊ÿõ›õ»€ôŸ\à\Ÿ\»Bôõ]õÿòXö[]NàH⁄[òŸH\»][\YYûH‘ì’T–“RSó—P–VH
+äà\⁄\ôH\ö\»›»X[ûHõ›Y\‹ÿYŸ\»Y\H^⁄[ôŸH[ôXYH\ÀàH⁄Z[à\Xÿ[Hù[ú»¯†$ÕõY\‹ÿYŸ\»[ôôXX⁄\»Hàÿ\ò\ô[K€»^⁄[ôŸ\»[ôûH]\ö[ô»›]ò]\à[Çú›‹[ô»ZY\Ÿ[ù[òŸH]Hÿ[à^X›Y€‹›\à[X[àôX]\»HŸ[€Y]öX»Ÿ\öY\¬ä8¢bÀå»[Ÿ[ÿ[ Kõ›Hÿ\
+äKÇÇääêôZ[ô»ò[YYõ»€ôŸ\àû\\‹Ÿ\»Hÿ]Jäà8†%]Ÿ]»H›\ù[ô»õÿòXö[]H»KåäåHôZ]ö[›\àõ‹àHö\ú›€€YXòX⁄ H[ô[àXÿ^\»⁄]]ô\û][ô»[ŸKà\»\»BäùY⁄[ö[ô ã[ô]\»ÿYXôX\ö[ôŒàò[Z[ô»HY\à\»HI‹»ò]õ›\ö]HôY⁄\›\à[Çù\ŸH^⁄[ôŸ\»
+öù[\Àõ»à»úö^XK‹õ€ô»äK€»[ô\àH€úôYH\‹»HY⁄\àÿ\ù€›[]ôHö]ô[à
+äô]ô\ûJäà⁄Z[à»HŸZ[[ô»8†%ôX⁄\Ÿ[H⁄\ôHH€‹›\ÀàBò€Z[KH[ô\ã[ÿ⁄»ôK\Ÿ[ôÿ\ôKX⁄X⁄ÀHõ›H[ôHZ[HùYŸ]\ôH[ù[ù›X⁄Y»0©Ã…‹»Yô[òŸKZ[ãY\\ô›[Y[ù›[€»⁄]€ôH[‹ôH^Y\ãÇÇòÿ]Y]	‹»‹õ›\[ôHõ›»ô\‹ù»ò[ù\à€üŸôà
+Xÿ^HäX[€ô‹⁄YHH^\›[ô¬ò⁄Z[ãÿùYŸ]€›[ù\úÀ€»ù⁄HY^H›‹»à›^\»[ú›Ÿ\òXõHúõ€H[Y‹ò[KÇÇääìõ›⁄[ôŸYääàH[X[ãYòX⁄[ô»]à[àYô\‹ŸY[X[àY\‹ÿYŸH\»›[[ú›Ÿ\ôYô]\õZ[ö\›Xÿ[HûH⁄Ÿ]ô\àÿ\»Yô\‹ŸY»[à[òYô\‹ŸY€ôH›[€Ÿ\»»^X›H€ôBòõ›öXHH€Z[KàŸ‹õ›\Ÿ[]ô\ò	‹»[›€\›[ô‘ì’T–S’—Q–””SPSëÿ\ôBù[ù›X⁄Y€»H‹õ›\8°•HY[[‹ûHõ›[ô\ûH\»^X›H⁄\ôH]ÿ\ÀÇÇääï\›Œääàô]»
+ç»›[
+KúôXZÀ]\›YôY8†%⁄]HXÿ^Hô]ô\ùY»Hõ]ÿ]BùH\\›»òZ[[ô⁄]HåHÿ\HôXX⁄Xö[]H\›òZ[Ààõ›‹õ›\]ò[¬ä‹õ›\Y[]ô\ãX€X[ò‹õ›\X€YX[›€\›
+H‹ôY[à[ô[ù›X⁄YÇÇà»»ååçãLLãåLà8†%HŸYY⁄X⁄»€⁄ŸY]HYôô\ô[ùö[H[àHÿY\ÇÇääîõ€›ÿ]\ŸNà‘—QQ—íSTÿ\ô€ŸYò]\Àùò⁄[HUT◊—íSXXZŸ\»]ò[YBò€€ôöY›\òXõKääà[ûH[ú›[òŸH⁄[ù[ô»H]\»€€Y]⁄\ôH[ŸH€›[Ÿ]òŸYYŒàRT‘“SëŒà]\Àùúõ€Hÿ]Y]⁄[HÿY[ô»]»]\»\ôôX›HŸ[8†%Bôò[ŸH[\õHúõ€HH^X›[ôHYY[àååçãLLãéH»›‹ò[ŸH⁄[[òŸKÇÇë[Z[Hÿ\»][ú›[òŸNà⁄HYXŸ\Àù[€ô‹⁄YH[àUT◊—íSX›ô\úöYK⁄X⁄ö\»⁄H\à‹ù[ô8°§ì€[\XHô[ÿÿ][€à\X\ôY»[ô[à]\Àù[ô⁄[ôŸHõ›[ô¬õ]ôKàHŸYYŒò[ôH€›[õ›]ôHÿ]Y⁄]ôXÿ]\ŸH]ÿ\»⁄X⁄⁄[ô»Hö[[ò[YBõõÿõŸHY€]Xõ›]à
+\à›ô\úöYH[ôH›[HXŸ\Àù\ôHõ›ô]\ôYõ›»8†%ò‹ô\X»	‘‹ù[ôù\õú⁄YW›Ÿ[	»€‹›[Y‹ò[KXõ›ÀŸ[Z[K ãùô]\õú»X‹õ‹‹¬ô]ô\ûHö[KäBÇò‹ŸYY‹] 
+Xõ›»ô\€€ô\»H]\»õ›Y⁄Hÿ[YH€ÿò[HÿY\àôXYÀ[ôúô\‹ù»⁄]]ô\àö[[ò[YH]\õú»›]»ôKàHŸ[ô\ò[ù[H\»\»[à[ú›[òŸHŸéÇääò[à]Y]]⁄X⁄‹»HYôô\ô[ù][àH€ŸHÿY»\»€‹úŸH[àõ»]Y]
+äãôXÿ]\ŸBö][ú›Ÿ\ú»€€ôöY[ùHXõ›]H‹õ€ô»[ôÀÇÇê[€»ô[[›ô\»H\Xÿ]Y‹ú[à€€[Y[ùõÿ⁄»YùXõ›ôHôX]\ô\◊ÿ€Y[àååçãLLãéKÇÇääïô\öYöXÿ][€éääàNKŒNH]\›ÃÀÃÃ»]ò[ÀàHô]»\›úôXZÀ]\›YëQ
+]ô\‹ùYòRT‘“SëŒà]\Àùõ‹àHô\Ÿ[ùXŸ\Àù8†%H]ôHòZ[\ôH^X›JKÇÇà»»ååçãLLãåLH8†%YôKù]õ€ô\»[ú›XYŸà⁄][ô»\ôBÇääîõ€›ÿ]\ŸNàõ›[ô»]ô\à‹õ›HYôKùääàQëW–Tê◊—íSXÿ\»]ô[à€€[Y[ùYò»\Ÿ\ã[XZ[ùZ[ôY‹ôXY€YôWÿ\ò 
+X€õHôXYÀ[ô€YôXY]»ûH[ô8†%€»HŸYYYò\ò»›^YYúõﬁô[à[ôYö[ö][KàH›€ô\àõ›XŸYõ€õöYI‹»Yâ›[›ôY[àH⁄[N»]ÿ\¬õô]ô\à€⁄[ô»ÀÇÇò^Kù[ôXYH[ú›Ÿ\ú»ù⁄]\[ôYŸ^Hà[ôôYŸ[ô\ò]\»öY⁄KàH\ò»[ô\õôX]∏†%⁄]⁄H\»›\úô[ùH
+ö[äà8†%Yõ»\]Z]ò[[ùà€X^XôW‹õ›]W€YôWÿ\ò 
+Xõ›»ù[ú»úõ€BùHZYöY⁄õÿà[ôX›»€òŸH]ô\ûHQëW‘ì’UW—VTÿ
+ KÇÇääí]]õ€ô\»ò]\à[àôYŸ[ô\ò]\ äã⁄X⁄\»H⁄€H\⁄Y€éÇãHH›\úô[ù\ò»€Ÿ\»
+äö[ù äàHõ€\€»[úô\€€ôYôXY»ÿ\úûH›ô\à[àHÿ[YBà€‹ô»⁄\ôHõ›[ô»Xõ›][H\»⁄[ôŸYãH
+äô^X›H€ôH[ô äàX^H[›ôH\àõ›][€à8†%ô\€€ôK€‹úŸ[ã‹àHô]»ôXY›\ùÀà[Çà\ò»]\õú»›ô\à€€\][H]ô\ûHŸYZ»\»õ›[à\òÀ]\»Hô]»⁄\òX›\àŸYZ€BãHHõ‹õH\»[õôYà€ôH\òY‹ò\ô\Ÿ[ù[úŸKMå€‹ôÀ[ôH€X[‹öY]ò[òŸH⁄Bà\»Z⁄[ô»\ú€€ò[H\»^X⁄]H\ùŸà]ãHòY›YHö[\à\»õ‹òöY[àûHò[YH8†%ú⁄H\»ôY[àôYõX›[ô»€à[ô‹»à\»H^X›àòZ[\ôH[ŸHõ‹à\»⁄[ôŸàõ€\ãH]\»ôYH\›ŸYZ»Ÿà^W ãù\ò⁄]ô\À€»H\ò»[›ô\»ôXÿ]\ŸHŸà⁄]X›X[Bà\[ôYò]\à[àöYù[ô»€à]»›€ÇÇääêÿY[òŸH\Ÿ\»H›[\ö[Kõ›HŸYZŸ^KääàHŸYZŸ^H⁄X⁄»⁄⁄\»H⁄€HŸYZ»YàBòõ›\»›€à]öY⁄»H›[\[^\»][ú›XYàö\ú›ù[à›[\»[ôÿZ]»Hù[\ö[Ÿú€»Húô\⁄HŸYYY\ò»\»õ›ô]‹ö][à€à]»ô\ûHö\ú›ZYöY⁄ÇÇääëòZ[\ôH\»[ÿ^\»›ÿ\ôŸY\[ô»⁄]^\› äéàH⁄‹ù‹à[\Hô\›[X]ô\»H\ò¬ù[ù›X⁄YHô]ö[›\»ô\ú⁄[€à\»\ò⁄]ôY\»YôW÷VVVKSSKQù[ô€YôWÿ\ò◊ÿÿX⁄Xö\»[ùò[Y]Y€»Hô]»^ZŸ\»YôôX›[[YYX][Hò]\à[àYù\à]»K[Z[ù]HÇÇì€ôH^òHHÿ[\àŸYZ»\à[ú›[òŸKà[ùò\öX[ùÃ»€›ô\õú»\ã[Y\‹ÿYŸHÿ[Œ»\»\¬ùŸYZ€K[ô]ù[ú»ŸôàH€‹ÇÇääïô\öYöXÿ][€éääàNŒN]\›ÃÀÃÃ»]ò[ÀàLàô]»\›ÀôYHúôXZÀ]\›YëQ8†%ôö\ú›\ù[à›X\ô⁄‹ù\ô\›[›X\ô[ô⁄]\àHZYöY⁄õÿàX›X[Hÿ[»]à]õ\›€ôHX]\úŒàHõ›][€àõ›[ô»[ùõ⁄Ÿ\»\»Hÿ[YHùY»\»HYôKùõ›[ô»‹ö]\ÀÇÇà»»ååçãLLãåL8†%õ⁄XŸO[€à€[›Hõ›[ôÀ[ôÿÿ][€àÿ\»Z\‹⁄[ô¬ÇääêHõY]]⁄YHÿ]Y]›ŸY\X‹õ‹‹»[Ÿ]ô[à^‹ŸY€»õ]‹»[àH]Y]]Ÿ[ãú⁄\Y[à›\àX\õY\ãääÇÇòõ⁄XŸO[€òÿ\»ùYH€à]ô\ûH[ú›[òŸKôXÿ]\ŸHHÿ\Xö[]HõÿôHH‹õ›Hÿ\¬ò[XôNàùYX8†%ò[õ—‘»€‹ö‹»⁄]›][à[ù€‹õŸ^K€»]€›[ô]ô\àÿ^H[û][ô¬ô[ŸKà]Yâ›\›[ô›Z\⁄[Z[KH[ù€‹õ[ú›[òŸKúõ€HH⁄^€àHò[òX⁄ÀàBôôX]\ôHôY⁄\›ûHõ›»ÿ\úöY\»[à‹[€ò[
+äô]Z[õÿôJäã€»]ôXY»õ⁄XŸO[€ä[ù€‹õ
+Xõ‹àõ⁄XŸO[€äò[õŸ‹
+X⁄Yè[€äY⁄
+XŸ[öYO[€äŸ[Z[öJXà]Z[»\ôH€Z]Y⁄[àBôôX]\ôH\»Ÿôã[ôHòZ\⁄[ô»õÿôHÿ[â›ZŸHH›[[X\ûH›€à⁄]]8†%XY€õ‹›X»›]]õ]\›ô]ô\àôHH[ô»]òZ[ÀÇÇòÿÿ][€éòõ⁄[ú»H›€ô\ã’à[ôKà]»XúŸ[òŸHÿ\»€€ú‹X›[›\Œà\»[ù\ôHŸ\‹⁄[€àôYÿ[Çù⁄]HŸX]\àùYÀ—PUTó”––US”ò\»⁄]ö]ô\»ŸX]\ã[ôõ›[ô»ô\‹ùY]ÇÇääï⁄]H›ŸY\õ›[ô[àHõY]
+äà
+€€ôöYÀõ›€ŸJNÇãH
+äìX\ò›\»ù[ú»[Y\öXÿK”ô]◊÷[‹öÿ
+äà⁄[H\»]\»ÿ^\»‹ù[ô‘à[ô]ô\ûH›\Çà[ú›[òŸH\»X⁄YöXÀàôYH›\ú»ŸôàX‹õ‹‹»ÿ⁄Y[Hù\ﬁKXõÿ⁄‹ÀZYöY⁄õ›][€ãBàŒåÿ\ôõÿôHX⁄»[ô]ZY]⁄[ô›‹»8†%[ôH⁄\ô\»H‹õ›\⁄][Z[H€àX⁄YöXÀàBàéò[ôHYY[àååçãLLãéHõ›[ô\»€àö\ú›\ŸKÇãH
+äòŸ][ôÀù\»Z\‹⁄[ô»€à[Ÿ]ô[ääà[ô^\›»[àõ»ô\»ŸYYà—USëÿ\»ô]ô\ÇàôY[à‹[]Yõ‹à[û[€ôKÇãH
+äòYôKù\»Z\‹⁄[ô»€àö^XKX\ò›\»[ôù[\ äé»H›\àõ›\à]ôH€ôK]ôK[€õKÇãH
+äëõ›\à[ú›[òŸ\»›[ÿYH[€õ€]X»ô\Ÿ]ù
+äà⁄[HX\ò›\À⁄ù[\Àÿÿ\‹»\ôBà^Y\ôYà]ô\ûH\ãX⁄\òX›\à^Y\à[ôXYH^\›À[ô€‹ôJ‹ú
+Ÿ^X⁄]
+‹›\Y\»ÃÀåLàû]\»YÿZ[ú›H[€õ€]	‹»ÕçH8†%€»\»\»Hô[ùò[ôKõ›Hô]‹ö]KÇãH
+äòQêUS‘—USëÿ\»õ‹òI‹»Ÿ][ô»^
+äãHÿ[YH€YKZ[ú›[òŸH⁄\òX›\àõYY\¬à–TPTêSê—W—QêUSôYõ‹ôHååçãLLKåLKà[úôXX⁄XõH€àò[YY[ú›[òŸ\À‹õ€ô»[àBàö[KÇÇääê[ö]ôH€‹ŸYåçãLLääà8†%ôX€‹ôY\ôHôXÿ]\ŸHHö[ô[ô‹»\›⁄]õ»ô\€€][€ÇúôXY»\»›\úô[ù›]H»Hô^Ÿ\‹⁄[€ãàX\ò›\»[›ôY»[Y\öXÿK”‹◊–[ôŸ[\ÿ
+[ô¬ì€[\XK⁄][Z[K€»\à‘—’òYôöX»X]⁄\»\à›]JN»Ÿ][ôÀù]]‹ôYõ‹à[úŸ]ô[à[ôYôKùõ‹àHõ›\à]X⁄ŸY€ôK[àXYHŸ[ãY]õ€ö[ô»[ÇùååçãLLãåLN»õ€õöYKŸ[Z[H›⁄]⁄Y»^Y\ôYô\Ÿ]»[à\»\‹Àõ‹òK‹ö^XH⁄]BùååçãLLãåLà\ﬁK€»[Ÿ]ô[à\ôH^Y\ôY»QêUS‘—USëÿô]]ò[^ôY[à€ŸKÇê€€ôöY»ô[YYY\»\ôH›€ô\ãX\YY[ô›€ô\ã\ô\‹ùYô\öYöYY8†%ô[ùòö[\»\ôHõ›[Çù\»ô\À€»H\ãZ[ú›[òŸHÿ]Y]\»H€õHôXY[ô»]Ÿ]\»[ûHŸà[KÇÇääïô\öYöXÿ][€éääàãŒà]\›ÃÀÃÃ»]ò[ÀàHô]»\›Àõ›ö^\»úôXZÀ]\›YëQÇÇà»»ååçãLLãéH8†%ŸôX]\ô\À[ô[à]Y]][ú›Ÿ\ú»H]Y\›[€ú»ŸHŸ\\⁄⁄[ô¬ÇääêHﬁ\›[X]X»\‹»›ô\à⁄]ÿ]Y]€›[õ›ŸYJäãõ€\YûHôYHŸ\\ò]Hõ[ôú‹›»[à€ôHŸYZ»]XX⁄€‹›Hõ›[ôö\àõ›\àõ›»⁄]õ»ôYô\ô[òŸH›ÀôYH€ÇòHŸXZŸ\à[XYŸHòX⁄Ÿ[ô[ôíI€Hõ››\ôHYàY[Y\»\ôH\õôY€àõ‹à[û[€ôHô\⁄Y\¬êõ€õöYHãàH€€[[€à⁄\H\»
+äú\ãZ[ú›[òŸH[ô‹»]òZ[⁄[[ùJäã€»H]Y]Ÿ[ùõ€⁄⁄[ô»õ‹àHô\›Ÿà[Hò]\à[àÿZ][ô»õ‹àHô^€ôKÇÇääïôYHô]»[ô\ŒääÇãHôX]\ô\Œò8†%]ô\ûH[ùY‹ò][€à\»€ò»Ÿôò»ãÿX⁄\ôHãÿXYX[ú»ô]ô\Çà€€ôöY›\ôYà
+äòŸôò[ôô]ô\à€€ôöY›\ôY\ôHYôô\ô[ùõÿõ[\»⁄]Yôô\ô[ùö^\ äãà[ô€€ôõ][ô»[H\»ôX⁄\Ÿ[H⁄]XYH‹ŸHôYH[ò⁄Y[ù»€›ÀÇãHŸYYŒò8†%[ô\Ÿ[ù‹àRT‘“SëŒàö[\œòà⁄^ö[\»
+]\ÿ8†%[ô\à⁄]]ô\Çàò[YHUT◊—íSXô\€€ô\»À⁄[òŸHååçãLLãåLà8†%[‹Xàõ⁄ôX›ÿÿ⁄Y[XYôXŸ][ôÿ
+H\ôHôXY›òZY⁄[ù»\àõ€\À[ôBàZ\‹⁄[ô»€ôH€‹›»€€ù[ù⁄]õ»\úõ‹à⁄]€Ÿ]ô\ãàù[\»ò[à⁄]›]]\Àù€àBàî»õ‹àH›ô]⁄»úÀ\ﬁ[òÀú⁄›[ÿ\úöY\»H€€[Y[ùXõ›]]ÇãH›€ô\éò»éò8†%õ»›€ô\àYX[ú»õ›[ô»õÿX›]ôHÿ[à]ô\àö\ôK[ôH‹õ€ô»[Y^õ€ôBà]ZY]HúôXZ‹»ù\ﬁKXõÿ⁄‹ÀZYöY⁄õ›][€à[ôHŒåÿ\ôõÿôHX⁄Ààõ›€⁄»ZŸBàX[H⁄[[òŸKÇÇïõ⁄XŸH[ôòYôöX»Ÿ\ôHH€»‹ôY[ùX[Yÿ]Y[ùY‹ò][€ú»ô\‹ù[ô»õ›[ô»][ô\‹]HX\»[ôX[[ôXYHôZ[ô»€›ô\ôY8†%[àHòYôöX»›X⁄»ÿ\»ö\⁄XõH[ô[Çùÿ\€â›⁄X⁄\»€‹úŸH[àôZ]\ãÇÇääòŸôX]\ô\»ò[YOà€üŸôò
+äàõ\»Ÿ[öYKY[YK⁄Yãõ⁄XŸKòYôöXÀX\»‹àX[]úù[ù[YH[ô\ú⁄\›»»ôX]\ôW‹ôYúÀöú€€òàXX⁄\ôŸ]\»HZ[à[Ÿ[H€ÿò[ôXY]òÿ[[YK€»õ\[ô»]ôXX⁄\»[LLÿ[⁄]\»⁄]›]›X⁄[ô»[ûHŸà[H8†%Búÿ[YHYX⁄[ö\€H‹Ÿ][Ÿ[[ôXYH\Ÿ\Àà]ôYù\Ÿ\»»›⁄]⁄€à[û][ô»H[ú›[òŸBö\€â›ÿ\XõHŸã[ôÿ^\»⁄KàŸ[öYW‹ôXYXÿY[YW‹ôXYX‹][ù»
+óÿÿ\XõX
+\‹Ÿ]¬úô\Ÿ[ù
+H[ô
+ó‹ôXYX
+ÿ\XõH
+äò[ô
+äà›⁄]⁄Y€äKÇÇääïô\öYöXÿ][€éääàKŒH]\›ÃÀÃÃ»]ò[ÀàLô]»\›ÀôYHúôXZÀ]\›YëQàBôõ›\ù[öôX›[€à8†%[ù⁄\ö[ô»H›⁄]⁄úõ€HŸ[öYW‹ôXYX8†%
+äú\‹ŸY
+äà]»\›ôXÿ]\ŸBùHö^\ôH\»õ»Ÿ[öYH\‹Ÿ]»€»Ÿ[öYWÿÿ\XõJ
+Xÿ\»ò[ŸHZ]\àÿ^H[ôBò\‹Ÿ\ù[€à[õ‹àH‹õ€ô»ôX\€€ãà\ô[ôY»õ‹òŸHÿ\Xö[]HùYK[à€€ôö\õYYëQÇîÿ[YHX\⁄⁄[ô»ÃL»\ÿ‹öXô\Àÿ]Y⁄€õHôXÿ]\ŸHH[öôX›[€àÿ\»ù[ãÇÇà»»ååçãLLãé8†%›»Ÿù[à⁄HôXX⁄\»õ‹àH“Qà‹àHY[YBÇääò“Qó–“Sê—X[ôQSQW–“Sê—X
+õ›åÕJHÿ]H⁄]\à⁄H\»—ëëTëQH‹[€à[àBô⁄]ô[àô\H8†%õ›⁄]\àHY»⁄H[Z]Y\»€õ›\ôYääà]\›[ò›[€à\»H⁄€Bô\⁄Y€ãàõ‹[ô»HY»Yù\àHòX›€›[X]ôH\à^ôYô\úö[ô»»[à[XYŸH]ô]ô\Çò\úö]ô\»
+ù\»\»[›H8°§àà⁄]õ›[ô»õ€›⁄[ô K€»Hõ€\[ú»⁄[àHõ€\\¬ò\‹Ÿ[XõYà€€YHô\Y\»⁄[\H€â›Y[ù[€à]“Qú»^\›[ô⁄H‹ö]\»õ‹õX[KÇÇääê\⁄⁄[ô»[ÿ^\»€‹ö‹ÀääàYà[›\à›€àY\‹ÿYŸH€€ùZ[ú»ô⁄Yàã»ööYàà‹àõY[YHãH‹[€à\¬õŸôô\ôYôYÿ\ô\‹»ŸàHXŸKàôZ[ô»€õ»ôXÿ]\ŸHŸàH€⁄[àõ\[›Hÿ[â›ŸYH\»Bù€‹ú›ô\ú⁄[€àŸà\»ôX]\ôKÇÇääê[€Œàÿ]Y]ÿZ[ôYHYYXNò[ôJäà8†%Y[YO[€ã€Ÿôà⁄Yè[€ã€Ÿôà
+ÿYô]JXà\»\»Bù\ô[YHHÿ[YHõ[ô‹›\»€‹›Hõ›[ôö\àŸ[öYHò\ŸNòÿ\»YY⁄[àõ›\Çòõ›»\õôY›]»]ôHõ»ôYô\ô[òŸH›Œ»öXHõ›öY\èò⁄[àôYHŸ\ôH⁄[[ùH€àBùŸXZŸ\àòX⁄Ÿ[ô»[ô\»ô[X\ŸHôYÿ[à⁄]íI€Hõ››\ôHYàY[Y\»\ôH\õôY€àõ‹à[û[€ôBòô\⁄Y\»õ€õöYHà8†%H]Y\›[€àHõ›€›[õ›[ú›Ÿ\àXõ›]]Ÿ[ãÇÇääï€‹ùôX€‹ô[ôÀ⁄[òŸH]ÿ]\ŸY][òŸ\ùZ[ùNääàQSQW’STUT◊—Tòô\€€ô\¬òYÿZ[ú›õ›úXõ›H[ú›[òŸH\ôX›‹ûK€»]\»€‹›[Y‹ò[KXõ›À€Y[YW›[\]\Àÿò[ô
+äú⁄\ôYûH[Ÿ]ô[ääãàY[YH›\‹ù\»[[‹ã[õ›[ô»X‹õ‹‹»HõY]»õ»⁄[ô€Hõ›òÿ[à]ôH]⁄[H›\ú»€â›à⁄YúÀù\X\ò[òŸKù[ôHô\›\ôH\ãZ[ú›[òŸH8†%ù\»€ôH\»õ›[ôH\ﬁ[[Y]ûH\»X\ﬁH»Z\‹ôXYÇÇääïô\öYöXÿ][€éääàÃKŒÃH]\›ÃÀÃÃ»]ò[Àà»ô]»\›Œ»HŸôô\àÿ][ô»[ôH]Y]õ[ôHúôXZÀ]\›YëQàH\›[ú»]ôZ]\àŸ[ô]€€ùZ[ú»HõÿòXö[]Hõ€€¬ùHÿ]Hÿ[õõ›ZY‹ò]Húõ€HHŸôô\à»HŸ[ô]\ãÇÇà»»ååçãLLãç»8†%Ÿ⁄Yã[ôHTHŸ^H]€›[]ôHXZŸY[ù»H⁄]ÇääòŸ⁄Yà€‹ôœò\»H\ö]H€€[X[ôõ‹à‹Ÿ[öYX[ô€Y[YX
+äã[ôHôX\€€à]õX]\ú»\»]]ô\ûHòZ[\ôH€àH“Qà]\»[Xô\ò][H⁄[[ù8†%€»⁄]›]]ú⁄Bõô]ô\àŸ[ô»“Qú»à[ôùH⁄\Hÿ[\»úõ⁄Ÿ[àà€⁄»Y[ùXÿ[[ô[›IŸÿZ]^\»»[ù[H\\ùàÿ[YHõ[ô‹›\»ÿ]Y]õ›ò[Z[ô»H[XYŸHòX⁄Ÿ[ô⁄X⁄€‹›Ÿ]ô\ò[úõ›[ô»H^HX\õY\ãÇÇí][õõ›[òŸ\»⁄]Ÿ[ù‹õ€ôÀ[ôHY\‹ÿYŸ\»\›[ô›Z\⁄Hÿ\Ÿ\»]ôYYYôô\ô[ùôö^\Œàõ»“TW–TW“—VX“Qó—SêPìQL⁄\H[úôXX⁄XõK‹àõ›[ô»›\ùö]ö[ô»Bôö[\à]H›\úô[ù]ô[àH]]»]ŸY\»[õõ›[òŸWŸ\úõ‹úœQò[ŸX8†%ZYX€€ùô\úÿ][€ÇòHZ\‹⁄[ô»“Qà]\››^H[ùö\⁄XõKÇÇääêùZ[[ô»]›\ôòXŸYHôX[XZ»[àååçãLLãçãääà⁄\HZŸ\»\W⁄Ÿ^X\»H
+äú]Y\ûBú\ò[Y]\ääã€»Hô\]Y\›ÿ^Ÿ\[€àÿ\úöY\»Hù[Tì8†%Ÿ^H[ò€YY8†%[ôòŸÀùÿ\õö[ô ñŸ⁄YóHŸX\ò⁄òZ[Yà	\»ãJX‹õ›H][ù»\úõ‹úÀõŸÿàŸ\úõ‹úÿX⁄Ÿ\¬úôXŸ[ù\úõ‹ú»»H›€ô\à[à[Y‹ò[K€»HŸ^HYH]úõ€HHŸ»[ù»H⁄]õY\‹ÿYŸKà‹ôYX›⁄Ÿ^J
+Xõ›»ÿ‹ùXú»\W⁄Ÿ^OXÿŸ^OXò[Y\»úõ€Hõ›HŸX\ò⁄[ôŸ[ôôòZ[\ôH]»ôYõ‹ôH[û][ô»\»ŸŸŸYŸY\[ô»Hô\›ŸàHTìõ‹àXY€õ‹⁄\ÀÇÇï]\»H^ò\ôŸà]ô\ûHŸ^KZ[ã\]Y\ûK\›ö[ô»TKõ›ù\›\»€ôNàHŸX‹ô][ô»\[Çô^Ÿ\[€à^]\úõ‹à[ô[ô»[àôX]»\»ÿYôH»ŸÀÇÇääïô\öYöXÿ][€éääàçŒç]\›ÃÀÃÃ»]ò[Ààô]»\›Œ»HôYX›[€àúôXZÀ]\›YëQõ€àõ›]ÀÇÇà»»ååçãLLãçà8†%“QúÀöXH⁄\K⁄‹Ÿ[à[à\à›€à€‹ô¬Çääï[õ‹àÿ\»H[à[ù[ô\ŸX\ò⁄⁄[Y]ääà€€Ÿ€H›‹Y\‹›Z[ô»[õ‹àTHŸ^\»€ÇååçãLKLL»[ô\õZ[ò]YHTH[ù\ô[H€à
+äååçãLãLÃ
+äà8†%H[€ùôYõ‹ôH\»ÿ\¬ù‹ö][ãà^\›[ô»Ÿ^\»ô]\õà\úõ‹úŒ»\ÿ€‹ôõY\⁄ﬁH[ô⁄]–\[ZY‹ò]YàBö[ùY‹ò][€àÿ\»ô]ô\à›\ùYà”THÿ\»]ò[X]Yô^à]»€€ù[ùö[\à\»Hô]\Çôö]
+Y⁄ÿYY][Xÿ›ÿÿŸôòX]⁄[ô»Hô\]Y\›Y€õÿú»^X›JH[ô]\»úôYBôõ‹ô]ô\ãù]]
+äö[úŸ\ù»Yô\ù\Ÿ[Y[ù»[ù»ŸX\ò⁄ô\›[ äà[ô]»[ô⁄[ùZŸ\»Bò’T’”QTó“Q8†%H\ã]\Ÿ\àY[ùYöY\à[ôY»[àYô]€‹ö»úõ€Hö]ò]H⁄]Àà]»ÿ‹¬ùŸ\ôH[úôXYXõHúõ€H\»€€ùZ[ô\à
+ K€»HöY[X\ö⁄[ô»[àY€›[õ›ôBöY[ùYöYY[ô[à[ùY‹ò][€àÿ\»õ›ùZ[€à›Y\‹Ÿ\Àà⁄\HûH[[Z[ò][€ãÇÇääí›»]€‹ö‹Œääà⁄H[Z]»Ÿ⁄YéàH⁄‹ùŸX\ò⁄ò\ŸWX[à\à›€à€‹ô[ôÀHò\ŸBö\»ŸX\ò⁄Yÿ[ôY]\»\ôHö[\ôY[ô€ôH\»Ÿ[ù⁄]Ÿ[ôÿ[ö[X][€òà
+äìõ»ô]»Bòÿ[
+äà8†%]öY\»Hô\H⁄Hÿ\»[ôXYHŸ[ô\ò][ôÀ⁄X⁄\»⁄][ùò\öX[ùÃ¬úô\]Z\ô\ÀÇÇääîÿYô]H\»^Y\ôYôXÿ]\ŸH⁄\I‹»›€àö[\àÿ[õõ›ôHù\›Y[€ôKääàŸ⁄YúÿYô]BöY⁄YY][_›ÿX\»»⁄\I‹»ò][ôÿ
+ÿ»ÿ»ÀLLÿ
+H[ô\ú⁄\›»¬ò⁄Yó‹ôYúÀöú€€ò8†%[õZŸH‹Ÿ][Ÿ[⁄[òŸHHÿYô]H]ô[⁄[[ùHô]ô\ù[ô»€àô\›\ùö\»H‹õ€ô»òZ[\ôH\ôX›[€ã[ô[à[úôX€Ÿ€ö\ŸY\ú⁄\›Yò[YHò[»òX⁄»»Y⁄úò]\à[à‹[ãà⁄\I‹»ò][ô»\»
+äò›[][]]ôJäà
+ÀLLÿ[€»ô]\õú»ÿ[ôÿ
+H[ôö]»\‹›YHòX⁄Ÿ\àÿ\úöY\»€ôÀ\›[ô[ô»ô\‹ù»ŸàZ^Yò][ô‹»€€Z[ô»òX⁄»ôYÿ\ô\‹Àú€»Hÿÿ[[ûK[\›ù[ú»]
+äô]ô\ûJäà]ô[€àXX⁄ÿ[ôY]I‹»]H[ô€YÀà]¬ôõ›\ùò][ôÀò\»[úôXX⁄XõHûH€€ú›ùX›[€ãàH[ûK[\›\úú»úõÿY€àŸ^X[[ôô‹ò\X»\õ\»8†%Hò[ŸH‹⁄]]ôH€‹›»€ôHZ\‹⁄[ô»“Qà8†%ù]›^\»ò\úõ›»€àö[€[òŸKú⁄[òŸHö⁄[à€›[X]ö⁄[[ô»]ãÇÇääí[ãX⁄\òX›\àŸ[X›[€ääà€€Y\»úõ€H€»XŸ\Œà\à›€à]Y\ûH€‹ô[ôÀ[ôH\ãZ[ú›[òŸBò⁄YúÀù⁄\ôHHXY[ô»Xò[ú»H\õH[ô[ûH›\à[ôH\»H\õH⁄H\»ÿ€‹ôYù›ÿ\ôà[›H›\ò]HHõÿÿXù[\ûKõ›H“Qú»8†%Hÿ[YH]ö\⁄[€à\»\X\ò[òŸKùùô\ú›\»HôYô\ô[òŸH›Àà\»HôXŸ[ùZYö[ô»ùYôô\à€»⁄HŸ\€â›ô\X]\úŸ[ãÇÇääïHY»\»›ö\Y[àHÿ[YH€€[Z]]XX⁄\»\à»[Z]]ääà^òX››Y‹ÿúô[[›ô\»Y‹»ûHò[YK€»[à[úôY⁄\›\ôY€ôHôXX⁄\»H\Ÿ\àô\òò][H8†%]\¬ùååçãLÀLéKåK[ô[›Hÿ]⁄Y‹Ÿ]ò\ŸNàå0¨ã€X\∏†)óX»]€àåçãLLãàŸ⁄YéóXúöY\»[€ô‹⁄YH‹ŸX\ò⁄óXò]\à[à^[ô[ô»H[õôY]\H€€ùòX›ÇÇë]ô\ûHòZ[\ôH\»⁄[[ùàõ»THŸ^KHŸX\ò⁄[Y[›]õ›[ô»\‹⁄[ô»Hö[\ãHŸ[ôô\úõ‹ãàHZ\‹⁄[ô»“Qà]\›ô]ô\à›\ôòXŸH\»[à\úõ‹àZYX€€ùô\úÿ][€ã[ôô]ô\à[^\»Búô\H]õ€›‹ÀÇÇääïô\öYöXÿ][€éääàMãŒMà]\›ÃÀÃÃ»]ò[ÀàMô]»\›Œ»õ›\àúôXZÀ]\›YëQ8†%BùY»XZÀH[ûK[\›\ãZ[ú›[òŸHò[úÀ[ôH[ö€õ›€ã]ò[YHòZ[\ÿYôKàBò[ùã]ò\úÀYÿ›[Y[ùY]ò[ÿ]Y⁄“TW‘—PTê“’Tì[ôÿ›[Y[ùYôYõ‹ôH\»⁄\YÇÇà»»ååçãLLãçH8†%ÿ]Y]ò[Y\»H[XYŸHòX⁄Ÿ[ôÇääîõ€›ÿ]\ŸHŸàHõY]‹]õÿõŸH€›[ŸYNà—SíQW‘ì’íQTòYò][»»ò[õŸ‹ù[õ\‹»—SRSíW–TW“—VX\»Ÿ][ôôYH[ú›[òŸ\»]ôHõ»Ÿ^Kääà‹ô\Râ——SRSíW–TW“—VI»€‹›[Y‹ò[KXõ›À ãÀô[ùòô]\õú»õ›[ô»][õ‹àù[\»[ô€õBò€€[Y[ùY[ô\»õ‹àö^XH[ôX\ò›\Àà‹ŸHôYHù[àò[õ—‘	‹»õ^Z€€ù^»õ€õöYKòÿ\‹À[Z[H[ôõ‹òHù[àŸ[Z[öKÇÇï]X\»^X›H€ù»H€€\Z[ùÀàù[\…‹»Ÿ[öYHÿ[YHòX⁄»\»Hö\⁄XõH€\ãôYôô\ô[ùKXõ€ôY€€X[à⁄[H\àôYô\ô[òŸHÿ\»€‹úôX›H]X⁄Y[ô€‹úôX›H‹õ‹Y8†%òÿ]Y]€€ôö\õYYŸ[öYHò\ŸNàù[\◊ÿò\ŸKúôÿ[ôHö[Hÿ\»ÕLûLK€ôH€X[Çò‹õ‹àö^XK[€»€àò[õ—‘ÿ\»òHö]Yôô\ô[ùãà]ô\ûHõ›ô\‹ùY\»ö[ôH\»€ÇëŸ[Z[öKà
+õ‹òHÿ\»HX\õY\à^Ÿ\[€à[ôYHŸ\\ò]K\›Xõ\⁄Yÿ]\ŸNàõ¬úôYô\ô[òŸH›»]X⁄Y][[ù[ååçãLLKåLäBÇääòÿ]Y]ô\‹ùY⁄X⁄›»ÿ\»[à^Hù]ô]ô\à⁄X⁄òX⁄Ÿ[ô€€ú›[YY]
+äã€»BùôYKZ[ú›[òŸH‹][à[XYŸH]X[]Hÿ\»[ùö\⁄XõHúõ€H[Y‹ò[H8†%Hÿ[YHÿúŸ\ùòXö[]Bôÿ\\»HŸ[öYKXò\ŸH€ôK€ôH^Y\àù\ù\à›€ãàHŸ[öYHò\ŸNò[ôHõ›»ôXY¬òö[OàöXHõ›öY\èò[ôò[Y\»H[Ÿ[€àò[õ—‘⁄[òŸHõò[õŸ‹à[€ôHŸ\€â›ÿ^Bòõ^Z€€ù^ÇÇääìõ›H€ŸHö^ääàõ^Z€€ù^ô\Ÿ\ùö[ô»Y[ù]H€‹úŸH[àŸ[Z[öH€à[àY]\»Bõ[Ÿ[Yôô\ô[òŸKõ›HùY»8†%Hô[YYH\»H—SRSíW–TW“—VX[à‹ŸHôYHô[ùòö[\Àù⁄X⁄\»H›€ô\â‹»»\KÇÇääïô\öYöXÿ][€éääàãŒà]\›ÃÀÃÃ»]ò[Àà»ô]»\›Œ»Hô[ô\à\‹Ÿ\ù[€ÇòúôXZÀ]\›YëQ[ô]Y]ZŸ^\À\ô[ô\ôYÿ]Y⁄Hÿ[YH[öôX›[€à[ô\[ô[ùK⁄X⁄ö\»H]ò[⁄[ô»^X›HHõÿà]ÿ\»YYõ‹à€ôHô[X\ŸHY€ÀÇÇà»»ååçãLLãç8†%‹Ÿ]ò\ŸHô]ô\à€‹öŸY\»Hÿ\[€ÇÇääîõ€›ÿ]\ŸNàâ‹»€€[X[ô[ô\òX]⁄\»Y\‹ÿYŸKù^
+»Y\‹ÿYŸKô[ù]Y\ÿ€õKääÇêH›»‹àÿ›[Y[ùÿ\[€à‹[]\»Y\‹ÿYŸKòÿ\[€ò»ÿ\[€óŸ[ù]Y\ÿ€»Bò‹Ÿ]ò\ŸXÿ\[€àô]ô\àôXX⁄YH[ô\à8†%H\]Hô[õ›Y⁄»[ôW‹›ÿò[ôH[Ÿ[[ú›Ÿ\ôY]\»€€ùô\úÿ][€ã[ùô[ù[ô»H‹Ÿ]ò\ŸNàå0¨ã€X\ã⁄[ô€\ú›[[Y\óXY»ûH[ò[ŸﬁH⁄]‹Ÿ[öYNà8†)óXàô\öYöYYûHôXY[ô»⁄X⁄◊›\]X[àBö[ú›[Y⁄Y[õ›\‹›[YYÇÇùååçãLLãå»⁄\Y]]
+ò[ôÿ›[Y[ùY]\»HôX€€[Y[ôY€ôJàHÿ[YH^KÇÇääï⁄HH\›»Ÿ\ôH‹ôY[à€àH]]€›[õ›ù[éääà[ZY⁄\‹Ÿ\ùY€àBö[ô\â‹»
+äú€›\òŸJäà8†%]⁄\◊ÿYZ[ò\X\ú»[à]]€€[X[ô[ô\äúŸ]ò\ŸHò\¬ö[àXZ[ä
+X]H‹ö]H\»]€ZXÀàõ›€ôH^\ò⁄\ŸY\‹]⁄àôXY[ô»Hù[ò›[€â‹¬ú€›\òŸHõ›ô\»H€ŸH^\›Œ»]õ›ô\»õ›[ô»Xõ›]⁄]\àHúò[Y]€‹ö»⁄[]ô\Çòÿ[]àõ›\ùÿÿ›\úô[òŸHŸàH\‹Ÿ\ù]⁄]›]Y^\ò⁄\⁄[ô»ò[Z[H
+Œ
+K[ôHö\ú›¬úôXX⁄HõY]ÇÇääëö^ääàHY\‹ÿYŸR[ô\ò€à
+’»ÿ›[Y[ùíSPQ—JH	àÿ\[€îôYŸ^
+àóã‹Ÿ]ò\ŸWàäXúôY⁄\›\ôY
+äòôYõ‹ôJäà[ôW‹›ÿ€»]⁄[ú»\‹]⁄àH€€[X[ô[ô\ò›^\»õ‹ÇùHô\K]ÀXK\›»]⁄X⁄ÿ\»[ÿ^\»ö[ôH⁄[òŸH]\»H^Y\‹ÿYŸKÇÇääïô\öYöXÿ][€éääàŒNKÕŒNH]\›ÃÀÃÃ»]ò[Ààô]»\›ÀôYHúôXZÀ]\›YëQà€ôHŸÇù[H^\ò⁄\Ÿ\»â‹»⁄X⁄◊›\]Xò]\à[à\ÿ‹öXö[ô»]€»YàHù]\ôHà›\ù¬õX]⁄[ô»ÿ\[€ú»H\›òZ[»[ôH^òH[ô\àÿ[àôHôX€€ú⁄Y\ôYÇÇà»»ååçãLLãå»8†%‹Ÿ]ò\ŸNà[ú›[HôYô\ô[òŸH›»›ô\à[Y‹ò[BÇääîõ€›ÿ]\ŸNàH€õHõ›]Hõ‹àŸ][ô»HôYô\ô[òŸH›»€ù»[à[ú›[òŸHÿ\¬ú€ôK[ÿÿ[ÿ‹[ôH›€ô\â‹»⁄[\»€àHîÀääàôYHŸ\\ò]H][\»[à€ôBúŸ\‹⁄[€àŸ[ù[ù»H‹õ€ô»⁄[8†%\õ]^\Ÿ]\\›‹òYŸNà€€[X[ôõ›õ›[ô[à€¬ò»‹Ÿÿ\ôÀããò]X]⁄Yõ›[ôÀà]\»ÃI‹»‹\ò]‹à[éàHYŸ[ùÿ[àXô[Bòõÿ⁄Àù]õ›[ô»›‹»H\›H[ô[ô»[àH‹õ€ô»\õZ[ò[ÇÇîôKY^Z[ö[ô»]Hõ›\ù[YHÿ\»õ›€⁄[ô»»€‹öÀ€»Hò[úŸô\à\»€€ôH[ú›XYÇò‹Ÿ]ò\ŸXZŸ\»H[XYŸH›ô\à[Y‹ò[H8†%Ÿ[ô]\»H
+äôö[Jäà⁄]‹Ÿ]ò\ŸX\»Bòÿ\[€ã‹àô\H»€ôH⁄]‹Ÿ]ò\ŸXàHõ‹õX[›»€‹ö‹»€»ù][Y‹ò[BúôX€€\ô\‹Ÿ\»‹ŸK[ôHôYô\ô[òŸH\»H›õ€ôŸ\›Y[ù]H⁄Y€ò[[àHŸ[öYBú\[[ôK€»Hô\Hÿ^\»€»^X⁄]KÇÇë]Z[»]X]\éÇãH
+äëõ‹õX]⁄X⁄ŸYûHXY⁄X»û]\ äãõ›Hö[[ò[YH‹à[Y‹ò[I‹»Z[YHXY\à8†%ëÀàîQÀŸXîà[û][ô»[ŸH\»ôYù\ŸYò]\à[à[ú›[YÇãH
+äï‹ö]\»»—SíQW–êT—X	‹»^\›[ô»ò[YJäã€»õ»ô[ùòY]à€€Xö[ôY⁄]àååçãLLãåâ‹»û]K\€öYôôYZ[YKHë»[ô[ô»]õ‹òWÿò\ŸKöúÿ\»õ›»\õ[\‹ÀÇãH
+äîô]ö[›\»›»Ÿ\\»ò[YOãúô]ò
+äãôXÿ]\ŸHHòY›ÿ\⁄›[ôHôX€›ô\òXõBà⁄]›][õ›\àò[úŸô\ãÇãH
+äê]€ZX äéà‹ö][à»ù\[ôô[ò[YYàH[ã]‹ö][àôYô\ô[òŸH\»€‹úŸH[àBà›[H€ôKÇãH
+äïZŸ\»YôôX›[[YYX][Jäà8†%‹ô\€€ôWÿò\ŸW⁄[XYŸJ
+X›]»H]\àŸ[öYK€¬à\ôH\»õ»ô\›\ù[ôõ»\ﬁKÇãHYZ[ãYÿ]Y»]›ô\ù‹ö]\»Hö[H[àH[ú›[òŸH\ôX›‹ûKÇÇääïô\öYöXÿ][€éääàŒMKÕŒMH]\›ÃÀÃÃ»]ò[Ààô]»\›Œ»HYZ[àÿ]K[ô\ÇúôY⁄\›ò][€à[ô]€ZX»‹ö]HúôXZÀ]\›YëQÇÇà»»ååçãLLãåà8†%HZ[YH\H€€Y\»úõ€HHû]\Àõ›Hö[[ò[YBÇääîõ€›ÿ]\ŸNàÿò\ŸW⁄[XYŸJ
+X\ö]ôYHZ[YH\Húõ€HHö[H^[ú⁄[€ãääàô[ò[Z[ô»Bîë»»öúÿ8†%õ›][ôH⁄[à›ÿ\[ô»ôYô\ô[òŸH›‹»ô]ŸY[à[ú›[òŸ\»8†%X€\ôYë¬ô]H\»[XYŸK⁄úYÿ»Ÿ[Z[öI‹»[õ[ôWŸ]XàHôZôX›YôYô\ô[òŸHYX[ú»HòXŸHò[¬òòX⁄»»⁄]]ô\àH^ÿ^\À⁄[[ùKÇÇí[ùô\›Yÿ]Y[ô€X\ôY\»Hÿ]\ŸHŸàõ‹òI‹»öYù
+ôôôôLHŸ[ùZ[ôHëíQàîQ Kò[ô[Xô\ò][H
+äõõ›
+äà⁄\Y]]⁄[ùà]ö^Yõ›[ô»ÿúŸ\ùôYà⁄\[ô»õ›¬òôXÿ]\ŸHH›€ô\à\»Xõ›]»ô\XŸHŸ]ô\ò[ò\ŸH›‹À⁄X⁄\»^X›HH‹\ò][€Çù]õŸXŸ\»[à^[ú⁄[€ãŸõ‹õX]Z\€X]⁄ÇÇò‹€öYôó€Z[YJ
+XôXY»HXY⁄X»û]\»8†%ë»⁄Y€ò]\ôKîQ»”“KíQëã’—Pî8†%[ôò[¬òòX⁄»»H^[ú⁄[€àõ‹à[û][ô»[úôX€Ÿ€ö\ŸY€»]\»ô]ô\à€‹úŸH[àôYõ‹ôKÇÇääïô\öYöXÿ][€éääàŒÀÕŒ»]\›ÃÀÃÃ»]ò[ÀàHô]»\›»[ò€Y[ô»ëÀ[ò[YYXöúÿíîQÀ[ò[YYXúôÿŸXî[úôX€Ÿ€ö\ŸYXû]\»ò[òX⁄À[ô[à[ô]ÀY[ô\‹»õ›Y⁄òÿò\ŸW⁄[XYŸJ
+XÇÇääê[€ÀHô]»]ò[8†%]Y]ZŸ^\À\ô[ô\ôYääàååçãLLãåHYYŸ[öYWÿò\ŸX¬òÿ]\óÿ]Y]Ÿ]J
+X[ôH›\ù\Ÿ»[ôK[ôH›€ô\àÿ\»€ÿ]Y]€›[⁄›¬ö]»]Y]ÿ€YùZ[»]»›€à[ô\»[ôô]ô\àô[ô\ôY]àH]ò[õ›»òZ[»Yà[ûHŸ^Bö[àH]Y]]HôXX⁄\»õ»\Ÿ\ãYòX⁄[ô»›\ôòXŸK[õ\‹»\›Y\»TK[€õKàúôXZÀ]\›YîëQûHô[[›ö[ô»HŸ[öYHò\ŸNò[ôKÇÇà»»ååçãLLãåH8†%ÿ]Y]ô\‹ù»⁄X⁄ôYô\ô[òŸH›»\»[à^BÇääîõ€›ÿ]\ŸNàååçãLLKåLYYHŸ[öYKXò\ŸH›]\»»HOOH’TïTUQUOOXõŸ»[ôK[ôH€H›€ô\àÿ]Y]€›[⁄›»]à‹ŸH\ôHYôô\ô[ù€ŸH]ÀääÇì›€ô\à⁄X⁄ŸY[ô]ÿ\»õ›\ôKÇÇòÿ]Y]\»H€õH›\ôòXŸHõ‹à\»]\»ôXX⁄XõHúõ€H[Y‹ò[K⁄X⁄X]\ú¬òôXÿ]\ŸHH]Y\›[€à][ú›Ÿ\ú»8†%ö\»\»õ›X›X[HôZ[ô»Ÿ[ù]»›€àòXŸO»à8†%\¬õ›\ù⁄\ŸHHõ›\õò[›]ÿ^K€àH‹›H›€ô\à\»»‘“[ùÀÇÇòÿ]\óÿ]Y]Ÿ]J
+XÿZ[ôYŸ[öYWÿò\ŸX
+⁄\ôY⁄]HYZ[àTJH[ô]Y]ÿ€Yúô[ô\ú»]\»HŸ[öYHò\ŸNò[ôKàÿ[YHÿò\ŸW⁄[XYŸW‹›]\ 
+X€›\òŸH\»H›\ù\[ôKú€»H€»›\ôòXŸ\»ÿ[õõ›\ÿY‹ôYH8†%H\›[ú»]\]X[]KÇÇê[€»Y»ÿ\‹Àÿ\X\ò[òŸKù[ôX\ò›\Àÿ\X\ò[òŸKù‹ö][àúõ€HHôYô\ô[òŸBú›‹»H›€ô\à›\YYò]\à[àúõ€HHÿ\ôÀàôZ]\à[ú›[òŸHY€ôK[ô⁄]õ¬òò\ŸH[XYŸHZ]\ãõ›Ÿ\ôHŸ[ô\ò][ô»úõ€HHò\ôHò[òX⁄»›ö[ôÀÇÇääï€»ÿ\ô‹›»\ÿ‹ô\[ò⁄Y\À[Xô\ò][Hô\€€ôY›ÿ\ôH› äà8†%H›»\»⁄]ò[à[XYŸHY]X›X[H[ò⁄‹ú»€ã€»H\ÿ‹ö\[€à]öY⁄»]ôX‹ôX]\»Bò€€ùòYX›[€à€\‹»\»ŸYZ…‹»ô[X\Ÿ\»]ôHôY[àô[[›ö[ôŒÇãHX\ò›\…‹»ÿ\ôÿ^\»
+àò€‹ŸKX‹õ‹YZ\àäà[ôYŸH
+äåÃJäãà\»›»⁄›‹»H€X[ã\⁄]ô[Çàÿÿ[Hù[ôX\ô€⁄[ô»‹ô^K[ôôXY»ZYMÀà\X\ò[òŸKù\ÿ‹öXô\»H›ÀÇãHÿ\‹…‹»ÿ\ô\»õ»\⁄Xÿ[õÿ⁄»][€»H›»\»H€õH€›\òŸHõ‹à\ãÇÇìôZ]\àÿ\ôÿ\»Y]Y8†%]\»H€€ù[ùX⁄\⁄[€àõ‹àH›€ô\ã[ôY]Xÿ\ôÀX[ô\ô\Ÿ]ÿö\»HöY⁄]YàHÿ\ô»⁄›[[›ôH[ú›XYÇÇääïô\öYöXÿ][€éääàŒãÕŒà]\›ÃãÃÃà]ò[À»ô]»\›ÀHô[ô\ôY[[ôH\‹Ÿ\ù[€ÇòúôXZÀ]\›YëQÇÇà»»ååçãLLKåLH8†%X\ò›\»ÿ\»ôZ[ô»ò]€à\»H€€X[ÇÇääîõ€›ÿ]\ŸNàH⁄\ôYõÀX\X\ò[òŸKùò[òX⁄»\ô€ŸYHŸ^ääà—SíQW–TPTêSê—XúôXYò[àY[€€X[à[à\à]HåÀHÿ[YH\ú€€à\»[àHôYô\ô[òŸH›»òõ‹à[ûBõò[YY[ú›[òŸH⁄]›][à\X\ò[òŸKùàX\ò›\»ÿ[\à\»ÃKâÃàãHX[à8†%[ô\»õ¬úôYô\ô[òŸH›»€à\⁄À€»⁄]]ô\à\ÿ‹öXô\»[H[à[à[XYŸHõ€\\»]›ö[ô»[€ôKÇÇëõ›[ô⁄[H]Y][ô»—SíQW–êT—XX‹õ‹‹»HõY]Yù\àååçãLLKåL⁄X⁄\õôY\ö›»X[ûH[ú›[òŸ\»ò[òX⁄»ò]\à[à€€ôöY›\ôKà
+äï\ô[ú›[òŸHŸà€ôH€\‹ äãYù\Çí[ô‹öY	‹»€›\öY\àòX⁄Ÿ]
+ååçãLLKé
+H[ô\ô€ŸYôúôX⁄€\»à
+ååçãLLKéJNà⁄\ôYò€ŸH\‹Ÿ\ù[ô»€ôH⁄\òX›\â‹»òZ]»X‹õ‹‹»[Ÿ]ô[ãàHö\ú›€»Ÿ\ôH€‹€Y]X»€àBò⁄\òX›\à⁄»\[ôYõ›»X]⁄à\»€ôH⁄[ôŸ\»H\ú€€ãÇÇääëö^ääàõ›ò[òX⁄‹»\ôHŸ^[ô]]ò[
+ò[àY[[àZ\à]Hå»ò
+KŸY\[ô»Bô^X⁄]Y[YŸH]Ÿ[Z[öI‹»[XYŸHö[\àôYY»»]õ⁄Yô]\õö[ô»õX⁄ŸY[›]úò[Y\ÀÇïH›\ù\X]Y]Ÿ[öYHò\ŸNòöY[õ›»\›[ô›Z\⁄\»H€‹ú›ÿ\ŸH8†%õ»ôYô\ô[òŸBú›»
+ò[ô
+àõ»\X\ò[òŸKùôXY»VS”ìKì»TPTêSê—Kï8†%]ô\ûHŸ[öYH\»BôŸ[ô\öX»›ò[ôŸ\òôXÿ]\ŸH]›]H\»õ›[ô»\ÿ‹öXö[ô»H⁄\òX›\à][ÇÇïHôX[ö^õ‹àÿ\‹»[ôX\ò›\»\»€€ù[ùõ›€ŸNàõ›]ôHõ»ò\ŸH[XYŸH€à\⁄À€¬ùååçãLLKåL	‹»]]Ÿ]X›ÿ[õõ›[[Kà^HôYYHôYô\ô[òŸH›À[Çò\X\ò[òŸKù‹àõ›ÇÇääïô\öYöXÿ][€éääàÕŒKÕÕŒH]\›ÃãÃÃà]ò[À»ô]»\›ÀHô]]ò[]H\‹Ÿ\ù[€ÇòúôXZÀ]\›YëQà]\›[€»òZ[Y⁄XŸHôYõ‹ôH]ÿ\»öY⁄àö\ú›]õYŸŸY]»›€Çô^[ò]‹ûH€€[Y[ù
+ÃM8†%Hÿÿ[õô\àÿ[õõ›[⁄[ôÀ]KXòY][ô»úõ€H\ÿ‹öXö[ô»]
+Kù[àöHòX]⁄Y[ú⁄YHùHòà€‹ôõ›[ô\öY\»[ô€€[Y[ù›ö\[ôÀõ›ôYYYÇÇà»»ååçãLLKåL8†%õ‹òI‹»ôYô\ô[òŸH›»ÿ\»ô]ô\àôZ[ô»Ÿ[ùÇääîõ€›ÿ]\ŸNà—SíQW–êT—XYò][»»ö^XWÿò\ŸKúôÿõ‹òI‹»ô[ùòô]ô\àŸ]][ôö\à›»\»õ‹òWÿò\ŸKöúÿ8†%‹õ€ô»ò[YH[ô‹õ€ô»^[ú⁄[€ãääà⁄\◊ÿò\ŸW⁄[XYŸJ
+Xúô]\õôYò[ŸK€»]ô\ûH€ôHŸà\àŸ[öY\»€⁄»H^[€õHúò[ò⁄[ôõ»ôYô\ô[òŸBú›»ÿ\»]ô\à]X⁄Y»HŸ[Z[öHÿ[àHö[H\»ôY[à⁄][ô»[Çò€‹›[Y‹ò[KXõ›À€õ‹òKÿ⁄[òŸHç»ù[ôKÇÇääìõ›[ô»ô\‹ùY]
+äã⁄X⁄\»H\ù€‹ùö^[ôÀàŸ[öYW‹ôXYJ
+Xô]\õú»ùYHYÇùHò\ŸH[XYŸH
+äõ‹ääà\X\ò[òŸKù^\›Œ»⁄H\»Y[à\X\ò[òŸKù⁄[òŸHçÇíù[ôK€»H⁄X⁄»\‹ŸY[ôHY‹òY][€àúõ€H[XYŸKYY]»^[€õHÿ\»€€\][Bú⁄[[ùà€ÿúŸ\ùôYX‹ô\S—SíQW–êT—H€‹›[Y‹ò[KXõ›À ãÀô[ùòô]\õôY^X›H€ôBö[ú›[òŸH8†%\úÀÇÇï\»›\\úŸY\»ååçãLLKéI‹»XY€õ‹⁄\»\»Hö[X\ûHÿ]\ŸKà]ô[X\ŸHYX\›\ôY€¬úôX[õÿõ[\»
+HY[ù]H[ò⁄‹àÿ]åL⁄\òX›\ú»úõ€HH[ôŸàHõ€\»éKéIBõŸàò]‹»›X⁄ŸYHòXŸK[ÿúÿ›\ö[ô»úò[Z[ô»€àHòXŸKYY‹òY[ô»ÿ[Y\òJH[ôõ›ö^\»›[ôõ€àZ\à›€à8†%ù]^HŸ\ôH[ö[ô»[à
+ôY]
+àõ€\õ‹àHÿ[]ÿ\»õ›Y][ô¬ò[û][ôÀàHååçãLLKéH[ò[\⁄\»\‹›[YYHôYô\ô[òŸH›»ÿ\»]X⁄Yà]ÿ\»õ›ÇÇääëö^ääÇãH‹ô\€€ôWÿò\ŸW⁄[XYŸJ
+Xò[»òX⁄»»H⁄[ô€H[ò[XöY›[›\»
+óÿò\ŸKäôﬂúﬂúYﬂŸXú
+Xà[àH[ú›[òŸH\ôX›‹ûH⁄[à—SíQW–êT—Xò[Y\»Hö[H]\»õ›\ôKà⁄]€»‹Çà[‹ôHÿ[ôY]\»]ô]\õú»õ€ôHò]\à[à›Y\‹⁄[ô»8†%X⁄⁄[ô»ô]ŸY[à€»òXŸ\»\»›¬à[›H⁄\H‹õ€ô»€€X[ãÇãHÿò\ŸW⁄[XYŸJ
+Xõ›»ZŸ\»]»Z[YH\Húõ€HH
+äúô\€€ôY
+äàö[Kõ›H€€ôöY›\ôYàò[YKàHöúÿ[õõ›[òŸY\»[XYŸK‹ôÿ\»H€‹ö⁄[ô»›»]›[Ÿ]»ôZôX›YÇãHHOOH’TïTUQUOOX[ôHÿZ[ôYŸ[öYHò\ŸNòô\‹ù[ô»Hö[[ò[YH[à^KàUU—UP’Q
+8†)àŸ]][àô[ùäX‹àVS”ìX⁄]Hÿ[ôY]\»]ÿ]Ààÿ]Y]àõ›»[ú›Ÿ\ú»ö\»⁄HX›X[HôZ[ô»Ÿ[ù\à›€àòXŸO»à⁄]›]H⁄[ÇãH⁄[›⁄]⁄—SíQW–êT—W–UU—UP’LÇÇääîô]ô\ùYúõ€HååçãLLKéNääà[Y‹ò[KX€€\[ö[€ãXõ›€õ‹òKÿ\X\ò[òŸKù⁄X⁄]úô[X\ŸHYYàõ‹òH[ôXYHYHôX[€ôH€àH[ú›[òŸKŒHû]\À]Yçàù[ôH8†%Búô\»€‹Hÿ\»‹ö][àúõ€H\àÿ\ôûH\»Ÿ\‹⁄[€à[ôYô]ô\àôY[à€€\\ôYYÿZ[ú›]ÇòúÀ\ﬁ[òÀú⁄€õH€‹Y\»ŸYYö[\»]\ôH
+õZ\‹⁄[ô ã€»õ›[ô»ÿ\»›ô\ù‹ö][ãù]õX]ö[ô»[à[ùô[ùYö[H[àHŸYY\ôX›‹ûH\»H^X›]ô\ôŸ[òŸHò\]ÿ‹ö\ùÿ\õú»Xõ›]
+Hù[\»]\Àùÿ\ŸKåçãLÀLéJKàH]ôH[ú›[òŸH\»]]‹ö]]]ôN¬ùHòXúöXÿ]YŸYY[ô]»ôYH\›»\ôHô[[›ôYÇÇääïô\öYöXÿ][€éääàÕÕãÕÕÕà]\›ÃãÃÃà]ò[ÀLô]»\›ÀàôYH\‹Ÿ\ù[€ú»úôXZÀ]\›YîëQàHö\ú›][\úõ⁄ŸH[ôYH]€òŸH[ôH[XöY›Z]H\››[\‹ŸY8†%Bò]]Ÿ]X›[Ÿôà[öôX›[€àX\⁄ŸYH›Y\‹À]KYö\ú›Xÿ[ôY]H[öôX›[€ã€»]ÿ\»\‹⁄[ô¬ôõ‹àH‹õ€ô»ôX\€€ãàôK\ù[à[à\€€][€ã]òZ[Y€‹úôX›KàúôXZÀ]\›»ôYY€ôBö[öôX›[€à]H[YKÇÇääî›[‹[éääàH—SíQW–êT—Xò[Y\»X‹õ‹‹»HõY]Ÿ\ôHôXY⁄]‹ô\Z⁄X⁄ú›ö\»ö[[ò[Y\À€»€»[ú›[òŸ\»⁄›⁄[ô»—SíQW–êT—O[õ‹òWÿò\ŸKúôÿÿ[õõ›ôH]öXù]Yù»[à[ú›[òŸKàYàHõ€ã[õ‹òH[ú›[òŸH⁄[ù»]õ‹òWÿò\ŸKúôÿ[ô\»õ»›X⁄ö[K]ö\»^[€õH€»8†%Hô]»›\ù\]Y][ôH⁄[ÿ^H€»€àô^ô\›\ùÇÇà»»ååçãLLKéH8†%€€Y][Y\»HŸ[öYHÿ\€â›\ÇÇääîõ€›ÿ]\ŸNàHY[ù]H[ú›ùX›[€à\»HíTî’[ô»[àH[XYŸHõ€\[ô€¬úô[X\Ÿ\»Ÿà\[ôYÿŸ[ôH^\⁄YåL⁄\òX›\ú»Yù\à]8†%⁄[HÃ	HŸàò[ô€Bôò]‹»›X⁄ŸYHòXŸK[ÿúÿ›\ö[ô»úò[Z[ô»€àHòXŸKYY‹òY[ô»ÿ[Y\òKääà›€ô\ã\ô\‹ùYÇúŸ[öY\»]€â›€⁄»ZŸHõ‹òK[ù\õZ][ùKà
+ÿ[YHô\‹ù€€ôö\õYYååçãLLKç…‹¬ùŸX]\àö^\»€‹ö⁄[ôÀäBÇòùZ[‹Ÿ[öYW‹õ€\‹[ú»⁄]ëY]H]X⁄Y›»Ÿà\»^X›€€X[à8†%»õ›ôŸ[ô\ò]HHô]»\ú€€∏†)àà\»ö]÷ÃX[à\[ô»M»[‹ôH[ú›ùX›[€úŒà‹ŸK^ô\‹⁄[€ãòX›]ö]K›]ö]›]\ùŸX\ãÿŸ[ôKÿ[Y\òH€⁄ÀHŸX]\à€]\ŸH
+⁄X⁄ååçãLLKç¬õXYH€ôŸ\äKH[ò]€^Hù[KHôX[\€Hù[K[ôHÿŸ[ôKYY\\›ò[Z[ô»
+õ›\ÇúŸ]\ ãà€à[à[XYŸHY]H\›[ô»ÿZY⁄]»ôX\ô\›H›]]»HY[ù]H[ò⁄‹Çùÿ\»\»ò\àúõ€H]\»]€›[ôKÇÇê€€\›[ô[ô»]Húò[Z[ô»[ôÿ[Y\òH€€»\ôHù[Ÿà⁄⁄XŸ\»]Y⁄][X][HXZŸBòHÿ[ôY€ôH›»8†%Z\úõ‹à⁄›À[ãZ[ãYúò[YH‹õ‹À[›[€àõ\ã\ú⁄õ\⁄‹òZ[ûBõ›»Y⁄òX⁄€]⁄Y›»8†%[ô^HŸ\ôHò]€à[ô\[ô[ùKàYX\›\ôY›ô\àåŸYYŒÇääåéKéIHŸàõ€\»ô]»HòXŸK[ÿúÿ›\ö[ô»úò[Z[ô»SëHòXŸKYY‹òY[ô»ÿ[Y\òJäã[ô€õBåMãç…HŸ\ôH€X[ãà€ôH€Ÿù⁄⁄XŸH\»ÿ[ôY»€»X]ôH[àY][Ÿ[[õ›Y⁄]]YH¬ôöYùHòXŸH[ù»HYôô\ô[ù€€X[ãàåÃ	HX]⁄\»õ€àÿÿÿ\⁄[€ààŸ[ÇÇêH\ô€€ùöXù]‹ã‹X⁄YöX»»õ‹òNà⁄HY
+äõõ»\X\ò[òŸKù
+äã€¬ò—SíQW–TPTêSê—Xô[òX⁄»»ò[àY[€€X[à[à\à]HåÀHÿ[YH\ú€€à\»[ÇùHôYô\ô[òŸH›»ò8†%H
+ú⁄[ù\äãõ›H\ÿ‹ö\[€ãà]ô\ûHô\òò[Y[ù]H⁄Y€ò[[Çö\àõ€\ÿ\»HôYô\ô[òŸH»[à[XYŸKà[ûHò]»]ŸXZŸ[ôYH›…‹»[ôõY[òŸHYùõõ›[ô»ôZ[ô]ÇÇääëö^ääÇãH‘—SíQW“QSïUW’RSô\›]\»HY[ù]H€€ú›òZ[ù\»HŸ[ùZ[ô[H\›[ôH8†%àYù\àHY\\›[Xô\ò][K⁄[òŸH]õÿ⁄»ò[Y\»›\àŸ]\ÀÇãHH€Ÿùúò[Z[ô»õ›»ö[\ú»€Ÿùÿ[Y\òH€⁄‹»›]ŸàH€€à›X⁄ŸYò]‹»
+äåéKéIH8°§à	Jäãà⁄]€ôH€Ÿù⁄⁄XŸH›[úôY[H]òZ[XõKÇãH[Y‹ò[KX€€\[ö[€ãXõ›€õ‹òKÿ\X\ò[òŸKù‹ö][àúõ€H\àÿ\ô	‹»\⁄Xÿ[]Oòàõÿ⁄À€»\àòXŸH\»Hô\òò[[ò⁄‹à[ôõ›ù\›H›»⁄[ù\ãÇãHH⁄\ôYY[ù]H[ôH\ô€ŸY
+äàôúôX⁄€\»ääà8†%õ‹òI‹»òZ]\YY»[Ÿ]ô[Çà⁄\òX›\úÀàõ›»ô\›[ô›Z\⁄[ô»ôX]\ô\»ãàÿ[YH⁄\òX›\ãXõYYò[Z[H\»H€›\öY\ÇàòX⁄Ÿ][àååçãLLKé»H\›[ú»H⁄\ôYõ€\YÿZ[ú›ö]ôH›X⁄òZ]ÀÇÇí⁄[›⁄]⁄—SíQW“QSïUW—’PTëLàõ€\\‹Ÿ[XõH€õKõ»ô]»Hÿ[ÀÇÇääïô\öYöXÿ][€éääàÕéKÕÕéH]\›ÃãÃÃà]ò[ÀLô]»\›ÀàôYHÿYXôX\ö[ô»\‹Ÿ\ù[€ú¬òúôXZÀ]\›YëQ
+K\›X⁄⁄[ôÀZ[‹⁄][€ãòZ]\ô€Ÿ[ô KàHZ[\‹⁄][€àÿ\ŸBõôYYY
+ù€ à\›Œà⁄]⁄]⁄YSõ€ôX\ôH\»õ»Y\õÿ⁄À€»H⁄[\Hô[ô»⁄]Çò\‹Ÿ\ù[€à›[\‹ŸY⁄[àHZ[ÿ\»[›ôYòX⁄»Xõ›ôH]8†%€õHHY\\ô\Ÿ[ù\›òÿ]Y⁄HôY‹ô\‹⁄[€ãÇÇääìõ›õ›ô[éääà]\»ö^\»⁄]H›€ô\àÿ]ÀàHYX⁄[ö\€\»\ôHôX[[ôYX\›\ôYòù]õ›[ô»\ôH€€ôö\õ\»⁄X⁄ò]»õŸXŸY[ûH\ùX›[\àòY[XYŸH8†%]ôYY¬úŸ[öY\»ÿ]⁄Y›ô\à[YKà[€»[ò€€ôö\õYYà⁄]\à—SíQW–êT—X\»€‹úôX›HŸ]õ‹ÇôXX⁄[ú›[òŸKà]Yò][»»ö^XWÿò\ŸKúôÿ€»[à[ú›[òŸH⁄‹ŸHô[ùò€Z]»]\¬ääõõ äàôYô\ô[òŸH›»]X⁄Y][[ôŸ[ô\ò]\»úõ€H^[€ôKÇÇà»»ååçãLLKé8†%⁄Hô\‹Ÿ\»€òŸHH^K[ô\àòX⁄Ÿ]^\›»YÿZ[ÇÇääïôYH›€ô\ã\ô\‹ùY][\À€ôH›Xúﬁ\›[KääÇÇääåKàHÿ\ôõÿôHô]ô\à⁄[ôŸY€à]»›€ãääàÿ\ôõÿôV»ò›\úô[ùóXÿ\»€õH]ô\àŸ]ûBö[ôöXH€›]ö]»⁄]õ›[ô»Ÿ]ùZ[‹Ÿ[öYW‹õ€\ô]»Húô\⁄ò[ô€H›]ö]\Çú›À€»⁄H€›[ŸX\àôYHYôô\ô[ù[ô‹»[à[à›\à[ôõ›[ô»[à\ùX›[\à€Çò[ûH⁄]ô[à^Kàõ›»ÿ\ôõÿôW‹õ›]W⁄õÿòX⁄‹»€ôHŸX]\ãX\õ‹öX]H›]ö]XX⁄[‹õö[ô¬ò[ô⁄HŸX\ú»][^KÇÇí]ù[ú»]–Tëì–ëW‘ì’UW“’Tò
+Yò][Œåÿÿ[
+K
+äõõ›
+äà]ZYöY⁄[ôôK\ôXY¬ùHŸX]\àö\ú›àX⁄⁄[ô»H^I‹»€›\»úõ€HZYöY⁄	‹»ôXY[ô»\»ôX⁄\Ÿ[HBôúõﬁô[ã[›ô\õöY⁄\€ò\⁄›Z\›ZŸH€‹õùXZŸ\»[ôååçãLLKç»ÿ\»‹ö][à¬úô[[›ôH8†%ôXùZ[[ô»]€ôHô[X\ŸH]\à[àHô]»XŸH€›[]ôHôY[àHõ⁄ŸHŸàBùŸYZÀàõ‹àHÿ[YHôX\€€ã[à›]ö]H
+úõ›][€äà⁄‹ŸH\»ôKX⁄X⁄ŸYYÿZ[ú›]ôBùŸX]\à]Ÿ[öYH[YH[ôõ‹YYàHYù\õõ€€à›]ò[à]»[à›]ö]Ÿ]
+òûH[ô
+à\¬õô]ô\àŸX€€ôY›Y\‹ŸYÇÇîŸ[X›[€àôYô\ú»HÿY›]ö]ÿ\ôõÿôH[ôò[»òX⁄»»HùZ[Z[à€€⁄[à]	‹¬ô[\K€»[à[ú›[òŸH⁄]õ»ÿ\ôõÿôH\›‹ûH›[⁄[ôŸ\»€›\»Z[KàúôYK]^õ›]ö]»\ôH€\‹⁄YöYYûHŸ^]€‹ô
+”’UíU’–TìW’”‘ëÿÿ”’UíU–”””’”‘ëÿ
+HYÿZ[ú›ò—SíQW’–TìW—òÿ—SíQW–””—ò8†%]\õZ[ö\›XÀ[ô
+äõõ»Hÿ[
+äãà[ö€õ›€àŸX]\Çú›Z]»]ô\û][ôŒàXúŸ[ù]H]\›ô]ô\àò\úõ›»Hÿ\ôõÿôH»õ›[ôÀÇÇò€›]ö]€»õ‹àHô\›Ÿà]^H[ôõ›][€àô\›[Y\»Hô^[‹õö[ô»
+›€ô\ÇôX⁄\⁄[€ãåçãLLJH8†%[\[Y[ùYûH]ö[ô»€›]ö]€Z[HH^I‹»X⁄ŸY›[\ù⁄X⁄Hõÿâ‹»ÿ[YKY^H›X\ô[à€õ‹ú»⁄]›]ôYY[ô»HŸX€€ôùv„Mº∂âûÀk∫wµÁ[à\»⁄[[ùH[ô\ù8†%€‹úôX›\»‹ö][ã[ôH›X\ô\»⁄KÇÇà»»ååçãLÀLçãç»8†%Hô\›\ù\›‹õH[\õHö\ôY€à]ô\ûH\ﬁBÇääîõ€›ÿ]\ŸH
+›€ô\ã\ô\‹ùYåçãLÀLçäNääàÿ]Y]ÿ\õôYúô\›\ùY[àH\›ö›\à8†%€€Y][ô»\»⁄[[ô»HõÿŸ\‹»àYù\àHöY⁄Ÿà‹ô[ò\ûHXZ[ù[ò[òŸKàBú›‹õH]X›‹à^€Y\»›\ù»ôXŸYYûHH‹ô\›\ùHô\]Y\›Y‹à»ô\›\ù[ôÿõX\öŸ\ã⁄X⁄€›ô\ú»‹ô\›\ù[ô›\]X8†%ù]
+äõõ›
+äàﬁ\›[X›ô\›\ù‹àBòúÀ\ﬁ[òÀú⁄\ﬁKà‹ŸH›‹Hõ›⁄]“Q’TìK⁄X⁄‹›‹⁄]›€ò[ô\¬ò[ôŸ‹»\»H‹òXŸYù[›‹[ô[Z]õ»X\öŸ\ãà⁄[òŸHHõY]Ÿ[ùL	Hﬁ\›[Y€ÇååçãLÀLçà[ôHõY]\ﬁH\»⁄^òX⁄À]ÀXòX⁄»ô\›\ùÀ]ô\ûH\ﬁHö\YBò[\õKÇÇêH\›X›]ô[H[ò€ŸYH€ôZ]ö[›\à8†%\›Ÿ‹òXŸYù[‹›‹ÿ[€ôW‹›[ÿ€›[ùÿöù\›YöYYûHôKôÀàHò]\ûK[X[òYŸ\à“Q’TìHãà]ò][€ò[Hÿ\»€ôKY\òNà€àBïî»\ôH\»õ»—SHò]\ûHX[òYŸ\ã[ôH‹òXŸYù[“Q’TìHYX[ú»€€Y[€ôH
+‹àBô\ﬁJH\⁄ŸYHõ›»›‹ÇÇääëö^ääÇãHH‹⁄]›€óH‹òXŸYù[›‹[ôHõ›»X\ö‹»Hõ€›⁄[ô»›\ù\»[Xô\ò]KÇà
+äïH\ôX›[€àŸàH[ôô\ô[òŸHX]\úŒääàH
+úô\Ÿ[òŸJàŸà][ôHõ›ô\»BàõÿŸ\‹»ÿ\»\⁄ŸY»›‹»]»
+òXúŸ[òŸJà›[õ›ô\»õ›[ô»
+›\]X[ôà‹ô\›\ù^]öXH‹ÀóŸ^]
+
+X⁄]›]ŸŸ⁄[ô»€ôJKà[û][ô»]⁄[»BàõÿŸ\‹»›]öY⁄8†%“Q““S””K[à[ö[ôY‹ò\⁄8†%X]ô\»õ»‹òXŸYù[\›‹[ôBà[ô\»›[€›[ùY⁄X⁄\»Hÿ\ŸHH[\õH^\›»õ‹ãÇãHH[\ù^ÿ\»[€»€ôKY\òH[ô\Ÿ[\‹»€àHîŒà]Ÿ[ùH‹\ò]‹à¬àõ›õŸÿ	‹»‹ù[ãXõ›Hããà^]Y
+€ŸHäX[ôH
+]ö[H\»û]\»[ô\Çàﬁ\›[Y
+H[ôõ[YYH[ôõ⁄Y[ù€K\õÿŸ\‹»⁄[\à[ô—SHò]\ûHX[òYŸ\úÀÇàô]‹ö][àõ‹àﬁ\›[Y8†%ﬁ\›[X››]\»õ›[ú›[òŸOòHõ›\õò[›‹ô\õ‹ÇàXZ[àõÿŸ\‹»^]Y⁄[Y›]ŸàY[[‹ûX›»»ôXY€ŸOZ⁄[Y‹›]\œNXú»Bàõ€ûô\õ»^][ô[à””H€€ôö\õX][€àöXHõ›\õò[›ZÿàH[ú›[òŸHò[YH\¬à[ù\ú€]Y€»H€€[X[ô»\ôH€‹K\\›XXõKÇãH\›ŒàH€\‹Ÿ\ù[€à\»[ùô\ùY⁄]HôX\€€àôX€‹ôY[õ[ôK\¬à\›‹⁄Y⁄⁄[‹›[ÿ€›[ùÿ
+H›X\ô]X]\ú H[ôà\›Ÿ\ﬁW€€‹ŸŸ\◊€õ›ÿ[\õX
+⁄^òX⁄À]ÀXòX⁄»\ﬁ\»8°§à
+KÇÇääïòYK[Ÿôã›]Y[Xô\ò][NääàHô\X]Y
+ô^\õò[
+à“Q’TìH€àHî»€›[õ¬õ€ôŸ\à[\õKà]ÿ\»HôX[€ôHòZ[\ôH[ŸH
+ò]\ûHX[òYŸ\ú H[ô\»õ›Bú]\⁄XõHî»€ôN»ﬁ\›[Y	‹»›€àŸ‹»€›ô\à]àô]ö\⁄]Yà[à[ú›[òŸH]ô\àù[ú¬ú€€Y]⁄\ôH⁄][àYŸ‹ô\‹⁄]ôHõÿŸ\‹»X[òYŸ\àYÿZ[ãÇÇà»»ååçãLÀLçãçà8†%HXúò\ûK[Z\‹⁄[ô»ÿ\õö[ô»ò[YYH€€[X[ô]ÿ[õõ›€‹ö¬Çääîõ€›ÿ]\ŸH
+]]ôKåçãLÀLçäNääàõ›ôÿ\õZ[ò€€õôX›\»Z\‹⁄[ô»àY\‹ÿYŸ\»8†%ùHÿ]Y]€€ôöY»ÿ\õö[ô»[ôHX[YôYY›]\»›ö[ô»8†%€H‹\ò]‹à¬úù[à\[ú›[ÿ\õZ[ò€€õôX›à€àXù[ùHçå]òZ[»›]öY⁄⁄]ò\úõ‹éà^\õò[K[X[òYŸYY[ùö\õ€õY[ù
+Tçé
+K[ô]ô[à⁄\ôH]›XÿŸYY»]ö[ú›[»ﬁ\›[K]⁄YK⁄X⁄\»õ›⁄\ôHHõ›»€⁄Œà]ô\ûH[ú›[òŸHù[ú»úõ€HBú⁄\ôYô[ùà]€‹›[Y‹ò[KXõ›À›ô[ùãÿà⁄[òŸHHåçãLÀLçàZY‹ò][€àHõY]\¬åL	HîÀ€»H›YŸŸ\›Y€€[X[ôÿ\»‹õ€ô»õ‹à
+äô]ô\ûJäà[ú›[òŸKàô\]Z\ô[Y[ùÀùö\»ÿ\úöYYH€‹úôX›ô[ùã\\[ùõÿÿ][€à[à]»€€[Y[ù»[[€ôŒ»Hù[ù[YBõY\‹ÿYŸ\»⁄[\H\ÿY‹ôYY⁄]]ÇÇääëö^ääàõ›Y\‹ÿYŸ\»õ›»[ù\ú€]Hﬁ\Àô^X›]XõX⁄X⁄
+ö\ àHô[ùâ‹¬ö[ù\úô]\àûH€€ú›ùX›[€à8†%€»^Hô[ô\à\¬ò€‹›[Y‹ò[KXõ›À›ô[ùãÿö[ã‹]€à[H\[ú›[ÿ\õZ[ò€€õôX›[ô›^H€‹úôX›€Çò[ûH‹›⁄]›]\ô€Ÿ[ô»H]
+[ùò\öX[ùÃéàõ»\ô€ŸY[ú›[òŸK⁄‹›]»[Çú⁄\ôYŸ⁄X KÇÇääîÿ€‹NääàY\‹ÿYŸH^€õKàõ»ôZ]ö[‹à⁄[ôŸKõ»ô]»[ùàò\ãõ»⁄[›⁄]⁄8†%àõŸôàà€›[YX[àô\›‹ö[ô»H€€[X[ô]ÿ[õõ››XÿŸYYÇÇà»»ååçãLÀLçãçH8†%HXYX[â‹»›⁄]⁄ô\‹ùY“»⁄[HôZ[ô»ôZôX›YÇääîõ€›ÿ]\ŸH
+õ›[ô]ôKåçãLÀLçäNääàô\]Y\›ÿŸ\»õ›òZ\ŸH€àÕ^8†%]úòZ\Ÿ\»€õH€à€€õôX›[€à\úõ‹ú»[ô[Y[›]ÀàHX[⁄X⁄»[ô»ÿ\¬Çò]€Çò]ÿZ]\ﬁ[ò⁄[Àù◊›ôXY
+[XôNàŸŸ]‹Ÿ\‹⁄[€ä
+KôŸ]
+PS“P“◊’Tì[Y[›]LL
+JBòÇù⁄]õ»›]\»⁄X⁄À€»H
+äúôZôX›Y
+äà[ô»€€\]YHûXõÿ⁄»õ‹õX[H[ôõŸŸŸYõ›[ôÀà]ô\ûH‹Ÿ[óÿ]Y][ôHôXYÿ]Y]H“ÿÇÇë\ÿ€›ô\ôY⁄[Hô\öYûZ[ô»[€ö]‹ö[ô»€›ô\òYŸHYù\àHî»ZY‹ò][€éàö]ôHŸà⁄^ö[ú›[òŸ\»YH
+äô›XõY
+äàTì8†%òPS“P“◊’TìZŒãÀ⁄À\[ôÀò€€K⁄ŒãÀ⁄À\[ôÀò€€Kœ]ZYò8†%⁄X⁄À\[ô¬ò[ú›Ÿ\ú»⁄]àû]KZY[ùXÿ[ô[ùòö[\»ÿ[YHŸôàH€ôH[àHZY‹ò][€Çù\ã€»‹ŸHö]ôHYôY[àúõ⁄Ÿ[à
+õ€àH€ôH€ éàHõY]ò[àõ‹àŸYZ‹»⁄]€ôBù€‹ö⁄[ô»XYX[â‹»›⁄]⁄›]Ÿà⁄^[ôõ›[ô»[à[ûHŸ»ÿZY€Àà€õHõ‹òI‹»Tìùÿ\»Ÿ[Yõ‹õYYÇÇï\»\»Hÿ[YH€\‹»H›ôX[Z[ô»][ôXYH[ú»\»[ùò\öX[ùÕH
+õ‹òŸK\ôXYBòõŸK[àòZ\ŸWŸõ‹ó‹›]\ 
+X
+K\YY»H]õÿõŸHYô]ö\⁄]Y⁄[òŸH]ÿ\¬ù‹ö][ãÇÇääëö^ääÇãH‹Ÿ[óÿ]Y]õ›»[ú‹X›»ô\‹ú›]\◊ÿ€ŸX»[û][ô»8¢iMŸ‹»H›Yÿ\õö[ô¬àò[Z[ô»H€ŸH[ô›][ô»]H›⁄]⁄\»ì’€‹ö⁄[ôÀ[ô€›[ù»BàX[⁄X⁄◊‹ôZôX›Y\úõ‹à€»]›\ôòXŸ\»[àÿ]Y]	‹»\úõ‹àúôXZŸ›€à[ô[àBàYZ[àTH8†%H⁄[[ù[€ö]‹àõ›»⁄›‹»\[àHXŸH‹\ò]‹ú»X›X[H€⁄ÀÇãH€€õôX›[€àòZ[\ô\»ŸY\Z\à^\›[ô»ÿ\õö[ôŒ»H€»òZ[\ôH[Ÿ\»\ôHõ›¬à\›[ô›Z\⁄XõH[àHŸÀÇãHõ»⁄[›⁄]⁄à\»Y»ÿúŸ\ùòXö[]H»[à^\›[ô»ÿ[àìŸôàà€›[YX[Çàô\›‹ö[ô»H⁄[[òŸH]YHùYÀÇãH\ﬁK”RQ‘êUS”ãõY›\õ»€ôŸ\à⁄›‹»H]\ò[[›\ãZù[\À]]ZYòàXŸZ€\à[ú⁄YHH€‹K\\›XXõHõÿ⁄À[ôÿZ[ú»Hô\öYöXÿ][€à›\à
+›\õYú‘ÿHTìúõ€HH[ú›[òŸI‹»›€àô[ùò\»H\›[ò›UURQ€›[ù
+H8†%àHXŸZ€\à[àH\›KXõÿ⁄»\»H]\⁄XõH‹öY⁄[àõ‹àH›Xõ[ôÀÇÇääïô\öYöXÿ][€éääàWÿ€€\[X]\›ù[ãY]ò[Àú⁄
+ô]»X[⁄X⁄À\›]\ÀX⁄X⁄ŸYô]ò[úôXZÀ]\›YôYY‹ôY[äKà]ôNà[⁄^[ú›[òŸ\»õ›»ô]\õàåúõ€HHTìö[àZ\à›€àô[ùò⁄^\›[ò›URQÀÇÇà»»ååçãLÀLçãç8†%HõY]	‹»õ⁄XŸ\ö[ùÿ\»Yô\‹⁄[ô»ﬁÿ⁄\ü_Xõ›H⁄\òX›\ÇÇää∏¶®;Ó#»“Së—T»HT‘—SPìQì”Tì‘àS“Vì’Àääàõ›HôZ]ö[›\àõY»8†%Hô\Ÿ]ù^]ô\ûH[ú›[òŸHŸ[ô»\»Yôô\ô[ùYù\à\»\ﬁKàôXYôYõ‹ôH⁄\[ôÀÇÇääîõ€›ÿ]\ŸNääàö[
+
+X›Xú›]]\»ﬁÿ⁄\ü_Xÿﬁ›\Ÿ\ü_X[ù»]ô\ûHõ‹ŸHõÿ⁄»Hõ›ò\‹Ÿ[Xõ\»8†%HY\ôŸYÿ\ô
+õ›úNçÃÃ
+KHŸ][ô»
+çÃÕX
+KH‹ôXõ€⁄¬äçNX
+K‹›Z\›‹ûH[ú›ùX›[€ú»
+çåN
+KH‹ôY][ô»
+çåLÿçÃŒX
+H8†%⁄]ô^X›H€ôH^Ÿ\[€éàHô\Ÿ]^Y\úÀ\[ôYò]»]çååÿàõ›[ô⁄[H€⁄⁄[ô»]ùH^Y\àö[\»õ‹àH\ãX⁄\òX›\àô\Ÿ]€‹öÀõ›ûH[ûH\›‹à\úõ‹ãÇÇî€»HXŸZ€\ú»ôXX⁄YH[Ÿ[
+äùô\òò][Jäã[àHõÿ⁄»]Yö[ô\»Hõ⁄XŸNÇÇü^Y\àﬁ¯†)ü_Xÿÿ›\úô[òŸ\»⁄»ÿY»]üKK_KK_KK_üô\Ÿ]X€‹ôKù
+äççääàÿ\‹»üô\Ÿ]ù
+äé
+äàH›\àö]ôHüô\Ÿ]\úùM8†%üô\Ÿ]X€‹Ÿ[ô\‹Àùô\Ÿ]\›\Yù»XX⁄8†%Çì[ôH»Ÿàô\Ÿ]X€‹ôKù\úö]ôY\»
+àñ[›H\ôHﬁÿ⁄\ü_H‹XZ⁄[ô»»ﬁ›\Ÿ\ü_H[à[Çõ€ô€⁄[ô»^⁄[ôŸKàäà8†%\»Yîô\Ÿ\ùôHﬁÿ⁄\ü_I‹»õ⁄XŸHãîô\‹€ôúõ€Hﬁÿ⁄\ü_I‹¬õ[›]ô\»ãûﬁÿ⁄\ü_H€õ›‹»€õH⁄]ﬁÿ⁄\ü_H\»⁄]ô\‹ŸY‹àôY[à€ãàH⁄[ô€BöY⁄\›[]ô\òYŸHõÿ⁄»[àHõ€\ÿ\»\‹›Z[ô»[ú›ùX›[€ú»Xõ›]HXŸZ€\ã[ôùH[Ÿ[Y»[ôô\àHôYô\ô[ùúõ€HHÿ\ôõÿ⁄»Xõ›ôH]ÇÇääï⁄H]ô]ô\à›\ôòXŸYääà]õŸXŸ\»õ»\úõ‹à[ôõ»X[õ‹õYY›]]àHÿ\ôò[Y\¬ùH⁄\òX›\àHô]»[ôôY⁄Ÿ[ú»X\õY\ã€»Hÿ\XõH[Ÿ[ô\€€ô\»][ôô\Y\»[Çò⁄\òX›\à8†%H€‹›\»⁄[[ù[à›»ö[ô[ô»XX⁄ù[H\Àà\»\»Hÿ[YH⁄\H\¬ùHååçãLÀLçKç»X\öŸ›€àòZ[\ôNà[ùö\⁄XõH[à€ŸHô]öY]À[ùö\⁄XõH[à]ô\ûHÿÿ[ù\›ö\⁄XõH€õH[à]X[]KÇÇääëö^ääà€ôH[ôH8†%H^Y\à€‹õ›»\[ô»ö[
+€^êSQK[ò[YJXàô\öYöYY]\¬ùH€õH[öôX›[€à⁄]N»VSë◊‘’SX
+Hõ⁄[ôYõ‹õJH\»õ›\ŸY»ùZ[õ€\¬ò[û]⁄\ôK€»\ôH\»õ»ŸX€€ô]»Z\‹ÀÇÇääëYôôX›€à⁄Ÿ[úŒääà€Y⁄H
+ôô]Ÿ\äà8†%ﬁÿ⁄\ü_X
+⁄\ú HôX€€Y\»Hò[YH
+\Xÿ[Bç8†$ÕäKà[[X]\öX[ô^»HYôôX›€à[ú›ùX›[€à€\ö]KÇÇääï\›Œääà\›ô\Ÿ]XŸZ€\ú–\ôQö[Y8†%H[öôX›[€à\Y\»ö[
+
+XH⁄\Yõ^Y\ú»ôX[H»€€ùZ[àXŸZ€\ú»
+€»H›X\ôÿ[â›⁄[[ùHõ›X›õ›[ô K[ôú›Xú›]][€à€‹ö‹»€àôX[\›X»^Y\à^ÇÇà»»ååçãLÀLçãå»8†%€ôHÿ]Y]€»⁄^ô\»õ‹àHÿ[YHö[H
+ôY‹ô\‹⁄[€à[àåäBÇääëõ›[ôûHÿ\‹…‹»ö\ú›‹›Y\ﬁHÿ]Y]
+äã⁄X⁄ô\‹ùYô\Ÿ]X€‹ôKù\¬ääüçMç]
+äà€àHõ€\ò‹Xõÿ⁄‹»[ôH[ô
+äüåŒŒ]
+äà€àHô\Ÿ]^Y\úŒò[ôH8†%ùHÿ[YHö[K€ôHÿ‹ôY[ã[à	H\ÿY‹ôY[Y[ù[ôõ›[ô»ÿ^Z[ô»⁄KÇÇääîõ€›ÿ]\ŸNàååçãLÀLçãåàÿ[Xúò]YHò[YH]Ÿ]»’‘ëQääà‹ôX€‹ô‹õ€\‹⁄^ôXòXÿ›[][]\»X‹õ‹‹»HõÿŸ\‹»Yô][YK[ôåà⁄[ùY]]Hÿ[Xúò]Y›⁄Ÿ[ú 
+XÇî€»XX⁄ÿ[\HúõﬁôH⁄X⁄]ô\àò][»ÿ\»]ôHH[€Y[ù]ÿ\»ZŸ[éÇãHHö\ú›õ€\»Yù\àHô\›\ù\ôHôX€‹ôYôYõ‹ôH[ûHTHÿ[\»ôY[àYX\›\ôYàKôKà]ò][»Kå8†%ò]Œ¬ãH]\àÿ[\\»\ôHôX€‹ôY]HôX[ò][»8†%ÿ[Xúò]Y¬ãH›[Xÿ]ôÿY»‹ŸHŸŸ]\ãZ^[ô»[ö]»[àH⁄[ô€H]ô\òYŸN¬ãHX^ÿõÿ⁄‹ÿŸY\»Hò][»úõ€H⁄[ô]ô\àHXZ»\[ôY»ôH][ôHXZ»Ÿ]à[àHö\ú›ŸX€€ô»Yù\àHô\›\ù\»
+ò[ÿ^\ àH[òÿ[Xúò]Y€ôKÇÇìYX[ù⁄[HHô\Ÿ]^Y\úŒò[ôH€€\]\»úô\⁄]ÿ]Y][YH[ô\»[ÿ^\¬ò›\úô[ùà[òŸH€»ù[Xô\ú»õ‹à€ôHö[Kàÿ\‹…‹»]Y]\»H^õ€⁄»ÿ\ŸNà\[YHåZúXZ»ôX€‹ôY\ö[ô»›\ù\]ò][»Kå[àHYX\›\ôYÿ[»[›ôYHò][»»éLãÇÇääïHù[H\»ö[€]YääàHÿ[Xúò]Yù[Xô\à\»€õHYX[ö[ôŸù[YÿZ[ú›Hò][»]úõŸXŸY]€»]]\›ô]ô\àôH\ú⁄\›Y‹àXÿ›[][]Yàò]»\»H›XõH[ö]ÇÇääëö^ääà›]»\ôH›‹ôYò]»
+‹õ€\›⁄Ÿ[ó››[‹ò]ÿ€\Ÿ◊›⁄Ÿ[ú◊‹ò]ÿ[ôò‹õ€\›‹ÿõÿ⁄‹ÿòX⁄»»Ÿ\››⁄Ÿ[úÿ
+H[ôHò][»\»\YY[Çò‹õ€\ÿ]Y]‹›]J
+X]ô[ô\ãà]ô\ûH\›‹öXÿ[ÿ[\H8†%[ò€Y[ô»€ô\»ZŸ[àôYõ‹ôBùHö\ú›YX\›\ô[Y[ù8†%\»õ›»ôKY^ô\‹ŸY[àŸ^I‹»[ö][ôH]\àò][»⁄[ôŸBúô]õÿX›]ô[H€‹úôX›»H⁄€H\›‹ûH[ú›XYŸà›ò[ô[ô»]ÇÇääë[Xô\ò][H›[ÿ[Xúò]Yà›ö[W‹õ€\›◊ÿùYŸ]ääà]XZŸ\»H]ôHX⁄\⁄[€ÇòYÿZ[ú›HôX[ŸZ[[ô»[ô›‹ô\»õ›[ôÀ⁄X⁄\»^X›HHÿ\ŸHÿ[Xúò][€à\»õ‹ãÇïH‹]\»õ›»^X⁄]à‹õ€\›⁄Ÿ[ó››[
+ÿ[Xúò]Y]ôHX⁄\⁄[€ú Hú¬ò‹õ€\›⁄Ÿ[ó››[‹ò]ÿ
+ò]À[û][ô»Xÿ›[][]Y
+KÇÇääêùX⁄Ÿ]»›^Hò]»[ô\ôHXô[Yääà^H\ôH€›[ù»[ôXYHö[õôY»\›‹ûHÿ[õõ›ôBúôKXö[õôY⁄]›]H‹öY⁄[ò[ÿ[\\ÀàHYŸ\»\ôH[Xô\ò][H€ÿ\úŸH8†%H]Y\›[€Çö\»ò[û]⁄\ôHôX\àHŸZ[[ô»ãõ›ö›»öY»^X›Hà8†%€»H]Y]õ›»ôXY¬ò‹ôXY
+ò]»\›
+Nòò]\à[à[\Z[ô»HôX⁄\⁄[€à]Ÿ\€â›]ôKÇÇääî›Ÿ\õ‹àH€\‹À[ô]ÿ\»H€\‹»8†%€»[‹ôH[ú›[òŸ\ äãõ›[ùö\⁄XõH[àBúô\‹ùYﬁ[\€NÇãH
+äòÿÿ\ôŸöY[›⁄Ÿ[úÿ
+äà\»ö[Y€òŸH]ÿ\ôÿY⁄X⁄\»
+ò[ÿ^\ àôYõ‹ôH[ûHTBàÿ[\»ôY[àYX\›\ôY[àô[ô\ôY]X⁄]\ãà]ô\ûHÿ\ôò[ôH€à]ô\ûH[ú›[òŸBàÿ\»\ôYõ‹ôHúõﬁô[à]ò][»Kå⁄[HHô\Ÿ]^Y\úŒò[ôH\ôX›HXõ›ôH]ÿ\¬àÿ[Xúò]Yàõ›»›‹ôYò]Àÿ[Xúò]Y[àÿ]\óÿ]Y]Ÿ]XÇãH
+äò€W‹›]÷»ù⁄◊⁄[àóX
+äàYH
+õ‹‹⁄]Jà\úõ‹ãà]€»Hõ›öY\â‹»ôX[à€›[ùÀù]åàYùHõÀ]\ÿYŸHò[òX⁄»Y[ô»
+äúò] äà\›[X]\»[ù»Hÿ[YH›[H8†%à€»[ö]»[à€ôH›[à]›[H\»ô[ô\ôY\ÀZ\»[ôô]ô\àôK\ÿÿ[Y€»Hò[òX⁄¬à⁄›[€€ùöXù]HHô\›\›[X]HŸàHôX[€›[ùà]õ›»Y»ÿ[Xúò]Y⁄Ÿ[úÀÇÇïHù[Kõ›»›]Y[àH€ŸH]õ›⁄]\Œà
+äú›‹ôHò]»YàHù[Xô\à⁄[ôBúôK\ô[ô\ôY]\é»›‹ôHÿ[Xúò]YYà]\»€€ú›[YY[[YYX][H[ôô]ô\àôK\ÿÿ[YääÇïH€»Z\›ZŸ\»\ôHZ\úõ‹à[XYŸ\À⁄X⁄\»⁄H€ôH›ŸY\õ›[ôõ›ÇÇääï\›Œääà\›õ€\›]’[ö]ÿ8†%ÿ[\\»›‹ôYò]»[ô\àH]ôHò][Àô[ô\à\Y\¬ùH›\úô[ùò][ÀHôKXÿ[Xúò][€àÿ[\H\»ôKY^ô\‹ŸYHö[HùYŸ]›^\¬òÿ[Xúò]Yÿ\ôöY[»›‹ôYò]»[ôô[ô\ôYÿ[Xúò]YHZ[H›[HY»ôX[[ö]¬ö[àõ›úò[ò⁄\À[ôHôY‹ô\‹⁄[€à]Ÿ[à[õôYàHÿ[YH^]\›õ›ô\‹ù€¬ôYôô\ô[ù⁄^ô\»[à€ôH]Y]ÇÇà»»ååçãLÀLçãåà8†%⁄Ÿ[à€›[ù»\ôHYX\›\ôYõ››Y\‹ŸYÇääîõ€›ÿ]\ŸNà]ô\ûH⁄Ÿ[àù[Xô\à\»ô\»\»]ô\àô\‹ùYÿ\»[ä^
+HÀ»ääÇòŸ\››⁄Ÿ[úÿ\»Hù[HŸà[XàXõ›][ô€\⁄õ‹ŸK[ô]ÿ\»ôZ[ô»\YY¬òúòX⁄Ÿ]Yù[]YX\öŸ›€àô\Ÿ]»8†%⁄X⁄⁄Ÿ[ö^ôH[úŸ\à[àõ‹ŸH8†%⁄]
+äõ€ôBò€€ú›[ù]ö\€‹àõ‹à⁄^õ›»ù[õö[ô»Yôô\ô[ù[Ÿ[»⁄]Yôô\ô[ù⁄Ÿ[ö^ô\ú äãà]ò€›[õ›]ôHôY[àöY⁄õ‹à[‹ôH[à€ôHŸà[H]H[YKà]ô\ûHöY›\ôH[àBùååçãLÀLçKåÀÀçKÀçà[ò[\Ÿ\ÀHÿ]Y]ô\Ÿ]^Y\úŒò[ôÿ\ôò[ô\À›\ÿYŸXò[ôH‹ô\Ÿ][\»⁄\Y›\ú»Y€»[àåH[[ö\ö]Y][ô[Ÿà[Búô[ô\ôY]\»ìù⁄X⁄ôXY»ZŸHõ›[ô[ô»ò]\à[àZŸHH›Y\‹ÀÇÇääïHõ›öY\àÿ\»ô]\õö[ô»HöY⁄[ú›Ÿ\àH⁄€H[YK[ôõ›úHô]»]]ÿ^KääÇïHô\‹€úŸH»]ô\ûH⁄]€€\][€àÿ\úöY\»H\ÿYŸXõÿ⁄»8†%õ€\›⁄Ÿ[úÿ€›[ùYòûHHôX[⁄Ÿ[ö^ô\àõ‹àHôX[[Ÿ[[ò€Y[ô»H⁄]][\]H›ô\öXYŸHÿ[õõ›úŸYKàŸ◊‹ô\]Y\›ôXYô\‹öú€€ä
+V»ò⁄⁄XŸ\»óVÃX[ô\ÿÿ\ôYHô\›€¬ò›òX⁄◊€W›\ÿYŸXôKY\ö]ôYúõ€H⁄\òX›\ú»Hù[Xô\à]Yù\›ôY[à[ôYÇÇääï⁄Hõ›H⁄Ÿ[ö^ô\àXúò\ûKääà€€ú⁄Y\ôY[ôôZôX›YàZ›⁄Ÿ[ò€›[ôHH
+ù‹õ€ô ÇùõÿÿXù[\ûH8†%HõY]ù[ú»”Hõ›Y⁄ò[õ—‘õ›[à‹[êRH[Ÿ[8†%€»]€›[›ÿ\õ€ôH‹õ€ô»ù[Xô\àõ‹àHYôô\ô[ùH‹õ€ô»€ôK⁄[HY[ô»Hö[ò\ûH⁄Y[»H\õ]^¬î]€àÀåMõY]⁄\ôH‹ÃM⁄Y[»\ôHÿÿ\òŸH[ô[û][ô»ô]»€€\[\»úõ€H€›\òŸKÇïHõ›öY\â‹»€›[ù\»õ›[‹ôHXÿ›\ò]H[ôúôYKÇÇääï⁄]⁄\YääÇåKà
+äîôX[\ÿYŸH\»ÿ\\ôY[ô‹[ùääàõ€ã\›ôX[Z[ô»ôXY»\ÿYŸXŸôàHõŸKÇà›ôX[Z[ô»\⁄‹»õ‹à]⁄]›ôX[W€‹[€úŒà»ö[ò€YW›\ÿYŸHéàùY_X[ô\úŸ\»Bàö[ò[⁄[öÀà›\ÿYŸX[ôÿ]Y]õ›»ô\‹ùX›X[⁄Ÿ[úÀXô[YYX\›\ôYà\›‹ààYX\›\ôY»H\›⁄[àH^HZ^\»õ›Çåãà
+äïH]\ö\›X»\»ÿ[Xúò]Yúõ€H‹ŸHYX\›\ô[Y[ùÀääàXX⁄YX\›\ôYÿ[ZY[»[Çà
+\›[X]YX›X[
+HZ\àõ‹àH
+úÿ[YH^
+é»Hò][»\»õ€Y[ù»H\ú⁄\›Yà\ãZ[ú›[òŸHSPH[ô\YY»]ô\û][ô»]ÿ[à€õH]ô\àôH\›[X]Y8†%Bà‹ô\Ÿ]^Y\à€‹›Àÿ]Y]	‹»ô\Ÿ][ôÿ\ô[ô\ÀHõ€\\⁄^ôH›]ÀÇåÀà
+äïHù[Xô\ú»ÿ^H⁄X⁄^H\ôKääà‹ô\Ÿ][ôÿ]Y]ÿ\úûBà€›[ùŒàÿ[Xúò]YKåéúõ€HHYX\›\ôYÿ[
+ X‹Çà€›[ùŒà\›[X]H8†%õ»YX\›\ôYTHÿ[Y]àô\Ÿ[ù[ô»H›Y\‹»[ôHYX\›\ô[Y[ùàY[ùXÿ[Hÿ\»HX›X[YôX›ÇÇääïôYHÿ^\»\»€›[]ôH€€ôH‹õ€ôÀ[ô⁄]›‹»XX⁄ääÇãH
+äïH\ÿYŸH⁄[ö»\»[à[\H⁄⁄XŸ\ÿ\›ääàôXYYù\àH^\›[ô¬à⁄[ö÷»ò⁄⁄XŸ\»óVÃXXÿŸ\‹»]€›[[ô^\úõ‹ò[ù»H€€ù[ùYX[ôôHõ‹Y8†%à⁄[[ùH\ÿÿ\ô[ô»H€õHôX[€›[ùH›ôX[Z[ô»]]ô\àõŸXŸ\Àà\úŸYàôYõ‹ôK[ô[õôYûHH\›\‹Ÿ\ù[ô»H€›\òŸH‹ô\ãÇãH
+äêHõ›öY\à]ôZôX›»›ôX[W€‹[€úÿääàH^\›[ô»[ô\à€›[]ôBà€€ò€YYù\»[Ÿ[ÿ[â››ôX[Hà[ô\ÿXõY›ôX[Z[ô»õ‹à]\õX[ô[ùH8†%Bà][òﬁHôY‹ô\‹⁄[€à€à]ô\ûHù]\ôHô\Kÿ]\ŸYûH[àXÿ€›[ù[ô»õYÀàH]\¬àõ›»ò\úõ›Ÿ\›Yö\ú›àõ‹›ôX[W€‹[€úÿ
+ŸY\›ôX[Z[ô K[ô€õH[àò[òX⁄»¬àõ€ã\›ôX[Z[ôÀàŸ\\ò]H€õ◊›\ÿYŸW‹›ôX[W€[Ÿ[ÿŸ]X\õôY]ù[ù[YKÇãH
+äêHò][»⁄\€€ôYûHÿ[»⁄\ôH]\»YX[ö[ô€\‹Àääàö\⁄[€àÿ[»ÿ\úûH[XYŸH⁄Ÿ[ú¬à⁄]õ»⁄\òX›\ú»ôZ[ô[N»[ûHõ€\»\ôH€Z[ò]YûH\ã[Y\‹ÿYŸH›ô\öXYÇàÿ[\\»\ôHôZôX›Y›]⁄YHçx†$ÃÀå‹à[ô\àå\›[X]Y⁄Ÿ[úÀ[ôHÿ]ôYò][¬à\»ôK]ò[Y]Y€àÿY€»H[ôYY]Y›]Köú€€òÿ[õõ›]Hõ€úŸ[úŸH][\Y\Çà€à]ô\ûHù[Xô\àHõ›ô\‹ùÀÇÇääë[Xô\ò][Hì’ôXÿ[Xúò]YàQSS‘ñW’“—Só–ïQ—Uääà]\»H[ôYôXÿ[€õÿãõ›òH€‹›ŸZ[[ô»8†%]ô\ûHò[YH[à]ô\ûHô[ùòÿ\»⁄‹Ÿ[àYÿZ[ú›Hò]»X⁄\ú»[ö]Çî›ÿ\[ô»[àÿ[Xúò]Y€›[ù»€›[⁄[ôŸH›»X[ûHY[[‹öY\»⁄^]ôH⁄\òX›\ú»ôXÿ[ÇòH\ú€€ò[]H⁄[ôŸH[]ô\ôY\»[àXÿ€›[ù[ô»ö^à]›^\»€àŸ\››⁄Ÿ[úÿ⁄]Bò€€[Y[ùÿ^Z[ô»⁄K[ôô][ö[ô»][àÿ[Xúò]Y[ö]»\»ö[Y\»ì–QPTçÇò””ïV’“—Só–ïQ—U
+ö\ àÿ[Xúò]Y
+]Ÿ[ùZ[ô[H\»H€‹›ŸZ[[ô H[ôYò][»¬å€Ÿôã€»õ»[ú›[òŸH⁄[ôŸ\»ôZ]ö[›\à€à\»\ﬁKÇÇääí€ô\›Xõ›]⁄]\»õ›ô\öYöYY\ôKääàHYX⁄[ö\€H\»õ›ô[à[ô]ÀY[ôYÿZ[ú›Bú⁄[][]Yò[õ—‘ô\‹€úŸH
+›ôX[Z[ô»\ÿYŸH⁄[öÀõ€ã\›ôX[Z[ô»õŸK›[K]\ÿYŸBò€X\ö[ôÀÿ[Xúò][€ãô\‹ù[ô KàH
+äòX›X[ò][»õ‹àHõY]	‹»[Ÿ[»\»õ›ö€õ›€ääà8†%\»€€ùZ[ô\àÿ[õõ›ôXX⁄ò[õÀY‹ò€€K[ôõ»îHõÿÿXù[\ûH\»ÿùZ[òXõBõŸôõ[ôH»\›[X]H]àXX⁄õ›YX\›\ô\»]»›€à€àHö\ú›ôX[€€ùô\úÿ][€àYù\Çô\ﬁN»ÿ]Y]⁄[⁄›»]à^X›]Xõ›ôHKåõ‹àHX\öŸ›€ãZX]ûHô\Ÿ]Àù]ù]\»HôYX›[€ãõ›HYX\›\ô[Y[ùà][€»YX[ú»
+äö\›‹öXÿ[öY›\ô\»[àHÿ‹¬ú›^H[àò]»[ö] äà8†%ô\Ÿ]ù\»éL»ò]ÀY\›[X]H⁄Ÿ[ú»ã[ôHÿ[Xúò]Yõù[Xô\àYù\à\ﬁH⁄[Yôô\ãà]\»Hù[Xô\ú»Ÿ][ô»[‹ôH€‹úôX›õ›öYù[ôÀÇÇääï\›ŒääàçHô]Àà\›\ÿYŸU⁄Ÿ[î\ú⁄[ôÿ
+ù[À›ö[ô‹ÀôYÿ]]ô\»8°§àô]ô\àòZ\Ÿ\»8†%òXÿ€›[ù[ô»[ô‹»Ÿôà[à[ôXYK\›XÿŸ\‹Ÿù[ô\JK\›ÿ[Xúò][€îÿ[\X¬ò\›ÿ[Xúò][€êõ[ô
+›]Y\àôZôX›[€ãö\ú›ÿ[\Hô\XŸ\»HŸYY€€ùô\ôŸ[òŸJKò\›ÿ[Xúò]Y⁄Ÿ[úÿ
+ÿÿ[[ôÀ⁄[›⁄]⁄€€ôöY[òŸH€‹ô[ôÀ[ô]HY[[‹ûBòùYŸ]›[\Ÿ\»Hò]»[ö]
+K\›\ÿYŸPXÿ€›[ù[ôÿ
+ôX[\ÿYŸHôYô\úôYò[òX⁄¬ù⁄]›]]€€ú›[YY^X›H€òŸH€»€ôHÿ[	‹»€›[ùÿ[â›ôHö[Y»Hô^òÿ[Xúò][€à\]Y
+K\›\ÿYŸPÿ\\ôU⁄\ö[ôÿ
+\ÿYŸHô\]Y\›Y\úŸYôYõ‹ôHBò⁄⁄XŸ\ÿXÿŸ\‹Àõ›ò[ú‹‹ùÀ‹ô\ö[ôÀ›[H€X\ö[ôÀÿ]ôY\ò][»ò[Y][€äKÇÇà»»ååçãLÀLçãåH8†%›⁄]⁄ô\Ÿ]^Y\ú»úõ€H[Y‹ò[H
+‹ô\Ÿ]
+BÇääìõ›HùY»ö^8†%Hÿ\ääàëT—U—íSTÿ
+ååçãLÀLçKçJHXYHHõ⁄XŸ\ö[ù^Y\ôY[ôú›ÿ\XõKù]H€õHÿ^H»›ÿ\]\»»‘“‹à‹[à\õ]^Y][à[ú›[òŸHô[ùòò[ôô\›\ùHõ›à]€‹›\»⁄Hì–QPTÀåL»8†%H€€ù[ù‹]]^Y\ö[ô»ÿ\¬òùZ[»[òXõH8†%\»ôY[à‹[à⁄[òŸH]⁄\Yà]ò[X][ô»⁄]\àÿ\‹»ôXY»ô]\Çù⁄]›]ô\Ÿ]\úùYX[ú»[àY]X[ô\ô\›\ùﬁX€H\à^\ö[Y[ù\àõ›€àBú€ôHŸ^Xõÿ\ôàHYX⁄[ö\€Hÿ\»\ôN»HôYYòX⁄»€‹ÿ\€â›ÇÇääï⁄H]	‹»⁄X\ääà\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ[ôXYHôK\ôXY»ëT—U”VQTîÿúõ€HH[Ÿ[Bô€ÿò[€à
+äô]ô\ûHY\‹ÿYŸJäà
+ååçãLÀLçKçH[öôX›»€ôHﬁ\›[Hõÿ⁄»\à^Y\äKàôXö[ô[ô¬ù]€ÿò[\ôYõ‹ôHZŸ\»YôôX›€àHô^ô\H⁄]õ»ô\›\ù[ôôXö[ô[ô»\¬ò]€ZX»8†%Hô\H[ôXYH\‹Ÿ[Xõ[ô»]»õ€\ŸY\»H\›ÿöôX›]›\ùY⁄]€¬õõ»ÿ⁄»\»ôYYYàHôX]\ôH\»H€€[X[ô\»\ú⁄\›[òŸKõ›ô]»õ€\XX⁄[ô\ûKÇÇääï⁄]⁄\Y
+äà8†%‹ô\Ÿ]YZ[ãYÿ]Y\ãZ[ú›[òŸNÇÇüõ‹õHYôôX›üKK_KK_ü‹ô\Ÿ]X›]ôH^Y\úÀ\ã[^Y\à[ô›[⁄Ÿ[à€‹›€›\òŸH
+ô[ùò‹à›ô\úöYJK⁄]	‹»€à\⁄»ü‹ô\Ÿ]€‹ôKúô\XŸHH›X⁄»ü‹ô\Ÿ]Y^X⁄]»‹ô\Ÿ]õ‹^X⁄]Yù\›€ôH^Y\àü‹ô\Ÿ]ô\Ÿ]òX⁄»»Hô[ùò›X⁄À›ô\úöYH€X\ôYÇìò[Y\»ô\€€ôH€‹Ÿ[H
+€‹ôX8°§àô\Ÿ]X€‹ôKù
+Hù]
+äõô]ô\à\õﬁ[X][Jäéà[Çù[õX]⁄Yò[YH\»ôZôX›Y⁄]H]òZ[XõH\›ò]\à[àô\€€ôY»H]\⁄XõBõôZY⁄õ›\ãà]ô\ûH⁄[ôŸHô\‹ù»H⁄Ÿ[à[H
+çÃLùOàåLLÕ›
+
+ÃŒLÕ]\ÇõY\‹ÿYŸJX
+KôXÿ]\ŸHH^Y\ú»\ôH\ôŸH[õ›Y⁄]Hÿ\›X[›ÿ\ÿ[à]ZY]Hö\BùH\ã[Y\‹ÿYŸHö[ÇÇääïôYHôYù\ÿ[ÀXX⁄›X\ô[ô»HòZ[\ôH[ŸHHò[òX⁄»Y\àÿ\»ùZ[õ‹ääÇäååçãLÀLçKçà8†%⁄[[ùHõ‹[ô»õ⁄XŸHù[\»ô\Ÿ[ù»\»H
+õ[Ÿ[
+àôY‹ô\‹⁄[€ã⁄X⁄\¬ùH[‹›^[ú⁄]ôH⁄[ôŸàùY»»XY€õ‹ŸH\ôJNÇåKàH›X⁄»\»
+äôûK\ù[àô\€€ôYôYõ‹ôHH]ôH€ôH\»›X⁄Y
+äãàYàõ›[ô»ô\€€ô\ÀàH›\úô[ù›X⁄»›^\»[ôHÿ\õö[ô‹»\ôH⁄›€ãÇåãà[à[\H›X⁄»\»ôYù\ŸY›]öY⁄ÇåÀà€à›\ù\Hÿ]ôY›ô\úöYH⁄‹ŸHö[\»]ôHò[ö\⁄Y
+ô[ò[YY‹à[àô[ùò\ﬁYYàZXYŸà]»ö[\ Hô]ô\ù»»Hô[ùòò\Ÿ[[ôH[ô\[ô»H€€ôöY»ÿ\õö[ô»8†%àô]ô\à»HåçL]⁄Ÿ[àùZ[Z[à›XãÇÇääî\ú⁄\›[òŸH[ôH⁄[›⁄]⁄ääàH⁄⁄XŸH\»ÿ]ôY\»ô\Ÿ]€›ô\úöYX[Çò›]Köú€€ò[ôôKX\YYûH\W€›ô\úöY\ 
+X[€ô‹⁄YH‹Ÿ][Ÿ[[ô‹Ÿ][ô‹ÿÇòëT—U–””SPSëL[úôY⁄\›\ú»H€€[X[ô
+äò[ôXZŸ\»›\ù\Y€õ‹ôHHÿ]ôY›ô\úöYJäà8†%ù]Z\ö[ô»\»[Xô\ò]H[ô\»HôX€›ô\ûH]àH›X⁄»]ùZ[ú»H⁄\òX›\â‹¬ùõ⁄XŸH\»[ô€ôH⁄]€ôHô[ùò[ôH\»Hô\›\ù⁄]õ»›]Köú€€à›\ôŸ\ûH€àBú€ôKàYò][€ã\àHåçãLÀLN€XﬁKÇÇääîZ[à^ûH€€ú›ùX›[€ãääàH€€[X[ô[ù\ú€]\»^Y\àö[[ò[Y\»[ôô\€€ô\Çùÿ\õö[ô»›ö[ô‹À⁄X⁄\»^X›HH⁄\H]úõ⁄ŸHÿ]Y][àååçãLÀLçKç»[ôBåLH€€[X[ô»›Ÿ\[àåL»8†%H›ò^Hÿ‹àÿXZŸ\»[Y‹ò[HôZôX›H⁄€HY\‹ÿYŸK€¬ùH€€[X[ôô\Y\»⁄]⁄[[òŸKà[õôYûHH\›ò]\à[àYù»ô]öY]Œ»BôŸ[ô\ò[\ŸY\›õ’[ô\ÿÿ\YX\öŸ›€í[ù\ú€][€ò›X\ô[€»€›ô\ú»]]]€X]Xÿ[KÇÇääòÿ]Y]õ›»X\ö‹»[àX›]ôH›ô\úöYJäà
+ô\Ÿ]^Y\ú»
+öXH‹ô\Ÿ]
+Nà8†)ò
+Kà⁄]›]]ò[à]Y]⁄›⁄[ô»^Y\ú»Hô[ùòŸ\€â›ò[YHŸ[ô»Hô^ôXY\à»H‹õ€ô»ö[H8†%ùHÿ[YH€\‹»\»HZ\€Xô[Yõ€\õÿ⁄»€‹úôX›Y[àååçãLÀLçKçKÇÇääí€õ›€à[Z]õ›HYôX›ääà‹ô\Ÿ]ÿ[à€õH⁄€‹ŸH^Y\ú»
+äõ€à\⁄»[à]ö[ú›[òŸH\ôX›‹ûJäãà€ôH[ú›[òŸ\»]ôH[Ÿà[H
+ﬁ[òÀXÿ\ôÀú⁄€‹Y\»]ô\ûBòô\Ÿ]Jãù
+K€»[ûH€€Xö[ò][€à€‹ö‹Àà€àHîÀúÀ\ﬁ[òÀú⁄[»€õHH^Y\ú¬òëT—U—íSTÿò[Y\»8†%[Xô\ò]K⁄[òŸHååçãLÀLçKçHôZôX›Y\Xÿ][ô»H^Y\à\›ö[ù»Hÿ‹ö\8†%€»
+äòÿ\‹»[ôù[\»ÿ[à€õH›⁄]⁄[[€ô»H^Y\ú»Z\àô[ùòò[ôXYHò[Y\ äãà‹ô\Ÿ]⁄]õ»\ô›[Y[ù»\›»⁄]][ú›[òŸHX›X[H\À€»Bò€€ú›òZ[ù\»ö\⁄XõH]H⁄[ùŸà\ŸHò]\à[à›\úö\⁄[ôÀàÿ›[Y[ùY[Çòô[ùãô^[\XÇÇääï\›Œääàç»X‹õ‹‹»\›ô\Ÿ]ò[YSõ‹õX[^ò][€ò
+€‹ŸHù]ô]ô\à\õﬁ[X]HX]⁄[ô Kò\›ô\Ÿ]\ô‘\ú⁄[ôÿ
+€€[XK‹‹XŸH\]Z]ò[[òŸKY\8†%H^Y\à\›Y⁄XŸH€›[ú⁄[[ùH›XõH]»€‹›
+K\›ô\Ÿ]›ÿ\
+õ›€ÿò[»ôXõ›[ôûK\ù[àŸ\»õ›õ]]]JK\›ô\Ÿ]›ô\úöYT\ú⁄\›[òŸX
+ôKX\YY€à›\ù\›ò[ôYûHH⁄[ú›⁄]⁄ò[ö\⁄Y^Y\ú»ô]ô\ù»ô[ùòŸ\öX[^ôY[ù»›]KõYŸŸY[àÿ]Y]
+K[ôò\›ô\Ÿ]€€[X[ô[ùò\öX[ùÿ
+YZ[àÿ]KZ[à^[\K\›X⁄»ôYù\ÿ[Y[ùHZ\úõ‹ú¬ùH⁄[›⁄]⁄õ»ô]»Hÿ[
+KàHö^\ôHô\›‹ô\»H[Ÿ[K\ÿ€‹H›X⁄»ûBúôKYY][ôÀ⁄[òŸH\›Ÿö^\ôWŸò[◊ÿòX⁄◊›◊ÿùZ[[ò\‹Ÿ\ù»]ÇÇà»»ååçãLÀLçKåM8†%ì’’SQVì”ëHô]ô\àŸ]H[Y^õ€ôH
+
+»]Y]][H
+BÇää∏¶®;Ó#»ëRUíS’Tà“Së—H”àT÷H8†%ôXYôYõ‹ôH⁄\[ôÀääà[ûH[ú›[òŸH⁄‹ŸHô[ùòŸ]¬òì’’SQVì”ëX\À[ù[õ›ÀôY[àY€õ‹ö[ô»][ôù[õö[ô»€à[Y\öXÿK”‹◊–[ôŸ[\ÿÇêYù\à\»ô[X\ŸH]\Ÿ\»H[Y^õ€ôH[›HX›X[H\⁄ŸYõ‹ãàYà]Yôô\ú»úõ€BîX⁄YöXÀ
+äú]ZY]›\úÀô[Z[ô\úÀõ›Hõ€›À]\Àÿ⁄Y[H⁄[ô›‹»[ôZYöY⁄^Búõ›][€à[⁄YùXÿ€‹ô[ô€Jäà8†%€‹úôX›ù]Hö\⁄XõH⁄[ôŸH[à⁄[à[ô‹»\[ãÇê⁄X⁄»XX⁄[ú›[òŸI‹»ÿ]Y][ôô[ùòôYõ‹ôH\ﬁZ[ô»Yà]X]\úÀÇÇääîõ€›ÿ]\ŸNääà€»[Y^õ€ôHò\öXXõ\À[ôHÿ›[Y[ùY€ôHÿ\»[ô\ùÇãHSQVì”ëXŸ]H€ÿ⁄ŒààHõ€ôR[ôõ SQVì”ëJXYò][[Y\öXÿK”‹◊–[ôŸ[\ÿÇãHì’’SQVì”ëXÿ\»ôXY[à^X›H€ôHXŸH8†%[ú⁄YHKX⁄X⁄ÀX€€ôöYÿ8†%\ô[H¬à
+õXô[
+àHÿ\õö[ô»›ö[ôÀÇãHô[ùãô^[\X\»[ÿ^\»ÿ›[Y[ùYì’’SQVì”ëX\»H[Y^õ€ôHŸ][ôÀ[ôBà]\›ö^\ôHŸ]»]€ÀÇÇî€»Hò\öXXõHHÿ‹»€[›H»Ÿ]Yõ›[ôÀ⁄[[ùKà€‹úŸKHôYõY⁄ò⁄X⁄»ôXY\»H\‹Œà⁄]ì’’SQVì”ëXŸ][ôSQVì”ëX[úŸ]òô\€€ô\»ö[ôBä»X⁄YöX K€»KX⁄X⁄ÀX€€ôöYÿ⁄Y\ôù[Hô\‹ùYH€‹ö⁄[ô»[Y^õ€ôH]ÿ\€â›Bõ€ôHô\]Y\›YÇÇòì’’SQVì”ëXõ›»⁄[úÀ⁄]SQVì”ëX›[€õ›\ôY€»^\›[ô»ô[ùòö[\»\⁄[ô»]ò\ôH[òYôôX›Y»Ÿ][ô»õ›»Yôô\ô[ùò[Y\»ÿ\õú»ò]\à[àX⁄⁄[ô»⁄[[ùKÇÇääí›»HX\õY\à›ŸY\Z\‹ŸY]€‹ùôX€‹ô[ôŒääàååçãLÀLçKåLâ‹»⁄X⁄»\⁄ŸY
+àö\¬ù\»ò\öXXõHôXY[û]⁄\ôO»äãàì’’SQVì”ëX
+äö\ äàôXY8†%ù\›õ›õ‹à]»ÿ›[Y[ùYú\ú‹ŸKàí\»]ôXY][à\»H›öX›HŸXZŸ\à\›[àôŸ\»]»⁄]Hÿ‹¬ò€Z[Hã[ô€õHHŸX€€ô€ôH€›[]ôHÿ]Y⁄\Àà]›\ôòXŸYûHXÿ⁄Y[ù⁄[Bô[ù[Y\ò][ô»[ôÿ›[Y[ùYò\öXXõ\»õ‹à][HÇÇääê]Y]][H8†%ô[ùãô^[\Xõ›»Xÿ€›[ù»õ‹à]ô\ûHò\öXXõHõ›úHôXYÀääàNMôXY¬åMÕ»ÿ›[Y[ùY\»Ÿ]XõH⁄]Yò][»^òX›Y
+ôúõ€HH€›\òŸJãõ›\Yúõ€BõY[[‹ûN»M»[Xô\ò][H\›Y\»[ù\õò[ÇÇìô]€Hÿ›[Y[ùY‹õ›\YûHôX]\ôNàŸX]\ã€ÿÿ][€ãŸXàŸX\ò⁄õ⁄XŸH	à[]ô\ûKôõ€›À]\ùXòõ\Àÿ›[Y[ùÀ‘úÀ⁄[XYŸ\ÀŸ[öYH[ö[ôÀÀY[[‹ûH	àõ›\À[€Ÿ	ÇúôXX›[€úÀõÿX›]ôH[Z[ôÀÿ⁄Y[\À[õô\àõ⁄XŸK[ô‹õ›\X⁄][ö[ôÀà
+äîôY][ö¬úôXY[ô»
+ëQU–”QSï“Qÿ—P‘ëUÿT—Tó–Q—Sï
+Hÿ\»[à[ù\ôH[ôÿ›[Y[ùYôX]\ôJäà8†%îôY]]»ÿ‹ò\[ô»ôZ[ôHî»ÿ[€»⁄\ôYôY][ö‹»⁄[[ùHòZ[⁄]›]BôúôYH–]]\[ôõ›[ô»€[›H]ÇÇïHM»[ù\õò[€ô\»
+ì’“”QXö[ôÀXùYôô\à⁄^ô\ÀY[[‹ûKX€€\X›[€àô\⁄€ÀTBô[ô⁄[ùÀHYÿXﬁHSQVì”ëX[X\ H\ôH\›Y
+äòûHò[YH⁄]õ»^[\Hò[Y\ äã€¬ùHö[H\»H€€\]HXÿ€›[ùŸà⁄]õ›úHôXY»⁄]›]ô\Ÿ[ù[ô»[\[Y[ù][€Çô]Z[»\»HY[ùH»[ôKÇÇääìô]»]ò[[ùã]ò\úÀYÿ›[Y[ùY
+äãúôXZÀ]\›Yà‹ôY[à€àHôX[ö[KôY⁄[àHòZŸBò‹ÀôŸ][ùò\»[öôX›Y[ù»H€‹Kà]òZ[»[àõ›\ôX›[€ú»8†%ÿ›[Y[ùYXù]][úôXYò[ôôXYXù]][ôÿ›[Y[ùY8†%€»\»öYùÿ[õõ›⁄[[ùHô]\õãÇÇääï\›Œääà\›õ›[Y^õ€ôUZŸ\—YôôX›8†%Hö^\ôI‹»ì’’SQVì”ëOP[Y\öXÿK”ô]◊÷[‹öÿõõ›»X›X[Hô\€€ô\»
+]€›[]ôHôY[à‹◊–[ôŸ[\»ôYõ‹ôJKH€ÿ⁄»\»ôXY]õ[Ÿ[Hÿ€‹Hò]\à[à€õH[àHôYõY⁄HYÿXﬁHò[YH›[€‹ö‹À[ôBò€€ôõX›ÿ\õö[ô»^\›ÀÇÇà»»ååçãLÀLçKåL»8†%]Y]][HŒàõ»€€[X[ôô[ô\ú»\òö]ò\ûH€€ù[ùõ›Y⁄X\öŸ›€ÇÇääîõ€›ÿ]\ŸNääàååçãLÀLçKç»ö^Yÿ]Y]Ÿ[ô[ô»\òö]ò\ûHXY€õ‹›X»›ö[ô‹»[ô\Çò\úŸW€[ŸOHìX\öŸ›€àò8†%H›ò^Hÿ‹à[õX]⁄YÿXZŸ\»[Y‹ò[HôZôX›H
+äù⁄€JäÇõY\‹ÿYŸK€»H€€[X[ôô\Y\»⁄]⁄[[òŸK⁄X⁄\»[ô\›[ô›Z\⁄XõHúõ€HHXYõ›Çï]ö^ÿ\»⁄[ù\ÿ€‹Y»ÿ]Y]àH]Y]›ŸY\\⁄ŸYHÿùö[›\»õ€›À]\ú]Y\›[€à8†%
+ù⁄\ôH[ŸO à8†%[ôõ›[ô
+äåL»[‹ôH⁄]\»X‹õ‹‹»LH€€[X[ô äà[ù\ú€][ô¬ùò[Y\»[ù»X\öŸ›€à›]⁄YHòX⁄›X⁄‹ÀÇÇê€€ùô\ùY»Z[à^
+X]⁄[ô»ÿ]Y][ôHôKY^\›[ô»Y[[‹ûWÿ€Y⁄X⁄ò[ôXYHÿ›[Y[ù»\»^X›ôX\€€ö[ô NÇÇü€€[X[ô⁄]]ô[ô\ú»üKK_KK_üÿÿ\ô‹Ÿ]ÿ\ô⁄\òX›\ãXÿ\ôöY[€€ù[ù»[ôH\Ÿ\â‹»ô]»ò[YHü€õ›\ÿH\Ÿ\â‹»›€àõ›H^ü‹›]\ÿ›]ö]YôKX\òÀ^KXõ›]^[›H€ö\]»
+äò[ôH€€ùô\úÿ][€àZ[
+äàü‹ÿ⁄Y[X‹[‹X‹õ⁄ôX›ÿ\Ÿ\ã]‹ö][àö[H€€ù[ù»ü›öXôXŸ[ô\ôﬁX‹Ÿ][Ÿ[‹Ÿ][ô‹ÿ\Ÿ\ã\›\YYò[Y\»[ôò[Y\»ü€[Ÿ[êSQXúõ€HHÿ\ôÇääì][ùõ›ö\ö[ôÀääà[õ›\à⁄\òX›\àÿ\ô»Ÿ\ôH\›YYÿZ[ú›X\öŸ›€à\ú⁄[ô¬ôö\ú›8†%ò[[òŸYúòX⁄Ÿ]À]ô[à[ô\úÿ€‹ôH€›[ùÀõ›[ô»›\úô[ùHúôXZ‹Àà\»\»Bôö^õ‹àHòZ[\ôH]Yâ›\[ôYY]à€õ›\ÿô[ô\ú»^[›H‹ö]H[ôò‹›]\ÿô[ô\ú»€€ùô\úÿ][€à€€ù[ù€»H⁄[ô€Hÿÿ\»[]€›[ZŸKÇÇääêòX⁄›X⁄‹»\ôHõ›HÿYôH‹ò\\à^H€⁄»ZŸKääàŸ]ÿ\ôÿ€Y‹ò\Yò]»\Ÿ\Çö[ú][àH€ŸH‹[à
+ŸöY[X
+H8†%HòX⁄›X⁄»
+ö[äà][ú]€‹Ÿ\»H‹[àX\õBò[ôúôXZ‹»H\úŸKàHÿÿ[õô\àYÿ€‹ôYòX⁄›X⁄À]‹ò\Yò[Y\»\»ÿYôN»]ò\‹›[\[€à[õ‹à[Ÿ[Y»[ôö^Y›ö[ô‹»ù]õ›õ‹à\òö]ò\ûH[ú]à‹ŸH€¬ú⁄]\»\ôHõ›»Z[à^⁄]ŸöY[\üXÇÇääï€»⁄]\»[Xô\ò][HYù€àX\öŸ›€ääã[›€\›Y[àH\›⁄]HôX\€€éÇò]ZY]⁄[óÿ€Y
+[à[ù[ô^ö^Y[€ò8†$ÿ›[òò[Y\ÀìSX›ö[ô‹ H[ôõY]ÿ€Yä[à[ù[ú⁄YHHô[òŸJKàôZ]\àÿ[àÿ\úûHHY]X⁄\òX›\ãÇÇääï\›ääà\›õ’[ô\ÿÿ\YX\öŸ›€í[ù\ú€][€ò\»H
+ôŸ[ô\ò[\ŸY
+à›X\ôõ›[õ›\Çú⁄[ùö^8†%]ôKY\ö]ô\»HŸôô[ô\à\›úõ€H€›\òŸH€à]ô\ûHù[à[ôòZ[»€à[ûHô]¬õ€ôK€»Hô^€€[X[ô]õ‹õX]»\òö]ò\ûH]H\»ÿ]Y⁄]€€[Z][YHò]\à[ÇòûH[à›€ô\à€€ô\ö[ô»⁄HH€€[X[ôŸ[ù]ZY]àHŸX€€ô\‹Ÿ\ù[€àòZ[»YàH€¬ò[›€\›Y€€[X[ô»]ô\à›‹[ù\ú€][ô»õ›òXõK\ÿYôHò[Y\À€»H[›€\›ÿ[â›ô€»›[H⁄[[ùKÇÇà»»ååçãLÀLçKåLà8†%]Y]][\»H	àéàXY[ùàò\úÀ[ôH‹õ›\[›‹]X‹õ‹‹»‹›¬Çëúõ€HHôYKX€\‹»]Y]
+⁄\ôY›]H»⁄[[ùô\Y\»»ÿÀ]úÀ\ôX[]HöYù
+KÇÇääí][HH8†%ô[ùãô^[\Xÿ›[Y[ùYŸ]ô[àò\öXXõ\»õ›úHô]ô\àôXYÀääàHYX⁄[öXÿ[ôYôàŸà‹ÀôŸ][ùòÿŸ[ùó⁄[ùÿŸ[ùóŸõÿ]ò[Y\»YÿZ[ú›H[\]Hõ›[ô»ÿ›[Y[ùYùò\ú»⁄]ô\õ»ôXY\úÀàŸ][ô»[ûHŸà[Hÿ\»H⁄[[ùõÀ[‹[ôH[\]H\»⁄]ò”UQKõYÿ[»Hôù[ÿ›[Y[ùY[\]HéÇãHPTïëPU”RSò»PTïëPU”PV8†%
+äõò[YHZ\€X]⁄
+äéà‹ŸH\ôHõ›úI‹»[ù\õò[àŸX€€ôÀ]ò[YY]€àò\öXXõ\Œ»H[ùàò\ú»\ôHPTïëPU”RSó“’Tîÿ¬àPTïëPU”PV“’TîÿÇãHïQ—W”PV8†%
+äõô]ô\à^\›Y
+äãàHùYŸHùYŸ]\»\ãX⁄]ù[ù[YH›]H
+Yò][ÀàH[õ[Z]Y
+HŸ]úõ€H[Y‹ò[H⁄]€ùYŸ\»ÿàÿ›[Y[ù[ô»]\»[à[ùàò\àYX[ùà[à›€ô\à€›[ô[Y]ôH^HYÿ\YõÿX›]ôHY\‹ÿYŸ\»⁄[à^HYõ›ÇãHì–P’UëW“’Tó‘’Tï»ì–P’UëW“’Tó—Së8†%ô]ô\à^\›YàHôX[€€ùõ€\¬àURQU‘’Tï»URQU—Së⁄X⁄\ôHH
+ú›\ô\‹⁄[€äà⁄[ô›»
+€»HŸ[úŸH\»[ùô\ùYàúõ€HH€ò[Y\ H[ôŸ\ôH[\Ÿ[ô\»[ôÿ›[Y[ùYÇãH””ïV”SRU»’SSPTñW—UëTñX8†%ô]ô\à^\›YàHô\òò][H⁄[ô›»\»õ›[ôYûBà\ô€ŸYPV“T’‘ñOLå»—QT‘ëP—SïLL\»HŸ]XõH“‘ï’TìW“’Tîÿ¬à›[[X\ö\ÿ][€à\»›ô\ôõ›À]öYŸŸ\ôY€»\ôH\»õ»ô]ô\ûHà\õú»à€õÿà][ÇÇê[Ÿ]ô[à€‹úôX›Y[àXŸH⁄]HôX[ò[Y\»[ô[à^X⁄]õ›H]H€€ô\¬ôYõ›[ôÀàôK\ù[õö[ô»H⁄X⁄»õ›»ô\‹ù»
+äå
+äàÿ›[Y[ùYXù]][úôXYò\ú»
+çHô[XZ[Çù[ôÿ›[Y[ùY[àH›\à\ôX›[€à8†%]Y]][Hõ›Yô\‹ŸY\ôJKÇÇääí][Hà8†%H‹õ›\X⁄][›\»‹]X‹õ‹‹»€»‹›Àääà‘ì’T–“U—T“Q”ãõY0©Ã¬ú›]\»H\‹›[\[€àZ[õNà
+àò[[ú›[òŸ\»]ôH€à€ôH€ôHäã
+àõ€ôH^ö[\ﬁ\›[Kù⁄\ôHõÿ⁄»\»ô[XXõHäãà[Y‹ò[Hô]ô\à[]ô\ú»€ôHõ›	‹»Y\‹ÿYŸ\»»[õ›\ã€»Bú⁄\ôYö[\ﬁ\›[H
+äö\ äàH⁄[õô[àù[\»ZY‹ò]Y»Hî»€àåçãLÀLNN»ö^XBú›^YY€àH€ôKàXX⁄‹›õ›»⁄[[ùHŸ]»]»›€àYŸ\à[ô€Z[H\ã⁄X⁄òúôXZ‹»ôX⁄\Ÿ[H⁄]H\⁄Y€à^\›»»ô]ô[ùÇãH›ûWÿ€Z[X[ÿ^\»›XÿŸYY»€àõ›⁄Y\»8†%\ôH\ôHõ»⁄\ôY€Z[Hö[\»»€€ù[ôàõ‹ã€»õ›õ›»[ú›Ÿ\àHÿ[YHY\‹ÿYŸN¬ãH‘ì’T–ì’–“RSó”PV[ô‘ì’T—RSW–ì’–ïQ—U\ôH€€\]Yúõ€HŸ\\ò]HYŸ\úÀà€»H⁄Z[àÿ\[ô[\õò][€à[ò[H»õ›\HX‹õ‹‹»HZ\ãÇÇò‘ì’T—RSW–ì’–ïQ—U›[õ›[ô»XX⁄õ›[ô]öYX[K€»Hù[ò]ÿ^H\»ÿ\Yò]\Çù[à[ôö[ö]H8†%ù]]õ›Y⁄H›XõHH[ù[ôYõ€[YH⁄]õ»[\õò][€à€€ùõ€Çê€€ùò\›€‹õù⁄‹ŸH\]Z]ò[[ù‹]RQ‘êUS”ãõY^X⁄]HXÿŸ\Œà]€ôBôY‹òY\»»[ô\[ô[ùŸX]\ã\»€ôHY‹òY\»»[òõ›[ôY[\õò][€ãÇÇòõ›úHÿ[õõ›€õ›»⁄\ôHHY\à]ô\À€»Hö^\»H›Y›\ù\–””ëíQ◊’–TìíSë‘ÿô[ùûH⁄[ô]ô\à‘ì’T”S—X\»€à⁄]Y\ú»€€ôöY›\ôYö[ù[ô»H
+äúô\€€ôY
+äÇò‘ì’T”Q—Tó—Tò€»H›€ô\àÿ[à€€\\ôH]X‹õ‹‹»‹›Ààÿ›[Y[ùY[Çò‘ì’T–“U—T“Q”ãõY
+[õ[ôH]H\‹›[\[€à]Ÿ[äH[ô[à\ﬁK”RQ‘êUS”ãõYò[€ô‹⁄YHHõ‹òKÿ€‹õùõ›K⁄]Hô\öYöXÿ][€à›\õ‹à⁄[àö^XHZY‹ò]\ÀÇÇääîôX€€[Y[ô][€à⁄[H‹]à‘ì’T”S—OL€àõ›ääà‘ì’T”S—XYò][»»€¬ù\»\»‹õX[ù[õ\‹»^X⁄]H[òXõYÇÇääï\›Œääà\›‹õ›\€€ÿÿ][€ïÿ\õö[ôÿ8†%Hÿ\õö[ô»\»ÿ]Y€à‘ì’T”S—H[ôë‘ì’T‘QTîÿ]ò[Y\»Hô\€€ôY\ôX›‹ûH
+H›€ô\à\»»
+ò€€\\ôJà]€»ö[ù[ô¬ö]\»H⁄[ù
+KHö^\ôH›^\»ÿ\õö[ôÀYúôYK[ô‘ì’T”Q—Tó—Tò›[Yò][»¬ùH⁄\ôY€ŸH\ã⁄X⁄\»⁄H€À[ÿÿ][€àX]\ú»][ÇÇà»»ååçãLÀLçKåLH8†%€€ò›\úô[ù›\]H€‹úù\YH⁄\ôY€ŸH\ÇÇääîõ€›ÿ]\ŸNääà›€ô\ã\ô\‹ùYúõ€HHî»õ›	‹»Ÿ\úõ‹úÿÇÇòëö[Hã€‹›[Y‹ò[KXõ›Àÿõ›úHã[ôHLMçå[à\ôõ‹õW‹Ÿ[ó›\]Bëö[Hã›\‹ã€Xã‹]€åÀåLã‹Wÿ€€\[KúHã[ôHMåK[à€€\[Bëö[Sõ›õ›[ô\úõ‹éà—\úõõ»óHõ»›X⁄ö[H‹à\ôX›‹ûNà	À€‹›[Y‹ò[KXõ›Àÿõ›úKõô]…¬òÇò\ôõ‹õW‹Ÿ[ó›\]X‹ö]\»õ›úKõô]ÿõ›úKòòZÿ[ôõ›úX[ù¬ò]
+◊Ÿö[W◊ Kú\ô[ù8†%H
+äú⁄\ôY
+äà€ŸH\ôX›‹ûKà]ô\ûH[ú›[òŸH€àH‹›⁄\ô\¬ö]àã›[Y‹ò[KXõ›õ‹àHõ›\à€ôHõ›À€‹›[Y‹ò[KXõ›ÿõ‹àÿ\‹»[ôù[\Àà€¬ù€»€€ò›\úô[ù›\]Xÿ[»‹\ò]H€àHÿ[YHôYH]»⁄]õ»ﬁ[ò⁄õ€ö\ÿ][€éÇÇåKàÿ\‹»‹ö]\»õ›úKõô]ÿåãàù[\»‹ö]\»õ›úKõô]ÿåÀàÿ\‹»€€\[\À[à\úô\XŸJ\ôŸ]
+X8†%⁄X⁄
+äúô[[›ô\ äàõ›úKõô]ÿçàù[\»€€\[\»8°§àö[Sõ›õ›[ô\úõ‹òÇääïH‹ò\⁄\»H€€Ÿ›]€€YKääàH⁄[[ùò\öX[ù\»€‹úŸNàH‹Ÿ\àôXX⁄\¬òõ›úKòòZ»H\ôŸ]
+òYù\äàH⁄[õô\à\»[ôXYH›ÿ\Y[àHô]»ö[K€»Búõ€òX⁄»⁄[ùôX€€Y\»H€‹HŸàH
+äõô] äà€ŸKà[›H€›[ô[Y]ôH[›HYHõ€òX⁄¬ò[ôõ›]ôH€ôH8†%[ôõ›[ô»€›[[[›KÇÇïHÿ›[Y[ùYõÿŸY\ôH
+ò›\]X»”ëHõ›[à‹ô\›\ùH›\ú»äH]õ⁄Y»\¬òûH€€ùô[ù[€ãàõ›[ô»[ôõ‹òŸY][ôH€ôH\»HY[ùXÿ[^‹›\ôKÇÇääëö^ääàH‹›]⁄YHõÿ⁄ÿ€àù\]Kõÿ⁄ÿ[àH€ŸH\ãZŸ[à
+äòôYõ‹ôJäàBô›€õÿY€»HôYù\ŸY\]HŸ\»õ»€‹ö»][8†%õ»ô\]Y\›õ»[\ö[Kõ›[ô¬ù›X⁄YàHŸX€€ôÿ[\àŸ]»»úôX\€€àéàù\]W⁄[ó‹õŸ‹ô\‹»üXò[Z[ô»H€‹úôX›úõÿŸY\ôKàHõŸH[›ôY»‹\ôõ‹õW‹Ÿ[ó›\]W€ÿ⁄ŸY€»Hÿ⁄»[ôH€‹ö»\ôBúŸ\\òXõH[ô\›XõKà[€õH[ú⁄YHHﬁ[ò»ù[ò›[€à[ùõ⁄ŸYöXH\ﬁ[ò⁄[Àù◊›ôXYù⁄]õ»]ÿZ]À€»[ùò\öX[ùŒHŸ\»õ›\KÇÇääîŸX€€ôYôX›õ›[ô⁄[Hö^[ô»Hö\ú›ääà\]Wÿ€YX]⁄YôX\€€ú»⁄][ÇöYãŸ[Yà⁄Z[à[ôõ»[ŸX€»\]W⁄[ó‹õŸ‹ô\‹ÿ8†%[ô[ûHù]\ôHôX\€€à8†%ô[ùõ›Y⁄»Hò\ôHô]\õò[ô
+äúô\YYõ›[ô»][
+äãàÿ[YH€\‹»\»Hÿ]Y]õ›]YŸH[àååçãLÀLçKçŒàH€€[X[ô]⁄[[ùHŸ\»õ›[ô»\»[ô\›[ô›Z\⁄XõHúõ€HBôXYõ›à\ôH\»õ›»Hÿ]⁄X[ô\KÇÇääê[€Œääàù\]Kõÿ⁄ÿõ›úKõô]ÿ[ôõ›úKòòZÿ\ôH⁄]Y€õ‹ôYàHÿ⁄»ö[Bôö\ú›\X\ôY\»[à[ùòX⁄ŸY\ùYòX›ŸàHô\ûH\›»‹ö][àõ‹à]ÇÇääï\›Œääà\›Ÿ[ï\]Sÿ⁄ÿ€»Hÿ⁄»Hÿ^HH€€\][ô»[ú›[òŸH€›[[ôò\‹Ÿ\ù»HôYù\ÿ[\[ú»ôYõ‹ôH[ûHô]€‹ö»‹àö[\ﬁ\›[H€‹ö»
+[ò€Y[ô»]òõ›úKõô]ÿ\»[ù›X⁄Y8†%H^X›ö[HHùY»\›õﬁYY
+K]Hÿ⁄»\»ô[X\ŸYôõ‹àHô^ÿ[\ã[ô]Hÿ⁄»]ô\»›]⁄YHH^òX›YõŸKÇò\›\]P€Yô]ô\îô\Y\‘⁄[[ùX[ú»Hÿ]⁄X[ÇÇääì‹\ò][€ò[Nääà›\]X€àHî»[ú›[òŸH€‹ö‹»ù]\»õ›Hÿ›[Y[ùY]8†%ò\ﬁK›úÀ\ﬁ[òÀú⁄[€»[»Hÿ\ô[ôô\Ÿ]^Y\ú»[ô[ô\»Hﬁ\›[Y[ö]Çï\ŸH]õ‹àÿ\‹»[ôù[\ÀÇÇà»»ååçãLÀLçKåL8†%ÿ[ö]KX⁄X⁄»›ŸY\àH‹õ€ô»öXYŸHù[HYõ›\à[‹ôH›\ùö]õ‹ú¬Çääîõ€›ÿ]\ŸNääàååçãLÀLçKé€‹úôX›Yò’TïTUQU⁄]õ»ôXŸY[ô¬ò‹⁄]›€óH‹òXŸYù[›‹H“Q““Sà[à”UQKõYH[€ö]‹ö[ô»ŸX›[€ãBòô\ÀYXùYŸ⁄[ôÀ\^Xõ€⁄ÿXõK[ô€€ó‹⁄]›€ò	‹»ÿ‹›ö[ôÀà[à^X⁄]›ŸY\õ›[ôö]›[›[ô[ô»[à
+äôõ›\à[‹ôHXŸ\ äà8†%H€‹úôX›[€à\‹»]‹ô\»€õH⁄\ôH[›Búô[Y[Xô\à‹ö][ô»€€Y][ô»\»õ›H€‹úôX›[€à\‹ÀÇÇïH€‹ú››\ùö]õ‹àÿ\»[à‹Ÿ[óÿ]Y]	‹»
+äúô\›\ù\›‹õHJäéàHY\‹ÿYŸHH›€ô\ÇúôXŸZ]ô\»
+ò]H[€Y[ù^H\ôHXùYŸ⁄[ô»Hô\›\ù›‹õJà€[Bòõ»[ôHH“Q““Sà€‹ú›‹‹⁄XõHXŸ[Y[ùõ‹àH€ôH[ú›ùX›[€à›X\ò[ùYY»ôBúôXY[ô\àô\‹›\ôKàõ›»⁄[ù»]H^]€ŸH
+LÕ»»M»»
+H[ô^X⁄]Hÿ\õú¬ù]H‹òXŸYù[\›‹[ôH\»õ›H\ÿ‹ö[Z[ò]‹ãÇÇê[€»ö^YÇãH“PU“QUõY8†%H[ù€KZ⁄[\à⁄X⁄»›[Ÿ^YYŸôàH‹òXŸYù[\›‹[ôKÇàô\XŸY⁄]H^]X€ŸH‹ô\\»Hõ›H]Ÿ][ô‹ÿÿ[õõ›ù[à[à\õ]^à
+]ôYY»YäH[ôHõÿŸ\‹ÀXŸ[ú›\»€ôK[[ô\à]õ›[ôH›X⁄ŸYÿ]⁄Ÿ‹ÀÇãHò][Ÿ[ù]Y\À›\õ]^\€ôKZ‹›õY8†%H]ôH€õ›€YŸH[ùûH]\›Ÿ\‹⁄[€ú»]ôBà€‹úôX›Y\ö[ô»[ò⁄Y[ùÀàÿ\úöYY
+äùôYJäà›[HòX›ŒàH€öXYŸHù[Kî]€ÇàÀåL»à
+]	‹»ÀåMçäK[ôò[⁄^õ›»à€àH€ôH
+]	‹»õ›\é»ÿ\‹»[ôù[\»\ôH€ÇàHî KÇãHHååçãLÀLçKå»[ùûHô[›»›[\‹Ÿ\ùYHÃMK]⁄Ÿ[àUêP’S”àïSXöY›\ôH\¬àòX›⁄]€õHHõ‹ùÿ\ô€‹úôX›[€à[àçXà[õõ›]Y[õ[ôH€»]ÿ[â›ôHôXY[Çà\€€][€à[ôô[Y]ôYà[Xô\ò][H[õõ›]Yò]\à[àô]‹ö][à8†%HZ\›ZŸK[ôà›»HZ\€Xô[YXY€õ‹›X»õŸXŸY]\ôH€‹ùŸY\[ô»Y⁄XõKÇÇääï\›ääà\›ô\›\ù›‹õPYöXŸR\–€‹úôX›[ú»HH»H^]X€ŸHù[H[ô\‹Ÿ\ù¬ùH€€Z[H\»XúŸ[ùôXÿ]\ŸH\»‹X⁄YöX»^\»õ›»ôY[à‹õ€ô»õ›Y⁄€¬ò€‹úôX›[€à\‹Ÿ\ÀÇÇà»»åçãLÀLçH8†%‹Œàÿ]⁄ŸÀú⁄⁄[ô€KZ[ú›[òŸH›X\ô
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇääîõ€›ÿ]\ŸNääàÿ]⁄ŸÀú⁄›\‹ù»€»[ú›[[Ÿ\»8†%K[€òŸX
+‹õ€äH[ôHò\ôBö[ùõÿÿ][€à][ù\ú»⁄[HùYN»»ù[óÿ⁄X⁄‹Œ»€Y\	–U“—◊“SïTïêS»€ôX[ôõô]ô\à^]Àà[ú›[Y[à‹õ€à
+äù⁄]›]
+äàK[€òŸX]ô\ûH[ùõÿÿ][€à›\ù»[õ›\Çö[[[‹ù[€‹àõ›[ô»›‹Y]àHÿ‹ö\Yõ»\Xÿ]KZ[ú›[òŸH›X\ôŸà[ûH⁄[ôÇÇìÿúŸ\ùôY€ãY]öXŸHåçãLÀLçNà
+äéLàò\⁄
+»LH€Y\õÿŸ\‹Ÿ\ äãåN»ŸàH€ôI‹¬åNLH\õ]^]ZYõÿŸ\‹Ÿ\ÀYÿZ[ú›[à[ôõ⁄Y[ù€K\õÿŸ\‹»[Z]ŸàÃãàXY€õ‹ŸYûBô‹õ›\[ô»»]H	
+Y]JXûH€€[X[ô8†%HZ\ôYò\⁄‹€Y\€›[ù»\ôHH⁄Y€ò]\ôHŸÇìà⁄[€‹»XX⁄\öŸY[àH€Y\ÇÇääïHõÿŸ\‹»€›[ùÿ\»H\‹Ÿ\àõÿõ[Kääà]ô\ûHXÿ›[][]Yÿ]⁄Ÿ»€»Hÿ[YBòò[]ôXX\ùôX]ö[\À€»H⁄[ô€H›[HX\ùôX]€›[õŸXŸHéLH⁄[][[ô[›\¬ö⁄[X[ô\ô[][ò⁄X⁄\⁄[€ú»YÿZ[ú›€ôHõ›à]\»HåçãLÀLH[ò⁄Y[ù\»ÿ‹ö\ùÿ\»‹ö][à»ô]ô[ù][\YYûH›Ÿ]ô\àX[ûH€‹Y\»]ôH[Y\ÇÇääëö^ääàHQYö[H›X\ôZXYŸàH[ŸH\‹]⁄àH]ôH›€ô\à
+⁄[L›XÿŸYY BõXZŸ\»Hô]»[ú›[òŸHŸ»⁄H[ô^]»H›[Hö[H\»€X\ôY[ôZŸ[à›ô\é»ò\8†)ÇëVUSïTìXô[[›ô\»]€àHÿ^H›]àQö[Hò]\à[àõÿ⁄ÿ»]õ⁄YBù][[[ù^\[ô[òﬁH€à\õ]^8†%H[‹ô]Xÿ[òXŸHô]ŸY[à€»⁄[][[ô[›\»›\ù»\¬ö\úô[]ò[ùYÿZ[ú›HK[Z[ù]H‹õ€àÿY[òŸKÇÇêúôXZÀ]\›Yõ›Y⁄[õ›\à]Œà€X[à›\ùôYù\ÿ[⁄[HH]ôH[ú›[òŸH€»Bôö[KŸ[ãZX[úõ€HH›[HQ[ô€X[ù\€à^]ÇÇääòÿ]⁄ŸÀú⁄\»›\õZ[ú›[Y[ôì’[YûH\]KX[ú⁄
+äà8†%ôKZ[ú›[]ûBö[ô»Ÿ]\»
+€€[X[ô[àHÿ‹ö\XY\äKà[€»⁄X⁄»‹õ€ùXà[àH‹õ€à[ôBõ]\›[ò€YHK[€òŸXÇÇà»»ååçãLÀLçKéH8†%H\ùX[ÿ\õZ[à[^Z[ú»]Ÿ[ÇÇääîõ€›ÿ]\ŸNääà€àåçãLÀLçH⁄X[õ›ÿô]\õôY€õHŸ^I‹»›\€›[ùàHôX]\ôBùÿ\»€‹ö⁄[ô»€‹úôX›H8†%Hÿ]⁄ÿ\»[àò]\ûHÿ]ô\ã⁄X⁄\ÿXõ\»H‹Xÿ[ÇúŸ[ú€‹ã€»€Y\ô\›[ô»ãõŸHò]\ûH[ô›ô\‹»Yô]ô\àôY[àôX€‹ôY⁄[Bú›\»
+XÿŸ[\õ€Y]\ã€ôK\⁄YJHŸ\\úö]ö[ôÀàù]
+äõõ›[ô»[àHõŸX›€›[ÿ^Bù]ääà⁄X[õ›ÿö[ùYHò\Ÿ\»]Y[ô›^YY⁄[[ùXõ›]Hô\›€»Bò€‹úôX›\ùX[[ÿ\»[ô\›[ô›Z\⁄XõHúõ€HHúõ⁄Ÿ[à[ùY‹ò][€ãÇÇï€‹úŸKHXY€õ‹›X‹»^\›Yù]Ÿ\ôH[úôXX⁄XõNàŸô]⁄Ÿÿ\õZ[òŸŸŸY\ãY[ô⁄[ùôòZ[\ô\»⁄]ö[ù
+
+X⁄X⁄ôXX⁄\»õ›õŸÿù]
+äõõ›
+äà\úõ‹úÀõŸÿ8†%€»Ÿ\úõ‹úÿò€›[õ›⁄›»[H[ôH€õHõ›]H»[à[ú›Ÿ\àÿ\»H⁄[à]\»HŸX€€ô[YBö[à€ôH^H]XY€õ‹⁄[ô»Húô\⁄H⁄\YôX]\ôHô\]Z\ôY]öXŸHXÿŸ\‹»]⁄›[â›ö]ôH
+ŸYHååçãLÀLçKç KÇÇääï⁄]⁄\YääÇãH
+äòŸÿ\õZ[óŸöY[ÿ
+äà\»õ›»H⁄[ô€H€›\òŸHŸàù]à^[ÿY»8°§à‹ô\ôYà Y]öX»Xô[ò\ŸH‹àõ€ôJWXõ‹à[⁄^Y]öX‹Àà
+äòŸÿ\õZ[óÿö]ÿ\»H[Çà‹ò\\à›ô\à]
+äã€»H€ò\⁄›^[ôHZ\‹⁄[ôÀ[Y]öX»ô\‹ùÿ[õõ›öYùÇà
+Hö\ú››]Ÿà\»ô[X\ŸH[ùô\ùY]\[ô[òﬁH8†%\ö]ö[ô»Xô[»ûBàôYö^[X]⁄[ô»ö[ö\⁄Yò\Ÿ\»8†%[ôúõ⁄ŸH[[YYX][KôXÿ]\ŸHú€\8†)àòŸ\»õ›à›\ù⁄]ú€Y\òàÿ]Y⁄ûHH\›Œ»H\ôX›[€àŸà\[ô[òﬁH\»Hö^äBãH
+äòŸÿ\õZ[ó€Z\‹⁄[ôÿ
+äàò[Y\»HY]öX‹»⁄]õ»\ÿXõH]N»
+äòŸÿ\õZ[óŸÿ\€õ›X
+äÇà\õú»][ù»HZ[ã]^Z[€à⁄X[[ô⁄X[õ›ÿ][€»›]\»Bà€»\›X[ÿ]\Ÿ\»
+ÿ]⁄õ›ﬁ[òŸY»ò]\ûHÿ]ô\à€[ô»HàŸ[ú€‹àŸôã⁄X⁄àZŸ\»›]õ›\àY]öX‹»]€òŸH⁄[H›\»›\ùö]ôJKÇãH
+äî\ãY[ô⁄[ùòZ[\ô\»õ›»€»õ›Y⁄ŸÀùÿ\õö[ôÿ
+äã€»^H[ô[à\úõ‹úÀõŸÿà[ôŸ\úõ‹úÿ[ô€›[ù[à\úõ‹àÿ]Y€‹ûKà›[€õHH^Ÿ\[€à
+ò€\‹ à\»ŸŸŸYà8†%ÿ\õZ[à^Ÿ\[€ú»ÿ[àÿ\úûHHô\]Y\›Tì
+HååçãLÀLååàŸ^K[XZ»€\‹ KÇãHHõõ»]Hõ‹éà8†)àò›[[X\ûH\»ŸŸŸY€òŸH\à[]–TìíSëÀàõ›][ôKù]]]\›àôHö\⁄XõH€€Y]⁄\ôH›\à[àH⁄[ÇãHZ\‹⁄[ôÿ\»\ú⁄\›Y[ù»ôÿ\õZ[ó‹€ò\⁄›€»⁄X[
+HÿX⁄YöY] H\»€ô\›à€Àà€ò\⁄›»‹ö][àôYõ‹ôH\»ô[X\ŸH]ôHõ»›X⁄Ÿ^H[ôÿY\»◊XÇÇääï\›Œääà\›ÿ\õZ[ëöY[ÿ
+[⁄^Xô[»[ÿ^\»ô\‹ùY»[\H^[ÿY»YX[Çô]ô\û][ô»Z\‹⁄[ôŒ»
+äùH^X›ò]\ûK\ÿ]ô\àÿ\ŸJäà8†%›\»ô\Ÿ[ùHö]ôHãY\ö]ôYõY]öX‹»XúŸ[ù»ù[^[ÿYô\‹ù»õ›[ô»Z\‹⁄[ôŒ»[ô[àY‹ôY[Y[ù\›[õö[ô¬òŸÿ\õZ[óŸöY[ÿYÿZ[ú›Ÿÿ\õZ[óÿö]ÿ
+K\›ÿ\õZ[ëÿ\õ›X
+⁄[[ù⁄[àõ›[ô»\¬õZ\‹⁄[ôÀò[Y\»HY]öX‹À›]\»Hÿ]\ŸK›^\»Z[à^
+K[ôò\›ÿ\õZ[ëòZ[\ô\‘ôXX⁄\úõ‹úÿ
+õ»ö[ù›\ùö]ô\»[àŸô]⁄Ÿÿ\õZ[òH^Ÿ\[€ÇõÿöôX›]Ÿ[à\»ô]ô\àŸŸŸYHô]\õà€€ùòX›\»
+^Z\‹⁄[ô X[ôHÿY\Çù€\ò]\»ôKXéX€ò\⁄›ö[\ Kà[M‹öY⁄[ò[Ÿÿ\õZ[óÿö]ÿ\›»\‹»[ò⁄[ôŸYù⁄X⁄\»⁄][[€ú›ò]\»H‹ò\\àô\Ÿ\ùôY]»€€ùòX›ÇÇà»»ååçãLÀLçKé8†%€Y[ù\⁄YHTH\úõ‹ú»›‹Y[ô»[àHô]€‹ö»ùX⁄Ÿ]Çääîõ€›ÿ]\ŸNääàòYô\]Y\›
+äú›Xò€\‹Ÿ\»ô]€‹ö—\úõ‹ò
+äà[à]€ã][Y‹ò[KXõ›äô\öYöYY€àåKåLKåNàòYô\]Y\›8°§àô]€‹ö—\úõ‹à8°§à[Y‹ò[Q\úõ‹ò
+Kà€óŸ\úõ‹ò\›Yò\⁄[ú›[òŸJ\úã
+ô]€‹ö—\úõ‹ã[YY›]
+JXö\ú›€»]ô\ûHúõ€HHõ›TH8†%õX[õ‹õYYX\ö›\Y\‹ÿYŸK]€À[€ôÀ[ùò[Y\ò[Y]\úÀòYö[H8†%ÿ\»ŸŸŸY\¬ò€ô]Hò[ú⁄Y[ùàòYô\]Y\›à8†)ò]–TìíSë»[ô€›[ùY[ô\àô]€‹öÿà]ùX⁄Ÿ]ôXY¬ò\»[XöY[ù€ôHõZ⁄[ô\‹»[ô\»öY⁄HY€õ‹ôYÇÇääï\»\»›»ååçãLÀLçKçI‹»ÿ]Y]X\ö›\ùY»›^YY[ùö\⁄XõKääàúõ€H[Z[I‹¬ò\úõ‹úÀõŸÿÇÇòåŒåŒåH’–TìíSë◊H€ô]Hò[ú⁄Y[ùàòYô\]Y\›àÿ[â›\úŸH[ù]Y\Œàããàû]HŸôúŸ]åŒçéçà’–TìíSë◊H€ô]Hò[ú⁄Y[ùàòYô\]Y\›àÿ[â›\úŸH[ù]Y\Œàããàû]HŸôúŸ]òÇï€»ô\õŸX›[€ú»ŸàH€ŸHYôX›ô\Ÿ[ùY»H›€ô\à[àÿ]Y]\»ô]€‹öŒàÿÇêHYX[ú»
+ùŸHŸ[ù€€Y][ô»[ùò[Y
+é»]\»õ›[ô»»»⁄]H€€õôX›[€ã[ôò€€ôõ][ô»H€»ô[[›ôYH€õH⁄Y€ò[]€›[]ôHò[YYHùYÀÇÇääëö^ääàòYô\]Y\›\»õ›»\›Y
+äòôYõ‹ôJäàô]€‹ö—\úõ‹ò
+X[ô]‹ûH⁄]ô[àBö[ö\ö][òŸJKŸŸŸYöXHŸÀô\úõ‹ò⁄]ÿ\WHòYô\]Y\›8†%€Y[ù\⁄YHYôX›õ›Bõô]€‹öÿ[ô€›[ùY[à]»›€àòY‹ô\]Y\›ÿ]Y€‹ûH€»]\X\ú»\»H\›[ò›[ôBö[àÿ]Y]àôX[ô]€‹ö—\úõ‹òÿ[YY›]ôZ]ö[›\à\»[ò⁄[ôŸYÇÇê€€ú⁄Y\ôY[ôXÿŸ\YàHô]»õ›TH»\ôHŸ[ZKXô[öY€à
+Y\‹ÿYŸH\»õ›[ŸYöYYò]Y\ûH\»€»€
+Kà‹ŸH⁄[õ›»Ÿ»]Tîì‘ãàYù[ôö[\ôYò]\à[ÇúôKY[\]ô[H›\ô\‹ŸY8†%Yà€ôH⁄›‹»\[àòX›XŸH]\»H€ôK[[ôH›Xú›ö[ô»ö[\ãù⁄\ôX\»›Y\‹⁄[ô»]H\›õ›»ö\⁄‹»ôKZY[ô»HôX[YôX›ÇÇääê[€»[à\»ô[X\ŸJäà
+Yô\úôYúõ€Hç»»]õ⁄YHôY\ﬁHõ‹àH€€[Y[ù
+NàBò€€ó‹⁄]›€òÿ‹›ö[ô»›]Y]H›\ù\]Y]⁄]õ»ôXŸY[ô»‹òXŸYù[\›‹[ôBõYX[ú»“Q““Sà]\»ò[ŸH8†%›\]X[ô‹ô\›\ù^]öXH‹ÿ⁄Y[WŸ^]
+
+X8°§Çò‹ÀóŸ^]
+
+Xû\\‹⁄[ô»‹›‹⁄]›€ò€»[à‹ô[ò\ûH\ﬁHŸ‹»õ»‹òXŸYù[›‹ôZ]\ãà€‹úôX›Y[àXŸH»⁄[ù]H^]€ŸH[ú›XY
+€X[ãLÕÿ“Q““SòMÿ[òÿ]Y⁄“Q’TìJKX]⁄[ô»H”UQKõY[ôô\ÀYXùYŸ⁄[ôÀ\^Xõ€⁄ÿö^\»XYBò[€ô‹⁄YH]àôXY[ô»]€€[Y[ù]\ò[H€‹›€»XùYŸ⁄[ô»õ›[ô»€àHõ›]YöYô\õ»[ô^X›Yô\›\ùÀÇÇääï\›Œääà\›òYô\]Y\›õ›ô]€‹öÿ8†%\‹Ÿ\ù»Hà›Xò€\‹»ô[][€ú⁄\]Ÿ[à
+€»Bôù]\ôHàö^›\ôòXŸ\»\»H⁄Y€ò[ò]\à[à⁄[[ùHXZ⁄[ô»H›X\ôôY[ô[ù
+Kù]HòYô\]Y\›[ò‹ô[Y[ù»òY‹ô\]Y\›[ô
+äõõ›
+äàô]€‹öÿ]Ÿ[ùZ[ôBòô]€‹ö—\úõ‹òÿ[YY›]›[€›[ù\»ô]€‹öÿ]H\⁄[ú›[òŸH‹ô\ö[ô»\¬ô^X⁄][à€›\òŸK[ô]Húò[ò⁄Ÿ‹»]Tîì‘àò]\à[à–TìíSëÀàö]ô[àõ›Y⁄ò€óŸ\úõ‹ò]Ÿ[ãõ›H€›\òŸH‹ô\ÇÇà»»ååçãLÀLçKç»8†%ÿ]Y]ÿ\»úõ⁄Ÿ[àûH]»›€à›]]
+ôY‹ô\‹⁄[€à[àçKÀçäBÇääîõ€›ÿ]\ŸNääà]Y]ÿ€YŸ[ô»⁄]\úŸW€[ŸOHìX\öŸ›€àò[ôååçãLÀLçKçKÀçàYYõ[ô\»][ù\ú€]H
+äò\òö]ò\ûHXY€õ‹›X»›ö[ô‹ äà[ù»]ÇãHÿ\ôöY[ò[Y\»úõ€HHô]»ÿ\ôò[ôH8†%ﬁ\›[W‹õ€\Y\◊Ÿ^[\Xà‹›⁄\›‹ûW⁄[ú›ùX›[€úÿ[€€ùZ[àÿ⁄X⁄‹[ú»][X‹»[à[Y‹ò[I‹»YÿXﬁBàX\öŸ›€é¬ãHõ€\õÿ⁄»XY[ô‹»úõ€HHõ€\ò‹Xõÿ⁄‹»[ôH8†%KôÀÇà’ì“P—TíSïëT—U8†%SQ‘êSH“Së”H”’X[à[õX]⁄Yÿ]YÿXﬁHX\öŸ›€Çà\úŸ\»\»H›\ùŸàH[öŒ¬ãH[ôôKY^\›[ô»ù]ò\àò\ô\ã€€ôöY»ÿ\õö[ô‹»ò[Z[ô»[ùàò\ú»
+’ëT‘◊’ëT“”
+KÇÇï[Y‹ò[HôZôX›»H⁄€HY\‹ÿYŸH⁄]àÿ[â›\úŸH[ù]Y\ÿ€»õ›[ô»Ÿ[ôÀÇëúõ€HH›€ô\â‹»⁄YHÿ]Y]⁄[\HŸ\»õ›[ô»8†%
+äùH€€[X[ô⁄‹ŸH[ù\ôH\ú‹ŸH\¬ôXY€õ‹⁄[ô»Hõ›ôXÿ[YHH[ô»]⁄[[ùHòZ[Y
+äã€à]ô\ûH[ú›[òŸHù[õö[ô»çBõ‹àçãõ›ù\›H€ôH⁄\ôH]ÿ\»õ›XŸYàô\öYöYYûHô[ô\ö[ô»[Z[I‹»ôX[]Y]ú^[ÿY[ô€›[ù[ô»HY]X⁄\òX›\úŒàôYHŸàHYY[ô\»\ôH[ô]öYX[Bù[òò[[òŸYÇÇääëö^ääàÿ]Y]õ›»Ÿ[ô»
+äúZ[à^
+äãàH€õHX\öŸ›€à]]ô\à\ŸYÿ\»Hõ€ò
+îŸ[ãP]Y]
+òXY\ã⁄X⁄\»õ›€‹ùHòZ[\ôH[ŸH⁄\ôHHXY€õ‹›X»\¬ù[ã\Ÿ[ôXõHôXÿ]\ŸHŸà⁄]]õ›[ôà\ÿÿ\[ô»ÿ\»H[\õò]]ôH[ôÿ\»ôZôX›YàBúŸ]Ÿà[ù\ú€]Yò[Y\»\»‹[ãY[ôY
+öY[ò[Y\ÀXY[ô‹Àö[H]À[Ÿ[YÀô^Ÿ\[€à€\‹»ò[Y\Àù]\ôHY][€ú K€»\ÿÿ\[ô»€›[ôYY»ôHô[Y[Xô\ôYõ‹ô]ô\Çò]]ô\ûHô]»ÿ[⁄]K⁄[HZ[à^ÿ[õõ›ôY‹ô\‹ÀÇÇääìõ›YôôX›Y[ô⁄NääàŸ\úõ‹úÿô]ô\àŸ]H\úŸW€[ŸXàŸõY]‹ò\»]»XõH[ÇòHô[òŸK⁄\ôHÿ[ôÿ\ôH]\ò[[ô€õHÿ\úöY\»ô\ú⁄[€ã›\[YKŸ\úõ‹à€›[ùÀÇêõ›Ÿ\ôH⁄X⁄ŸYò]\à[à\‹›[YYÇÇääë]ò[
+»\›Àääàô]»]Y]\Z[ã]^]ò[
+äòúôXZÀ]\›YôYY‹ôY[ääà8†%[ôHö\ú›ùô\ú⁄[€àŸà]ÿ\»]Ÿ[àúõ⁄Ÿ[éàHZ[à]⁄»ò[ôŸBò◊ò\ﬁ[ò»Yà]Y]ÿ€YÀ◊ò\ﬁ[ò»Yàÿ€€\Ÿ\»»H⁄[ô€H[ôKôXÿ]\ŸHH‹[ö[ô¬õ[ôH[€»X]⁄\»H[ô]\õã€»H⁄X⁄»€›[ô]ô\àòZ[àô\XŸY⁄]BôõYÀXò\ŸYÿÿ[à]⁄⁄\»€€[Y[ù[ô\»
+Hö^	‹»›€à€€[Y[ùôXŸ\‹ÿ\ö[HY[ù[€ú¬ò\úŸW€[ŸOHìX\öŸ›€àò»^Z[àHò[äKà€€ôö\õYY€àHö^Yö[H[ôH€àH€‹Bù⁄]\úŸW€[ŸXôKZ[öôX›Yà\›]Y]\‘Z[ï^[ú»Hÿ[YH€€ùòX›[à]\›ö[ò€Y[ô»]Hÿ\ôYöY[ò[Y\»ôX[H»€€ùZ[à[ô\úÿ€‹ô\»8†%€»Hù]\ôHôXY\Çòÿ[â›Z\›ZŸHHZ[ã]^ô\]Z\ô[Y[ùõ‹à€‹€Y]X»ôYô\ô[òŸKÇÇääï⁄H[à]ò[õ‹àHö\ú›ÿÿ›\úô[òŸJäà
+H\›X[ò\à\»⁄XŸJNàHòZ[\ôH\»[ùö\⁄XõBö[à€ŸHô]öY]»[ô[à]ô\ûHÿÿ[\›õŸXŸ\»õ»\Ÿ\ã]ö\⁄XõH\úõ‹ã[ô\ÿXõ\»BôõY]	‹»ö[X\ûHXY€õ‹›XÀàHÿ[YH⁄\H€›[ôX›\àH[€Y[ù[û[€ôHY»Hõ‹õX]Yõ[ôH»ÿ]Y]ÇÇà»»ååçãLÀLçKçà8†%Hô\Ÿ]‹]ÿ\‹»ö\ú›
+
+»ò[òX⁄»Y\äBÇääê€€ù[ù\»€ôH€X[õ›úH\ô[ö[ôÀääàååçãLÀLçKçH⁄\YH^Y\ö[ô¬õYX⁄[ö\€N»\»ÿ\ùô\»HX›X[^Y\ú»[ô[›ô\»
+äêÿ\‹»[€ôJäà€ù»[Kàô\Ÿ]ùö\»
+äù[ò⁄[ôŸY
+äã€»H›\àö]ôHõ›»\ôHû]KZY[ùXÿ[H[òYôôX›Y[ù[Z\Çòô[ùò‹»[ãÇÇääï⁄]H‹]ô]ôX[Yääà–“TêP’TàUUSïP“UWX
+ãŒà⁄»8†%H\ôŸ\›ŸX›[€Çö[àHö[JH\»€»[úô[]YõŸY\»Ÿà^€€òÿ][ò]Y[ô\à€ôHXY[ôŒÇãHçL⁄»ŸàŸ[ùZ[ô[H[ö]ô\úÿ[›ZY[òŸNà]]\›X»⁄\òX›\úÀÿ⁄Y[ù\›»[ôàõŸô\‹⁄[€ò[»ô[ô\ôY\»ù[[‹N»X⁄öXÿ[õÿÿXù[\ûHô[€ô‹»»H€‹öÀõ›Bà[ù\ö[‹ãÇãHåKL⁄»ŸàHXY›ôH€€ù[ù›ZYH
+»^X⁄]€€ù[ù[Ÿ[H8†%[ò]€ZXÿ[àŸ^]‹ö][ô»YX⁄[öX‹ÀX›[€ã\ôXX›[€à⁄Z[úÀ€‹öŸY^[\\ÀHÿŸ[ôK\]X[]H⁄X⁄€\›ÇÇî€»
+äêÿ\‹»8†%H]ô[‹Y[ù[Y]‹à8†%ÿ\»ÿ\úûZ[ô»åKL⁄Ÿ[ú»Ÿà^X⁄]ÿŸ[ôK]‹ö][ô¬õYX⁄[öX‹»€à]ô\ûHY\‹ÿYŸKääàHZ\€XY[ô»XY[ô»\»^X›H⁄H]›^YY[ùö\⁄XõNÇùHÿ[YHòZ[\ôH[ŸH\»HUêP’S”àïSXZ\€Xô[€‹úôX›Y[àååçãLÀLçKçKàBúŸX›[€à\»‹]]H»»»XY›ôH€€ù[ù›ZYXõ›[ô\ûN»H[ö]ô\úÿ[\ùŸY\¬ùHXY[ô»[ô€Ÿ\»»€‹ôKÇÇääì^Y\ú»‹ôX]Y
+äà
+\ù][€ôYõŸ‹ò[[X]Xÿ[K€»^\»ô\Ÿ\ùôYû]KYõ‹ãXû]JNÇÇü^Y\à⁄»€€ù[ù»üKK_KK_KK_üô\Ÿ]X€‹ôKùMçàõ⁄XŸ\ö[ùö[‹ö]H‹ô\ãõ⁄XŸK\\›[ZX»‹ö^õ€ã[ùK\€‹⁄\òX›\àYŸ[òﬁK]][ùX⁄]H
+[ö]ô\úÿ[\ù
+K[ùKYX⁄À^[]ô\ûKô\Z\ãŸ[ãX⁄X⁄»üô\Ÿ]\úùKéò\úò][€ãî»X[òYŸ[Y[ùÿŸ[ôH€€ù[ùZ]KÿŸ[ôHö]Hüô\Ÿ]Y^X⁄]ùKLÃHXY›ôH›ZYH
+»^X⁄]€€ù[ù[Ÿ[Hüô\Ÿ]\›\Yù»‘’TQSí“Së◊X8†%€›\Y»’T“SïSïüô\Ÿ]X€‹Ÿ[ô\‹ÀùÃå»‘ëSUS”î“T’Q—WX8†%€›\Y»”‘—SëT‘◊—SêPìQ⁄X⁄
+äôYò][»»
+äàÇïô\öYöYYûHôX€€ú›ùX›[€éà]ô\ûHŸX›[€à[ô»[à^X›H€ôH^Y\ã[ôH][\Ÿ]ŸÇõõ€ã]⁄]\‹XŸH⁄\òX›\ú»X‹õ‹‹»H^Y\ú»\]X[»H‹öY⁄[ò[ô\Ÿ]ù8†%õ»^õ‹›õ€ôH\Xÿ]Y
+Là⁄»Ÿà^Y\ú»ú»L»‹öY⁄[ò[H[HôZ[ô»õ⁄[Çù⁄]\‹XŸH[àH\›[X]‹äKÇÇääìYX\›\ôYääÇü[ú›[òŸHŸ^H^Y\ôY^Y\ú»üKK_KK_KK_KK_ü
+äòÿ\‹ äàLKÕ»
+äçÀLääà
+8¢$åÀLÕK8¢$åÕâJH€‹ôH
+»›\Yüù[\»MçHMNH
+8¢$åÃçäH€‹ôH
+»ú
+»^X⁄]
+»›\YÇíù[\…‹»8¢$åÃçà\»H‘ëSUS”î“T’Q—WXŸX›[€à]ÿ\»XYŸZY⁄€à[⁄^õ›ÀÇêÿ\‹»⁄Y»H^X⁄][Ÿ[KHÿŸ[ôHXX⁄[ô\ûK[ô€‹Ÿ[ô\‹ÀÇÇääòõ›úH⁄[ôŸH8†%Hò[òX⁄»Y\ãääàúÀ\ﬁ[òÀú⁄ôXY»ëT—U—íSTÿúõ€HBö[ú›[òŸHô[ùò»€õ›»⁄X⁄^Y\ú»»[€»Hô[ùòY]ôXŸ\‹ÿ\ö[HôXŸY\»Bôö[H\úö]ö[ôÀàYàõ›[ô»ô\€€ôYHô]ö[›\»€ŸHõ‹Y›òZY⁄»HåçL]⁄Ÿ[ÇòùZ[Z[à—QêUS’VSë◊‘’SX8†%⁄[[ùH›ö\[ô»›\ÿ[ô»Ÿà⁄Ÿ[ú»Ÿà[ôYõ⁄XŸBúù[\À⁄X⁄ô\Ÿ[ù»\»H[Ÿ[ôY‹ô\‹⁄[€àò]\à[àH\ﬁH\úõ‹ãàHY\à\»õ›¬ääõò[YY^Y\ú»8°§àH⁄\ôYô\Ÿ]ù8°§àùZ[Z[ääã⁄]Hÿ\õö[ô»]XX⁄ù[ôÀÇïô\öYöYYà⁄]ô[ùòò[Z[ô»^Y\ú»]\ô[â›€à\⁄»Y]ÿ\‹»ô\€€ô\»¬òô\Ÿ]ù
+ò[òX⁄ X]LKÕ»⁄»8†%Y[ùXÿ[»Ÿ^H8†%[ôŸ‹»ôYHXY€õ‹ÿXõBùÿ\õö[ô‹ÀÇÇë^òX›Y\»\ôH‹ô\€€ôW‹ô\Ÿ]€^Y\ú ò[Y\ÀôXYYò][›^ÿ\õäX⁄]HôXY\Çö[öôX›Y€»HY\à\»\›XõH⁄]›]Hö[\ﬁ\›[KàLH\›»[Çò\›ô\€€ôTô\Ÿ]^Y\úÿ[ò€Y[ô»]HôXY\à^Ÿ\[€â‹»Y\‹ÿYŸHô]ô\àôXX⁄\»Bùÿ\õö[ô»
+]Àÿ‹ôY[ùX[»›^H›]Ÿà\úõ‹úÀõŸÿ\àHååçãLÀLååà€\‹ H[ô]òHô\€€òXõHô\Ÿ]ù\›Y\»Hõ‹õX[^Y\à\»õ›ô[Xô[Y\»Hò[òX⁄»ù[ôÀÇÇääìõ›€ôNääàH›\àö]ôHõ›»›^H€àH[€õ€]X»ô\Ÿ]ùà[›ö[ô»[H\»Bõ€ôK[[ôHô[ùò⁄[ôŸHXX⁄
+ëT—U—íSTœ\ô\Ÿ]X€‹ôKùô\Ÿ]\úùô\Ÿ]Y^X⁄]ùô\Ÿ]\›\Yù
+Bõ€òŸHÿ\‹»\»õ›ô[àH‹][à\ŸKÇÇà»»ååçãLÀLçKçH8†%^Y\ôYô\Ÿ]À[ô[à€ô\›ÿ\ôúôXZŸ›€à
+ëT—U—íST BÇääê€‹úôX›[€à»ååçãLÀLçKå…‹»ö[ô[ô‹»8†%ôXY\»ôYõ‹ôHù\›[ô»][ùûI‹»ù[Xô\úÀääÇï]ô[X\ŸHô\‹ùYù[\»ÿ\úûZ[ô»òHÃMK]⁄Ÿ[àUêP’S”àïSXõÿ⁄»ãà
+äï‹õ€ôÀääÇò–UêP’S”àïSWX\»
+äé⁄Ÿ[ú äãàHÃMHÿ\»H[ù\ôH
+õY\ôŸY
+àÿ\ôõÿ⁄»8†%òÿYÿ⁄\òX›\òõ⁄[ú»ﬁ\›[W‹õ€\
+»õ⁄[\ú]H
+»\ÿ‹ö\[€ò
+KÕåäH
+»ÿŸ[ò\ö[ÿäJH
+»Y\◊Ÿ^[\X
+K
+H[ù»€ôHﬁ\›[HY\‹ÿYŸK[ô‹õ€\›‹ÿõÿ⁄‹ÿXô[YôXX⁄õÿ⁄»ûH]»
+äôö\ú›[ôJäãàù[\…‹»ﬁ\›[W‹õ€\‹[ú»⁄]–UêP’S”àïSWXú€»[à]⁄Ÿ[àŸX›[€àÿ\»‹ôY]Y⁄]H⁄€Hÿ\ôàù[\…‹»ﬁ\›[W‹õ€\\»KÕÕBù⁄Ÿ[ú»X‹õ‹‹»Ÿ]ô[àŸX›[€úÀH\ôŸ\›ôZ[ô»‘P—H””ïì”X]ÕÇÇï]ÿ\»HYôX›[àHXY€õ‹›X»⁄\Y€ôHô[X\ŸHX\õY\ã[ô]Ÿ[ùHôX[ö[ùô\›Yÿ][€à›€àH‹õ€ô»]
+õ[›ôHUêP’S”àïSX»H‹ôXõ€⁄»»›]\àõ€‹ÇòûHH\ôà8†%]€›[]ôHÿ]ôY⁄Ÿ[ú Kàõ›[ô\»\ôHö^Y\ôNÇãH‹õ€\›‹ÿõÿ⁄‹ÿ⁄]ô\»Y\‹ÿYŸ\÷ÃXHö^YXô[
+ÿ\ôÇàﬁ\›[W‹õ€\
+Ÿ\ÿ‹ö\[€ä¯†)äX[ú›XYŸà[ö\ö][ô»⁄]]ô\àHÿ\ô‹[ú»⁄]ÇãHÿYÿ⁄\òX›\òõ›»ôX€‹ô»HôX[\ãYöY[úôXZŸ›€à
+ÿÿ\ôŸöY[›⁄Ÿ[úÿ
+H
+ù⁄\ôHBàöY[»›[^\›
+ãôYõ‹ôHHY\ôŸH\›õﬁ\»H›ùX›\ôKàÿ]Y]ÿZ[ú»Hÿ\ôòà[ôHŸ\\ò][ô»[ÿ^\À[€àöY[»úõ€HH‹ôXõ€⁄»
+⁄X⁄€õH€‹›»€àHöYŸŸ\äK\¬àHõ›\àöYŸŸ\›öY[»ûHò[YKÇÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\»
+HX›X[ôX]\ôJNääà€ôH⁄\ôYô\Ÿ]ù\¬éL»⁄Ÿ[ú»[öôX›Y€à
+äô]ô\ûHY\‹ÿYŸHõ‹à]ô\ûHõ›
+äã[ôûHŸX›[€à]\»åKÕåù[ö]ô\úÿ[»çãåõ€\^K\ÿŸ[ôHXX⁄[ô\ûH»çÃç»€›\Y»ôX]\ô\»]]ôHZ\à›€Çô[ùàõY‹»
+‘ëSUS”î“T’Q—WX\»Ãå»⁄Ÿ[ú»[ú›ùX›[ô»]ô\ûHõ›Xõ›]ò”‘—SëT‘◊—SêPìQ⁄X⁄
+äôYò][»»
+äà8†%XYŸZY⁄€à[⁄^
+Kàÿ\‹»\»Bô]ô[‹Y[ù[Y]‹à⁄]õ»ÿŸ[ô\»[ôõ»î‹Àÿ\úûZ[ô»çö»⁄Ÿ[ú»ŸàÿŸ[ôK[X[òYŸ[Y[ùö[ú›ùX›[€à⁄Hÿ[õõ›\ŸKàH€‹›\€â›ôX[H⁄Ÿ[ú»8†%]	‹»⁄Y€ò[]À[õ⁄\ŸNàçÃù⁄Ÿ[ú»Ÿà]ôH\ã]\õà€€ù^
+[€Ÿ^Kÿ⁄Y[Kÿ]⁄Y]öX‹Àÿ\Xö[]Y\ HŸ\ôBò€€\][ô»YÿZ[ú›L⁄Ÿ[ú»Ÿà\ôŸ[H[ò\XÿXõHŸ[ô\öX»[ú›ùX›[€ã⁄X⁄\»Búÿ[YHòZ[\ôH[ŸH\»HôXÿ[öX\»ö^Y[àååçãLÀLçKåKÇÇääï⁄]⁄\YääàëT—U—íSTÿ8†%[à‹ô\ôY€€[XK\Ÿ\\ò]Y\›Ÿà^Y\àö[\ÀXX⁄úôXYúõ€HH[ú›[òŸH\ôX›‹ûH[ô[öôX›Y\»
+äö]»›€àﬁ\›[Hõÿ⁄ äà
+€»ÿ]Y]ú⁄›‹»⁄]XX⁄^Y\à€‹›À[ôH^Y\àÿ[àôHYY‹àõ‹Y⁄]›]Y][ô»Bõ[€õ€]
+Kà[úŸ]ò[»òX⁄»»ëT—U—íSX⁄X⁄›[Yò][»»ô\Ÿ]ù€»Bú⁄[ô€K[^Y\à€€ôöY»õŸXŸ\»^X›H€ôHõÿ⁄»\»ôYõ‹ôH[ô
+äùHõY]	‹»\‹Ÿ[XõYõ€\ö\»[ò⁄[ôŸY[ù[[àô[ùò‹»[ääãàHò[YYXù][Z\‹⁄[ô»^Y\à\[ô»Bò–””ëíQ◊’–TìíSë‘ÿ[ùûHò]\à[à⁄[[ùHò[ö\⁄[ô»8†%]ZY]Hõ‹[ô»õ⁄XŸHù[\¬úôXY»\»H[Ÿ[ôY‹ô\‹⁄[€ãõ›H\ﬁH\úõ‹ãàYàõ»^Y\àô\€€ô\»][HùZ[Z[Çò—QêUS’VSë◊‘’SX›[\Y\À[ôHÿ›[Y[ùYõõ»ô\Ÿ]ùàÿ\ŸHŸ\»õ›ùÿ\õãÇÇääë\ﬁH]»XYH^Y\ãX]ÿ\ôH[àHÿ[YH€€[Z]
+äã€»H€€ù[ù‹]ÿ[â›[ã[[ôÇãHﬁ[òÀXÿ\ôÀú⁄€‹Y\»]ô\ûHô\Ÿ]Jãù[àHô\»»]ô\ûH[ú›[òŸH
+XX⁄õ›	‹¬àëT—U—íSTÿX⁄Y\»⁄]]ÿY Kà€ÿú»ÿYô[H⁄[àõ»^Y\ú»^\›Y]ÇãH\ﬁK›úÀ\ﬁ[òÀú⁄ÿ[â›\›Hô[[›H\ôX›‹ûH›ô\àò]»TìÀ€»]\úŸ\»Bà[ú›[òŸI‹»›€àëT—U—íSTÿ[ô[»^X›H‹ŸKàŸ[ã[XZ[ùZ[ö[ô»8†%õ»^Y\à\›à\Xÿ]Y[àHÿ‹ö\àHò[YY^Y\à]»\»
+äôò][€à\ú‹ŸJäéà›\ù[ô»Hõ›à⁄]Z\‹⁄[ô»õ⁄XŸHù[\»\»€‹úŸH[àHòZ[Y\ﬁKÇÇääìYX\›\ôY⁄]Hõ››\H€‹ôK‹úŸôX]\ôH‹]
+äà
+õ›⁄\Y8†%ŸYHô[› NÇü[ú›[òŸHŸ^H^Y\ôY^Y\ú»\ŸYüKK_KK_KK_KK_üÿ\‹»LKÃH
+äçÕN
+äà
+8¢$çM…JH€‹ôHüù[\»MNHMNH€‹ôH
+»ú
+»ôX]\ôHÇíù[\»\»[ò⁄[ôŸY
+òûH\⁄Y€äà8†%⁄H\Ÿ\»]ô\ûH^Y\ã€»\ôH\»õ›[ô»»õ‹àH⁄[Çö\»€€òŸ[ùò]Y^X›H⁄\ôHH⁄\òX›\àŸ\€â›ôYYHõ€\^HXX⁄[ô\ûK⁄X⁄\»Bö€ô\›⁄\HŸà\»⁄[ôŸKÇÇääïH€€ù[ù‹]\»[Xô\ò][Hì’[à\»ô[X\ŸKääàô\Ÿ]ù\»õ⁄XŸKX‹ö]Xÿ[ò[ô[Xô\ò][H[ôY
+ŸYHååçãLÀLNåI‹»[ùKYX⁄»€‹ö K[ô–“TêP’TàUUSïP“UWXò[€ôH\»ãŒà⁄Ÿ[úÀàÿ\ùö[ô»]\\»[à›€ô\ã\ô]öY]ŸY€€ù[ùX⁄\⁄[€ã€ôH^Y\à]Bù[YK\⁄[ô»Hô]»ÿ]Y]ù[Xô\ú»\»H]öY[òŸHò\ŸKà\»ô[X\ŸH⁄\»€õHBõYX⁄[ö\€K[ô\ùûHYò][àì–QPTÀåL»òX⁄‹»H‹]ÇÇääï\›Œääà\›ô\Ÿ]^Y\úÿ
+^Y\ú»ÿYò[YK›^⁄\Kõ⁄[ôYVSë◊‘’SXô\]Z]ò[[òŸKùZ[Z[àò[òX⁄Àõ»‹\ö[›\»ÿ\õö[ô»õ‹àHZ\‹⁄[ô»Yò][òëT—U—íSXòX⁄ÀX€€\]\ã[^Y\à[öôX›[€ã]Y]ô\‹ù[ô K\›ÿ\ôõÿ⁄”Xô[[ôÿäHÿ\ôõÿ⁄»Ÿ]»Hö^YXô[]\àõÿ⁄‹»ŸY\Z\àXY[ô‹À[ôHXô[XZ‹¬õõ»ÿ\ô€€ù[ù
+K\›ÿ\ôöY[⁄Ÿ[úÿ
+úôXZŸ›€àôX€‹ôY[\HöY[»€Z]Y‹ôXõ€⁄¬ùòX⁄ŸYŸ\\ò][K›\ôòXŸY[àÿ]Y]
+Kà€ôHååçãLÀLçKå»\›ÿ\»\]YôXÿ]\ŸBòY\‹ÿYŸ\÷ÃX\»õ›»Xô[Y[Xô\ò][Hò]\à[àûH]»ö\ú›[ôKÇÇà»»ååçãLÀLçKç8†%õ€\ö[[Z[ô»⁄]ô\»\HöY⁄[ô‹»ö\ú›Çääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà›ö[W⁄\›‹ûW›◊ÿùYŸ]€€\]Yòõ›X›YHﬁ\›[W⁄[ôXŸ\»Ÿö[ò[›\Ÿ\üX8†%KôKà
+äô]ô\ûJäàﬁ\›[Hõÿ⁄»ÿ\»^[\[ôõ€õH€€ùô\úÿ][€à\›‹ûHÿ\»õ‹XõKà€»€€úŸ\]Y[òŸ\Àõ›[[€ú›ò]YûBô^\ò⁄\⁄[ô»Hù[ò›[€àò]\à[àôXY[ô»]ÇÇåKà
+äïHö[‹ö]Hÿ\»[ùô\ùYääà€àHôX[\‹Ÿ[XõYõ€\]HMK]⁄Ÿ[àùYŸ]]àŸ\KŒHﬁ\›[Hõÿ⁄‹»[ôõ‹YLÀÃå€€ùô\úÿ][€à\õúÀà]€›[[]HHﬁô[Çà\õú»Ÿà]ôH€€ùô\úÿ][€à»ô\Ÿ\ùôHHöYŸŸ\ôY‹ôXõ€⁄»[ùûH‹àHò[ô€[Hÿ[\Yà\›Ÿàÿÿ[ô\›]\ò[ù»8†%€€ù^H⁄\òX›\à[[€ú›òXõHŸ\»õ›ôYY»€Bà€€ùô\úÿ][€ãÇåãà
+äïHùYŸ]ÿ\»[ô[ôõ‹òŸXXõH[ô⁄[[ùXõ›]]ääàôXÿ]\ŸHHõ›X›YŸ]€›[à^ŸYYHùYŸ]€à]»›€ãH€‹òZ[ôY]ô\ûHõ‹XõHY\‹ÿYŸH[ôô]\õôYà›ô\àùYŸ][û]ÿ^Kà⁄]HM]⁄Ÿ[àﬁ\›[H›X⁄»[ôHùYŸ]ŸààŸàà\›‹ûHY\‹ÿYŸ\»Ÿ\õ€\›[MÀŸŸŸY\»H›XÿŸ\‹Àà
+ååçãLÀLçKå»XYBà]ÿ\ŸHŸ»H–TìíSëŒ»\»ô[X\ŸHXZŸ\»]ò\ôKäBÇääï⁄]⁄\Y
+äà8†%›ö[W⁄\›‹ûW›◊ÿùYŸ]8°§à
+äò›ö[W‹õ€\›◊ÿùYŸ]
+äãõ›»Y\ôYÇåKà‹[€ò[ﬁ\›[Hõÿ⁄‹À
+äõ\ôŸ\›ö\ú›
+äà
+ô]Ÿ\›\›[ò›õÿ⁄‹»‹›\à⁄Ÿ[àúôYY
+N¬åãà\›‹ûH€\à[à—QT‘ëP—Sï€\›ö\ú›¬åÀà\›ô\€‹ù8†%\ô[›»—QT‘ëP—Sï€\›ö\ú›
+HY‹òYYõ€\]ö]»ôX]¬àH\ô€€ù^òZ[\ôJN¬çà›[›ô\à8°§à–TìíSë»
+»õ€\ÿùYŸ]\úõ‹ã\»ôYõ‹ôKÇÇïHö[ò[\Ÿ\àY\‹ÿYŸH[ô]ô\ûH[õX\öŸYﬁ\›[Hõÿ⁄»\ôHô]ô\àõ‹YÇÇääìX\ö⁄[ô»\»‹Z[à[ôòZ[»ÿYôKääàHõÿ⁄»\»õ‹XõH€õHYàùZ[⁄]Hô]¬ò‹ﬁ\◊€‹
+
+X[\ã⁄X⁄Y‹»]›Y\àH’QTó”‘S”êS»‹›ö\›Y\ú 
+Xô[[›ô\»Bö[ù\õò[Ÿ^HôYõ‹ôHH\›ôXX⁄\»HTH
+ÿ[YHôX\€€à\›‹ûI‹»ÿ\»õ‹Y⁄[Çò€‹YY[ù»Hõ€\
+KàŸ]ô[àõÿ⁄‹»\ôHX\öŸYà»ô[]ò[ùòX⁄Ÿ‹õ›[ô
+‹ôJKò»ô[]ò[ùY[[‹öY\ÿ»[ú⁄YHõ⁄Ÿ\ÿ»ÿÿ[XŸ\ÿ»‹[àôXYÿò»⁄]	‹»€⁄[ô»€àŸ^X[ôHôXŸ[ù\]Y\›[€ú»\›à]ô\û][ô»[ŸH8†%Hÿ\ôBúô\Ÿ]ÿ\Xö[]Y\À‹›Z\›‹ûH[ú›ùX›[€úÀ[€ŸH[ö]X]]ôHõ›H8†%›^\¬úõ›X›Y
+äòûHYò][
+äã€»Hô]€HYYõÿ⁄À‹à€ôH⁄‹ŸHXY[ô»€€Y[€ôHô]‹ö]\Àòÿ[õõ›⁄[[ùHôX€€YHõ‹XõKàHôZôX›Y[\õò]]ôHÿ\»€\‹⁄YûZ[ô»ûHXY[ô¬ú›ö[ô»]ö[H[YK⁄X⁄ôX€\‹⁄YöY\»Hõÿ⁄»H[€Y[ù]»€‹ô[ô»⁄[ôŸ\ÀÇÇääìYX\›\ôYYôôX›
+äà
+ö^XK‹[]Y⁄]ôXYÀ⁄õ⁄Ÿ\À‹ôXŸ[ù\]Y\›[€úÀå\õúÀåLÀH⁄Ÿ[ú»[ùö[[YY
+Nà]HLãùYŸ]HY\ôYö[[Y\àõ‹»à‹[€ò[õÿ⁄‹¬ò[ôŸY\»
+äåNÃå
+äà\õúÀà
+äí€ô\›[Z]ääàHô[ôYö]\»õ‹‹ù[€ò[»›»]X⁄õ‹[€ò[€€ù^\»]ôKàõ‹àHÿ\ôZX]ûH[ú›[òŸHZŸHù[\»8†%MM»⁄Ÿ[ú»Ÿàﬁ\›[Bú›X⁄»]\»[[‹›[ù\ô[H
+úõ›X›Y
+à
+ô\Ÿ]L»
+»ÿ\ôKåç
+H8†%\ôH\»]Bõ‹[€ò[€€ù^»⁄]ôH\[ôHùYŸ]ô[›»åMçZ»›[€‹›»€€ùô\úÿ][€ãàH€õBúôX[]ô\à\ôH\»ôYX⁄[ô»Hõ›X›Y€€ù[ù]Ÿ[ã⁄X⁄\»H€€ù[ùX⁄\⁄[€ÇäŸYHHõ€\ò‹Xõÿ⁄‹»[ôHYY[àååçãLÀLçKå Kõ›Hö[[Z[ô»€ôKà\¬úô[X\ŸHŸ\»õ›€Z[H»ö^]ÿ\ŸKÇÇò””ïV’“—Só–ïQ—U›[Yò][»»
+äå€Ÿôääà8†%õ›[ô»⁄[ôŸ\»õ‹àHõY][ù[ö]\»[Xô\ò][HŸ][ôô[ùãô^[\Xõ›»ÿ^\»»Ÿ]]úõ€HHÿ]Y]ù[Xô\ú¬úò]\à[àûH›Y\‹⁄[ôÀÇÇääî\ôH[\ú»
+»\›Œääà‹ﬁ\◊€‹‹›ö\›Y\úÿàçHô]»\›»X‹õ‹‹»\›ﬁ\”‹ò\››ö\Y\úÿ\›Y\ôYö[S‹ô\ò
+‹[€ò[XôYõ‹ôKZ\›‹ûK\ôŸ\›[‹[€ò[Yö\ú›õ€\›Z\›‹ûKYö\ú›⁄]H›\ùö]õ‹ú»õ›ô[à€€ùY›[›\»[ôô]Ÿ\›Y[ô[ôÀ\›\ô\€‹ùô\ö[ò[]\Ÿ\à›\ùö]ò[õ›X›YXõÿ⁄»›\ùö]ò[X\õH›‹[ôö]XõHÿ\õö[ô H[ôò\›‹[€ò[õÿ⁄‹–\ôSX\öŸY
+HŸ]ô[àõÿ⁄‹»ÿ\úûHHX\öŸ\é»‘’“T’‘ñW‘êUÿ[ôòVSë◊‘’SX[Xô\ò][H»õ›
+KàHôKY^\›[ô»\›ö[Tõ€\–ùYŸ]ÿ\Ÿ\»\‹¬ù[ò⁄[ôŸYYù\àHô[ò[YH8†%[õX\öŸYõÿ⁄‹»ôZ]ôH^X›H\»ôYõ‹ôKÇÇà»»ååçãLÀLçKå»8†%YX\›\ôHH\‹Ÿ[XõYõ€\
+ì”T‘’U BÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàH]Y\›[€àÿ[YH\Xõ›]⁄]\à\ôŸH⁄\òX›\Çòÿ\ô»Ÿ\ôH›\ùö[ô»›\àôX]\ô\»Ÿàõ€\][ù[€ã[ô
+äõõ›[ô»[àH€ŸXò\ŸBò€›[[ú›Ÿ\à]
+äãà€W‹›]÷»ù⁄◊⁄[àóXXÿ›[][]\»HZ[Hù[õö[ô»›[HX‹õ‹‹»]ô\ûHBòÿ[
+⁄]›[[X\ûK[ò[\⁄\ÀôXX›[€äK€»]ÿ[õõ›ô\‹ùH⁄^ôHŸàH⁄[ô€Bò\‹Ÿ[XõYõ€\]»X^[][K‹à⁄X⁄õÿ⁄»õ›ôH]à\ôH\»õ»€€ù^[›ô\ôõ›¬ô]X›[€àZ]\ãà[ú›ù[Y[ù[ô»ö\ú›\»\»ô\…‹»›€àõ›ÿ€€
+õ‹\]YH\úõ‹à8°§Çö[ú›ù[Y[ùö\ú›äH[ô]X⁄Y\»⁄]\àHõ€›À]\ö[[Y\à€‹ö»\»\ôŸ[ù‹Çù[‹ô]Xÿ[àõ»ö[[Z[ô»ôZ]ö[›\à⁄[ôŸ\»\ôKÇÇìYX\›\ôY⁄[HXY€õ‹⁄[ô»
+ôX€‹ôY€»Hô^Ÿ\‹⁄[€àŸ\€â›ôKY\ö]ôH]8†%\›[X]\¬ùöXHŸ\››⁄Ÿ[úÿ⁄\úÀ›⁄Ÿ[ã€à[à[\H[ú›[òŸH⁄]å⁄‹ù\›‹ûHY\‹ÿYŸ\ NÇÇü€›\òŸH⁄Ÿ[ú»€€ô][€ò[»üKK_KK_KK_üô\Ÿ]ù
+⁄\ôYõ⁄XŸ\ö[ù
+H
+äéL äàõ»8†%]ô\ûHY\‹ÿYŸK]ô\ûHõ›üÿ\ô	‹»[ò€€ô][€ò[öY[»KÕ
+ÿ\‹ H8°§àKåç
+ù[\ Hõ»ü‹ôXõ€⁄»8°§àÀNLH
+ù[\ HY\À€õH€àöYŸŸ\àüÿ\Xö[]Y\»»[€Ÿ»[ö]X]]ôH»[ùà»]ÀàçÃ[‹›Hü\›‹ûH
+å⁄‹ù\Ÿ‹ HHõ›[ôYûH”’Sïõ›⁄Ÿ[ú»Çëù[\‹Ÿ[XõYõ€\à
+äòÿ\‹»LKÕH8°§àù[\»MåääãàHXY[ôHö[ô[ô»\»]ääòÿ\ôö[H⁄^ôH\»H€‹àõﬁHõ‹àõ€\€‹›
+äéàù[\…‹»ÿ\ô\»Ké0Â»ÿ\‹…‹»€à\⁄¬òù]\àõ€\\»€õHKåÂ»\ôŸ\ãôXÿ]\ŸH[‹›Ÿà]Lí–à\»‹ôXõ€⁄»
+€€ô][€ò[
+Bò[ôî””à›ùX›\ôKàH\ôŸ\›⁄[ô€H[ôH][Hõ‹à]ô\ûHõ›\»H
+ú⁄\ôY
+àô\Ÿ]8†%çÕ…HŸàÿ\‹…‹»ﬁ\›[H›X⁄ÀNIHŸàù[\…‹Ààù[\…‹»€ôHôX[›]Y\à\»HÃMK]⁄Ÿ[ÇòUêP’S”àïSXõÿ⁄»[ú⁄YH\àÿ\ô⁄X⁄⁄\»[ò€€ô][€ò[H]ô\ûHY\‹ÿYŸKÇÇèà8¶®;Ó#»
+äïHô]ö[›\»Ÿ[ù[òŸH\»‘ì”ë»8†%€‹úôX›Y[àååçãLÀLçKçKääà–UêP’S”àïSWXèà\»
+äé⁄Ÿ[ú äãàHÃMHöY›\ôH\»H[ù\ôH
+õY\ôŸY
+àÿ\ôõÿ⁄»
+ﬁ\›[W‹õ€\
+¬èà\ÿ‹ö\[€à
+»ÿŸ[ò\ö[»
+»Y\◊Ÿ^[\JN»‹õ€\›‹ÿõÿ⁄‹ÿXô[Y]ô\ûHõÿ⁄»ûH]¬èàö\ú›[ôK[ôù[\…‹»ÿ\ô\[ú»»‹[à⁄]]XY[ôÀà»õ›X›€àHÃMBèàù[Xô\ãàYù[àXŸHò]\à[àô]‹ö][à€»HZ\›ZŸK[ô›»HZ\€Xô[YèàXY€õ‹›X»õŸXŸY]›^HY⁄XõKÇÇääï⁄]⁄\Y
+äãôZ[ôì”T‘’Uÿ
+Yò][
+äåHH€ääé»\ÿXõ\»Hõ€⁄⁄ŸY\[ô NÇãH‹ôX€‹ô‹õ€\‹⁄^ôX]H[ôŸà\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ8†%€›[ùù[õö[ô»›[KX^
+⁄]à[Y\›[\[ô⁄]
+K[ôH€ÿ\úŸH\›Ÿ‹ò[Kà€ã[€‹[ô Y\‹ÿYŸ\ KHÿ[YHÿ[¬à›òX⁄◊€W›\ÿYŸX[ôXYHŸ\»\àÿ[à[ã[Y[[‹ûH€õKZŸH‹ôXŸ[ù‹]Y\›[€úÿ»Bàô\›\ùô\Ÿ]»]ò]\à[àY[ô»H›]K\Ÿ\öX[^ò][€à]ÇãH€àHô]»X^[][H][€»ôX€‹ô»HôYH\ôŸ\›ﬁ\›[Hõÿ⁄‹»ûHXY[ôÀ€»ÿ]Y]àÿ^\»
+ù⁄X⁄
+àõÿ⁄»õ›ôHHXZ»[ú›XYŸà€õH]HXZ»\[ôYÇãHÿ]Y]ÿZ[ú»Hõ€\ò[ôH
+]ôÀX^YŸHŸàX^ÿ[\H€›[ù
+KHùX⁄Ÿ]‹ôXYà[ô‹ŸH‹õÿ⁄‹ÀÇÇääï€»ŸŸ⁄[ô»YôX›»ö^Y[à›ö[W⁄\›‹ûW›◊ÿùYŸ]
+äà
+õ›õ›[ôûH^\ò⁄\⁄[ô»Bôù[ò›[€à\ôX›Hò]\à[àûHôXY[ô»]
+NÇãHH€€\][€à[ôHôXYüâY»⁄Ÿ[ú»›ô\àùYŸ]ò⁄[Hö[ù[ô»H
+äôö[ò[›[
+äãàõ›H›ô\òYŸH8†%H›XÿŸ\‹Ÿù[ö[Hô\‹ùY]Ÿ[à\»[à›ô\ú⁄€›àõ›¬àôõ‹Yà\›‹ûH\Ÿ  N»ö[ò[ñ»⁄Ÿ[ú»
+ùYŸ]ñZ HòÇãH
+äïHùYŸ]ÿ\»⁄[[ùH[ô[ôõ‹òŸXXõH[ôÿZYõ›[ôÀääàôXÿ]\ŸHõ›X›YBàﬁ\›[W⁄[ôXŸ\»Ÿö[ò[›\Ÿ\üX^[\»]ô\ûHﬁ\›[Hõÿ⁄À€òŸHHﬁ\›[Hõÿ⁄‹»[€ôBà^ŸYYHùYŸ]Hù[ò›[€à›ö\»H[ù\ôH€€ùô\úÿ][€à[ôô]\õú»›ô\àùYŸ]à[û]ÿ^Kà[[€ú›ò]Y]HM]⁄Ÿ[àﬁ\›[H›X⁄ŒàùYŸ]8°§àŸà\›‹ûBàY\‹ÿYŸ\»Ÿ\õ€\›[MÀŸŸŸY\»›XÿŸ\‹Àà]õ›»[Z]»H–TìíSë»
+€»]àôXX⁄\»\úõ‹úÀõŸÿ[ôŸ\úõ‹úÿ
+H[ô€›[ù»Hõ€\ÿùYŸ]\úõ‹ãÇÇò””ïV’“—Só–ïQ—Uô[XZ[ú»
+äå€Ÿôääà[ôô[ùãô^[\Xõ›»ÿ\õú»YÿZ[ú›Ÿ][ô»]ù[ù[Hö[[Y\â‹»ö[‹ö]H‹ô\à\»ö^Y8†%⁄][ﬁ\›[Hõÿ⁄‹»õ›X›YHùYŸ]òô[›»Hﬁ\›[H›[\›õﬁ\»H€€ùô\úÿ][€à»ô\Ÿ\ùôH‹[€ò[õÿ⁄‹»ZŸHBùöYŸŸ\ôY‹ôXõ€⁄»[ùûKà][ùô\ú⁄[€à\»Hô^ô[X\ŸK[Xô\ò][HŸ\Ÿ\\ò]Bú€»\»€ôH\»\ôHÿúŸ\ùò][€ãÇÇääî\ôH[\ú»
+»\›Œääà€\Ÿ◊›⁄Ÿ[úÿ‹õ€\›⁄Ÿ[ó››[‹õ€\ÿùX⁄Ÿ]ò‹õ€\›‹ÿõÿ⁄‹ÿàô]»\›õ€\⁄Ÿ[ï›[\›õ€\ùX⁄Ÿ]ò\›õ€\‹õÿ⁄‹ÿ\›ôX€‹ôõ€\⁄^ôX\›ö[PùYŸ]ŸŸ⁄[ôÿÇÇà»»ååçãLÀLçKåà8†%ÿ\õZ[àX[ôYY‹ùY€ù»XZ[à
+–TìRSó—ëQQ
+BÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàH›€ô\à\⁄ŸY⁄HHõ›»ô]ô\àúö[ô»\ÿ\õZ[Çô]Kà^Hô]ô\àY[ûKàHÿ\õZ[àX[ôYYÿ\»ùZ[€Çò‹öY⁄[ãÿ€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿ[ô]úò[ò⁄
+äú⁄\ô\»õ»⁄]\›‹ûH⁄]XZ[ò
+äà8†%ò⁄]Y\ôŸKXò\ŸHXZ[à‹öY⁄[ãÿ€]YK‹\⁄]À\ô\ÀM⁄Lôåÿÿô]\õú»[\K[ôôZ]\àúò[ò⁄\¬ò[à[òŸ\›‹àŸàH›\ãà]	‹»HŸ\\ò]H[ôXYŸHõ€›Y]ÕåååŸéHåçãLLMHêYö[\¬ùöXH\ÿYò
+KLK[[ôHõ›úX\››X⁄YåçãLÀL
+H⁄[HXZ[â‹»\»LK»[ô\ÀÇòXZ[òY
+äûô\õ äàôYô\ô[òŸ\»»ÿ\õZ[à[àõ›úXô[ùãô^[\X‹à[ûHÿÀà⁄[òŸH]ô\ûBô\ﬁH]
+›\]Xﬁ[òÀXÿ\ôÀú⁄úÀ\ﬁ[òÀú⁄
+H[»úõ€HXZ[òõ»õ›]ô\àYùHôX]\ôKàõ›Hõ€\X][ù[€àõÿõ[H8†%HZ\‹⁄[ôÀX€ŸHõÿõ[KÇÇêôXÿ]\ŸHH\›‹öY\»\ôH[úô[]Y\»\»H
+äö[ô\‹ùõ›H⁄\úûK\X⁄ äà
+HY\ôŸBù€›[]ôHòYŸŸY[àH⁄€H\ò[[õ›úJKàXX⁄YXŸHÿ\»ô]‹ö][àYÿZ[ú››\úô[ùõXZ[à[ô]»TH›\ôòXŸHôK]ô\öYöYYYÿZ[ú›H[ú›[YXúò\ûNàÿ\õZ[ä[XZ[ú\‹›€‹ô
+X‹⁄][€ò[Ÿ⁄[ä⁄Ÿ[ú›‹ôJX[ôŸ]‹€Y\Ÿ]X»Ÿ]‹›]ÿ¬òŸ]ÿX›]ö]Y\ÿ»Ÿ]‹›ô\‹◊Ÿ]X[€€ôö\õYYô\Ÿ[ùÇÇääï⁄]⁄\Y
+äãôZ[ô–TìRSó—ëQQ
+Yò][
+äåHH€ääé»\ÿXõ\»⁄]›][][ô¬ò‹ôY[ùX[»8†%HôYY\»Y][€ò[H[ô\ù⁄]õ»‹ôY[ùX[À€»[úŸ]›^\»HõÀ[‹
+NÇãH
+äî€ò\⁄›ôYYääà–TìRSó’SQTÿ
+Yò][ŒåÃMéå
+H\»€òŸH]›\ù\[»€Y\àô\›[ô»ã›\ÀõŸHò]\ûK]ô»›ô\‹À[ô\›€‹ö€›][ù»€ôH⁄‹ù[ôKÿX⁄Yà»ôÿ\õZ[ó‹€ò\⁄›[ôôK\ôXYYù\àHô\›\ùà[öôX›Y\»»›»›\Ÿ\üH\»⁄[ô¬à\⁄Xÿ[HŸ^X[ô€»€‹ö»][à⁄]›]]ô\àôX⁄][ô»ù[Xô\úÀà›‹»ôZ[ô¬à[öôX›Y\›–TìRSó”PV–Q—W“’Tîÿ
+N
+H€»⁄Hô]ô\à‹XZ‹»»Y\›\ô^I‹»õŸKÇãH
+äïôYHõÿX›]ôH⁄X⁄ÀZ[ú äãXX⁄⁄]]»›€à\ú⁄\›Y€€€›€à€»Hô\›\ùÿ[â›àôKYö\ôH€ôNà›\›Z[ôYY⁄›ô\‹»
+’ëT‘◊ ò
+KõŸHò]\ûHõ›€YY›]
+êó ò
+K[ôàô\›[ô»àXõ›ôHH\Ÿ\â‹»›€àõ€[ô»YYX[àò\Ÿ[[ôH
+íó ò
+KÇãH
+äò⁄X[⁄X[õ›ÿ‹›ô\‹ÿ
+äà8†%ôY⁄\›\ôY⁄[ô]ô\à‹ôY[ùX[»^\›]ô[à⁄[ÇàH⁄[›⁄]⁄\»Ÿôà‹àHXúò\ûH\»Z\‹⁄[ôÀ€»^Hÿ[à^Z[à
+ù⁄Jà^I‹ôH[ô\ùà
+[à[úôY⁄\›\ôY€€[X[ô[ú›Ÿ\ú»õ›[ôÀ⁄X⁄\»[ôXY€õ‹ÿXõHúõ€HH\Ÿ\à⁄YJKÇàÿ]Y]ÿZ[ôYHX[ôYY
+ÿ\õZ[äX[ôHô\‹ù[ô»Ÿôà»[ô\ù»€ò\⁄››[[ô\‹ÀÇãH
+äìŸ⁄[ãX€€€›€à\ô[ö[ô»ÿ\úöYY›ô\àúõ€HHúò[ò⁄ääàHòZ[YŸ⁄[à\ú⁄\›»Bà–TìRSó”—“Só–”””’”ò
+N HòX⁄€Ÿôà»ôÿ\õZ[óÿ€€€›€òôXÿ]\ŸHÿ\õZ[àò]K[[Z]¬àHŸ⁄[à[ô⁄[ù[ôHô\›\ù€‹›\ù⁄\ŸH[[Y\ú»]àH€Y[ù]úôXZ‹¬à
+õZY\ù[ù[YJà\»õ‹Y
+Ÿõ‹Ÿÿ\õZ[ó‹Ÿ\‹⁄[€ò
+H€»Hô^€ôK[Ÿ‹»[à[ú›XYŸÇàô]ûZ[ô»HXYŸ\‹⁄[€àõ‹ô]ô\ãÇÇääí[ùò\öX[ù»\»YôàY»ÿ]\ŸûJäà
+XX⁄ÿ\»HôX[ö\⁄»\ôJNÇãH
+äàŒõ»ò\ôHõÿ⁄⁄[ô»ÿ[»[à\ﬁ[òŒääàÿ\õZ[ò€€õôX›\»õÿ⁄⁄[ô»ô\]Y\›ÿ[ô\õôX]Çà]ô\ûHÿ[⁄]H€Ÿ\»õ›Y⁄\ﬁ[ò⁄[Àù◊›ôXY»[õôYûHH\›]‹ô\»[õ›\Çà\ﬁ[ò»[ùûH⁄[ùÀÇãH
+äàÃÀõ»ô]»Hÿ[ŒääàH€ò\⁄›\»õ€\€€ù^[ôH⁄X⁄ÀZ[ú»ô]\ŸHBà^\›[ô»Ÿ[ô›öYŸŸ\ôY]àô\õ»€€\][€àÿ[»YY»[õôYûHH\›ÇãH
+äë‘ì’T–“U—T“Q”ãõY0©ÕNääàÿ]⁄Y]öX‹»\ôHö]ò]HNåH›]K€»Hõÿ⁄»\»ÿ]Yà–TìRSó—SêPìQ[ôõ›‹õ›\ÿ[YH\»\Ÿ\ó€õ›\ÿ[ô[ú⁄YHõ⁄Ÿ\Àà[õôYûHH\›8†%à⁄]›]\ÀX[]H€›[ôHò\úò]Y»ö^XH[ôù[\…‹»‹õ›\ôXYÇãH
+äùååçãLÀLååàŸ^K[XZ»€\‹Œääàÿ\õZ[à^Ÿ\[€ú»ÿ[àÿ\úûHHô\]Y\›Tì€»õ»Ÿ¬à[ôH[ù\ú€]\»H^Ÿ\[€à8†%€õH\JJKó◊€ò[YW◊ÿà[õôYûHH\›ÇãH
+äàÃMNääà]ô\ûHù[Y\öX»€õÿà€Ÿ\»õ›Y⁄Ÿ[ùó⁄[ùÿŸ[ùóŸõÿ]»H\»ÿ\õú»[ôò[¬àòX⁄»[ú›XYŸàúöX⁄⁄[ô»H[ú›[òŸKÇãH⁄X⁄ÀZ[ú»€»õ›Y⁄Hÿ[YHõÿX›]ôHÿ]H\»õ›WŸõ€››\⁄õÿò
+]ZY]õYÀ]ÿ^Kà]ZY]›\úÀ\ãX⁄]]ZY]⁄[ô›‹ H[ô
+äò€€ú›[YHH⁄\ôYùYŸHùYŸ]
+äà8†%HX[à⁄X⁄ÀZ[à\»HùYŸH[ô\€â›^[\úõ€H]à^òX›Y\»⁄X[€ùYŸW€⁄ÿÇÇääòÿ\õZ[ò€€õôX›\»[Xô\ò][Hì’[àô\]Z\ô[Y[ùÀùääàõ›\àŸà⁄^[ú›[òŸ\»]ôHõ¬ùÿ]⁄[ôH€ôHô[ùà\»⁄\ôY€»Hô[ùàôXùZ[⁄›[â›[H\[‹›õ›»ô]ô\Çö[\‹ùà]›^\»[à‹[€ò[ûKŸ^Ÿ\[\‹ùÿ›[Y[ùY[àô\]Z\ô[Y[ùÀù[ôòô[ùãô^[\X⁄]H\ãZ[ú›[òŸH\€€[X[ôà‹ôY[ùX[À\Ÿ]Xù][Xúò\ûK[Z\‹⁄[ô»\»õ›ú⁄[[ùà]\[ô»H–””ëíQ◊’–TìíSë‘ÿ[ùûH[ô⁄›‹»\»[ô\ù[àÿ]Y]ÇÇääî\ôH[\ú»
+»\›ŒääàŸÿ\õZ[óÿö]ÿ
+^[ÿY8°§àò\Ÿ\À€»Hÿ\õZ[àöY[ô[ò[YH\¬òÿ]Y⁄ûHH\›ò]\à[àûH⁄[[òŸJK‹›ô\‹◊‹›\›Z[ôY
+⁄⁄\»ÿ\õZ[â‹»LKÀLÇù[õYX\›\òXõHX\öŸ\úŒ»ô]\õú»]ôœSõ€ôXõ‹àõõ»]Hã[Xô\ò][H\›[ò›úõ€HHÿ[Bò]ô\òYŸH]õ›[ô»»
+K‹öóÿò\Ÿ[[ôX
+^€Y\»Ÿ^H€»€ôH[]ò]YôXY[ô»ÿ[â›úòZ\ŸHHò\Ÿ[[ôH]	‹»€€\\ôYYÿZ[ú›
+KàHô]»\›»X‹õ‹‹»\›ÿ\õZ[êö]ÿò\››ô\‹‘›\›Z[ôY\›öêò\Ÿ[[ôX\›ÿ\õZ[ê€€ôöYÿ\›ÿ\õZ[í[ùò\öX[ùÿÇÇääìõ›‹ùYúõ€HHúò[ò⁄
+äà
+›]Ÿàÿ€‹KôX€‹ôY€»]\€â›Z\›ZŸ[àõ‹à[Çõ›ô\ú⁄Y⁄
+Nà][ôXYŸI‹»€ã]\ÀY^Hô[Z[ö\ÿ⁄[ôÀŸôõ[ôHYôH]ô[ùÀY\]ôBù^[ôÀ\›[HZ\úõ‹ö[ôÀX€›\›X◊ŸX\úÀ[ôŸXYÿàŸ]ô\ò[›ô\õ\ôX]\ô\»XZ[à[ôXYBú€€ôYYôô\ô[ùKà€õHHX[ôYYÿ\»ô\]Y\›YÇÇà»»ååçãLÀLçKåH8†%‹X»[ö]X]]ôHôXò[[òŸY]ÿ^Húõ€HôXÿ[
+ì”T–êSSê—JBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà›€ô\ã\ô\‹ùYﬁ[\€Hÿ\»ùHõ›»\ôH€»õÿ›\ŸYõ€àúö[ô⁄[ô»\Y[[‹öY\»[ôõ›\»[ô€â›úö[ô»\[ô‹»»»⁄]›\àôX]\ô\»ãàBòÿ]\ŸH\»õ›ÿ\ô⁄^ôH[ôõ›€€ù^ô\‹›\ôH8†%]	‹»[à
+äò\ﬁ[[Y]ûH[àH\ôX›]ôH^
+äÇõŸàH[öôX›Yõÿ⁄‹ÀàŸàHåMHﬁ\›[Hõÿ⁄‹»\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ\[ôÀ^X›H€¬òÿ\úöYY[à^X⁄][ú›ùX›[€à»òZ\ŸHZ\à€€ù[ù»8†%»[ô‹»[›H€õ›»›\Ÿ\üH\»€⁄[ô¬õ€ò
+ê\⁄»Xõ›]\ŸHò]\ò[HYà€ôHö]»äH[ô»‹[àôXY»ô]ŸY[à[›H€ÿ
+ì][Bú›\ôòXŸHò]\ò[HYà€ôHö]»äKàõ›\ôHôXÿ[àYX[ù⁄[HH]ôKX€€ù^õÿ⁄‹»Ÿ\ôBôZ]\àò\ôH›][Y[ù»
+[ùö\õ€õY[ù€õ›J
+X	‹»[YJ›ŸX]\à€ôK[[ô\ã»”êSQ_I‹»ÿ⁄Y[BùŸ^X
+H‹à
+äòX›]ô[H›\ô\‹ŸY
+äéà»⁄]	‹»€⁄[ô»€àŸ^X[ôY⁄]ô€â›ò\úò]H]õZŸHH\›ãà€»H€õHÿ[ò›[€ôYÿ^Hõ‹àH⁄\òX›\à»‹[àH‹X»ÿ\»»ô[Y[Xô\Çú€€Y][ôÀ[ôHõÿ⁄»\ÿ‹öXö[ô»\àX›X[ô\Ÿ[ù^Hÿ\»H€ôH€»›^H[àBòòX⁄Ÿ‹õ›[ôàH[Ÿ[ÿ\»õ€›⁄[ô»Hõ€\€‹úôX›KÇÇï€»[ô‹»ù[Y›]⁄[HXY€õ‹⁄[ôÀôX€‹ôY€»^H\ô[â›ôKZ[ùô\›Yÿ]YÇãH
+äêÿ\ô⁄^ôH\»õ›HòX›‹ãääà””ïV’“—Só–ïQ—UYò][»»€¬à›ö[W⁄\›‹ûW›◊ÿùYŸ]ô]\õú»[[YYX][H[ôõ›[ô»\»ö[[YY][à]ô[à⁄]BàùYŸ]Ÿ]õ›X›YHﬁ\›[W⁄[ôXŸ\»Ÿö[ò[›\Ÿ\üX8†%]ô\ûH[öôX›Yõÿ⁄»\»^[\à[ô€õH€€ùô\úÿ][€à\›‹ûH\»õ‹YàHL“–àÿ\ô
+ù[\ H€‹›»ôXŸ[ù\õúÀô]ô\àBàôX]\ôHõÿ⁄ÀÇãH\»\»Hõ€›À[€àô[X\ŸHååçãLÀLNåH^X⁄]HYô\úôY
+ì‹ôKY[[‹ûWÿõÿ⁄ÿàòX›À‹›[[X\öY\À\Ÿ\ó€õ›\ÿ[õôY[ô^Kù8†)à[öôX›Y⁄€\ÿ[H
+õ›ò[öŸY
+K€¬à›\ô\‹⁄[€à\ôH\»HYôô\ô[ùYX⁄[ö\€H8†%Yùõ‹àHù]\ôHô[X\ŸHäKà]ô[X\ŸBàö^Y
+úô\]][€àŸà€ôHò[öŸYY[[‹ûJé»\»€ôHö^\»
+ù⁄X⁄ÿ]Y€‹ûHŸà[ô»⁄BàôXX⁄\»õ‹à][
+ãàYôô\ô[ùYX⁄[ö\€K\»ôYX›YÇÇääï⁄]⁄\Y
+äãôZ[ôì”T–êSSê—X
+Yò][
+äåHH€ääé»ô\›‹ô\»Hô]ö[›\¬úõ€\^û]KYõ‹ãXû]JNÇãHô]»\ôH⁄[ö]X]]ôW€õ›Jò[YK[ò[YJX8°§àH»úö[ô⁄[ô»[ô‹»\õÿ⁄»\[ôYYù\Çà]ô\ûHôXÿ[õÿ⁄»
+€»]úò[Y\»[JH[ôôYõ‹ôH‘’“T’‘ñW‘êUÿ
+€»Hÿ\ôŸY\»Bà\›€‹ô€àõ⁄XŸJKà]ÿ^\»Z[õH]ôXÿ[[ô»\»€ôH‹[€à[[€ô»Ÿ]ô\ò[[ôõ›BàYò][]⁄]⁄I‹»⁄[ôÀÀ›⁄]	‹»\õ›[ô\ã›⁄]⁄Hõ›XŸYŸ^H\ôH\]X[Hò[Yà‹[ö[ô‹À[ô]ôXÿ[YòX›»\ôH€€ù^ò]\à[àH›\HŸà‹X‹»»ò]»›€ãÇãH\Ÿ\ó€õ›\ÿZ[ô]‹ö][éà›[ò\⁄»Yà]ö]»ãõ›»^X⁄]Hõõ›H⁄X⁄€\›»€‹ö¬àõ›Y⁄[ôõ›[›\àYò][ÿ^HŸà⁄›⁄[ô»[›Hÿ\ôKà[‹›Y\‹ÿYŸ\»⁄›[â››X⁄]àÇãH‹[ó›ôXYÿZ[ô]‹ö][éàY»ô€â›ôXX⁄õ‹à\ŸHù\›ôXÿ]\ŸH[›H]ôHõ›[ô¬à[ŸKàÇãH^KùZ[ô]‹ö][éàH[ùK[\››X\ô\»Ÿ\
+]	‹»ÿYXôX\ö[ô»YÿZ[ú›ôX⁄]][€äBàù]Hõÿ⁄»õ›»‹ò[ù»[ö]X]]ôH8†%û[›\ú»»úö[ô»\[úõ€\YHÿ^H[û[€ôHY[ù[€ú¬à⁄]^I‹ôH[àHZYHŸãàÇÇääë[Xô\ò][H[ò⁄[ôŸYääàõ»õÿ⁄»ÿ\»ô[[›ôY[ôõ€ôHY]»€€ù[ùò\úõ›ŸYÇò\Ÿ\ó€õ›\ÿ[öôX›[€à[ù»]ô\ûHNåHõ€\›^\»\ÀZ\»8†%HåçãLÀLL]Y][ôXYBúôZôX›Yö[öôX›Y[ù»]ô\ûH⁄]	‹»õ€\à\»HYôX›
+ûH\⁄Y€àõ‹à⁄[ô€K[›€ô\àõ› KÇîò[öŸY[Y[[‹ûH›\ô\‹⁄[€à
+QSS‘ñW‘ëTPU‘’TëT‘◊’Tìîÿ
+H\»[ù›X⁄Y[ô‹ùŸ€€ò[ÇÇääî\ôH[\à
+»\›Œääà⁄[ö]X]]ôW€õ›Xàô]»\›[ö]X]]ôSõ›X
+ò[Y\»[ù\ú€]Yú›]\»H]ôK[›ô\ã\ôXÿ[ôYô\ô[òŸKõ»Yù›ô\àò⁄X⁄€\›àúò[Z[ô H[ôò\›õ€\ò[[òŸUZ[ÿ
+XX⁄ô]‹ö][àZ[Yôô\ú»úõ€H]»YÿXﬁH›ö[ôÀ[ôHYÿXﬁBú›ö[ô»\»⁄]H⁄[›⁄]⁄ô\›‹ô\ KÇÇà»»ååçãLÀLåÀåÇÇê[ùKZ[X⁄[ò][€éàõ›H€€ôöY[òŸHÿ][ô»
+\ùX€Nàî›‹RH[X⁄[ò][€ú»ôYõ‹ôBï^H›\ùäKàõ€›ÿ]\ŸH€\‹Œàõ›\»X⁄ŸYH€€ôöY[òŸKYÿ][ô»Yô[úŸH]Y[[‹öY\¬ò[ôXYHYàH]\⁄XõKXù]]‹õ€ô»õ›H]\‹ŸY][›H‹õ›[ô[ô»
+ôXÿ]\ŸHH\Ÿ\Çö\[ôY»Y[ù[€àH⁄\òX›\â‹»]ô[ùô\òò][JHÿ\»›‹ôY\»òX›àY[[‹öY\»]ôBöYY[[‹ûWÿ€€ôöY[òŸX
+»QSS‘ñW–UU–””ëò⁄[òŸHååçãLÀLLåé»õ›\»Yõ»\]Z]ò[[ùÇÇê⁄[ôŸ\ŒÇåKà
+äò\Ÿ\ó€õ›Wÿ€€ôöY[òŸXöY[
+äà[à‹›‹ô\Wÿ[ò[\⁄\ÿ8†%H[ò[\⁄\»[Ÿ[õ›¬àŸ[ã\ô\‹ù»KLL€€ôöY[òŸH€àXX⁄õ›H^òX›[€ã\ò[[»Y[[‹ûWÿ€€ôöY[òŸXÇåãà
+äòì’W–UU–””ëò[ùàò\ääà
+Yò][À⁄[›⁄]⁄
+H8†%]\õZ[ö\›X»òX⁄‹›‹ôZôX›¬àõ›\»ô[›»H€€ôöY[òŸHô\⁄€]ô[àYà][›KY‹õ›[ôYàZ\úõ‹ú»H\ùX€I‹¬àú›\‹ùY]ùYHù]õ»]öY[òŸH8°§àõÿ⁄ŸYà]\õãÇåÀà
+äàìù[›ô\à]\⁄XõH›Y\‹»à[ú›ùX›[€ääà8†%^X⁄][ô›XYŸHYY»H[ò[\⁄\¬àõ€\àï⁄[à]öY[òŸH\»Z\‹⁄[ô»‹à[XöY›[›\Àô]\õàù[àHZ\‹ŸYôX[]ô[ù\¬àôX€›ô\òXõN»H›‹ôYòXúöXÿ][€à\»õ›ààH^\›[ô»‘íUP–S[ú›ùX›[€à€Bà[Ÿ[
+ù⁄]
+à»^òX›»\»[»]
+ù⁄[àõ› ãÇçà
+äï€‹öŸõ› äéà‘TêUSë◊”PSïPS0©Õ\]Y⁄]^X⁄]ò[ŸK\›XÿŸ\‹»ô]ô[ù[€Çà
+õô]ô\àô\‹ù›XÿŸ\‹»úõ€H[ù[ù[€ãY[[‹ûK‹à[à[\H€€ô\‹€úŸHäH[ô]ò[à›Z]H^[ôY⁄][ùKZ[X⁄[ò][€àò\]ò[ÀÇÇë\ﬁNà›\]X€ôHõ›‹ô\›\ùHô\›ô\öYûHÿ]Y]⁄›‹»åçãLÀLåÀåãÇÇà»»ååçãLÀLåÀåBÇëôX]\ôNà›\Y][ö⁄[ô»ö[ù[ùàŸYY
+›€ô\àô\]Y\›8†%‹ùHYXHôZ[ôBî⁄[U]ô\õà›\›\Y][ö⁄[ôÿ^[ú⁄[€äKà]^[ú⁄[€à[\õ›ô\»ô\Y\»ûHXZ⁄[ô¬ùH[Ÿ[[ö»\»H⁄\òX›\à
+òôYõ‹ôJà[ú›Ÿ\ö[ôŒ»]»ò]]ôHYX⁄[ö\€H\»€ôH^òBìH€€\][€à\à€€ôöY›\ôY[ö⁄[ôÀ\õ€\\àY\‹ÿYŸKà]YX⁄[ö\€H\»Bõõ€ã\›\ù\à\ôNà[ùò\öX[ùÃ»õ‹òöY»\ã[Y\‹ÿYŸH⁄YH€€\][€àÿ[»ôXÿ]\ŸH⁄^òõ›»⁄\ôH€ôH€ôHòY[À[ô]ô[à‹›Uî»‹ŸHÿ[»›[€‹›][òﬁH€àBù\Ÿ\ãYòX⁄[ô»ô\H\»[€ô^Kà€»HYXH\»õ€Y[ù»HXX⁄[ô\ûHŸH[ôXYH]ôKõ€à
+äûô\õ»^òHÿ[ äéÇÇåKà
+äòõ›úH8†%õ‹ùÿ\ô[€⁄⁄[ô»[ù[ù€àH^\›[ô»⁄[ô€Hÿ[ääàH€€Xö[ôYà‹›‹ô\Wÿ[ò[\⁄\ÿ\‹»õ›»[Z]»€ôH^òHî””àŸ^Kö[ù[ùòàH€ôK[[ôKà\ô\\ú€€àôúò[YHŸàZ[ôàõ›Hõ‹àﬁÿ⁄\ü_H€⁄[ô»[ù»\à
+õô^
+àô\H
+[Çà[[›[€ò[ôXY»H›X\ô»H€X[ÿ[ù
+Kà]	‹»›‹ôY[àHô]»\[Y\ò[àô^⁄[ù[ùX›8†%ì’\ú⁄\›Yì’‹ö][à»[ûH\Ÿ\ãYòX››‹ôKàõ›ô[ò[òŸBà
+[ùò\öX[ùÃL
+Nà[ù[ù\»Ÿ[ô\ò]Y€€ù[ù€»]]ô\»€õH⁄\ôH[€Ÿ]ô\»8†%à[öôX›Y[ù»Hô^ô\I‹»ﬁ\›[Hõ€\ô]ô\à[ù»\Ÿ\ó€õ›\ÿ€Y[[‹ûKàBàô^ô\HùZ[\à[öôX›»]öY⁄Yù\àH[€Ÿõ›Kúô\⁄ô\‹ÀYÿ]YûBà‹›\⁄[ù[ù‹ŸYY
+\ôK[ö]]\›Y
+H€»H›[HŸYY
+ò’T“SïSï’‘—PÿàYò][ö
+Hô]ô\àô\›\ôòXŸ\Àà€‹öŸ\∏°§õ€‹‹ö]\»€»öXHÿ[‹€€€ó›ôXYÿYôXà
+[ùò\öX[ùÕäKàYò][”à⁄]⁄[›⁄]⁄’T“SïSï
+›€ô\à€XﬁHåçãLÀLN
+KÇåãà
+äúô\Ÿ]ù8†%‘’TQSí“Së◊Xõÿ⁄»
+õY]]⁄YK€€ù[ù
+KääàH›YŸYà[ã][ã]‹ö]H[ú›ùX›[€à
+ôY[8°§àÿ[ù8°§à‹ö]JH]⁄\\»HY[àôX\€€ö[ô¬àHù[ö⁄[ôÿ⁄][Ÿ[[ôXYHõŸXŸ\À]õ»€‹›àZ\úõ‹ú»H^\›[ô¬à‘—SãP“P“◊Xú⁄[[ùKŸY\]›]ŸàHô\Hàúò[Z[ô»ôX⁄\Ÿ[H8†%]úò[Z[ô¬à\»H›X\ôYÿZ[ú›Hÿ›[Y[ùY[õö[ôÀ[XZ»€\‹»
+ö^XH€òŸHXZŸY\Çà[õö[ô»[€õ€Ÿ›YJH€àò[òX⁄»[Ÿ[»]€â›‹ò\ôX\€€ö[ô»[à[öœòÇÇï€»\ﬁH]Œàõ›úHöXH›\]X
+
+»‹ô\›\ùHô\›ô\öYûHÿ]Y]⁄›‹¬ååçãLÀLåÀåJN»ô\Ÿ]ùöXHﬁ[òÀXÿ\ôÀú⁄
+»‹ô\›\ùXX⁄õ›
+õY]]⁄YHö[JKÇÇà»»åçãLÀLå8†%‹ŒàôX€€ò⁄[Hõ‹òI‹»[ú›[òŸH\à[à][ò⁄‹ﬁ[ò»ÿ‹ö\»
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇîõ€›ÿ]\ŸNà\]KX[ú⁄ÿ]⁄ŸÀú⁄[ôﬁ[òÀXÿ\ôÀú⁄[\‹ŸY	ì’‘‘êÿäã›[Y‹ò[KXõ›H⁄\ôY
+ò€ŸJà\äH\»õ‹òI‹»
+ö[ú›[òŸJà\ãù]\à[ú›[òŸH\Çö\»ã€õ‹òKXõ›
+€€ôö\õYY€ãY]öXŸHåçãLÀLLHöXHH’TïTUQU[ú›[òŸNò[ôN¬úôX€‹ôY[à”UQKõYò][Ÿ[ù]Y\À€õ‹òKõY—UT—’RQK‘◊”PSïPS
+Kà\»ÿ\»Bõ‹[à][H”UQKõYõYŸŸY
+ùô\öYûH\]KX[ú⁄X]⁄\»€ãY]öXŸHäH[ôô]ô\à€‹ŸYÇì][ùõ›Y]ö\ôYà‹ô\›\ùô\›\ù»Hù[õö[ô»õÿŸ\‹»[àXŸH[ôÿ]⁄Ÿ»€õBúô[][ò⁄\»H
+ô›€äàŸ\‹⁄[€ã€»H‹õ€ô»\àô]ô\à^X›]Y8†%ù]Hô^\]KX[ú⁄ôù[ôY\ﬁH‹à‹›X‹ò\⁄ÿ]⁄Ÿ»ô[][ò⁄€›[]ôHúõ›Y⁄õ‹òH\úõ€Hã›[Y‹ò[KXõ›ä‹õ€ô»ô[ùò›⁄Ÿ[ã‹›]JK[ôÿ]⁄Ÿ…‹»úôY^ôH⁄X⁄»ÿ\»[ôXYHôXY[ô»H‹õ€ô¬òã›[Y‹ò[KXõ›Àò[]ôXX\ùôX]àö^Y[ôYH»\ŸHã€õ‹òKXõ›»	ì’‘‘êÿ›^\»Bò€ŸH\à
+ù[ãXõ›ú⁄\»›[[ùõ⁄ŸYúõ€H]
+Kà[õôYûHHô]»õ‹òKZ[ú›[òŸKY\ò]ò[äúôXZÀ]\›YôYY‹ôY[äKà›\ôòXŸY\ö[ô»Hô\Ÿ]ù\ﬁK\]€‹ö»ô[›ÀÇÇà»»åçãLÀLå8†%€€ù[ùàô\Ÿ]ù[ùK\€‹ò[õ\›^[ôYõY]]⁄YH
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇê⁄\úûK\X⁄ŸYH[[›[€ò[[ò\úò][€à€X⁄0Í\»úõ€HHYY›[Z[à›Z]HéHò[õ\›]›\Çú⁄\ôYô\Ÿ]ùYâ›[ôXYH€›ô\ãàõ€›ôX\€€à»ôX€‹ôàô\Ÿ]ù	‹»^\›[ô¬ò–SïKT”‘X\›\ôŸ]»›ùX›\ò[ÿ\‹⁄\›[ù[»
+ñõ›Hàúò[Y\Àù[HŸàôYKàòH\›[Y[ù»äN»YY›[Z[â‹»\ôŸ]»[[›[€ò[X€X⁄0ÍHò\⁄[ô»8†%\ôŸ[Hõ€ã[›ô\õ\[ôÀú€»HY][€ú»\ôHY]]ôKõ›ôY[ô[ùàYY»–SïKT”‘XàôYH€€ú›ùX›[€Çòù[]»
+X›[€ä‹ﬁ[Xõ€XÀ[YX[ö[ô»›XõKX\⁄ÀYõ‹[õõ›[òŸ[Y[ùÀôY[[ô‹ÀX\À[XX⁄[ô\ûBùô\òú H[ô[õ[ôHò\Ÿ\»
+ùÿ\⁄Y›ô\ãàôõ€ŸYõ›Y⁄àõ]›]HúôX]⁄HYâ›ö€õ›»⁄Hÿ\»€[ôÀàòôYõ‹ôH⁄H€›[›‹\úŸ[ãàúŸY[YY»\⁄Xÿ[Hõ[ò⁄Çàö]ZŸHH\⁄Xÿ[õ›ÀàùHŸZY⁄Ÿà]à\»›[ô[€ôHY]\‹äKàõY]]⁄YNà[ú⁄^õ›»ôXYH⁄\ôYô\Ÿ]à\ﬁNàﬁ[òÀXÿ\ôÀú⁄
+»‹ô\›\ùXX⁄õ›àõ›NÇòﬁ[òÀXÿ\ôÀú⁄ô]ö[›\€Hﬁ[òŸY€õHHÿ\ô
+»ŸYYö[\»[ôô]ô\à›X⁄Yòô\Ÿ]ù8†%H⁄\ôYõY]]⁄YHö[H⁄]õ»\ﬁH]8†%€»\»⁄[ôŸHY»Bòô\Ÿ]ù[»]
+ô\öYöYYöXHKYûK\ù[ò
+Kà‹öY⁄[éà[ÿö[H]õ»‹ù\⁄»8†%ŸYBòYY›[Z[ã[[ÿö[Kÿ»⁄€\ÿ[K[Y\ô⁄[ô»H‹ùÿ\»ôZôX›Y
+]\Xÿ]YçÃ	HŸÇúô\Ÿ]ù[ôÿ\úöYY÷S–K»ùH»àõÿÿXù[\ûH]Ÿ\€â›ö]H^[ô»€€\[ö[€äKÇà»»åçãLÀLå8†%õY]ô\Ÿ]ùàôYHôYö[ô[Y[ù»
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇëúõ€HHô\Ÿ]ô]öY]»
+⁄\òX›\ã\ô]öY]À‘ì‘‘–SÀLåçãLÀ\ô\Ÿ]ÀõY
+Kà[ôYBù›X⁄ô\Ÿ]ùH⁄\ôYõ⁄XŸ\ö[ùôYY[ô»[⁄^õ›»
+õY]]⁄YJNÇåKà
+äê[ùK\€‹ô[Xô\ò]H‹òYùà€]\ŸJäà
+Z[ôYúõ€H][Y\àãå	‹»õÀT€‹
+NàBàò[õôYX€€ú›ùX›[€à\›\»õ›»^X⁄]HôYò][»»]õ⁄Yõ›H⁄X⁄€\›¬àúôY^ôHYÿZ[ú›à8†%Hò[õôY[›ôHXYH€à\ú‹ŸHôXÿ]\ŸHHõ⁄XŸHX\õôY]\¬à‹òYùõ›€‹àô]ô[ù»H\ôò[õôY[\›úõ€H›Yôô[ö[ô»õ‹ŸH[ù»YŸYàŸ[ô\öX»ô\Y\ÀÇåãà
+äê[ùKYXY€õ‹⁄\»ôY⁄\›\àù[Jäà
+Z[ôYúõ€H[öYöYY‹ö]\ú‘õ€€I‹»ôXX›[€Çà]\õú KYY»TT’SRP»‘íVì”éàﬁÿ⁄\ü_HôXY»ﬁ›\Ÿ\ü_Hù]Ÿ\€â›à\õX⁄Z\ãYXY€õ‹ŸH[H
+û[›H\ŸH[[‹à»YõX›äH[õ\‹»]\ò[HH\ò\\›8†%àõ⁄XŸHHôXY\»ÿúŸ\ùò][€à
+»]Y\›[€ãõ›HX⁄ÿYŸYô\ôX›ÇåÀà
+äàî[ò⁄Hà€‹ô[ô»ö^
+äéàVSUëTñHÿZYúôYô\à⁄‹ù\ã[ò⁄Y\àô\‹€úŸ\»Çà⁄[HSïKT”‘ò[ú»€‹⁄[ô»€àH[ò⁄H€ôK[[ô\é»€\öYöYY»òúô]ö]Kõ›Bàò[X]X»€ôK[[ô\àà€»H€»ŸX›[€ú»›‹€€ùòYX›[ôÀÇîõ€›⁄[òõﬁô\Ÿ]»ôYYYõ»Y]»
+P][Y\ïçHÿ\»[ôXYHô\XŸY»YY›[Z[â‹¬ê\òXöX»€’\»[ù[ù[€ò[8†%ÿ€‹Y»Y[à[ö⁄[ôÀ›]]›^\»[ô€\⁄
+KÇë\ﬁNàﬁ[òÀXÿ\ôÀú⁄
+»‹ô\›\ù[⁄^õ›»
+ô\Ÿ]ù\»õY]]⁄YJKÇÇà»»åçãLÀLå8†%€€ù[ùàö^XHŸ[Ÿ‹ò\Hö^
+»ù[\»ŸYYö[\»
+õ»õ›úH⁄[ôŸKõ»ô\ú⁄[€àù[\
+BÇëúõ€HHö\ú›⁄\òX›\ã\\‹»ô]öY]»
+õ‹‹ÿ[»[à⁄\òX›\ã\ô]öY]À‘ì‘‘–SÀLåçãLÀõYõ€à€]YKÿ⁄\òX›\ã\ô]öY]ÿ
+NàHåçãL»]\›[∏°§êô[]ùYHô[ÿÿ][€àZ\‹ŸYö^XI‹¬ò\\ùY[ù[ôH8†%ú€X[ô[›€à\\ùY[ùà
+ŸX]JH›\ùö]ôY[àõ›\à\ÿ‹ö\[€Çò[ôHö[Xù\»‹ôXõ€⁄»[ùûK€€ùòYX›[ô»”UQKõY\à]\À[ô\àX\›⁄YBöXö]Àà[›ôY»ú€X[\\ùY[ù[à›€ù›€àô[]ùYHà[àõ›XŸ\»
+
+»Y\◊Ÿ^[\Bàúô[ù[àŸX]Hà8°§àúô[ù[àô[]ùYHäKà[€»‹ôX]Yù[\ÀÿŸYYö[\¬ä[‹K‹õ⁄ôX›À‹ÿ⁄Y[Kÿ]\Àô[[ô⁄[KY‹õ›[ôY8†%⁄Hÿ\»H€õH⁄\òX›\Çù⁄]›][ûJH[ô€‹úôX›YHõ€õöYH\ú€€ò[]K[‹ô\àõ›H[à”UQKõY
+»BôY]Xÿ\ô»⁄⁄[⁄X⁄YôX€‹ôYHÿ\ô	‹»ŸX›[€à‹ô\àô]ô\úŸY⁄[òŸH]ÿ\¬ù‹ö][ãà\ﬁNàﬁ[òÀXÿ\ôÀú⁄
+»‹ô\›\ùö^XH[ôù[\ÀÇÇà»»ååçãLÀLåå»8†%Yò][PV’“—Sî»å8°§àMà
+XYõ€€Hõ‹à[ö⁄[ô»[Ÿ[ BÇääîõ€›ÿ]\ŸNääàH⁄€HõY]ù[ú»[ö⁄[ô»[Ÿ[»
+€KMNù[ö⁄[ôÿ⁄]õŸù[àHÿ[YHõ‹à›[[X\öY\ K⁄X⁄‹[ô⁄Ÿ[ú»ôX\€€ö[ô»
+òôYõ‹ôJàH[ú›Ÿ\ãà⁄]ùHYò][ÿ\]å[à[ú›[òŸH⁄]õ»PV’“—Sîÿ[ôH
+[Z[JHôY›[\õH]Bòÿ\ZY\ôX\€€ö[ô»[ôô]\õôY[\H€€ù[ù8†%HöYŸŸ\àôZ[ôHô\X]Yòô]\õôY[\H€€ù[ùô]ûX»ôXŸ[ùòX›€€ú€€Y][€à8†)à[\H€€\][€ò[ô\ÀÇùååçãLÀLååHXYH]ÿYôH
+õ»⁄Z[ã[Ÿã]›Y⁄XZÀò[»òX⁄ Kù]H[\Y\¬ù[\Ÿ[ô\»Ÿ\ôH\ôHÿ\›KÇÇääëö^ääàYò][PV’“—Sîÿ\»õ›»Mãà]	‹»Hÿ\õ›H\ôŸ]8†%ô\Y\»›^H⁄‹ùú€»€‹›\»[òYôôX›Yõ‹àõ‹õX[\õú»⁄[H[ö⁄[ô»[Ÿ[»Ÿ]õ€€H»ôX\€€à[ô›[ò[ú›Ÿ\ãà€õH›ôX[Z[ô»ÿ[»\HHÿ\»\ãZ[ú›[òŸHô[ùòÿ[à›[›ô\úöYH
+›Ÿ\Çö]õ‹àHõ€ã][ö⁄[ô»[Ÿ[»õ›[ô€‹›
+Kàô[ùãô^[\X\]Yàõ»ôZ]ö[‹à⁄[ôŸHõ‹Çò[ûH[ú›[òŸH][ôXYHŸ]»PV’“—Sîÿ^X⁄]KÇÇà»»ååçãLÀLååà8†%‘—’òYôöX»\úõ‹ú»õ»€ôŸ\àXZ»HXÿŸ\‹–€ŸH[ù»HŸ¬Çääîõ€›ÿ]\ŸNääàŸô]⁄›‹Ÿ›ÿ[\ùÿ»Ÿô]⁄›‹Ÿ››[Y\ÿŸŸŸYHò]»ô\]Y\›¬ô^Ÿ\[€à
+ŸÀùÿ\õö[ô ∏†)àòZ[Yà	\»ãJX
+Kà‘—’ZŸ\»]»THŸ^H\»[àXÿŸ\‹–€ŸXú]Y\ûK\›ö[ô»\ò[K[ôHô\]Y\›»€€õôX›[€ã›[Y[›]\úõ‹â‹»›ö[ô»€€ùZ[ú»Hù[ïTì8†%€»HŸ^H[ôY[à\úõ‹úÀõŸÿ[àZ[ù^[ôôXX⁄YH⁄\ôY\›BäÿúŸ\ùôYåçãLÀLå€à[Z[JKà\»\»Hÿ[YH€\‹»H€U€H][ôXYHö^Y[ÇùååçãLÀLLKéH
+\úõ‹ú»XYHŸ^KYúôYJN»H‘—’]ôY]Y]\ÿ⁄\[ôKÇÇääëö^ääàô]»›‹Ÿ›Ÿ\úó‹ôX\€€äJX€\‹⁄YöY\»H^Ÿ\[€àûH›]\À›\H[ù»H⁄‹ùöŸ^KYúôYHôX\€€à
+íLà»ù[YY›]à»õô]€‹öÀ—î»\úõ‹àà»H^Ÿ\[€à€\‹¬õò[YJH8†%ô]ô\à›äJXàõ›‘—’ô]⁄\»Ÿ»HôX\€€à[ú›XYŸàHò]»^Ÿ\[€ãõZ\úõ‹ö[ô»›€]€WŸ\úó‹ôX\€€òà[õôYûH\››‹Ÿ›Ÿ\úó‹ôX\€€ó€ô]ô\ó€XZ‹◊⁄Ÿ^X[ôBò‹Ÿ›ZŸ^K[õ›[ŸŸŸY]ò[à
+›€ô\ú»⁄][à^‹ŸYXÿŸ\‹–€ŸH⁄›[õ›]H]8†%BõŸ»ö^Ÿ\€â›[ú‹[⁄][ôXYHXZŸYäBÇà»»ååçãLÀLååH8†%ôX\€€ö[ô»[Ÿ[»õ»€ôŸ\àXZ»ò]»⁄Z[ã[Ÿã]›Y⁄\»Hô\BÇääîõ€›ÿ]\ŸNääàõ›[Ÿ[[›]]]»ô[òX⁄»»ôX\€€ö[ô◊ÿ€€ù[ù⁄[à€€ù[ùòÿ[YHòX⁄»[\H
+Ÿ^òX›ÿ€€ù[ùõ‹àõ€ã\›ôX[Z[ôŒ»HôX\€€ö[ô◊‹\ùÿõ⁄[à[ÇòŸ◊‹ô\]Y\›õ‹à›ôX[Z[ô KàôX\€€ö[ô◊ÿ€€ù[ù\»ò]»⁄Z[ã[Ÿã]›Y⁄⁄]
+äõõ¬ò[öœòY‹ äã€»‹›ö\›[ö⁄[ôÿ
+⁄X⁄€õHô[[›ô\»[öœ∏†)è›[öœò
+Hÿ[â›ù›X⁄]8†%]Ÿ[ù»H\Ÿ\àô\òò][Kà\»ö\ôY⁄[àHôX\€€ö[ô»[Ÿ[
+KôÀàBôYò][€KMNù[ö⁄[ôÿ
+H‹[ù]»⁄€H⁄Ÿ[àùYŸ]
+ù[ö⁄[ô à[ô[Z]Y[à[\Bò€€ù[ùàö^XHô\YY»Hõ‹õX[Y\‹ÿYŸH⁄]\à[õö[ô»[€õ€Ÿ›YH
+ê›\úô[ùú›]Nà8†)àH⁄›[[ò€‹ú‹ò]HH\⁄H[ô»ò]\ò[H8†)àX^XôHäKù[òÿ]YZY\Ÿ[ù[òŸBù⁄\ôHH⁄Ÿ[àùYŸ]ò[à›]àHôX\€€ö[ô◊ÿ€€ù[ùò[òX⁄»ÿ\»^X⁄]Hÿ[YBàõXZ»ôX›‹àà[àHåçãLÀLL]Y]ù]]\‹»€õH›ö\Y€€Xÿ[Súõ€H]õô]ô\àZ[àôX\€€ö[ô»8†%€»H€H›^YY‹[ãÇÇääëö^ääàôZ]\à][]ô\ú»ôX\€€ö[ô◊ÿ€€ù[ù[û[[‹ôKà[\H€€ù[ù8°§à[\Bú›ö[ôÀ[ôÿ[€ò[õŸ‹õ›»ôX]»[à[\H€€\][€àZŸHHò[ú⁄Y[ùZ\‹»8†%úô]ûK[àò[õ›Y⁄»Hõ€ã][ö⁄[ô»êSêP“◊”S—S
+XY€ù[K]çMÃòò
+K⁄X⁄úô[XXõHõŸXŸ\»€€ù[ùàH€ôK[[ôH€[Ÿ[H8†)àôX\€€ö[ô»ù]õ»€€ù[ùÿ\õö[ô¬õXZŸ\»H€€ô][€àö\⁄XõH[àŸ\úõ‹úÿà€€ùöXù][ô»€€ôöY»öYŸŸ\à
+[ôYúŸ\\ò][K\à[ú›[òŸJNàPV’“—SîÿŸ]€»›»õ‹àH[ö⁄[ô»[Ÿ[X]ô\»õ»õ€€Bôõ‹àHö[ò[[ú›Ÿ\àYù\àHôX\€€ö[ô»8†%òZ\ŸH]€àYôôX›Y[ú›[òŸ\Àà[õôYûBò\›Ÿ^òX›ÿ€€ù[ù€ô]ô\ó‹ô]\õú◊‹ôX\€€ö[ôÿ[ôHõÀ\ôX\€€ö[ôÀX€€ù[ù[XZÿ]ò[ÇÇà»»ååçãLÀLNKåà8†%õ›H›€ô\ú⁄\à\à]ô[ù»õ»€ôŸ\àôX€€YHH\Ÿ\â‹»ÿ[[ô\ÇÇääîõ€›ÿ]\ŸH
+›€ô\ã\ô\‹ùY
+Nääàõ›»úõ›Y⁄\]ô[ù»úõ€H
+ùZ\à›€äàöX›[€ò[õ]ô\»[ô[à\⁄ŸYH›€ô\àö›»]Ÿ[ùà\»Yà]Ÿ\ôHH›€ô\â‹»[ãà\ôôŸ[ô\ò][€àŸàHõ›ô[ò[òŸK[XZ»€\‹»
+åçãLÀLL[X⁄[ò]YY[[‹öY\ÀùååçãLÀLLãçõ›H‹õ›[ô[ô NàHååçãLÀLLãçö^ô\]Z\ô\»\Ÿ\ó€õ›W‹][›X¬òôHHô\òò][H›Xú›ö[ô»ŸàH
+ù\Ÿ\â‹ à[ô\»8†%H‹X»ÿ]Kõ›[à›€ô\ú⁄\ôÿ]Kà⁄[àH⁄\òX›\à\»Hÿ‹ö[[XYŸHÿ]\ô^H[ôH\Ÿ\àô\Y\»ô€€ŸX⁄¬ò]Hÿ‹ö[[XYŸKàH\Ÿ\â‹»›€à[ôH›]\»H]ô[ùô\òò][KHõ›H\‹Ÿ\¬ô‹õ›[ô[ô»Y⁄][X][K[ô\»›‹ôY›€ô\õ\‹Ààõ›WŸõ€››\⁄õÿò	‹»öYŸŸ\à[Çö\ôX€Ÿ\»›€ô\ú⁄\H‹õ€ô»ÿ^H
+û›\Ÿ\üHY[ù[€ôY\»8†%\⁄»›»]Ÿ[ùäKò€€\][ô»Hõ\à]ô\ûH›X\ô⁄X⁄ŸY⁄‹ŸH
+õ[›]
+àH€‹ô»ÿ[YHúõ€N»õ€ôBò⁄X⁄ŸY⁄‹ŸH
+õYôJàH]ô[ùô[€ôŸYÀÇÇääëö^
+õ€\[]ô[õ›[ô»ŸàH\Kô\õ»ô]»Hÿ[Àõ»ô]»€ŸH] NääÇãH^òX›[€à
+‹›‹ô\Wÿ[ò[\⁄\ÿ
+Nà\Ÿ\ó€õ›Xõ›»ô\]Z\ô\»H]ô[ù»ôH\ùàŸàH\Ÿ\â‹»’”àYôN»H\Ÿ\à\⁄⁄[ô»Xõ›]»ôXX›[ô»»»⁄\⁄[ô»X⁄»€àBà⁄\òX›\â‹»]ô[ù\»^X⁄]Hù[àH‘íUP–S€]\ŸHY»Hö[ò⁄\NÇà›€ô\ú⁄\ŸàH]ô[ùX⁄Y\Àõ›⁄‹ŸHY\‹ÿYŸHY[ù[€ôY]ÇãHõ€›À]\òX⁄‹›‹
+õ›WŸõ€››\⁄õÿòöYŸŸ\äNàYàH›‹ôYõ›HX›X[Bà\ÿ‹öXô\»H⁄\òX›\â‹»›€à]ô[ù⁄H]\›õ›\⁄»H\Ÿ\à›»]Ÿ[ù8†%⁄Bà[»[H›»]Ÿ[ùõ‹à\à[ú›XYà\»Y‹òY\»[ôXYK\€]Yõ›\¬à‹òXŸYù[H[ú›XYŸàÿ\€Y⁄[ô»H›€ô\ãÇãHõ»⁄[›⁄]⁄à\ôHõ€\]^ùYŸö^€à^\›[ô»ôZ]ö[‹à8†%õŸôàà€›[YX[ÇàöŸY\HùYÀàà^\›[ô»€]Y[ùöY\»⁄›[ôHù[ôYX[ùX[HöXBà€õ›\ÿ
+»€õ›\»[èò€àYôôX›Yõ›Œ»HòX⁄‹›‹€›ô\ú»⁄]ô[XZ[úÀÇÇà»»ååçãLÀLNKåH8†%ŸõY]à[Y‹ò[K[ò]]ôHõY]€€ú€€H›ô\àHYZ[àTBÇääîõ€›ÿ]\ŸH
+Hÿ\õ›HùY NääàõY]ö\⁄Xö[]Hô\]Z\ôYH⁄[ÇòõY]\›]\Àú⁄[ú›Ÿ\ú»ö\»]ô\û[€ôH\⁄]ô\ú⁄[€ààù]€õHúõ€HH\õZ[ò[∏†%[ôHî»ZY‹ò][€à\»^X›H⁄[à][ú›Ÿ\à\»ôYYYúõ€HH€ôH⁄]õõ»‘“][ôà[ú›[òŸ\»õ›»]ôH€à€»‹›À[ôHù[\»[›	‹»òZ[\ôBõ[ŸH
+€»‹›»€[ô»€ôH⁄Ÿ[äH\»H⁄[ôŸà[ô»H€[òŸXXõH\ãZ‹›ùöY]»ÿ]⁄\»X\õKàHYZ[àTH[ôXYHŸ\ùôY[H]BäÿYZ[ã⁄X[ÿYZ[ãÿ]Y]
+N»õ›[ô»€€ú›[YY]úõ€H[ú⁄YH[Y‹ò[KÇÇääï⁄]⁄\YääÇãHŸõY]
+YZ[ãYÿ]Y⁄\◊ÿYZ[ò
+Nàõÿô\»]ô\ûHY\à[àìQU‘QTîÿà€€ò›\úô[ùH
+\ﬁ[ò⁄[Àôÿ]\ò›ô\à\ﬁ[ò⁄[Àù◊›ôXY8†%õ»ò\ôHô\]Y\›ÿà[àH\ﬁ[ò»[ô\äH[ôô\Y\»⁄]€ôHXõNàT—’”ãô\ú⁄[€ã\[YKà[ô\úéèèò\›Z›\à\úõ‹à€›[ù⁄[àHõY]⁄\ô\»€ôBàQRSó–TW’“—Sò
+]Y]õÿôHY‹òY\»»ÿ€àH⁄Ÿ[àZ\€X]⁄‹à€\ÇàY\äKà’”à\»Xô[Y\»òYZ[àTH[úôXX⁄XõHãõ›òõ›XYà8†%Bà€€[[€àÿ\ŸH\»QRSó–TW—SêPìQ[úŸ]€àHX[Hõ›ÇãHìQU‘QTîœ[ò[YO\‹ùò[YOZ‹›ú‹ù8†)ò8†%‹›Yò][»»ÿÿ[‹›€¬àHÿ[YH€€ôöY»€‹ö‹»€ã\€ôHõ›»[ôX‹õ‹‹»HZ[ô]ZY[ZY‹ò][€ãÇà\úŸYûH\ôHŸõY]‹\úŸW‹Y\úÿ»òY[ùöY\»ÿ\õàöXH–””ëíQ◊’–TìíSë‘ÿà[ô\ôH⁄⁄\Y
+Hô[ùã]\À[]\›[õ›XúöX⁄»ù[KååçãLÀLLåäKÇãHÿYZ[ã⁄X[õ›»[ò€Y\»[ú›[òŸX[ô\[YW⁄›\úÿ
+›[à[ò]][ùXÿ]Y]ô[ô\‹»€õJH8†%õY]\›]\Àú⁄[ôXYHöYY»ôXYà\[YW⁄›\úÿ[ôô[ô\ôYåõ‹à]ô\û[€ôN»õ›»]	‹»ôX[ÇãH⁄[›⁄]⁄ìQU–”Q
+[úŸ]H€ãHŸôäH\à›€ô\à€XﬁHåçãLÀLN¬àôX]\ôH\»[ô\ù⁄]›]ìQU‘QTîÿôYÿ\ô\‹ÀàìQU’SQS’U
+Yò][à Hõ›[ô»XX⁄õÿôKà‹õ›\\ÿYôH]]€X]Xÿ[Nà€€[X[ô»[à‹õ›\»\ôBàYò][Y[ûH
+‘ì’T–S’—Q–””SPSëÿ
+K[ù›X⁄YÇÇääï\›Œääà\›õY]\úŸTY\úÿ
+JH
+»\›õY]õ‹õX]
+ H[à\›‹\ôKúKÇÇà»»ååçãLÀLNçH8†%›\ÿYŸH‹XZ‹»ò[õ—‘	‹»⁄Ÿ[ãXò\ŸY›Xúÿ‹ö\[€à⁄\BÇääîõ€›ÿ]\ŸNääàHååçãLÀLNçŸ[ãY\ÿ‹öXö[ô»\úõ‹àY]»õÿà8†%H›€ô\â‹¬ùô\ûHô^›\ÿYŸXÿ\\ôYHôX[ô\‹€úŸKàò[õ—‘	‹»›Xúÿ‹ö\[€àTH\»õ¬õ€ôŸ\àZ[K€[€ùHô\]Y\›€›[ùŒ»]	‹»
+äù⁄Ÿ[ãXò\ŸY
+äéà‹[]ô[\ã\ŸX›[€Çù\ÿYŸHX›»
+ŸYZ€R[ú]⁄Ÿ[úÿZ[R[ú]⁄Ÿ[úÿZ[R[XYŸ\ÿXX⁄ò›\ŸYô[XZ[ö[ôÀ\òŸ[ù\ŸYX
+HŸ^YYY[ùXÿ[H»H[Z]ÿX›\¬ò\ö[Ÿò›\úô[ù\ö[Ÿ[ôàù[\…‹»ôX[ù[Xô\úŒàåHŸYZ€H[ú]⁄Ÿ[ú»[Z]òZ[R[ú]⁄Ÿ[úÿ[Z]ù[
+H[òÿ\Y
+KLZ[H[XYŸ\ÀÇÇääï⁄]⁄\Yääà›\ÿYŸW‹›[[X\ûXõ›»ôX€Ÿ€ö^ô\»H⁄Ÿ[à⁄\Hö\ú›
+ŸX›[€ú¬õZ\‹⁄[ô»Z\à\ÿYŸHX›\ôH⁄⁄\Y»Hù[[Z]ô[ô\ú»\»8¢'é»ô[ô]ÿ[]Bò\[ôY
+H[ôò[»òX⁄»»HYÿXﬁHZ[K€[€ùH⁄\K[ŸHõ€ôH8°§àBùååçãLÀLNçŸ[ãY\ÿ‹öXö[ô»]àô]»\ôHŸõ]ÿ€›[ù[X[ö^ô\»€›[ù¬äå8°§àåKMM8°§àMKç KàHÿ\\ôYôX[õŸH\»[õôY[àH\›¬ú€»Hô^THöYùòZ[»›YHYÿZ[ú›€õ›€ãY€€Ÿ]KÇÇääï\›Œääà\›\ÿYŸT›[[X\ûU⁄Ÿ[î⁄\X
+[ò€àHôX[ÿ\\ôYõŸJH
+¬ò\›õ]€›[ù
+äN»YÿXﬁK\⁄\H\›»[ò⁄[ôŸY[ô›[‹ôY[ãÇÇà»»ååçãLÀLNç8†%›\ÿYŸHõ»€ôŸ\à‹ò\⁄\»€à[à[ô^X›YTHô\‹€úŸH⁄\BÇääîõ€›ÿ]\ŸNääà⁄X⁄◊›\ÿYŸXù\›YHò[õ—‘›Xúÿ‹ö\[€à[ô⁄[ù	‹»ô\‹€úŸBú⁄\H8†%]ÿ]Y€à]KôŸ]
+òX›]ôHäXù][à[ô^Y]V»ôZ[HóX¬ò]V»õ[€ùHóX»]V»õ[Z]»óX\ôX›Kà€àù[\»H[ô⁄[ùô]\õôYòX›]ôXù]H
+äù⁄]›]
+äàHZ[XŸ^H
+Xÿ€›[ùY\à‹àTH⁄\H⁄[ôŸH8†%Bò‹ò\⁄\›õﬁYYH]öY[òŸHŸà⁄X⁄
+K€»›\ÿYŸXYY⁄]òŸ^Q\úõ‹éà	ŸZ[Iÿ[ô[à›[ö[ôYXòXŸXòX⁄»[ú›XYŸà[[ô»[û[€ôH⁄]ùHTHX›X[HÿZYàÿ[YHYôX›€\‹»\»H›ôX[Z[ôÀY\úõ‹ãXõŸHù[Nà[Çô^\õò[ô\‹€úŸH€€ú›[YY⁄]›]ò[Y][€à\»[ôXY€õ‹ÿXõH⁄[à]⁄[ôŸ\ÀÇÇääï⁄]⁄\YääÇãHô]»\ôH›\ÿYŸW‹›[[X\ûJ]JXàò[Y]\»HZ[K€[€ùK€[Z]»⁄\Bà
+ô]\õú»õ€ôH€àZ\€X]⁄
+K€\ò]\»Z\‹⁄[ô»[õô\àŸ^\»⁄]ÿXŸZ€\úÀÇãH⁄X⁄◊›\ÿYŸXõ›»[ô\»[ôYHòZ[\ôH[Ÿ\»‹òXŸYù[Nàõ€ãRî””àõŸBà
+›]\»»⁄]õŸH»Ÿ K[òX›]ôH›Xúÿ‹ö\[€à
+[ò⁄[ôŸY
+K[ôàX›]ôKXù]][úôX€Ÿ€ö^ôY⁄\H8†%Hô\Hò[Y\»HŸ^\»HTHô]\õôY[ôàHù[õŸH€Ÿ\»»HŸÀ€»H
+õô^
+à⁄\H⁄[ôŸH\»Ÿ[ãY\ÿ‹öXö[ô¬à
+XùYŸ⁄[ô»õ›ÿ€€Ã H[ú›XYŸàHŸ^Q\úõ‹ãÇãHõ»ô]»[ùàò\úŒ»ùYŸö^»[à^\›[ô»€€[X[ôõ»⁄[›⁄]⁄ôYYYÇÇääï\›Œääà\›\ÿYŸT›[[X\ûX
+JH8†%ù[⁄\KZ\‹⁄[ôÀ›‹õ€ôÀ]\YŸX›[€úÀõZ\‹⁄[ô»[õô\àŸ^\À[\Hô\‹€úŸKÇÇà»»ååçãLÀLNå»8†%€ÿ⁄X[ò]\ûH
+»Z[ö[X[\ô\HXŸ[úŸH
+»^K[[€Ÿô\⁄YYH
+ì–QPTÀç BÇääîõ€›ÿ]\Ÿ\»\»ô[X\ŸHYô\‹Ÿ\»
+ôYHô[]YôX[\€H[À€ôH[Xö[ô»\ôXJNääÇåKà[€ŸòX⁄‹»⁄]⁄HôY[»
+òXõ›]
+à[ô‹Àù]õ›[ô»òX⁄ŸYô[XZ[ö[ô»€ÿ⁄X[àÿ\X⁄]H8†%H⁄^Z›\à[ù[úŸH€€ùô\úÿ][€àYù\à^X›H\»]òZ[XõH\»Z[ù]Bà€ôKà⁄[ô€KX^\»[€Ÿÿ[â›^ô\‹»ô‹ôX]^Kõ»[ô\ôﬁHYùàÇåãà]ô\ûH[ò€€Z[ô»Y\‹ÿYŸHX\õôYHù[[[ô›ô\H8†%õ»ôX[\ú€€àY»ö»à[ù»Bà\òY‹ò\ù]Hõ€\ô]ô\àXŸ[úŸY[û][ô»\‹ÀÇåÀà\àŸ[ô\ò]YYôH
+^Kù
+Hô]ô\à€€‹ôY›»⁄H
+õ‹[ôY
+à8†%[€Ÿ⁄[ôŸY”ìBàõ›Y⁄€€ùô\úÿ][€à
+‹›‹ô\Wÿ[ò[\⁄\ÿ
+»ÿ\Xÿ^H[àùYŸW€[€Ÿ
+K€»Bàõ]\ôH[à\à^Hÿ\»[ùö\⁄XõH[õ\‹»H\Ÿ\à\[ôY»\⁄¬à
+ëUíQUÀVUTêSSQKLåçãLÀLNõYH€ôHY‹[€àúõ€H]ô]öY] KÇÇääï⁄]⁄\Y
+ô\õ»^òHHÿ[Œ»êUQ’QW‘’UOL»VW”S”—‘ëT“QQOL⁄[ú›⁄]⁄\ÀYò][€äNääÇãH
+äî€ÿ⁄X[ò]\ûNääà\ãX⁄]ò]Y›YX8†$ÃL\ú⁄\›Y⁄]›]Kà\ôBàŸò]Y›YW›\]Xù[ú»[ú⁄YHH^\›[ô»[ò[\⁄\»€‹öŸ\à€àHò[[òŸH]à[ôXYH^òX›Œà[YHXÿ^Hö\ú›
+êUQ’QW—P–VW‘Tó“’TòYò][L
+K[Çàò[[òŸ_8¢iHà8°§à
+ÃLà
+[ù[ú⁄]HòZ[ú»ôYÿ\ô\‹»Ÿà⁄Y€à8†%HöY»Y⁄€‹›»[ô\ôﬁBà€ Kÿ[K\‹⁄]]ôH8°§à8¢$åMK[ŸH8¢$çKà€‹öŸ\ã]ôXY‹ö]\»€»òX⁄»öXBàÿ[‹€€€ó›ôXYÿYôXZ\úõ‹ö[ô»HYòXŸ[ù[€Ÿ‹ö]KàŸò]Y›YWXŸ»[ôH€Çàô\⁄€‹õ‹‹⁄[ô‹»€õKÇãH
+äîôXY][YHXÿ^NääàŸò]Y›YWŸYôôX›]ôX\Y\»\‹⁄]ôHXÿ^H]õ€\X\‹Ÿ[XõBà[YH€»H€ô»⁄[[ùÿ\ôX€›ô\ú»\à
+òôYõ‹ôJàHö\ú›ô\HŸàHô]¬à€€ùô\úÿ][€ãõ›€ôHô\H]KÇãH
+äëòZ[ôYôY⁄\›\éääàXõ›ôHêUQ’QW’ëT“”
+Yò][Ã
+K€ôHﬁ\›[H[ôH8†%à⁄‹ù\àô\Y\À\‹»]Y[òŸK⁄[ô»H⁄]›€é»^X⁄]Hõ›àúòZ[ë[ô⁄[ôI‹»ôY€»\][€àà
+‹⁄[ô»€ÿ⁄X[ôY›[][€àÿ\»ôZôX›Y[àBàô]öY]»\»HXXö[]Hõ‹àH€ôÀ\ù[õö[ô»ô[][€ú⁄\
+KÇãH
+äìZ[ö[X[\ô\HXŸ[úŸNääà⁄[àòZ[ôYZYXù\ﬁKXõÿ⁄»
+ÀçäK‹à[àH›»[€Ÿà
+8¢i8¢$åKåäKHﬁ\›[H[ôHXZŸ\»	⁄…À…€€	Àÿ[à[[⁄öHHY⁄][X]H€€\]Hô\KÇàX\›\à›⁄]⁄\»êUQ’QW‘’UXÇãH
+äë^K[[€Ÿô\⁄YYNääàHZYöY⁄^HŸ[ô\ò]‹àõ›»[ô»⁄]€ôBàS”—àXô[àò[[òŸOò[ôKà\ôH‹‹]€‹[ö[ô◊€[€ŸY[»]ŸôàëQì‘ëBà^Kù\»‹ö][à8†%HY]H[ôHô]ô\àôXX⁄\»õ€\»‹àY[[‹ûH8†%[ôŸYY¬àH›€ô\â‹»[€Ÿ›]H
+€ã[€‹õÿã\ôX›‹ö]H\»€‹úôX›\ôJKàH[Ÿ[]àY€õ‹ô\»H[ú›ùX›[€àY‹òY\»»õ»ô\⁄YYH]^Kàõ›ô[ò[òŸH[òYôôX›YÇà[€Ÿ\»ô\Ÿ[ù][€à›]Kõ›HòX››‹ôN»H€›€ãY^WXù[H\»[ù›X⁄YÇãH\‹Ÿ[XõW€Y\‹ÿYŸ\ÿõ›»ôXY»ÿ⁄Y[Kù€òŸH\à\‹Ÿ[XõH
+ô]ö[›\€HHÀçÇàõÿ⁄»ôK\ôXY]
+N»ù\ﬁH›]H\»⁄\ôYô]ŸY[àHXŸ[úŸH[ôHÿ⁄Y[BàŸX›[€ãÇÇääê€€ôöYŒääàêUQ’QW‘’UXêUQ’QW’ëT“”êUQ’QW—P–VW‘Tó“’TòòVW”S”—‘ëT“QQX[àô[ùãô^[\X»ù[Y\öX‹»öXHŸ[ùóŸõÿ]ÇÇääî\ôH[\ú»
+»\›ŒääàŸò]Y›YW›\]XŸò]Y›YWŸYôôX›]ôXò‹‹]€‹[ö[ô◊€[€Ÿ»\›ò]Y›YX
+
+H
+»\›‹]‹[ö[ô”[€Ÿ
+äNàòZ[ã‹ôX⁄\ôŸBò\ö]Y]XÀ€[\Àÿ\Xÿ^H‹ô\ö[ôÀôXY][YHXÿ^KS”—[[ôH\úŸK‹›ö\ÿ€[\õZY]^[[][ö]K‹òXŸYù[XúŸ[òŸKÇÇà»»ååçãLÀLNåà8†%ÿ⁄Y[KYö]ô[à[ò]òZ[Xö[]H
+–“Q–ïT÷N»ì–QPTÀçäBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääàÿ⁄Y[Kùÿ\»[öôX›Y[ù»€€ù^]ô\ûBù\õàù]õ›[ô»
+äô[ôõ‹òŸY
+äà]ôZ]ö[‹ò[H8†%H⁄\òX›\àôXY\»[ÿ^\»[ú›[ùBò]òZ[XõKô]ô\àZYX[û][ôÀô]ô\à]ö[ô»»X]ôKàH[ÿ^\À[€à€€\[ö[€à\»Bú⁄[ô€HöYŸŸ\›ú\]à[
+Y[ùYöYY[àëUíQUÀPîêRSëSë“SëKLåçãLÀLNõYBõ€ôHYXHúõ€H]ô]öY]»€‹ù]»ŸZY⁄
+Kà€€ù^[€ôHŸ\€â›⁄YùôY⁄\›\é¬õ[Ÿ[»ôX][à[öôX›Yÿ⁄Y[H\»ö]öXH[õ\‹»Hõ€\›]\»⁄]]YX[ú¬äúöY⁄õ› ãÇÇääï⁄]⁄\Y
+ô\õ»^òHHÿ[ NääàôZ[ô–“Q–ïT÷X
+Yò][
+äõ€ääãô\ÿXõ\»⁄]›]ôY\ﬁJNÇãHô]»\ôH‹\úŸWÿù\ﬁWÿõÿ⁄‹ ÿ⁄Y›^
+Xà^òX›»
+›\ù€Z[ã[ô€Z[ãX›]ö]JXàúõ€HŸ^I‹»ÿ⁄Y[H[ô\»ÿ\úûZ[ô»[à
+äô^X⁄]
+äàìSKRìSXò[ôŸH
+\[ãŸ[Çà\⁄Ÿ[H\⁄
+Kà[Xô\ò][H€€úŸ\ùò]]ôH8†%€‹ŸH€‹ô[ô»
+õ[‹õö[ô»⁄Yùãôﬁ[Bà]\àäHô]ô\àö\ô\Œ»[ùò[Y€ÿ⁄»ò[Y\»[ô›ô\õöY⁄ò[ôŸ\»
+[ô8¢i›\ù
+H\ôBà⁄⁄\Yò]\à[à›Y\‹ŸYàÿù\ﬁW€õ› ÿ⁄Y›^õ› Xô]\õú»HX›]ö]HBà›\úô[ù[YHò[»[ú⁄YK[ŸHàãÇãH\‹Ÿ[XõW€Y\‹ÿYŸ\ÿà⁄[àZYXõÿ⁄À€ôHﬁ\›[H[ôHYù\àHÿ⁄Y[H8†%⁄I‹¬à[ú›Ÿ\ö[ô»úõ€H\à€ôH[à›€[à[€Y[ùÀ⁄‹ù\àô\Y\À[ôX^Hÿ^H⁄H\»¬àŸ]òX⁄»»]àŸ‹»‹ÿ⁄YXù\ﬁWHX›]ö]Oò\à\‹Ÿ[XõH€»›ô\ãYö\ö[ô»\¬àö\⁄XõH[àõ›õŸ»
+Hì–QPT\‹X⁄YöYYö\⁄\ôJKÇãHö]ò]Hô\H]à€€\‹ŸH[^H
+›\[ô◊Ÿ[^W‹ŸX‹ÿ
+H\»][\YYûBà–“Q–ïT÷W—SVW”US
+Yò][Àå€[\Yx†$ÃL]\ŸJH⁄[Hù\ﬁKàH
+äô‹õ›\à]ŸY\»]»›€à[Z[ô»[ù›X⁄Y
+äà8†%õ»‹õ›\XôZ]ö[‹à⁄[ôŸH[à\»ô[X\ŸKÇãHõÿX›]ôHŸ[ô»[ò⁄[ôŸYà]ZY]›\ú»
+»ùYŸHùYŸ]›^H]]‹ö]]]ôN»\¬àôX]\ôH€õHY»ô\›òZ[ùô]ô\àŸ[ôÀÇÇääê€€ôöYŒääà–“Q–ïT÷X–“Q–ïT÷W—SVW”USÿ›[Y[ùY[àô[ùãô^[\XÇìù[Y\öX»\ú⁄[ô»öXHŸ[ùóŸõÿ]
+òYò[Y\»ÿ\õà
+»ò[òX⁄ KÇÇääî\ôH[\ú»
+»\›Œääà‹\úŸWÿù\ﬁWÿõÿ⁄‹ÿÿù\ﬁW€õ›ÿ»\›ù\ﬁPõÿ⁄‹ÿ
+ù\›Œà^X⁄]ò[ôŸ\À€‹ŸK]€‹ô[ô»[[][ö]K\⁄ò\öX[ùÀ›ô\õöY⁄⁄[ùò[Yú⁄⁄\õ›[ô\ûHZ[ù]\À[\Hÿ⁄Y[JKÇÇà»»ååçãLÀLNåH8†%›‹Y[[‹ûH]⁄[ô»
+QSS‘ñW‘ëTPU‘’TëT‘◊’Tìî BÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàöYŸŸ\ôY€Y[[‹öY\ÿ\»]\õZ[ö\›X»[ôääú›][\‹»X‹õ‹‹»\õú äà8†%]ô\ûHô\H]ôK\ÿ€‹ô\»[ŸàY[[‹öY\ÀùYÿZ[ú›BúôXŸ[ù€€ùô\úÿ][€à
+Ÿ^]€‹ô›ô\õ\
+»€‹⁄[ôH0ÂÃÀå
+K€‹ùÀ[ô‹ôYY[Hö[»BåÃ]⁄Ÿ[àùYŸ]àõ›[ô»ôX€‹ôY⁄X⁄Y[[‹öY\»Ÿ\ôH[öôX›Y€àö[‹à\õúÀ€»⁄[BòH€€ùô\úÿ][€à›^YY€à€ôH[YHH
+úÿ[YJà‹\ÿ€‹ö[ô»[ô\»€€àHùYŸ]]ô\ûBú⁄[ô€H\õà[ôH⁄\òX›\àôK]€€ôHY[[‹ûH[ô\‹€Kô]€‹ôYXX⁄[YKà]	‹»BôôYYòX⁄»€‹àHY[[‹ûH⁄HY[ù[€ú»[ô»[àHôXŸ[ùZ\›‹ûHÿÿ[à^⁄X⁄úôK\ò[ö‹»]»H‹YÿZ[àô^\õãàHô\»[ôXYH€€ôY\»^X›⁄\Hõ‹Çäú]Y\›[€ú à
+‹ôXŸ[ù‹]Y\›[€úÿ8°§àô€â›ô\X]\ŸHäHù]Yõ»\]Z]ò[[ùõ‹ÇõY[[‹öY\Œ»‹ö]K][YHY\
+QSS‘ñW—QT‘“SX
+H€õH›‹»
+ú›‹ö[ô à\Xÿ]\Àõ›úôKZ[öôX›[ô»Hÿ[YH›‹ôY[ôKÇÇääï⁄]⁄\YääàôZ[ôQSS‘ñW‘ëTPU‘’TëT‘◊’Tìîÿ
+Yò][
+äçàH€ääé»Ÿ]¬ô\ÿXõH8†%Hö\ú›ô[X\ŸH[ô\àHô]»›€ô\àYò][[€à€XﬁKŸYHô[› K\ãX⁄]ö[ã[Y[[‹ûHòX⁄⁄[ô»ŸàôXŸ[ùKZ[öôX›YY[[‹ûH[ô\À€€ú›[YY\»Hÿ€‹ôH][\Y\à[ÇòöYŸŸ\ôY€Y[[‹öY\ÿÇãHô]»\ôH‹ô\X]‹[ò[J\››\õã›\úô[ù›\õã⁄[ô›Àõ€‹äXàù[[ò[Bà
+QSS‘ñW‘ëTPU‘SêSXYò][åMJHH\õàöY⁄Yù\àH[ôH\»[öôX›YòY[ô¬à[ôX\õHòX⁄»»Kå›ô\à⁄[ô›ÿ\õúÀàH
+äõ][\Y\ãô]ô\à^€\⁄[€ääà8†%HY[[‹ûBàH\Ÿ\à\ôX›H\⁄‹»Xõ›]›[›]ÿ€‹ô\»H[ò[H[ô›\ôòXŸ\ÀÇãHöYŸŸ\ôY€Y[[‹öY\ÿÿZ[ú»⁄]⁄YSõ€ôXà⁄]H⁄]⁄Y
+H]ôHô\H]
+H[ôàHõY»€ã][ò‹ô[Y[ù»H\ãX⁄]\õà€›[ù\ã›€ã]ŸZY⁄»ôXŸ[ùK\ŸY[à[ô\Àà[ôôX€‹ô»H⁄[õô\úÀà⁄]⁄YSõ€ôX
+KôÀà‹ôXÿ[
+H[ôHõY»Ÿôà\ôHõ›àû]KZY[ùXÿ[»€ôZ]ö[‹ã€»^\›[ô»ÿ[\úÀ›\›»\ôH[ù›X⁄YÇãHòX⁄Ÿ\ú»
+€Y[W⁄[öôX››\õò€Y[W€\›⁄[öôX›Y
+H\ôH
+äö[ã[Y[[‹ûH€õJäãX]⁄[ô¬à‹ôXŸ[ù‹]Y\›[€úÿ8†%õ»›]K\Ÿ\öX[^ò][€à⁄[ôŸ\Àõ»‹õ‹‹À]ôXY€€òŸ\õúŒ»Bàô\›\ùù\›€X\ú»›\ô\‹⁄[€à
+€‹ú›ÿ\ŸNà€ôHô\X]Y[YHYù\àHô\›\ù
+KÇãHHÿ]Y€ôK[[ô\à\»\[ôY»H»ô[]ò[ùY[[‹öY\ÿõÿ⁄»[[ô»H⁄\òX›\Çàõ›»ôK\òZ\ŸHHY[[‹ûH⁄I‹»ôYô\ô[òŸYôXŸ[ùH[õ\‹»H\Ÿ\àúö[ô‹»]\àBà⁄[›⁄]⁄
+
+Hô\›‹ô\»H^X›€õ€\ÇÇääî€XﬁH⁄[ôŸH
+›€ô\ãåçãLÀLN
+Nääàô]»ôX]\ô\»õ›»Yò][
+äì”ääà⁄]HX[ô]‹ûBô[ùà⁄[›⁄]⁄
+[úŸ]HX›]ôKHŸôäKô]ô\ú⁄[ô»Hö[‹àYò][[Ÿôà€€ùô[ù[€ãÇïH⁄[›⁄]⁄\»õ›»Hô\]Z\ôYÿYô]HYX⁄[ö\€Hò]\à[àHŸôãXûKYYò][›]KÇîôX€‹ôY[à”UQKõYõ›X€ŸKZ[ùò\öX[ùÿÃMã[ôô\ÀX⁄[ôŸKX€€ùõ€à\¬úô[X\ŸH\»Hö\ú›[ô\à]8†%[òŸHQSS‘ñW‘ëTPU‘’TëT‘◊’TìîœMòûHYò][ÇÇääîô\Ÿ]
+ô\Ÿ]ù⁄\»[€ô‹⁄YN»€€ù[ùõ»ì’’ëTî“S”à\[ô[òﬁJNääàYYBò€€ùò\›]ôH–SïKQP“»»ì»ëRT“XŸX›[€à[ô[õ[ôHòY8°§ô€€Ÿ^[\HZ\ú»[ô\ÇúŸ]ô\ò[^\›[ô»Xú›òX›ù[\»
+ò\úò]Y[[›[€ãò\úò]‹à\[ô»ŸôàY\ÀŸ[ô\öX¬ùõ⁄XŸKô\X]YŸ[ú€‹ûH]Z[î»Ÿ\ùö[]JH8†%òY8°§ô€€ŸZ\ú»›Y\à[Ÿ[»\ô\à[ÇòXú›òX›õ‹ŸKà\ﬁ\»öXHHÿ\ô‹ŸYY]
+ﬁ[òÀXÿ\ôÀú⁄»›\õ[ù»[ú›[òŸBô\ú Kõ››\]XÇÇääë[Xô\ò][H›]Ÿàÿ€‹H
+€»]\€â›ôK[]Yÿ]Y
+NääÇãHQSS‘ñW—P–VW“SìQëW—VTÿ
+Yò][
+Hô[XZ[ú»H€€ôöYÀ[€õK‹ùŸ€€ò[Z]Yÿ][€Çàõ‹à
+õ€
+àY[[‹öY\»€Z[ò][ô»8†%]Ÿ\»õ›[ô»Xõ›]⁄][ãX€€ùô\úÿ][€à]⁄[ôÀà⁄X⁄\»⁄]\»ô[X\ŸHö^\ÀÇãH‹ôKY[[‹ûWÿõÿ⁄ÿòX›À‹›[[X\öY\À\Ÿ\ó€õ›\ÿ[õôY[ô^Kùÿ[à[€¬àÿ\úûHH]⁄[ô»[YHù]\ôH[öôX›Y⁄€\ÿ[H
+õ›ò[öŸY
+K€»›\ô\‹⁄[€à\ôH\¬àHYôô\ô[ùYX⁄[ö\€H8†%Yùõ‹àHù]\ôHô[X\ŸH»ŸY\\»YôàZ[ö[X[ÇÇääî\ôH[\à
+»\›Œääà‹ô\X]‹[ò[Xàô]»\›ô\X][ò[X[ôò\›öYŸŸ\ôYY[[‹öY\‘ô\X]›\ô\‹⁄[€ò
+›\ô\‹⁄[€àõ›]\»H⁄[õô\ãòY\»Yù\àBù⁄[ô›À⁄[›⁄]⁄[ô⁄]⁄YSõ€ôXô\Ÿ\ùôH€ôZ]ö[‹ã\ãX⁄]\€€][€äKÇÇà»»ååçãLÀLMÀåH8†%Ÿ[ô\ò[^ôYX\[ù[ù
+PT“SïSï»ì–QPTÀçH\ŸHäBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääàì”—‘’Q——T’S”î»
+ååçãLÀLLKåM
+Hõ›ôY]úôKYô]⁄[ô»ôX[€U€H]H[ù»H⁄[ô€Hô\H›‹»H⁄\òX›\à[ùô[ù[ô¬úXŸ\»8†%ù]€õHõ‹àõ€Ÿà\⁄ŸYö›»ò\à\»ô[]ùYH‹]X\ôHà‹àö\»\ôHBú\õXXﬁHôX\òûHã⁄H›[[ú›Ÿ\ôYúõ€H[XY⁄[ò][€éàòXúöXÿ]YZ[ù]\À\›[òŸ\Àò[ôXŸHò[Y\À^X›HH[X⁄[ò][€à€\‹»Hõ€Ÿ]€‹ŸYÇÇääï⁄]⁄\YääàôZ[ôPT“SïSïLX
+Yò][Ÿôé»[úŸ]Hö[‹àôZ]ö[‹äK[Çô^X⁄]X\\⁄\Y\⁄»[àHNåH⁄]ôKYô]⁄\»ôX[]H[ô[öôX›»]\»Búÿ[YH€ôK]\õàúòX⁄Ÿ]Yõ›HHõ€Ÿ]\Ÿ\ÀöY[ô»H⁄[ô€H^\›[ô»ô\NÇãH
+äîõ›]H\⁄‹ äà
+ö›»»HŸ]»ãö›»ò\à\»
+] Hãô\ôX›[€ú»»ãàö›»€ô»»öZŸKŸö]ôK›ÿ[»»ãù⁄]	‹»H€€[]]H»äNàŸ[ÿ€ŸHBà\›[ò][€ãõ›]Húõ€HH\Ÿ\â‹»›‹ôYÿÿ][€à⁄]H[ú›[òŸI‹¬à”U”W’êUëS”S—X[öôX›HZ[à‹õ›]WÿúöYYò
+ôö]ôH»àNZ[ãÀéHZBà
+[ò€à
+ÕZ[àòYôöX HäH⁄]\ŸKS”ìK]\ŸKYòX›»ò\⁄[ôÀàX^àëT’ÿ[ÀÇãH
+äìôX\òûH\⁄‹ äà
+ö\»\ôHH[ôœàôX\òûHãò[ûH[ôœà\õ›[ô\ôHãàò€‹Ÿ\›€ôX\ô\›[ôœàäNà“HŸX\ò⁄\õ›[ôH\Ÿ\â‹»ÿÿ][€à
+H€JK[öôX›YàöXH‹XŸ\◊ÿúöYYò
+‹ô\›]\ò[ù◊ÿúöYYòŸ[ô\ò[^ôY»H€ò[YH[Yÿ]\»€»Bàõ€Ÿ][ô]»\›»\ôH[ù›X⁄Y
+KàHëT’ÿ[ÇÇääë\⁄Y€àX⁄\⁄[€ú»
+⁄K€»^H\ô[â›ôK[]Yÿ]Y
+NääÇãH
+äíŸ^]€‹ôôYŸ^[ù[ùõ›[àH€\‹⁄YöY\ääà8†%[ù[ùù[ú»€à]ô\ûHNåHY\‹ÿYŸBà[ôH\ã[Y\‹ÿYŸHH⁄YHÿ[\»ò[õôY
+õ›X€ŸKZ[ùò\öX[ù»ÃÀÿ[YHôX\€€Çà⁄\◊Ÿõ€Ÿ‹]Y\ûX\»HôYŸ^
+KàHôYÿ]]ôH‹XŸH\»\›\[õôYàö›»»HŸ]¬à€Y\ãö›»ò\à\»€»ò\àãò€‹Ÿ\›[ô»»X]ô[àà]Àà]\›ô]ô\àö\ôN»Bà\›[ò][€à›‹\›
+”PT—T’‘ëRëP’
+Hÿ]⁄\»öY›\ò]]ôHÿöôX›ÀãX[ò⁄‹ôYà€»ôX[XŸ\»
+í€õﬁö[HäH›\ùö]ôKàZ\‹Ÿ\»€à‹ôX]]ôHò\⁄[ô‹»\ôHXÿŸ\YåBà€‹›ÿ[YH\»õ€ŸÇãH
+äìÿÿ][€àúô\⁄ô\‹»ÿ]Jäà
+Ÿúô\⁄€ÿÿ][€ò
+Nàõ›]H‹öY⁄[ú»[ôôX\òûHŸ[ù\ú¬à\ŸHH›‹ôYÿÿ][€à€õH⁄[à€
+H›»]	‹»ôXŸY[ù
+H‹à[ú⁄YHBà]ôK\⁄\ôH⁄[ô›»8†%Hõ›]Húõ€H\›ŸYZ…‹»[à€›[ôH€€ôöY[ùH‹õ€ôÀÇà⁄]›]€ôH⁄HùYŸ\»õ‹àH[à[ú›XYŸà›Y\‹⁄[ô»
+õ€Ÿ\]]\õäKÇãH
+äï[ãYŸ[ÿ€ŸXõH\›[ò][€ú»òZ[€ô\›Nääàö€YHã»ù€‹ö»àŸ[ÿ€ŸH]\ò[Kà\›X[HZ\‹À[ô[öôX›Hû[›H€›[â›ö[ô]8†%ÿ^H€À€â›[ùô[ùàõ›KÇàô\€€ö[ô»[Húõ€H\àY[[‹ûHŸàH\Ÿ\à\»H[Xô\ò]Hõ€›À]\à
+›€ô\ã\Ÿ]YåçãLÀLM K\»\»ù⁄]	‹»ôX\àô[[›HXŸOàà8†%åHôX\òûH\¬à\Ÿ\ã[ÿÿ][€ã[€õKÇãH
+äìõ»€€€›€ãÿÿX⁄Jäà
+›€ô\ãX\õ›ôY
+NàHôX⁄\ŸH[ù[ùÿ]H\»HùYŸ]à€€ùõ€X]⁄[ô»›»ì”—‘’Q——T’S”î»⁄\Y»H€X\H[ù[ùKããòŸ»[ôBà[ú›ù[Y[ù»Hö\ôHò]KàYàõY]Ÿ‹»⁄›»›ô\ãYö\ö[ôÀH\ãX⁄]€€€›€à\¬àHôKXY‹ôYYõ€›À]\ÇãHõ€Ÿ⁄[ú»⁄[àõ›õY‹»ö\ôH
+[Yà⁄Z[äH8†%][‹›€ôH[öôX›[€à
+»€ôH€U€Bàô]⁄Ÿ\]Y[òŸH\àY\‹ÿYŸKà‹õ›\⁄]»ô]ô\àôXX⁄Hõÿ⁄»
+]]ô\»[àHNåBà[ôW€Y\‹ÿYŸX]
+N»’€U€Q\úõ‹ò[û]⁄\ôHY‹òY\»⁄[[ùH»Hõ‹õX[àô\N»\úõ‹àŸŸ⁄[ô»›^\»Ÿ^KYúôYHöXHH^\›[ô»›€]€WŸ\úó‹ôX\€€ò]ÇÇääî\ôH[\ú»
+»\›Œääà€X\⁄[ù[ùÿ€X[ó€X\Ÿ\›‹õ›]WÿúöYYòò‹XŸ\◊ÿúöYYòŸúô\⁄€ÿÿ][€òàM»ô]»\›Œ»\›ô\›]\ò[ù–úöYYò\‹Ÿ\¬ù[õ[ŸYöYYYÿZ[ú›H[Yÿ]Kõ›ö[ô»HôYòX›‹à\»ôZ]ö[‹ã\ô\Ÿ\ùö[ôÀÇÇà»»ååçãLÀLLÀåà8†%\úõ‹àY⁄Y[ôH
+»KX⁄X⁄ÀX€€ôöY»ôYõY⁄
+åä‘åÀ‹\òXö[]JBÇï€»€X[][\»úõ€HHÿ[YH\ô[ö[ô»[à\»ååçãLÀLLÀåK⁄\YŸŸ]\ãÇÇääîåà8†%ò]»^Ÿ\[€ú»õ»€ôŸ\àôXX⁄⁄]ääàZY⁄[ô\à⁄]\»Ÿ[ùò8ßc€€Y][ô»Ÿ[ù‹õ€ôŒàŸ_X
+[ôò\öX[ù H[ôH€ÿò[€óŸ\úõ‹òŸ[ùò›\J\úäKó◊€ò[YW◊ﬂNàŸ\úüX»⁄]]ô\à⁄]öYŸŸ\ôYHòZ[\ôKà]XZ‹¬ö[ù\õò[»
+]ÀXúò\ûH\úõ‹úÀõ›öY\à]Z[ H[ô8†%H⁄\úYŸH8†%€óŸ\úõ‹òù€›[‹›[H[ù»H
+ô‹õ›\
+à⁄]KôKà»]ô\ûH[X[à[àH[›‹õ›\à[ù\Ÿ\ãYòX⁄[ô»\úõ‹ú»\ôHõ›»Hö^YŸ[ô\öX»[ôH⁄[ù[ô»]Ÿ\úõ‹úÿ
+YZ[ãYÿ]Yù⁄\ôHH]Z[[ôXYH]ô\»öXHH^\›[ô»ŸÀô\úõ‹òÿ[Œ»H€ôH⁄]H]ôYâ›ŸÀHY[ùHX\ùôX]ù]€ãõ›»Ÿ\ Kà€óŸ\úõ‹òY][€ò[H€Ÿ\»⁄[[ùö[à‹õ›\⁄]ÀàŸ\\ÀZ\Œà[X[ãX]]‹ôYY\‹ÿYŸ\»
+ôö[I‹»€»öY»äK[ôHî””Çù\ÿY\úŸH\úõ‹àõ›»⁄›‹»€õHH›ùX›\ôYKõ\ŸÿÿKõ[ô[õÿúõ€Bíî””ëX€ŸQ\úõ‹à8†%]	‹»Xõ›]H\Ÿ\â‹»›€àö[Kõ›[ù\õò[Àà]ò[\[õôYäõÀY^Ÿ\[€ã[XZÿ
+KÇÇääîå»8†%]€àõ›úH\èàKX⁄X⁄ÀX€€ôöYÿääàõÀ[ô]€‹ö»ôYõY⁄õ‹à›[ô[ô»\ò[à[ú›[òŸNà⁄Ÿ[à⁄\K[Y^õ€ôHX›X[Hô\€€ö[ô»
+ì’’SQVì”ëXŸ]ù]òõ€ôR[ôõÿòZ[[ô»HZ\‹⁄[ô»ô]KH⁄[[ùòZ]ôK][YHòZ[\ôH[ŸJKÿ\ôõÿYY[ú›[òŸH\à‹ö]XõK]ô\ûHô\Ÿ[ù›]Hö[H\úŸ\»\»î””à
+H€‹úù\õ€ôHYX[ú»⁄[[ù[\K\›]H›\ù\8†%ô\›‹ôHúõ€HòX⁄›\ö\ú›
+K›€ô\à€Z[YY‹Çõõ›S’—Q’T—Tî»[\H‹àõ›[Ÿ[»Ÿ]à^]HôXYH»][ò⁄àZ\‹⁄[ô¬ù⁄Ÿ[ã⁄Ÿ^Kÿÿ\ô[ôXYH\ôYòZ[][\‹ù⁄]X›[€òXõHY\‹ÿYŸ\À€»H⁄X⁄¬ò€›ô\ú»HòZ[\ô\»]Ÿ\ôHô]ö[›\€H€õH\ÿ€›ô\òXõH]ÿ[KÇÇà»»ååçãLÀLLÀåH8†%›€ô\ú⁄\\ô[ö[ôŒà€Z[K[€òŸH›€ô\à
+»ö]ò]KX⁄]ÿ]H
+åKŸX›\ö]JBÇääîõ€›ÿ]\ŸH
+õ›[ô⁄[HòX›X⁄X⁄⁄[ô»[à^\õò[ô]öY]À€€ôö\õYY[à€ŸJNääÇù€»]]‹ö^ò][€àÿ\À€ôHŸ]ô\ôKÇÇåKà
+äì›€ô\ú⁄\ZŸ[›ô\àöXH‹›\ùääàŸ]€›€ô\òôYù\ŸY‹õ›\Y»ù]Yõ¬àò[ôXYH€Z[YYà›X\ô8†%]ô]‹õ›H›€ô\óÿ⁄]ù€à]ô\ûHÿ[⁄[ô]ô\Çà’”ëTó–“U“Qÿ\»[úŸ]à⁄^Ÿà]»Ÿ]ô[àÿ[⁄]\»‹ò\Y][ÇàYàŸ]€›€ô\ä
+H\»õ€ôNò»H‹›\ù[ô\àÿ[Y]ò\ôKà[Y‹ò[Hõ›»\ôBàXõX€HYô\‹ÿXõHûH\Ÿ\õò[YK€»[ûH›ò[ôŸ\à⁄»õ›[ôHõ›[ôŸ[ùà‹›\ù⁄[[ùHôXÿ[YHH›€ô\à8†%X\ùôX]Àõ›Hõ€›À]\À[ô]ô\ûBàõÿX›]ôHY\‹ÿYŸHôY\ôX›Y»[K[ôHôX[›€ô\à€›õ»⁄Y€ò[Çåãà
+äêS’—Q’T—Tî»€õH[ãY[ôõ‹òŸYääà⁄\◊ÿ[›ŸYÿ\»H\ãZ[ô\à⁄X⁄»]àöYùYàYYXK›^[ô\ú»Y]‹›\ù[ô[‹›ŸàHé€€[X[ô»ô]ô\Çà€›]à⁄][à[›€\›€€ôöY›\ôYH›ò[ôŸ\à€›[â›Ÿ[ôH›»ù]€›[àù[à€õ›\ÿ€Y[\ÿ‹Ÿ][ô‹ÿ8†%[ô‹›\ùÇÇääëö^\»
+õ›]ò[\[õôYZ\úõ‹ö[ô»›»H‹õ›\õ›[ô\ûH\»õ›X›Y
+NääÇãHŸ]€›€ô\ò€Z[\»€òŸNàö\ú›€€ùX›ö[ô»›€ô\ú⁄\⁄]òYôöX»ÿ[àô]ô\ÇàôX\‹⁄Y€à]à[Xô\ò]Hò[úŸô\àHY]›€ô\óÿ⁄]ù€ãY]öXŸH‹àŸ]à’”ëTó–“U“Q
+[ùà›^\»]]‹ö]]]ôJKàôZ]ö[‹à⁄[ôŸH»€õ›»Xõ›]àŸ[ô[ô¬à‹›\ùúõ€HHëU»⁄]õ»€ôŸ\à[›ô\»›€ô\ú⁄\\ôKÇãH‹ö]ò]WŸÿ]XH⁄Xõ[ô»Ÿà‹õ›\Ÿ›X\ô[à[ô\à‹õ›\LNà⁄[ÇàS’—Q’T—Tî»\»Ÿ]ö]ò]KX⁄]\]\»úõ€H[û[€ôH[ŸH›‹]€ôH⁄⁄ŸBà⁄[ù8†%€€[X[ôÀY\‹ÿYŸ\ÀYYXKÿ[òX⁄‹À[ô[ûHù]\ôH\]H\H8†%[ú›XYàŸàô[Z[ô»€à\ãZ[ô\à⁄X⁄‹»
+⁄X⁄\»^X›H›»Hÿ\õ‹õYY
+KàH›€ô\Çà[ÿ^\»\‹Ÿ\»]ô[àYàYù›]ŸàS’—Q’T—Tî»
+ÿ⁄⁄[ô»H›€ô\à›]ŸàZ\Çà›€àõY]\»€‹úŸH[àôY[ô[òﬁJKà[\HS’—Q’T—Tî»HŸ^I‹»‹[àôZ]ö[‹é¬à‹õ›\⁄]»\ôH[ù›X⁄Y
+‹õ›\Ÿ›X\ô	‹»ù\ö\ŸX›[€ã‘ì’T–“U—T“Q”ãõY
+KÇà^\›[ô»\ãZ[ô\à⁄X⁄‹»›^H\»Yô[úŸH[à\ÇÇìô]»]ò[Œà›€ô\ãX€Z[K[€òŸX
+Ÿ]€›€ô\àŸY\»]»›X\ô
+H[ôòö]ò]KYÿ]K\ôY⁄\›\ôY
+Hÿ]H›^\»⁄\ôY[à‹õ›\LJKÇÇà»»ååçãLÀLLãç8†%\Ÿ\ã[õ›H]X[]Nà‹õ›[ô[ôÀXúö\»ÿ[ö]][€ãôX[Y\›[K[õ›H^\ûBÇääîõ€›ÿ]\ŸH
+›€ô\â‹»]ôH\Ÿ\ó€õ›\Àùô]öY]ŸYåçãLÀLLäNääàHMK[õ›Hö[Bù⁄\ôHåLà[ùöY\»Ÿ\ôHÿ\òòYŸKõ›\à\›[ò›òZ[\ôH[Ÿ\»ö\⁄XõH]€òŸNÇÇåKà
+äê⁄\òX›\àöX›[€à›‹ôY\»\Ÿ\àòX› äà
+ö\»H\ÿò[ôò\Y[àHôYõ€€Bà⁄»\»€€ôù\ŸYûH\à\ôõ‹õX[òŸHã\à›€àò[ò[òHúôXY\»
+ö\ àòZ⁄[ô KàBà^òX›[€àõ€\õ‹òöY»\Àù]\ö[ô»õ€\^HÿŸ[ô\»H[ò[\⁄\»[Ÿ[Ÿ\¬à][û]ÿ^Kà\»\»H^X›òZ[\ôH€\‹»\»HåçãLÀLL[X⁄[ò]Y[Y[[‹öY\¬àùY»8†%[ôHY[[‹ûH]€›][›KY‹õ›[ô[ô»\»]»ö^⁄[H
+äùHõ›\»]Yàõ»‹õ›[ô[ô»⁄X⁄»][
+äãÇåãà
+äíî””àXúö\»[àõ›H^
+äéàõY[ù[€ú»\»\€€Z[ô»‘à]Y]›\∏†)à
+ò[[òŸBàù[
+Hà8†%H[Ÿ[XZ‹»ÿ⁄[XHúòY€Y[ù»[ù»Hõ›H›ö[ôÀà€‹úŸH[Çà€‹€Y]XŒàH[Ÿ[Y[Z]YäYH8†)äHà€›[ôXX⁄Hõ€›À]\\úŸ\à⁄]›]à\‹⁄[ô»Hÿ[\â‹»]Hò[Y][€ãÇåÀà
+äëY\Z\‹Ÿ\»ÿùö[›\»\Xÿ]\ äéàö\»Hÿ[⁄]]Y[à[àZY⁄Z[ù]\»à[ôàö\»HúHÿ[⁄]]Y[ààŸ\ôHõ››‹ôY8†%HåX⁄\ã\ôYö^⁄X⁄»ÿ[â›ŸYBà\›HYôô\ö[ô»Ÿ[ù[òŸH‹[ö[ôÀÇçà
+äîô]\ôYõ›\»ô]ô\àX]ôJäéàä\⁄ŸY8†)äHà[ô\»[ôŸ\à[àHõ€\õÿ⁄»]ô\ûBàô\H[ù[HMK[õ›Hÿ\\[ú»»]öX›[KÇÇääëö^\»
+XX⁄⁄]]»›€à⁄[›⁄]⁄[úŸ]H€äNääÇãH\Ÿ\ó€õ›W‹][›XYY»H€€Xö[ôY[ò[\⁄\»î””à
+ô\õ»ô]»Hÿ[ N»Bàõ›H\»ôZôX›Y[õ\‹»H][›H\»Hô\òò][H›Xú›ö[ô»ŸàH\Ÿ\â‹»›€à[ô\¬à
+ô]\Ÿ\»‹][›WŸ‹õ›[ôY
+KàôZôX›[€ú»ŸŸŸY\»õ›W›[ô‹õ›[ôYàì’W—‘ì’SëQLàô\›‹ô\»€ôZ]ö[‹ãàõ€\[€»õ›»[X[ô»”ëH]ô[ù\àõ›H
+Hùÿ[»[ô»
+¬à]Y[àXààX\⁄\
+KÇãH‹ÿ[ö]^ôW€õ›X›ö\»XX⁄[ô\ûK\⁄\Y\ô[ù]Xÿ[»8†%
+Y_]ô\û_\⁄ŸYõ›Yàò[[òŸ_[€Ÿ€€ôöY[òŸH8†)äX8†%úõ€H[Ÿ[\›\YYõ›H^ôYõ‹ôHX\öŸ\ú»\ôBà\[ôY€»›‹ôYX\öŸ\ú»\ôH€õH]ô\à‹ö][àûH\ÀÇãH€õ›W⁄\◊Ÿ\àYÿXﬁHôYö^⁄X⁄»\»€‹ôX€€ùZ[õY[ù
+⁄\ôY⁄Ÿ[ú»»€X[\ÇàŸ]8¢iHì’W—QT‘“SXYò][é»HôYö^[€õJKÇãHõ›WŸõ€››\⁄õÿòù[ô\»
+\⁄ŸY8†)äXõ›\»€\à[àì’W–T“—Q’—VTÿà
+Yò][Œ»HŸY\õ‹ô]ô\äH[à]»Z[H\‹ÀÇÇà»»ååçãLÀLLãå»8†%ôX›\úö[ô»]ô[ù»úõ€H€€ùô\úÿ][€àX›X[HôX›\à
+[ô›^H[à⁄\òX›\äBÇääîõ€›ÿ]\ŸH
+›€ô\ã\ô\‹ùY
+NääàúôX›\úö[ô»]ô[ùô[Z[ô\ú»YYöXH€€ùô\úÿ][€àŸ]õŸŸŸYù]ô]ô\à€€YH\ò]\ò[H8†%ù\›HôY›[\àô[Z[ô\àY\‹ÿYŸKààôX›\úö[ô»]ô[ù¬ôô[[ù»Hÿ\ô]ŸY[àôYH\ÿ€€õôX›Y›Xúﬁ\›[\Àà
+JHH€€ùô\úÿ][€ãXÿ\\ôBú]
+‹›‹ô\Wÿ[ò[\⁄\ÿ
+H€õHYH⁄[ô€H\Ÿ\ó€õ›WŸ]X8†%úòX›XŸH]ô\ûBï\úŸ^Hàÿ\\ôY][‹›Hö\ú›\úŸ^K[ôYù\àõ›WŸõ€››\⁄õÿò\⁄ŸYòXõ›]]€òŸKH[ôHÿ\»ô]‹ö][à»
+\⁄ŸY8†)äX[ôô]\ôYõ‹ô]ô\ãà
+äHH€õBúôX›\úö[ô»XX⁄[ô\ûK‹Ÿ]ô[Z[ô\ò[]ô\ú»õ›Y⁄ö\ôW‹ô[Z[ô\ò	‹»]\ò[ò8£Ïô[Z[ô\éà^ò8†%YX⁄[öXÿ[õ»⁄\òX›\àõ⁄XŸKõ»H[ùõ€ôYà
+ HBõò]\ò[Y[]ô\ûHXX⁄[ô\ûH
+Ÿ[ô›öYŸŸ\ôY\ŸYûH‹õ€àõÿú»[ôõ›Hõ€›À]\ Bô^\›Yù]õ›[ô»ôX›\úö[ô»ÿ\»]ô\à⁄\ôY[ù»]ÇÇääëö^8†%⁄\ôHH^\›[ô»YXŸ\»ŸŸ]\ã\àH›€ô\â‹»⁄‹Ÿ[à‹]ääÇãH‹›‹ô\Wÿ[ò[\⁄\ÿÿZ[ú»H\Ÿ\ó€õ›W‹ôX›\úö[ôÿî””àŸ^H[àHÿ[YH€€Xö[ôYàÿ[
+ô\õ»ô]»Hÿ[À\àH[ùò\öX[ù
+NàŸYZ€Nè^Oò»[€ùNèKLÃOò¬àYX\õNèSKQòù[õ‹à€ôK[Ÿôú»[ôòY›YHÿY[òŸ\ÀÇãHôX›\úö[ô»õ›\»\ôH›‹ôY\»õ›Oà
+]ô\ûHù[OäH
+YH]OäX[Çà\Ÿ\ó€õ›\Àù»YàH[Ÿ[ÿ]ôHHù[Hù]õ»]KHö\ú›YH[ò⁄‹à\»Bàô^ÿÿ›\úô[òŸKàù[\»\ôHò[Y]YûH‹\úŸW‹ôX›\úô[òŸX8†%[û][ô»ÿ\òõYàY‹òY\»»H€ôK[Ÿôàõ›Hò]\à[à‹ò\⁄[ô»H\‹ÀÇãHõ›WŸõ€››\⁄õÿò
+[ôXYHò]\ò[[ãX⁄\òX›\ã]ZY]Z›\úÀH[ôàùYŸKXùYŸ]X]ÿ\ôJHõ›»õ€»HôX›\úö[ô»õ›I‹»YH]Hõ‹ùÿ\ôöXBà€ô^‹ôX›\úô[òŸXYù\à\⁄⁄[ôÀ[ú›XYŸàô]\ö[ô»]àô^ÿÿ›\úô[òŸH\¬à€€\]Yúõ€H
+ùŸ^Jãõ›H›‹ôYYH]K€»Hõ›H›ô\ôYHûHŸYZ‹»
+€ôBàŸôäHÿ[â›õ€»H\›]H[ôôYö\ôHZ[H⁄[Hÿ]⁄[ô»\à›ô\ôõ›»^\¬à€[\
+[€ùNåÃHö\ô\»\àÃ
+KÇãH
+äë[Xô\ò][Hì’⁄[ôŸYääà‹ô[Z[ôYX[ô‹Ÿ]ô[Z[ô\òŸY\HYX⁄[öXÿ[à8£Ïõ‹õX]8†%›€ô\ãX€€ôö\õYY‹]à\ôô[Z[ô\ú»
+YYÀ[Y\ú H⁄›[ôBà[ò[XöY›[›\»[ôô]ô\à‹›[à⁄\òX›\àõ]õ‹é»€õH€€ùô\úÿ][€ãXÿ\\ôY]ô[ù¬à€»Hò]\ò[õ›]KÇãH⁄[›⁄]⁄ì’W‘ëP’TîíSëœL
+Yò][€à8†%›€ô\àô\]Y\›YHôZ]ö[‹é¬à\ÿXõ[ô»ô\›‹ô\»^X›ô]ö[›\»ôZ]ö[‹éàÿ\\ôH\»€ôK[Ÿôã
+\⁄ŸY8†)äXô]\ôJKÇàÿ[òŸ[HôX›\úö[ô»õ›H[û][YH⁄]€õ›\»[èòÇÇà»»ååçãLÀLLãåà8†%[XôY[ô‹»]X›X[HôXÿ[à]ôHŸ[X[ùX»Y[[‹ûH
+»‹ôKŸ[X[ùX»Y\]öX›[€à	àõ›ô[ò[òŸHö^\¬Çääîõ€›ÿ]\ŸH
+HXY[ôJNääà]ô\ûHY[[‹ûH‹ö]H[XôY»H[ôHöXHHõÿ⁄⁄[ô¬ìò[õ—‘Ÿ[XôY[ô‹ÿÿ[ù]
+äù‹ŸHôX›‹ú»Ÿ\ôHô]ô\àôXY\ö[ô»H]ôHô\KääÇòöYŸŸ\ôY€Y[[‹öY\ÿ⁄⁄\YŸ[X[ùX»ÿ€‹ö[ô»⁄[ô]ô\à]ò[à€àH]ô[ù€‹
+Bô›X\ôYY€»HÃ»õÿ⁄⁄[ô»[XôY€›[â›úôY^ôHH€‹
+K[ô\‹Ÿ[XõW€Y\‹ÿYŸ\ÿò[ÿ^\»ù[ú»€àH€‹8†%€»Ÿ[X[ùX»ôXÿ[€õH]ô\àö\ôYõ‹àHX[ùX[‹ôXÿ[ò[ô€Y[X⁄X⁄ŒóX€€[X[ôÀàõ‹õX[⁄]ÿ\»Ÿ^]€‹ô[€õH[ôH
+åÀåŸ[X[ùX¬ùŸZY⁄ÿ\»XY€ŸKàŸHZYH‹ö]H€‹›[ô€›[[‹›õ€ôHŸàHôXYô[ôYö]ÇÇääì]ôHŸ[X[ùX»ôXÿ[
+QSS‘ñW‘—SPSïP◊”UëXYò][€äNääàHõÿ⁄⁄[ô»]Y\ûBô[XôY\»õ›»⁄\›Y[ù»H\ﬁ[ò»[ô\àöXHHô]»\‹Ÿ[XõW€Y\‹ÿYŸ\◊ÿ\ﬁ[òÿù‹ò\\à8†%Ÿ[XôY‹]Y\ûWÿÿX⁄Yù[ú»Ÿ[XôY›^[à\ﬁ[ò⁄[Àù◊›ôXYõ›[ôYûBòQSS‘ñW‘UQTñW—SPëQ’SQS’U
+‹ K⁄]H€X[ïH€»ô\X]Y‹[ô\ú»€â›úôKY[XôYàHôX›‹à\»ôXYYõ›Y⁄\‹Ÿ[XõW€Y\‹ÿYŸ\ÿ8°§àöYŸŸ\ôY€Y[[‹öY\ÿù⁄X⁄õ›»ò[ö‹»⁄]H\ôKX€‹⁄[ôH‹Ÿ[X[ùX◊‹ôXÿ[›ôXÿ
+õ»õ»]ô[ù[€‹ú⁄⁄\
+KàŸ^]€‹ôÿ€‹ö[ôÀôXŸ[òﬁHXÿ^KY⁄[ôÀ[ôH⁄Ÿ[àùYŸ]\ôH[ò⁄[ôŸY8†%ù^Hö[ò[H‹\ò]H€àHôX[Ÿ[X[ùX»ÿ[ôY]HŸ]à€à[Y[›]ŸòZ[\ôKŸ\ÿXõH]ôY‹òY\»»^X›HŸ^I‹»Ÿ^]€‹ô[€õHôZ]ö[‹ãÇÇäë[Xô\ò]KôX€‹ôYX⁄\⁄[€éäà\»Y»
+äõ€ôH[XôY[ô»õ›[ô]ö\\àô\Jäà8†%Bú\ã[Y\‹ÿYŸH⁄YHÿ[⁄X⁄Hõ›X€ŸKZ[ùò\öX[ù»ÿ]][€àYÿZ[ú›õ‹à€ôBòò[ô⁄YàH›€ô\àXÿŸ\Y]^X⁄]Nà[à[XôY[ô»\»H[ûKò\›ô\]Y\›
+õ›òHML»⁄]€€\][€äK]\»ÿX⁄Y
+»[Y[›]Xõ›[ôY
+»Ÿôã[€‹[ô]\»BôYò][[€à⁄[›⁄]⁄
+QSS‘ñW‘—SPSïP◊”UëOL
+Kà]\»ì’Hô]»H[ò[\⁄\»ÿ[ú€»Hõ€ôH€€Xö[ôY‹›‹ô\Wÿ[ò[\⁄\ÿÿ[à[ùò\öX[ù\»[ù›X⁄YàŸŸŸY[Çòò€]YK€Y[[‹ûK€‹\ò][€ò[[ŸÀõY€»]\€â›]\àõYŸŸY\»HôY‹ô\‹⁄[€ãÇÇääîŸ[X[ùX»‹ôXõ€⁄»X]⁄[ôŒääàHÿ[YH\ã\ô\HôX›‹àõ›»[€»›Ÿ\ú¬òöYŸŸ\ôY€‹ôX8†%õ€ãX€€ú›[ù‹ôH[ùöY\»\ôH[XôYY€òŸH[ù¬ò‹ôWŸ[XôY[ô‹Àöú€€òûHH›\ù\õÿà
+Ÿ[XôY€‹ôW⁄õÿòŸôã[€‹
+K[ô\¬òQSS‘ñW”‘ëW‘—SPSïP◊’‘ÿ
+ HŸ[X[ùXÿ[KX€‹ŸH[ùöY\»Xõ›ôHHå»õ€‹à\ôBòYY»HŸ^]€‹ô]ÀàH\Ÿ\à\ò\ò\⁄[ô»H‹X»⁄]›]][ô»H‹ôHŸ^]€‹ôõõ›»›\ôòXŸ\»Hô[]ò[ù‹ôKàõ»^òHÿ[8†%ô]\Ÿ\»HY[[‹ûH]Y\ûHôX›‹ãÇÇääîŸ[X[ùX»‹ö]KYY\
+QSS‘ñW—QT‘“SXéLäNääàH^Xÿ[Y\[Çòÿ\[ô€Y[[‹ûXZ\‹ŸYô]€‹ôY\Xÿ]\»
+õ]ô\»[àŸX]Hà8°§àõ[›ôY¬î‹ù[ôäKàH]]»]õ›»[XôY»H[ùûH€òŸH
+H[XôY€Y[[‹ûW‹ô\XŸXù€›[»[û]ÿ^H8†%\‹ŸYõ›Y⁄öXHôX€€\]Y›ôXÿ€»]\»õ›[XôYY⁄XŸJBò[ô⁄⁄\»]Yà⁄\◊‹Ÿ[X[ùX◊Ÿ\ö[ô»HôX\ãY\Xÿ]H[ôXYH›‹ôYàX[ùX[Y¬ò[ô]Y][Y\ôŸ\»\ôH[ù[ù[€ò[[ôû\\‹»]ÇÇääî⁄YXÿ\à‹ú[àXZ»ö^Y
+»€€ôöY[òŸKX]ÿ\ôH]öX›[€éääàQSS‘íQT◊”PV›ô\ôõ›¬ù\ŸYHíQì»€XŸH]õ‹Y[ô\»ù]
+äõô]ô\à‹YZ\àY[[‹ûW€Y]Köú€€ò¬ò[XôY[ô‹Àöú€€ò[ùöY\ äà8†%õ›⁄YXÿ\ú»‹ô]»[òõ›[ôY[ô›[HY]H€›[⁄Y›¬òHô]»Y[ùXÿ[[ôKàô]»\ôHŸ]öX›ÿûW›ò[YXõ‹»H›Ÿ\›]ò[YH[ùöY\¬ä€€ôöY[òŸKY\»úõ⁄Ÿ[àûH€\›Œ»YÿXﬁHõÀ[Y]HHô]]ò[JH[ôHÿ[\à‹¬ô]ô\ûH]öX›YŸ^Húõ€Hõ›⁄YXÿ\ú»8†%€»H[ôX€‹úôX›Y€€ôãLLòX›õ›»›]]ô\»Bùö]öX[€€ôãL»€ôK[ôåI‹»ùôYHö[\»›^H[àﬁ[ò»à€»€àH]öX›[€à]€ÀÇÇääîõ›ô[ò[òŸH⁄›€à»H[Ÿ[ääà⁄YŸW€Y[[‹ûW€[ô\ÿõ›»\[ô»HôX€‹ôYú€›\òŸH€ö\]»YŸY
+›ÀX€€ôöY[òŸJHY[[‹öY\»8†%
+[ú›\ôJH[ôOàﬁ[›HôXÿ[\¬ôúõ€Nàè€›\òŸOàóX8†%€»H⁄\òX›\àÿ[àŸ[ãX⁄X⁄»H⁄ZﬁHY[[‹ûHYÿZ[ú›BúŸ[ù[òŸH]‹ôX]Y][ú›XYŸàõ›ô[ò[òŸHôZ[ô»YZ[ã[€õH
+‹€›\òŸ[Y[X
+KÇÇåç»ô]»\›»
+Ÿ[X[ùX»ôXÿ[ôXÀŸ[X[ùX»Y\ò[YH]öX›[€ã‹ôHŸ[X[ùX»]Àúõ›ô[ò[òŸHYŸK]Y\ûKY[XôYÿX⁄K[ôH]ôK\]ôY‹ô\‹⁄[€àõ›ö[ô»Ÿ[X[ùX»ôXÿ[õõ›»ô]\õú»H]]⁄\ô\»õ»Ÿ^]€‹ô»⁄]H]Y\ûJKÇÇà»»ååçãLÀLLãåH8†%Y[[‹ûH€‹ŒàŸYZ€H]Y]8°§àô]öY]»]Y]YKôXŸ[òﬁHXÿ^K€€ôöY[òŸHY⁄[ô¬Çääîõ€›ÿ]\ŸH
+[ôYK€ôH[YJNääàHY[[‹ûHﬁ\›[HYH‹ö]H]⁄]úõ›ô[ò[òŸH
+åJHù]õ»
+õ€‹
+à8†%õ›[ô»]ô\àŸ[ùòX⁄»›ô\à⁄]ÿ\»›‹ôYÇõY[[‹öY\Àùÿ\»\[ô[€õH\\ùúõ€HX[ùX[Ÿ[Y[XÿŸY]Y[Xà€€ùòYX›[€ú¬ò[ô›\\úŸYYòX›»Xÿ›[][]Y[ù[H€›[ùÿ\]öX›Y€€Y][ô»\òö]ò\ûKÇîôXÿ[ò[öŸY\ô[HûHŸ^]€‹ô]»
+»€‹⁄[ôH⁄[Z[\ö]K€»Hã[[€ù[€€ôK[ŸôÇõ›]ò[öŸYY\›\ô^I‹»€‹úôX›[€àYà]⁄\ôYHŸ^]€‹ôà[ôH›ÀX€€ôöY[òŸHY[[‹ûBùH›€ô\à\õ›ôYúõ€HHô]öY]»]Y]YHÿ\»\‹Ÿ\ùY]ôXÿ[⁄]Hÿ[YBòŸ\ùZ[ùH\»H€€ôãLL][›KY‹õ›[ôYòX›8†%HY]H€€ôöY[òŸH^\›Yù]ÿ\¬õô]ô\à€€ú›[Y][öôX›[€ãÇÇääïŸYZ€HY[[‹ûH]Y]
+QSS‘ñW–UQUŸôàûHYò][
+NääàY[[‹ûWÿ]Y]⁄õÿòöY\¬ùHöY⁄HôYõX›[€ó⁄õÿò[ôö\ô\»€òŸHHŸYZ»
+QSS‘ñW–UQU’—QR—VX
+Nà€ôBòò]⁄Y’SSPTñW”S—Sÿ[›ô\àY[[‹öY\Àù
+
+»YŸKÿ€€ôà[õõ›][€ú»úõ€BõY[[‹ûW€Y]JHõ‹‹⁄[ô»][‹›QSS‘ñW–UQU”PV‘ì‘‘–Sÿ€€ùòYX›[€ã¬ú›\\úŸYY‹›[Hö[ô[ô‹Ààõ‹‹ÿ[»[ô[àHVT’Së»Y[[‹ûW‹ô]öY]Àöú€€ò8°§Çò‹ô]öY]€Y[Xõ›»\»⁄[ôàò]Y]ò][\»8†%Hõ›ô]ô\à[]\»‹àY\ôŸ\»€à]¬õ›€ãà\õ›ö[ô»\Y\»[]K€Y\ôŸHõ›Y⁄€Y[[‹ûW‹ô\XŸX
+Y]JŸ[XôY[ô‹»›^Bö[àﬁ[òŒ»Y\ôŸ\»Ÿ]‹öY⁄[éà]Y][Y\ôŸXZ[ã[Ÿã\\ô[ù»€€ôöY[òŸK[ôBòY\ôŸYàHò€›\òŸHòZ[õ‹à‹€›\òŸ[Y[X
+N»H\ôŸ]Y]Y⁄[òŸHHõ‹‹ÿ[òXõ‹ù»ÿYô[H
+õY[[‹ûH⁄[ôŸY⁄[òŸHõ‹‹ŸYäKàôZôX›[ô»ôX€‹ô»[Çõ‹ô\ãZ[úŸ[ú⁄]]ôHZ\àŸ^H[àY[[‹ûWÿ]Y]‹ŸY[ãöú€€ò€»HX€[ôYõ‹‹ÿ[ô]ô\Çúô]\õúŒ»]Y]YKXÿ\›ô\ôõ›»ù\›ôK\õ‹‹Ÿ\»ô^ŸYZ»
+ô]ô\à]öX›»[ô[ô»][\ KÇÇääîôXŸ[òﬁHXÿ^H
+QSS‘ñW—P–VW“SìQëW—VTÿŸôàûHYò][ôX€€[Y[ôL
+NääÇòöYŸŸ\ôY€Y[[‹öY\ÿõ›»][\Y\»HY\ôŸYŸ^]€‹ô
+‹Ÿ[X[ùX»ÿ€‹ôHûBò‹ôXŸ[òﬁW›ŸZY⁄8†%^€ô[ùX[[ã[YôH€àHY[[‹ûW€Y]H[Y\›[\õ€‹ôY]ååH€»€Y[[‹öY\»òYH[àHò[ö⁄[ô»ù]ô]ô\à\ÿ\X\àúõ€H]à[ùöY\»⁄]õõ»ôX€‹ôY»
+YÿXﬁKôK[Y]JH›^H]ô]]ò[Kå8†%ô]ô\à[ö\⁄YÇÇääê€€ôöY[òŸHY⁄[ô»
+QSS‘ñW“Q—XŸôàûHYò][
+Nääà][öôX›[€ãò⁄YŸW€Y[[‹ûW€[ô\ÿôYö^\»
+[ú›\ôJX€àôXÿ[YY[[‹öY\»⁄‹ŸHY]Bò€€ôöY[òŸH\»ô[›»QSS‘ñW–UU–””ëò[ô\[ô»€ôH[ú›ùX›[€à[ôH[[ô»Bò⁄\òX›\à»YŸHò]\à[à\‹Ÿ\ùà\‹^K][YH€õN»H›‹ôY[ôH\¬ù[ù›X⁄YÇÇääí[ùò\öX[ù€€\X[òŸNääàô\õ»ô]»\ã[Y\‹ÿYŸHHÿ[»
+H]Y]\»HŸYZ€Búÿ⁄Y[Yÿ[[ô\à‘’SSPTíVëW‘—SXöXH\ﬁ[ò⁄[Àù◊›ôXY
+N»[]]][€ú»€¬ùõ›Y⁄H€Y[[‹ûW‹ô\XŸX⁄⁄ŸH⁄[ùôZ[ôH›€ô\â‹»^X⁄]‹ô]öY]€Y[Bõ⁄ÿ»]Y][Y\ôŸY^\»Xô[Yõ›ô[ò[òŸH
+‹öY⁄[à
+»€›\òŸJK€õ‹ö[ô»BôŸ[ô\ò]YX€€ù[ùù[Kà[€»ö^Y[à\‹⁄[ôŒà‹ô]öY]€Y[H⁄ÿÿ[Yòÿ\[ô€Y[[‹ûX\ôX›H€àH]ô[ù€‹8†%€Y[[‹ûW‹ô\XŸH8°§àŸ[XôY€Y[[‹ûW€[ôXõXZŸ\»Hõÿ⁄⁄[ô»ÿ[
+\»Ã»›[
+N»õ›»‹ò\Y[à\ﬁ[ò⁄[Àù◊›ôXYÇÇåÕô]»\›»
+ôXŸ[òﬁHŸZY⁄Y⁄[ôÀ]Y]\úŸKŸY\‹]Y]YKÿ\JKÇÇà»»åçãLÀLLà8†%‹Œà]ò[Yö^ô]ûH€‹
+›‹€⁄ H
+»[\õ›ô[Y[ùõ›][ôHX›]ò]YÇìõ›Hõ›ô[X\ŸH
+õ›úH[ù›X⁄Y
+Kà€»€‹öŸõ›»€‹»úõ€HHRK[€‹»ÿ\ò[ò[\⁄\Àò€]YKÿ€õNÇÇääë]ò[Yö^ô]ûH€‹
+ò€]YK⁄€⁄‹ÀŸ]ò[Yÿ]Kú⁄ô]»›‹€⁄ NääàH]ò[¬ò€›[òZ[⁄]õ›[ô»ôYY[ô»HòZ[\ôHòX⁄»8†%H[]ô\ûHÿ]Hõÿ⁄‹»€òŸKê“Hõÿ⁄‹»€à\⁄ù]õ»YX⁄[ö\€HôK\ô\Ÿ[ùYHòZ[[ô»›]]õ‹à[õ›\àö^úõ›[ô»HŸ\‹⁄[€à€›[[ô]»\õà⁄]ôY]ò[»]ÿ]\ŸYàHô]»€⁄»ù[ú¬òù[ãY]ò[Àú⁄
+
+»]\›⁄[à]ò[»\ôH‹ôY[äH⁄[ô]ô\àHŸ\‹⁄[€à\»[ò€€[Z]Yò⁄[ôŸ\»»ÿ]Y›\ôòXŸ\À[ô€àòZ[\ôHõÿ⁄‹»\õãY[ô⁄]HòZ[[ô»[ô\Œà¬òõ›[ôYö^õ›[ôÀ[à€ôH\ÿÿ[][€àõÿ⁄»
+›[[X\ö^ôHõ‹àH›€ô\ãô]ô\àY]ò[à]ò[»\‹ K[à]›[ô»\⁄YH€»H\õàÿ[à[ÿ^\»[ôà€›[ù\à[Çô⁄]Y€õ‹ôYò€]YKÀúù[ù[YKÿŸ^YYûHŸ\‹⁄[€àYÇÇääí[\õ›ô[Y[ùõ›][ôHX›]ò]Yääà”UQKõY\ÿ‹öXôYHõ[€ùHõ›][ôHà]Yõô]ô\àX›X[HôY[àÿ⁄Y[Y8†%H[\õ›ô[Y[ù€‹^\›Y€õH\»õ‹ŸKà‹ôX]Yò[\õ›ô[Y[ù[€‹[[€ùX
+‹õ€àHH
+à
+òúô\⁄Ÿ\‹⁄[€à\àö\ö[ô H[ôôX€‹ôYö]»ÿ⁄Y[H
+»ô\òò][Hõ€\[àò€]YK€‹\ò][ôÀ‹õ›][ô\ÀõY⁄]Hﬁ[ò»ù[H€¬ùH]ôHöYŸŸ\àÿ[â›⁄[[ùHöYùúõ€HHô\…‹»ôX€‹ôÇÇà»»ååçãLÀLLKåMH8†%€»öYŸ€\Œà€€[X[ôY[ùH€€\][ô\‹»
+»ô\›\ù\›‹õHò[ŸH[\õBÇääê€€[X[ô]]ÿ€€\]HY[ùH
+Ÿ]€^Wÿ€€[X[ôÿ
+NääàH[ôZŸ\Y[ùH\›YöYùYôúõ€HHX›X[[ô\àôY⁄\›ò][€ú»8†%HX\»€€[X[ô»
+‹õ›]H€ôX\òûH‹XŸBãŸõ€Ÿ
+H[ôòYôöX»€€[X[ô»
+›òYôöX»⁄[ò⁄Y[ùÿ
+HŸ\ôHôY⁄\›\ôYù]XúŸ[ùúõ€BùHY[ùK€»^HYâ›]]ÿ€€\]KàYY[HöXHH\›XõHÿùZ[ÿ€€[X[ô€Y[ùXÇõX\»[ÿ^\»
+‹ŸH[ô\ú»\ôH[ò€€ô][€ò[
+KòYôöX»€õH⁄[à‘—’–TW“—VX\¬úŸ]
+Z\úõ‹ú»ôY⁄\›ò][€äK^[Y[ù»\»ôYõ‹ôKÇÇääîô\›\ù\›‹õHò[ŸH[\õNääà‹Ÿ[óÿ]Y]	‹»úô\›\ùYû[àH\››\à8†%ú€€Y][ô»\»⁄[[ô»HõÿŸ\‹»à€›[ùY]ô\ûH’TïTUQU[ò€Y[ô»H›€ô\â‹¬õ›€à‹ô\›\ù[ô›\]Xà\ö[ô»‹ô[ò\ûHXZ[ù[ò[òŸH
+ZŸH\»Ÿ\‹⁄[€â‹»ò\Yô\ﬁ\ H]ö\YHò[ŸH[\õKà›[W›[ô^X›Y‹ô\›\ùÿ
+\ôK\›Y
+Hõ›¬ú⁄⁄\»[ûH›\ùôXŸYYûHH‹ô\›\ùHô\]Y\›Y‹à›\]WH8†)é»ô\›\ù[ôÿX\öŸ\ãú€»€õHôX[‹ò\⁄\À⁄⁄[»
+“Q““Sÿ]⁄ŸÀò]\ûHX[òYŸ\äH€›[ù8†%H‹òXŸYù[\›‹ù⁄]õ»›X⁄X\öŸ\à
+Hò]\ûK[X[òYŸ\à“Q’TìJH›[€›[ùÀÇÇéô]»\›ÀÇÇà»»ååçãLÀLLKåM8†%[ãX⁄\òX›\àô\›]\ò[ùôX‹»
+ô[X\ŸHé»ì”—‘’Q——T’S”î BÇääï⁄]\»Y»
+Hù^HôX€€[Y[ôà^Y\äNääà⁄]ì”—‘’Q——T’S”îœLX
+
+»Bï€U€HŸ^JK⁄[àH\Ÿ\àŸ[ô»Hõ€ŸZ\⁄Y\‹ÿYŸH[ô\»⁄\ôYZ\àÿÿ][€ãò[ôW€Y\‹ÿYŸXôKYô]⁄\»ôX[ôX\òûHô\›]\ò[ù»[ô\[ô»[H»H\Ÿ\Çò€€ù[ù\»HúòX⁄Ÿ]Yõ›HôYõ‹ôH\‹Ÿ[XõW€Y\‹ÿYŸ\ÿàH⁄\òX›\à[ÇúôX€€[Y[ô»
+ù‹ŸHôX[XŸ\»[à\à›€àõ⁄XŸJà8†%õ»\›õ»€€[X[ôÇÇääí[ùò\öX[ù€€\X[òŸH
+õ›X€ŸKZ[ùò\öX[ù Nääà\»öY\»H
+äú⁄[ô€Jäà^\›[ô¬úô\Hÿ[8†%ì»ô]»\ã[Y\‹ÿYŸHHÿ[
+Ã KàH€U€Hô]⁄\»ŸôàH]ô[ùõ€‹öXH\ﬁ[ò⁄[Àù◊›ôXY
+Œ
+H[ô‹ò\Y€»HòZ[\ôHY‹òY\»»Hõ‹õX[úô\Kà]ô]\Ÿ\»H^X›€ôK]\õà”õ›Nà8†)óX[öôX›[€à]\õàHÿ\X]ÿ\ôH[ôõ[Y]X›[€àõ›\»[ôXYH\ŸKàYò][Ÿôà
+ÃMäNà[úŸ]HŸ^I‹»ôZ]ö[‹ãÇÇääê[ùKZ[X⁄[ò][€éääàH[öôX›Yõ›Hÿ^\»\ŸH”ìHH\›YXŸ\»[ô€â›ö[ùô[ùô\›]\ò[ùÀàYàõ»ÿÿ][€à\»⁄\ôYHYôô\ô[ùõ›H[»\à»\⁄»Bù\Ÿ\à»õ‹H[àò]\à[àò[YHXŸ\»⁄Hÿ[â›ô\öYûKÇÇääî\ôH[\ú»
+»\›Œääà⁄\◊Ÿõ€Ÿ‹]Y\ûX
+Ÿ^]€‹ô]\ö\›XÀåJK‹ô\›]\ò[ù◊ÿúöYYòäZ[àõ€\Yõ‹õX][ô\ Kààô]»\›ÀàöYŸŸ\à\»Ÿ^]€‹ôXò\ŸYõ‹àåH8†%]⁄[õZ\‹»‹ôX]]ôHò\⁄[ô‹Œ»úõÿY[ö[ô»]\»Hù]\ôHŸXZÀÇÇà»»ååçãLÀLLKåL»8†%Ÿõ€ŸàôX\òûHô\›]\ò[ùôX€€[Y[ô][€ú»
+ô[X\ŸHHŸàäBÇääï⁄]\»YŒääàŸõ€Ÿÿ›Z\⁄[ôWX\Ÿ\»H\Ÿ\â‹»⁄\ôY‘»ÿÿ][€à»\›ôX[õôX\òûHô\›]\ò[ù»
+ò[YH0≠»›Z\⁄[ôH0≠»\›[òŸKôX\ô\›ö\ú›
+KàŸõ€Ÿ[€ôH\›¬úô\›]\ò[ù»Ÿ[ô\ò[N»Ÿõ€ŸZXö[\ú»ûH›Z\⁄[ôKàôY⁄\›\ôY[ò€€ô][€ò[BõZŸHH›\àX\»€€[X[ô»
+ô\Y\»ìX\»\ô[â›Ÿ]\à⁄]›]HŸ^JN»ô\]Z\ô\»Bú⁄\ôYÿÿ][€ãàô]\Ÿ\»Ÿô]⁄›€]€W‹ŸX\ò⁄
+H€HöX\ Kàô]»\ôH[\ú¬ò‹⁄Wÿ›Z\⁄[ôX
+»Ÿõ‹õX]‹ô\›]\ò[ùÿ»\›ÀÇÇääë[Xô\ò][H›]ŸàåNääàõ‹[àõ›»ãà]ôYY»‹[ö[ôÀZ›\ú»\ú⁄[ô»
+»ÿÿ[][YBò€€\\ö\€€ã[ô\»õ⁄ôX›\»Hÿÿ\àúõ€HãX]ÿ\ôK]úÀ[òZ]ôH]][YX
+õY]ú›\ù\‹ò\⁄ååçãLÀLKçJH8†%⁄\[ô»]€‹úôX›\»Hò\›õ€›À]\õ›H›Y\‹ÀÇÇääï\»\»ô[X\ŸHHŸàH›€ô\â‹»òõ›à⁄⁄XŸKääàô[X\ŸHà
+ì–QPTÀçJH\»Bö[ãX⁄\òX›\à^Y\éà⁄[àHÿÿ][€à\»⁄\ôY[ôH\Ÿ\à\⁄‹»€€Y][ô»õ€ŸZ\⁄úôKYô]⁄ôX\òûHô\›]\ò[ù»[ô[öôX›[H[ù»H
+ú⁄[ô€Jàô\H€»H⁄\òX›\ÇúôX€€[Y[ô»[à\à›€àõ⁄XŸH8†%õ»^òH\ã[Y\‹ÿYŸHHÿ[ÇÇà»»ååçãLÀLLKåLà8†%›\]HÿX⁄KXù\›»⁄]Xâ‹»ò]»—ÇÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà›\]Xô]⁄\»XZ[ãÿõ›úXúõ€Bòò]Àô⁄]Xù\Ÿ\ò€€ù[ùò€€X⁄X⁄ò\›HÿX⁄\»õ‹àçHZ[ãàù[õö[ô»›\]XöY⁄òYù\àH\⁄ô\X]YHô]⁄YH›[Hö[‹àô\ú⁄[€ãX]⁄Y]YÿZ[ú›Búù[õö[ô»ô\ú⁄[€ã[ôô\‹ùYò[ôXYH›\úô[ùà8†%H\ﬁH\X\ôY›X⁄»
+€‹›úôX[[YHX‹õ‹‹»\»Ÿ\‹⁄[€â‹»ò\Yô[X\Ÿ\ KÇÇääëö^ääà\ôõ‹õW‹Ÿ[ó›\]Xõ›»ô\]Y\›»Hò]»Tì⁄]H[ö\]YHÿÿèO\œò]Y\ûBú\ò[H
+ò\›HŸ^\»]»ÿX⁄H€àHù[Tì€»Hô]»\ò[HHÿX⁄HZ\‹»Húô\⁄ôô]⁄
+H\»ÿX⁄KP€€ùõ€àõÀXÿX⁄X»òY€XNàõÀXÿX⁄XXY\úÀàô\öYöYYHò]¬ö‹››[Ÿ\ùô\»Hö[H⁄][à\òö]ò\ûH]Y\ûH\ò[Kà\]KX[ú⁄
+H⁄[ô\ﬁH]
+H›[]»HZ[àTì8†%Yù\»Hõ€›À]\ÇÇà»»ååçãLÀLLKåLH8†%€U€Hõ›][ôŒàõ›]U\Hôò\›\›à
+ëT’‹[[ôÀõ›P‘ôò\›äBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàHõ›]Hÿ[Ÿ[ùõ›]U\OYò\›8°§Çï€U€Hí8†%[ùò[Yõ›]H\NàŸò\›Hà
+›\ôòXŸYûHãåL	‹»\úõ‹ãXõŸBú[Xö[ô Kàò\›\»H
+ìP‘€€	‹ à\ò[Y]\àò[YN»Hò]»\Kù€]€Kò€€Xîõ›][ô»ëT’TH\Ÿ\»
+äòò\›\›
+äãàÿ[YHP‘[ò[Y\Àx¢hTëT’[ò[Y\»ò\]BëŸ[“î””ã]úÀ[ò]]ôHô\‹€úŸH⁄\H]X\õY\à8†%€‹Z[ô»[àP‘\ò[Hò[YH[ù»BîëT’ÿ[àö^Y»ò\›\›»H\›[ú»HëT’‹[[ô»€»]ÿ[â›ôY‹ô\‹ÀÇÇà»»ååçãLÀLLKåL8†%€U€Hõ›][ôŒàõ»òYôöXœHõ‹àöZŸK‹Y\›öX[é»›\ôòXŸHõŸBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà‹õ›]XŸ[ùòYôöXœ]ùYX€à
+ô]ô\ûJàõ›]Kòù]€U€I‹»õ›][ô»TH€õHXÿŸ\»]\ò[Y]\àõ‹à[›‹ö^ôY[Ÿ\»8†%€»BòöXﬁX€H
+õ‹òJH‹àY\›öX[à
+ö^XJHõ›]Hÿ[YHòX⁄»
+äí
+äãà[ôãéI‹»Ÿ^BúôYX›[€àY›ô\ãX€‹úôX›Yà]õ‹Y€U€I‹»\úõ‹à
+òõŸJã€»H›\ôòXŸYò\»Hò\ôHíà⁄]õ»ôX\€€ãÇÇääëö^\ŒääÇãH›€]€W‹õ›]W‹\ò[\ [ŸJXY»òYôöXœ]ùYX€õHõ‹à’”U”W’êQëíP◊”S—Tÿà
+ÿ\ã›ùX⁄À›^Kÿù\À›ò[ã€[›‹òﬁX€JN»öXﬁX€K‹Y\›öX[à€Z]]àö^\»Hõ‹Çàõ‹òH[ôö^XKÇãH›€]€WŸ\úóŸ]Z[
+ô\‹
+X^òX›»€U€I‹»[X[à\úõ‹àY\‹ÿYŸHúõ€HHô\‹€úŸBàõŸH
+]Z[Y\úõ‹ãõY\‹ÿYŸX»\úõ‹ãô\ÿ‹ö\[€ò»Y\‹ÿYŸX
+H[ô\[ô»]¬àY\úõ‹àôX\€€úÀ€»Hõ›»ôXY»KôÀàí8†%€U€I‹»ôX\€€èàãàHõŸBà\»Ÿ^KYúôYH
+HŸ^H\»€õH]ô\à[àH]Y\ûH›ö[ôÀ⁄X⁄ŸHô]ô\àŸ N»H›X\ôàõ‹»[û][ô»€€ùZ[ö[ô»HŸ^OX⁄Ÿ[àù\›[àÿ\ŸKààô]»\›ÀÇÇà»»ååçãLÀLLKéH8†%€U€Nà€ô\›\úõ‹àY\‹ÿYŸ\»
+»Ÿ^Hô]ô\àŸŸŸYÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\»
+õ›õ›[ô\ö[ô»€ãY]öXŸHõ€›]
+NääÇåKàHô]⁄[\ú»ô]\õôYH
+úÿ[YJà[\Hô\›[õ‹àHŸ[ùZ[ôHõõ›õ›[ôà[ôàõ‹àHô]€‹öÀ“òZ[\ôK€»‹õ›]Xô\‹ùYê€›[â›ö[ôô[]ùYHà⁄[àBàôX[ÿ]\ŸHÿ\»H
+äçH[ò]]‹ö^ôY
+äà
+HXŸZ€\àŸ^HYôY[à\›Y[ù¬àô[ùò
+KàHZ\€XY[ô»Y\‹ÿYŸH€‹›Ÿ]ô\ò[XùYŸ⁄[ô»õ›[ô]ö\ÀÇåãà€àòZ[\ôHH[\ú»ŸŸŸY›ä^Ÿ\[€äX[ôô\]Y\›ÿ]»HTHŸ^H[ÇàH]Y\ûH›ö[ô»8†%€»H
+äôù[Ÿ^Hÿ\»‹ö][à»õ›õŸÿÿ\úõ‹úÀõŸÿ
+äà
+[ôà\»[ù»[ûHòX⁄›\‹à\›YŸ KàHXõXÀ\ô\»õY]]\›ô]ô\àŸ»ŸX‹ô]ÀÇÇääëö^\ŒääÇãHô]»’€U€Q\úõ‹òÿ\úöY\»H⁄‹ù
+äöŸ^KYúôYJäàôX\€€ãàô]⁄[\ú»õ›»òZ\ŸH]à€àHô]€‹öÀ“òZ[\ôH[ôô]\õà[\H€õHõ‹àHŸ[ùZ[ôHZ\‹Àà[ô\ú»ô\BàìX\»€⁄›\òZ[YàH8†%Ÿ^HôZôX›Y8†)àà»úò]H[Z]Yà»ù[YY›]à¬àõô]€‹öÀ—î»\úõ‹àà[ú›XYŸàHZ\€XY[ô»ê€›[â›ö[ôãÇãH›€]€WŸ\úó‹ôX\€€ä
+X€\‹⁄YöY\»H^Ÿ\[€àúõ€Hô\‹€úŸKú›]\◊ÿ€ŸX»\Bàò[YH[ôô]ô\à[ò€Y\»HTì‹àŸ^N»HŸ»[ôHö[ù»€õH]ôX\€€ãà»ô]¬à\›À[ò€à€ôH\‹Ÿ\ù[ô»HôX\€€àô]ô\à€€ùZ[ú»€]€Kò€€X‹àŸ^OXÇÇääëÿ»ö^
+€€ôö\õYY€ãY]öXŸJNääà”UQKõY	‹»[ú›[òŸHXõH\›Yõ‹òI‹»\ôX›‹ûBò\»ã›[Y‹ò[KXõ›ÿù]\àù[õö[ô»[ú›[òŸH\»ã€õ‹òKXõ›ÿ
+H’TïTUQUò[ú›[òŸNò[ôH\»]]‹ö]]]ôJKà€‹úôX›YHXõH[ôò][Ÿ[ù]Y\À€õ‹òKõYÇÇà»»ååçãLÀLLKé8†%€U€HÿúŸ\ùòXö[]Nà[ú⁄[[òŸH\ÿXõY›]H
+»]Y]ö\⁄Xö[]BÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääàãç»ôY⁄\›\ôY‹õ›]H€ôX\òûH‹XŸX€õBù⁄[à”U”W–TW“—VXÿ\»ô\Ÿ[ù
+H‘—’]\õäKà⁄[àHŸ^Hÿ\€â›ÿYYùH€€[X[ô»Ÿ\ô[â›ôY⁄\›\ôY€»[Y‹ò[Hô]\õôY
+äõõ»ô\H][
+äà8†%[Çù[ôXY€õ‹ÿXõH⁄[[òŸKà\ö[ô»õ€›]\»XYHö\»HŸ^HX›X[HÿYY»Çö[\‹‹⁄XõH»[ú›Ÿ\àúõ€HH\Ÿ\à⁄YH
+Hõ›^‹ŸYõ»€U€H›]H[û]⁄\ôJKù⁄X⁄€‹›Ÿ]ô\ò[XùYŸ⁄[ô»õ›[ô]ö\ÀÇÇääëö^\»
+ÿúŸ\ùòXö[]Kõ»ôZ]ö[‹à⁄[ôŸH⁄[àHŸ^H\»Ÿ]
+NääÇãH‹õ›]H€ôX\òûH‹XŸX\ôHõ›»ôY⁄\›\ôY
+äù[ò€€ô][€ò[Jäé»⁄]õ»Ÿ^H^Bàô\HìX\»\ô[â›Ÿ]\
+”U”W–TW“—VHZ\‹⁄[ô Kàà[ú›XYŸà€⁄[ô»⁄[[ùÇãHH’TïTUQUŸ»[ôHõ›»[ò€Y\»X\Œà[ŸOüŸôò€»Hô\›\ù⁄›‹¬à⁄]\àHù[õö[ô»õÿŸ\‹»X›X[HÿYYHŸ^H
+[ô⁄X⁄ò]ô[[ŸJKÇãHÿ]Y][ôÿ]\óÿ]Y]Ÿ]J
+Xõ›»ô\‹ùX\»
+€U€JNà[ŸOüŸôòÇÇï\»\»Hô\…‹»õ‹\]YH\úõ‹à8°§à[ú›ù[Y[ùö\ú›àù[H\YYàXZŸHHòZ[\ôBúŸ[ãY\ÿ‹öXö[ô»ò]\à[à›Y\‹»]]úõ€H›]⁄YKÇÇà»»ååçãLÀLLKç»8†%€U€HX\Œà‹õ›]K€ôX\òûK‹XŸH
+ÿ]YYò][ŸôäBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàôYH⁄\òX›\ú»\ôH‹õ›[ôY[àôX[ôŸ[Ÿ‹ò\H
+õ‹òHöZŸ\»ŸX]K[Z[HŸ\»Ÿ\›\õãU–HòYôöXÀö^XHôYô\ô[òŸ\»ôX[êô[]ùYK—X\›⁄YHXŸ\ Hù]Hõ›Yõ»ÿ^H»[ú›Ÿ\àõ›][ôÀò]ô[][YK‹Çàù⁄]	‹»ôX\àYHà]Y\›[€ú»⁄]ôX[]H8†%€õH‘—’[ò⁄Y[ùôYY»õ‹à[Z[KÇÇääï⁄]⁄\Y
+€\⁄€€[X[ôÀ\ŸHHŸàäNääàôYH\Ÿ\ãZ[ö]X]Y€€[X[ôÀúôY⁄\›\ôY€õH⁄[à”U”W–TW“—VX\»Ÿ]
+òZ[X€‹ŸYÿ[YHÿ]H⁄\H\»‘—’
+NÇãH‹õ›]Húõ€Oà»\›ò8†%Ÿ[ÿ€Ÿ\»õ›[ô⁄[ùÀ[àHòYôöXÀX]ÿ\ôH€U€Bàõ›]N»ô\‹ù»UH
+»\›[òŸH
+
+»òYôöX»[^H⁄[à8¢iLHZ[äKàò]ô[[ŸH\¬à\ãZ[ú›[òŸHöXH”U”W’êUëS”S—X
+ò[Y]Y»òYò[YHÿ\õú»8°§àÿ\äKÇãH€ôX\òûH[ôœò8†%“HŸX\ò⁄\õ›[ôH\Ÿ\â‹»⁄\ôYÿÿ][€ã\›[òŸK\€‹ùYÇãH‹XŸHò[YOò8†%Ÿ[ÿ€ŸKÿù\⁄[ô\‹»€⁄›\ÿÿ][€ãXöX\ŸY⁄[àHÿÿ][€à\»⁄\ôYÇÇääê\ò⁄]X›\ôHõ›\Œääàõ›úHÿ[»Hò]»\Kù€]€Kò€€XëT’[ô⁄[ù»
+ò]]ôBíî””äKõ›HŸ[“î””àH€]YHP‘€€õôX›‹àô]\õú»8†%€»XX⁄õ›ôYY»]»›€ÇöŸ^H
+ÿ›[Y[ùY[àô[ùãô^[\X
+Kà[\úŸ\ú»\ôHYô[ú⁄]ôK››[
+Y\ôŸ]
+
+Xò⁄Z[úŒ»Hô\‹€úŸK\⁄\H⁄[ôŸHY‹òY\»»HY\‹ÿYŸKô]ô\àH‹ò\⁄
+KZ\úõ‹ö[ô»Bï‘—’[ùY‹ò][€â‹»\ÿ⁄\[ôKàô]€‹ö»ô]⁄\»ù[àöXH\ﬁ[ò⁄[Àù◊›ôXY»õ»ô]¬ú\ã[Y\‹ÿYŸHHÿ[Àõ»ô]»õÿŸ\‹Ÿ\Àà\ôH\úŸ\úÀŸõ‹õX]\ú»€›ô\ôYûHçHô]¬ù\›Œ»]ôHëT’õ›[ô]ö\\»ô\öYöYY€ãY]öXŸH
+ôYY»HôX[Ÿ^JKÇÇääëYô\úôY»\ŸHà
+›€ô\ãX\õ›ôYòõ›€\⁄ö\ú›äNääà[à[ãX⁄\òX›\à^Y\Çù]]»õ‹òK—[Z[K‘ö^XHŸX]ôHX\]H[ù»€€ùô\úÿ][€àöXHH]Y⁄[ù[ùY¬äZŸH‹ŸX\ò⁄óX
+Kò]\à[à€õH^X⁄]€€[X[ôÀàòX⁄ŸY[àì–QPTÀçKÇÇà»»ååçãLÀLLKçà8†%çà]õ€][€à^\ö[Y[ù»
+[ÿ]YYò][ŸôäBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàHõ›Yõ»YX⁄[ö\€Hõ‹à\Ÿ\ú»¬ú⁄Y€ò[\õ›ò[Ÿ\ÿ\õ›ò[Ÿà[ô]öYX[Y\‹ÿYŸ\»⁄]›]\[ôÀõ»\ö]ôYõYX\›\ôHŸàô[][€ú⁄\\»[Ÿ[]Hﬁ\›[HôZ]ö[‹ãô^Ÿ€ÿ[ÿÿ\»Bú⁄[ô€H›ö[ô»]€›[â›òX⁄»\ò[[€€ùô\úÿ][€àôXYÀ[ô[[‹õ›\¬òÿ[òX⁄‹»€›[â›ôH›\ôòXŸYõ‹à›\ò][€à⁄]›]HYXÿ]YHÿ[ÇÇääîôXX›[€àôYYòX⁄»
+ëQQêP“◊‘ëPP’S”îœLX
+NääàôY⁄\›\ú»ÇòY\‹ÿYŸTôXX›[€í[ô\ò»<'‰cK¸'‰cà€àõ›Y\‹ÿYŸ\»8°§àõ›[ôY\ãX⁄]ôYYòX⁄◊€Ÿÿäÿ\YL
+H
+»0¨Lå»[€ŸùYŸKà<'‰cà[€»[öôX›»H€ôK]\õàôXÿ[Xúò][€àõ›Bö[ù»Hô^ô\Hõ€\à[›ŸY›\]\ÿ^[ôY»[ò€YBòY\‹ÿYŸW‹ôXX›[€ò€õH⁄[àHõY»\»€ãÇÇääê€‹Ÿ[ô\‹»ÿ€‹ôH
+”‘—SëT‘◊—SêPìQLX
+Nääà\ôHÿ€€\]Wÿ€‹Ÿ[ô\‹ ^\◊ÿX›]ôKõY\‹ÿYŸWÿ€›[ùZ[\›€ô\◊ÿ€›[ùô[YYú◊ÿ€›[ù
+X8°§à
+õÿ]LKùX⁄Ÿ]
+KàùX⁄Ÿ]ŒÇàôŸ][ô»»€õ›»XX⁄›\àà»ò€€Yõ‹ùXõHà»ôY\Hò[Z[X\àãàôX€€\]YôZ[H]ZYöY⁄õ›][€é»⁄›€à[à‹›]\ÿ»[öôX›Y\»H€ôK[[ôHﬁ\›[Bõõ›H[à\‹Ÿ[XõW€Y\‹ÿYŸ\ÿàö]ôHô]»\›»[àHõ‹õ][KÇÇääì‹[àôXY»
+ëPQ◊—SêPìQLX
+NääàZY‹ò]\»ô^Ÿ€ÿ[ÿ›à8°§à\ãX⁄]ò‹[ó›ôXYÿ\›
+ÿ\Y H€àÿYà‹›‹ô\Wÿ[ò[\⁄\ÿî””àÿZ[ú¬òùôXY›\]Hò
+Y‹ô\€€ôY
+Kàõ€\õÿ⁄»ì‹[àôXY»ô]ŸY[à[›H€»Çúô\XŸ\»H⁄[ô€Hô^Y€ÿ[[ôKà⁄[àëPQ◊—SêPìQ\»Ÿôã^\›[ô¬õô^Ÿ€ÿ[»ôZ]ö[‹à\»[ò⁄[ôŸYÇÇääê]]»[ú⁄YKZõ⁄ŸHÿ[ôY]\»
+ì“—W––SëQUTœLX
+Nääà‹›‹ô\Wÿ[ò[\⁄\ÿî””ÇôÿZ[ú»öõ⁄ŸWÿÿ[ôY]Hò
+‹ò\ŸKYX[ö[ôÀ€ô_Hù[
+Kàÿ[ôY]\»€»»Bô^\›[ô»‹ô]öY]€Y[X]Y]YH8†%ô]ô\à]]ÀXYY»õ⁄Ÿ\Àöú€€ãÇÇê[õ›\àôX]\ô\»Yò][Ÿôà[ô]ôHô\õ»\ã[Y\‹ÿYŸHH€‹›
+ôXX›[€ú»\ôBõÿÿ[€‹Ÿ[ô\‹»\»Hõ‹õ][KôXYÀ⁄õ⁄Ÿ\»YŸﬁXòX⁄»€àH^\›[ô¬ú‹›\ô\H[ò[\⁄\»ÿ[][ôXYHù[ú KÇÇà»»ååçãLÀLLKçH8†%çHVà›]\»Z[	àôX›\úö[ô»]ZY]⁄[ô›‹¬Çääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà‹›]\ÿÿ]ôHõ»ö\⁄Xö[]H[ù»⁄]ÿ\¬öù\›ÿZY
+[›HY»ÿ‹õ€\
+K[ô›\ô\‹⁄[ô»õÿX›]ôHY\‹ÿYŸ\»€àHÿ⁄Y[BäKôÀà]ô\ûHúöY^HöY⁄
+Hô\]Z\ôYô[Y[Xô\ö[ô»»‹]ZY]XX⁄ŸYZÀÇÇääã‹›]\»Z[ääà\[ô»H\›»€€ùô\úÿ][€àY\‹ÿYŸ\À‹XZŸ\ã[Xô[Y[ôùù[òÿ]Y»é⁄\ú»XX⁄€»[›Hÿ[àŸYHHôXŸ[ùôXY]H€[òŸKÇÇääîôX›\úö[ô»]ZY]⁄[ô›‹»
+‹]ZY]⁄[ò
+NääàôYH›Xò€€[X[ôŒÇãH‹]ZY]⁄[àYúöHåŒåLå8†%Y»HŸYZ€H]ZY]⁄[ô›»
+ZYöY⁄‹õ‹‹⁄[ô¬à›\‹ùYà›\ùà[ô‹[ú»[ù»Hô^^JKÇãH‹]ZY]⁄[à\›8†%⁄›‹»ù[Xô\ôY\›ÇãH‹]ZY]⁄[à[ò8†%ô[[›ô\»ûH[ô^ÇÇî\ãX⁄]›]H]ZY]›⁄[ô›‹ÿ
+\›ŸàŸ›À›\ù[ôX
+Kà⁄X⁄ŸYöXH\ôBúôYXÿ]H⁄[ó‹]ZY]›⁄[ô› õ›À⁄[ô›‹ X[àHÿ[YHõÿX›]ôHÿ]\»\¬ò]ZY]›[ù[
+X\ùôX][ôõ›KYõ€››\õÿú KàŸ[ôHô]»\›»€›ô\àZYöY⁄ò‹õ‹‹⁄[ôÀ‹õ€ô»^Kõ›[ô\ûHZ[ù]\À[ô][\H⁄[ô›‹Àà‹›]\ÿ[€»⁄›‹¬òX›]ôH]ZY]⁄[ô›‹»[õ[ôKÇÇà»»ååçãLÀLLKç8†%çõ€\Y⁄Y[ôH	àÿYô]BÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà€ô»€€ùô\úÿ][€ú»€›[⁄[[ùH^ŸYYBõ[Ÿ[	‹»YôôX›]ôH€€ù^⁄[ô›»
+õ»ö[[Z[ô KöYŸŸ\ôY€‹ôXô]\õôY\Xÿ]Bô[ùöY\»⁄[à][\HŸ^\»[àHÿ[YH‹ôXõ€⁄»[ùûHX]⁄Y[Ÿ[»ÿÿÿ\⁄[€ò[Bòúõ⁄ŸH⁄\òX›\à⁄]ò\»[àRHàô\‹€úŸ\»]ôXX⁄YH\Ÿ\à[ôö[\ôY[ôõ][KX⁄]›[[X\ö^ò][€àù\ú›»€›[›X⁄»ò[ô⁄YZX]ûHHÿ[»€àH€ôBú⁄[][[ô[›\€KÇÇääï⁄Ÿ[ãXùYŸ]ö[[Z[ôŒääàô]»\ôHù[ò›[€à›ö[W⁄\›‹ûW›◊ÿùYŸ]
+Y\‹ÿYŸ\ÀòùYŸ]
+Xõ‹»€\›õ€ã\ﬁ\›[Kõ€ãYö[ò[]\Ÿ\àY\‹ÿYŸ\»[ù[H\›[X]Y⁄Ÿ[Çò€›[ù\»[ô\à””ïV’“—Só–ïQ—U
+[ùãYò][H\ÿXõY»ôX€€[Y[ôYç
+KÇêÿ[Y]H[ôŸà\‹Ÿ[XõW€Y\‹ÿYŸ\ÿàŸ‹»⁄[à]ö[\ÀÇÇääì‹ôHY\NääàöYŸŸ\ôY€‹ôXõ›»\Ÿ\»HŸY[òŸ]€à[ùûH€€ù[ù8†%\Xÿ]Bò€€ù[ùúõ€H][\HX]⁄[ô»Ÿ^\»[àHÿ[YH[ùûH\»›\ô\‹ŸYÇÇääî\ú€€òKXúôXZ»›X\ôòZ[ääàôYŸ^ÿ]⁄\»ö\ú›\\ú€€àRHYZ\‹⁄[€ú»
+I€H[àRXò\»[àRH[ô›XYŸH[Ÿ[\ôŸH[ô›XYŸH[Ÿ[H€â›]ôHôY[[ô‹ÀÿHõŸK¬ú\ú€€ò[^\öY[òŸ\ÿ
+Kà\YY[àŸ[]ô\ò[ôŸ[ô›öYŸŸ\ôY€àHö[ò[ò€X[ò^àŸôô[ô[ô»Ÿ[ù[òŸH\»›ö\Y€›[ùY\»\ú€€òWÿúôXZÿ
+ö\⁄XõH[Çòÿ]Y]
+Kà\ô\\ú€€àôYô\ô[òŸ\»
+õ^HRH€›€‹öŸ\àäH\‹»õ›Y⁄
+ö\ú›\\ú€€Çú]\õàô\]Z\ôY
+Kà[\Hô\›[Yù\à›ö\Hõ›[ô»Ÿ[ù
+õ»]]À\ôYŸ[ô\ò]JKÇÇääî›[[X\ö^ò][€àŸ[X\‹ôNääà‘’SSPTíVëW‘—SHH\ﬁ[ò⁄[ÀîŸ[X\‹ôJJXŸ\öX[^ô\¬ú›[[X\ö^ò][€àX‹õ‹‹»⁄]»[àXZ[ùZ[ó€Y[[‹ûX[ôXZ[ùZ[ó€€ô◊›\õW€Y[[‹ûX8†%úô]ô[ù»][KX⁄]ù\ú›»úõ€H›X⁄⁄[ô»€à€ôHò[ô⁄Yà\ãX⁄]›ô\õ\ÿ\¬ò[ôXYHô]ô[ùYûHH›[[X\ö^ö[ôÿŸ]ÇÇääã‹›\ùù[ääà‹›\ùù[⁄\\»€€ùô\úÿ][€à\›‹ûHSë[\ãX⁄]Y[[‹ûBä›[[X\öY\ÀòX›ÀôXŸ[ù‹›[[X\öY\ÀôXŸ[ùŸòX›ÀZ[\›€ô\À[õôY[€ŸÀòô[YYú HYù\à[à[õ[ôKXù]€à€€ôö\õX][€ãà⁄\òX›\ã[]ô[Y[[‹öY\¬äY[[‹öY\Àù
+H\ôH[ù›X⁄Yàõ‹õX[‹›\ùôZ]ö[‹à[ò⁄[ôŸYÇÇà»»ååçãLÀLLKå»8†%å»ÿúŸ\ùòXö[]H	àõÿù\›ô\‹¬Çääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääàô\›\ù\›‹õHöXYŸH‹›]»›€à]öY[òŸBòôXÿ]\ŸHŸ\úõ‹óÿ€›[ùÿÿ\»Y[[‹ûK[€õH
+⁄\Y€à]ô\ûHô\›\ù
+KàòYô[ùòò[Y\¬ùŸ\ôHÿ\õôY€õH»HŸ»ö[HõÿõŸH⁄X⁄‹»úõ€H[Y‹ò[Kà€X[Yö[Hÿ]ô\¬äõ⁄Ÿ\Àô[Z[ô\úÀ‹õ€ã^[Y[ùÀÿ\ôõÿôJH\ŸYõ€ãX]€ZX»‹ö]\»]€›[ùù[òÿ]H€àHõÿŸ\‹»X]à›\]X[ô‹ô\›\ù€›[›]Hô\HZY\›ôX[BòôXÿ]\ŸH\ôHÿ\»õ»òZ[ãà[ô\ôHÿ\»õ»ö\⁄Xö[]H[ù»Hÿ[õ€[YKÇÇääî\ú⁄\›Ÿ\úõ‹óÿ€›[ùÿääà\úõ‹à\›‹ûHõ›»›\ùö]ô\»ô\›\ù»8†%Ÿ\öX[^ôY[ù¬ò›]Köú€€ò[€ô‹⁄YH€W‹›]ÿàô\›\ù\›‹õHöXYŸHúõ€Hÿ]Y]õ»€ôŸ\Çõ‹Ÿ\»H]öY[òŸH]ÿ\»Ÿ[ô\ò]Y»⁄›ÀÇÇääê€€ôöY»ÿ\õö[ô‹»›\ôòXŸYääàŸ[ùó⁄[ùÿŸ[ùóŸõÿ]ÿ‹\úŸW⁄Y‹Ÿ]õ›»€€X›ùÿ\õö[ô‹»[ù»–””ëíQ◊’–TìíSë‘ÿ
+[àY][€à»ŸŸ⁄[ô Kàÿ]Y]⁄›‹»€›[ù
+»ö\ú›å»ÿ\õö[ô‹Àà[ÿ\õö[ô‹»[€»Ÿ»]›\ù\[à€ôH€€ú€€Y]YY\‹ÿYŸKÇÇääê]€ZX»€X[Yö[H‹ö]\Œääàô]»ÿ]€ZX◊›‹ö]W›^
+]^
+X[\à
+\
+¬ò‹Àúô\XŸX
+H\ŸYûHÿ]ôW⁄õ⁄Ÿ\ÿÿ]ôW‹ô[Z[ô\úÿÿ]ôWÿ‹õ€ó⁄õÿúÿòÿ]ôW‹^[Y[ùÿÿ]ôW›ÿ\ôõÿôXàHX]ZY]‹ö]Hõ»€ôŸ\àù[òÿ]\»\ŸHö[\ÀÇÇääë‹òXŸYù[òZ[à€à‹ô\›\ù[ô›\]Nääà‹ÿ⁄Y[WŸ^]õ›»ÿZ]»\»\»õ‹Çò‹ô\Y\◊⁄[óŸõY⁄OHôYõ‹ôH‹ö][ô»›]H[ô^][ôÀàô\Y\»[àõŸ‹ô\‹¬ò€€\]Hò]\à[àôZ[ô»›]ZY\›ôX[KÇÇääìH\ÿYŸH€›[ù\ú»[àÿ]Y]ääà[Ÿ[HX›€W‹›]ÿòX⁄‹»Z[Hÿ[»[ôô\›[X]Y⁄Ÿ[à€›[ù»
+öXHŸ\››⁄Ÿ[úÿ
+Kàù[\Y[àÿ[€ò[õŸ‹€à]ô\ûBú›XÿŸ\‹Ÿù[ÿ[à\ú⁄\›Y[à›]Kô\Ÿ]»€à]H⁄[ôŸKàÿ]Y]⁄›‹ŒÇòHŸ^Nààÿ[Àñ»[à»ñZ»›]
+\›
+XÇÇääîù[ôH€\›‹ô\]Y\›ääà‹Ÿ[óÿ]Y]
+]ô\ûHÃZ[äHõ›»õ‹»[ùöY\»€\à[ÇåZúõ€HHò]K[[Z]X›ô]ô[ù[ô»[òõ›[ôY‹õ››[à€ôÀ\ù[õö[ô»[ú›[òŸ\¬ù⁄]X[ûH[ö\]YH\Ÿ\úÀÇÇà»»ååçãLÀLLKåà8†%åà]òZ[Xö[]H]ÿ\ô[ô\‹Œàÿ]ÿ^KÿòX⁄Àô[[›KYYò][úò[Z[ô¬Çääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\Œääà⁄\òX›\ú»€›[ùÿ[»›ô\à»[›Hà‹à\ÿ‹öXôBòôZ[ô»[àHÿ[YHõ€€H\ö[ô»õ‹õX[^[ô»8†%\ôHÿ\»õ»úò[Z[ô»]Bò€€ùô\úÿ][€à\»ô[[›HûHYò][àõÿX›]ôHY\‹ÿYŸ\»
+X\ùôX]Àõ›Hõ€›À]\ÀùòYôöX»[\ù H[€»Yõ»ÿ^H»ôH›\ô\‹ŸY⁄[àH\Ÿ\à\»ö]ö[ôÀ[àBõYY][ôÀ‹à›\ù⁄\ŸH[ò]òZ[XõH⁄]›]\⁄[ô»HX]öY\à‹]ZY]€€[X[ôÇÇääîô[[›KYYò][úò[Z[ôŒääà\‹Ÿ[XõW€Y\‹ÿYŸ\ÿõ›»[öôX›»Hﬁ\›[Hõ›H⁄[ÇòX›]ôW›öXôX\»õ›ö[ã\\ú€€àòàñ[›H[ô›\Ÿ\üH\ôH^[ô»úõ€HYôô\ô[ùXŸ\»8†%û[›I‹ôHõ›\⁄Xÿ[HŸŸ]\à[õ\‹»HÿŸ[ôH^X⁄]Hÿ^\»€Ààà⁄[»H€\‹»ŸÇúõ€\^H€\»⁄\ôHH⁄\òX›\à\ÿ‹öXô\»\⁄Xÿ[õﬁ[Z]H\ö[ô»^[ôÀÇÇääãÿ]ÿ^H[ôÿòX⁄»€€[X[ôŒääàô]»]ÿ^X›]HX›\ú⁄\›Y[à›]Köú€€ãàÿ]ÿ^Bôö]ö[ôÿ‹àÿ]ÿ^HYY][ô»[ù[ÿ›‹ô\»HôX\€€àô\òò][H[ô›\ô\‹Ÿ\»[úõÿX›]ô\»
+X\ùôX]õ›Hõ€›À]\ÀòYôöX»[\ù KàÿòX⁄ÿ€X\ú»]X[ùX[KÇê[ûH[ò€€Z[ô»^Y\‹ÿYŸH]]ÀX€X\ú»]ÿ^H›]\»
+^I‹ôHòX⁄»ûHYö[ö][€äH[ôö[öôX›»H€ôK]\õàöù\›€›òX⁄»úõ€Nà‹ôX\€€üHàõ€\õ›H€»H⁄\òX›\àÿ[ÇòX⁄€õ›€YŸHò]\ò[KÇÇääê]]ÀY^òX›[€àúõ€H€€ùô\úÿ][€éääà‹›‹ô\Wÿ[ò[\⁄\ÿî””àÿ⁄[XHÿZ[ú»[Çòò]òZ[Xö[]HòöY[
+ôö]ö[ô»üù€‹ö⁄[ô»üòù\ﬁHüù[
+Kà⁄[àH\Ÿ\à^X⁄]Bú›]\»]òZ[Xö[]H
+KôÀàô€›Hö]ôK[äK]ÿ^H\»Ÿ]]]€X]Xÿ[H⁄]ò‹öY⁄[éà]]ÿ[ôH€€ôöY›\òXõHU–VW–UU◊“’Tîÿ
+Yò][⁄
+H^\ûH\»Bòô[X[ô\›\‹[ô\ú»YÿZ[ú››X⁄»õY‹ÀÇÇääìô]»öXôHô\Ÿ]Œääàù\ﬁX€‹ö⁄[ôÿö]ö[ôÿ8†%⁄‹ù\àô\Y\Àõ»€ô»]Y\›[€úÀõ›ÀY[X[ôôY⁄\›\ãàö]ö[ôÿ\»[òK\⁄‹ù[ôõ€ãZ[ö]X][ôÀÇÇääê]ÿ^H[à‹›]\»[ôÿ]Y]ääà‹›]\ÿ⁄›‹»›\úô[ù]ÿ^H›]H⁄]ôX\€€ã\ò][€ãõ‹öY⁄[ã[ô^\ûKàÿ]Y][ò€Y\»]ÿ^W›\Ÿ\úÿ[à]»]KÇÇà»»ååçãLÀLLKåH8†%åHY[[‹ûH]Y]‹éà€›\òŸKX]X⁄YY[[‹öY\À][›H‹õ›[ô[ôÀô]öY]»]Y]YBÇääîõ€›ÿ]\ŸH\»ô[X\ŸHYô\‹Ÿ\ŒääàHåçãLÀLL]Y]õ›[ô]]]ÀY^òX›YõY[[‹öY\»Yõ»õ›ô[ò[òŸH8†%õ»ÿ^H»€õ›»⁄\ôHHY[[‹ûHÿ[YHúõ€Kõ»YX⁄[öXÿ[ò⁄X⁄»]H^òX›[€àÿ\»‹õ›[ôY[à⁄]H\Ÿ\àX›X[HÿZYõ»ÿ^H¬ò€‹úôX›HòYY[[‹ûHúõ€H[Y‹ò[H[à[ô\àHZ[ù]Kà\»ô[X\ŸHXZŸ\»]ô\ûHY[[‹ûBùòXŸXXõK]ô\ûH^òX›[€à‹õ›[ôY[ô]ô\ûH€‹úôX›[€àò\›ÇÇääî€›\òŸKX]X⁄YY[[‹öY\Œääàô]»⁄YXÿ\àY[[‹ûW€Y]Köú€€ò›‹ô\»õ›ô[ò[òŸHõ‹àXX⁄õY[[‹ûH[ôNà[Y\›[\⁄]⁄Y‹öY⁄[à
+]]ÿÿX[ùX[ÿX[ùX[YY]
+K€€ôöY[òŸBäKLL
+K[ôHô\òò][H€›\òŸH][›Húõ€HH\Ÿ\â‹»Y\‹ÿYŸKàô]»€Y[[‹ûW‹ô\XŸXö[\à\»H⁄[ô€H⁄⁄ŸH⁄[ùõ‹à[Y[[‹ûH]]][€ú»
+YŸY]Ÿ[]JH8†%ŸY\¬òY[[‹öY\Àù[XôY[ô‹Àöú€€ò[ôY[[‹ûW€Y]Köú€€ò[àﬁ[òÀàŸ[Y[XZY‹ò]Yù»\ŸH]à‹€›\òŸ[Y[Hèò⁄›‹»›‹ôYõ›ô[ò[òŸN»ôKLåçãL»Y[[‹öY\»⁄›»Bàõõ»€›\òŸHôX€‹ôYàò[òX⁄ÀÇÇääî][›H‹õ›[ô[ô»
+[ùKZ[X⁄[ò][€ãYX⁄[öXÿ[õ›õ€\Z‹JNääàH‹›\ô\Bò[ò[\⁄\»Hÿ[õ›»ô]\õú»Y[[‹ûW‹][›X
+ô\òò][H›Xú›ö[ô»úõ€HH\Ÿ\â‹¬õY\‹ÿYŸ\ H[ôY[[‹ûWÿ€€ôöY[òŸX
+KLL
+Kà€ŸK\⁄YHò[Y][€àô\]Z\ô\»H][›H»ôBòHÿ\ŸK›⁄]\‹XŸK[õ‹õX[^ôY›Xú›ö[ô»ŸàH\Ÿ\â‹»X›X[[ô\»8†%Yà]òZ[ÀBõY[[‹ûH\»ôZôX›Y[ô€›[ùY\»Y[[‹ûW›[ô‹õ›[ôY
+ö\⁄XõH[àŸ\úõ‹úÿÿÿ]Y]
+KÇî\ôHù[ò›[€à‹][›WŸ‹õ›[ôY⁄]\›»
+^X›X]⁄ÿ\ŸH€\ò[òŸKòXúöXÿ]Yú][›HôZôX›[€ã[\H[ú] KÇÇääê€€ôöY[òŸH
+»ô]öY]»]Y]YNääàY[[‹öY\»⁄]€€ôöY[òŸHèHQSS‘ñW–UU–””ëò
+[ùãôYò][ HSë‹õ›[ôY\ôH›‹ôY\ôX›Kà‹õ›[ôYù]›Ÿ\ãX€€ôöY[òŸHY[[‹öY\»€¬ù»Y[[‹ûW‹ô]öY]Àöú€€ò[ú›XY
+ÿ\Y]å€\›õ‹Y
+Kà‹ô]öY]€Y[X\›¬ú[ô[ô»⁄]€€ôöY[òŸH
+»€›\òŸN»‹ô]öY]€Y[H⁄»èòõ€[›\À‹ô]öY]€Y[Hõ»èòôõ‹Ààÿ]Y]⁄›‹»€›[ù⁄[àõ€ûô\õÀÇÇääê€‹úôX›[€àõ›»
+€Y[X⁄X⁄ŒóXY Nääàô]»ÿ\Xö[]HY»]Y⁄»H⁄\òX›\éÇù⁄[àH\Ÿ\à\‹]\»HY[[‹ûH
+ù]ô]ô\à\[ôYäK[ò€YBò€Y[X⁄X⁄Œà⁄]	‹»\‹]YXàY»[ô[ô»ù[ú»^\›[ô»ôXÿ[XX⁄[ô\ûH
+Ÿ^]€‹ô
+¬úŸ[X[ùX H›ô\àH]Y\ûK\»Hù[Xô\ôY]»⁄]Z\à€›\òŸ\»[ô^X›ö^ò€€[X[ô»
+Ÿ[Y[HòŸY]Y[Hà^ò
+Kà[ôYöXHŸ\\ò]HôYŸ^[àŸ[]ô\òõ€õH8†%H^òX››Y‹ÿ]\H€€ùòX›\»[ù›X⁄YÇÇääòŸY]Y[Hèàô]»^òääàô\XŸ\»HY[[‹ûH[ôHõ›Y⁄€Y[[‹ûW‹ô\XŸXäôKY[XôYÀ[›ô\»Y]H⁄]‹öY⁄[éàõX[ùX[YY]òô\Ÿ\ùô\»‹öY⁄[ò[€›\òŸJKÇÇääìY[[‹ûH]Y]ŸŒääàY[[‹ûW€ŸÀù
+\[ô[€õJHôX€‹ô»]ô\ûH]]][€éÇòQ]]À€X[ùX[QUSëUíQUÀS“ÿëUíQUÀSìÿëUíQUÀQì‘òëUíQUÀTUQUQXQSP“P“ÿàö[\»»L[ô\»⁄[àåLÇÇìô]»\›Œà\›][›Q‹õ›[ôY
+Hÿ\Ÿ\ K\›Y[[‹ûTô\XŸX
+ÿ\Ÿ\ Kà›[\›ò€›[ùàL
+ÿ\»MJKÇÇà»»ååçãLÀLLåà8†%]Y]ô[X\ŸNàY[[‹ûH[X⁄[ò][€à
+»€€Xÿ[XZ»
+»€€ò›\úô[òﬁHö^\¬ÇïöYŸŸ\ôYûH€»\Ÿ\ã[ÿúŸ\ùôYﬁ[\€\»\»[à^\õò[
+Y\ŸYZ H]Y]Ÿàõ›úKÇë]ô\ûH]Y]€Z[Hÿ\»ô\öYöYYYÿZ[ú›H€ŸHôYõ‹ôHôZ[ô»ö^Y8†%LŸàMH€€ôö\õYYçò[ŸKHûKY\⁄Y€ãàù[öXYŸH[àUQULåçãLÀLLõYÇÇääíX\ùôX]Y[[‹ûH[X⁄[ò][€à
+õ€›ÿ]\ŸJNääà‹õ›]WŸ^Wÿ€€ù^\ò⁄]ôYXX⁄ô^I‹»^Kù8†%H⁄\òX›\â‹»›€à—SëTêUQöX›[€à8†%[ù»ôXŸ[ùŸòX›÷€›€ô\óX\¬òHZ[àñ“ù[WH8†)àòòX›àY[[‹ûWÿõÿ⁄ÿô[ô\ôY][ô\àîôXŸ[ù‹X⁄YöX‹»à
+ôXYòûHH[Ÿ[\»ôX[⁄\ôY\›‹ûJKŸYZ€Hõ€[›[€àõ€Y][ù»\õX[ô[ùõ€ôÀ]\õHòX›À[ô›Ÿ^\◊€Y[[‹ûW€õ›X€›[õY»\à›€à\ò⁄]ôH\»òH⁄Y€öYöXÿ[ùô]Hãàö^à›€ãY^Hõ›ô[ò[òŸHY»
+€›€ãY^H8†)óX
+H€õ‹ôYûH]ô\ûH€€ú›[Y\à8†%Ÿ\\ò]Bò€X\õKYúò[YYõ€\ŸX›[€ãô]ô\àK[Y\ôŸY[ù»\Ÿ\àòX›Àô]ô\àõ€[›Y⁄⁄\YòûHH]Hÿÿ[ãÿ\Y]’”ó—VT◊“—TMX»ÿY‹›]XZY‹ò]\»YÿXﬁH[ùöY\¬ä‹\ö[ô»¯†)àHõ⁄XŸHõ›Nò\Ÿ\à€€ù[ù
+Kà^òX›[€àõ€\[€»Y⁄[ôYàõ›\»[ôõY[[‹öY\»€õHúõ€H⁄]HT—TàÿZYÇÇääîò]»€€ÿÿ[òSŸ[ù»H\Ÿ\à
+õ€›ÿ]\ŸJNääà[Ÿ[»]Y⁄HúòX⁄Ÿ]ò‹ŸX\ò⁄à8†)óXY»€€Y][Y\»[Z]H[ù[ù[àZ\àêUUëHù[ò›[€ãXÿ[S[ú›XY¬õõ›[ô»[û]⁄\ôH\úŸY‹à›ö\Y]ﬁ[ù^€»]ÿZ[Yõ›Y⁄»[Y‹ò[KÇëö^à‹›ö\€ò]]ôW›€€ÿÿ[ÿ]H[Ÿ[[›]]⁄⁄ŸH⁄[ù
+õ›Ÿ◊‹ô\]Y\›úô]\õà]À[ò€Y[ô»HôX\€€ö[ô◊ÿ€€ù[ùò[òX⁄À]Ÿ[àHXZ»ôX›‹äH8†%úŸX\ò⁄[ZŸHÿ[»ôX€€YH‹ŸX\ò⁄àWX€»X^XôW‹ŸX\ò⁄›[ù[úŒ»›\ú»›ö\YÇÇääê€€ò›\úô[òﬁH
+]Y]X€€ôö\õYY
+Nääà›]HŸ\öX[^ò][€àõ›»[ÿ^\»\[ú»€àH]ô[ùõ€‹
+€‹öŸ\ã]ôXYÿ]ô\»[ôŸôàöXHÿ[‹€€€ó›ôXYÿYôX»€õHHö[H‹ö]Hù[ú¬ö[àHôXY
+H8†%H€]]\ò]Yåé]ôHX›»‹õ‹‹À]ôXY
+ù[ù[YQ\úõ‹éàX›ò⁄[ôŸY⁄^ôH\ö[ô»]\ò][€ò
+Kà‹›\ô\H[ò[\⁄\»€ò\⁄›»H\›‹ûHZ[€àBõ€‹àõ⁄XŸK›öY[»ò[úÿ‹ö\[€à[ô›\ÿYŸXõ»€ôŸ\àù[àò\ôHﬁ[ò⁄õ€õ›\»ô\]Y\›ÿòÿ[»€àH]ô[ù€‹
+XX⁄úõﬁôH]ô\ûH⁄]õ‹à\»å KàŸ\úõ‹óÿ€›[ùÿö]\ò][€à€ò\⁄›YÇÇääî€X[\à€€ôö\õYYùY‹ŒääàS’—Q’T—Tîÿÿ‘ì’T–S’—Q–“Uÿõ»€ôŸ\à‹ò\⁄Bö[\‹ù€àX[õ‹õYYY»
+KLLåÿ
+N»ÿ⁄Y[H^KZXY[ô‹»ô\]Z\ôHHö\ú›€‹ô»ëHBô^Hò[YH
+õ[€ô^Hà\»õ›[€ô^KùŸY[ô»à\»õ›ŸYô\Ÿ^JN»Ÿ^òX›⁄ú€€òôX€›ô\ú¬ùHö\ú›ò[[òŸYÿöôX›⁄[àH›ò^HúòXŸHõ€›‹Œ»Ÿ]€›€ô\òÿ\õú»›YH€àBõõ€ã[ù[Y\öX»’”ëTó–“U“Q»ÿòX⁄›\⁄⁄\»ö[\»]ò[ö\⁄ZY\ù[é»[çò[ù
+
+KŸõÿ]
+
+X[ùà\úŸ\»ò[òX⁄»»Yò][»⁄]Hÿ\õö[ô»[ú›XYŸÇò‹ò\⁄[€‹[ô»Hõ›€àH\…Ÿô[ùò»[]YL»[ô\»Ÿà[úôXX⁄XõHXY€ŸH[Çò›ŸX]\óÿÿ[Y\òW‹€€ÇÇà»»ååçãLÀLLåH8†%‹õ›\⁄]õ››\H
+‘ì’T”S—Kö^XH
+»ù[\»[›
+BÇääë‹õ›\⁄]»õ›]ÀXõ›
+ì–QPTÀç
+Nääà€»⁄\òX›\àõ›»
+»€ôH[X[à[à€ôBï[Y‹ò[H‹õ›\ôZ[ô‘ì’T”S—OLX
+»‘ì’T–S’—Q–“Uÿ€àH[›[ú›[òŸ\¬õ€õKàù[\⁄Y€à
+»ò][€ò[H[à‘ì’T–“U—T“Q”ãõY8†%]›\ùö]ôYõ›\àõ›[ô»ŸÇòYô\úÿ\öX[X‹ö]X»ô]öY]»ôYõ‹ôH[ûHŸà\»€ŸHÿ\»‹ö][ã[ôHô]öY]»ÿ]Y⁄úôX[ùY‹»
+H€€]ôH›XõKX[ú›Ÿ\àòXŸKH⁄Z[ãXÿ\òXŸK[ô€»õ›[ô»ŸàZ\‹ŸYôõ]Yö[H‹ö]H] K€»ôXY]ôYõ‹ôH›X⁄[ô»\»ôX]\ôKÇÇääïH]õ‹õHòX›]ô\û][ô»\»ùZ[\õ›[ôääà[Y‹ò[Hô]ô\à[]ô\ú»€ôHõ›	‹¬õY\‹ÿYŸ\»»[õ›\àõ›
+TK[]ô[[ùK[€‹€XﬁKôYÿ\ô\‹»Ÿàö]òXﬁH[ŸJKÇêõ›]ÀXõ›\ôYõ‹ôHõ›‹»õ›Y⁄H⁄\ôYYŸ\àö[H
+‹õ›\œ⁄]⁄Yãöú€€õò[€ô‹⁄YHõ›úKÿ[YH‹õ‹‹ÀZ[ú›[òŸH]\õà\»€‹õù
+NàXX⁄õ›\[ô»⁄]]ú‹›ÀH\»€õÿàôXY»⁄]Y\ú»ÿZYà[X[àY\‹ÿYŸ\»\úö]ôH]ôHöXH[Y‹ò[Bäö]òXﬁH[ŸH]\›ôHT–PìQöXHõ›ò]\àõ‹àH[›õ› H[ô\ôHô]ô\àX›Yõ€àúõ€HHYŸ\à8†%X›[ô»€àõ›€›[›XõKX[ú›Ÿ\à]ô\ûHYô\‹ŸYY\‹ÿYŸKÇÇãH
+äï\õã]Z⁄[ôŒääàYô\‹ŸYY\‹ÿYŸ\»
+Y[ù[€à»ö\ú›ò[YH€à€‹ôõ›[ô\ûH»ô\Bà»›€àY\‹ÿYŸJH[ú›Ÿ\ôY]\õZ[ö\›Xÿ[N»[òYô\‹ŸY€ô\»õ›Y⁄[à]€ZX»€Z[Bàö[H
+◊–‘ëPU◊—V”
+H€»^X›H€ôHõ›[ú›Ÿ\úÀ⁄]Hö]\ôY[^HöX\ŸYà›ÿ\ô[\õò][€ãÇãH
+äì€‹ô]ô[ù[€ã^Y\ôYääà]ô\ûHô\H»Hõ›Y\‹ÿYŸHôYY»H€Z[H
+]ô[Çà⁄[àYô\‹ŸYûHò[YH8†%HI‹»ò]õ‹ö]HôY⁄\›\à\»^X›HH€‹ö\⁄ N¬à⁄Z[àÿ\‘ì’T–ì’–“RSó”PVLòôKX⁄X⁄ŸY[ô\àHYŸ\àÿ⁄»öY⁄ôYõ‹ôBàŸ[ô
+Ÿ[ô\ò]Yô\H\ÿÿ\ôYYàH⁄Z[àö[YYX[ù⁄[JN»å»Ÿ[ôõ›N¬àÃŸ^Hõ›]ÀXõ›ùYŸ]ÇãH
+äëõY]]⁄YHòZ[X€‹ŸY
+[Xô\ò]HôZ]ö[‹à⁄[ôŸJNääà‹õ›\⁄]»\ôHY€õ‹ôYûBà]ô\ûH[ú›[òŸH[õ\‹»‘ì’T”S—H
+»[›€\›ÿ^H›\ù⁄\ŸK[ôS€€[X[ô»^Ÿ\àÿ⁄]Y\ôHôYù\ŸY[à[ûH‹õ›\öXHH⁄[ô€H\R[ô\à⁄⁄ŸH⁄[ù
+‹õ›\LJKÇàô]ö[›\€H[ûHõ›YY»Hò[ô€H‹õ›\€›[^X›]H€õ›XÿòX⁄›\]ÀÇà\ôH8†%ÿ[YH][ùXùY»€\‹»\»Ÿ]€›€ô\òôZ[ô»€Z[XXõHûHH‹õ›\⁄X⁄\¬à[€»ö^Y
+Ÿ[ùò[›X\ôàôYÿ]]ôH⁄]⁄Y»ÿ[àô]ô\àôX€€YHHõÿX›]ôH›€ô\äKÇãH
+äìY[[‹ûHôXY[€õH[à‹õ›\Œääà‹õ›\õ€\»ôXYH⁄\òX›\â‹»YôH
+Y[[‹öY\Àà[‹Kõ⁄ôX›À^K›€‹õ€€ù^
+Hù]ô]ô\à\Ÿ\ó€õ›\Àù‹à[ú⁄YHõ⁄Ÿ\¬à
+ö]ò]HNåH›]JN»õ›[ô»[àH‹õ›\‹ö]\»[ûHõ]ö[H8†%Ÿ‹õ›\Ÿ[]ô\ò\¬à[›€\›XùZ[
+õ»‹›‹ô\Wÿ[ò[\⁄\Àõ»õ⁄ŸHòX⁄⁄[ôÀõ»À‹Ÿ[öYK€Y[YJH[ôàH€€[X[ô›X\ôõÿ⁄‹»HX[ùX[]Àà€»ô]»]ò[»[à\»õ›[ô\ûH[à“Bà
+‹õ›\Y[]ô\ãX€X[ò‹õ›\X€YX[›€\›
+KÇãH
+äê€‹›ääà8¢ià⁄][[Ÿ[ÿ[»\à[X[àY\‹ÿYŸHõY]]⁄YH
+»[[‹ù^ôY›[[X\ö^ò][€Çà
+‹õ›\»›[[X\ö^ôH[à\»Ÿù[äN»ô\õ»⁄YHÿ[»[à‹õ›\ÀÇãH
+äì‹Œääà]€àõ›úH\èàKX€Z[K]\›€[⁄ŸK]\›»õ›]€ZX⁄]Hö[Z]]ô\¬à€ãY]öXŸN»ÿ]Y]⁄›‹»YŸ\à⁄^ôKùYŸ][ô⁄Z[à›]H\à‹õ›\»ô]»\úõ‹Çàÿ]Y€‹öY\»‹õ›\€YŸ\ò»‹õ›\ÿ€Z[XÇÇà»»ååçãLÀLÀåà8†%ô\Z\àŸ\ùô\ã\⁄YH[⁄öXòZŸHúõ€Hò[õ—‘‘—BÇääîõ€›ÿ]\ŸNääàH[ò€Ÿ[ô»\‹›YHÿ\»ô]ô\à€à›\à⁄YKàò[õ—‘	‹»‘—H[ôúò\›ùX›\ôBôX€Ÿ\»[Ÿ[›]]
+UãN
+H\»][ãLH[ôôKY[ò€Ÿ\»»UãNôYõ‹ôHŸ[ô[ôÀàûHBù[YHHû]\»ôXX⁄›\à€ÿ⁄Ÿ]^H[ôXYH‹[0Ë∏†´8°(ò[ú›XYŸà	ÿà›\àô]ö[›\¬ôö^\»
+ååçãLÀLãåHô\‹ô[ò€Ÿ[ôÿååçãLÀLÀåHX[ùX[ôX€ŸJù]ãNäX
+H€‹úôX›BôX€ŸYH⁄\ôHû]\»8†%ù]‹ŸHû]\»Ÿ\ôH[ôXYH‹õ€ôÀÇÇääëö^ääàŸö^€[⁄öXòZŸJ^
+Xô]ô\úŸ\»H][ãLHZ\⁄[ù\úô]][€éÇò^ô[ò€ŸJõ][ãLHäKôX€ŸJù]ãNäXàYàH^\»€X[à
+õ»[⁄öXòZŸJKBô[ò€ŸH›\Z]\àõ›[ô]ö\»\õ[\‹€H‹àòZ\Ÿ\»[öX€ŸQ[ò€ŸQ\úõ‹ò
+⁄\òX›\ú¬òXõ›ôHJÃëàÿ[â›[ò€ŸH»][ãLJK[à⁄X⁄ÿ\ŸHŸHŸY\H‹öY⁄[ò[à\YY¬òõ››ôX[Z[ô»[ôõ€ã\›ôX[Z[ô»ô]\õà]»[àŸ◊‹ô\]Y\›ÇÇà»»ååçãLÀLÀåH8†%ö^‘—H[⁄öXòZŸHõ‹àôX[
+X[ùX[UãNX€ŸJBÇääîõ€›ÿ]\ŸNääàHååçãLÀLãåHö^
+ô\‹ô[ò€Ÿ[ô»Hù]ãNò
+Hô[YY€àô\]Y\›ÿ	¬ò]\ó€[ô\ X€ŸW›[öX€ŸOUùYJX€õ‹ö[ô»H[ò€Ÿ[ô»›ô\úöYKà€àH€ôI‹¬òô\]Y\›ÿô\ú⁄[€à]Yâ›8†%Hô\‹€úŸHÿ\»›[X€ŸY\»][ãLKõŸX⁄[ô¬ô›XõK[[⁄öXòZŸH
+0‡®∞‡∞‡ò[ú›XYŸà	ÿ
+H\»H[ôXYKYÿ\òõY^ÿ\»ôKY[ò€ŸYùõ›Y⁄[õ›\à^Y\ãÇÇääëö^ääàõ‹X€ŸW›[öX€ŸOUùYX[ù\ô[Kàÿ[ô\‹ö]\ó€[ô\ 
+X»Ÿ]ò]»û]\Àù[àX€ŸHXX⁄[ôH^X⁄]H⁄]ò]ÀôX€ŸJù]ãNã\úõ‹úœHúô\XŸHäXà\¬òû\\‹Ÿ\»ô\]Y\›ÿ	»[ò€Ÿ[ô»]X›[€à€€\][H8†%õ»€€ù[ùU\HXY\ãõ¬ò\\ô[ùŸ[ò€Ÿ[ôÿõ»Xúò\ûHô\ú⁄[€àò\öX[òŸKàHû]\»€€YHúõ€HH€ÿ⁄Ÿ][ôŸBôX€ŸH[H›\úŸ[ô\ÀÇÇà»»ååçãLÀLãçH8†%Ÿ[X[ùX»Y[[‹ûHôXÿ[öXHò[õ—‘[XôY[ô‹¬ÇääîŸ[X[ùX»ôXÿ[
+ì–QPTÀå NääàY[[‹ûHô]öY]ò[õ›»›\[Y[ù»Ÿ^]€‹ôX]⁄[ô»⁄]ò€‹⁄[ôK\⁄[Z[\ö]HŸX\ò⁄›ô\àò[õ—‘[XôY[ô‹»
+^Y[XôY[ôÀLÀ\€X[ûHYò][ò€€ôöY›\òXõHöXHSPëQSë◊”S—S
+KÇÇãH
+äì€àY[[‹ûH‹ö]Nääàÿ\[ô€Y[[‹ûX[XôY»Hô]»[ôH[ôÿX⁄\»HôX›‹à[Çà[XôY[ô‹Àöú€€ò
+⁄YXÿ\à»Y[[‹öY\Àù
+Kà€ôHTHÿ[\àô]»Y[[‹ûKÇãH
+äì€à€€ù^\‹Ÿ[XõNääàöYŸŸ\ôY€Y[[‹öY\ÿY\ôŸ\»Ÿ^]€‹ô]»
+^\›[ô»ôZ]ö[‹äH⁄]àŸ[X[ùX»X]⁄\»
+€‹⁄[ôH‹ZÀô\⁄€å Kàÿ€‹ô\»\ôH›[[YY€»H[ôH]X]⁄\¬àõ›Ÿ^]€‹ôSëYX[ö[ô»ò[ö‹»Y⁄\›ÇãH
+äì€à‹ôXÿ[ääàŸ[X[ùX»ô\›[»
+⁄]⁄[Z[\ö]H\òŸ[ùYŸJH\X\à[€ô‹⁄YHŸ^]€‹ôà]À€»\ò\ò\ŸY]Y\öY\»
+úô[Y[Xô\à⁄[àŸH[ŸYXõ›]^H⁄\›\â‹»ŸY[ôœ»äBà€‹ö»]ô[à⁄[àH›‹ôYòX›\Ÿ\»Yôô\ô[ù€‹ôÀÇãH
+äëò[òX⁄Œääà[ûH[XôY[ô»THòZ[\ôHò[»òX⁄»⁄[[ùH»Ÿ^]€‹ô[€õH8†%BàôX]\ôH\»Y]]ôKô]ô\à›XùòX›]ôKÇÇà»»ååçãLÀLãç8†%⁄\ôY€‹õ€€ù^\››Z]Kô]ÀXõ›õ€››ò\Çääî⁄\ôY€‹õ€€ù^
+ì–QPTÀåäNääà[⁄^⁄\òX›\ú»õ›»⁄\ôHHÿ[YHŸX]\Çò[ô[XöY[ù\[ö[ô‹»XX⁄^KàH\⁄Y€ò]Y€‹õYŸ[ô\ò]‹à[ú›[òŸBä”‘ì——SëTêU‘èLX\Xÿ[Hõ‹òJH‹ö]\»€‹õù]ZYöY⁄8†%HãL»[ôH⁄\ôYòòX⁄Ÿõ‹
+ŸX]\à[€Ÿÿÿ[€€‹äKà]ô\ûH[ú›[òŸI‹»ŸŸ[ô\ò]WŸZ[WŸ]ô[ùÿôXY»]ò\»€€ù^€»õ‹òI‹»òZ[ú›‹õH\»[€»ö^XI‹»òZ[ú›‹õKàY‹òY\»‹òXŸYù[NàYàBôö[H\»XúŸ[ù
+Ÿ[ô\ò]‹àõ›€€ôöY›\ôY‹à]òZ[Y
+KôZ]ö[‹à\»[ò⁄[ôŸYúõ€BòôYõ‹ôH8†%XX⁄[ú›[òŸHŸ[ô\ò]\»]»›€àŸX]\à[ô\[ô[ùKÇÇääï\››Z]H
+ì–QPTãåJNääà\›À›\›‹\ôKúX
+]\›
+H€›ô\ö[ô»H\ôHù[ò›[€ú¬ù⁄\ôHHôY‹ô\‹⁄[€à\»õY]XúôXZ⁄[ôŒà^òX››Y‹ÿ
+]\H€€ùòX›
+K\úŸWÿ‹õ€ó‹ÿ⁄Y[X¬ò\ÿ‹öXôWÿ‹õ€ó‹ÿ⁄Y[X
+õ›[ôö\
+KŸ^òX›⁄ú€€ò
+õ‹ŸKŸô[òŸH^òX›[€äK\úŸW›⁄[òäô[Z[ô\à[YH\ú⁄[ô KŸ\››⁄Ÿ[úÿÿ€›[ùŸ\úõ‹òÿ\àH\›Àà“H€‹öŸõ›»\]Yù»ù[à]\›Yù\àH]ò[›Z]Kàö^\ôH[à€€ôù\›úX›[ô»\H[\‹ò\ûH[ú›[òŸBô\ôX›‹ûH⁄]HZ[ö[X[ô[ùò[ô⁄\òX›\àÿ\ô€»õ›úH[\‹ù»€X[õKÇÇääõô]ÀXõ›ú⁄
+ì–QPTãåäNääà[ù\òX›]ôHõ€››ò\ÿ‹ö\õ‹àô]»[ú›[òŸ\»8†%‹ôX]\»Bô\ôX›‹ûKõ€\»õ‹à⁄Ÿ[úÀ€[Ÿ[À[»Hÿ\ô[ôŸYYö[\À›\ù»Hõ›àBúŸ]ô[ù[ú›[òŸHÿ[àôH›€Ÿ\[à[ô\àö]ôHZ[ù]\ÀÇÇà»»ååçãLÀLãå»8†%õ⁄XŸHô\Hﬁ[[Y]ûH
+»Y‹òY][€à[\ù¬Çääïõ⁄XŸHﬁ[[Y]ûH
+ì–QPTÀåJNääàŸ[ô[ô»Hõ⁄XŸHõ›H»Hõ›⁄]›õ⁄XŸX€àõ›¬òöX\Ÿ\»›ÿ\ôô\Z[ô»[à⁄[ô8†%ì“P—W‘ëTW’◊’ì“P—X
+Yò][éJHô\XŸ\»Bò[XöY[ù◊–“Sê—X
+Yò][å H⁄[àH[ò€€Z[ô»Y\‹ÿYŸH\»Hõ⁄XŸHõ›KÇí[\[Y[ù][€éàŸ[]ô\òÿZ[ú»Hõ⁄XŸW⁄[ú]õYŒ»[ôW›õ⁄XŸXŸ]»]»Bï»õÿòXö[]H⁄X⁄»X⁄‹»HY⁄\àò[YKà^Y\‹ÿYŸ\»\ôH[òYôôX›YÇÇääëY‹òY][€à[\ù»
+ì–QPTKç
+Nääà‹Ÿ[óÿ]Y]õ›»ÿ]⁄\»€»ô]»⁄Y€ò[ŒÇãH
+ëò[òX⁄»ò]JéàHô]»ôò[òX⁄»ò\úõ‹àÿ]Y€‹ûH\»[ò‹ô[Y[ùYXX⁄[YBàÿ[€ò[õŸ‹ò[»úõ€HHö[X\ûH[Ÿ[»êSêP“◊”S—S
+ùYŸ]^ŸYYY‹Çàô]öY\»^]\›Y
+KàYàò[òX⁄»ö\ô\»8¢iL»[Y\»[àH\››\ãH›€ô\àŸ]»HBà
+ö€€€›€ãÿ[YH]\õà\»ô\›\ù\›‹õH[\ù KÇãH
+ì[€ùH‹[ô
+éàYàT–Q—W–ïQ—U”S”ïX\»Ÿ][àô[ùò‹Ÿ[óÿ]Y]]»Bàò[õ—‘›Xúÿ‹ö\[€ã›\ÿYŸHTH]ô\ûHÃZ[à[ô\»H›€ô\à]	H[ôL	HŸÇàùYŸ]
+ç€€€›€äKà[ô\ù⁄[à[úŸ]ÇÇê[€»[à\»ô[X\ŸNàÿ]⁄ŸÀú⁄õY]\›]\Àú⁄ﬁ[òÀXÿ\ôÀú⁄€€[Z]Y»Búô\»
+ì–QPTKåKKåÀãå»8†%⁄[ÿ‹ö\»€õKõ»õ›úH⁄[ôŸHõ‹à‹ŸJKÇÇà»»ååçãLÀLãåà8†%ö^Ÿ[öYH‹ò\⁄⁄[àõ»ò\ŸHë»
+ò[õ—‘]
+BÇääîõ€›ÿ]\ŸNääàŸŸ[ô\ò]W‹Ÿ[öYW€ò[õŸ‹[ò€€ô][€ò[Hÿ[Yÿò\ŸWŸ]W›\õ
+
+Xù⁄X⁄ôXY»—SíQW–êT—X
+KôÀàö^XWÿò\ŸKúôÿ
+Húõ€H\⁄ÀàYàõ»ò\ŸH[XYŸH^\›¬òù][à\X\ò[òŸKùŸ\ÀŸ[öYW‹ôXYJ
+Xô]\õú»ùYH
+^[€õHŸ[ô\ò][€à\¬ôö[ôJK[ôùZ[‹Ÿ[öYW‹õ€\€‹úôX›HZŸ\»H^[€õHúò[ò⁄8†%ù][ÇòŸŸ[ô\ò]W‹Ÿ[öYW€ò[õŸ‹‹ò\⁄\»⁄]ö[Sõ›õ›[ô\úõ‹òôXÿ]\ŸH]ô]ô\à⁄X⁄ŸYò⁄\◊ÿò\ŸW⁄[XYŸJ
+Xö\ú›àHŸ[Z[öH][ôXYHY\»›X\ô
+[ôHçÕŒ
+N»Bìò[õ—‘]ÿ\»Z\‹⁄[ô»]ÇÇääëö^ääà€õH[ò€YH[XYŸQ]U\õ[àHò[õ—‘^[ÿY⁄[à⁄\◊ÿò\ŸW⁄[XYŸJ
+Xö\»ùYKX]⁄[ô»HŸ[Z[öH]	‹»ôZ]ö[‹ãÇÇà»»ååçãLÀLãåH8†%ö^UãN[⁄öXòZŸH
+»›\ô\‹»ò[[‹›Yà[Ÿ[X¬Çääì[⁄öXòZŸHõ€›ÿ]\ŸNääàô\]Y\›ÿ	»]\ó€[ô\ X€ŸW›[öX€ŸOUùYJX\Ÿ\»Hô\‹€úŸI‹¬ò€€ù[ùU\X⁄\úŸ]»X€ŸHû]\Ààò[õ—‘	‹»‘—H[ô⁄[ùô]\õú¬ò^Ÿ]ô[ù\›ôX[X⁄]›][à^X⁄]⁄\úŸ]]]ãN€»ô\]Y\›ÿò[»òX⁄»¬íT”ÀNNKLH
+HÃKåHYò][õ‹à^ ò
+Kà[ûH][KXû]HUãN⁄\òX›\à8†%›\õBú][›\À[H\⁄\ÀXÿŸ[ùY]\ú»8†%Ÿ]»X€ŸY\»][ãLHÿ\òòYŸH
+KôÀà	ÿ8°§Çò0Ë∏†´8°(ò
+Kà[ÿ^\»][ùù]ô]ô\àöYŸŸ\ôY[ù[”HKåà›\ùY\⁄[ô»€X\ùú[ò›X][€à[ú›XYŸàT–“RH\‹›õ‹\ÀÇÇääì[⁄öXòZŸHö^ääàõ‹òŸHô\‹ô[ò€Ÿ[ô»Hù]ãNò€àH›ôX[Z[ô»ô\‹€úŸHôYõ‹ôBò]\ó€[ô\ X€ŸW›[öX€ŸOUùYJX[àŸ◊‹ô\]Y\›ÇÇääàê[[‹›^Y[›HàXŒääà”HKåàX]ö[Hò]õ‹ú»ò\úò][ô»X›[€ú»][[‹›€⁄¬äò[[‹›^Y[›KàíH[]YH⁄€H\ô›[Y[ùàùÿ\»€⁄[ô»»Ÿ[ô[›H\»äH\»Bõ›ÀYYôõ‹ùÿ^H»\ôõ‹õH[[›[€ò[]X⁄Y[ùàYYHù[H»HYò][^[ô»›[Bòÿ[[ô»\»›]8†%Z]\à»]‹à€â›Y[ù[€à]ÇÇà»»åçãLÀLà8†%‹»€€[ôŒàõY]òX⁄›\ÿ‹ö\“H]ò[ÀŸX‹ô]ÿÿ[à
+õ»õ›úH⁄[ôŸJBÇääìõ›Hõ›ô[X\ŸH8†%õ»ì’’ëTî“S”àù[\ääà
+ô]»XY[ô»€€ùô[ù[€ã[ôõ‹òŸYûHBòô\ú⁄[€ãX⁄[ôŸ[ŸÀ\ﬁ[òÿ]ò[à€õHX›X[õ›úHô[X\Ÿ\»Ÿ]»»èô\ú⁄[€èòXY[ô‹Àù⁄X⁄]\›X]⁄ì’’ëTî“S”ò»‹ÀŸÿ‹»[ùöY\»\ŸH]YXY[ô‹»ZŸH\»€ôKäBÇãH
+äòòX⁄›\X[ú⁄
+äéàöY⁄KX‹õ€òXõHõY]›]HòX⁄›\à[›]ò][€éà[⁄\òX›\ÇàY[[‹ûK‹›]H]ô\»€à€ôH€ôN»ÿòX⁄›\\»X[ùX[[ô\ãXõ›€»HXY€ôBàYX[ù‹⁄[ô»]ô\û][ôÀà\ò⁄]ô\»XX⁄[ú›[òŸI‹»›]Hö[\»
+ÿ[YH\›\»ÿòX⁄›\àô[ùò[ÿ^\»^€YY
+H»ã‹›‹òYŸK‹⁄\ôYÿõ›XòX⁄›\Àÿ
+›\ùö]ô\»\õ]^à[ö[ú›[
+Kù[ô\»Yù\àM^\À‹[€ò[êP“’T‘ê””ëW‘ëSS’Xõ‹àŸôã\€ôH\⁄ÇàZŸHÿ]⁄ŸÀú⁄]]\›ôH›\õZ[ú›[Y€òŸH[ô\»õ››X⁄YûBà\]KX[ú⁄àŸ]\[ú›ùX›[€ú»[àHÿ‹ö\XY\à[ô‘◊”PSïPSõYÇãH
+äê“Jäà
+ô⁄]Xã›€‹öŸõ›‹ÀŸ]ò[Àû[[
+Nàù[ú»ò€]YKŸ]ò[À‹ù[ãY]ò[Àú⁄€à]ô\ûBà\⁄»XZ[òÿ€]YK äò[ô€àúÀàò][€ò[Nàõ›»\ﬁHûH›\õ[ô»ò]»ö[\¬àúõ€HXZ[ò[ôŸ\‹⁄[€ã\⁄YH⁄X⁄‹»€õHù[à⁄[àHŸ\‹⁄[€àù[ú»[H8†%HŸXãURBàY]‹à€ôH\⁄Yõ»ÿ]H][ôYõ‹ôH\ÀÇãH
+äï€»ô]»]ò[ äéàŸX‹ô]\ÿÿ[ò
+⁄Ÿ[ã\⁄\Y›ö[ô‹»[àòX⁄ŸYö[\»8†%[Y‹ò[Bàõ›⁄Ÿ[úÀ⁄ÀHŸ^\ÀU‘»Ÿ^HQŒ»\»ô\»\»[Y›ô\àXõX»ò]»TìÀ€»Bà€€[Z]Y⁄Ÿ[à\»[ú›[ùHXõX H[ôô\ú⁄[€ãX⁄[ôŸ[ŸÀ\ﬁ[òÿ
+ì’’ëTî“S”à]\›à\]X[Hô]Ÿ\›»»ò⁄[ôŸ[Ÿ»XY[ô»8†%H[]ô\ûHÿ]H⁄X⁄‹»õ›⁄[ôŸYàù]õ›]^HY‹ôYJKàõ›úôXZÀZ]\›YÇÇà»»ååçãLÀLKåLà8†%YZ[àTH
+\ŸHHŸàî»ZY‹ò][€äBÇääìô]»ÿ\Xö[]Kõ›HùY»ö^ääàY»[à‹Z[àYZ[àTH]Z\úõ‹ú¬òÿ]Y]Ÿ\úõ‹ú»ÿòX⁄›\›\]H‹ô\›\ùõ‹àõ€ãU[Y‹ò[H€Y[ù»8†%H[›]ò][ô¬òÿ\ŸH\»Hù]\ôHò]]ôH[ôõ⁄Y€€ùõ€\[ô[\⁄X⁄ÿ[â›ù\›ôHHŸX€€ôï[Y‹ò[H€Y[ù
+€õH€ôHõÿŸ\‹»ÿ[à€Hõ›⁄Ÿ[àõ‹à\]\»]H[YK[ôù\ôI‹»õ»ÿ^H»õ›]HHúŸ[ô\»H\Ÿ\ààô\HòX⁄»»HŸX€€ô€Y[ùöXHBêõ›TJKàù[H[ô\ù[õ\‹»QRSó–TW—SêPìQLX\»Ÿ]8†%^\›[ô»\õ]^[ú›[òŸ\¬ù]ô]ô\àŸ]]\ôH[òYôôX›YÇÇîôYòX›‹ôY]Y]ÿ€Yÿ\úõ‹ú◊ÿ€Yÿ\]Wÿ€Yÿ‹Ÿ[ôÿòX⁄›\€»Z\àŸ⁄X»]ô\»[ÇúZ[àù[ò›[€ú»
+ÿ]\óÿ]Y]Ÿ]XZ[Ÿ\úõ‹ó€[ô\ÿòX⁄›\Ÿö[W€\›òùZ[ÿòX⁄›\ﬁö\\ôõ‹õW‹Ÿ[ó›\]X
+Hÿ[YûHõ›H[Y‹ò[H[ô\à[ôBõX]⁄[ô»õ›]H8†%õ»\Xÿ]YŸ⁄XÀ[ôH[Y‹ò[KYòX⁄[ô»›]]^Ÿõ‹õX]ö\»[ò⁄[ôŸYÇÇò›\]X[ô‹ô\›\ù	‹»€]\õà8†%ô\K›‹ö]W‹›]J
+X[[YYX]Bò‹ÀóŸ^]
+
+X8†%Ÿ\€â›€õ‹ààôXY[ô“Ÿ\ùô\ò‹ö]\»]»ô\‹€úŸH€àBúÿ[YHôXY[ô[ô»Hô\]Y\›€»[à[[YYX]H^]öY⁄Yù\àùZ[[ô»Búô\‹€úŸHö\⁄‹»⁄[[ô»HõÿŸ\‹»ôYõ‹ôH‹ŸHû]\»ôXX⁄H€ÿ⁄Ÿ]
+Hÿ[\Çù€›[ŸYHH€€õôX›[€àô\Ÿ][ú›XYŸàHå^HŸ\ôHù\›Ÿ[ù
+Kàô]¬ò‹ÿ⁄Y[WŸ^]
+
+X[\àö\ô\»‹ÀóŸ^]
+
+Xúõ€HHôXY[ôÀï[Y\òYù\àH⁄‹ùô[^H[ú›XY\ŸYûH›\]X‹ô\›\ù[ôHX]⁄[ô»ÿYZ[ã›\]XòÿYZ[ã‹ô\›\ùõ›]\ÀàôXY[ôÀï[Y\òù[ú»€à]»›€àôXYôYÿ\ô\‹»ŸÇòÿ[\ã€»\»€‹ö‹»[öYõ‹õ[Húõ€Hõ›H\ﬁ[ò⁄[»]ô[ù€‹ôXY
+[Y‹ò[Bö[ô\ú H[ô[àYZ[àTHô\]Y\›Z[ô[ô»ôXYÇÇê]]à]ô\ûHõ›]H^Ÿ\—UÿYZ[ã⁄X[ô\]Z\ô\»]]‹ö^ò][€éàôX\ô\ÇèQRSó–TW’“—Sèò€€\\ôY⁄]ŸX‹ô]Àò€€\\ôWŸYŸ\›àÿYZ[ã⁄X[\¬ô[Xô\ò][H[ò]][ùXÿ]Y
+ö]öX[]ô[ô\‹»[ôÀõ»Ÿ[ú⁄]]ôH]JH€»\[YBõ[€ö]‹ú»[ôHù]\ôH\	‹»€€õôX›]ö]H⁄X⁄»€â›ôYYH⁄Ÿ[à⁄\ôY[ãÇòQRSó–TW–íSëYò][»»LçÀåååX
+òZ[»€‹ŸY
+H8†%Ÿ]]»H‹›	‹¬ïZ[ÿÿ[HT»X›X[H^‹ŸH]›ô\àHö]ò]HZ[ô]»ô]ô\àö[ôåååÇÇê[€»ô]Œà[Y‹ò[KX€€\[ö[€ãXõ›Ÿ\ﬁKÿõ›úŸ\ùöXŸX
+ﬁ\›[Y[\]H[ö]òô\›\ùX[ÿ^\ÿô\›\ùŸXœLò
+H[ô\ﬁK⁄[ú›[]úÀú⁄
+Y[\›[ùî¬ö[ú›[\à8†%€€ô\À‹[»Hô\ÀùZ[»Hô[ùàúõ€Hô\]Z\ô[Y[ùÀù\»Bú⁄[ô€H€›\òŸHŸàù]õ€\»\ãZ[ú›[òŸHõ‹à⁄Ÿ[úÀ[ú›[»Hﬁ\›[Y[ö]úö[ù»Z[ÿÿ[HŸ]\[ú›ùX›[€ú Kà€€ôö\õYY‘Q—íSX	‹»›[K[ÿ⁄»]X›[€Çä‹Àö⁄[
+Y
+X
+H[ô‹ÀóŸ^]
+
+X\ôH[ôXYH€€\]XõH⁄]ô\›\ùX[ÿ^\ÿ\ÀZ\¬∏†%ô\›\ùŸXœLò^\›»‹X⁄YöXÿ[H»XZŸHQ\ô]\ŸHòXŸ\»ô]ŸY[à[à€^][ô¬úõÿŸ\‹»[ôﬁ\›[Y	‹»ô[][ò⁄òX›Xÿ[H[\‹‹⁄XõKõ›»€‹ö»\õ›[ôHô]»ùYÀÇÇà»»ååçãLÀLKåLH8†%Y[YHŸ[ô\ò][€à
+€Y[YX
+»€Y[YNóXY BÇääìô]»ôX]\ôKõ›HùY»ö^ääàõ›»ÿ[àõ›»XZŸH[ôŸ[ôHY[YHöXH€Y[YH⁄[ùXõ‹àX⁄YH»Ÿ[ô€ôH[úõ€\YZYX€€ùô\úÿ][€àöXHH€Y[YNà‹õ›€WXY»8†%õZ\úõ‹ú»^X›H›»‹Ÿ[öYXÿ‹Ÿ[öYNà[ùX[ôXYH€‹ö»
+ÿ[YHYÀ\\ú⁄[ô»]\õÇö[à^òX››Y‹ÿÿ[YHŸ[]ô\òÿŸ[ô›öYŸŸ\ôY⁄\ö[ôÀÿ[YH⁄\◊ÿ[›ŸYÿ][ôÀúÿ[YH⁄ŸY\›\ÿY[ôÿÿû]\“SÿÿŸ[ô‹›ÿŸ[ô]
+KÇÇääë[Xô\ò]H\⁄Y€à⁄⁄XŸNääàY[Y\»\ôH[\]H[XYŸ\»
+»[›»^›ô\õ^Kõ›êRKYŸ[ô\ò]YàRH[XYŸH[Ÿ[»ô[ô\à^[úô[XXõH
+ÿ\òõY€Z\‹‹[Yÿ\[€ú Kù⁄X⁄YôX]»H[ù\ôH⁄[ùŸàHY[YH8†%Hÿ\[€à
+ö\ àHõ⁄ŸKà[\]\¬äY[YW›[\]\À ãöúÿ
+H[ôHõ€ù
+õ€ùÀ–[ù€ãTôY›[\ãùò—ì[XŸ[úŸY
+H\ôBú⁄\ôY\‹Ÿ]»[€ô‹⁄YHõ›úXõ›\ãZ[ú›[òŸK[ôõ›\ùŸà\]KX[ú⁄	‹¬úõ›][ôH[8†%ŸYH—UT—’RQKõY›\õ‹àH€ôK][YHô]⁄ÇÇìô]ŒàY[YW‹ôXYXÿ‹X⁄◊€Y[YW›[\]X
+⁄]\ãX⁄]Y\Z\úõ‹ú¬ò‹ôXŸ[ù‹Ÿ[öYW⁄[ùÿ
+Kÿô[ô\ó€Y[YX
+€‹ô]‹ò\
+»]]À\⁄ö[öÀ]ÀYö]
+»›õ⁄ŸY^
+K¬òŸŸ[ô\ò]W€Y[YWÿÿ\[€úÿ
+€ôHHÿ[î””à»ù‹ãòõ›€HüXô]\Ÿ\»H^\›[ô¬òŸ^òX›⁄ú€€ò[\äKÿŸ[ô€Y[YXÿY[YWÿ€Yà^òX››Y‹ÿõ›»ô]\õú»H]\Bä€X[ó›^ôXX›[€ãŸ[öYW⁄[ùY[YWÿÿ\[€ò
+H[ú›XYŸà»8†%õ›ÿ[⁄]\¬äŸ[]ô\òŸ[ô›öYŸŸ\ôY
+H\]Y»ô\öYöYYöXH\€€]Y^òX›[€à\›»⁄[òŸHBõZ\€X]⁄\ôH€›[úôXZ»]ô\ûHY\‹ÿYŸKõ›ù\›Y[YH€ô\ÀÇÇìô]»\[ô[òﬁNà[›œèLLåLKåà\õ]^[ú›[ÿ[àôHõZﬁH8†%ŸYHH\õ]^ú]Z\ö‹»õ›H[à”UQKõYõ‹àHŸ»[ú›[]€ã\[›ÿ
+»K\ﬁ\›[K\⁄]K\X⁄ÿYŸ\ÿôò[òX⁄»YàH€›\òŸHùZ[òZ[ÀÇÇêì’’ëTî“S”àåçãLÀLKåLKÇÇà»»ååçãLÀLKåL8†%ô\»€X[ù\àXY][ò⁄\úÀ›[Hÿ‹Àö^XI‹»ôX[ÿÿ][€ÇÇääìõ›HùY»ö^8†%Hÿ›[Y[ù][€ã⁄Y⁄Y[ôH\‹ äãõ€\YûHö[ô[ô»]Ÿ]ô\ò[ö[\¬ö[àHô\»Yâ›ôY[à›X⁄Y⁄[òŸHôYõ‹ôH\»õ⁄ôX›	‹»ô[XXö[]H€‹ö»
+\¬úŸ\‹⁄[€ãååçãLÀLKåHõ›Y⁄éJH[ôYöYùY[ù»X›]ô[HZ\€XY[ô»\úö]‹ûNÇÇãHù[ãú⁄[ô›\ùXõ›Àú⁄õ››[][ò⁄Y⁄]ò\ôH]€ò
+õ»›\\ùö\€‹ãàõ»‹ò\⁄ôX€›ô\ûJH8†%H^X›[Ÿ[Sõ›õ›[ô\úõ‹ò‹ò\⁄[€‹ùY»[ôXYHö^Y[Çàù[ãXõ›ú⁄à[]Yõ›»ù[ãXõ›ú⁄
+⁄]õ»õ€\à\ô›[Y[ù
+H[ô\]KX[ú⁄à[ôXYH€›ô\à]ô\û][ô»^HYÇãHì“ëP’–””ïVõYÿì“ëP’“Sî’ïP’S”îÀõYŸ\ôH€ò\⁄›ÿ‹»úõ€H[àX\õY\ãàõ›À\›\\úŸYYŸ\‹⁄[€à8†%‹õ€ô»[ú›[òŸH\›H›[H⁄]úò[ò⁄ôYô\ô[òŸKò\»ŸÇà\›Ÿ\‹⁄[€àà›]Kàù[H›\\úŸYYûH”UQKõY
+»\»⁄[ôŸ[ŸÀà[]Yò]\Çà[àYù»ôHù\›Y›ô\àHôX[ÿ‹»ûHZ\›ZŸKÇãHÿ⁄Ÿ\ôö[Xÿÿ⁄Ÿ\ãX€€\‹ŸKû[[Ÿ\ôH[ò€€\]H
+õ»][KZ[ú›[òŸKÿì’“”QXà›\‹ù⁄[ô€H\ô€ŸY”Q
+H[ô[úôYô\ô[òŸYûH”UQKõY8†%\»õ⁄ôX›\¬à\õ]^Yö\ú›[ôHÿ⁄Ÿ\à]ÿ\»ô]ô\àX›X[H⁄\ôY\àô[[›ôY»ô\]Z\ô[Y[ùÀùà\»õ›»H⁄[ô€H€›\òŸHŸàù]õ‹à\[ú›[»
+—UT—’RQKõY”UQKõY	‹»ô[ùÇàôXùZ[ôX⁄\JH[ú›XYŸàôZ[ô»\Xÿ]Y[õ[ôH[àôYHXŸ\À⁄X⁄\»^X›BàH⁄[ôŸàöYù]ÿ]\ŸYHZ\‹⁄[ôÀXô]XùY»[àååçãLÀLKçKÇãH—UT—’RQKõY€\Ÿ\ú»»Ÿ]êSì—‘–êT—W’Tì8†%HX›X[€ŸHôXY¬àêSì—‘–êT—X»H‹õ€ô»ò[YH€›[⁄[[ùH»õ›[ô»[ôX]ôH]ô\ûHõ€ãSò[õ—‘àõ›öY\àŸ]\úõ⁄Ÿ[ãàö^Y[€ô»⁄]HYò][Tì
+€ŸHYò][\¬àŒãÀ€ò[õÀY‹ò€€Kÿ\K›åX›ZYHÿZYŒãÀÿ\Kõò[õÀY‹ò€€K›åX
+KÇãH–’SQSï”S—S	‹»€ŸHYò][
+Y]K[[XK€[XKLÀåÀMÃãZ[ú›ùX›
+Hô]ô\àX]⁄Yà⁄]”UQKõYÿ›[Y[ùY
+Y\ŸYZÀŸY\ŸYZÀ]çYõ\⁄
+H‹à⁄]	‹»X›X[Hù[à[ÇàòX›XŸKà⁄[ôŸYH€ŸHYò][»X]⁄ÇãHUT◊—íSXYò][ô[ò[YY‹ù[ô‹XŸ\Àù8°§à]\Àù
+€ŸHYò][[ô[àö]ôH⁄\òX›\à›Xô\ôX›‹öY\ H8†%H€ò[YHÿ\»H€‹K\\›H\ùYòX›]ÿ\¬àX›]ô[H‹õ€ô»õ‹à[‹›⁄\òX›\úÀÇãH
+äëõ›[ô[ôö^YHôX[ôKY^\›[ô»ùY»⁄[H[ùô\›Yÿ][ô»Hö^XHô[ÿÿ][€Çàô\]Y\›ääàQêUS‘—USëÿ[àõ›úX8†%Hò[òX⁄»Ÿ][ô»^õ‹àBà
+ù[õò[YY⁄€YH[ú›[òŸJà
+õ‹òI‹»€›
+H8†%ÿ\»\ô€ŸY\ÿ‹öXö[ô»îö^XKããà›\›€ãà^\Àããà[›ôY»‹ù[ô‹ôY€€à»]€»]H⁄‹àà]ô]ô\àX]⁄Yõ‹òH
+Bà€õH⁄\òX›\à]€›[X›X[H\H H[ôô]ô\à\YY»HôX[ö^XHZ]\Çà
+ò[YY[ú›[òŸ\»€â›ò[òX⁄»»QêUS‘—USëÿ][[õ\‹»^HX⁄»Z\Çà›€àŸ][ôÀù
+Kàô]‹ö][à»X›X[H\ÿ‹öXôHõ‹òH
+⁄XÿY€»€›]⁄YH8°§àŸX]Kà\à\àôX[ÿ\ô
+H[ú›XYŸà[à‹ú[ôY‹õ€ôÀX⁄\òX›\àXŸZ€\ãÇãHö^XH
+HôX[\ﬁYYö^XKöú€€ò8†%[Z[P[Y\öXÿ[à€Ÿùÿ\ôH[ô⁄[ôY\ãù]Ÿ\ú¬à‹òY
+Hô[ÿÿ]Yúõ€H]\›[ã»ô[]ùYK–H]H\Ÿ\â‹»ô\]Y\›à\]Y\Çàÿ\ô\ÿ‹ö\[€à[ôô]‹õ›Hö^XKÿ]\Àù⁄]ôX[X\›⁄YK‘ŸX]KX\ôXHXŸ\¬à
+Y^Y[òò]Y\àò^H\öÀ€›Yÿ\à[›[ùZ[ã›€ôHÿ\ô[úÀ]ÀäKŸY\[ô»Hÿ[YBà\ú€€ò[]K\ô]ôX[[ôÀX[õõ›][€à›ùX›\ôH\»H‹öY⁄[ò[à[‹Kù¬àõ⁄ôX›Àùÿÿ⁄Y[KùôYYYõ»⁄[ôŸ\»8†%^HYõ»]\›[ã\‹X⁄YöX»€€ù[ùÇàYYö^XI‹»
+[ôù[\…‹ HZ\‹⁄[ô»[ùöY\»»”UQKõY	‹»⁄\òX›\àõ›\»8†%ö^XBàYô]ô\àX›X[HY€ôN»H›\›€ã‘‹ù[ô\ÿ‹ö\[€à€€YHX\õY\àŸ\‹⁄[€àX^Bà]ôH€€ôHûHÿ\»[ÿ^\»QêUS‘—USëÿ
+ŸYHXõ›ôJKô]ô\àHÿ›[Y[ùYòX›Xõ›]\ãÇÇà»»ååçãLÀLKéH8†%ò[]ôXX\ùôX]õ‹àÿ]⁄ŸÀú⁄Çääîõ€›ÿ]\ŸNääàH€ôK\⁄YHÿ‹ö\
+ã›[Y‹ò[KXõ››ÿ]⁄ŸÀú⁄õ›\ùŸà\»ô\ Búô\›\ù»[ûHõ›⁄‹ŸHò[]ôXö[H\»€\à[àÃÀôX][ô»]\»úõﬁô[ãàõ›úXõô]ô\à‹õ›H]ö[Kàÿ]⁄ŸÀõŸÿ⁄›ŸY]ô\ûHõ›õYŸŸYúõﬁô[à
+X\ùôX]çÃ¬õ€
+X[ôô[][ò⁄Y]ô\ûHHZ[ù]\Àõ‹ô]ô\ã€à[⁄^õ›»8†%öXHù[ãXõ›ú⁄	‹»›€Çò⁄[	”‘QHôX[“Q’TìHYÿZ[ú›\ôôX›HX[HõÿŸ\‹Ÿ\Àà\»ÿ\»HX›X[òÿ]\ŸHŸàH[ù\ôHô\›\ù\›‹õHÿYÿH
+ååçãLÀLKçõ›Y⁄éô[› N»ÿ[\›[ô»ò]\ûBúŸ][ô‹À]]»õÿ⁄Ÿ\ã[ôH[ù€K\õÿŸ\‹ÀZ⁄[\àö^Ÿ\ôH[ôX[\‹›Y\»ù]ô]ô\ÇùHÿ]\ŸHŸà
+ù\ à]\õãÇÇääëö^ääàYY››X⁄ÿ[]ôXHå»ô\X][ô»õÿà]›X⁄\»êT—W—TãÀò[]ôXõX]⁄[ô»⁄]ÿ]⁄ŸÀú⁄^X›Ààÿ›[Y[ùYHÿ]⁄ŸÀú⁄ÿò[]ôX€€ùòX›[Çê”UQKõY	‹»[€ö]‹ö[ô»ŸX›[€ã[ò€Y[ô»H€ôKX€€[X[ôXY€õ‹›X»]€›[]ôBôõ›[ô\»[[YYX][NàZ[ÿ]⁄ŸÀõŸÿŸ‹»]»^X›ôX\€€à
+Ÿ\‹⁄[€à›€òú¬òúõﬁô[à
+X\ùôX]ú»€
+X
+HôYõ‹ôH]ô\ûHô[][ò⁄ÇÇà»»ååçãLÀLKé8†%XY⁄]›€à⁄Y€ò[[ô\ÇÇääîõ€›ÿ]\ŸNääà]€ã][Y‹ò[KXõ›	‹»ù[ó‹€[ô 
+X[ú›[»]»›€à“Q“Sï‘“Q’TìBö[ô\ú»[ù\õò[K⁄[[ùH›ô\úöY[ô»⁄]]ô\à⁄Y€ò[ú⁄Y€ò[
+
+Xÿ\»ôY⁄\›\ôY[ÇòXZ[ä
+XôYõ‹ôZ[ôà›\à›\›€H‹⁄]›€ò[ô\à
+ŸŸ⁄[ô»îôXŸZ]ôY⁄Y€ò[ããàäHYõô]ô\àö\ôYõ›€òŸKõ›Y⁄[ûHô\›\ù[Ÿ\‹⁄[€à8†%H[ù\ôHõõ»⁄Y€ò[[ôHBî“Q““SàXY€õ‹›X»\»Ÿ\‹⁄[€â‹»[ù€KZ⁄[\à[‹ûHÿ\»ùZ[€àÿ\»[úô[XXõBôúõ€HH›\ùÇÇääëö^ääàô\XŸYHXY⁄Y€ò[ú⁄Y€ò[
+
+XôY⁄\›ò][€à⁄]ò\Xÿ][€êùZ[\ä
+Kú‹›‹⁄]›€ä€€ó‹⁄]›€äX8†%[à\ﬁ[ò»€⁄»]ù[ú»\»\ùŸÇîâ‹»›€à[ôXYKX€‹úôX›‹òXŸYù[\⁄]›€àŸ\]Y[òŸHôYÿ\ô\‹»Ÿà⁄]öYŸŸ\ôY]Çîô[[›ôYHõ›À][ù\ŸY⁄Y€ò[[\‹ùÇÇà»»ååçãLÀLKç»8†%ò[ŸK\‹⁄]]ôHô\›\ù\›‹õH[\ù¬Çääîõ€›ÿ]\ŸNääàHååçãLÀLKçô\›\ù€›[ù\à\ŸY[YKõZ›[YJ[YKú›ú[YJããäJXù»\úŸHŸ»[Y\›[\À⁄X⁄\[ô»€àH‘…‹»ÿÿ[][YHÿ[Xúò][€ÇäŸ]À€ÿÿ[[YXÿò
+H8†%HYôô\ô[ùYX⁄[ö\€H[à]€â‹»õ€ôZ[ôõÿù]€ôHBúÿ[YHŸ»\‹òYX
+ŸYHãçJH]öY[ùH[€»\‹ù\Yà[⁄^õ›»ù[à€àHÿ[YBú€ôK€»[Ÿà[HZ\⁄ùYŸY€’TïTUQU[ô\»\»ù⁄][àH\››\àÇöY[ùXÿ[KõŸX⁄[ô»HõY]]⁄YHò[ŸH[\õH
+åNNHô\›\ù»ô\‹ùY€àX[Hõ› KÇÇääëö^ääà€€\\ôHòZ]ôHÿ[X€ÿ⁄»]][YXÿöôX›»\ôX›H[ú›XYŸà€€ùô\ù[ô¬ùõ›Y⁄[ö^\ÿ⁄8†%€õHôYY»úÿ[YHúò[YK€€ú⁄\›[ùô[]]ôHYôãàõ›Xú€€]BïU»€‹úôX›ô\‹ÀÇÇà»»ååçãLÀLKçà8†%]€àÀåM\ﬁ[ò⁄[»[ò€€\]Xö[]BÇääîõ€›ÿ]\ŸNääà[à[úô[]YŸ»\‹òYX
+ù[à»ö^[àYã€Xúõ›ÿùYà\úõ‹äH[ôYï\õ]^€à]€àÀåM⁄X⁄ô[[›ôYH]]ÀX‹ôX]Hò[òX⁄»]ò\ﬁ[ò⁄[ÀôŸ]Ÿ]ô[ù€€‹
+
+X\ŸY»õ›öYKà]€ã][Y‹ò[KXõ›ååI‹»ù[ó‹€[ô 
+Xô\[ô»€à]ò[òX⁄À€»]ô\ûH][ò⁄‹ò\⁄Y⁄]ù[ù[YQ\úõ‹éà\ôH\»õ¬ò›\úô[ù]ô[ù€‹[àôXY	”XZ[ïôXY	ÿôYõ‹ôHHõ›€›[]ô[à›\ù€[ôÀÇÇääëö^ääà^X⁄]H‹ôX]H[ôŸ][à]ô[ù€‹[àXZ[ä
+XôYõ‹ôHù[ó‹€[ô 
+XYÇõõ€ôH^\›»8†%HõÀ[‹€à]€àô\ú⁄[€ú»⁄\ôHH€ò[òX⁄»›[€‹ö‹ÀÇÇà»»ååçãLÀLKçH8†%›\ù\‹ò\⁄úõ€HZ\‹⁄[ô»ô]XÇääîõ€›ÿ]\ŸNääàHÿ[YHŸ»\‹òYX
+ãçäHù[\Y]€à[õ›Y⁄]Hô[ùàôYYYúôXùZ[[ô»
+ŸYHHôK]ô\ú⁄[€ö[ô»ÿLÿÃÃö^ô[› Kù]HôXùZ[ôX⁄\HYâ›ö[ò€YHô]Xà\õ]^\»õ»ﬁ\›[HPSêH[Y^õ€ôH]Xò\ŸK€»õ€ôZ[ôõÀñõ€ôR[ôõÿú⁄[[ùHô[òX⁄»»àHõ€ôXàHô]ö[›\€K\ÿ]ôYô[Z[ô\â‹»YX[Y\›[\ÿ\¬ú›[[Y^õ€ôKX]ÿ\ôH
+ÿ]ôYôYõ‹ôHHúôXZ K€»€€\\ö[ô»]YÿZ[ú›Hõ›À[òZ]ôBò]][YKõõ› 
+XòZ\ŸY\Q\úõ‹éàÿ[â›€€\\ôHŸôúŸ][òZ]ôH[ôŸôúŸ]X]ÿ\ôBô]][Y\ÿ⁄[HôKX\õZ[ô»ô[Z[ô\ú»]›\ù\8†%‹ò\⁄[ô»H[ù\ôHõÿŸ\‹»ôYõ‹ôH]ò€›[Ÿ\ùôH[Y‹ò[H][ÇÇääëö^ääàÿ⁄Y[W‹ô[Z[ô\òõ‹õX[^ô\»Z\€X]⁄Y]ÿ\ôK€òZ]ôH[Y\›[\»[ú›XYŸÇò‹ò\⁄[ôŒ»H›\ù\ô[Z[ô\ã\ôX\õH€‹‹ò\»XX⁄ô[Z[ô\à[àûKŸ^Ÿ\€»€ôHòYô[ùûHÿ[â›õÿ⁄»Hô\›
+‹àHõ›]Ÿ[äKà”UQKõY	‹»ô[ùàôXùZ[ôX⁄\Hõ›¬ö[ò€Y\»ô]XÇÇà»»ååçãLÀLKç8†%[€ö]‹ö[ôŒàô\›\ù\›‹õHŸ[ã\ô\‹ù
+»XYX[â‹»›⁄]⁄ÇêYY‹Ÿ[óÿ]Y]ô\›\ù€›[ù[ô»
+ùYŸﬁH[ù[ãç»8†%ŸYHXõ›ôJH[ôPS“P“◊’Tìú›\‹ùà⁄[àŸ][à[à[ú›[òŸI‹»ô[ùòHõ›[ô‹»]Tì]ô\ûHÃZ[à€»[Çô^\õò[Ÿ\ùöXŸH
+KôÀàX[⁄X⁄‹Àö[ Hÿ[à[\ù€à⁄[[òŸH8†%€›ô\ú»õ›Yù[KY›€à[ôú€ôKYXY⁄X⁄õ›[ô»€ãY]öXŸHÿ[àŸ[ã\ô\‹ùÇÇà»»ååçãLÀLKå»8†%€€ù[ùZ]HôX]\ô\¬ÇãH
+äë]KX]ÿ\ôHõ›Hõ€›À]\ äéàH€€Xö[ôY‹›\ô\H[ò[\⁄\»ÿ[õ›»[€¬à^òX›»H]H⁄[àH\Ÿ\àõ›H\»]XõH
+ö[ù\ùöY]»Y\Ÿ^HäN»›‹ôY\»Bà
+YHVVVKSSKQ
+X›Yôö^[à\Ÿ\ó€õ›\ÀùàHZ[Hõÿà
+ì’W—ì”’’T’SQXàYò][Nå
+HõÿX›]ô[H\⁄‹»›»]Ÿ[ù€òŸHH]H\‹Ÿ\À[àô]‹ö]\»BàX\öŸ\à»
+\⁄ŸYããäX€»]ô]ô\àôKYö\ô\Ààô\‹X›»]ZY]›\ú»[ôHùYŸBàùYŸ]»X^€ôH\à^KÇãH
+äì][KY^HYôHôXY äéàHZYöY⁄^KX€€ù^õ›][€àõ›»ôYY»Y\›\ô^I‹¬à^Kù[ù»Ÿ^I‹»]ô[ùŸ[ô\ò][€ã€»H[ô⁄[ô»ôXY
+H[ã[à\úò[ôBà\ú€€äHX^H€€ù[ùYH‹àô\€€ôH[ú›XYŸàH⁄\òX›\â‹»YôHô\Ÿ][ô»Z[KÇÇà»»ååçãLÀLKåà8†%‹»\ô[ö[ô¬ÇãHÿòX⁄›\[ôHŸYZ€H]]ÀXòX⁄›\õ›»[ò€YHY[[‹öY\Àù\Ÿ\ó€õ›\ÀùàŸ][ôÀù
+ô]ö[›\€H€õH›]Köú€€òÿô[Z[ô\úÀöú€€òÿ^[Y[ùÀöú€€ò8†%Bà⁄\òX›\â‹»Xÿ›[][]Yô[][€ú⁄\\›‹ûHÿ\»ô]ô\àX›X[HòX⁄ŸY\
+KÇàô[ùò›^\»^€YY€à\ú‹ŸKÇãHô]»⁄\◊ÿYZ[òÿ]H
+[›€\›Y[Xô\à‹à›€ô\à€õJH€à›\]X‹ô\›\ùàŸ\úõ‹úÿÿ]Y]ÿòX⁄›\8†%ô]ö[›\€H⁄\◊ÿ[›ŸYô]\õôYùYHõ‹à
+ò[û[€ôJÇà⁄[àS’—Q’T—Tîÿÿ\»[úŸ]€»\ŸH‹\ò][€ò[€€[X[ô»Ÿ\ôH⁄YH‹[à€à[ûBà[ú›[òŸH⁄]›][à^X⁄][›€\›ÇãH‹ô\›\ùà€X[à›\\ùö\€‹àô\›\ùúõ€H[Y‹ò[Kõ»⁄[ôYYYõ‹àô[ùòY]ÀÇãH›\\ùö\€‹àö[\»õ›õŸÿ»]»\›HPà€òŸH]^ŸYY»HPà
+ô]ö[›\€H[òõ›[ôY¬à\úõ‹úÀõŸÿ[ôXYHõ›]Y]àPàöXHõ›][ô—ö[R[ô\ò
+KÇÇà»»ååçãLÀLKåH8†%Ÿ[ãY\ﬁK€€ú€€Y]Y[ò[\⁄\»ÿ[X[ô\à›\\ùö\€‹ÇÇãH
+äòì’’ëTî“S”ò[ùõŸXŸY
+äà8†%⁄›€à[àÿ]Y][ôH›\ù\ŸÀ€»ôYBà\]HZŸO»à\»[ú›Ÿ\òXõHúõ€H[Y‹ò[H[ú›XYŸà›Y\‹ŸY]ÇãH
+äò›\]X€€[X[ô
+äéà›€õÿY»õ›úXúõ€HXZ[òôYù\Ÿ\»»[ú›[[û][ô¬à]Ÿ\€â›Wÿ€€\[XŸY\»Hõ›úKòòZÿ›ÿ\À[ôô\›\ù»öXHBà›\\ùö\€‹ãàõ»\õ]^⁄[ôYYYõ‹àõ›][ôH\ﬁ\ÀÇãH
+äì€ôH€€Xö[ôY‹›\ô\H[ò[\⁄\»ÿ[
+äà
+‹›‹ô\Wÿ[ò[\⁄\ÿ
+Hô\XŸ\»ôYBàŸ\\ò]HHÿ[»
+[€Ÿ\òZ\ÿ[\Ÿ\ã[õ›H^òX›[€ãî»Y[[‹ûH^òX›[€äH]àò[àYù\à]ô\ûHY\‹ÿYŸKà€àH€ôH€€õôX›[€à‹ŸH⁄YHÿ[»€€\]Y⁄]Bà\Ÿ\ãYòX⁄[ô»ô\Hõ‹àò[ô⁄Y8†%HôX[ö]ô\àŸà[Z[I‹»X\õY\à[Y[›]›‹õH
+ŸYBàHôK]ô\ú⁄[€ö[ô»[ùöY\»ô[› Kà]]À\ôXX›[€»õ›»⁄⁄\»⁄[HHô\H\¬à[àõY⁄ÇãHù[ãXõ›ú⁄à›\\ùö\€‹àŸ‹»öXHèòôY\ôX›[ú›XYŸàYX8†%€ôHô]Ÿ\àõÿŸ\‹¬à\àõ›⁄^ô]Ÿ\à›ÿ\ô[ôõ⁄Y	‹»Ãã\[ù€K\õÿŸ\‹»⁄[[Z]ÇÇà»»ôK]ô\ú⁄[€ö[ô»ö^\»
+ÿ[YHXùYŸ⁄[ô»Ÿ\‹⁄[€ãôYõ‹ôHì’’ëTî“S”ò^\›Y
+BÇï\ŸH[ôYôYõ‹ôHHô\ú⁄[€à›[\ÿ\»[ùõŸXŸYXõ›ôN»ö[ô[HûH€€[Z]Y\‹ÿYŸBùöXH⁄]ŸÿYà[›HôYYH^X›Yôãà[àH‹ô\à^HŸ\ôHX›X[Hõ›[ô[ôôö^Y8†%õ€›ÿ]\Ÿ\»€õNÇÇãH
+äòù[ãXõ›ú⁄][ò⁄Yò\ôH]€òõ›Hô[ùâ‹Àääà€õH€‹öŸYYàHô[ùÇà\[ôY»ôH€àU⁄[à]^›\ùY»›\ù⁄\ŸH‹ò\⁄[€‹Y€Çà[Ÿ[Sõ›õ›[ô\úõ‹éàõ»[Ÿ[Hò[YY	‹ô\]Y\›…ÿà\»^X›ùY»ôX›\úôY]\Çà
+[úô[]Y»\»ö^8†%HŸ»\‹òYXúõ⁄ŸHHô[ùà]Ÿ[é»ŸYHååçãLÀLKçJBà[ô\»HôX›\úö[ô»^ò\ô€‹ù⁄X⁄⁄[ô»ö\ú›€à[ûH[ú›[òŸH]€€â››\ùÇãH
+äë[Z[I‹»ïö\⁄[€àTH\úõ‹éà8†%àY[à[\HõŸKääàH›ôX[Z[ô»ô\‹€úŸI‹¬à⁄]õÿ⁄»€‹ŸYH€€õôX›[€àôYõ‹ôHòZ\ŸWŸõ‹ó‹›]\ 
+X	‹»\úõ‹àõŸH€›[ôBàôXYàö^YûHõ‹òŸK\ôXY[ô»ô\‹ò€€ù[ù€à[ûH›]\»8¢iHôYõ‹ôHòZ\⁄[ô»8†%à\»]\õà]\›ôHŸ\YàŸ◊‹ô\]Y\›\»]ô\à›X⁄YYÿZ[ã‹à]ô\ûHù]\ôBàÕ^ôX€€Y\»[ôXY€õ‹ÿXõHYÿZ[ãÇãH
+äòíT“S”ó”S—SYò][Y»êSì—‘”S—S
+äà
+H^[€õHôX\€€ö[ô»[Ÿ[
+K€»[ûBà[ú›[òŸH⁄]›][à^X⁄]íT“S”ó”S—S[àô[ùòŸ[ù›‹»»H[Ÿ[]àôZôX›»[XYŸ\Àà⁄[ôŸYHYò][»òZK[‹ôÀŸ€KMçùòÇãH
+äò’ëPSW’SQS’U
+Ã Hÿ\»€»Y⁄
+äàõ‹àH€ôH€€õôX›[€àù[õö[ô»Ÿ]ô\ò[à€€ò›\úô[ù⁄YKXÿ[»\àY\‹ÿYŸN»]ô\ûH[Ÿ[[ò€Y[ô»ò\›õ\⁄]Y\à€ô\Àà[YY›]€€ú›[ùKàòZ\ŸY»LÀÇãH
+äï‘—’Ÿ][\ù–\“ú€€òô]\õú»Hò\ôH\úò^Jäãù]H\úŸ\àÿ[YôŸ]
+ê[\ù»äXà€à]‹ò\⁄[ô»HòYôöX»€\à]ô\ûHLZ[ù]\»
+⁄[[ùK⁄[òŸH]ÿ\»ÿ]Y⁄[ôàŸŸŸYõ›ò][8†%ù]›òYôöXÿÿ⁄[ò⁄Y[ùÿŸ\ôHúõ⁄Ÿ[àH⁄€H[YJKàö^Y¬àXÿŸ\õ›Hò\ôH\úò^H[ôH‹ò\YÿöôX›ÇãH
+äí[ù€‹õõ⁄XŸHQ»Ÿ[ù»ò[õ—‘	‹»‹[êRK\›[H»[ô⁄[ù	Ÿ
+äà8†%õ⁄XŸH[ôà[Ÿ[]\›€€YHúõ€HHÿ[YHõ›öY\ãàYYò]]ôH[ù€‹õ»›\‹ùà
+Sï”‘ì–TW“—VXÿSï”‘ì’◊”S—S
+K]]À\Ÿ[X›Y⁄[àHŸ^H\»Ÿ]ÇãH
+äêYYŸ\úõ‹úÿ€€[X[ô
+äà8†%Z[»\úõ‹úÀõŸÿ[ù»⁄]€»ù]\ôHùY»ô\‹ù¬àÿ\úûHHX›X[\úõ‹à^[ú›XYŸàHòY›YHö]	‹»›€ãàÇÇëõ‹à\›‹ûHôYõ‹ôH\»XùYŸ⁄[ô»Ÿ\‹⁄[€à
+Y[[‹ûHﬁ\›[Hö^\À][òﬁH€‹öÀôXYúÿYô]K]ÀäK⁄]Ÿÿ\»H€›\òŸHŸàù]8†%‹ŸH€€[Z]»ôY]H\»ö[KÇ

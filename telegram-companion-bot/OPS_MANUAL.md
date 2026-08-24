@@ -11,9 +11,11 @@ created 2026-07-29; the Termux phone is empty). Layout:
 
 | Path | What |
 |---|---|
-| `/opt/telegram-bots/bot.py` | the single shared bot.py (every instance runs it) |
-| `/opt/telegram-bots/bot.py.bak` | previous version — the rollback |
-| `/opt/telegram-bots/venv/` | shared virtualenv |
+| `/opt/telegram-bots/current` | atomic symlink to the selected immutable release |
+| `/opt/telegram-bots/previous` | prior release pointer — the rollback target |
+| `/opt/telegram-bots/releases/<git-sha>/` | immutable code, assets, lock, and venv pointer |
+| `/opt/telegram-bots/venvs/py312-<lock-sha256>/` | exact hashed dependency layer, reused across code-only releases |
+| `/opt/telegram-bots/shared/` | bot-writable group ledgers and the inert `/update` lock; release pointers stay root-owned |
 | `/opt/telegram-bots/<instance>/` | per-instance dir: `.env`, card, state, memory |
 | `/opt/telegram-bots/world.txt` | shared world context (nora writes it) |
 | `/etc/systemd/system/bot@.service` | unit template, `WorkingDirectory=/opt/telegram-bots/%i` |
@@ -64,10 +66,11 @@ what is happening now. For "is it happening right now", use a bounded journalctl
 window with a count.
 
 ### Deploying
-One command per instance; it pulls `preset.txt`, that instance's preset layers and
-card, and `bot.py` from `main`, compile-checks `bot.py` before swapping (keeping
-`bot.py.bak`), normalizes `CHARACTER_CARD`, restarts + enables the unit, and prints
-hash + STARTUP AUDIT verification:
+One command per instance; it prepares the full-git-SHA immutable code release and exact
+lock-addressed dependency layer, pulls `preset.txt`, that instance's preset layers and
+card from `main`, atomically selects the release (keeping `previous`), normalizes
+`CHARACTER_CARD`, restarts + enables the unit, and prints release, hash, and STARTUP
+AUDIT verification:
 ```bash
 # host: VPS (as root). NOT curl-piped — the repo is private since 2026-07-28 and
 # raw.githubusercontent.com 404s. The script fetches + hard-resets the checkout to
@@ -76,13 +79,9 @@ hash + STARTUP AUDIT verification:
 ```
 `/update`, `update-all.sh` and `sync-cards.sh` are phone-era and manage nothing now.
 
-**Rollback:**
+**Rollback:** atomically swaps `current` and `previous`, then restarts every active bot.
 ```bash
-cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
-for b in $(systemctl list-units 'bot@*' --no-legend --plain \
-          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
-  systemctl restart "bot@$b"
-done
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
 ```
 
 ### File ownership
@@ -455,8 +454,9 @@ containing:
 - `state.json` — conversation history, memory, mood (auto-created)
 - Context files: `life.txt`, `people.txt`, `projects.txt`, `schedule.txt`, `day.txt`, `user_notes.txt`, `atlas.txt`
 
-The shared `/opt/telegram-bots/bot.py` is used by all instances — each instance just
-reads its own directory.
+The release selected by `/opt/telegram-bots/current` is used by all instances — each
+instance reads and writes only its own directory plus the explicitly shared world/group
+paths in `bot@.service`.
 
 To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use `/forget` for a clean memory slate.
 
@@ -464,10 +464,10 @@ To swap the character card: change `CHARACTER_CARD=` in `.env` and restart. Use 
 
 ## Running Multiple Characters
 
-All seven bots share one `/opt/telegram-bots/bot.py` and run from their own directories
-as systemd unit `bot@<instance>` (see "VPS operations" at the top for start/stop/restart
-and the whole-fleet loop). Instances: `nora`, `bonnie`, `cass`, `emily`, `priya`, `jules`,
-`marcus`.
+All seven bots share the release selected by `/opt/telegram-bots/current` and run from
+their own directories as systemd unit `bot@<instance>` (see "VPS operations" at the top
+for start/stop/restart and the whole-fleet loop). Instances: `nora`, `bonnie`, `cass`,
+`emily`, `priya`, `jules`, `marcus`.
 
 Each character is fully isolated — separate state, memory, context files, and bot token.
 They have no knowledge of each other (except instances opted into the group-chat pilot —
@@ -498,18 +498,19 @@ Emily+Marcus's setup did):
 3. **Precondition — both pilots must share one ledger directory** (`GROUP_CHAT_DESIGN.md`
    §0). Bot-to-bot flow is a shared *filesystem* side channel, not Telegram; split hosts
    silently give each bot its own ledger and the loop caps stop being enforced. All seven
-   instances run on the VPS under `/opt/telegram-bots/`, so `GROUP_LEDGER_DIR` defaults to
-   the shared code dir for both. Verify rather than assume:
+   instances run on the VPS under `/opt/telegram-bots/`, and `bot@.service` explicitly
+   pins `GROUP_LEDGER_DIR` there so moving code into immutable release directories cannot
+   split the ledger. Verify rather than assume:
    ```bash
    # host: VPS
-   sudo -u bot test -w /opt/telegram-bots && echo "ledger dir writable" || echo "NOT WRITABLE"
+   sudo -u bot test -w /opt/telegram-bots/shared && echo "ledger dir writable" || echo "NOT WRITABLE"
    systemctl show bot@priya bot@jules -p ExecStart | grep -o '/opt/[^ ]*bot\.py'
    grep -H "^[[:space:]]*GROUP_LEDGER_DIR=" /opt/telegram-bots/{priya,jules}/.env
    ```
-   `GROUP_LEDGER_DIR` defaults to the directory of the running `bot.py` (bot.py:373), so
-   **identical `ExecStart` paths + no override in either `.env` = co-located, by
-   construction.** The last grep printing nothing is the passing result. If the dir is
-   not writable by `bot`, set `GROUP_LEDGER_DIR` in both `.env`s to one that is.
+   The service-level environment is the shared default for every instance; an instance
+   `.env` does not override an already-set process variable. The last grep printing
+   nothing is the passing result. If the dir is not writable by `bot`, repair ownership
+   on `/opt/telegram-bots/shared` before enabling group mode.
 
    > **Do not try to verify this from the logs before enabling.** The startup config
    > warning that names the resolved path is gated `if GROUP_MODE and GROUP_PEERS`
@@ -525,7 +526,7 @@ Emily+Marcus's setup did):
 5. One-time smoke test of the atomicity primitives, on the VPS:
    ```bash
    # host: VPS
-   sudo -u bot /opt/telegram-bots/venv/bin/python /opt/telegram-bots/bot.py \
+   sudo -u bot /opt/telegram-bots/current/venv/bin/python /opt/telegram-bots/current/bot.py \
      /opt/telegram-bots/priya --claim-test
    ```
    (must print two PASS lines — run it as `bot` so it exercises the real permissions).
@@ -576,10 +577,11 @@ best RAM headroom per dollar for running all seven bots comfortably as of mid-20
 sudo git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git /opt/telegram-bots/.repo
 sudo bash /opt/telegram-bots/.repo/telegram-companion-bot/deploy/install-vps.sh
 ```
-It's idempotent — re-run it to add another instance or after a `git pull` updates
-`requirements.txt`; it skips already-configured `.env` files and only touches units
-whose config changed. It prompts per instance for a Telegram token, NanoGPT key, and
-character card filename, and generates an `ADMIN_API_TOKEN`.
+It's idempotent — re-run it to add another instance or after a `git pull`; it reuses an
+existing dependency layer when `requirements.lock` is unchanged, skips already-configured
+`.env` files, and only touches units whose config changed. It prompts per instance for a
+Telegram token, NanoGPT key, and character card filename, and generates an
+`ADMIN_API_TOKEN`.
 
 **Supervision**: `systemctl {status,restart,stop} bot@nora`, logs via
 `journalctl -u bot@nora -f` (see "VPS operations" at the top). `/restart` from Telegram
@@ -666,16 +668,14 @@ after sending that bot `/audit` (`_self_audit` fires the ping inline with that j
 - Check for typos in the key name
 
 **`ModuleNotFoundError: No module named 'requests'` (or similar)**
-- On the VPS: the shared venv (`/opt/telegram-bots/venv/`) is missing or was built
-  against a different Python. The unit's `ExecStart` launches with
-  `/opt/telegram-bots/venv/bin/python` explicitly, so this means the venv itself needs
-  rebuilding, not that the unit picked the wrong interpreter:
+- On the VPS, do not mutate the selected venv. Re-run the deploy path: it verifies the
+  hashed lock, builds a new immutable dependency layer if needed, runs `pip check`, and
+  activates only after those pass:
   ```bash
-  python3 -m venv --clear /opt/telegram-bots/venv
-  /opt/telegram-bots/venv/bin/pip install -r /opt/telegram-bots/.repo/telegram-companion-bot/requirements.txt
+  /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
   ```
-  Then restart every unit (see "Whole fleet" under "VPS operations") to pick up the
-  rebuilt venv.
+  If the selected release itself was damaged, remove nothing: use `vps-sync.sh
+  --rollback`, inspect `current`/`previous`, then repair forward on `main`.
 
 **Model errors / 5xx from the API**
 - Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically

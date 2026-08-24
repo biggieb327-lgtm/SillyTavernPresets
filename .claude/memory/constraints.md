@@ -1098,6 +1098,27 @@ cause — grouping by it would have produced an unactionable entry and left thes
 constructs unmechanised. Recorded in `SESSION-AUTOPSY-2026-08-10.md` as an observation
 instead.
 
+### C24 — Repairing the system interpreter changes the system under test
+**seen: 2** (2026-08-21, 2026-08-23) — *promoted from the Minor log; both entries deleted.*
+Twice, a truthful environment-only `bot-imports` result triggered a root `pip install`
+into the managed system interpreter. The install could not repair Debian's broken
+`cryptography`; it merely unmasked a pyo3 panic and turned a precise SKIP into a more
+alarming FAIL. The second attempt repeated the move with `--force-reinstall` while the
+change under review was Markdown-only.
+
+**Constraint:** classify a verification failure before changing its interpreter. If the
+check is missing dependencies, build a disposable virtualenv from the exact lock and run
+the gate with that venv first on `PATH`; never install or force-reinstall into the system
+interpreter to chase green. Re-read the result after any environment change, because it
+now measures a different system. For doc-only changes, clean-environment CI is the
+authoritative dependency-bearing gate.
+
+**Graduated 2026-08-24 → exact-lock verification setup.** `repo-change-control` now gives
+an isolated `/tmp` venv procedure using `requirements.lock` plus a pinned pytest, and the
+CI/VPS release contract installs the same hashed runtime set without mutating the session
+interpreter. A blanket hook against root pip would false-positive legitimate isolated
+root-owned venvs, so the enforceable boundary is the explicit venv path, not uid alone.
+
 ## Minor — running log
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
@@ -1117,7 +1138,7 @@ show up first. A section with nothing in it means under-reporting, not a clean r
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
 promotes was still worth ten seconds to write.
 
-**Last promotion pass: 2026-08-10** — `sweep.py constraints-drift` reads this line and
+**Last promotion pass: 2026-08-24** — `sweep.py constraints-drift` reads this line and
 counts only what has arrived *since* it, which is what "is another pass worth running"
 actually asks. **Update the date whenever you run a pass**, including one that promotes
 nothing. Counting the *total* instead is what made the check useless: the 2026-08-02 pass
@@ -1131,6 +1152,23 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
+- 2026-08-24 — Tested the writable-state migration with `nobody:nobody`, but this
+  container's `nobody` primary group is `nogroup` and the sandbox also rejects that
+  ownership change. Worse, invoking the function inside an `&&` chain suppressed its
+  inherited `set -e`, so later moves ran after the failed directory creation. → Derive a
+  service account's primary group with `id -gn`, make critical function commands return
+  explicitly instead of borrowing caller `set -e`, and use root for ownership mechanics
+  in a sandbox that cannot chown to the production uid.
+- 2026-08-24 — Added `immutable-release-contract` before loading the repo's
+  `add-regression-eval` skill; its first rule is to commit all real work before any
+  break-test injection. Caught before injecting, finished the artifact, and moved the
+  commit ahead of RED/GREEN work. → Load the named regression skill before writing the
+  check, not merely before break-testing it; its ordering constraint changes the work
+  sequence even when the checker itself is sound.
+- 2026-08-24 — First `uv pip compile` failed because uv defaulted to the read-only
+  `/root/.cache/uv`; the resolver never started. Re-ran with a task-specific cache under
+  `/tmp`. → In this managed workspace, set `UV_CACHE_DIR` to a writable task directory
+  before the first uv invocation instead of treating tool availability as cache access.
 - 2026-08-24 — Wrote the `reviewer-stance-present` eval's error message as
   `f"...(\"{'\" / \"'.join(missing)}\")..."` — a backslash inside an f-string expression,
   which only parses on Python 3.12+ (PEP 701). The fleet runs 3.12 and CI pins it, so it
@@ -1154,19 +1192,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   settings.json exists. Not a gap. → a finding you generate is not exempt from your own
   verification protocol (C10); grep the machinery before naming a gap in it, especially while
   scanning *for* gaps. Caught before it reached the file.
-- 2026-08-23 — **Ran `pip install` (then `--force-reinstall`) as root chasing a green local
-  `verify.sh`, when the two failures were a broken cloud interpreter, not my Markdown-only
-  change.** `bot-imports` failed with a `pyo3_runtime.PanicException` from system
-  `cryptography`, and pytest was absent from `/usr/local/bin/python`. The install couldn't
-  fix a Debian-managed interpreter (`Cannot uninstall packaging … RECORD file not found`),
-  only unmasked the crypto panic that PIL's absence had hidden — briefly making the signal
-  look *worse* and nearly muddying a clean merge decision. The `bot-imports` eval's own
-  message already said how to read it: traceback into `dist-packages` ⇒ "the environment's
-  packages are broken, not bot.py". → When local `verify.sh` is red, first classify each
-  failure as environmental vs. change-caused (read the traceback's path; a doc-only diff
-  cannot cause an import error) **before** touching the environment. For a doc-only change,
-  the clean-env CI run is the authoritative gate — read it, don't try to repair the session's
-  interpreter. Same family as C8 (ask what a reading measures) applied to a verify result.
 - 2026-08-23 — **Shipped a stateful dedup loop (`fire_poll_job`) whose green 1300-test suite
   covered only the happy path and cold-start; the mandated step-7 `/code-review` then found
   four real correctness bugs — id-less records re-alerting forever, backlog dump on
@@ -1214,13 +1239,6 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   rule rather than by hand, state the rule's precondition and test it per item** — here,
   an even backtick count. The verification that caught it was already written, which is
   the only reason this was a minute and not a corrupted record.
-- 2026-08-21 — **`pip install -r requirements.txt` as root turned a truthful SKIP into a
-  misleading FAIL.** `bot-imports` had been skipping for a missing dependency and saying
-  so correctly; installing into the system interpreter surfaced a broken Debian
-  `cryptography` (pyo3 panic) and the eval then reported bot.py as crashing on import. The
-  eval's own message said which reading was which, so it cost minutes rather than a wrong
-  diagnosis. → **Changing the environment to make a check runnable is a change to the
-  system under test.** Re-read what the check says after, not just whether it is green.
 - 2026-08-12 (**second occurrence, same session**) — Did it again in the very next
   release: wrote "10 new tests … Total: 1,273" into the v2026-08-12.2 changelog while
   drafting; `verify.sh` said 1267, and the real count was 4 (I had counted six DEFAULTS

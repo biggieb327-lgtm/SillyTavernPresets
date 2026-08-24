@@ -34,12 +34,16 @@ Your job ends at "merged, green, deploy instructions given."
 
 2. **Fresh-container setup** (once per session, before any test/eval run):
    ```bash
-   pip install -r telegram-companion-bot/requirements.txt pytest
-   pip install --upgrade cryptography   # if pytest panics with pyo3_runtime.PanicException
+   python3 -m venv /tmp/telegram-bot-verify-venv
+   /tmp/telegram-bot-verify-venv/bin/python -m pip install \
+     --require-hashes --only-binary=:all: -r telegram-companion-bot/requirements.lock
+   /tmp/telegram-bot-verify-venv/bin/python -m pip install pytest==8.4.2
+   PATH=/tmp/telegram-bot-verify-venv/bin:$PATH bash .claude/tools/verify.sh
    ```
-   Without these, the `bot-imports` eval fails on `ModuleNotFoundError: PIL` and
-   pytest can die at collection inside Debian's system cryptography. Both are
-   environment gaps, not code bugs. Do not "fix" bot.py for them.
+   Without the isolated environment, `bot-imports` can skip on `ModuleNotFoundError`
+   and pytest can die inside Debian's system cryptography. Both are environment gaps,
+   not code bugs. Never repair them with root pip in the system interpreter (C24): use
+   the disposable exact-lock venv, then classify any remaining traceback.
 
 3. **Implement.** Small diffs: one release = one theme (a mega-release risks all seven
    bots at once). New/changed env vars get documented in `.env.example`. Per owner
@@ -141,8 +145,8 @@ Your job ends at "merged, green, deploy instructions given."
   versa) — the sync eval catches it late; get it right up front.
 - Leaving work on the claude/ branch: the fleet deploys from main, so an unmerged
   green branch ships nothing.
-- Proposing to split bot.py into modules. Recorded non-goal; the entire deploy
-  model (`vps-sync.sh` swaps one file, `bot.py.bak` rollback) depends on a single file.
+- Proposing to split bot.py into modules. Recorded non-goal; immutable releases still
+  ship bot.py as the single application entrypoint used by every instance.
 - Running `git checkout -- bot.py` to undo an experiment while the file holds
   uncommitted real work — this destroyed ~700 lines once. Commit real work first;
   revert experiments by re-editing.

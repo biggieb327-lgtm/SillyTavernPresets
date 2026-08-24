@@ -26,9 +26,10 @@ already on the box:
 
 ## Deploy
 
-One command per instance — pulls preset + layers + card + bot.py from `main`,
-compile-checks bot.py before swapping (keeps `bot.py.bak`), normalizes
-`CHARACTER_CARD`, restarts + enables the unit, prints verification:
+One command per instance — prepares the git-SHA immutable release and exact hashed
+dependency layer, pulls preset + layers + card from `main`, atomically selects the
+release (keeps `previous`), normalizes `CHARACTER_CARD`, restarts + enables the unit,
+and prints verification:
 
 ```bash
 $REPO/deploy/vps-sync.sh nora
@@ -87,12 +88,8 @@ journalctl -u bot@<name> --since "-2 min" | grep -c Conflict    # 0 = resolved
 ls -la /opt/telegram-bots/<name>/state.json        # want: bot bot
 chown -R bot:bot /opt/telegram-bots/<name>
 
-# Rollback a bad bot.py
-cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
-for b in $(systemctl list-units 'bot@*' --no-legend --plain \
-          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
-  systemctl restart "bot@$b"
-done
+# Roll back to the previous immutable release and restart every active bot
+$REPO/deploy/vps-sync.sh --rollback
 
 # Disk (state + journals)
 df -h /opt
@@ -108,7 +105,7 @@ df -h /opt
 - `systemctl start` ≠ `enable`. Unenabled units vanish on reboot.
 - `/errors` and `errors.log` are history; a bounded `journalctl` window is *now*.
 - Verify migrated/copied state by **content** (dict entry counts), not size or hash.
-- Rollback: `/opt/telegram-bots/bot.py.bak` → copy back, restart.
+- Rollback: `$REPO/deploy/vps-sync.sh --rollback`.
 
 ## Phone (historical)
 

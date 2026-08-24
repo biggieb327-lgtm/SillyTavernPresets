@@ -73,6 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o ~/telegram-bot/run-bot.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/update-all.sh -o ~/telegram-bot/update-all.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o ~/telegram-bot/requirements.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.lock -o ~/telegram-bot/requirements.lock
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o ~/telegram-bot/.env.example
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/preset.txt -o ~/telegram-bot/preset.txt
 ```
@@ -82,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/
 cd ~/telegram-bot
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --only-binary=:all: -r requirements.lock
 ```
 
 ---
@@ -241,10 +242,11 @@ mkdir -p ~/telegram-bot && cd ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o run-bot.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o requirements.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.lock -o requirements.lock
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --only-binary=:all: -r requirements.lock
 ```
 
 Then follow Step 4 onwards. `run-bot.sh` uses tmux and works the same here as on Termux;
@@ -260,10 +262,11 @@ mkdir -p ~/telegram-bot && cd ~/telegram-bot
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/bot.py -o bot.py
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/run-bot.sh -o run-bot.sh
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.txt -o requirements.txt
+curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/requirements.lock -o requirements.lock
 curl -fsSL https://raw.githubusercontent.com/biggieb327-lgtm/SillyTavernPresets/main/telegram-companion-bot/.env.example -o .env.example
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --only-binary=:all: -r requirements.lock
 ```
 
 Then follow Step 4 onwards.

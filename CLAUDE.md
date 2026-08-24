@@ -173,9 +173,13 @@ Two composition facts the per-skill descriptions can't tell you:
 | `jules` | `/opt/telegram-bots/jules/` | `jules_nakagawa.json` |
 | `marcus` | `/opt/telegram-bots/marcus/` | `marcus_calder.json` |
 
-All instances share the venv at `/opt/telegram-bots/venv/`; `bot.py` lives at
-`/opt/telegram-bots/bot.py`. Each runs as `bot@<instance>` (unit file
-`deploy/bot@.service`, `WorkingDirectory=/opt/telegram-bots/%i`).
+All instances select the shared immutable release through `/opt/telegram-bots/current`;
+code releases live at `releases/<full-git-sha>/` and exact dependency layers at
+`venvs/py312-<lock-sha256>/`. Each runs as `bot@<instance>` (unit file
+`deploy/bot@.service`, `WorkingDirectory=/opt/telegram-bots/%i`). `previous` is the
+atomic rollback pointer. Per-instance release pointers are deliberately ROADMAP item 2.
+The root-owned release/pointer layout is not bot-writable; group ledgers live in the
+separate bot-writable `/opt/telegram-bots/shared/` directory.
 
 The instance directory is the basename on the `=== STARTUP AUDIT === … Instance:`
 line — **that runtime value is authoritative** if it ever disagrees with this table.
@@ -217,9 +221,10 @@ below). The phone's rollback dirs (`~/<name>-bot.migrated`) were retained throug
 ## Deployment
 
 All seven instances deploy from `main` via **`deploy/vps-sync.sh`**, one invocation per
-instance — it pulls `preset.txt`, the instance's preset layers and card, and `bot.py`
-(compile-checked, `bot.py.bak` kept), normalizes `CHARACTER_CARD`, restarts and
-enables the unit, then prints hash + STARTUP AUDIT verification:
+instance. It installs the exact hashed dependency lock into a lock-addressed immutable
+environment, assembles a full-git-SHA code release, atomically updates `current` (keeping
+`previous`), pulls the instance's preset layers and card, normalizes `CHARACTER_CARD`,
+restarts and enables the unit, then prints release + hash + STARTUP AUDIT verification:
 
 ```bash
 # host: VPS (as root)
@@ -341,7 +346,9 @@ that doesn't require a commit to persist.
 character cards + seed dirs, `preset.txt`, `tests/`, `deploy/` (VPS), and the docs
 above. `ls` it for the rest. The non-obvious bits:
 
-- `requirements.txt` is the single source of truth for pip installs.
+- `requirements.txt` declares direct dependency ranges; `requirements.lock` is the
+  generated, exact, hashed install contract shared by CI and VPS releases. Regenerate it
+  with the command in its header; never hand-edit it.
 - `preset.txt` is the shared voiceprint — editing it changes **all seven** bots.
 - `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are phone-era leftovers: they were
   curl-installed onto the phone once, and no VPS deploy path touches them. Editing them

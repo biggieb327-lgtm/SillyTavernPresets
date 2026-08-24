@@ -49,21 +49,22 @@ and manage nothing now** — do not hand them to the user.
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh marcus
 ```
 Only send the instances actually affected — a card-only edit needs just the instance(s)
-using that card; a bot.py change needs all seven. Each invocation: compile-checks
-bot.py before swapping it (keeping `bot.py.bak`), copies `preset.txt` + whatever preset
-layers that instance's own `PRESET_FILES` names, normalizes `CHARACTER_CARD` in
-`.env` to the repo's filename, restarts + enables the unit, then prints hash and
-`STARTUP AUDIT` verification. It also reports (never copies) any seed file
+using that card; a bot.py change needs all seven. Each invocation prepares an immutable
+code release at `releases/<full-git-sha>` and an exact dependency layer at
+`venvs/py312-<lock-sha256>` (reused when the lock is unchanged), then atomically selects
+it through `current` while retaining `previous`. It copies `preset.txt` + whatever preset
+layers that instance's own `PRESET_FILES` names, normalizes `CHARACTER_CARD` in `.env`,
+restarts + enables the unit, then prints release, hashes, and `STARTUP AUDIT`
+verification. It also reports (never copies) any seed file
 (`people.txt`/`projects.txt`/`schedule.txt`/`atlas.txt`) present in the repo but
 missing on that instance — diff a sibling instance before copying one over, since a
 repo seed file can be an older generation than what's live (jules, 2026-07-29).
 
-**The shared swap is locked** (ROADMAP 1.6, shipped 2026-08-01, race-confirmed on the
-real VPS). `vps-sync.sh` takes a non-blocking `flock` on `$BASE/.vps-sync.lock` before it
-touches the shared `/opt/telegram-bots/bot.py` and `bot.py.bak`, and `set -euo pipefail`
-makes the backup `cp` fatal rather than `|| true`. So a concurrent second run cannot
-corrupt the rollback point — **it refuses**: `flock -n` fails, the run prints
-`another sync is swapping bot.py on this host; retry` and exits 1.
+**The shared operation is locked** (ROADMAP 1.6, shipped 2026-08-01, race-confirmed on
+the real VPS). `vps-sync.sh` takes a non-blocking `flock` on `$BASE/.vps-sync.lock`
+before it prepares releases or changes `current`/`previous`. A concurrent second run
+cannot corrupt the rollback point — **it refuses**, prints that another release
+operation is running, and exits 1.
 
 Still run them **sequentially**, for a different reason than the old one: a rejected run
 deploys nothing, so a concurrent launch leaves that instance silently on the previous
@@ -72,18 +73,15 @@ version. The loop below stops on the first non-zero exit, which is what you want
 **Verify:** `/audit` to each synced instance — MUST show the new BOT_VERSION. If it
 still shows the old one, stop: the sync didn't take (see failure modes below).
 
-**Rollback (shared bot.py, all instances):**
+**Rollback (shared release, all active instances):**
 ```bash
-cp /opt/telegram-bots/bot.py.bak /opt/telegram-bots/bot.py
-for b in $(systemctl list-units 'bot@*' --no-legend --plain \
-          | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'); do
-  systemctl restart "bot@$b"
-done
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback
 ```
-There is deliberately no `/rollback` command — a broken bot can't be trusted to roll
-itself back. Cards and preset layers aren't versioned by `vps-sync.sh`'s backup step;
-if a card/preset edit needs rolling back, re-run `vps-sync.sh` after reverting the
-change on `main`.
+There is deliberately no Telegram `/rollback` command — a broken bot can't be trusted
+to roll itself back. The host-side mode atomically swaps `current` and `previous`, then
+restarts every active bot. Cards and preset layers remain mutable and aren't part of
+the release pointer; if one needs rolling back, revert it on `main` and re-run
+`vps-sync.sh` for the affected instance.
 
 ## Refreshing the checkout by hand (repo tools, not a deploy)
 
@@ -105,13 +103,13 @@ The key path honours `STPRESETS_DEPLOY_KEY` if that is set. Simpler alternative 
 restart is acceptable: **any `vps-sync.sh <instance>` run does this fetch-and-reset first**,
 so deploying one instance also refreshes the checkout for every tool.
 
-**Running a repo tool on the VPS needs the fleet venv**, not system python — system python
+**Running a repo tool on the VPS needs the selected release venv**, not system python — system python
 has none of `bot.py`'s dependencies and the three tools that import it die on
 `ModuleNotFoundError` (they now name the venv in the error):
 
 ```bash
 # host: vps (as root)
-/opt/telegram-bots/venv/bin/python3 \
+/opt/telegram-bots/current/venv/bin/python3 \
   /opt/telegram-bots/.repo/telegram-companion-bot/tools/atlas_audit.py priya --near "Seattle"
 ```
 
@@ -120,10 +118,10 @@ has none of `bot.py`'s dependencies and the three tools that import it die on
 - `vps-sync.sh` exits at "FATAL: no git checkout" → the deploy key or checkout is
   missing on this host; see the script's own header and `deploy/MIGRATION.md` §
   "Private-repo deploys".
-- `vps-sync.sh` exits at the `py_compile` step → the downloaded bot.py doesn't
-  compile; main is broken — fix forward on main immediately (red main is a fleet-wide
-  deploy blocker, and `evals.yml`'s hard-reset-before-copy note in CLAUDE.md says the
-  same).
+- `vps-sync.sh` exits while building a dependency layer → the exact hashed lock could
+  not install or `pip check` failed; `current` was not changed. Fix the lock on main.
+- `vps-sync.sh` exits while assembling a release → bot.py/acoustic_ears.py did not
+  compile or an existing SHA directory failed validation; `current` was not changed.
 - `/audit` still shows the old BOT_VERSION after a sync reports success → check the
   script's printed checkout HEAD against `git log origin/main`; the push may not have
   actually reached `origin/main`.
