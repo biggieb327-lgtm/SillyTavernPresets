@@ -24,7 +24,7 @@ fi
 out=$(bash .claude/evals/run-evals.sh 2>&1); evals_rc=$?
 py_out=""; py_rc=0
 # python3 -m pytest, never bare pytest — the bare binary can belong to a different
-# interpreter without the project's deps (same lesson as venv-explicit-python).
+# interpreter without the project's deps (same lesson as deploy-service-launch).
 if [ $evals_rc -eq 0 ] && python3 -m pytest --version >/dev/null 2>&1; then
   py_out=$(python3 -m pytest telegram-companion-bot/tests/ -q 2>&1); py_rc=$?
 fi

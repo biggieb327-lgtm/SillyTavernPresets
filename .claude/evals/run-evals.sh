@@ -22,14 +22,6 @@ else
   bad "streaming-error-body" "'_ = resp.content' missing from bot.py — streamed error bodies will be empty again"
 fi
 
-# Incident 2026-07-05: watchdog.sh restarted the whole healthy fleet forever because
-# bot.py stopped writing the .alive heartbeat. The repeating job must stay registered.
-if grep -q 'run_repeating(_touch_alive' "$BOT"; then
-  ok "heartbeat-alive: _touch_alive repeating job registered"
-else
-  bad "heartbeat-alive" "run_repeating(_touch_alive...) missing — watchdog.sh will judge every bot frozen and restart the fleet forever"
-fi
-
 # Incident v2026-07-05.8: PTB's run_polling() silently overrides signal.signal() handlers;
 # shutdown logging must be wired via post_shutdown, not a plain signal handler.
 if grep -q '\.post_shutdown(_on_shutdown)' "$BOT"; then
@@ -38,12 +30,23 @@ else
   bad "graceful-shutdown" ".post_shutdown(_on_shutdown) missing — SIGTERM diagnostics (phantom-killer triage) are lost"
 fi
 
-# Incident: bare 'python' in a launcher crash-looped bots with ModuleNotFoundError when
-# the venv wasn't on PATH. The supervisor must invoke the venv interpreter explicitly.
-if grep -q 'venv/bin/python' telegram-companion-bot/run-bot.sh; then
-  ok "venv-explicit-python: run-bot.sh launches via venv/bin/python"
+# The two launch invariants, on the live artifact. Phone-era history: bare `python` in a
+# launcher crash-looped bots with ModuleNotFoundError when the venv wasn't on PATH, and on
+# 2026-07-05 the phone watchdog restart-stormed a frozen fleet. Both now live in the systemd
+# unit file `bot@.service` — the actual launch/restart path since the 2026-07-29 cutover;
+# the phone's run-bot.sh and watchdog.sh manage nothing. This replaces the retired
+# venv-explicit-python and heartbeat-alive evals, which pinned those dead phone files while
+# bot@.service itself was guarded by nothing (coverage-inversion fix, 2026-08-24).
+SERVICE=telegram-companion-bot/deploy/bot@.service
+svc_problems=""
+grep -q 'ExecStart=/opt/telegram-bots/venv/bin/python' "$SERVICE" \
+  || svc_problems="ExecStart is not the explicit venv interpreter — bare python crash-loops with ModuleNotFoundError"
+grep -q '^Restart=always' "$SERVICE" \
+  || svc_problems="${svc_problems:+$svc_problems; }Restart=always missing — a crashed bot would not be resupervised (systemd is the supervisor now, not the phone watchdog)"
+if [ -z "$svc_problems" ]; then
+  ok "deploy-service-launch: bot@.service launches via the venv interpreter and Restart=always"
 else
-  bad "venv-explicit-python" "run-bot.sh no longer uses the explicit venv interpreter"
+  bad "deploy-service-launch" "$svc_problems"
 fi
 
 # Incident v2026-07-05.5: missing tzdata made ZoneInfo silently fall back, then a
