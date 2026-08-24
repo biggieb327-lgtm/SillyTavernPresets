@@ -11,6 +11,19 @@ trap cleanup EXIT INT TERM
 # shellcheck source=../deploy/release-lib.sh
 source "$ROOT/deploy/release-lib.sh"
 
+# mktemp roots begin private. Publishing must add read/traversal for the systemd service
+# user while retaining immutability, and must reject a symlink in place of an artifact.
+private_dir="$TEST_BASE/private-published"
+mkdir "$private_dir"
+chmod 0500 "$private_dir"
+release_publish_dir "$private_dir"
+[ "$(stat -c '%a' "$private_dir")" = "555" ]
+ln -s "$private_dir" "$TEST_BASE/published-link"
+if release_publish_dir "$TEST_BASE/published-link" >/dev/null 2>&1; then
+  echo "symlink was accepted as a published directory" >&2
+  exit 1
+fi
+
 mkdir -p "$TEST_BASE/releases" "$TEST_BASE/selectors/nora" "$TEST_BASE/selectors/emily"
 for revision in aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; do
   mkdir "$TEST_BASE/releases/$revision"
@@ -45,4 +58,4 @@ if release_activate "$TEST_BASE/selectors/nora" "$TEST_BASE/releases/incomplete"
   exit 1
 fi
 
-echo "selector behavior ok: canary isolated, exact promotion, scoped rollback, incomplete rejected"
+echo "release behavior ok: published roots traversable; canary isolated; exact promotion; scoped rollback; incomplete rejected"

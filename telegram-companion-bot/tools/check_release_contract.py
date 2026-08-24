@@ -81,6 +81,15 @@ def main() -> int:
             'selector_dir="$base/selectors/$instance"',
             'must be root-owned mode 755',
         ),
+        "release_published_dir_ok": (
+            '[ ! -L "$path" ] && [ -d "$path" ]',
+            '[ "$owner" = "$(id -u)" ] && [ "$mode" = "555" ]',
+        ),
+        "release_publish_dir": (
+            'refusing to publish a directory owned by uid',
+            'chmod 0555 "$path"',
+            'release_published_dir_ok "$path"',
+        ),
         "release_migrate_writable_state": (
             'install -d -o "$bot_user" -g "$bot_group" -m 0755 "$base/shared"',
             'chown root:root "$base"',
@@ -92,6 +101,8 @@ def main() -> int:
             "pip install --require-hashes --only-binary=:all:",
             '"$temp_dir/bin/python" -m pip check',
             'chmod -R a-w "$temp_dir"',
+            'release_publish_dir "$venv_dir"',
+            'release_publish_dir "$temp_dir"',
         ),
         "release_prepare": (
             'release_secure_stores "$base"',
@@ -99,6 +110,12 @@ def main() -> int:
             'ln -s "../../shared/update.lock" "$temp_dir/.update.lock"',
             'mv "$temp_dir" "$release_dir"',
             'chmod -R a-w "$temp_dir"',
+            'release_publish_dir "$release_dir"',
+            'release_publish_dir "$temp_dir"',
+        ),
+        "release_validate": (
+            'release_published_dir_ok "$release_dir"',
+            'release_published_dir_ok "$(realpath "$release_dir/venv")"',
         ),
         "release_activate": (
             'realpath --relative-to="$pointer_dir" "$release_dir"',

@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-24 — immutable release directory permission repair (no bot.py change)
+
+**Root cause: `mktemp -d` created each dependency-layer and code-release root with mode
+0700, then the immutability step removed write bits without adding read or traversal
+permission, publishing both roots as mode 0500.** Deployment validated the Python path as
+root, which can bypass those mode bits, while every `bot@<instance>` service runs as the
+unprivileged `bot` user. The result was a fleet-wide `status=203/EXEC` restart loop with
+`Permission denied` at the selected release's Python executable.
+
+The broader failure class is publishing a private temporary directory without setting an
+explicit final access mode, then validating it only as its privileged creator. Release
+creation now publishes both roots as root-owned mode 0555, validates that contract before
+selection, and safely repairs otherwise-complete mode-0500 artifacts on the next sync.
+The behavioral release test starts from the failed 0500 mode and requires 0555, while the
+release-contract checker requires the repair and validation on both artifact paths.
+`BOT_VERSION` remains v2026-08-24.4 because `bot.py` did not change.
+
 ## 2026-08-24 — immutable Garmin dependency repair (no bot.py change)
 
 **Root cause: the immutable-release migration guard detected `garminconnect` in the
