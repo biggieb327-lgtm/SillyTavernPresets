@@ -7969,6 +7969,7 @@ class TestEveryBooleanFlagDefault:
 
     DEFAULTS = {
         "ADMIN_API_ENABLED": False,
+        "AMBIENT_PREDRAFT": True,
         "BB_ALERTS": True,
         "CLOSENESS_ENABLED": False,
         "CRIME_ALERTS": True,
@@ -12059,3 +12060,106 @@ class TestPredraftedHooks:
         asyncio.run(bot._predraft_proactive_hooks(7))
         assert called == []                                # no generation attempted
         assert bot.predrafted_hooks == {}
+
+
+# ── ambient-news pre-drafting (ROADMAP 6.2 slice 2) ───────────────────────────
+# Nightly stashes a headline digest; send_proactive uses it instead of a live
+# [search:], falling back when the stash is empty/stale. See CHANGELOG v2026-08-24.7.
+class TestAmbientNewsDigest:
+    def test_format_is_headline_only_no_urls(self):
+        items = [
+            {"category": "local", "title": "Ferry cancelled", "source": "WSDOT",
+             "summary": "long summary text", "url": "http://x"},
+            {"category": "interest", "title": "New GPU", "source": "GeekWire",
+             "summary": "", "url": "http://y"},
+        ]
+        out = bot._format_ambient_news(items)
+        assert out == "Ferry cancelled (WSDOT); New GPU (GeekWire)"
+        assert "http" not in out and "long summary" not in out
+
+    def test_format_respects_limit_and_drops_titleless(self):
+        items = [
+            {"title": "One", "source": "A"},
+            {"title": "", "source": "B"},          # dropped: no title
+            {"title": "Three", "source": "C"},
+            {"title": "Four", "source": "D"},
+        ]
+        assert bot._format_ambient_news(items, limit=2) == "One (A)"  # 2 scanned, 1 titleless
+        assert bot._format_ambient_news([]) == ""
+
+    def test_format_handles_missing_source(self):
+        assert bot._format_ambient_news([{"title": "Solo"}]) == "Solo"
+
+    def test_fresh_returns_none_when_kill_switch_off(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", False)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": "stuff", "ts": bot.time.time()})
+        assert bot._fresh_ambient_news() is None
+
+    def test_fresh_returns_none_when_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": None, "ts": 0.0})
+        assert bot._fresh_ambient_news() is None
+
+    def test_fresh_returns_text_when_within_ttl(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "AMBIENT_NEWS_TTL_S", 3600)
+        monkeypatch.setattr(bot, "_ambient_news_cache",
+                            {"text": "Ferry cancelled (WSDOT)", "ts": bot.time.time() - 60})
+        assert bot._fresh_ambient_news() == "Ferry cancelled (WSDOT)"
+
+    def test_fresh_returns_none_when_stale(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "AMBIENT_NEWS_TTL_S", 3600)
+        monkeypatch.setattr(bot, "_ambient_news_cache",
+                            {"text": "old news", "ts": bot.time.time() - 7200})  # 2h > 1h TTL
+        assert bot._fresh_ambient_news() is None
+
+    def test_refresh_stashes_digest(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "SEARCH_ENABLED", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 3)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "_fetch_morning_news",
+                            lambda: ([{"title": "Big storm", "source": "NPR"}], False))
+        asyncio.run(bot._refresh_ambient_news())
+        assert bot._ambient_news_cache["text"] == "Big storm (NPR)"
+        assert bot._ambient_news_cache["ts"] > 0
+
+    def test_refresh_is_noop_when_kill_switch_off(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", False)
+        monkeypatch.setattr(bot, "SEARCH_ENABLED", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 3)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "_fetch_morning_news",
+                            lambda: called.append(1) or ([], False))
+        asyncio.run(bot._refresh_ambient_news())
+        assert called == []                                 # no fetch attempted
+        assert bot._ambient_news_cache["text"] is None
+
+    def test_refresh_is_noop_when_search_disabled(self, monkeypatch):
+        # Producer must match the SEARCH_ENABLED-gated consumer: no point fetching a digest
+        # send_proactive can never inject. (Regression guard for a /code-review finding.)
+        called = []
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "SEARCH_ENABLED", False)
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 3)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": None, "ts": 0.0})
+        monkeypatch.setattr(bot, "_fetch_morning_news",
+                            lambda: called.append(1) or ([], False))
+        asyncio.run(bot._refresh_ambient_news())
+        assert called == []
+        assert bot._ambient_news_cache["text"] is None
+
+    def test_refresh_leaves_prior_digest_when_feeds_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "AMBIENT_PREDRAFT", True)
+        monkeypatch.setattr(bot, "SEARCH_ENABLED", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 3)
+        monkeypatch.setattr(bot, "_ambient_news_cache", {"text": "yesterday", "ts": 123.0})
+        monkeypatch.setattr(bot, "_fetch_morning_news", lambda: ([], True))  # all feeds failed
+        asyncio.run(bot._refresh_ambient_news())
+        assert bot._ambient_news_cache["text"] == "yesterday"  # not clobbered with empty

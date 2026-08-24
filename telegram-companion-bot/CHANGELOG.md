@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.7 — pre-draft the ambient-news digest in the nightly reflection (ROADMAP 6.2 slice 2)
+
+**Root cause: the proactive ambient-color path ran a live web search on the reply.** On
+~25% of proactive messages (`PROACTIVE_AMBIENT_CHANCE`, gated by `SEARCH_ENABLED`),
+`send_proactive` injected `PROACTIVE_AMBIENT_HINT`, which tells the model to run
+`[search: <city> news today]` mid-generation and let the result color the message — a
+slow web search on the live proactive path, for what is meant to be a passing mention. The
+fleet already fetches a curated local/interest news digest every morning
+(`_fetch_morning_news`, v2026-08-24.1), so the same sleep-time-compute move as slice 1
+(v2026-08-24.6) applies: fetch the ambient detail off-loop and let the proactive draw on
+the stash.
+
+The nightly `reflection_job` now calls `_refresh_ambient_news`, which fetches the
+morning-news feeds once (off-loop) and stashes a compact headline digest
+(`_format_ambient_news` — titles + source only, no URLs or summaries) in an in-memory
+`_ambient_news_cache`, mirroring `_weather_cache`. `send_proactive`'s ambient branch now
+injects that stash via `PROACTIVE_AMBIENT_STASH_HINT` when `_fresh_ambient_news` returns a
+digest within `AMBIENT_NEWS_TTL_HOURS` (default 30), and falls back to the pre-fix live
+`[search:]` hint otherwise — an unset nightly run, a stale digest, a restart, or the kill
+switch off — so behavior is byte-identical whenever no fresh stash exists. Runs every night
+for the fleet, independent of whether the morning briefing is *enabled*, so the ambient
+source does not silently depend on briefing config.
+
+Three `/code-review` findings shaped the final form. The nightly refresh is gated on
+`SEARCH_ENABLED`, matching `send_proactive`'s consumer branch, so a search-disabled instance
+neither fetches nor uses a digest (a producer with no consumer is pure waste). It does
+**not** call `_count_error("news")`: the morning briefing is the authoritative news-health
+signal, a failed ambient fetch degrades gracefully to the live-search fallback, and
+counting both would double-report one feed outage. And on weekday mornings the ambient
+refresh and the briefing fetch the same feeds independently (two cheap RSS GETs) — left
+un-deduplicated on purpose, since the briefing wants full items with URLs and summaries
+while the ambient digest wants headlines only, so a shared cache would serve neither well.
+
+Honest accounting (the same care slice 1's `/code-review` forced): this removes the live
+web search from the ~25% of proactives that use ambient color, in exchange for one off-loop
+RSS fetch per night. It is not a per-message reply-path call, so `bot-code-invariants` #3
+is not implicated; and like slice 1 the nightly fetch is speculative — on a quiet day the
+digest goes unused. A secondary effect worth noting: the ambient source changes from
+whatever a live web search returns to the curated morning-news feeds (local + interest),
+which is more consistent and on-brand for where she lives, but it is a behavior change, not
+a pure perf move. Kill switch `AMBIENT_PREDRAFT` (default on). This ships slice 2 of 6.2's
+"what nightly consolidation can absorb" list.
+
 ## v2026-08-24.6 — pre-draft proactive hooks in the nightly reflection (ROADMAP 6.2)
 
 **Root cause: the proactive "what's on her mind" hook was generated cold on the live

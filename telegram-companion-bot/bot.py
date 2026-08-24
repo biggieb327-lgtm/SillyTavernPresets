@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.6"
+BOT_VERSION = "2026-08-24.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3022,6 +3022,10 @@ WEATHER_CODES = {
 }
 
 _weather_cache = {"text": None, "ts": 0.0, "fail_ts": 0.0}
+# Ambient local-news digest stashed by the nightly reflection (ROADMAP 6.2), so a proactive
+# can mention what's going on without a live [search:] on the reply. In-memory like the
+# weather cache — a restart just falls back to the live-search path until the next refresh.
+_ambient_news_cache = {"text": None, "ts": 0.0}
 # After a failed fetch, wait this long before trying again. Without it a failure is retried
 # on EVERY ensure_weather() call — 13 call sites, on every message, selfie and scheduled
 # job — because the success guard tests `text` and `ts`, neither of which a failure
@@ -3160,6 +3164,14 @@ _MORNING_NEWS_DEFAULT_FEEDS = (
     ("interest", "Marketplace Morning Report",
      "https://feeds.publicradio.org/public_feeds/marketplace-morning-report"),
 )
+# Ambient-news pre-drafting (ROADMAP 6.2, second slice). The nightly reflection stashes a
+# compact headline digest (reusing the morning-news feeds) so a proactive can let current
+# events casually color it, instead of the model running a live [search:] mid-reply. Reuses
+# the MORNING_NEWS feeds and limit. Default on; AMBIENT_PREDRAFT=0 keeps the live-search
+# hint. A stashed digest is used until AMBIENT_NEWS_TTL_HOURS old (default 30, covering a
+# day between nightly refreshes); past that, the proactive path falls back to live search.
+AMBIENT_PREDRAFT = _env_bool("AMBIENT_PREDRAFT", True)
+AMBIENT_NEWS_TTL_S = max(1, _env_int("AMBIENT_NEWS_TTL_HOURS", "30")) * 3600
 # Per-instance default travel mode for /route, validated per-call by _tomtom_mode().
 # Name the neighbourhood when a location is shared: she holds lat/lon today and cannot say
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
@@ -12420,6 +12432,14 @@ PROACTIVE_AMBIENT_HINT = (
     " Before replying, use [search: {location} news today] and let whatever you find "
     "casually color what you say — don't report it like a headline roundup."
 )
+# Used instead of PROACTIVE_AMBIENT_HINT when the nightly reflection has stashed an ambient
+# news digest (ROADMAP 6.2), so the model gets the current events directly rather than
+# running a live [search:] on the reply.
+PROACTIVE_AMBIENT_STASH_HINT = (
+    " A few current things going on around her right now: {news}. If one fits, let it "
+    "casually color what you say — the way real news is just on your mind — don't report "
+    "it like a headline roundup or list them."
+)
 PROACTIVE_AMBIENT_CHANCE = 0.25
 
 # Occasionally have her attach a selfie to a proactive message -- the model almost never
@@ -12630,6 +12650,19 @@ def _pop_predrafted_hook(chat_id: int) -> str | None:
     return hook
 
 
+def _fresh_ambient_news() -> str | None:
+    """The nightly-stashed ambient news digest if still fresh (ROADMAP 6.2), else None so
+    send_proactive falls back to the live-search hint. In-memory cache, no save_state."""
+    if not AMBIENT_PREDRAFT:
+        return None
+    text = _ambient_news_cache.get("text")
+    if not text:
+        return None
+    if time.time() - (_ambient_news_cache.get("ts") or 0.0) > AMBIENT_NEWS_TTL_S:
+        return None
+    return text
+
+
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
@@ -12662,7 +12695,11 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             f" If something from it fits the reach-out naturally, draw on it.]"
         )
     if SEARCH_ENABLED and random.random() < PROACTIVE_AMBIENT_CHANCE:
-        trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
+        ambient = _fresh_ambient_news()
+        if ambient:
+            trigger = trigger[:-1] + PROACTIVE_AMBIENT_STASH_HINT.format(news=ambient) + "]"
+        else:
+            trigger = trigger[:-1] + PROACTIVE_AMBIENT_HINT.format(location=WEATHER_LOCATION) + "]"
     elif selfie_ready() and random.random() < PROACTIVE_SELFIE_CHANCE:
         trigger = trigger[:-1] + PROACTIVE_SELFIE_HINT + "]"
     # 40% chance to weave in an unsent draft from a previous blocked tick
@@ -12869,6 +12906,19 @@ def _format_morning_news(items: list[dict]) -> str:
             lines.append(f"  {item['summary']}")
         lines.append(f"  {item['url']}")
     return "\n".join(lines)
+
+def _format_ambient_news(items: list[dict], limit: int = 3) -> str:
+    """A compact headline-only digest for ambient color in a proactive (ROADMAP 6.2):
+    titles + source, no URLs or summaries — the proactive is a passing mention, not the
+    morning-briefing roundup. Returns "" when there is nothing usable."""
+    bits = []
+    for item in items[:max(0, limit)]:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        source = (item.get("source") or "").strip()
+        bits.append(f"{title} ({source})" if source else title)
+    return "; ".join(bits)
 
 def _telegram_text_chunks(text: str, limit: int = _TELEGRAM_MAX_LEN) -> list[str]:
     """Split plain text on line boundaries where possible, never above Telegram's cap."""
@@ -13527,6 +13577,10 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         await _predraft_proactive_hooks(owner)
     except Exception as e:
         log.warning("[predraft] error: %s", e)
+    try:
+        await _refresh_ambient_news()
+    except Exception as e:
+        log.warning("[ambient-news] error: %s", e)
 
 
 async def _predraft_proactive_hooks(chat_id: int):
@@ -13547,6 +13601,30 @@ async def _predraft_proactive_hooks(chat_id: int):
             hooks.append(h)
     predrafted_hooks[chat_id] = hooks
     save_state()
+
+
+async def _refresh_ambient_news():
+    """Sleep-time compute (ROADMAP 6.2): stash a compact local-news digest during the nightly
+    reflection so a proactive can mention current events without a live [search:] on the
+    reply. Reuses the morning-news feeds; runs every night for the fleet, independent of
+    whether the morning briefing is enabled. In-memory cache, no save_state (rule 6 moot).
+    Gated on SEARCH_ENABLED so the producer matches send_proactive's consumer branch — an
+    instance with search off consumes no ambient digest, so it should not fetch one either.
+    No _count_error here: the morning briefing is the authoritative news-health signal, a
+    failed ambient fetch degrades gracefully to the live-search fallback, and counting both
+    would double-report one feed outage. Speculative like slice 1 (may go unused on a quiet
+    day); not a per-message reply-path call (bot-code-invariants #3 not implicated)."""
+    if not (AMBIENT_PREDRAFT and SEARCH_ENABLED and MORNING_NEWS and MORNING_NEWS_LIMIT):
+        return
+    try:
+        news, _all_failed = await asyncio.to_thread(_fetch_morning_news)
+    except Exception as exc:
+        log.warning("[ambient-news] fetch failed (%s)", type(exc).__name__)
+        return
+    digest = _format_ambient_news(news)
+    if digest:
+        _ambient_news_cache["text"] = digest
+        _ambient_news_cache["ts"] = time.time()
 
 
 async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1342,9 +1342,13 @@ per-message LLM side calls) with no case strong enough to argue an exception.
   set of live-path work that can move to the nightly job with no new live call; extend
   as slices ship):
   1. ✅ **Proactive-hook pre-draft** — shipped v2026-08-24.6 (above).
-  2. Proactive **ambient-detail refresh** — the `PROACTIVE_AMBIENT_HINT` search
-     (`SEARCH_ENABLED`, 25% of proactives) fetches city news live inside the reply; a
-     nightly pass could stash a small ambient-detail digest the hook draws on instead.
+  2. ✅ **Proactive ambient-detail refresh** — shipped v2026-08-24.7 (`AMBIENT_PREDRAFT`).
+     The nightly reflection stashes a compact headline digest (reusing the morning-news
+     feeds) in `_ambient_news_cache`; `send_proactive` injects it via
+     `PROACTIVE_AMBIENT_STASH_HINT` instead of the live `[search:]`, falling back to the
+     search hint when the stash is empty/stale. Removes the live web search from the ~25%
+     of proactives that use ambient color, for one off-loop RSS fetch/night. See CHANGELOG
+     v2026-08-24.7.
   3. **Selfie-scene pre-selection** — `PROACTIVE_SELFIE_CHANCE` picks a scene at send
      time; candidate scenes could be pre-composed nightly (pairs with `_recent_selfie_hints`
      dedup).
