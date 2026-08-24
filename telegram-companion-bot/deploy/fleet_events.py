@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Summarize payload-free OP_EVENT records read from journalctl on stdin."""
+"""Summarize payload-free OP_EVENT records read from journalctl on stdin.
+
+The report is intentionally a filter: collection and retention stay with journald.
+See OPS_MANUAL.md for the bounded whole-fleet query.
+"""
 
 import argparse
 import json
