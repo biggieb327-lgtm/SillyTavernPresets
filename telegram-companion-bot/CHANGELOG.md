@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-24 — immutable Garmin dependency repair (no bot.py change)
+
+**Root cause: the immutable-release migration guard detected `garminconnect` in the
+legacy shared venv, but it never checked whether the new lock now contained the package,
+so the documented repair could not make the guard pass.** Nora's first selector-aware
+canary stopped with exactly that fatal error after v2026-08-24.4 was otherwise healthy.
+The broader failure class is a migration precondition that inspects only the old system:
+if it never tests the replacement artifact, no valid replacement can satisfy it.
+
+`garminconnect` is now a direct runtime dependency because immutable environments cannot
+inherit optional packages from the shared venv. The Python 3.12 lock includes its exact
+hashed dependency closure. Both deployment entry points now fail only when Garmin is
+present in the legacy venv **and absent from the new lock**. The release-contract checker
+derives every legacy import probe and rejects either an undeclared package or a guard
+that does not inspect the new lock. This is a dependency/operations repair only;
+`BOT_VERSION` remains v2026-08-24.4.
+
 ## v2026-08-24.4 — transactional reminder persistence, incrementally
 
 **Root cause: a machine-managed JSON store rewrites its entire document for every

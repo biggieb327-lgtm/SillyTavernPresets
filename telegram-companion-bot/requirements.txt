@@ -15,20 +15,8 @@ Pillow>=10.0,<11.0
 # feature independently rather than crashing the bot.
 numpy>=1.26,<3.0
 
-# Optional — Garmin health feed only (GARMIN_EMAIL/GARMIN_PASSWORD). Deliberately NOT a
-# hard requirement: not every instance has a watch, the venv is shared across all seven,
-# and a venv rebuild shouldn't pull a dep most bots never import. bot.py imports it in a
-# try/except and reports "inert" in /audit when credentials exist without the library.
-#
-# Immutable release environments cannot carry manually installed packages forward.
-# Before enabling Garmin on the fleet, promote it to a declared requirement here,
-# regenerate requirements.lock, and deploy normally. The first migration refuses to
-# continue if it detects garminconnect in the legacy shared venv, preventing a silent
-# feature loss.
-#
-# Was confirmed installable on Termux under Python 3.14.6 (2026-07-25), despite 0.3.x
-# needing curl_cffi -> cffi; not independently re-confirmed on the VPS's Python 3.12,
-# though wheels are readily available there for everything else in this file (see
-# CLAUDE.md Stack). If a version won't build, `garminconnect<0.3` uses pure-Python garth
-# instead (but pulls Rust-based pydantic).
-# garminconnect>=0.3
+# Garmin health feed. This used to be a manual optional install in the shared legacy
+# venv, but immutable per-release environments cannot inherit it. It must therefore be
+# declared even though only credentialed instances activate the feature. 0.3.x supports
+# the fleet's Python 3.12 runtime and publishes the curl_cffi dependency used for auth.
+garminconnect>=0.3,<0.4

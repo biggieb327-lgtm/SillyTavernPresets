@@ -88,7 +88,8 @@ source "$SRC/deploy/release-lib.sh"
 # environment without being declared and locked. Refuse a legacy migration rather
 # than silently disabling the only optional package this repo documents.
 if [ ! -L "$INSTALL_DIR/current" ] && [ -x "$INSTALL_DIR/venv/bin/python" ] \
-   && "$INSTALL_DIR/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1; then
+   && "$INSTALL_DIR/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1 \
+   && ! grep -q '^garminconnect==' "$INSTALL_DIR/requirements.lock"; then
   echo "FATAL: legacy venv contains garminconnect, but requirements.lock does not." >&2
   echo "Add it to requirements.txt, regenerate requirements.lock, and re-run." >&2
   exit 1

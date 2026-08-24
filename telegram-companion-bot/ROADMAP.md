@@ -163,6 +163,11 @@ constraints; check their assumptions before acting on them.
   `immutable-release-contract` pins the cross-file contract.
 - **Boundary:** release selection is still host-wide. Per-instance pointers and canary
   promotion are the next architecture item, not silently folded into this one.
+- **Migration repair 2026-08-24:** the first selector-aware Nora canary proved the
+  legacy-package guard could detect Garmin but could never be satisfied: it inspected
+  only the old venv, not the replacement lock. `garminconnect` is now declared and
+  hashed, both deploy paths condition the fatal on its absence from the new lock, and
+  the release-contract checker derives and pins that old-to-new dependency class.
 
 ### 1.8 ~~Per-instance canary release selectors~~ ✅ (shipped 2026-08-24)
 - **Evidence:** item 1.7 made code and dependencies reproducible, but one host-wide
