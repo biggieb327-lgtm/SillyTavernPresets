@@ -8143,11 +8143,26 @@ class TestHealthAlertsFollowTheLiveSwitch:
         finally:
             (bot.GARMIN_EMAIL, bot.GARMIN_PASSWORD, bot._Garmin, bot.GARMIN_ENABLED) = saved
 
-    def test_monitors_are_scheduled_on_capability_not_on_the_switch(self):
+    def test_monitors_are_scheduled_on_capability_not_on_the_switch(self, monkeypatch):
         """Registering under GARMIN_ENABLED made `off` a one-way trip until restart."""
+        monkeypatch.setattr(bot, "GARMIN_EMAIL", "owner@example.test")
+        monkeypatch.setattr(bot, "GARMIN_PASSWORD", "secret")
+        monkeypatch.setattr(bot, "_Garmin", object())
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", False)
+        monkeypatch.setattr(bot, "STRESS_ALERTS", True)
+        monkeypatch.setattr(bot, "BB_ALERTS", True)
+        monkeypatch.setattr(bot, "RHR_ALERTS", True)
+
+        callbacks = {spec.callback for spec in bot._health_job_specs()}
+        assert {
+            bot.garmin_job,
+            bot.stress_monitor_job,
+            bot.bb_monitor_job,
+            bot.rhr_monitor_job,
+        } <= callbacks
+
         import inspect
         src = inspect.getsource(bot.main)
-        assert "if GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None:" in src
         assert "if WSDOT_API_KEY:" in src
 
 
