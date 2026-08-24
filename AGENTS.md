@@ -15,11 +15,14 @@ first, and link deeper docs instead of repeating them here.
 ## Read order
 
 1. `CLAUDE.md` — every task.
-2. `.claude/OPERATING_MANUAL.md` — non-trivial work.
-3. `.claude/skills/skill-router/SKILL.md`, then load only the skill(s) it routes to.
-4. `.claude/operating/fable-to-opus.md` + `.claude/memory/constraints.md` — multi-step,
+2. `.claude/memory/mycelium.md` — every session: inspect it for `status: open`
+   entries, and read those entries before non-trivial work. Do this directly when the
+   harness does not run `.claude/hooks/session-audit.sh` (including Codex).
+3. `.claude/OPERATING_MANUAL.md` — non-trivial work.
+4. `.claude/skills/skill-router/SKILL.md`, then load only the skill(s) it routes to.
+5. `.claude/operating/fable-to-opus.md` + `.claude/memory/constraints.md` — multi-step,
    behavior-changing, or fleet-touching work.
-5. Newest `.claude/operating/HANDOFF-*.md` — broad view. Its numbers are a dated
+6. Newest `.claude/operating/HANDOFF-*.md` — broad view. Its numbers are a dated
    snapshot; runtime output and current code win.
 
 Do not create a second quick-reference documentation map. `CLAUDE.md` and the skill
