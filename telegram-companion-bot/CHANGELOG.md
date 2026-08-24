@@ -7,6 +7,31 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-24 — per-instance systemd service hardening (no bot.py change)
+
+**Root cause: application-level instance paths were being treated as a security boundary
+even though all seven processes share one Unix identity.** The base systemd template had
+no sandbox directives, so a compromised bot could write sibling instance state, replace
+root-unprotected host files, inspect devices, or acquire capabilities that the Python
+process never needs. This is the broader failure class: ownership alone does not isolate
+same-user services.
+
+Each instance now receives a root-owned `10-hardening.conf` drop-in with a read-only host
+filesystem and explicit writes only to its own instance directory, shared ledgers, and the
+world file; it also removes capabilities, blocks privilege gain, hides other-user processes,
+and restricts devices, namespaces, realtime scheduling, kernel controls, and address
+families. `HOME` is instance-local so PDF scratch data and default Garmin tokens do not
+force `/opt/telegram-bots` writable. A one-time deploy migration copies an existing legacy
+Garmin token store without overwriting instance-local tokens.
+
+The drop-in is deliberately per-instance: `vps-sync.sh nora` canaries it only on Nora,
+`--promote nora` installs the tested policy on the active fleet, and
+`--rollback-hardening nora` removes it without changing Nora's selected code release.
+Promotion verifies every unit and removes the fleet drop-ins if any unit fails. The first
+slice intentionally leaves network access, executable memory, and syscall filtering alone
+until live media/native-library traces justify narrower rules. The release-contract checker
+pins the exact writable set, required sandbox controls, canary/promotion wiring, and rollback.
+
 ## 2026-08-24 — immutable release directory permission repair (no bot.py change)
 
 **Root cause: `mktemp -d` created each dependency-layer and code-release root with mode

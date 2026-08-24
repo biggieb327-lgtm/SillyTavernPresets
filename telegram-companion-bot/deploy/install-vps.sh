@@ -165,6 +165,11 @@ done
 
 echo "== 6/8: systemd unit =="
 cp "$INSTALL_DIR/deploy/bot-selector@.service" /etc/systemd/system/bot@.service
+for name in "${CONFIGURED_INSTANCES[@]}"; do
+  install -d -o root -g root -m 0755 "/etc/systemd/system/bot@${name}.service.d"
+  install -o root -g root -m 0644 "$INSTALL_DIR/deploy/bot-hardening.conf" \
+    "/etc/systemd/system/bot@${name}.service.d/10-hardening.conf"
+done
 systemctl daemon-reload
 
 echo "== 7/8: enabling instances =="

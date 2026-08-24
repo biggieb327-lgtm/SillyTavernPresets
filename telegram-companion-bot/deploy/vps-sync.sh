@@ -26,6 +26,8 @@
 #   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --promote nora
 # Roll back only one instance with:
 #   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback nora
+# Remove one instance's sandbox drop-in without changing its selected release with:
+#   /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback-hardening nora
 #
 # The host-wide flock remains necessary: releases and the root-owned selector store are
 # shared host state, while promotion updates several per-instance pointers as one operation.
@@ -35,7 +37,8 @@ MODE=deploy
 case "${1:-}" in
   --rollback) MODE=rollback; INST="${2:?usage: vps-sync.sh --rollback <instance>}" ;;
   --promote)  MODE=promote;  INST="${2:?usage: vps-sync.sh --promote <canary-instance>}" ;;
-  "") echo "usage: vps-sync.sh <instance> | --promote <instance> | --rollback <instance>" >&2; exit 1 ;;
+  --rollback-hardening) MODE=rollback-hardening; INST="${2:?usage: vps-sync.sh --rollback-hardening <instance>}" ;;
+  "") echo "usage: vps-sync.sh <instance> | --promote <instance> | --rollback <instance> | --rollback-hardening <instance>" >&2; exit 1 ;;
   *) INST="$1" ;;
 esac
 BASE=/opt/telegram-bots
@@ -59,6 +62,72 @@ active_instances() {
     | awk '{print $1}' | sed 's/^bot@//; s/\.service$//'
 }
 
+validate_instance() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+    echo "[vps-sync] FATAL: invalid instance name: $1" >&2
+    exit 1
+  }
+}
+
+HARDENING_SOURCE="$SRC/deploy/bot-hardening.conf"
+HARDENING_CHANGED=0
+
+install_hardening() {
+  local name="$1" dropin_dir dropin_path
+  validate_instance "$name"
+  [ -f "$HARDENING_SOURCE" ] || {
+    echo "[vps-sync] FATAL: missing hardening policy at $HARDENING_SOURCE" >&2
+    exit 1
+  }
+  dropin_dir="/etc/systemd/system/bot@${name}.service.d"
+  dropin_path="$dropin_dir/10-hardening.conf"
+  if ! cmp -s "$HARDENING_SOURCE" "$dropin_path"; then
+    install -d -o root -g root -m 0755 "$dropin_dir"
+    install -o root -g root -m 0644 "$HARDENING_SOURCE" "$dropin_path"
+    HARDENING_CHANGED=1
+  fi
+
+  # Older units inherited HOME=/opt/telegram-bots, so the default Garmin token store
+  # was fleet-global. The sandbox gives each unit its own HOME; preserve an existing
+  # authenticated session once, without ever overwriting instance-local tokens.
+  if [ -d "$BASE/.garminconnect" ] && [ ! -e "$BASE/$name/.garminconnect" ]; then
+    cp -a "$BASE/.garminconnect" "$BASE/$name/.garminconnect"
+    chown -R bot:bot "$BASE/$name/.garminconnect"
+  fi
+}
+
+remove_hardening() {
+  local name="$1" dropin_path dropin_dir
+  validate_instance "$name"
+  dropin_dir="/etc/systemd/system/bot@${name}.service.d"
+  dropin_path="$dropin_dir/10-hardening.conf"
+  if [ -e "$dropin_path" ]; then
+    rm -f -- "$dropin_path"
+    rmdir --ignore-fail-on-non-empty "$dropin_dir"
+    HARDENING_CHANGED=1
+  fi
+}
+
+validate_instance "$INST"
+
+if [ "$MODE" = rollback-hardening ]; then
+  remove_hardening "$INST"
+  if [ "$HARDENING_CHANGED" -eq 1 ]; then
+    systemctl daemon-reload
+  fi
+  if systemctl is-active --quiet "bot@$INST"; then
+    systemctl restart "bot@$INST"
+    if [ "$HARDENING_CHANGED" -eq 1 ]; then
+      echo "[vps-sync] removed the sandbox drop-in and restarted $INST"
+    else
+      echo "[vps-sync] no sandbox drop-in was installed; restarted $INST unchanged"
+    fi
+  else
+    echo "[vps-sync] sandbox drop-in removed or already absent for $INST; unit is inactive, so it was not started"
+  fi
+  exit 0
+fi
+
 if [ "$MODE" = rollback ]; then
   release_selector_rollback "$BASE" "$INST"
   if systemctl is-active --quiet "bot@$INST"; then
@@ -80,12 +149,34 @@ if [ "$MODE" = promote ]; then
   }
   for name in "${ACTIVE_INSTANCES[@]}"; do
     release_select "$BASE" "$name" "$CANARY_RELEASE_DIR"
+    install_hardening "$name"
   done
+  if [ "$HARDENING_CHANGED" -eq 1 ]; then
+    systemctl daemon-reload
+  fi
   for name in "${ACTIVE_INSTANCES[@]}"; do
     systemctl restart "bot@$name"
   done
+  sleep 3
+  failed=()
+  for name in "${ACTIVE_INSTANCES[@]}"; do
+    systemctl is-active --quiet "bot@$name" || failed+=("$name")
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    echo "[vps-sync] hardening promotion failed for: ${failed[*]}; removing fleet drop-ins" >&2
+    HARDENING_CHANGED=0
+    for name in "${ACTIVE_INSTANCES[@]}"; do
+      remove_hardening "$name"
+    done
+    systemctl daemon-reload
+    for name in "${ACTIVE_INSTANCES[@]}"; do
+      systemctl restart "bot@$name"
+    done
+    echo "[vps-sync] FATAL: release selectors remain promoted; sandbox drop-ins were rolled back" >&2
+    exit 1
+  fi
   echo "[vps-sync] promoted $(basename "$CANARY_RELEASE_DIR") from $INST to: ${ACTIVE_INSTANCES[*]}"
-  echo "[vps-sync] immutable code/runtime only; instance cards and preset layers were not changed"
+  echo "[vps-sync] immutable code/runtime and tested sandbox promoted; instance cards and preset layers were not changed"
   exit 0
 fi
 
@@ -185,6 +276,13 @@ if ! cmp -s "$SRC/deploy/bot-selector@.service" /etc/systemd/system/bot@.service
   UNIT_CHANGED=1
 fi
 
+# The sandbox is an instance drop-in, not part of UNIT_CHANGED: a normal deploy must
+# remain a true one-bot canary and must not restart the fleet merely to harden Nora.
+install_hardening "$INST"
+if [ "$HARDENING_CHANGED" -eq 1 ]; then
+  systemctl daemon-reload
+fi
+
 MIGRATING_LAYOUT=0
 mapfile -t ACTIVE_INSTANCES < <(active_instances)
 if [ "$UNIT_CHANGED" -eq 1 ] || [ ! -d "$BASE/shared" ] \
@@ -235,6 +333,11 @@ fi
 systemctl enable "bot@$INST" 2>/dev/null || true
 
 sleep 3
+if ! systemctl is-active --quiet "bot@$INST"; then
+  echo "[vps-sync] FATAL: bot@$INST is not active after deploy" >&2
+  echo "[vps-sync] sandbox rollback: $0 --rollback-hardening $INST" >&2
+  exit 1
+fi
 echo "--- verification ---"
 echo "checkout HEAD:     ${REVISION:0:12}"
 echo "instance selector: $(readlink "$BASE/selectors/$INST/current")"

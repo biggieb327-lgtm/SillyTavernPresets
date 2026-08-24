@@ -206,6 +206,21 @@ constraints; check their assumptions before acting on them.
   memories, `people.txt`, `projects.txt`, `schedule.txt`, `life.txt`, and `day.txt` stay
   file-backed. Future stores migrate separately only after this slice has fleet evidence.
 
+### 1.11 ~~Per-instance systemd sandbox~~ ✅ (shipped 2026-08-24)
+- **Evidence:** every bot ran as the same Unix user under a service template with no
+  systemd sandbox. Instance directories organized state but did not prevent one
+  compromised process from modifying a sibling or the host.
+- **Shipped:** an instance-scoped root-owned drop-in makes the host read-only and grants
+  writes only to that bot's directory, shared ledgers, and `world.txt`; removes ambient
+  capabilities and privilege gain; restricts devices, kernel controls, namespaces,
+  process visibility, realtime scheduling, and network address families. Each unit gets
+  an instance-local `HOME` for PDF scratch files and Garmin tokens.
+- **Rollout/rollback:** a normal deploy canaries the policy on one bot; `--promote`
+  applies the exact tested drop-in to active units and health-checks all of them;
+  `--rollback-hardening` removes only one instance's policy without moving its release.
+- **Boundary:** syscall allowlisting, private networking, and executable-memory denial
+  remain deferred until representative media and native-extension traces can prove them.
+
 ---
 
 ## Track 2 — Engineering workflow
@@ -1414,6 +1429,8 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.7 exact dependency lock + immutable releases~~ | ✅ **Shipped 2026-08-24** — CI/VPS share one hashed Python 3.12 lock; deploys select full-git-SHA releases with atomic rollback. Follow-up 1.8 added per-instance canary selectors. |
 | ~~**Next**~~ | ~~1.8 per-instance canary release selectors~~ | ✅ **Shipped 2026-08-24** — each bot has a root-owned `current`/`previous` selector; deploy and rollback are instance-scoped, and a tested canary release can be promoted explicitly to the active fleet. |
 | ~~**Next**~~ | ~~1.9 structured fleet operation events~~ | ✅ **Shipped v2026-08-24.3** — payload-free JSON at model, external-fetch, scheduled-job, and delivery boundaries; one journal report compares latency, outcomes, and fallback across the fleet. |
+| ~~**Next**~~ | ~~1.10 incremental transactional machine-state persistence~~ | ✅ **Shipped v2026-08-24.4** — reminders use a transactional per-instance SQLite store with verified JSON migration/export and a one-release feature rollback. |
+| ~~**Next**~~ | ~~1.11 per-instance systemd sandbox~~ | ✅ **Shipped 2026-08-24** — one-bot canary and explicit promotion of a root-owned sandbox drop-in; narrow writable paths and a release-independent rollback command. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
