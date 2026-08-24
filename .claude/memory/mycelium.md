@@ -145,6 +145,13 @@ but NOT on the VPS — the owner runs `vps-sync.sh` per instance; `/audit` must 
 > fleet. Entry left `open` because the slice-3 "do not re-attempt" and item-4 "scope fresh"
 > handoff above are still for the next 6.2 session; the deploy sub-item is the resolved part.
 
+> 2026-08-24 (from: claude/continue-morning-work-g7gbif): `[decision]` **Item 4 now has a
+> full handoff plan: `telegram-companion-bot/PLAN-5.9-reviewlife.md`.** It nails the cheap
+> extension point (ride the existing `reflect()` JSON call, zero new LLM calls), the
+> `/reviewmem`-mirrored accept/reject UX, the invariants to satisfy, build order, test plan
+> (incl. the delivery-gate "test must CALL `reviewlife_cmd`" trap), and a stopping rule. Start
+> there, not from scratch. Open owner questions are listed at the bottom of the plan.
+
 ### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
 `[decision]` New memory file: **`.claude/memory/watchlist.md`** — the parking lot for
 low-level observations that aren't yet a system failure, our mistake, or a finding, but

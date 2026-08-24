@@ -1212,6 +1212,9 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
 - **Risk:** unassessed — direction only, not a spec.
 
 ### 5.9 Nightly-suggested edits to the living files (`/reviewlife`) — M
+- **Plan (2026-08-24):** scoped as 6.2's item-4 slice — full implementation handoff in
+  `PLAN-5.9-reviewlife.md` (rides the existing `reflect()` JSON call, so zero new LLM
+  calls; mirrors `/reviewmem`'s accept/reject UX). Read it before starting.
 - **Evidence:** sourdough-starter domain (random-stimulus lateral-thinking pass,
   2026-08-05) — same culture, different loaf depending on how it's fed. `life.txt` /
   `people.txt` / `projects.txt` are already the intended drift surface (user-maintained,
@@ -1361,7 +1364,11 @@ per-message LLM side calls) with no case strong enough to argue an exception.
      frozen-snapshot contradiction v2026-08-01.7 removed. So there is no sleep-time-compute
      win here; recorded closed rather than left open.
   4. **`/reviewlife` nightly edits** (5.9, same shape, sourced independently) — the living
-     files (`life.txt`, notes) get their nightly-suggested edits computed here.
+     files (`life.txt`, `people.txt`, `projects.txt`) get nightly-suggested one-line
+     additions drafted by the existing `reflect()` pass and gated per-line by a new
+     `/reviewlife` command. **Scoped, not started** — full handoff plan in
+     `PLAN-5.9-reviewlife.md` (extension point, invariants, build order, test plan, and a
+     stopping rule). A feature, not a thin slice.
   - Not on the list (deliberately live): anything that depends on the *current* inbound
     message (safety assessment, reply advisor 6.3, the reply itself) — those cannot be
     precomputed the night before.
