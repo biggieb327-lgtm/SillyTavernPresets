@@ -1121,6 +1121,16 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-24 — Shipping the ROADMAP 6.2 hook pre-draft, wrote "redistributes an existing
+  call, adds none / zero-net" into the changelog, ROADMAP, code comment and `.env.example`
+  before checking it against the call sites. `/code-review` caught it: the old hook call
+  fired only *inside* `send_proactive`, so its count equalled proactives actually sent,
+  while the nightly job generates a fixed count regardless — so on a heavily-gated
+  low-activity day it is a net *increase* in cheap calls, not a redistribution. Corrected
+  all four before merge. → **Before claiming a change "adds no call / is net-neutral,"
+  count the call at each site under the actual gating, don't assert the accounting from
+  the design's intent** — the C8 shape (ask what the number actually measures) applied to
+  a cost claim rather than a reading.
 - 2026-08-24 — Sent a 432,082-byte changelog through a command-output bridge as one
   base64 string. The tool truncated the output, but the partial bytes still formed a
   valid Git blob, so `main` moved and CI failed only when the missing release heading
