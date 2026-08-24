@@ -97,7 +97,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-23.1"
+BOT_VERSION = "2026-08-23.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2970,6 +2970,12 @@ def _alerts_on(flag: bool) -> bool:
 # Fail-closed like WSDOT above: no key => /route /nearby /place are disabled.
 TOMTOM_API_KEY      = os.getenv("TOMTOM_API_KEY", "")
 TOMTOM_ENABLED      = bool(TOMTOM_API_KEY)
+MORNING_BRIEFING = _env_bool("MORNING_BRIEFING", True)
+MORNING_BRIEFING_TIME = os.getenv("MORNING_BRIEFING_TIME", "08:00")
+MORNING_BRIEFING_DAYS = os.getenv("MORNING_BRIEFING_DAYS", "2,3,4,5,6")
+MORNING_BRIEFING_ORIGIN = os.getenv("MORNING_BRIEFING_ORIGIN", "")
+MORNING_BRIEFING_DESTINATION = os.getenv("MORNING_BRIEFING_DESTINATION", "")
+MORNING_BRIEFING_ARRIVE_BY = os.getenv("MORNING_BRIEFING_ARRIVE_BY", "11:00")
 # Per-instance default travel mode for /route, validated per-call by _tomtom_mode().
 # Name the neighbourhood when a location is shared: she holds lat/lon today and cannot say
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
@@ -12310,6 +12316,53 @@ async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
         log.error("[cron #%s] Error: %s", job_id, e)
         _count_error("cron")
 
+def _briefing_weekday() -> bool:
+    try:
+        days = {int(x.strip()) for x in MORNING_BRIEFING_DAYS.split(",") if x.strip()}
+    except ValueError:
+        log.warning("[briefing] bad MORNING_BRIEFING_DAYS %r", MORNING_BRIEFING_DAYS)
+        return False
+    return _today().weekday() in days
+
+def _briefing_leave_by(route: dict, arrive_by: str) -> str:
+    try:
+        h, m = (int(x) for x in arrive_by.split(":"))
+        secs = int((((route.get("routes") or [])[0] or {}).get("summary") or {}).get("travelTimeInSeconds"))
+        return (datetime.combine(_today(), dtime(h, m)) - timedelta(seconds=secs)).strftime("%-I:%M %p")
+    except (ValueError, TypeError, IndexError, KeyError):
+        return ""
+
+async def morning_briefing_job(context: ContextTypes.DEFAULT_TYPE):
+    owner = get_owner()
+    if not (MORNING_BRIEFING and owner and _briefing_weekday()):
+        return
+    lines = [f"☀️ Good morning — {_today().strftime('%A, %B %-d')}"]
+    await ensure_weather()
+    if _weather_cache.get("text"):
+        lines.append(f"Weather: {_weather_cache['text']}")
+    if TOMTOM_ENABLED and MORNING_BRIEFING_ORIGIN and MORNING_BRIEFING_DESTINATION:
+        try:
+            o = await asyncio.to_thread(_tomtom_geocode, MORNING_BRIEFING_ORIGIN)
+            d = await asyncio.to_thread(_tomtom_geocode, MORNING_BRIEFING_DESTINATION)
+            if o and d:
+                route = await asyncio.to_thread(_fetch_tomtom_route, (o[0], o[1]), (d[0], d[1]), _tomtom_mode())
+                leave_by = _briefing_leave_by(route, MORNING_BRIEFING_ARRIVE_BY)
+                suffix = f" Leave by {leave_by} for an {MORNING_BRIEFING_ARRIVE_BY} arrival." if leave_by else f" Arrive by {MORNING_BRIEFING_ARRIVE_BY}."
+                lines.append(f"Commute: {_format_route(route, _tomtom_mode())}.{suffix}")
+        except _TomTomError as e:
+            lines.append(f"Commute: unavailable ({e}).")
+    if TRAFFIC_ENABLED:
+        alerts = await asyncio.to_thread(_fetch_wsdot_alerts)
+        open_alerts = [a for a in alerts if (a.get("EventStatus") or "").lower() == "open"]
+        if open_alerts:
+            lines.append("WSDOT: " + _format_alert(open_alerts[0]))
+    due = [r["text"] for r in reminders if r.get("chat_id") == owner and r.get("due", "")[:10] == _today_str()]
+    if due:
+        lines.append("Today: " + " · ".join(due[:3]))
+    if GARMIN_ENABLED and _garmin.get("text"):
+        lines.append(f"Health: {_garmin['text']}")
+    await context.bot.send_message(chat_id=owner, text="\n".join(lines))
+
 
 async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -16644,6 +16697,11 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
+        try:
+            _mb_h, _mb_m = (int(x) for x in MORNING_BRIEFING_TIME.split(":"))
+            app.job_queue.run_daily(morning_briefing_job, time=dtime(_mb_h, _mb_m, tzinfo=TZ) if TZ else dtime(_mb_h, _mb_m))
+        except Exception:
+            log.warning("[briefing] bad MORNING_BRIEFING_TIME %r; briefing not scheduled", MORNING_BRIEFING_TIME)
         if WARDROBE_DAILY:
             _wr_h = max(0, min(23, WARDROBE_ROTATE_HOUR))
             wardrobe_time = dtime(_wr_h, 0, tzinfo=TZ) if TZ else dtime(_wr_h, 0)

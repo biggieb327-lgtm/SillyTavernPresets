@@ -7773,6 +7773,7 @@ class TestEveryBooleanFlagDefault:
         "LINK_READING": True,
         "LOCATION_PLACE": True,
         "MAP_INTENT": True,
+        "MORNING_BRIEFING": True,
         "MEME_ENABLED": True,
         "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,

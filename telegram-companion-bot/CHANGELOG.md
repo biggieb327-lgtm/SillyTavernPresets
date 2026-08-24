@@ -7,6 +7,10 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-23.2 — weekday morning briefing
+
+**Root cause: the bot had the individual data sources but no deterministic daily message that assembled them.** A new default-on `MORNING_BRIEFING` job sends the owner weather, TomTom live-traffic commute, same-day reminders, and the existing Garmin snapshot on configured workdays. `MORNING_BRIEFING=0` disables it; address, days, send time, and arrival target stay per-instance in the untracked `.env`.
+
 ## v2026-08-23.1 — /fire: proactive Seattle Fire real-time 911 alerts
 
 New feature: the first **proactive** crime/safety alert. `/crime` and `/dispatch` are
