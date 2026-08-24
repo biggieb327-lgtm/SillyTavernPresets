@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.5 — declarative maps and traffic command registry
+
+**Root cause: the nine map-related command names, callbacks, descriptions, and gates
+were still declared separately in `main()` and the Telegram autocomplete lists.** Tests
+could compare the two copies, but adding or renaming one command still required both
+sites to change together. This is the same duplicated declarative-fact class addressed
+by the health registry's first slice.
+
+The map, place, civic-alert, and WSDOT commands now come from immutable `CommandSpec`
+records. The same records drive `CommandHandler` registration and menu entries. Existing
+behavior stays intact: route/place/food and Seattle alert commands always register;
+WSDOT handlers register whenever the key exists so an off command can explain itself;
+the menu still hides traffic commands when `TRAFFIC_ENABLED` is off. Tests execute the
+registry helpers, pin every callback, cover both traffic gate states, preserve whole-menu
+parity, and require both `main()` and `_build_command_menu()` to consume the records.
+
 ## 2026-08-24 — per-instance systemd service hardening (no bot.py change)
 
 **Root cause: application-level instance paths were being treated as a security boundary

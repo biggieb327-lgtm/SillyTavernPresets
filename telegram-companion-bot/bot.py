@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.4"
+BOT_VERSION = "2026-08-24.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -16847,6 +16847,23 @@ def _health_command_specs(enabled: bool) -> tuple[CommandSpec, ...]:
     )
 
 
+def _maps_command_specs(traffic_enabled: bool) -> tuple[CommandSpec, ...]:
+    """Map, place, and local-alert commands, including capability-gated traffic."""
+    return (
+        CommandSpec("route", "Travel time & directions (from X to Y)", route_cmd),
+        CommandSpec("nearby", "Places near your shared location", nearby_cmd),
+        CommandSpec("place", "Look up an address or business", place_cmd),
+        CommandSpec("food", "Restaurants near your shared location", food_cmd),
+        CommandSpec("crime", "Recent crime reports near your location (Seattle)", crime_cmd),
+        CommandSpec("dispatch", "Recent 911 dispatch calls near you (Seattle)", dispatch_cmd),
+        CommandSpec("fire", "Recent fire/medic 911 calls near you (Seattle)", fire_cmd),
+        CommandSpec("traffic", "Current congestion (near you if location shared)",
+                    traffic_cmd, traffic_enabled),
+        CommandSpec("incidents", "Active incidents (near you if location shared)",
+                    incidents_cmd, traffic_enabled),
+    )
+
+
 def _health_job_specs() -> tuple[JobSpec, ...]:
     if not (GARMIN_EMAIL and GARMIN_PASSWORD and _Garmin is not None):
         return ()
@@ -16976,24 +16993,6 @@ _PAYMENT_COMMANDS = [
     BotCommand("remindpayments", "Trigger payment reminder now"),
 ]
 
-# Maps handlers are registered unconditionally (they reply "Maps aren't set up"
-# without a key), so they always belong in the autocomplete menu.
-_MAPS_COMMANDS = [
-    BotCommand("route", "Travel time & directions (from X to Y)"),
-    BotCommand("nearby", "Places near your shared location"),
-    BotCommand("place", "Look up an address or business"),
-    BotCommand("food", "Restaurants near your shared location"),
-    BotCommand("crime", "Recent crime reports near your location (Seattle)"),
-    BotCommand("dispatch", "Recent 911 dispatch calls near you (Seattle)"),
-    BotCommand("fire", "Recent fire/medic 911 calls near you (Seattle)"),
-]
-
-# Traffic handlers register only when WSDOT_API_KEY is set, so the menu mirrors that.
-_TRAFFIC_COMMANDS = [
-    BotCommand("traffic", "Current congestion (near you if location shared)"),
-    BotCommand("incidents", "Active incidents (near you if location shared)"),
-]
-
 # /preset registers only when PRESET_COMMAND is on, so the menu mirrors that.
 _PRESET_COMMANDS = [
     BotCommand("preset", "Show or switch preset (voice) layers"),
@@ -17003,9 +17002,7 @@ def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
                         garmin_enabled: bool = False,
                         preset_enabled: bool = True) -> list:
     """The autocomplete menu, including registry-backed and legacy commands."""
-    cmds = _BASE_COMMANDS + list(_MAPS_COMMANDS)
-    if traffic_enabled:
-        cmds += _TRAFFIC_COMMANDS
+    cmds = _BASE_COMMANDS + _command_menu_entries(_maps_command_specs(traffic_enabled))
     if payments_enabled:
         cmds += _PAYMENT_COMMANDS
     cmds += _command_menu_entries(_health_command_specs(garmin_enabled))
@@ -17264,27 +17261,15 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_location))
-    # Registered whenever the key exists (same reasoning as the health commands below):
-    # both handlers explain why they're inert, and an unregistered command is silent.
-    if WSDOT_API_KEY:
-        app.add_handler(CommandHandler("traffic", traffic_cmd))
-        app.add_handler(CommandHandler("incidents", incidents_cmd))
-    app.add_handler(CommandHandler("crime", crime_cmd))
-    app.add_handler(CommandHandler("dispatch", dispatch_cmd))
-    app.add_handler(CommandHandler("fire", fire_cmd))
+    # Registration uses capability rather than the live switch: configured traffic
+    # commands stay reachable while switched off so they can explain how to re-enable.
+    # The menu passes TRAFFIC_ENABLED separately and continues to hide them while off.
+    _register_command_specs(app, _maps_command_specs(bool(WSDOT_API_KEY)))
     # Registered whenever credentials exist (even if the kill switch is off or the library
     # is missing) so the commands can explain WHY they're inert — an unregistered command
     # gives no response at all, which is undiagnosable from the user side.
     _register_command_specs(
         app, _health_command_specs(bool(GARMIN_EMAIL and GARMIN_PASSWORD)))
-    # Registered unconditionally: when TOMTOM_API_KEY is unset the handlers reply
-    # "Maps aren't set up" instead of going silent (an unregistered command gives
-    # no response at all, which is undiagnosable from the user side).
-    app.add_handler(CommandHandler("route", route_cmd))
-    app.add_handler(CommandHandler("nearby", nearby_cmd))
-    app.add_handler(CommandHandler("place", place_cmd))
-    app.add_handler(CommandHandler("food", food_cmd))
-
     if FEEDBACK_REACTIONS:
         app.add_handler(MessageReactionHandler(reaction_feedback_handler))
 
