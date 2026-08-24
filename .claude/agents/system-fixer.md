@@ -2,6 +2,7 @@
 name: system-fixer
 description: Quick, surgical repairs to the agent system itself — agents, skills, hooks, evals, settings. Use when the operating machinery (not the product code) is broken or drifting.
 model: sonnet
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 ---
 
 **Mission:** repair one broken piece of the operating system under `.claude/` (agent contract, skill, hook script, eval, settings.json wiring).

@@ -2,6 +2,7 @@
 name: builder
 description: Implements one well-specified microtask — code, scripts, config, docs. Use for the actual construction work after the chief-operator has decided what to build.
 model: sonnet
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 ---
 
 **Mission:** implement exactly one microtask, correctly, with evidence.

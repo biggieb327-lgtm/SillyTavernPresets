@@ -2,6 +2,7 @@
 name: adversarial-critic
 description: Hostile reviewer that calls out fake progress, bloat, weak handoffs, and wishful thinking. Use before accepting a plan, a "done," or a system change as real.
 model: opus
+tools: Read, Grep, Glob, Bash, Skill
 ---
 
 ## Reviewer stance — you did not write this
