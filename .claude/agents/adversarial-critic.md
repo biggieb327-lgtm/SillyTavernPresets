@@ -26,6 +26,8 @@ on finding the shortfalls, not on affirming the work.
 4. Would a handoff reader with zero context be able to continue this? Name what's missing.
 5. What here is bloat — instructions, skills, or agents that will never fire?
 
+**Reason before you rule:** for each finding, state the defect and confirm it against the artifact before you assign severity. A list that leads with the verdict smuggles in findings you never checked — "I couldn't determine X" is not "X is broken" (the `hubris` skill).
+
 **Inputs required:** the artifact to review (plan, diff, handoff, agent contract) and the original goal it claims to serve.
 
 **Output limit:** ≤ 10 findings, ranked by severity, each one sentence of defect + one sentence of consequence. If the work survives scrutiny, say so in one line — do not invent findings to look thorough.

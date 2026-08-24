@@ -625,7 +625,9 @@ fi
 # description says it reviews or verifies is required to carry the stance, so the rule
 # reaches agents that don't exist yet — which is what "any reviewer agent" means. EXEMPT
 # lists description-verb matches that are not artifact-against-standard reviewers, each
-# with a reason; it is empty today.
+# with a reason; it is empty today. ALWAYS lists agents the owner classified as reviewers
+# whose description does not trip the verb (context-librarian reviews docs against reality,
+# owner call 2026-08-24) — without it the stance there could be stripped unnoticed.
 if ! reviewer_stance=$(python3 - 2>&1 <<'PYEOF'
 import re
 from pathlib import Path
@@ -640,6 +642,8 @@ ANCHORS = [
 # name (file stem) -> reason. Add here only when a new agent's description trips the verb
 # but the agent does not judge someone else's work product against a standard.
 EXEMPT = {}
+# Agents the owner classified as reviewers whose description carries no review verb.
+ALWAYS = {"context-librarian"}
 
 problems = []
 reviewers = []
@@ -647,7 +651,8 @@ for f in sorted(agents_dir.glob("*.md")) if agents_dir.exists() else []:
     text = f.read_text(encoding="utf-8")
     m = re.search(r"^description:\s*(.+)$", text, re.M)
     desc = m.group(1) if m else ""
-    if not re.search(r"\b(review|verif|critiqu)", desc, re.I) or f.stem in EXEMPT:
+    is_reviewer = f.stem in ALWAYS or bool(re.search(r"\b(review|verif|critiqu)", desc, re.I))
+    if not is_reviewer or f.stem in EXEMPT:
         continue
     reviewers.append(f.stem)
     norm = re.sub(r"\s+", " ", text)
@@ -662,9 +667,9 @@ for f in sorted(agents_dir.glob("*.md")) if agents_dir.exists() else []:
 # agent, it is broken or every reviewer was renamed out from under it — fail loudly.
 if not reviewers:
     problems.append(
-        "no agent description matched the reviewer verb (review/verif/critiqu) — the "
-        "detector is broken; it guarded 3 agents when written (adversarial-critic, "
-        "qa-engineer, character-reviewer)")
+        "no reviewer agent matched (verb review/verif/critiqu, or the ALWAYS set) — the "
+        "detector is broken; it guarded 4 agents when written (adversarial-critic, "
+        "qa-engineer, character-reviewer, context-librarian)")
 
 print(" | ".join(problems))
 PYEOF

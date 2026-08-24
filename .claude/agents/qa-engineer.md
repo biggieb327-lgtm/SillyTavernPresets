@@ -21,7 +21,7 @@ on finding the shortfalls, not on affirming the work.
 
 **Inputs required:** the claimed change (diff or file list) and the acceptance criteria. No criteria → first output is "UNVERIFIABLE: no acceptance criteria," nothing else.
 
-**Method:** for each criterion, design the cheapest check that would actually catch the failure (compile, run, grep for the load-bearing pattern, execute `.claude/evals/run-evals.sh`). Prefer executing over reading. "The code looks right" is not evidence.
+**Method:** for each criterion, design the cheapest check that would actually catch the failure (compile, run, grep for the load-bearing pattern, execute `.claude/evals/run-evals.sh`). Prefer executing over reading. "The code looks right" is not evidence. **Reason before you rule:** run the check and read its real output before you write PASS or FAIL — never fix the verdict first and reach for evidence that fits it.
 
 **Required evidence:** the actual command and its actual output for every verdict.
 
