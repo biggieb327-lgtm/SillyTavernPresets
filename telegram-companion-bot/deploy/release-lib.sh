@@ -56,6 +56,29 @@ release_secure_selector() {
   PREPARED_SELECTOR_DIR="$selector_dir"
 }
 
+release_published_dir_ok() {
+  local path="$1" owner mode
+  [ ! -L "$path" ] && [ -d "$path" ] || return 1
+  owner=$(stat -c '%u' "$path") || return 1
+  mode=$(stat -c '%a' "$path") || return 1
+  [ "$owner" = "$(id -u)" ] && [ "$mode" = "555" ]
+}
+
+release_publish_dir() {
+  local path="$1" owner
+  [ ! -L "$path" ] && [ -d "$path" ] || {
+    echo "[release] FATAL: published path must be a real directory: $path" >&2
+    return 1
+  }
+  owner=$(stat -c '%u' "$path") || return 1
+  [ "$owner" = "$(id -u)" ] || {
+    echo "[release] FATAL: refusing to publish a directory owned by uid $owner: $path" >&2
+    return 1
+  }
+  chmod 0555 "$path" || return 1
+  release_published_dir_ok "$path"
+}
+
 release_migrate_writable_state() {
   local base="$1" bot_user="$2" bot_group path destination
   bot_group=$(id -gn "$bot_user") || return 1
@@ -97,6 +120,8 @@ release_validate() {
   cmp -s "$source_dir/requirements.lock" "$release_dir/requirements.lock" || return 1
   venv_key=$(cat "$release_dir/VENV_KEY") || return 1
   [ "$(readlink "$release_dir/venv")" = "../../venvs/$venv_key" ] || return 1
+  release_published_dir_ok "$release_dir" || return 1
+  release_published_dir_ok "$(realpath "$release_dir/venv")" || return 1
   [ -x "$release_dir/venv/bin/python" ] || return 1
 }
 
@@ -116,6 +141,10 @@ release_prepare_venv() {
   venv_key="py${python_version}-${lock_hash}"
   venv_dir="$base/venvs/$venv_key"
   if [ -f "$venv_dir/.complete" ]; then
+    # Repair layers published by the first immutable-release implementation. mktemp -d
+    # gave their roots mode 0700, and removing write bits left mode 0500: valid to root,
+    # but impossible for the systemd service user to traverse.
+    release_publish_dir "$venv_dir" || return 1
     "$venv_dir/bin/python" -m pip check >/dev/null
     PREPARED_VENV_KEY="$venv_key"
     return 0
@@ -138,6 +167,7 @@ release_prepare_venv() {
     printf '%s\n' "$lock_hash" > "$temp_dir/LOCK_SHA256"
     touch "$temp_dir/.complete"
     chmod -R a-w "$temp_dir"
+    release_publish_dir "$temp_dir"
     mv "$temp_dir" "$venv_dir"
     trap - EXIT
   )
@@ -158,6 +188,9 @@ release_prepare() {
 
   release_dir="$base/releases/$revision"
   if [ -e "$release_dir" ]; then
+    # The same repair is safe for an otherwise complete code release: it changes only
+    # the root directory's traversal mode, not immutable release contents.
+    release_publish_dir "$release_dir" || return 1
     release_validate "$release_dir" "$source_dir" "$revision" || {
       echo "[release] FATAL: release $release_dir is incomplete or does not match git" >&2
       return 1
@@ -188,6 +221,7 @@ release_prepare() {
       "$temp_dir/bot.py" "$temp_dir/acoustic_ears.py"
     touch "$temp_dir/.complete"
     chmod -R a-w "$temp_dir"
+    release_publish_dir "$temp_dir"
     mv "$temp_dir" "$release_dir"
     trap - EXIT
   )
