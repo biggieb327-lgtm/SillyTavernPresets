@@ -248,6 +248,77 @@ if [ -z "$ref_missing" ]; then
 else
   bad "hook-refs-exist" "hook wrapper(s) invoke missing file(s):$ref_missing — the interpreter runs on a nonexistent path, exits nonzero, and the hook fails open"
 fi
+
+# --- stop-guards-behavioral ------------------------------------------------------------
+# hook-python-compiles proves the four Python Stop-guards COMPILE; nothing exercised them.
+# All four fail OPEN (a broken guard returns 0/allow), so a gutted regex passes every other
+# check while blocking nothing at runtime — the class gate_corpus/ solves for sweep.py,
+# left unapplied to the guards until the 2026-08-24 functions audit (H2). This drives each
+# guard through its REAL path — a fixture transcript on stdin — and asserts it BLOCKS (exit
+# 2) a payload it must catch and ALLOWS (exit 0) a payload it must not. A guard that stops
+# blocking its block-fixture turns this red. Fixtures mirror each guard's own incident:
+# host (unattributed VPS command), theory (named-function claim, unhedged), claim (identity
+# on metadata alone), handoff (cd then a relative path).
+if ! stop_guards=$(python3 - 2>&1 <<'PYEOF'
+import json, subprocess, sys, tempfile, os
+from pathlib import Path
+
+hooks = Path(".claude/hooks")
+
+def run_guard(guard, txt):
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as tf:
+        tf.write(json.dumps({"type": "assistant",
+                             "message": {"role": "assistant", "content": txt}}) + "\n")
+        tpath = tf.name
+    try:
+        p = subprocess.run([sys.executable, str(hooks / guard)],
+                           input=json.dumps({"transcript_path": tpath}),
+                           capture_output=True, text=True, timeout=20)
+        return p.returncode
+    finally:
+        os.unlink(tpath)
+
+# (guard, must-BLOCK fixture -> exit 2, must-ALLOW fixture -> exit 0)
+CASES = [
+    ("host_guard.py",
+     "Run this:\n```\nsystemctl restart bot@nora\n```\n",
+     "On the VPS, run:\n```\n# host: vps\nsystemctl restart bot@nora\n```\n"),
+    ("theory_guard.py",
+     "The function _group_deliver() returns None when the shared ledger is empty.",
+     "The function _group_deliver() probably returns None when the ledger is empty."),
+    ("claim_guard.py",
+     "Priya: confirmed - the upload is identical to her reference, both 1024x1024 progressive JPEG.",
+     "Priya: the upload is consistent with her reference, both 1024x1024 progressive JPEG."),
+    ("handoff_guard.py",
+     "```\n# host: vps\ncd /opt/telegram-bots/.repo\nbash telegram-companion-bot/deploy/vps-sync.sh nora\n```",
+     "```\n# host: vps\ncd /opt/telegram-bots/.repo\nbash /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora\n```"),
+]
+
+problems = []
+for guard, block_txt, allow_txt in CASES:
+    if not (hooks / guard).is_file():
+        problems.append(f"{guard} is missing")
+        continue
+    rc_block = run_guard(guard, block_txt)
+    rc_allow = run_guard(guard, allow_txt)
+    if rc_block != 2:
+        problems.append(f"{guard} did NOT block its block-fixture (exit {rc_block}, want 2) "
+                        f"— the guard is failing OPEN / gutted")
+    if rc_allow != 0:
+        problems.append(f"{guard} blocked its allow-fixture (exit {rc_allow}, want 0) "
+                        f"— false positive")
+
+print(" | ".join(problems))
+PYEOF
+); then
+  stop_guards="the harness itself exited non-zero: ${stop_guards:-(no output)} — a check that goes green when its own harness dies is not a check"
+fi
+if [ -z "$stop_guards" ]; then
+  ok "stop-guards-behavioral: all four Python Stop-guards block their block-fixture and allow their allow-fixture"
+else
+  bad "stop-guards-behavioral" "$stop_guards"
+fi
+
 if [ -f .claude/settings.json ]; then
   if python3 -m json.tool .claude/settings.json >/dev/null 2>&1; then
     ok "settings-valid-json: .claude/settings.json parses"
@@ -614,6 +685,56 @@ if [ -z "$skill_index" ]; then
   ok "skill-index-integrity: skill-router's table and .claude/skills/ agree, both directions"
 else
   bad "skill-index-integrity" "$skill_index"
+fi
+
+# --- skill-body-current ----------------------------------------------------------------
+# skill-index-integrity proves a skill EXISTS and is registered; it never reads a skill
+# body. The 2026-08-24 functions audit found four skills whose bodies still described the
+# empty Termux phone as the live system — including repo-debugging-playbook (loaded when a
+# bot is down) and artifact-first-delivery (loaded on every deliverable). This catches a
+# skill body naming the retired phone platform in live-command terms without marking it
+# historical. It is a prose scan, so deliberately coarse (C14): the escape hatch is a
+# historical/phone-era marker in the same body, plus ALLOWLIST for a skill that must name a
+# phone token for a reason the marker does not cover. It would have failed on all four.
+if ! skill_body=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+
+skills = Path(".claude/skills")
+# Tokens that signal phone-era LIVE commands/paths, not merely the word "phone".
+STALE = re.compile(r'Termux|~/telegram-bot|run-bot\.sh|watchdog\.sh|\btmux\b|raw\.githubusercontent|\badb ', re.I)
+# A body carrying one of these acknowledges the phone is retired — that is not drift.
+MARKER = re.compile(r'historical|phone-era|retired|no longer|manages nothing|phone is (gone|empty)|migration complete', re.I)
+# name -> reason: a skill that must name a phone token for a reason the marker cannot cover.
+ALLOWLIST = {}
+
+problems = []
+scanned = 0
+for d in sorted(skills.iterdir()) if skills.exists() else []:
+    f = d / "SKILL.md"
+    if not f.is_file() or d.name in ALLOWLIST:
+        continue
+    scanned += 1
+    body = f.read_text(encoding="utf-8")
+    tok = STALE.search(body)
+    if tok and not MARKER.search(body):
+        problems.append(
+            f"{d.name}/SKILL.md names phone-era token '{tok.group(0).strip()}' with no "
+            f"historical/phone-era marker — the fleet is VPS/systemd; mark it historical, "
+            f"correct it, or add it to ALLOWLIST with a reason")
+
+if scanned == 0:
+    problems.append("scanned no skill bodies — the detector is broken (a scan that scans nothing is not a check)")
+
+print(" | ".join(problems))
+PYEOF
+); then
+  skill_body="the parser itself exited non-zero: ${skill_body:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$skill_body" ]; then
+  ok "skill-body-current: no skill body describes the retired phone as the live system"
+else
+  bad "skill-body-current" "$skill_body"
 fi
 
 # --- reviewer-stance-present -----------------------------------------------------------
