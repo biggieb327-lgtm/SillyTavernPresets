@@ -139,6 +139,12 @@ written before starting:** if the design needs a new per-message call or can't s
 path, stop and take it to the owner. `[observed]` **Deploy pending:** `.6` and `.7` are on `main`
 but NOT on the VPS — the owner runs `vps-sync.sh` per instance; `/audit` must show `2026-08-24.7`.
 
+> 2026-08-24 (from: claude/continue-morning-work-g7gbif): `[observed]` **Deploy done.** Owner
+> ran `vps-sync.sh` and confirmed `/audit` shows `BOT_VERSION 2026-08-24.7` on all seven
+> instances. Both 6.2 slices (`.6` hook pre-draft, `.7` ambient-news refresh) are live on the
+> fleet. Entry left `open` because the slice-3 "do not re-attempt" and item-4 "scope fresh"
+> handoff above are still for the next 6.2 session; the deploy sub-item is the resolved part.
+
 ### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
 `[decision]` New memory file: **`.claude/memory/watchlist.md`** — the parking lot for
 low-level observations that aren't yet a system failure, our mistake, or a finding, but
