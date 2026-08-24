@@ -30,6 +30,8 @@ import zipfile
 import collections
 import http.server
 import html as _html_module
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 from datetime import datetime, date, timedelta, time as dtime
 from pathlib import Path
@@ -97,7 +99,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-23.2"
+BOT_VERSION = "2026-08-24.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2976,6 +2978,20 @@ MORNING_BRIEFING_DAYS = os.getenv("MORNING_BRIEFING_DAYS", "2,3,4,5,6")
 MORNING_BRIEFING_ORIGIN = os.getenv("MORNING_BRIEFING_ORIGIN", "")
 MORNING_BRIEFING_DESTINATION = os.getenv("MORNING_BRIEFING_DESTINATION", "")
 MORNING_BRIEFING_ARRIVE_BY = os.getenv("MORNING_BRIEFING_ARRIVE_BY", "11:00")
+MORNING_NEWS = _env_bool("MORNING_NEWS", True)
+MORNING_NEWS_LIMIT = max(0, min(6, _env_int("MORNING_NEWS_LIMIT", "3")))
+MORNING_NEWS_MAX_AGE_HOURS = max(1, _env_int("MORNING_NEWS_MAX_AGE_HOURS", "36"))
+MORNING_NEWS_FEEDS = os.getenv("MORNING_NEWS_FEEDS", "").strip()
+_MORNING_NEWS_DEFAULT_FEEDS = (
+    ("local", "Skagit County", "https://www.skagitcounty.net/Home/xml/scnews.xml"),
+    ("general", "Washington State Standard", "https://washingtonstatestandard.com/feed/localFeed"),
+    ("general", "NPR", "https://feeds.npr.org/1001/rss.xml"),
+    ("interest", "GeekWire", "https://www.geekwire.com/feed/"),
+    ("interest", "Ars Technica AI", "https://arstechnica.com/ai/feed/"),
+    ("interest", "BleepingComputer", "https://www.bleepingcomputer.com/feed/"),
+    ("interest", "Marketplace Morning Report",
+     "https://feeds.publicradio.org/public_feeds/marketplace-morning-report"),
+)
 # Per-instance default travel mode for /route, validated per-call by _tomtom_mode().
 # Name the neighbourhood when a location is shared: she holds lat/lon today and cannot say
 # where that IS, so she says nothing where a person would say "wait, you're in Ballard?".
@@ -12332,6 +12348,168 @@ def _briefing_leave_by(route: dict, arrive_by: str) -> str:
     except (ValueError, TypeError, IndexError, KeyError):
         return ""
 
+def _parse_morning_news_feeds(raw: str) -> list[tuple[str, str, str]]:
+    if not raw:
+        return list(_MORNING_NEWS_DEFAULT_FEEDS)
+    feeds = []
+    for entry in raw.split(";"):
+        parts = [part.strip() for part in entry.split("|", 2)]
+        if len(parts) != 3:
+            continue
+        category, source, url = parts
+        if category not in {"local", "general", "interest"} or not source or not url.startswith("https://"):
+            continue
+        feeds.append((category, _news_text(source, 60), url))
+    return feeds
+
+def _news_text(value: str, limit: int = 220) -> str:
+    clean = _html_module.unescape(re.sub(r"<[^>]+>", " ", value or ""))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if len(clean) <= limit:
+        return clean
+    prefix = clean[:limit + 1]
+    boundary = prefix.rfind(" ")
+    cut = (prefix[:boundary] if boundary >= limit // 2 else clean[:limit]).rstrip(" ,;:-")
+    return cut + "…"
+
+def _news_timestamp(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, OverflowError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ or datetime.now().astimezone().tzinfo)
+    return dt.timestamp()
+
+def _parse_news_feed(content: bytes, category: str, source: str) -> list[dict]:
+    root = ET.fromstring(content)
+    items = []
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] not in {"item", "entry"}:
+            continue
+        fields: dict[str, list[ET.Element]] = collections.defaultdict(list)
+        for child in node:
+            fields[child.tag.rsplit("}", 1)[-1]].append(child)
+        title = _news_text(fields.get("title", [ET.Element("x")])[0].text or "", 180)
+        link = ""
+        for link_node in fields.get("link", []):
+            link = (link_node.get("href") or link_node.text or "").strip()
+            if link:
+                break
+        if urlparse(link).scheme not in {"http", "https"} or len(link) > 350:
+            link = ""
+        published_raw = ""
+        for key in ("pubDate", "published", "updated", "date"):
+            if fields.get(key):
+                published_raw = (fields[key][0].text or "").strip()
+                break
+        summary_raw = ""
+        for key in ("description", "summary", "content", "encoded"):
+            if fields.get(key):
+                summary_raw = "".join(fields[key][0].itertext())
+                break
+        published = _news_timestamp(published_raw)
+        if title and link and published is not None:
+            summary = _news_text(summary_raw)
+            if summary.casefold() == title.casefold():
+                summary = ""
+            items.append({"category": category, "source": source, "title": title,
+                          "summary": summary, "url": link, "published": published})
+    return items
+
+def _fetch_morning_news_feed(feed: tuple[str, str, str]) -> list[dict]:
+    category, source, url = feed
+    max_bytes = 1_500_000
+    response = _get_session().get(
+        url, headers={"User-Agent": _HTTP_UA}, timeout=(3, 6), stream=True)
+    try:
+        response.raise_for_status()
+        content_length = response.headers.get("Content-Length", "")
+        if content_length.isdigit() and int(content_length) > max_bytes:
+            raise ValueError("feed exceeds 1.5 MB")
+        content = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            content.extend(chunk[:max_bytes + 1 - len(content)])
+            if len(content) > max_bytes:
+                raise ValueError("feed exceeds 1.5 MB")
+    finally:
+        response.close()
+    return _parse_news_feed(content, category, source)
+
+def _select_morning_news(items: list[dict], limit: int, now: float | None = None) -> list[dict]:
+    if limit <= 0:
+        return []
+    cutoff = (time.time() if now is None else now) - MORNING_NEWS_MAX_AGE_HOURS * 3600
+    fresh = [item for item in items if item.get("published", 0) >= cutoff]
+    fresh.sort(key=lambda item: item["published"], reverse=True)
+    unique = []
+    seen = set()
+    for item in fresh:
+        key = re.sub(r"\W+", " ", item["title"].casefold()).strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(item)
+    selected = []
+    for category in ("local", "general", "interest"):
+        match = next((item for item in unique if item["category"] == category and item not in selected), None)
+        if match:
+            selected.append(match)
+        if len(selected) >= limit:
+            return selected
+    selected.extend(item for item in unique if item not in selected)
+    return selected[:limit]
+
+def _fetch_morning_news() -> tuple[list[dict], bool]:
+    feeds = _parse_morning_news_feeds(MORNING_NEWS_FEEDS)
+    if MORNING_NEWS_FEEDS and not feeds:
+        log.warning("[briefing-news] MORNING_NEWS_FEEDS has no valid entries")
+        return [], True
+    items = []
+    failures = 0
+    for feed in feeds:
+        try:
+            items.extend(_fetch_morning_news_feed(feed))
+        except (requests.RequestException, ET.ParseError, ValueError) as exc:
+            failures += 1
+            log.warning("[briefing-news] %s failed (%s)", feed[1], type(exc).__name__)
+    return _select_morning_news(items, MORNING_NEWS_LIMIT), bool(feeds and failures == len(feeds))
+
+def _format_morning_news(items: list[dict]) -> str:
+    labels = {"local": "Local", "general": "Top", "interest": "Interest"}
+    lines = ["News:"]
+    for item in items:
+        lines.append(f"• {labels.get(item['category'], 'News')} · {item['title']} — {item['source']}")
+        if item.get("summary"):
+            lines.append(f"  {item['summary']}")
+        lines.append(f"  {item['url']}")
+    return "\n".join(lines)
+
+def _telegram_text_chunks(text: str, limit: int = _TELEGRAM_MAX_LEN) -> list[str]:
+    """Split plain text on line boundaries where possible, never above Telegram's cap."""
+    if limit <= 0:
+        raise ValueError("chunk limit must be positive")
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:]
+        else:
+            chunks.append(remaining[:split_at + 1])
+            remaining = remaining[split_at + 1:]
+    if remaining or not chunks:
+        chunks.append(remaining)
+    return chunks
+
 async def morning_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if not (MORNING_BRIEFING and owner and _briefing_weekday()):
@@ -12361,7 +12539,18 @@ async def morning_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         lines.append("Today: " + " · ".join(due[:3]))
     if GARMIN_ENABLED and _garmin.get("text"):
         lines.append(f"Health: {_garmin['text']}")
-    await context.bot.send_message(chat_id=owner, text="\n".join(lines))
+    if MORNING_NEWS and MORNING_NEWS_LIMIT:
+        try:
+            news, all_failed = await asyncio.to_thread(_fetch_morning_news)
+        except Exception as exc:
+            log.warning("[briefing-news] failed (%s)", type(exc).__name__)
+            news, all_failed = [], True
+        if all_failed:
+            _count_error("news")
+        if news:
+            lines.append(_format_morning_news(news))
+    for chunk in _telegram_text_chunks("\n".join(lines)):
+        await context.bot.send_message(chat_id=owner, text=chunk)
 
 
 async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.1 — real-world news in the morning briefing
+
+**Root cause: v2026-08-23.2 assembled weather, commute, reminders, and health but had no
+external-news input; the existing `/news` command is the character's fictional life events,
+not current reporting.** The morning briefing now fetches RSS/Atom feeds off the event loop,
+skips malformed, duplicate, and older-than-36-hour items, and selects at most three headlines:
+one Skagit/local item, one Washington-or-national item, and one technology, security, or
+economy item.
+Each includes its source, a short feed summary when present, and the original link. No model
+call or new dependency was added.
+
+Defaults are Skagit County, Washington State Standard, NPR, GeekWire, Ars Technica AI,
+BleepingComputer, and Marketplace Morning Report. `MORNING_NEWS=0` is the kill switch; `MORNING_NEWS_LIMIT`,
+`MORNING_NEWS_MAX_AGE_HOURS`, and the semicolon-separated `MORNING_NEWS_FEEDS` override are
+documented in `.env.example`. One broken source is logged and skipped; only an all-source
+failure increments the `news` error category.
+
 ## v2026-08-23.2 — weekday morning briefing
 
 **Root cause: the bot had the individual data sources but no deterministic daily message that assembled them.** A new default-on `MORNING_BRIEFING` job sends the owner weather, TomTom live-traffic commute, same-day reminders, and the existing Garmin snapshot on configured workdays. `MORNING_BRIEFING=0` disables it; address, days, send time, and arrival target stay per-instance in the untracked `.env`.

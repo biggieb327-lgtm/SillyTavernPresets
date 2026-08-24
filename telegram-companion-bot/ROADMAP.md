@@ -688,6 +688,13 @@ dropped by the MCP wrapper; worth one more test against a named POI before relyi
 
 </details>
 
+### 3.19 ~~Real-world morning news~~ ✅ (shipped v2026-08-24.1, `MORNING_NEWS`)
+
+The weekday morning briefing now adds up to three recent RSS/Atom stories: local,
+Washington-or-national, and technology/security/economy. Feed parsing, age filtering, duplicate
+removal, and source selection are deterministic; no new model call is made. Defaults and
+the per-instance feed override are documented in `.env.example`.
+
 ### 3.17 ~~Preserve small worn face items in the selfie face lock~~ ✅ (shipped v2026-08-10.3, rode /place)
 
 **Shipped as specified, effect unverified.** The clause names the category — "anything

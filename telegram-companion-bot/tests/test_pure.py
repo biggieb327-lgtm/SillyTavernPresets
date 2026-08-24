@@ -7774,6 +7774,7 @@ class TestEveryBooleanFlagDefault:
         "LOCATION_PLACE": True,
         "MAP_INTENT": True,
         "MORNING_BRIEFING": True,
+        "MORNING_NEWS": True,
         "MEME_ENABLED": True,
         "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,
@@ -11401,3 +11402,171 @@ class TestEmbedRetryAndBackfill:
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
             bot._embed_backfill_job(None))     # must not raise
         assert bot._embeddings_cache == {}
+
+
+class TestMorningBriefingNews:
+    NOW = 1_800_000_000.0
+
+    def _item(self, category, title, age=60, source="Source"):
+        return {"category": category, "source": source, "title": title,
+                "summary": f"Summary for {title}", "url": "https://example.com/story",
+                "published": self.NOW - age}
+
+    def test_feed_override_parser_is_bounded_to_supported_https_entries(self):
+        raw = (
+            "local|Skagit|https://example.com/local.xml;"
+            "wrong|Bad|https://example.com/bad.xml;"
+            "interest|Unsafe|http://example.com/feed;"
+            "general|NPR|https://example.com/top.xml"
+        )
+        assert bot._parse_morning_news_feeds(raw) == [
+            ("local", "Skagit", "https://example.com/local.xml"),
+            ("general", "NPR", "https://example.com/top.xml"),
+        ]
+        assert bot._parse_morning_news_feeds("") == list(bot._MORNING_NEWS_DEFAULT_FEEDS)
+
+    def test_rss_parser_cleans_markup_and_reads_rfc_date(self):
+        xml = b"""<rss><channel><item>
+          <title>County &amp; city update</title>
+          <link>https://example.com/local</link>
+          <pubDate>Mon, 24 Aug 2026 14:00:00 GMT</pubDate>
+          <description><![CDATA[<p>Road work starts today.</p>]]></description>
+        </item></channel></rss>"""
+        items = bot._parse_news_feed(xml, "local", "Skagit County")
+        assert len(items) == 1
+        assert items[0]["title"] == "County & city update"
+        assert items[0]["summary"] == "Road work starts today."
+        assert items[0]["url"] == "https://example.com/local"
+        assert items[0]["published"] == bot._news_timestamp("Mon, 24 Aug 2026 14:00:00 GMT")
+
+    def test_atom_parser_reads_href_and_iso_date(self):
+        xml = b"""<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+          <title>AI release</title><link href="https://example.com/ai" />
+          <updated>2026-08-24T13:00:00Z</updated><summary>Useful details.</summary>
+        </entry></feed>"""
+        items = bot._parse_news_feed(xml, "interest", "Ars")
+        assert [(i["title"], i["url"], i["summary"]) for i in items] == [
+            ("AI release", "https://example.com/ai", "Useful details.")]
+
+    def test_selector_takes_one_per_slot_deduplicates_and_drops_stale(self, monkeypatch):
+        monkeypatch.setattr(bot, "MORNING_NEWS_MAX_AGE_HOURS", 36)
+        items = [
+            self._item("interest", "Useful AI release", age=10),
+            self._item("general", "State budget update", age=20),
+            self._item("local", "Skagit road closure", age=30),
+            self._item("interest", "Useful AI release", age=40, source="Duplicate"),
+            self._item("local", "Old county item", age=37 * 3600),
+        ]
+        selected = bot._select_morning_news(items, 3, now=self.NOW)
+        assert [item["category"] for item in selected] == ["local", "general", "interest"]
+        assert [item["title"] for item in selected] == [
+            "Skagit road closure", "State budget update", "Useful AI release"]
+
+    def test_formatter_keeps_source_summary_and_link(self):
+        text = bot._format_morning_news([self._item("local", "Skagit road closure")])
+        assert text.startswith("News:\n• Local · Skagit road closure — Source")
+        assert "Summary for Skagit road closure" in text
+        assert text.endswith("https://example.com/story")
+
+    def test_news_text_hard_truncation_is_bounded(self):
+        assert bot._news_text("x" * 300, 20) == "x" * 20 + "…"
+
+    def test_all_feed_failures_are_reported_once_to_the_job(self, monkeypatch):
+        monkeypatch.setattr(bot, "MORNING_NEWS_FEEDS", "")
+        monkeypatch.setattr(bot, "_parse_morning_news_feeds", lambda raw: [
+            ("local", "Broken", "https://example.com/feed")])
+        monkeypatch.setattr(
+            bot, "_fetch_morning_news_feed",
+            lambda feed: (_ for _ in ()).throw(bot.requests.Timeout("secret-url-detail")))
+        items, all_failed = bot._fetch_morning_news()
+        assert items == [] and all_failed is True
+
+    def test_feed_download_stops_at_size_cap(self, monkeypatch):
+        reads = []
+
+        class Response:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size):
+                assert chunk_size == 64 * 1024
+                for chunk in (b"x" * 1_000_000, b"y" * 600_000, b"unread"):
+                    reads.append(chunk[:1])
+                    yield chunk
+
+            def close(self):
+                return None
+
+        class Session:
+            def get(self, url, **kwargs):
+                assert kwargs["stream"] is True
+                return Response()
+
+        monkeypatch.setattr(bot, "_get_session", lambda: Session())
+        with pytest.raises(ValueError, match="feed exceeds 1.5 MB"):
+            bot._fetch_morning_news_feed(
+                ("general", "Oversized", "https://example.com/feed"))
+        assert reads == [b"x", b"y"]
+
+    def test_telegram_chunks_never_exceed_limit_and_preserve_text(self):
+        text = "header\n" + "x" * 45 + "\nfooter"
+        chunks = bot._telegram_text_chunks(text, limit=20)
+        assert all(0 < len(chunk) <= 20 for chunk in chunks)
+        assert "".join(chunks) == text
+
+    def test_job_adds_news_without_a_model_call(self, monkeypatch):
+        sent = []
+
+        async def _weather():
+            return None
+
+        async def _send_message(**kwargs):
+            sent.append(kwargs["text"])
+
+        monkeypatch.setattr(bot, "get_owner", lambda: 123)
+        monkeypatch.setattr(bot, "_briefing_weekday", lambda: True)
+        monkeypatch.setattr(bot, "ensure_weather", _weather)
+        monkeypatch.setattr(bot, "_weather_cache", {"text": "Clear", "ts": time.time()})
+        monkeypatch.setattr(bot, "TOMTOM_ENABLED", False)
+        monkeypatch.setattr(bot, "TRAFFIC_ENABLED", False)
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", False)
+        monkeypatch.setattr(bot, "reminders", [])
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 3)
+        monkeypatch.setattr(
+            bot, "_fetch_morning_news", lambda: ([self._item("local", "Local item")], False))
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=_send_message))
+        asyncio.run(bot.morning_briefing_job(context))
+        assert len(sent) == 1
+        assert "Weather: Clear" in sent[0]
+        assert "News:\n• Local · Local item" in sent[0]
+
+    def test_job_chunks_long_briefing_under_telegram_limit(self, monkeypatch):
+        sent = []
+
+        async def _weather():
+            return None
+
+        async def _send_message(**kwargs):
+            sent.append(kwargs["text"])
+
+        monkeypatch.setattr(bot, "get_owner", lambda: 123)
+        monkeypatch.setattr(bot, "_briefing_weekday", lambda: True)
+        monkeypatch.setattr(bot, "ensure_weather", _weather)
+        monkeypatch.setattr(bot, "_weather_cache", {"text": "Clear", "ts": time.time()})
+        monkeypatch.setattr(bot, "TOMTOM_ENABLED", False)
+        monkeypatch.setattr(bot, "TRAFFIC_ENABLED", False)
+        monkeypatch.setattr(bot, "GARMIN_ENABLED", False)
+        monkeypatch.setattr(bot, "reminders", [])
+        monkeypatch.setattr(bot, "MORNING_NEWS", True)
+        monkeypatch.setattr(bot, "MORNING_NEWS_LIMIT", 6)
+        huge = self._item("interest", "x" * 180)
+        huge["summary"] = "y" * 220
+        huge["url"] = "https://example.com/" + "z" * 330
+        monkeypatch.setattr(bot, "_fetch_morning_news", lambda: ([huge] * 6, False))
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=_send_message))
+        asyncio.run(bot.morning_briefing_job(context))
+        assert len(sent) > 1
+        assert all(len(chunk) <= bot._TELEGRAM_MAX_LEN for chunk in sent)
