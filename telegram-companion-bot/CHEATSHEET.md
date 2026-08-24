@@ -43,14 +43,17 @@ for b in $(systemctl list-units 'bot@*' --no-legend --plain \
 done
 ```
 
-Canary code/runtime rollout:
+Canary code/runtime + sandbox rollout:
 ```bash
 $REPO/deploy/vps-sync.sh nora          # canary only
+# run it twice on the first hardening adoption (the first run self-updates this script)
+systemctl show bot@nora -p NoNewPrivileges -p ProtectSystem -p ProtectHome -p ProtectProc
 # verify /audit and journalctl, then:
 $REPO/deploy/vps-sync.sh --promote nora
 ```
-Promotion selects the canary's immutable release for every active bot; it does not copy
-cards or preset layers.
+Promotion selects the canary's immutable release and tested sandbox for every active bot;
+it does not copy cards or preset layers. Sandbox-only rollback leaves code selected:
+`$REPO/deploy/vps-sync.sh --rollback-hardening nora`.
 
 `.env` change only: edit the file → `systemctl restart bot@<name>` → check `/errors`
 for `[config]` warnings.

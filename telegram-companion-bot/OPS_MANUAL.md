@@ -19,6 +19,7 @@ created 2026-07-29; the Termux phone is empty). Layout:
 | `/opt/telegram-bots/<instance>/` | per-instance dir: `.env`, card, state, memory |
 | `/opt/telegram-bots/world.txt` | shared world context (nora writes it) |
 | `/etc/systemd/system/bot@.service` | installed from `deploy/bot-selector@.service`; resolves `%i` through its selector |
+| `/etc/systemd/system/bot@<instance>.service.d/10-hardening.conf` | per-instance sandbox; installed from `deploy/bot-hardening.conf` |
 
 Each bot is `bot@<instance>` — `bot@nora`, `bot@bonnie`, `bot@cass`, `bot@emily`,
 `bot@priya`, `bot@jules`, `bot@marcus`. The authoritative list is whatever
@@ -92,11 +93,18 @@ AUDIT verification:
 ```
 `/update`, `update-all.sh` and `sync-cards.sh` are phone-era and manage nothing now.
 
-**Canary rollout:** deploy one instance, verify `/audit` and its journal, then promote
-that exact immutable code/runtime release to every active bot. Promotion deliberately
-does not copy mutable cards or preset layers.
+**Canary rollout:** deploy one instance, verify `/audit`, its journal, and the effective
+sandbox, then promote that exact immutable code/runtime release and tested hardening
+drop-in to every active bot. Promotion deliberately does not copy mutable cards or
+preset layers. Because a running shell cannot replace its own already-loaded body, run
+the canary command a second time when this hardening release first updates an older
+checkout.
 ```bash
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora  # first adoption only
+systemctl show bot@nora -p NoNewPrivileges -p PrivateTmp -p PrivateDevices \
+  -p ProtectSystem -p ProtectHome -p ProtectProc -p RestrictAddressFamilies
+systemd-analyze security bot@nora --no-pager
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --promote nora
 ```
 
@@ -105,6 +113,17 @@ restarts it if it was active.
 ```bash
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback nora
 ```
+
+To remove only the sandbox drop-in while leaving the selected code release untouched:
+```bash
+/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh --rollback-hardening nora
+```
+
+The sandbox keeps the network available and permits writes only beneath the named
+instance, `/opt/telegram-bots/shared`, and `/opt/telegram-bots/world.txt`. The unit's
+`HOME` is its instance directory, which is where PDF scratch directories and default
+Garmin tokens live after hardening. The deploy copies a legacy shared Garmin token store
+once if the instance does not already have one.
 
 ### File ownership
 Bots run as the `bot` user. Anything you create or unpack in an instance dir must be

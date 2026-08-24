@@ -30,6 +30,7 @@ def main() -> int:
     vps_sync = (BOT_DIR / "deploy/vps-sync.sh").read_text(encoding="utf-8")
     installer = (BOT_DIR / "deploy/install-vps.sh").read_text(encoding="utf-8")
     service = (BOT_DIR / "deploy/bot-selector@.service").read_text(encoding="utf-8")
+    hardening = (BOT_DIR / "deploy/bot-hardening.conf").read_text(encoding="utf-8")
 
     direct_names = {
         _normalized(re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip())
@@ -174,10 +175,18 @@ def main() -> int:
         problems.append("vps-sync has no per-instance immutable-pointer rollback mode")
     if 'MODE=promote' not in vps_sync or 'release_select "$BASE" "$name" "$CANARY_RELEASE_DIR"' not in vps_sync:
         problems.append("vps-sync has no canary promotion mode")
+    if 'MODE=rollback-hardening' not in vps_sync or 'remove_hardening "$INST"' not in vps_sync:
+        problems.append("vps-sync has no per-instance sandbox rollback mode")
+    if 'install_hardening "$INST"' not in vps_sync:
+        problems.append("vps-sync does not install sandboxing on the canary instance")
+    if 'install_hardening "$name"' not in vps_sync:
+        problems.append("vps-sync does not promote sandboxing to active instances")
     if '"$SRC/deploy/bot-selector@.service"' not in vps_sync:
         problems.append("vps-sync does not install the selector-aware unit template")
     if '"$INSTALL_DIR/deploy/bot-selector@.service"' not in installer:
         problems.append("install-vps does not install the selector-aware unit template")
+    if '"$INSTALL_DIR/deploy/bot-hardening.conf"' not in installer:
+        problems.append("install-vps does not install per-instance sandbox drop-ins")
 
     legacy_service = (BOT_DIR / "deploy/bot@.service").read_text(encoding="utf-8")
     if "ExecStart=/opt/telegram-bots/current/venv/bin/python" not in legacy_service:
@@ -194,6 +203,39 @@ def main() -> int:
         if fragment not in service:
             problems.append(f"systemd release contract missing: {fragment}")
 
+    hardening_required = (
+        "Environment=HOME=/opt/telegram-bots/%i",
+        "NoNewPrivileges=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=read-only",
+        "ReadWritePaths=/opt/telegram-bots/%i /opt/telegram-bots/shared /opt/telegram-bots/world.txt",
+        "ProtectControlGroups=yes",
+        "ProtectKernelModules=yes",
+        "ProtectKernelTunables=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectClock=yes",
+        "ProtectHostname=yes",
+        "ProtectProc=invisible",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        "RestrictNamespaces=yes",
+        "RestrictRealtime=yes",
+        "RestrictSUIDSGID=yes",
+        "LockPersonality=yes",
+        "CapabilityBoundingSet=",
+        "SystemCallArchitectures=native",
+        "UMask=0077",
+    )
+    for fragment in hardening_required:
+        if fragment not in hardening:
+            problems.append(f"systemd sandbox contract missing: {fragment}")
+    if re.search(r"(?m)^ReadWritePaths=.*(?:%h|/opt/telegram-bots(?:\s|$))", hardening):
+        problems.append("systemd sandbox exposes the fleet root as writable")
+    for risky in ("PrivateNetwork=yes", "ProtectHome=yes", "MemoryDenyWriteExecute=yes", "SystemCallFilter="):
+        if risky in hardening:
+            problems.append(f"systemd sandbox includes an untraced first-slice restriction: {risky}")
+
     if problems:
         print("release contract is broken:", file=sys.stderr)
         for problem in problems:
@@ -201,7 +243,7 @@ def main() -> int:
         return 1
     print(
         f"release contract ok: {len(package_blocks)} exact hashed packages; "
-        "CI and VPS share the lock; per-instance git-SHA selectors, promotion, and rollback are wired"
+        "CI and VPS share the lock; per-instance selectors, sandbox canary, promotion, and rollback are wired"
     )
     return 0
 
