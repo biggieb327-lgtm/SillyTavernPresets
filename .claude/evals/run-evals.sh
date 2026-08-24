@@ -613,6 +613,70 @@ else
   bad "skill-index-integrity" "$skill_index"
 fi
 
+# --- reviewer-stance-present -----------------------------------------------------------
+# Owner rule (2026-08-24): every reviewer agent — one that judges an artifact it did not
+# write against a standard — must carry the shared reviewer stance verbatim: judge only
+# against the standard, and list every shortfall before saying anything positive. A model
+# that grades its own output finds reasons to pass; a separate reviewer is the fix, and
+# that stance lived only in a chat prompt until this check pinned it into the contracts.
+#
+# "Reviewer agent" is decided from the frontmatter description's verb (review/verify/
+# critique), the self-maintaining direction skill-index-integrity uses: a NEW agent whose
+# description says it reviews or verifies is required to carry the stance, so the rule
+# reaches agents that don't exist yet — which is what "any reviewer agent" means. EXEMPT
+# lists description-verb matches that are not artifact-against-standard reviewers, each
+# with a reason; it is empty today.
+if ! reviewer_stance=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+
+agents_dir = Path(".claude/agents")
+# Whitespace-normalized anchors that must BOTH appear in a reviewer agent's body. Two
+# lines, not one, so stripping half the stance still trips the check.
+ANCHORS = [
+    "You did not write the thing you are reviewing.",
+    "List every place it falls short before you say anything positive.",
+]
+# name (file stem) -> reason. Add here only when a new agent's description trips the verb
+# but the agent does not judge someone else's work product against a standard.
+EXEMPT = {}
+
+problems = []
+reviewers = []
+for f in sorted(agents_dir.glob("*.md")) if agents_dir.exists() else []:
+    text = f.read_text(encoding="utf-8")
+    m = re.search(r"^description:\s*(.+)$", text, re.M)
+    desc = m.group(1) if m else ""
+    if not re.search(r"\b(review|verif|critiqu)", desc, re.I) or f.stem in EXEMPT:
+        continue
+    reviewers.append(f.stem)
+    norm = re.sub(r"\s+", " ", text)
+    missing = [a for a in ANCHORS if a not in norm]
+    if missing:
+        joined = " / ".join(missing)
+        problems.append(
+            f"{f.name} reads as a reviewer agent but is missing the reviewer stance "
+            f"({joined}) — add the shared stance block or list it in EXEMPT with a reason")
+
+# A stance check that guards nothing is not a check (C14): if the detector matches no
+# agent, it is broken or every reviewer was renamed out from under it — fail loudly.
+if not reviewers:
+    problems.append(
+        "no agent description matched the reviewer verb (review/verif/critiqu) — the "
+        "detector is broken; it guarded 3 agents when written (adversarial-critic, "
+        "qa-engineer, character-reviewer)")
+
+print(" | ".join(problems))
+PYEOF
+); then
+  reviewer_stance="the parser itself exited non-zero: ${reviewer_stance:-(no output)} — a check that goes green when its own parser dies is not a check"
+fi
+if [ -z "$reviewer_stance" ]; then
+  ok "reviewer-stance-present: every reviewer agent carries the judge-against-standard / shortfalls-first stance"
+else
+  bad "reviewer-stance-present" "$reviewer_stance"
+fi
+
 # --- runtime-version-pinned ------------------------------------------------------------
 # Second occurrence of one class: CI testing a Python the fleet doesn't run. It was pinned
 # to 3.13 while the phone ran 3.14 (fixed 2026-07-26), then left at 3.14 after the VPS
