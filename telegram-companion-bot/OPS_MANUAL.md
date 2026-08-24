@@ -65,6 +65,19 @@ Note that `errors.log` is *historical* — a tail of it proves what was written,
 what is happening now. For "is it happening right now", use a bounded journalctl
 window with a count.
 
+The bot also emits payload-free `OP_EVENT` JSON records at model, external HTTP,
+scheduled-job, and Telegram delivery boundaries. Compare latency, failures, and model
+fallback across every instance represented in a journal window with one pipeline:
+```bash
+journalctl -u 'bot@*' --since '24 hours ago' -o cat --no-pager \
+  | python3 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/fleet_events.py
+```
+Add `--boundary model` (or `external_fetch`, `scheduled_job`, `delivery`) to narrow the
+report. The journal is the source of truth; the script performs no network calls and
+does not require a hosted telemetry service. `OP_EVENTS=0` is the per-instance emergency
+kill switch. Events never contain prompts, replies, URLs, chat IDs, tokens, or raw
+exception text.
+
 ### Deploying
 One command per instance; it prepares the full-git-SHA immutable code release and exact
 lock-addressed dependency layer, pulls `preset.txt`, that instance's preset layers and

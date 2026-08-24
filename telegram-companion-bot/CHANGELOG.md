@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.3 — structured fleet operation events
+
+**Root cause: the fleet had prose logs at some boundaries and no timing at others, so
+provider latency, fallback use, scheduled-job outcomes, and Telegram delivery could not
+be compared consistently across seven instances.** Shared choke points now emit one
+payload-free `OP_EVENT` JSON schema to journald. The common HTTP session labels known
+providers without logging URLs; the model boundary records the final model and fallback;
+the JobQueue wraps every supported schedule shape before PTB catches callback failures;
+and `send_bubbles` records Telegram delivery outcomes.
+
+`deploy/fleet_events.py` turns a bounded `journalctl` stream into per-instance/provider
+call counts, success/failure totals, p50/p95 latency, and fallback rates. `OP_EVENTS`
+defaults on and is an emergency kill switch. Events deliberately exclude prompts,
+replies, URLs, chat IDs, tokens, and raw exception messages; this is local journald
+observability, not a hosted telemetry dependency.
+
 ## v2026-08-24.2 — declarative health command and job registries
 
 **Root cause: one capability's command names, callbacks, menu descriptions, enablement,

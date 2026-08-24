@@ -11676,3 +11676,169 @@ class TestMorningBriefingNews:
         asyncio.run(bot.morning_briefing_job(context))
         assert len(sent) > 1
         assert all(len(chunk) <= bot._TELEGRAM_MAX_LEN for chunk in sent)
+
+
+class TestStructuredOperationEvents:
+    def test_event_schema_is_stable_and_contains_no_payload(self, caplog, monkeypatch):
+        import logging
+
+        monkeypatch.setattr(bot, "OP_EVENTS", True)
+        with caplog.at_level(logging.INFO, logger="companion"):
+            bot._emit_operation_event(
+                boundary="model",
+                feature="llm",
+                operation="completion",
+                provider="nanogpt",
+                duration_ms=123.6,
+                outcome="success",
+                model="test/model",
+                fallback=False,
+            )
+
+        line = next(r.getMessage() for r in caplog.records
+                    if r.getMessage().startswith(bot._OP_EVENT_PREFIX))
+        event = json.loads(line[len(bot._OP_EVENT_PREFIX):])
+        assert event == {
+            "boundary": "model",
+            "duration_ms": 124,
+            "event": "bot_operation",
+            "fallback": False,
+            "feature": "llm",
+            "instance": bot.BASE_DIR.name,
+            "model": "test/model",
+            "operation": "completion",
+            "outcome": "success",
+            "provider": "nanogpt",
+            "schema": 1,
+            "ts": event["ts"],
+        }
+        assert event["ts"].endswith("Z")
+
+    def test_kill_switch_suppresses_events(self, caplog, monkeypatch):
+        import logging
+
+        monkeypatch.setattr(bot, "OP_EVENTS", False)
+        with caplog.at_level(logging.INFO, logger="companion"):
+            bot._emit_operation_event(
+                boundary="model", feature="llm", operation="completion",
+                provider="nanogpt", duration_ms=1, outcome="success",
+            )
+        assert not any(r.getMessage().startswith(bot._OP_EVENT_PREFIX)
+                       for r in caplog.records)
+
+    def test_known_provider_mapping_never_logs_the_url(self):
+        assert bot._provider_from_url(
+            "https://api.tomtom.com/search/2/geocode/secret?key=also-secret") == "tomtom"
+        assert bot._provider_from_url("https://private.example.test/path") == "other"
+
+    def test_external_http_boundary_records_status_without_url(self, monkeypatch):
+        events = []
+
+        class Response:
+            status_code = 200
+
+        monkeypatch.setattr(bot.requests.Session, "request",
+                            lambda self, method, url, **kwargs: Response())
+        monkeypatch.setattr(bot, "_emit_operation_event",
+                            lambda **event: events.append(event))
+
+        response = bot._InstrumentedSession().request(
+            "GET", "https://api.open-meteo.com/v1/forecast?token=secret")
+
+        assert response.status_code == 200
+        assert events[0]["boundary"] == "external_fetch"
+        assert events[0]["provider"] == "open_meteo"
+        assert events[0]["operation"] == "get"
+        assert "url" not in events[0]
+
+    def test_model_boundary_records_fallback_model(self, monkeypatch):
+        events = []
+
+        def one_call(messages, model):
+            if model == "primary":
+                raise bot.requests.exceptions.ConnectionError("offline")
+            return "recovered"
+
+        monkeypatch.setattr(bot, "_CHAT_RETRIES", 1)
+        monkeypatch.setattr(bot, "_one_call", one_call)
+        monkeypatch.setattr(bot, "_track_llm_usage", lambda messages, reply: None)
+        monkeypatch.setattr(bot, "_emit_operation_event",
+                            lambda **event: events.append(event))
+
+        assert bot.call_nanogpt([], model="primary", fallback="backup") == "recovered"
+        assert events == [{
+            "boundary": "model",
+            "feature": "llm",
+            "operation": "completion",
+            "provider": "nanogpt",
+            "duration_ms": events[0]["duration_ms"],
+            "outcome": "success",
+            "error_category": None,
+            "model": "backup",
+            "fallback": True,
+        }]
+
+    def test_scheduled_job_wrapper_records_success_and_failure(self, monkeypatch):
+        events = []
+
+        async def okay(context):
+            return None
+
+        async def broken(context):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(bot, "_emit_operation_event",
+                            lambda **event: events.append(event))
+        asyncio.run(bot._instrument_job_callback(okay)(SimpleNamespace()))
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(bot._instrument_job_callback(broken)(SimpleNamespace()))
+
+        assert [(e["operation"], e["outcome"]) for e in events] == [
+            ("okay", "success"),
+            ("broken", "failure"),
+        ]
+
+    def test_job_queue_covers_every_ptb_schedule_shape(self):
+        assert all(hasattr(bot._InstrumentedJobQueue, name) for name in (
+            "run_once", "run_repeating", "run_daily", "run_monthly", "run_custom"))
+
+    def test_send_bubbles_records_telegram_delivery(self, monkeypatch):
+        events = []
+
+        async def send_message(**kwargs):
+            return SimpleNamespace(message_id=9)
+
+        monkeypatch.setattr(bot, "_emit_operation_event",
+                            lambda **event: events.append(event))
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+
+        sent = asyncio.run(bot.send_bubbles(context, 123, "hello"))
+
+        assert sent.message_id == 9
+        assert events[0]["boundary"] == "delivery"
+        assert events[0]["provider"] == "telegram"
+        assert events[0]["outcome"] == "success"
+
+    def test_fleet_report_compares_all_seven_instances(self):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(bot.__file__).parent / "deploy" / "fleet_events.py"
+        spec = importlib.util.spec_from_file_location("fleet_events", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        instances = ("nora", "bonnie", "cass", "emily", "priya", "jules", "marcus")
+        events = []
+        for i, instance in enumerate(instances):
+            events.append({
+                "event": "bot_operation", "schema": 1, "instance": instance,
+                "boundary": "model", "provider": "nanogpt", "operation": "completion",
+                "outcome": "success", "duration_ms": 100 + i, "fallback": False,
+            })
+        events.append({**events[0], "duration_ms": 300, "fallback": True})
+
+        report = module.render_report(events, boundary="model")
+
+        assert all(instance in report for instance in instances)
+        assert "nanogpt" in report
+        assert "50.0%" in report

@@ -34,8 +34,9 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from functools import wraps
 from io import BytesIO
-from datetime import datetime, date, timedelta, time as dtime
+from datetime import datetime, date, timedelta, time as dtime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlparse, unquote
@@ -66,10 +67,38 @@ import concurrent.futures
 # avoiding the thread-safety issues of a shared requests.Session.
 _thread_local = threading.local()
 
+
+class _InstrumentedSession(requests.Session):
+    """A requests session that emits one payload-free event per external call."""
+
+    def request(self, method, url, **kwargs):
+        started = time.monotonic()
+        outcome = "failure"
+        error_category = None
+        try:
+            response = super().request(method, url, **kwargs)
+            outcome = "success" if response.status_code < 400 else "failure"
+            if outcome == "failure":
+                error_category = "http_status"
+            return response
+        except Exception as exc:
+            error_category = _operation_error_category(exc)
+            raise
+        finally:
+            _emit_operation_event(
+                boundary="external_fetch",
+                feature="http",
+                operation=str(method).lower(),
+                provider=_provider_from_url(url),
+                duration_ms=(time.monotonic() - started) * 1000,
+                outcome=outcome,
+                error_category=error_category,
+            )
+
 def _get_session() -> requests.Session:
     s = getattr(_thread_local, "session", None)
     if s is None:
-        s = requests.Session()
+        s = _InstrumentedSession()
         s.mount("https://", HTTPAdapter(
             max_retries=Retry(total=0),
             pool_connections=4,
@@ -95,6 +124,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     MessageReactionHandler,
+    JobQueue,
     ContextTypes,
     TypeHandler,
     filters,
@@ -102,7 +132,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.2"
+BOT_VERSION = "2026-08-24.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -417,6 +447,139 @@ def _env_bool(name: str, default: bool) -> bool:
     logging.warning("[config] %s", msg)
     _CONFIG_WARNINGS.append(msg)
     return default
+
+
+# Structured events are intentionally payload-free. journald already provides the
+# process timestamp and unit; these fields make cross-instance comparisons stable
+# without exposing prompts, replies, URLs, chat IDs, or exception messages.
+OP_EVENTS = _env_bool("OP_EVENTS", True)
+_OP_EVENT_PREFIX = "OP_EVENT "
+_PROVIDER_HOSTS = {
+    "nano-gpt.com": "nanogpt",
+    "api.open-meteo.com": "open_meteo",
+    "api.tomtom.com": "tomtom",
+    "api.giphy.com": "giphy",
+    "api.inworld.ai": "inworld",
+    "api.x.ai": "xai",
+    "generativelanguage.googleapis.com": "gemini",
+    "data.seattle.gov": "seattle_open_data",
+    "wsdot.wa.gov": "wsdot",
+    "reddit.com": "reddit",
+    "www.reddit.com": "reddit",
+    "oauth.reddit.com": "reddit",
+    "nominatim.openstreetmap.org": "openstreetmap",
+    "duckduckgo.com": "duckduckgo",
+    "hc-ping.com": "healthchecks",
+    "raw.githubusercontent.com": "github",
+}
+
+
+def _provider_from_url(url: str) -> str:
+    """Return a bounded provider label; never return any part of an unknown URL."""
+    try:
+        host = (urlparse(str(url)).hostname or "").lower()
+    except (TypeError, ValueError):
+        return "other"
+    if host in _PROVIDER_HOSTS:
+        return _PROVIDER_HOSTS[host]
+    for known, provider in _PROVIDER_HOSTS.items():
+        if host.endswith("." + known):
+            return provider
+    return "other"
+
+
+def _operation_error_category(exc: Exception) -> str:
+    """Collapse exceptions to non-sensitive, low-cardinality operational labels."""
+    if isinstance(exc, (requests.exceptions.Timeout, TimedOut, asyncio.TimeoutError)):
+        return "timeout"
+    if isinstance(exc, (requests.exceptions.ConnectionError, NetworkError)):
+        return "network"
+    if isinstance(exc, requests.exceptions.HTTPError):
+        return "http_status"
+    if isinstance(exc, BadRequest):
+        return "bad_request"
+    if isinstance(exc, Forbidden):
+        return "forbidden"
+    return "unexpected"
+
+
+def _emit_operation_event(*, boundary: str, feature: str, operation: str,
+                          provider: str, duration_ms: float, outcome: str,
+                          error_category: str = None, model: str = None,
+                          fallback: bool = False) -> None:
+    if not OP_EVENTS:
+        return
+    event = {
+        "boundary": boundary,
+        "duration_ms": max(0, round(duration_ms)),
+        "event": "bot_operation",
+        "fallback": bool(fallback),
+        "feature": feature,
+        "instance": BASE_DIR.name,
+        "operation": operation,
+        "outcome": outcome,
+        "provider": provider,
+        "schema": 1,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"),
+    }
+    if error_category is not None:
+        event["error_category"] = error_category
+    if model is not None:
+        event["model"] = model
+    log.info("%s%s", _OP_EVENT_PREFIX,
+             json.dumps(event, sort_keys=True, separators=(",", ":")))
+
+
+def _instrument_job_callback(callback):
+    """Wrap a PTB job before Job.run catches callback exceptions."""
+    if getattr(callback, "_op_instrumented", False):
+        return callback
+
+    @wraps(callback)
+    async def instrumented(context):
+        started = time.monotonic()
+        outcome = "failure"
+        error_category = None
+        try:
+            result = await callback(context)
+            outcome = "success"
+            return result
+        except Exception as exc:
+            error_category = _operation_error_category(exc)
+            raise
+        finally:
+            _emit_operation_event(
+                boundary="scheduled_job",
+                feature="scheduler",
+                operation=getattr(callback, "__name__", "job"),
+                provider="internal",
+                duration_ms=(time.monotonic() - started) * 1000,
+                outcome=outcome,
+                error_category=error_category,
+            )
+
+    instrumented._op_instrumented = True
+    return instrumented
+
+
+class _InstrumentedJobQueue(JobQueue):
+    """Install operation timing at every supported PTB scheduling entry point."""
+
+    def run_once(self, callback, *args, **kwargs):
+        return super().run_once(_instrument_job_callback(callback), *args, **kwargs)
+
+    def run_repeating(self, callback, *args, **kwargs):
+        return super().run_repeating(_instrument_job_callback(callback), *args, **kwargs)
+
+    def run_daily(self, callback, *args, **kwargs):
+        return super().run_daily(_instrument_job_callback(callback), *args, **kwargs)
+
+    def run_monthly(self, callback, *args, **kwargs):
+        return super().run_monthly(_instrument_job_callback(callback), *args, **kwargs)
+
+    def run_custom(self, callback, *args, **kwargs):
+        return super().run_custom(_instrument_job_callback(callback), *args, **kwargs)
 
 
 def _env_float(name: str, default: str = None):
@@ -6274,8 +6437,8 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     return categories >= _REASONING_LEAK_MIN_MARKERS
 
 
-def call_nanogpt(messages: list, model: str = None, fallback: str = None,
-                 leak_guard: bool = False) -> str:
+def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str = None,
+                               leak_guard: bool = False, operation_state: dict = None) -> str:
     """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors.
 
     leak_guard: the completion is a persona reply headed for a chat, so the
@@ -6291,6 +6454,8 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None,
     last_err = None
     t0 = time.time()
     for i, m in enumerate(models):
+        if operation_state is not None:
+            operation_state["model"] = m
         for attempt in range(_CHAT_RETRIES):
             if time.time() - t0 > _CALL_BUDGET and i < len(models) - 1:
                 log.warning("[model] %s: budget exceeded (%.0fs), falling back to %s",
@@ -6360,6 +6525,37 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None,
                     _count_error("api")
                     _count_error("fallback")
     raise last_err
+
+
+def call_nanogpt(messages: list, model: str = None, fallback: str = None,
+                 leak_guard: bool = False) -> str:
+    """Run a completion and emit one aggregate model event, including fallback use."""
+    requested_model = model or NANOGPT_MODEL
+    operation_state = {"model": requested_model}
+    started = time.monotonic()
+    outcome = "failure"
+    error_category = None
+    try:
+        result = _call_nanogpt_with_retries(
+            messages, model, fallback, leak_guard, operation_state)
+        outcome = "success"
+        return result
+    except Exception as exc:
+        error_category = _operation_error_category(exc)
+        raise
+    finally:
+        used_model = operation_state["model"]
+        _emit_operation_event(
+            boundary="model",
+            feature="llm",
+            operation="completion",
+            provider=_provider_from_url(NANOGPT_BASE_URL),
+            duration_ms=(time.monotonic() - started) * 1000,
+            outcome=outcome,
+            error_category=error_category,
+            model=used_model,
+            fallback=used_model != requested_model,
+        )
 
 
 _replies_in_flight = 0  # gates optional side calls (auto-react) off active replies
@@ -6698,26 +6894,44 @@ async def send_bubbles(context, chat_id: int, text: str, pre_delay: float = 0.0,
                 await typing_task
             except asyncio.CancelledError:
                 pass
-    last = None
-    for i in range(0, len(text), _TELEGRAM_MAX_LEN):
-        chunk = text[i:i + _TELEGRAM_MAX_LEN]
-        reply_to = reply_to_message_id if i == 0 else None
-        for attempt in range(3):
-            try:
-                if DEVICE_RENDER:
-                    escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
-                    last = await context.bot.send_message(
-                        chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML",
-                        reply_to_message_id=reply_to)
-                else:
-                    last = await context.bot.send_message(
-                        chat_id=chat_id, text=chunk, reply_to_message_id=reply_to)
-                break
-            except (NetworkError, TimedOut) as e:
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-    return last
+    started = time.monotonic()
+    outcome = "failure"
+    error_category = None
+    try:
+        last = None
+        for i in range(0, len(text), _TELEGRAM_MAX_LEN):
+            chunk = text[i:i + _TELEGRAM_MAX_LEN]
+            reply_to = reply_to_message_id if i == 0 else None
+            for attempt in range(3):
+                try:
+                    if DEVICE_RENDER:
+                        escaped = _HTML_ESCAPE_RE.sub(lambda m: _HTML_ESCAPE[m.group(0)], chunk)
+                        last = await context.bot.send_message(
+                            chat_id=chat_id, text=f"<code>{escaped}</code>", parse_mode="HTML",
+                            reply_to_message_id=reply_to)
+                    else:
+                        last = await context.bot.send_message(
+                            chat_id=chat_id, text=chunk, reply_to_message_id=reply_to)
+                    break
+                except (NetworkError, TimedOut):
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+        outcome = "success"
+        return last
+    except Exception as exc:
+        error_category = _operation_error_category(exc)
+        raise
+    finally:
+        _emit_operation_event(
+            boundary="delivery",
+            feature="telegram",
+            operation="send_message",
+            provider="telegram",
+            duration_ms=(time.monotonic() - started) * 1000,
+            outcome=outcome,
+            error_category=error_category,
+        )
 
 
 # --- Selfies ---
@@ -16331,7 +16545,7 @@ def _fleet_probe(name: str, host: str, port: int) -> dict:
     base = f"http://{host}:{port}"
     row = {"name": name, "up": False, "version": "", "uptime": "", "errors": "", "detail": ""}
     try:
-        r = requests.get(f"{base}/admin/health", timeout=FLEET_TIMEOUT)
+        r = _get_session().get(f"{base}/admin/health", timeout=FLEET_TIMEOUT)
         _ = r.content  # force-read before raise_for_status, same as _do_request
         r.raise_for_status()
         h = r.json()
@@ -16344,8 +16558,8 @@ def _fleet_probe(name: str, host: str, port: int) -> dict:
         row["uptime"] = f"{h['uptime_hours']:.1f}h"
     if ADMIN_API_TOKEN:
         try:
-            r = requests.get(f"{base}/admin/audit", timeout=FLEET_TIMEOUT,
-                             headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"})
+            r = _get_session().get(f"{base}/admin/audit", timeout=FLEET_TIMEOUT,
+                                   headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"})
             _ = r.content
             r.raise_for_status()
             row["errors"] = str(r.json().get("errors_last_hour_total", "?"))
@@ -16794,6 +17008,7 @@ def main():
         .write_timeout(30)
         .pool_timeout(30)
         .get_updates_read_timeout(40)
+        .job_queue(_InstrumentedJobQueue())
         .post_init(_post_init)
         .post_shutdown(_on_shutdown)
         .build()

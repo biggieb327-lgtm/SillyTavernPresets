@@ -175,6 +175,17 @@ constraints; check their assumptions before acting on them.
   them to the bot user. `immutable-release-contract` pins the selector, promotion, and
   rollback paths.
 
+### 1.9 ~~Structured fleet operation events~~ ✅ (shipped v2026-08-24.3)
+- **Evidence:** provider latency, fallback use, scheduled-job health, and Telegram
+  delivery were recorded as unrelated prose lines or not recorded at all. Comparing
+  the seven instances required ad-hoc grep and could not answer the same question at
+  every boundary.
+- **Shipped:** one payload-free JSON schema emitted to journald at shared model,
+  external-fetch, scheduled-job, and delivery choke points; stable provider and error
+  categories; a default-on `OP_EVENTS` kill switch; and `deploy/fleet_events.py`, which
+  reports per-instance/provider call counts, outcomes, p50/p95 latency, and fallback
+  rates from a bounded journal query. No hosted observability dependency was added.
+
 ---
 
 ## Track 2 — Engineering workflow
@@ -1382,6 +1393,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
 | ~~**Next**~~ | ~~1.7 exact dependency lock + immutable releases~~ | ✅ **Shipped 2026-08-24** — CI/VPS share one hashed Python 3.12 lock; deploys select full-git-SHA releases with atomic rollback. Follow-up 1.8 added per-instance canary selectors. |
 | ~~**Next**~~ | ~~1.8 per-instance canary release selectors~~ | ✅ **Shipped 2026-08-24** — each bot has a root-owned `current`/`previous` selector; deploy and rollback are instance-scoped, and a tested canary release can be promoted explicitly to the active fleet. |
+| ~~**Next**~~ | ~~1.9 structured fleet operation events~~ | ✅ **Shipped v2026-08-24.3** — payload-free JSON at model, external-fetch, scheduled-job, and delivery boundaries; one journal report compares latency, outcomes, and fallback across the fleet. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
