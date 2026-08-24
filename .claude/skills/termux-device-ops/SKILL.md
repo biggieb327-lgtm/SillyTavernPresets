@@ -1,21 +1,23 @@
 ---
 name: termux-device-ops
-description: Android/Termux platform behavior and the on-device monitoring layer — phantom-process killer, exit-code triage, adb, pkg upgrade hazards, venv rebuilds, tzdata, watchdog/healthcheck/backup/cleanup scripts. Load when a fleet problem looks device-level rather than code-level, or when working on the on-device helper scripts.
+description: HISTORICAL — the Termux phone is empty (migration complete 2026-07-29); this governs nothing running. Load only to understand the reasoning behind a past Android incident (phantom-process killer, adb, pkg-upgrade hazards, tzdata), never for a command to run now. For a live incident use repo-debugging-playbook (systemd/journalctl).
 ---
 
 # Termux device ops and fleet monitoring
 
-The phone is not yours to touch. Everything here is a command the user runs and
-pastes back. Quote commands exactly — they are copy-pasted verbatim.
+**HISTORICAL (2026-07-29).** All seven bots run on the VPS under systemd; the Termux
+phone is empty. Nothing in this skill applies to what is running now — it is kept only
+for the reasoning behind past Android incidents. For a live problem, use
+`repo-debugging-playbook` (systemd/journalctl) and `OPS_MANUAL.md` for live commands.
+
+The phone was not yours to touch. Everything below was a command the user ran on the
+phone and pasted back.
 
 ## When NOT to use
 
-- Diagnosing a live incident from scratch → `repo-debugging-playbook` first; it
-  routes here once the cause looks device-level.
+- **Any live incident** → `repo-debugging-playbook` (the fleet is VPS/systemd now).
 - Changing bot.py to work around a platform limit → `bot-code-invariants` rules
   11–13 already encode the constraints.
-- VPS instances (cass, jules) — systemd, not tmux, and none of this applies →
-  `vps-migration`.
 
 ## Phantom process killer (the big one)
 

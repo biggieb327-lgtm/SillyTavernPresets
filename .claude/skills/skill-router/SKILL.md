@@ -19,7 +19,7 @@ such exemption.
 | Any bot.py change that will ship (feature, fix, refactor) | `repo-change-control` |
 | Reviewing or writing any bot.py diff (also loaded by repo-change-control) | `bot-code-invariants` |
 | A live bot is misbehaving, restarting, or silent | `repo-debugging-playbook` |
-| The cause looks device-level (SIGKILL/137, venv, tzdata, pkg upgrade), or you're touching watchdog/backup/cleanup | `termux-device-ops` |
+| Understanding a past Android/Termux incident — HISTORICAL, phone empty since 2026-07-29; live device-level triage (OOM/137, venv, tzdata) is now in `repo-debugging-playbook` | `termux-device-ops` |
 | Editing an `.env`, choosing/changing a model, or working on note follow-ups, day threads, or the shared world | `bot-config-reference` |
 | The work is written and needs to become a deployed release (sequencing only) | `ship` |
 | Work is merged; user needs to get it onto the fleet, or a deploy went wrong | `deploy-and-verify-fleet` |
@@ -30,7 +30,7 @@ such exemption.
 | External audit/review output (LLM or human) lists claimed bugs | `verify-external-audit` |
 | Writing a tool that renders a verdict, reporting a finding, or explaining why something broke | `hubris` |
 | Touching any GROUP_* code, the ledger, or bot-to-bot behavior | `group-chat-changes` |
-| Moving instances from the phone to a VPS (ROADMAP 1.2) | `vps-migration` |
+| Standing up a new instance from scratch (the phone→VPS migration itself is COMPLETE, 2026-07-29) | `vps-migration` |
 | Working in voicekit-starter/ | `voicekit-work` |
 | Designing unattended/overnight iterative work (a Routine, /loop, or autonomous session) | `unattended-loops` |
 | User asks for terse/caveman-mode chat replies, or invokes /caveman | `caveman` |

@@ -3,6 +3,7 @@ name: character-reviewer
 description: Reviews character content — cards, seed files, preset layers — and triages reported voice defects to content vs. prompt-assembly code. Use when a bot sounds wrong, before shipping a card/preset edit, or for a character pass on demand — the monthly Routine that used to run it is retired (2026-08-22), so on-demand is now the only path.
 model: opus
 tools: Read, Write, Edit, Glob, Grep, Bash, Skill
+skills: edit-cards-and-presets
 ---
 
 ## Reviewer stance — you did not write this

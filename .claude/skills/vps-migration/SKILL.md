@@ -1,9 +1,13 @@
 ---
 name: vps-migration
-description: Assisting the ROADMAP 1.2 migration of bot instances from the Termux phone to a VPS. Load when the user starts, continues, or debugs the phone→VPS move, or asks about running bots on the VPS. The runbook is deploy/MIGRATION.md — this skill is the guardrails around it.
+description: HISTORICAL — the phone→VPS migration (ROADMAP 1.2) completed 2026-07-29; all seven bots are on the VPS. Load ONLY if standing up an 8th instance from scratch, and even then prefer SETUP_GUIDE.md / new-bot.sh. Not for day-to-day VPS ops (that is OPS_MANUAL.md and deploy-and-verify-fleet).
 ---
 
 # VPS migration (ROADMAP 1.2)
+
+**HISTORICAL (complete 2026-07-29).** The migration is finished; this skill describes a
+one-time move that will not recur. Load it only if adding a new instance. For running
+bots on the VPS, use `OPS_MANUAL.md` and `deploy-and-verify-fleet`.
 
 The runbook is `telegram-companion-bot/deploy/MIGRATION.md` — follow it literally;
 don't reconstruct it from memory. This skill covers only the constraints around the
@@ -26,8 +30,9 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
    starting it on the VPS. Never leave both "just to compare".
 2. **Backup before stopping anything:** `bash ~/telegram-bot/backup-all.sh` on the
    phone. State files are the character's memory — unrecoverable if lost.
-3. **`.env` files move by hand, never through git** (tokens; repo is public via
-   raw URLs). scp them; the secret-scan eval and risk-guard exist because of this.
+3. **`.env` files move by hand, never through git** (tokens must never land in the
+   repo — it was public via raw URLs until 2026-07-28 and is private now, but the rule
+   holds either way). scp them; the secret-scan eval and risk-guard exist because of this.
 4. **Rollback stays available:** don't delete the phone-side instance directory
    until the runbook's soak criteria pass (7 days for the pilot). `MIGRATION.md`
    § Rollback is the procedure — phone restart is always the fallback.
