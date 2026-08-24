@@ -1953,6 +1953,183 @@ class TestReviewmemOkMarksTheOwnersJudgement:
         assert self.appended[0][2] is None
 
 
+class TestReviewlifeSuggestions:
+    """ROADMAP 5.9: the nightly reflect() pass drafts one-line living-file additions,
+    queued for per-line owner review via /reviewlife. Drives the real enqueue helper, the
+    real append helper, and the real handler — a test that reads their source cannot fail
+    for the reason they exist (C8, and the /features ValueError the delivery gate guards)."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def _isolate(self, tmp_path, monkeypatch, *, enabled=True, cap=20):
+        monkeypatch.setattr(bot, "REVIEWLIFE", enabled)
+        monkeypatch.setattr(bot, "REVIEWLIFE_MAX", cap)
+        monkeypatch.setattr(bot, "LIFE_REVIEW_FILE", tmp_path / "life_review.json")
+        # Point the three living files at tmp copies so an approved append is asserted on a
+        # real file without touching the fixture instance's seeds.
+        self.files = {name: tmp_path / f"{name}.txt" for name in ("life", "people", "projects")}
+        self.caches = {name: {"text": None, "ts": 0.0} for name in self.files}
+        monkeypatch.setattr(bot, "_LIVING_FILES", {
+            name: (self.files[name], self.caches[name]) for name in self.files})
+
+    # ── _enqueue_life_suggestions ──────────────────────────────────────────────
+    def test_valid_suggestion_lands_in_the_queue(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        n = bot._enqueue_life_suggestions([
+            {"file": "people", "line": "Marco — new dispatcher, gruff",
+             "source": "the new guy Marco keeps giving me the bad routes"}])
+        assert n == 1
+        queue = bot._load_life_review()
+        assert len(queue) == 1
+        assert queue[0]["file"] == "people"
+        assert queue[0]["line"] == "Marco — new dispatcher, gruff"
+        assert queue[0]["source"].startswith("the new guy Marco")
+
+    def test_unknown_file_and_missing_source_are_rejected(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        n = bot._enqueue_life_suggestions([
+            {"file": "diary", "line": "x", "source": "s"},          # unknown target
+            {"file": "life", "line": "  ", "source": "s"},           # blank line
+            {"file": "life", "line": "real shift", "source": ""},    # no provenance (#17)
+            "not-a-dict",
+        ])
+        assert n == 0
+        assert bot._load_life_review() == []
+
+    def test_kill_switch_off_enqueues_nothing(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch, enabled=False)
+        n = bot._enqueue_life_suggestions([
+            {"file": "life", "line": "real", "source": "clearly happened today"}])
+        assert n == 0
+        assert bot._load_life_review() == []
+
+    def test_cap_drops_oldest(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch, cap=2)
+        for i in range(3):
+            bot._enqueue_life_suggestions([
+                {"file": "projects", "line": f"line{i}", "source": f"src{i}"}])
+        queue = bot._load_life_review()
+        assert [q["line"] for q in queue] == ["line1", "line2"]  # oldest dropped
+
+    # ── _append_life_line ──────────────────────────────────────────────────────
+    def test_append_adds_one_line_no_date_stamp_no_cross_contamination(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        self.files["people"].write_text("Pete — dispatcher.\n", encoding="utf-8")
+        self.caches["people"]["text"] = "stale"
+        bot._append_life_line(self.files["people"], self.caches["people"],
+                              '  "Rosa — another messenger."  ')
+        assert self.files["people"].read_text(encoding="utf-8") == \
+            "Pete — dispatcher.\nRosa — another messenger.\n"
+        # no [Mon DD] stamp, unlike _append_life_event
+        assert "[" not in self.files["people"].read_text(encoding="utf-8")
+        assert self.caches["people"]["text"] is None       # cache invalidated
+        assert not self.files["projects"].exists()          # other files untouched
+
+    def test_append_creates_file_when_absent(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._append_life_line(self.files["life"], self.caches["life"], "first line")
+        assert self.files["life"].read_text(encoding="utf-8") == "first line\n"
+
+    # ── reviewlife_cmd (delivery-gate: the handler must be CALLED) ──────────────
+    def _run(self, args):
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=1))
+        asyncio.run(bot.reviewlife_cmd(update, SimpleNamespace(args=args)))
+        return msg.sent
+
+    def test_list_shows_file_line_and_source(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([{"file": "projects", "line": "learning Seattle hills",
+                                "source": "still annoyed the hills are real"}])
+        sent = self._run([])
+        assert any("projects" in s and "learning Seattle hills" in s for s in sent)
+        assert any("still annoyed the hills are real" in s for s in sent)
+
+    def test_ok_appends_to_the_target_file_and_pops(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([{"file": "people", "line": "Marco — new dispatcher",
+                                "source": "the new guy Marco"}])
+        sent = self._run(["ok", "1"])
+        assert self.files["people"].read_text(encoding="utf-8") == "Marco — new dispatcher\n"
+        assert bot._load_life_review() == []                # popped
+        assert any("Added to people" in s for s in sent)
+
+    def test_no_drops_without_touching_any_file(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([{"file": "life", "line": "should not land", "source": "s"}])
+        sent = self._run(["no", "1"])
+        assert bot._load_life_review() == []
+        assert not self.files["life"].exists()
+        assert any("Dropped" in s for s in sent)
+
+    def test_empty_queue_reports_nothing_pending(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([])
+        assert any("Nothing pending" in s for s in self._run([]))
+
+    def test_disabled_reports_off_and_does_not_apply(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch, enabled=False)
+        bot._save_life_review([{"file": "life", "line": "x", "source": "s"}])
+        sent = self._run(["ok", "1"])
+        assert any("REVIEWLIFE=0" in s for s in sent)
+        assert bot._load_life_review() == [{"file": "life", "line": "x", "source": "s"}]
+
+    def test_bad_index_and_usage_are_handled(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([{"file": "life", "line": "x", "source": "s"}])
+        assert any("No review item" in s for s in self._run(["ok", "9"]))
+        assert any("Usage" in s for s in self._run(["maybe", "1"]))
+
+    def test_ok_on_line_that_collapses_to_empty_does_not_claim_it_added(self, tmp_path, monkeypatch):
+        # A model draft of bare quotes passes enqueue (non-empty after .strip) but
+        # _append_life_line strips the quotes to nothing — the handler must not report "Added".
+        self._isolate(tmp_path, monkeypatch)
+        bot._save_life_review([{"file": "people", "line": '""', "source": "s"}])
+        sent = self._run(["ok", "1"])
+        assert not self.files["people"].exists()          # nothing written
+        assert any("Nothing to add" in s for s in sent)
+        assert bot._load_life_review() == []              # still consumed
+
+    # ── kill switch gates the PROMPT, not just the enqueue ─────────────────────
+    def _reflect_prompt(self, tmp_path, monkeypatch, *, enabled):
+        self._isolate(tmp_path, monkeypatch, enabled=enabled)
+        captured = {}
+
+        def fake_call(messages, model, **kw):
+            captured["sys"] = messages[0]["content"]
+            return "{}"
+
+        monkeypatch.setattr(bot, "call_nanogpt", fake_call)
+        monkeypatch.setattr(bot, "beliefs",
+                            {1: {"items": {"warmth": {"anchor": 5.0, "score": 5.0}}}})
+        monkeypatch.setattr(bot, "_today_messages",
+                            lambda cid: [{"role": "user", "content": "hi"}])
+        monkeypatch.setattr(bot, "recommendations", {})
+        monkeypatch.setattr(bot, "rec_seq", {})
+        monkeypatch.setattr(bot, "next_goals", {})
+        monkeypatch.setattr(bot, "milestones", {})
+        monkeypatch.setattr(bot, "user_names", {1: "sam"})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        asyncio.run(bot.reflect(1))
+        return captured["sys"]
+
+    def test_prompt_asks_for_suggestions_when_enabled(self, tmp_path, monkeypatch):
+        sys = self._reflect_prompt(tmp_path, monkeypatch, enabled=True)
+        assert "living_file_suggestions" in sys and "living files" in sys
+
+    def test_prompt_omits_suggestions_when_kill_switch_off(self, tmp_path, monkeypatch):
+        sys = self._reflect_prompt(tmp_path, monkeypatch, enabled=False)
+        assert "living_file_suggestions" not in sys
+        assert '"milestones"' in sys                       # JSON object still closes cleanly
+
+
 class TestAuditSourceQuote:
     def test_auto_with_source(self):
         assert bot._audit_source_quote(
@@ -8026,6 +8203,7 @@ class TestEveryBooleanFlagDefault:
         "REACTIONS_AUTO": True,
         "REASONING_LEAK_GUARD": True,
         "REMINDERS_SQLITE": True,
+        "REVIEWLIFE": True,
         "RHR_ALERTS": True,
         "SAFETY_ENABLED": True,
         "SCHED_BUSY": True,

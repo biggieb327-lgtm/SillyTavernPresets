@@ -7,6 +7,48 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.8 — nightly reflection drafts living-file edits for review (`/reviewlife`, ROADMAP 5.9)
+
+**Root cause: the living files were a one-way drift surface — read into every prompt, but
+only the arc paragraph ever evolved on its own.** `life.txt` / `people.txt` / `projects.txt`
+are sampled into every prompt via `_read_life_file`, and the nightly `reflect()` pass already
+reads the whole day's conversation to update self-image, recommendations, the next-goal, and
+milestones. Nothing connected the two: a day that revealed a new person in her life, a new
+project, or a shift in what she's living through left the living files untouched unless the
+owner hand-edited them. `life.txt`'s weekly rotation (v2026-08-02.11) evolves the arc but
+never adds a person or a project, and by design moves only one thing a week.
+
+`reflect()` now asks the **same** `SUMMARY_MODEL` request for one more key,
+`living_file_suggestions` — at most a few `{file, line, source}` drafts, each a one-line
+addition to `life`/`people`/`projects` with the exact quote from that day that prompted it.
+This adds **zero** LLM calls: it rides the request that already fires nightly (the whole
+reason 5.9 belongs to 6.2's sleep-time-compute list; `bot-code-invariants` #3 is not
+implicated — no per-message call, no second nightly call). `_enqueue_life_suggestions`
+validates each draft (known target file, non-empty line, non-empty source quote — #17: no
+source, no suggestion) and appends it to a dedicated `life_review.json` queue, capped at
+`REVIEWLIFE_MAX` (20, oldest drop).
+
+**Never applied silently.** Silent personality drift is the wrong default on a companion bot
+even opt-in, so — exactly as `/reviewmem` gates the memory auditor — a new `/reviewlife`
+command lists each pending suggestion with its target file, candidate line, AND source quote,
+and `ok <n>` / `no <n>` applies or drops it per line. Approval appends one line via the new
+`_append_life_line` (no `[Mon DD]` stamp — the living files don't use one, unlike
+`_append_life_event`, which writes the separate offline-life-sim log) and prints a
+journalctl-visible log line; reject changes nothing.
+
+**Provenance (#10/#17):** the drafts are model-generated, so they enter no consumed store
+without an explicit owner ok. The queue stores the source quote; the listing shows it; the
+prompt instructs a line only when the day concretely supports it and never about the user
+rather than her. The living files are the character's canvas, not a user-fact store, so #10
+is not directly triggered, but the source quote makes each approval an entailment judgement
+made with evidence.
+
+Kill switch `REVIEWLIFE` (default on): `REVIEWLIFE=0` stops the drafting and makes
+`/reviewlife` report disabled (#16). A `life`-file suggestion appends a sentence to the arc
+paragraph rather than a list item; that's the one format seam, and it's acceptable because
+the owner gates every addition and the weekly rotation re-consolidates the paragraph over
+time. This ships ROADMAP 5.9 (6.2's item-4 slice); slice 3 was closed not-applicable.
+
 ## v2026-08-24.7 — pre-draft the ambient-news digest in the nightly reflection (ROADMAP 6.2 slice 2)
 
 **Root cause: the proactive ambient-color path ran a live web search on the reply.** On

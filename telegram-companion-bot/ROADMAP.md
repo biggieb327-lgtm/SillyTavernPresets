@@ -1211,7 +1211,14 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
   owner should decide if this tension is worth resolving in either direction.
 - **Risk:** unassessed — direction only, not a spec.
 
-### 5.9 Nightly-suggested edits to the living files (`/reviewlife`) — M
+### 5.9 Nightly-suggested edits to the living files (`/reviewlife`) — ✅ SHIPPED v2026-08-24.8
+- **Shipped (2026-08-24):** `reflect()` now asks its existing `SUMMARY_MODEL` request for one
+  more key, `living_file_suggestions` (zero new LLM calls); `_enqueue_life_suggestions`
+  validates + dedups them into `life_review.json`, and the new `/reviewlife` command gates
+  each one per-line (`ok`/`no`) with its source quote shown, appending via `_append_life_line`
+  on accept. Kill switch `REVIEWLIFE` (default on) gates the prompt itself, not just the
+  enqueue. Built per `PLAN-5.9-reviewlife.md`; "done when" criteria met in tests, pending a
+  real-day validation on one instance before fleet promotion.
 - **Plan (2026-08-24):** scoped as 6.2's item-4 slice — full implementation handoff in
   `PLAN-5.9-reviewlife.md` (rides the existing `reflect()` JSON call, so zero new LLM
   calls; mirrors `/reviewmem`'s accept/reject UX). Read it before starting.
@@ -1363,12 +1370,13 @@ per-message LLM side calls) with no case strong enough to argue an exception.
      selfie the night before would freeze it to stale weather/outfit, reintroducing the
      frozen-snapshot contradiction v2026-08-01.7 removed. So there is no sleep-time-compute
      win here; recorded closed rather than left open.
-  4. **`/reviewlife` nightly edits** (5.9, same shape, sourced independently) — the living
+  4. ✅ **`/reviewlife` nightly edits** (5.9, same shape, sourced independently) — the living
      files (`life.txt`, `people.txt`, `projects.txt`) get nightly-suggested one-line
      additions drafted by the existing `reflect()` pass and gated per-line by a new
-     `/reviewlife` command. **Scoped, not started** — full handoff plan in
-     `PLAN-5.9-reviewlife.md` (extension point, invariants, build order, test plan, and a
-     stopping rule). A feature, not a thin slice.
+     `/reviewlife` command. **Shipped v2026-08-24.8** — rode the existing `reflect()` JSON
+     (zero new LLM calls) per `PLAN-5.9-reviewlife.md`; kill switch `REVIEWLIFE` gates the
+     prompt itself. That closes every actionable item on this 6.2 list (slice 3 closed
+     not-applicable above).
   - Not on the list (deliberately live): anything that depends on the *current* inbound
     message (safety assessment, reply advisor 6.3, the reply itself) — those cannot be
     precomputed the night before.

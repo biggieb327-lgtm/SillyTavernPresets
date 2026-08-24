@@ -152,6 +152,19 @@ but NOT on the VPS — the owner runs `vps-sync.sh` per instance; `/audit` must 
 > (incl. the delivery-gate "test must CALL `reviewlife_cmd`" trap), and a stopping rule. Start
 > there, not from scratch. Open owner questions are listed at the bottom of the plan.
 
+> 2026-08-24 (from: claude/item-4-handoff-4qe1v7): `[decision]` **Item 4 (ROADMAP 5.9
+> `/reviewlife`) SHIPPED — `v2026-08-24.8`, on `main`, CI green.** Built exactly per the plan:
+> one extra key on the existing `reflect()` request (zero new LLM calls), `_enqueue_life_suggestions`
+> (validate + dedup + cap `REVIEWLIFE_MAX=20`), `_append_life_line`, `/reviewlife` mirroring
+> `/reviewmem`. Owner (present, interactive) confirmed per-owner scope, no nag, cap 20.
+> Stopping rule never tripped — premise held. `/code-review` found 5 issues; 4 fixed (empty-line
+> "✓ Added" lie, no-dedup, kill-switch gated only the enqueue not the prompt, pre-cap log count),
+> 1 kept as consistent-with-`reviewmem` (pop-before-append ordering). **Two things for the next
+> session:** (1) `[observed]` **not yet on the VPS** — owner runs `vps-sync.sh` per instance;
+> `/audit` must show `2026-08-24.8`. (2) `[hypothesis]` **the "done when" real-day validation is
+> unverified** — tests prove the mechanics, but nobody has watched a real day produce a good
+> suggestion on a live instance. Validate on one bot before trusting the draft quality fleet-wide.
+
 ### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
 `[decision]` New memory file: **`.claude/memory/watchlist.md`** — the parking lot for
 low-level observations that aren't yet a system failure, our mistake, or a finding, but

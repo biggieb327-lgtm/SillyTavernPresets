@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.7"
+BOT_VERSION = "2026-08-24.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1156,6 +1156,20 @@ _people_cache: dict = {"text": None, "ts": 0.0}
 _projects_cache: dict = {"text": None, "ts": 0.0}
 _life_arc_cache: dict = {"text": None, "ts": 0.0}
 
+# ROADMAP 5.9 (/reviewlife): the nightly reflect() pass also drafts candidate one-line
+# additions to the three living files and queues them for per-line owner review — never
+# applied silently, exactly as /reviewmem gates the memory auditor. `file` in a suggestion
+# and in an /reviewlife item is a key of this map; it resolves the target file and its cache
+# to invalidate on append. REVIEWLIFE=0 stops the drafting and makes /reviewlife report
+# disabled (bot-code-invariants #16 kill switch); default on.
+_LIVING_FILES: dict[str, tuple] = {
+    "life": (LIFE_ARC_FILE, _life_arc_cache),
+    "people": (PEOPLE_FILE, _people_cache),
+    "projects": (PROJECTS_FILE, _projects_cache),
+}
+REVIEWLIFE = _env_bool("REVIEWLIFE", True)
+REVIEWLIFE_MAX = _env_int("REVIEWLIFE_MAX", "20")  # cap pending suggestions; oldest drop
+
 # Offline life: a couple times a day, invent ONE concrete event in her own world (grounded
 # in schedule/people/projects/arc) so unprompted news feels like real news instead of
 # generic small talk. Concrete past-tense events only -- opposite of the introspective
@@ -1182,6 +1196,10 @@ _memory_lock = threading.Lock()
 MEMORY_META_FILE = BASE_DIR / "memory_meta.json"
 MEMORY_REVIEW_FILE = BASE_DIR / "memory_review.json"
 MEMORY_LOG_FILE = BASE_DIR / "memory_log.txt"
+# ROADMAP 5.9: /reviewlife's pending-suggestion queue. Its own file and lifecycle — a
+# suggestion applies by appending one line to a living file, not by _memory_replace — so it
+# never shares memory_review.json.
+LIFE_REVIEW_FILE = BASE_DIR / "life_review.json"
 MEMORY_REVIEW_MAX = 20
 _memory_meta: dict[str, dict] = {}
 
@@ -1261,6 +1279,65 @@ def _save_memory_review(queue: list[dict]):
             json.dumps(queue, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
         log.warning("[memory-review] save failed: %s", e)
+
+
+def _load_life_review() -> list[dict]:
+    try:
+        if LIFE_REVIEW_FILE.exists():
+            return json.loads(LIFE_REVIEW_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_life_review(queue: list[dict]):
+    try:
+        LIFE_REVIEW_FILE.write_text(
+            json.dumps(queue, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        log.warning("[life-review] save failed: %s", e)
+
+
+def _enqueue_life_suggestions(suggestions) -> int:
+    """Validate model-drafted living-file additions and append them to the /reviewlife
+    queue (ROADMAP 5.9). Gated on REVIEWLIFE. Each item must name a known living file and
+    carry a non-empty line AND a non-empty source quote — the quote is the provenance the
+    owner judges the addition against (bot-code-invariants #17: no source, no suggestion).
+    Returns how many were queued; caps the queue at REVIEWLIFE_MAX, dropping oldest."""
+    if not REVIEWLIFE or not isinstance(suggestions, list):
+        return 0
+    queue = _load_life_review()
+    # Dedup on (file, line): a durable detail can surface across several nights before the
+    # owner reviews, and milestones already guard the same way — without this the same
+    # person/project gets queued (and could be appended) repeatedly.
+    seen = {(q.get("file"), q.get("line")) for q in queue}
+    added = 0
+    for item in suggestions:
+        if not isinstance(item, dict):
+            continue
+        target = item.get("file")
+        line = item.get("line")
+        source = item.get("source")
+        if target not in _LIVING_FILES:
+            continue
+        if not (isinstance(line, str) and line.strip()):
+            continue
+        if not (isinstance(source, str) and source.strip()):
+            continue
+        line = line.strip()[:200]
+        if (target, line) in seen:
+            continue
+        seen.add((target, line))
+        queue.append({"file": target, "line": line,
+                      "source": source.strip()[:200], "ts": time.time()})
+        added += 1
+    if added:
+        if len(queue) > REVIEWLIFE_MAX:
+            queue = queue[-REVIEWLIFE_MAX:]
+        _save_life_review(queue)
+    # This batch's items are the newest, so the cap keeps at most REVIEWLIFE_MAX of them —
+    # report what actually survived, not the pre-cap count.
+    return min(added, REVIEWLIFE_MAX)
 
 
 def _memory_log(action: str, text: str = "", extra: str = ""):
@@ -1844,6 +1921,25 @@ def _append_life_event(line: str):
         existing = existing[-LIFE_EVENTS_MAX:]
     LIFE_EVENTS_FILE.write_text("\n".join(existing) + "\n", encoding="utf-8")
     _life_events_cache["text"] = None
+
+
+def _append_life_line(path: Path, cache: dict, line: str) -> bool:
+    """Append ONE line to a living file (life/people/projects) and invalidate its cache so
+    the addition takes effect before the 5-min TTL. Unlike _append_life_event this writes NO
+    `[Mon DD]` date stamp — the living files don't use one — and touches only the given file.
+    Called from reviewlife_cmd after the owner approves a drafted suggestion (ROADMAP 5.9).
+    Returns True if a line was written, False if it collapsed to empty after cleanup (so the
+    handler doesn't claim it added a line it didn't)."""
+    line = line.strip().strip('"').strip()
+    if not line:
+        return False
+    existing = ""
+    if path.exists():
+        existing = path.read_text(encoding="utf-8").rstrip("\n")
+    new = (existing + "\n" + line) if existing else line
+    path.write_text(new + "\n", encoding="utf-8")
+    cache["text"] = None
+    return True
 
 
 def _generate_life_event() -> str:
@@ -5625,6 +5721,27 @@ async def reflect(chat_id: int):
     existing_milestones = milestones.get(chat_id) or []
     ms_lines = (", ".join(m["text"] for m in existing_milestones[-10:])
                 if existing_milestones else "(none yet)")
+    # ROADMAP 5.9: only ask for living-file drafts when the feature is on, so REVIEWLIFE=0
+    # genuinely stops the drafting (not just the enqueue) — no wasted prompt tokens or model
+    # effort on a request whose output would be discarded.
+    if REVIEWLIFE:
+        life_instr = (
+            f"Finally, look at whether today's conversation concretely reveals a NEW durable "
+            f"detail about {NAME}'s OWN life that belongs in one of her living files: a person "
+            f"who matters to her (\"people\"), something she is working on or toward "
+            f"(\"projects\"), or a shift in what she is currently living through (\"life\"). "
+            f"Draft it as one short line in her own register — the same voice those files are "
+            f"written in. Propose a line ONLY when the day's conversation concretely supports it "
+            f"(something she stated or that clearly happened); never a plausible guess, and "
+            f"never a detail about {uname} rather than her. For each one give the exact quote "
+            f"from today's conversation that prompted it. Return an empty list if nothing "
+            f"concrete came up — most days will.\n\n")
+        life_schema = (
+            f', "living_file_suggestions": [{{"file": "life"|"people"|"projects", '
+            f'"line": "<one line in her voice>", "source": "<quote from today>"}}]')
+    else:
+        life_instr = ""
+        life_schema = ""
     sys = (
         f"You help {NAME} do a private nightly reflection on her day with {uname}. You're given "
         f"her current self-image (a handful of traits she rates herself on, 1-10), any open "
@@ -5648,12 +5765,14 @@ async def reflect(chat_id: int):
         f"opinion on something big. Be selective — only flag genuine firsts that will matter "
         f"later. Keep each one short (one brief phrase). Return an empty list if today had "
         f"nothing new.\n\n"
+        f"{life_instr}"
         f"Respond with ONLY a JSON object:\n"
         f'{{"beliefs": {{"trait": score, ...}}, '
         f'"new_recommendations": ["..."], '
         f'"resolved": [{{"id": <int>, "outcome": "good"|"bad"|"open_loop", "note": "..."}}], '
         f'"next_goal": "...", '
-        f'"milestones": ["first time he ..."]}}\n'
+        f'"milestones": ["first time he ..."]'
+        f'{life_schema}}}\n'
         f"Keep the exact same trait names as given. No prose, no code fences."
     )
     user = (f"SELF-IMAGE:\n{belief_lines}\n\nOPEN ITEMS:\n{rec_lines}\n\n"
@@ -5722,6 +5841,13 @@ async def reflect(chat_id: int):
                 existing_texts.add(text.strip().lower())
         if len(ms_list) > MILESTONES_MAX:
             ms_list[:] = ms_list[-MILESTONES_MAX:]
+
+    # ROADMAP 5.9: same pass drafts one-line additions to the living files. Never applied
+    # here — queued for per-line owner review via /reviewlife. Zero new LLM calls: rides
+    # this request. _enqueue_life_suggestions is a no-op when REVIEWLIFE is off.
+    n_life = _enqueue_life_suggestions(data.get("living_file_suggestions"))
+    if n_life:
+        print(f"[reflect] Queued {n_life} living-file suggestion(s) for /reviewlife.")
 
     save_state()
     print(f"[reflect] Updated self-image and {len(recs)} tracked item(s) for chat {chat_id}.")
@@ -10227,6 +10353,60 @@ async def reviewmem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _save_audit_seen(seen)
         _memory_log("REVIEW-NO", item["text"])
         await update.message.reply_text(f"✗ Dropped: {item['text']}")
+
+
+async def reviewlife_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Review the nightly-drafted additions to the living files (ROADMAP 5.9). Mirrors
+    /reviewmem: a numbered list shows each suggestion's target file, candidate line, AND the
+    source quote from that day's conversation, so approving one is a human entailment
+    judgement made with evidence. `ok <n>` appends the line to the file; `no <n>` drops it.
+    Nothing is applied without an explicit ok."""
+    if not REVIEWLIFE:
+        await update.message.reply_text("Living-file review is off (REVIEWLIFE=0).")
+        return
+    args = context.args or []
+    queue = _load_life_review()
+    if not args:
+        if not queue:
+            await update.message.reply_text("Nothing pending.")
+            return
+        lines = []
+        for i, item in enumerate(queue):
+            lines.append(f"{i+1}. [{item.get('file')}] {item.get('line', '')}")
+            src = item.get("source", "")
+            if src:
+                lines.append(f"   src: \"{src[:80]}\"")
+        await update.message.reply_text(
+            f"📝 {len(queue)} pending living-file suggestion(s):\n\n" + "\n".join(lines)
+            + "\n\nUse /reviewlife ok <n> or /reviewlife no <n>")
+        return
+    action = args[0].lower()
+    if action not in ("ok", "no") or len(args) < 2 or not args[1].isdigit():
+        await update.message.reply_text("Usage: /reviewlife [ok|no] <number>")
+        return
+    idx = int(args[1]) - 1
+    if not (0 <= idx < len(queue)):
+        await update.message.reply_text("No review item at that number.")
+        return
+    item = queue.pop(idx)
+    _save_life_review(queue)
+    target = item.get("file")
+    line = item.get("line", "")
+    if action == "ok":
+        entry = _LIVING_FILES.get(target)
+        if entry is None:
+            await update.message.reply_text(f"✗ Unknown target file: {target}")
+            return
+        path, cache = entry
+        if _append_life_line(path, cache, line):
+            print(f"[reviewlife] appended to {target}: {line}")
+            await update.message.reply_text(f"✓ Added to {target}: {line}")
+        else:
+            print(f"[reviewlife] dropped empty line for {target}")
+            await update.message.reply_text("⚠ Nothing to add — the line was empty.")
+    else:
+        print(f"[reviewlife] dropped [{target}]: {line}")
+        await update.message.reply_text(f"✗ Dropped: {line}")
 
 
 async def recall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17057,6 +17237,7 @@ _BASE_COMMANDS = [
     BotCommand("editmem", "Edit a memory note by number"),
     BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
+    BotCommand("reviewlife", "Review nightly-suggested living-file edits"),
     BotCommand("dupefacts", "Diagnostic: flag near-duplicate facts (reports only, no merge)"),
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
@@ -17328,6 +17509,7 @@ def main():
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
+    app.add_handler(CommandHandler("reviewlife", reviewlife_cmd))
     app.add_handler(CommandHandler("dupefacts", dupefacts_cmd))
     app.add_handler(CommandHandler("selfimage", selfimage_cmd))
     app.add_handler(CommandHandler("reflect", reflect_now))
