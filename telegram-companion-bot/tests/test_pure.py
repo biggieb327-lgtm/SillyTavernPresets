@@ -7866,6 +7866,7 @@ class TestEveryBooleanFlagDefault:
         "NOTE_GROUNDED": True,
         "NOTE_RECURRING": True,
         "ONTHISDAY_ENABLED": True,
+        "OP_EVENTS": True,
         # The one instance-dependent default: `not IS_NAMED_INSTANCE`, and the fixture
         # instance IS named, so False is the shipped default here. Nothing pinned this
         # before v2026-08-12.2 — it was hand-rolled, so the table never saw it.
