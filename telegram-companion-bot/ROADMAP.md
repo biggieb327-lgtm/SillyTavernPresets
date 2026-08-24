@@ -1349,9 +1349,17 @@ per-message LLM side calls) with no case strong enough to argue an exception.
      search hint when the stash is empty/stale. Removes the live web search from the ~25%
      of proactives that use ambient color, for one off-loop RSS fetch/night. See CHANGELOG
      v2026-08-24.7.
-  3. **Selfie-scene pre-selection** — `PROACTIVE_SELFIE_CHANCE` picks a scene at send
-     time; candidate scenes could be pre-composed nightly (pairs with `_recent_selfie_hints`
-     dedup).
+  3. ~~Selfie-scene pre-selection~~ — **checked, not applicable (2026-08-24).** The premise
+     that a scene is "picked at send time" does not hold in the code. `send_proactive`'s
+     selfie branch only appends a static `PROACTIVE_SELFIE_HINT` telling the model to include
+     a `[selfie:]` tag in the reply it already generates — no scene selection, no call. Scene
+     composition lives in `build_selfie_prompt` (bot.py:7482) and is pure local `random.choice`
+     sampling from the `SELFIE_*` pools plus live weather/mood/wardrobe filtering and
+     `_recent_selfie_hints` dedup — no LLM call, microseconds of CPU, nothing to move off-loop.
+     The one expensive step, `generate_selfie_image`, is inherently live: pre-generating a
+     selfie the night before would freeze it to stale weather/outfit, reintroducing the
+     frozen-snapshot contradiction v2026-08-01.7 removed. So there is no sleep-time-compute
+     win here; recorded closed rather than left open.
   4. **`/reviewlife` nightly edits** (5.9, same shape, sourced independently) — the living
      files (`life.txt`, notes) get their nightly-suggested edits computed here.
   - Not on the list (deliberately live): anything that depends on the *current* inbound
