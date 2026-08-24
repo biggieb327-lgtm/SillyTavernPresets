@@ -1325,7 +1325,34 @@ per-message LLM side calls) with no case strong enough to argue an exception.
   before/after prompt capture (matching 2.4's methodology) proves the reorder is
   behavior-identical and `cache_read_input_tokens` moves off zero.
 
-### 6.2 Deepen `nightly_maintenance` as deliberate sleep-time compute — S
+### 6.2 ~~Deepen `nightly_maintenance` as deliberate sleep-time compute~~ ✅ (first slice shipped v2026-08-24.6, `NIGHTLY_PREDRAFT`)
+- **Shipped:** the nightly `reflection_job` now pre-drafts the day's proactive hooks
+  (`_predraft_proactive_hooks` → persisted `predrafted_hooks` buffer, sized by
+  `NIGHTLY_PREDRAFT_COUNT`, default 3 = the default daily nudge budget). `send_proactive`
+  consumes a prepared hook via `_pop_predrafted_hook` and only pays the live
+  `_generate_proactive_hook` call when the buffer is empty — so hook generation moves off
+  the live proactive tick into the idle nightly window, with byte-identical fallback
+  whenever no pre-draft exists. No new per-message reply-path call (`bot-code-invariants`
+  #3 not implicated — these are nightly, off-loop). **Not** a call-count reduction, though:
+  a `/code-review` pass corrected that first-draft claim — the nightly count is fixed while
+  proactive sends are heavily gated, so on a low-activity day the surplus cheap calls go
+  unused (net-neutral on active days, a small increase on quiet ones). Kill switch
+  `NIGHTLY_PREDRAFT` (default on). See CHANGELOG v2026-08-24.6.
+- **"What nightly consolidation can absorb" list** (the item's standing deliverable — the
+  set of live-path work that can move to the nightly job with no new live call; extend
+  as slices ship):
+  1. ✅ **Proactive-hook pre-draft** — shipped v2026-08-24.6 (above).
+  2. Proactive **ambient-detail refresh** — the `PROACTIVE_AMBIENT_HINT` search
+     (`SEARCH_ENABLED`, 25% of proactives) fetches city news live inside the reply; a
+     nightly pass could stash a small ambient-detail digest the hook draws on instead.
+  3. **Selfie-scene pre-selection** — `PROACTIVE_SELFIE_CHANCE` picks a scene at send
+     time; candidate scenes could be pre-composed nightly (pairs with `_recent_selfie_hints`
+     dedup).
+  4. **`/reviewlife` nightly edits** (5.9, same shape, sourced independently) — the living
+     files (`life.txt`, notes) get their nightly-suggested edits computed here.
+  - Not on the list (deliberately live): anything that depends on the *current* inbound
+    message (safety assessment, reply advisor 6.3, the reply itself) — those cannot be
+    precomputed the night before.
 - **Evidence:** "Sleep-time compute" (Letta, 2025) names a pattern this repo already
   half-built without naming it: agents that consolidate memory and pre-compute context
   during idle time instead of only at query time, reported at up to 18% accuracy gains
@@ -1437,7 +1464,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.11 per-instance systemd sandbox~~ | ✅ **Shipped 2026-08-24** — one-bot canary and explicit promotion of a root-owned sandbox drop-in; narrow writable paths and a release-independent rollback command. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
-| **Someday** | 6.1 prompt-caching verification, 6.2 nightly-consolidation extension | Not scheduled — 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. 6.2 has no blocking dependency. |
+| **Someday** | 6.1 prompt-caching verification, ~~6.2 nightly-consolidation extension~~ | 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. **6.2's first slice shipped v2026-08-24.6** (proactive-hook pre-draft, `NIGHTLY_PREDRAFT`) with a standing "what nightly can absorb" list for further slices. |
 | **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,

@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.5"
+BOT_VERSION = "2026-08-24.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -3704,6 +3704,7 @@ current_vibe = {}   # chat_id -> {"name": str, "expires_at": float|None}
 vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
+predrafted_hooks = {}  # chat_id -> [str]; nightly-prepared proactive hooks, consumed at send time (ROADMAP 6.2)
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
 quiet_windows = {}  # chat_id -> [{"dow": int (0=Mon), "start": int (minutes), "end": int (minutes)}]
@@ -3804,6 +3805,8 @@ def load_state():
         user_energy[int(cid)] = ue
     for cid, ud in data.get("unsent_drafts", {}).items():
         unsent_drafts[int(cid)] = ud
+    for cid, ph in data.get("predrafted_hooks", {}).items():
+        predrafted_hooks[int(cid)] = ph
     for cid, nb in data.get("nudge_budget", {}).items():
         nudge_budget[int(cid)] = nb
     for cid, qt in data.get("quiet_until", {}).items():
@@ -3899,6 +3902,7 @@ def _serialize_state() -> str:
         "vent_mode": {str(k): v for k, v in vent_mode.items()},
         "user_energy": {str(k): v for k, v in user_energy.items()},
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
+        "predrafted_hooks": {str(k): v for k, v in predrafted_hooks.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "quiet_until": {str(k): v for k, v in quiet_until.items()},
         "quiet_windows": {str(k): v for k, v in quiet_windows.items()},
@@ -12453,6 +12457,21 @@ _recent_selfie_hints: dict = {}  # chat_id -> list of recent scene descriptions
 PROACTIVE_HOOK_DEDUP_SIZE = _env_int("PROACTIVE_HOOK_DEDUP_SIZE", "8")
 _recent_proactive_hooks: dict = {}  # chat_id -> list of recent hook sentences
 
+# Sleep-time compute (ROADMAP 6.2): pre-draft the day's proactive hooks during the nightly
+# reflection so a heartbeat tick consumes a prepared hook instead of generating one cold at
+# send time. These are nightly, off-loop MOOD_MODEL calls, so they do NOT implicate
+# bot-code-invariants #3 (whose concern is per-message reply-path latency and the ~17k-token
+# reply prompt) — but they are speculative: the nightly count is fixed while the heartbeat
+# is heavily gated (activity, quiet hours, /away, nudge budget, random skip), so on a
+# low-activity day fewer proactives fire than were pre-drafted and the surplus cheap calls
+# go unused. So this is not a call-count reduction; it moves hook generation off the live
+# proactive tick and trades a bounded number of cheap off-loop calls for it (net-neutral on
+# active days, a small increase on quiet ones). Default on; NIGHTLY_PREDRAFT=0 falls back to
+# cold generation at send time (byte-identical to the pre-fix path). NIGHTLY_PREDRAFT_COUNT
+# sizes the buffer to the default daily nudge budget.
+NIGHTLY_PREDRAFT = _env_bool("NIGHTLY_PREDRAFT", True)
+NIGHTLY_PREDRAFT_COUNT = _env_int("NIGHTLY_PREDRAFT_COUNT", "3")
+
 # Question memory — tracks questions the bot has asked recently; avoids repeating them.
 QUESTION_MEMORY_SIZE = _env_int("QUESTION_MEMORY_SIZE", "8")
 _recent_questions: dict = {}  # chat_id -> list of recent questions
@@ -12596,10 +12615,29 @@ def _generate_proactive_hook(chat_id: int, uname: str) -> str:
         return ""
 
 
+def _pop_predrafted_hook(chat_id: int) -> str | None:
+    """Return and remove the oldest nightly pre-drafted proactive hook, or None when
+    pre-drafting is off or the buffer is empty (send_proactive then generates cold).
+    Event-loop only — it calls save_state, which worker threads must never do (rule 6)."""
+    if not NIGHTLY_PREDRAFT:
+        return None
+    buf = predrafted_hooks.get(chat_id) or []
+    if not buf:
+        return None
+    hook = buf.pop(0)
+    predrafted_hooks[chat_id] = buf
+    save_state()
+    return hook
+
+
 async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     uname = user_names.get(chat_id, "you")
     trigger = PROACTIVE_INSTRUCTION.format(name=NAME, user=uname)
-    hook = await asyncio.to_thread(_generate_proactive_hook, chat_id, uname)
+    # Prefer a hook pre-drafted by the nightly reflection (ROADMAP 6.2); only pay the
+    # model call live when none is prepared, preserving the pre-fix behavior exactly.
+    hook = _pop_predrafted_hook(chat_id)
+    if not hook:
+        hook = await asyncio.to_thread(_generate_proactive_hook, chat_id, uname)
     if hook:
         trigger = trigger[:-1] + f" Something specific on her mind right now: {hook}]"
     # Inject the last exchange so the model can actually reference what was last discussed,
@@ -13485,6 +13523,30 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
     _overnight_mood_reset(owner)
+    try:
+        await _predraft_proactive_hooks(owner)
+    except Exception as e:
+        log.warning("[predraft] error: %s", e)
+
+
+async def _predraft_proactive_hooks(chat_id: int):
+    """Sleep-time compute (ROADMAP 6.2): generate the day's proactive hooks during the
+    nightly reflection so the heartbeat tick consumes a prepared one instead of paying the
+    model call live. These are nightly, off-loop MOOD_MODEL calls (not per-message reply-
+    path calls, so bot-code-invariants #3 is not implicated); the generation is speculative,
+    so on a low-activity day some pre-drafts go unused — the goal is moving work off the
+    live tick, not cutting total call count. save_state runs here on the event loop; only
+    the blocking generation is offloaded to a thread (rule 6)."""
+    if not NIGHTLY_PREDRAFT:
+        return
+    uname = user_names.get(chat_id, "you")
+    hooks = []
+    for _ in range(max(0, NIGHTLY_PREDRAFT_COUNT)):
+        h = await asyncio.to_thread(_generate_proactive_hook, chat_id, uname)
+        if h:
+            hooks.append(h)
+    predrafted_hooks[chat_id] = hooks
+    save_state()
 
 
 async def reflect_now(update: Update, context: ContextTypes.DEFAULT_TYPE):

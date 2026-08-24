@@ -8009,6 +8009,7 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MOOD_AUTO": True,
+        "NIGHTLY_PREDRAFT": True,
         "NOTE_GROUNDED": True,
         "NOTE_RECURRING": True,
         "ONTHISDAY_ENABLED": True,
@@ -11990,3 +11991,71 @@ class TestStructuredOperationEvents:
         assert all(instance in report for instance in instances)
         assert "nanogpt" in report
         assert "50.0%" in report
+
+
+# ── proactive-hook pre-drafting (ROADMAP 6.2, sleep-time compute) ──────────────
+# The nightly reflection pre-drafts hooks; send_proactive consumes them and only
+# generates cold when the buffer is empty. See CHANGELOG v2026-08-24.6.
+class TestPredraftedHooks:
+    def test_pop_returns_none_when_kill_switch_off(self, monkeypatch):
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", False)
+        monkeypatch.setattr(bot, "predrafted_hooks", {7: ["a hook"]})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        assert bot._pop_predrafted_hook(7) is None
+        # left untouched so it survives a later re-enable
+        assert bot.predrafted_hooks[7] == ["a hook"]
+
+    def test_pop_returns_none_when_buffer_absent_or_empty(self, monkeypatch):
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", True)
+        monkeypatch.setattr(bot, "predrafted_hooks", {7: []})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        assert bot._pop_predrafted_hook(7) is None      # empty list
+        assert bot._pop_predrafted_hook(999) is None     # missing key
+
+    def test_pop_is_fifo_and_mutates_buffer(self, monkeypatch):
+        saves = []
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", True)
+        monkeypatch.setattr(bot, "predrafted_hooks", {7: ["first", "second"]})
+        monkeypatch.setattr(bot, "save_state", lambda: saves.append(True))
+        assert bot._pop_predrafted_hook(7) == "first"
+        assert bot.predrafted_hooks[7] == ["second"]
+        assert saves == [True]                            # persisted the consumption
+
+    def test_pop_exhaustion_falls_through_to_none(self, monkeypatch):
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", True)
+        monkeypatch.setattr(bot, "predrafted_hooks", {7: ["only"]})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        assert bot._pop_predrafted_hook(7) == "only"
+        assert bot._pop_predrafted_hook(7) is None        # buffer now empty -> cold fallback
+
+    def test_predraft_populates_buffer_and_skips_empty(self, monkeypatch):
+        gen = iter(["hook one", "", "hook three"])
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", True)
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT_COUNT", 3)
+        monkeypatch.setattr(bot, "predrafted_hooks", {})
+        monkeypatch.setattr(bot, "user_names", {7: "sam"})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        monkeypatch.setattr(bot, "_generate_proactive_hook", lambda cid, uname: next(gen))
+        asyncio.run(bot._predraft_proactive_hooks(7))
+        assert bot.predrafted_hooks[7] == ["hook one", "hook three"]  # empty one dropped
+
+    def test_predraft_replaces_not_appends_each_night(self, monkeypatch):
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", True)
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT_COUNT", 1)
+        monkeypatch.setattr(bot, "predrafted_hooks", {7: ["stale from yesterday"]})
+        monkeypatch.setattr(bot, "user_names", {})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        monkeypatch.setattr(bot, "_generate_proactive_hook", lambda cid, uname: "fresh")
+        asyncio.run(bot._predraft_proactive_hooks(7))
+        assert bot.predrafted_hooks[7] == ["fresh"]        # yesterday's not carried over
+
+    def test_predraft_is_noop_when_kill_switch_off(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(bot, "NIGHTLY_PREDRAFT", False)
+        monkeypatch.setattr(bot, "predrafted_hooks", {})
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        monkeypatch.setattr(bot, "_generate_proactive_hook",
+                            lambda cid, uname: called.append(1) or "x")
+        asyncio.run(bot._predraft_proactive_hooks(7))
+        assert called == []                                # no generation attempted
+        assert bot.predrafted_hooks == {}

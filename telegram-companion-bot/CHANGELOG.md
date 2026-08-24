@@ -7,6 +7,48 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.6 — pre-draft proactive hooks in the nightly reflection (ROADMAP 6.2)
+
+**Root cause: the proactive "what's on her mind" hook was generated cold on the live
+heartbeat tick, when it depends almost entirely on context that only changes once a day.**
+`_generate_proactive_hook` makes a `MOOD_MODEL` call every time `send_proactive` fires,
+built from the life arc, weather, user notes, and recent life events — all of which the
+nightly reflection already computes. Paying that call at send time is generating work on
+the live path that could have been prepared during idle time. This is the "sleep-time
+compute" pattern (Letta, 2025): move consolidation and context pre-computation into the
+already-running nightly job instead of doing it at query time. `nightly_maintenance`
+(reflection + long-term promotion + memory audit + overnight mood reset) was already this
+pattern without being treated as a deliberate place to absorb more of it.
+
+The nightly `reflection_job` now pre-drafts the day's proactive hooks
+(`_predraft_proactive_hooks`, default `NIGHTLY_PREDRAFT_COUNT=3` to match the default daily
+nudge budget) into a persisted per-chat buffer. `send_proactive` consumes a prepared hook
+via `_pop_predrafted_hook` and only falls back to a live `_generate_proactive_hook` call
+when the buffer is empty — an unset nightly run, a fourth send in one day, or the kill
+switch off — so behavior is byte-identical to the old path whenever no pre-draft exists.
+
+**What this does and does not save (a `/code-review` finding corrected a first-draft
+overclaim).** The old path generated a hook only inside `send_proactive`, so it made
+exactly as many hook calls as proactives actually sent. The nightly job generates a fixed
+`NIGHTLY_PREDRAFT_COUNT` regardless, and the heartbeat is heavily gated (recent activity,
+quiet hours, `/away`, nudge budget, a random mood skip), so a typical day sends fewer
+proactives than were pre-drafted. This is therefore **not** a reduction in total model
+calls — on a low-activity day it is a small *increase* in cheap off-loop MOOD_MODEL calls;
+on an active day it is net-neutral. The real change is that hook generation moves **off the
+live proactive tick into the idle nightly window** (speculative precompute, the sleep-time
+pattern). It does not add a per-message reply-path call, so `bot-code-invariants` #3 —
+whose concern is reply latency and re-paying the ~17k-token reply prompt — is not
+implicated; these are nightly, off-loop, small-prompt calls.
+
+Invariant care: `save_state` is called only from the event loop (`_pop_predrafted_hook`
+runs inside the `send_proactive` coroutine; `_predraft_proactive_hooks` awaits the blocking
+generation in a thread but serializes on the loop), never from a worker thread (rule 6).
+Kill switch `NIGHTLY_PREDRAFT` (default on, `0` disables without a redeploy). Tradeoff
+recorded: a pre-drafted hook reflects context captured at nightly time, so an ambient
+detail (e.g. weather) can be a few hours stale by the time it is sent — acceptable because
+`send_proactive` still injects the fresh last exchange, schedule, and date notes around it,
+and a slightly-stale passing thought reads as natural.
+
 ## v2026-08-24.5 — declarative maps and traffic command registry
 
 **Root cause: the nine map-related command names, callbacks, descriptions, and gates
