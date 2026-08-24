@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 # Stop hook — the "no fake done" gate. Blocks ending the turn when bot.py was modified
 # but the repo's own shipping rules (BOT_VERSION bump, CHANGELOG entry, a compile check
-# in the evidence log) haven't been met. Fires at most once per stop (stop_hook_active guard).
+# in the evidence log) haven't been met. Re-verifies every stop; stands aside only after
+# MAX_BLOCKS consecutive blocks in a session (the bound that prevents an infinite loop).
 set -u
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+mkdir -p .claude/.runtime
+MAX_BLOCKS=3
 
-# Never block twice in a row — avoids infinite stop loops.
-active=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("stop_hook_active", False))' 2>/dev/null) || exit 0
-[ "$active" = "True" ] && exit 0
+# Bounded per-session block counter, NOT a blanket stop_hook_active bypass. The old guard
+# exited 0 on the SECOND consecutive stop, so a bot.py edit made during a forced
+# continuation shipped ungated (2026-08-24 audit H1). Re-verify every stop; only stand
+# aside after MAX_BLOCKS consecutive blocks — that bound, not a one-shot skip, is what
+# prevents an infinite stop loop (the pattern eval-gate.sh uses and documents). Counter in
+# .claude/.runtime (gitignored), keyed by session id like eval-gate.sh and budget-governor.
+sid=$(python3 -c 'import json,sys; print((json.load(sys.stdin).get("session_id") or "unknown")[:16])' 2>/dev/null) || exit 0
+cnt=".claude/.runtime/delivery-gate-blocks-${sid}.count"
 
 BOT=telegram-companion-bot/bot.py
 CHANGELOG=telegram-companion-bot/CHANGELOG.md
 
-# Only gate when bot.py differs from HEAD (staged or unstaged).
-git diff --quiet HEAD -- "$BOT" 2>/dev/null && exit 0
+# Only gate when bot.py differs from HEAD (staged or unstaged). Compliant or unmodified
+# resets the counter, so a later fresh non-compliant edit gets the full MAX_BLOCKS again.
+if git diff --quiet HEAD -- "$BOT" 2>/dev/null; then
+  rm -f "$cnt"
+  exit 0
+fi
 
 missing=""
 
@@ -65,7 +77,14 @@ else
 fi
 
 if [ -n "$missing" ]; then
-  printf '[delivery-gate] bot.py is modified but the shipping checklist is incomplete:\n%b Complete these (or explicitly tell the user why they do not apply) before finishing.\n' "$missing" >&2
+  n=$(( $(cat "$cnt" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$cnt"
+  if [ "$n" -gt "$MAX_BLOCKS" ]; then
+    printf '[delivery-gate] bot.py is STILL modified without the shipping checklist after %d blocks — standing aside so the turn can end. This is the loop bound, NOT approval: the checklist below is unmet and shipping it now is yours to justify.\n%b' "$MAX_BLOCKS" "$missing" >&2
+    rm -f "$cnt"
+    exit 0
+  fi
+  printf '[delivery-gate] bot.py is modified but the shipping checklist is incomplete (block %d of %d):\n%b Complete these (or explicitly tell the user why they do not apply) before finishing.\n' "$n" "$MAX_BLOCKS" "$missing" >&2
   exit 2
 fi
+rm -f "$cnt"
 exit 0
