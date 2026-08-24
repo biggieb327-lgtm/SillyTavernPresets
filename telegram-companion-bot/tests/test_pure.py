@@ -5546,6 +5546,9 @@ class TestCommandMenuMirrorsHandlers:
         registered_specs = {
             spec.name for spec in bot._health_command_specs(True) if spec.enabled
         }
+        registered_specs.update(
+            spec.name for spec in bot._maps_command_specs(True) if spec.enabled
+        )
         return direct | registered_specs
 
     def test_every_registered_command_is_in_the_full_menu(self):
@@ -5562,7 +5565,7 @@ class TestCommandMenuMirrorsHandlers:
         assert not dead, f"in the menu but no CommandHandler registers it: {sorted(dead)}"
 
 
-class TestHealthRegistries:
+class TestCommandAndJobRegistries:
     class _App:
         def __init__(self):
             self.handlers = []
@@ -5599,6 +5602,48 @@ class TestHealthRegistries:
 
         assert app.handlers == []
         assert bot._command_menu_entries(specs) == []
+
+    def test_map_specs_drive_handlers_callbacks_and_menu(self):
+        specs = bot._maps_command_specs(True)
+        app = self._App()
+        bot._register_command_specs(app, specs)
+
+        registered = {name for handler in app.handlers for name in handler.commands}
+        menu = {item.command for item in bot._command_menu_entries(specs)}
+        expected = {
+            "route", "nearby", "place", "food", "crime", "dispatch", "fire",
+            "traffic", "incidents",
+        }
+        assert registered == menu == expected
+        # This test owns registry wiring, not each handler's Telegram behavior. Compare
+        # names so source-coverage tooling does not mistake a reference for a call.
+        assert {spec.name: spec.callback.__name__ for spec in specs} == {
+            "route": "route_cmd",
+            "nearby": "nearby_cmd",
+            "place": "place_cmd",
+            "food": "food_cmd",
+            "crime": "crime_cmd",
+            "dispatch": "dispatch_cmd",
+            "fire": "fire_cmd",
+            "traffic": "traffic_cmd",
+            "incidents": "incidents_cmd",
+        }
+
+    def test_map_specs_preserve_traffic_capability_gate(self):
+        specs = bot._maps_command_specs(False)
+        app = self._App()
+        bot._register_command_specs(app, specs)
+
+        names = {name for handler in app.handlers for name in handler.commands}
+        assert names == {"route", "nearby", "place", "food", "crime", "dispatch", "fire"}
+        assert {item.command for item in bot._command_menu_entries(specs)} == names
+
+    def test_map_specs_are_the_source_for_main_and_menu(self):
+        import inspect
+
+        assert "_maps_command_specs(traffic_enabled)" in inspect.getsource(
+            bot._build_command_menu)
+        assert "_maps_command_specs(bool(WSDOT_API_KEY))" in inspect.getsource(bot.main)
 
     def test_health_job_specs_preserve_each_schedule_shape(self, monkeypatch):
         monkeypatch.setattr(bot, "GARMIN_EMAIL", "owner@example.test")

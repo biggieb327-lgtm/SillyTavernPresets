@@ -279,7 +279,7 @@ the same "ride the next functional release" reasoning as 2.4 above, which worked
 comment should name instances at all rather than say "per-instance, see each `.env`" —
 a list that cannot go stale beats a list that is correct today.
 
-### 2.6 ~~Declarative command and job registries~~ ✅ (first slice shipped v2026-08-24.2)
+### 2.6 ~~Declarative command and job registries~~ ✅ (second slice shipped v2026-08-24.5)
 
 - **Evidence:** command handler registration, Telegram autocomplete entries, capability
   gates, and scheduled jobs were expressed in separate branches. The existing parity
@@ -290,9 +290,13 @@ a list that cannot go stale beats a list that is correct today.
   handlers and menu entries; its job records cover multiple daily pulls, startup refresh,
   stress and Body Battery polling, and the resting-HR daily check. Tests preserve parity
   across the legacy and registry paths and verify every schedule shape.
-- **Boundary:** this is an incremental pattern, not a whole-file rewrite. Migrate another
-  cohesive family only when it is already being changed; feature and prompt registries
-  remain deferred until this command/job pattern proves useful in maintenance.
+- **Second slice:** the nine maps, places, local-alert, and WSDOT commands now use the
+  same records for callbacks, descriptions, registration, and menu visibility. It adds
+  the mixed-gate case: WSDOT handlers follow capability while their menu entries follow
+  the live `TRAFFIC_ENABLED` switch.
+- **Boundary:** this stays incremental, not a whole-file rewrite. Feature and prompt
+  registries remain separate changes; the rest of the direct command registrations move
+  only as cohesive families, with behavior pinned before each migration.
 
 ---
 
