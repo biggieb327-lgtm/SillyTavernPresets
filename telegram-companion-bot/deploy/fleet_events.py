@@ -3,6 +3,7 @@
 
 The report is intentionally a filter: collection and retention stay with journald.
 See OPS_MANUAL.md for the bounded whole-fleet query.
+The command exits nonzero when no matching structured events are present.
 """
 
 import argparse
