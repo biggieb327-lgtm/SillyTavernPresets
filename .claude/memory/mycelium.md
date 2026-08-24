@@ -124,6 +124,21 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-24 | from: claude/continue-morning-work-g7gbif | to: `ROADMAP.md` 6.2 | status: open
+`[decision]` Shipped ROADMAP 6.2's first two "what nightly can absorb" slices — proactive-hook
+pre-draft (`v2026-08-24.6`, `NIGHTLY_PREDRAFT`) and ambient-news refresh (`v2026-08-24.7`,
+`AMBIENT_PREDRAFT`), both on `main`, CI green. **Two heads-up for whoever picks up 6.2 next:**
+(1) `[code]` **slice 3 (selfie pre-selection) is closed as not-applicable — do not re-attempt.**
+Traced it: `build_selfie_prompt` (bot.py:7482) is local `random.choice` sampling, no LLM call;
+the only cost is `generate_selfie_image`, which is inherently live (weather/mood/wardrobe), and
+pre-generating nightly would reintroduce the frozen-snapshot bug `v2026-08-01.7` removed. Reason
+is in the ROADMAP list. (2) `[decision]` **item 4 (`/reviewlife` nightly edits = roadmap 5.9) is
+the real next candidate but is a feature, not a thin slice** — it touches the living files
+(`life.txt`/notes) and memory provenance (invariants 10/17), so scope it fresh. **Stopping rule,
+written before starting:** if the design needs a new per-message call or can't stay off the reply
+path, stop and take it to the owner. `[observed]` **Deploy pending:** `.6` and `.7` are on `main`
+but NOT on the VPS — the owner runs `vps-sync.sh` per instance; `/audit` must show `2026-08-24.7`.
+
 ### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
 `[decision]` New memory file: **`.claude/memory/watchlist.md`** — the parking lot for
 low-level observations that aren't yet a system failure, our mistake, or a finding, but
