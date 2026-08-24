@@ -2,8 +2,19 @@
 
 A research pass on how to improve the operating machinery a session runs with: the
 agent contracts, the skills library, the hooks, and the evals. Prompted by "let's do
-more research on how to improve your functions." **Research only — nothing here has
-been implemented.** Each finding is grounded in an external best-practice source (URL)
+more research on how to improve your functions."
+
+**Status 2026-08-24 — implemented in four sprints (commits on `claude/reviewer-agent-prompt-gamqk3`):**
+Sprint 1 (S1, S2, S4, S5, A1) phone-era skill drift; Sprint 2 (E1) eval coverage
+inversion; Sprint 3 (S3, H2) skill body-drift check + Stop-guard behavioral fixtures;
+Sprint 4 (H1) delivery-gate second-stop bypass. Deliberately NOT done: A2 (`memory:`)
+and A3 (`isolation: worktree`) — recommended against / situational. Open follow-up
+surfaced during the work: `bot-code-invariants` says "six bots" and treats phone
+platform rules (12–13) as live — the fleet is seven since 2026-07-29 and those rules
+need a VPS review; left untouched because that skill governs every bot.py diff and the
+change is the owner's call, not drift to silently rewrite.
+
+Originally research only. Each finding is grounded in an external best-practice source (URL)
 or a concrete repo location (`file:line`), and the load-bearing claims were verified by
 reading the cited files, not taken on a subagent's word.
 
