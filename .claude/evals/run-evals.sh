@@ -1517,6 +1517,46 @@ PYEOF
   fi
 fi
 
+# --- mycelium-startup-routing -----------------------------------------------------------
+# 2026-08-24: Mycelium was wired into Claude Code's SessionStart hook, but the Codex
+# entrypoint only described the repo's context system in general. A new Codex session
+# could therefore start non-trivial work without reading the open cross-session messages.
+# Pin both always-loaded instruction files: CLAUDE.md owns the all-harness rule, while
+# AGENTS.md tells harnesses without the Claude hook (including Codex) to inspect directly.
+if ! myc_route_err=$(python3 - AGENTS.md CLAUDE.md 2>&1 <<'PYEOF'
+import re, sys
+from pathlib import Path
+
+requirements = {
+    "AGENTS.md": (
+        r"mycelium\.md` — every session:.*status: open.*before non-trivial work.*including Codex",
+        "put .claude/memory/mycelium.md in the every-session read order, including the "
+        "direct Codex fallback",
+    ),
+    "CLAUDE.md": (
+        r"Session continuity — every harness:.*before non-trivial work.*mycelium\.md.*"
+        r"status: open.*Codex.*inspect the file directly",
+        "restore the all-harness Mycelium rule and the direct Codex fallback under "
+        "CLAUDE.md's Operating rule",
+    ),
+}
+problems = []
+for path in sys.argv[1:]:
+    text = " ".join(Path(path).read_text(encoding="utf-8").split())
+    pattern, remedy = requirements[path]
+    if not re.search(pattern, text):
+        problems.append(f"{path}: {remedy}")
+print("; ".join(problems))
+PYEOF
+); then
+  myc_route_err="the parser itself exited non-zero: ${myc_route_err:-(no output)} — a startup check that dies green leaves new sessions uninformed"
+fi
+if [ -z "$myc_route_err" ]; then
+  ok "mycelium-startup-routing: Claude and Codex entrypoints require reading open messages before non-trivial work"
+else
+  bad "mycelium-startup-routing" "$myc_route_err"
+fi
+
 # --- mechanism-recurrence-surfaced ------------------------------------------------------
 # The learning layer graduates a repeated mistake into a guard (constraints.md rule 4), but
 # for months nothing asked the next question — did the mistake keep happening AFTER the guard
