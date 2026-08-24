@@ -133,6 +133,26 @@ def main() -> int:
             problems.append(f"{script_name} bypasses the shared release prepare/select path")
         if "release_migrate_writable_state" not in script:
             problems.append(f"{script_name} does not isolate writable state from release pointers")
+
+    # A legacy-package migration guard must test the NEW lock as well as the OLD venv.
+    # Otherwise declaring the dependency cannot satisfy the guard: every retry keeps
+    # failing merely because the legacy environment still contains the package.
+    legacy_imports = set(re.findall(
+        r"-c 'import ([A-Za-z_][A-Za-z0-9_]*)'",
+        vps_sync + "\n" + installer,
+    ))
+    undeclared_legacy = sorted(_normalized(name) for name in legacy_imports
+                               if _normalized(name) not in direct_names)
+    if undeclared_legacy:
+        problems.append(
+            "legacy packages probed by deploy but absent from direct requirements: "
+            + ", ".join(undeclared_legacy)
+        )
+    if "garminconnect" in legacy_imports:
+        if "grep -q '^garminconnect==' \"$SRC/requirements.lock\"" not in vps_sync:
+            problems.append("vps-sync Garmin migration guard never checks the new lock")
+        if "grep -q '^garminconnect==' \"$INSTALL_DIR/requirements.lock\"" not in installer:
+            problems.append("install-vps Garmin migration guard never checks the new lock")
     if 'MODE=rollback' not in vps_sync or 'release_selector_rollback "$BASE" "$INST"' not in vps_sync:
         problems.append("vps-sync has no per-instance immutable-pointer rollback mode")
     if 'MODE=promote' not in vps_sync or 'release_select "$BASE" "$name" "$CANARY_RELEASE_DIR"' not in vps_sync:

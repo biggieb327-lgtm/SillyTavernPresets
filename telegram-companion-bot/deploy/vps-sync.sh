@@ -140,7 +140,8 @@ need requirements.lock; need bot.py; need acoustic_ears.py
 # environment without being declared and locked. Garmin is the only such package the
 # repo has documented. Refuse the first migration instead of silently disabling it.
 if [ ! -L "$BASE/current" ] && [ -x "$BASE/venv/bin/python" ] \
-   && "$BASE/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1; then
+   && "$BASE/venv/bin/python" -c 'import garminconnect' >/dev/null 2>&1 \
+   && ! grep -q '^garminconnect==' "$SRC/requirements.lock"; then
   echo "[vps-sync] FATAL: legacy venv contains garminconnect, but requirements.lock does not." >&2
   echo "[vps-sync] Add it to requirements.txt, regenerate requirements.lock, and redeploy." >&2
   exit 1
