@@ -7,6 +7,33 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## 2026-08-25 — reshape the STEPPED THINKING preset block (content only, all seven bots)
+
+Follow-up to v2026-08-25.1 (the guard fix). The `[STEPPED THINKING]` block is the
+source of the reasoning-leak class — a thinking model that externalizes it emits a
+numbered, labeled, option-listing scaffold as the reply. The character-reviewer agent
+assessed the block and recommended reshaping (not removing) it: its concrete substance
+(the epistemic constraints, the anti-slop targets, the character-agency framing) already
+lives in `preset-core.txt`, which every instance loads alongside it, so the numbered
+steps were largely duplicating guidance the assembled prompt already carried. What is
+unique and kept: the feel → want → know → weight-the-scene → write-past-the-first-reply
+priming.
+
+The block was rewritten as running prose with no numbered steps, no "Option 1/2/3"
+enumeration, and the section header renamed `[STEPPED THINKING]` → `[BEFORE WRITING]` to
+drop the "steps" cue — the shapes a model most readily echoes verbatim. **Edited in both
+places the block lived:** `preset-stepped.txt` (the live layered module every instance
+loads via `PRESET_FILES`) and `preset.txt` (the fallback copy). The filename
+`preset-stepped.txt` is unchanged — `PRESET_FILES` depends on it.
+
+This is harm-reduction, not a fix: it makes the recognizable labeled-scaffold leak less
+likely, but reasoning leaks happen regardless of form, so `REASONING_LEAK_GUARD` (widened
+in v2026-08-25.1) stays the primary backstop. Voice-reliability tradeoff — an enumerated
+checklist may drive more consistent compliance than prose — was surfaced to and accepted
+by the owner; it can't be A/B'd here, so watch reply quality on the fleet after deploy.
+No `BOT_VERSION` bump (content-only; the delivery gate does not fire). Deploy: owner runs
+`vps-sync.sh` per instance, which pulls each instance's `PRESET_FILES` layers.
+
 ## v2026-08-25.1 — reasoning-leak guard catches the STEPPED THINKING scaffold
 
 **Root cause: the reasoning-leak guard's markers were fitted to priya's 2026-08-03
