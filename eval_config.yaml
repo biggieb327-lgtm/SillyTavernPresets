@@ -1,0 +1,66 @@
+# Evaluation configuration for GLM and Gemma models
+# Using lm-evaluation-harness with API or local models
+
+# Core benchmark tasks
+tasks:
+  - mmlu              # Massive Multitask Language Understanding
+  - gsm8k             # Grade School Math 8K
+  - hellaswag         # Commonsense reasoning
+  - arc_easy          # AI2 Reasoning Challenge (easy)
+  - arc_challenge     # AI2 Reasoning Challenge (challenge)
+  - truthfulqa        # TruthfulQA benchmark
+
+# Model configurations
+models:
+  # GLM-4 (ZhipuAI) - requires API access or local deployment
+  glm-4:
+    type: "local-chat-completions"  # or "hf" for local HF model
+    model_args:
+      model: "ZhipuAI/glm-4-9b-chat"
+      base_url: "http://localhost:8000/v1/chat/completions"
+      num_concurrent: 16
+      max_retries: 3
+      tokenized_requests: false
+    apply_chat_template: true
+    fewshot_as_multiturn: true
+  
+  # Gemma 2 (Google) - publicly available but gated
+  gemma-2-9b:
+    type: "hf"
+    model_args:
+      pretrained: "google/gemma-2-9b-it"
+      dtype: "bfloat16"
+      device_map: "auto"
+    batch_size: "auto"
+  
+  # Gemma 2 2B - smaller, more accessible
+  gemma-2-2b:
+    type: "hf"
+    model_args:
+      pretrained: "google/gemma-2-2b-it"
+      dtype: "bfloat16"
+      device_map: "auto"
+    batch_size: "auto"
+  
+  # Gemma 3 4B - latest, public
+  gemma-3-4b:
+    type: "hf"
+    model_args:
+      pretrained: "google/gemma-3-4b-it"
+      dtype: "bfloat16"
+      device_map: "auto"
+    batch_size: "auto"
+
+# Evaluation settings
+evaluation:
+  limit: null  # Set to small number (e.g., 100) for testing
+  num_fewshot: null  # Use task defaults
+  batch_size: "auto"
+  random_seed: 0
+  numpy_random_seed: 1234
+  torch_random_seed: 1234
+  fewshot_random_seed: 1234
+
+# Output
+output_path: "./eval_results"
+log_samples: true
