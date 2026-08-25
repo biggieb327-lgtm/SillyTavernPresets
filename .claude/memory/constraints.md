@@ -34,7 +34,12 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 7** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1)
+**seen: 8** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1, 2026-08-25 ×1)
+- 2026-08-25 — A final-report deploy block (`/opt/telegram-bots/.repo/.../vps-sync.sh <instance>`)
+  was written with no host named. `host-guard.sh` blocked the turn (seen 7→8) — the guard doing
+  exactly its job. Fixed by prefixing `# host: vps (as root)`. The guard covers only the agent's
+  half (a block that names its host); it stops nothing once the owner pastes, which is the reason
+  the label has to be there.
 Phone tooling (`update-all.sh`, `tmux kill-session`, `pkg`) was run on the VPS, and
 VPS commands (`journalctl`, `sudo`, `/opt/...`) on the phone. Each failure looked like
 a broken tool rather than a wrong machine, and one silently no-op'd mid-cutover.
@@ -238,7 +243,13 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 2** (2026-07-26, 2026-08-21)
+**seen: 3** (2026-07-26, 2026-08-21, 2026-08-25)
+- 2026-08-25 — A final-report line — "5.9 done-when: does a real day produce a good `/reviewlife`
+  suggestion?" — read as a settled claim about what the shipped code produces, when it is an
+  unverified prediction: no live instance has run it. `theory-guard.sh` blocked the turn. The tell
+  is that I had only read/tested the code, never watched it produce a suggestion on a deployed bot
+  — exactly C5's line "reading source tells you what code says; only running it tells you what it
+  produces." Restated as `[hypothesis] … should produce …, unverified until observed`.
 Asserted that `watchdog.sh` was running from cron and that this explained bonnie's
 resurrection. The interval was consistent with it but never confirmed, and the real
 mechanism (watchdog relaunches on a *missing tmux session*, in any mode) made the cron
@@ -1121,6 +1132,18 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-25 — Both releases this session shipped a first-draft changelog claim that overreached
+  the diff, and `/code-review` (repo-change-control step 7) caught both before merge. 5.9: the
+  changelog said "REVIEWLIFE=0 stops the drafting" when the kill switch gated only the *enqueue*
+  — the model was still asked for suggestions every night; fixed by gating the prompt too. 6.1:
+  the `/audit` line showed "N cached, X% of in", but cached tokens are a subset of `tok_in` only
+  for the nested OpenAI usage shape, not the flat `cache_read_input_tokens` one, so the ratio
+  could exceed 100%; dropped the percentage. → **a behavioral sentence in the changelog is a
+  claim about the diff, verify it against the diff — not against what the feature was meant to
+  do.** Same shape as the 2026-08-24 "adds no call / net-neutral" cost overclaim below (now 2nd
+  occurrence). Not minting a constraint: the guard that catches it — running `/code-review` on the
+  diff before merge — already exists and fired both times; the lesson is to read the changelog
+  adversarially *before* review, not to add machinery.
 - 2026-08-24 — Building 5.9 `/reviewlife`, the `repo-change-control` fresh-container venv
   failed twice before it worked, wasting a verify cycle. First: created it with bare
   `python3` (3.11 here) — the repo pins 3.12 and the hashed `requirements.lock` holds only
