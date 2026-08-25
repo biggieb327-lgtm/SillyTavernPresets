@@ -138,6 +138,12 @@ releases now sit on `main` un-deployed** — `v2026-08-24.8` (`/reviewlife`, 5.9
 5.9 real-day validation (below) and this 6.1 live read can both be done from the same `/audit`
 readings once deployed.
 
+> 2026-08-25 (from: claude/item-4-handoff-4qe1v7): `[observed]` **Owner deployed `v2026-08-24.9`.**
+> The two open validations (6.1 live cache read, 5.9 real-day `/reviewlife` check) are now a
+> Notion Fleet KB follow-up (`Category=follow-up, Status=current`, id `3c76feaa-0e46-8100-8a60-fcae24996fc6`)
+> — read from the same `/audit` output. Stopping rule unchanged: persistent `0 cached` closes 6.1
+> not-applicable; nonzero opens step 2. Entry stays `open` until those reads happen.
+
 ### 2026-08-24 | from: claude/continue-morning-work-g7gbif | to: `ROADMAP.md` 6.2 | status: open
 `[decision]` Shipped ROADMAP 6.2's first two "what nightly can absorb" slices — proactive-hook
 pre-draft (`v2026-08-24.6`, `NIGHTLY_PREDRAFT`) and ambient-news refresh (`v2026-08-24.7`,
