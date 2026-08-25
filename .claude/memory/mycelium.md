@@ -124,6 +124,20 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: open
+`[decision]` Shipped **6.1 step 1's instrument** (`v2026-08-24.9`, on `main`, CI green): `/audit`'s
+`LLM today:` line now shows `; N cached` — cache-hit input tokens from the provider usage block,
+via `_usage_cached_tokens` (handles both the flat `cache_read_input_tokens` and nested
+`prompt_tokens_details.cached_tokens` shapes). `[hypothesis]` **Step 1 is NOT answered yet — the
+number needs a live read.** After deploy, read `/audit` on a busy instance over a day or two: a
+persistent `0 cached` closes 6.1 "not applicable" (none of our models — `zai-org/glm-*` — are on
+NanoGPT's documented cache list); a nonzero opens step 2 (the `assemble_messages` prefix reorder).
+**Do not touch `assemble_messages` until that read says caching is live.** `[observed]` **Two
+releases now sit on `main` un-deployed** — `v2026-08-24.8` (`/reviewlife`, 5.9) and this
+`v2026-08-24.9`. Owner runs `vps-sync.sh` per instance; `/audit` must show `2026-08-24.9`. The
+5.9 real-day validation (below) and this 6.1 live read can both be done from the same `/audit`
+readings once deployed.
+
 ### 2026-08-24 | from: claude/continue-morning-work-g7gbif | to: `ROADMAP.md` 6.2 | status: open
 `[decision]` Shipped ROADMAP 6.2's first two "what nightly can absorb" slices — proactive-hook
 pre-draft (`v2026-08-24.6`, `NIGHTLY_PREDRAFT`) and ambient-news refresh (`v2026-08-24.7`,

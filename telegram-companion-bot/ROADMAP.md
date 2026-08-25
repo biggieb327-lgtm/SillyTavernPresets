@@ -1294,7 +1294,16 @@ four adversarial review rounds) already covers the pattern, and the live-collabo
 shape most 2026 frameworks assume runs straight into `bot-code-invariants` #3 (no new
 per-message LLM side calls) with no case strong enough to argue an exception.
 
-### 6.1 Prompt caching on the `assemble_messages` prefix — S (verification), size TBD after
+### 6.1 Prompt caching on the `assemble_messages` prefix — step 1 instrument SHIPPED v2026-08-24.9; awaiting live read
+- **Step 1 instrument shipped (2026-08-24, `v2026-08-24.9`):** `/audit`'s `LLM today:` line
+  now shows `; N cached` (cache-hit input tokens the provider reported), via
+  `_usage_cached_tokens` reading both the flat `cache_read_input_tokens` and nested
+  `prompt_tokens_details.cached_tokens` usage shapes. **Step 1 is not yet answered** — the
+  code that produces the number shipped, but the number itself needs a live read: after this
+  deploys, check `/audit` on a busy instance over a day or two. A persistent `0 cached`
+  across measured calls closes this item "checked, not applicable" (step 3); a nonzero opens
+  step 2 (the `assemble_messages` prefix reorder). Do not touch `assemble_messages` until the
+  live read says caching is active — that is the whole point of gating step 2 on step 1.
 - **Evidence:** NanoGPT (this fleet's provider) documents automatic implicit prompt
   caching — no request changes needed — for "OpenAI and Gemini model families plus
   many open-source provider/model routes," with cache hits reported via
