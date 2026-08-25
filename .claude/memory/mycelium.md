@@ -24,11 +24,13 @@ not standing rules (CLAUDE.md). **Messages.**
 - System failures → `operational-log.md`
 - Your own mistakes → `constraints.md`
 - Standing rules → `CLAUDE.md`
-- Durable findings/decisions → Notion Fleet Knowledge Base
+- A project-changing decision (what won over what, and why) → `.claude/memory/decisions.md`
+- Fast-moving/uncommitted findings → Notion Fleet Knowledge Base
 - Full incident detail → `CHANGELOG.md`
 
 If an entry here keeps getting copied forward because it matters permanently,
-promote it: CLAUDE.md for rules, Notion for findings, a skill for procedures.
+promote it: CLAUDE.md for rules, `decisions.md` for a settled choice and its rejected
+alternatives, Notion for findings, a skill for procedures.
 
 ## What an entry cannot do
 

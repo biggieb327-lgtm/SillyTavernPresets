@@ -114,6 +114,7 @@ to any defect that only shows up on input shaped differently, which is exactly h
 |---|---|---|
 | a failure the **system** had | `.claude/memory/operational-log.md` row | it was diagnosed and resolved |
 | a mistake **we** made doing the work | `.claude/memory/constraints.md` (numbered or Minor) | always, including self-corrected |
+| a **project-changing decision** — a choice among real alternatives (architecture, a contract, deploy/memory layer, a shipped default, a will/won't, an approach ruled out) | `.claude/memory/decisions.md` (`log-decision`) | whenever the session settled one and it isn't logged yet |
 | the session-level pattern analysis | `.claude/SESSION-AUTOPSY-<date>.md` | only for long/multi-release sessions |
 | shipped item status | `ROADMAP.md` / `IMPROVEMENTS_PLAN.md` | anything moved |
 | a live Routine created | — | n/a: Routines are retired here (2026-08-22); `routines.md` is historical |
@@ -141,6 +142,7 @@ data arrives, so it cannot be revised to fit.
 - [ ] CI confirmed by hand for HEAD — the one condition the check refuses to guess
 - [ ] Session reconstructed from `git log` / memory-layer greps, not memory
 - [ ] Constraints updated: `seen` counts incremented, Minor entries added, promotions done
+- [ ] Any project-changing decision this session settled is logged in `decisions.md` (what won, what over, why)
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence
 - [ ] Mechanisms grepped for before being proposed
 - [ ] New checks break-tested RED then GREEN; scanners have `gate_corpus` cases

@@ -25,6 +25,8 @@ All under `telegram-companion-bot/` unless noted:
 - `SETUP_GUIDE.md` — standing up a new instance (or use `new-bot.sh`).
 - `.env.example` — every variable bot.py reads, documented with defaults.
 - `.claude/memory/operational-log.md` — one row per failure that changed the system.
+- `.claude/memory/decisions.md` — the decision log: what we chose, what over, and why.
+  **Log a project-changing decision here** (see Working principles #9); `log-decision` skill.
 - `.claude/memory/mycelium.md` — messages between sessions (findings, dead ends,
   partial handoffs, heads-ups). `session-audit.sh` surfaces open entries at startup.
 - `.claude/memory/watchlist.md` — low-level observations not yet worth a failure,
@@ -129,6 +131,7 @@ or gets said in plain words.
 | the class | every other place the bug shape you just fixed occurs | `fix-the-class` |
 | kill switch | the env var that disables a default-on feature without a redeploy | `bot-code-invariants` #16 |
 | Routine | a scheduled session that fires with nobody watching — **retired here 2026-08-22**, kept as a term because the memory layer records them | `.claude/operating/routines.md` |
+| the decision log | `.claude/memory/decisions.md` — what we chose, what we chose it over, and why | `log-decision` |
 
 ## Where things live
 
@@ -301,6 +304,15 @@ each with a threshold and a test, so they are not restated here. What is project
    against the specific diff being written. When wording is explicit, verify the work
    against the words themselves before calling it done, the same way a delivery-gate
    check is verified, not held in mind as a general attitude.
+9. **Log project-changing decisions to `.claude/memory/decisions.md`.** When a choice among
+   real alternatives that changes the project gets settled — architecture, a contract, the
+   deploy or memory layer, a default that ships, a standing will/won't, or an approach ruled
+   out — record what won, what it beat, and why, before calling the work done. The code
+   records *what*; this file is the only record of *why this way and not the other way*, and
+   an unlogged decision is one a future session re-opens or quietly undoes. Load `log-decision`
+   for the format and the qualifying test; this applies to a subagent's decision too, which the
+   main session records in repo terms. Routine implementation with one obvious path is not a
+   decision — don't log those. `session-debrief` asks before a session closes.
 
 ## Shared brain (Notion)
 

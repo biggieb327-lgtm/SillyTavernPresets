@@ -1532,6 +1532,58 @@ PYEOF
   fi
 fi
 
+# --- decisions-format -------------------------------------------------------------------
+# The decision log (.claude/memory/decisions.md, 2026-08-25) records what we chose, what
+# over, and why. Its entry header carries a status the file's own header promises is one of
+# a fixed set — `current` or `superseded`. A drifted header (renamed status, trailing
+# space, wrong date shape) does not error; it just reads as a non-entry and the log quietly
+# loses that row's status. Same C13/silence shape as mycelium-format, minus the hook count
+# (nothing surfaces a decisions count at startup — a decision does not age out, so there is
+# no open queue to report). The check parses every non-fenced `### ` header and fails on any
+# that is not the promised shape, and it is invoked with 2>&1 + exit-status test so a broken
+# parser fails loud instead of green (the gate-corpus finding).
+dec=.claude/memory/decisions.md
+if [ ! -f "$dec" ]; then
+  bad "decisions-format" "$dec missing — the decision log CLAUDE.md #9 and log-decision point at is gone"
+else
+  if ! dec_err=$(python3 - "$dec" 2>&1 <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+HEADER = re.compile(r"^### 20\d{2}-\d{2}-\d{2} \| .+ \| status: (current|superseded)$")
+bad_headers, statuses, in_fence = [], [], False
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    # C14: the Entry format section documents the header shape inside a fence, and the
+    # seed entries use a "(seed)" prefix instead of a date — both are legal non-entries.
+    if line.startswith("```"):
+        in_fence = not in_fence
+        continue
+    if in_fence:
+        continue
+    if not line.startswith("### 20"):
+        continue
+    m = HEADER.match(line)
+    if m:
+        statuses.append(m.group(1))
+    else:
+        bad_headers.append(f"line {n}: {line[:90]}")
+if bad_headers:
+    print("decision header(s) not in the promised shape: " + "; ".join(bad_headers) +
+          " — required: '### YYYY-MM-DD | <title> | status: current|superseded'")
+elif not statuses:
+    print("parsed 0 dated entries out of the file — the parser broke, which is exactly "
+          "the silent-green shape this check exists for")
+PYEOF
+  ); then
+    dec_err="the parser itself exited non-zero: ${dec_err:-(no output)} — a check that goes green when its own parser dies is not a check"
+  fi
+  if [ -z "$dec_err" ]; then
+    ok "decisions-format: every dated decision header is well-formed"
+  else
+    bad "decisions-format" "$dec_err"
+  fi
+fi
+
 # --- mycelium-startup-routing -----------------------------------------------------------
 # 2026-08-24: Mycelium was wired into Claude Code's SessionStart hook, but the Codex
 # entrypoint only described the repo's context system in general. A new Codex session

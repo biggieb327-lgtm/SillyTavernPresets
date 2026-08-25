@@ -26,6 +26,7 @@ such exemption.
 | Editing character cards, seed files, preset.txt, or root SillyTavern presets | `edit-cards-and-presets` |
 | A fix is about to ship, or a check/eval is being written | `fix-the-class` |
 | Same failure class happened twice, or user asks to pin a check | `add-regression-eval` |
+| A choice among real alternatives that changes the project got settled (architecture, a contract, deploy/memory layer, a shipped default, a will/won't, an approach ruled out) | `log-decision` |
 | Session is done and green, or the user is wrapping up — harvest lessons before context closes | `session-debrief` |
 | External audit/review output (LLM or human) lists claimed bugs | `verify-external-audit` |
 | Writing a tool that renders a verdict, reporting a finding, or explaining why something broke | `hubris` |
