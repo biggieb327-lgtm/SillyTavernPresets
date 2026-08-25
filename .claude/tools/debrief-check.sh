@@ -96,6 +96,34 @@ else
   note "          near-misses went unwritten, which is what the skill exists to prevent."
 fi
 
+# --- 5. did a shipped decision go unlogged? (advisory) -----------------------------------
+# The decision log (.claude/memory/decisions.md) records choices among alternatives that
+# change the project. No tool can tell whether a decision was actually made — hubris: this
+# reports only what it can see (decision-shaped surfaces changed today, no decisions.md entry
+# dated today) and phrases it as a question, never a verdict. Advisory like the harvest check
+# above: most skill/hook/eval edits are routine and settle nothing, so a false positive here
+# must cost a glance, not a blocked turn. Same span as harvest (today's commits).
+# NOT `grep -c … || echo 0` (C23): grep -c prints "0" and exits 1 on no match, and the pipe
+# already yields a clean "0" — the fallback is what stacks a second line and breaks arithmetic.
+dec_surface=$(git log --since="${today} 00:00" --name-only --pretty=format: 2>/dev/null \
+  | grep -cE '^(CLAUDE\.md|\.claude/(skills|agents|hooks|evals|operating)/|deploy/|telegram-companion-bot/(GROUP_CHAT_DESIGN|ROADMAP|IMPROVEMENTS_PLAN))')
+dec_surface=${dec_surface:-0}
+dec_logged=$(git log --since="${today} 00:00" --name-only --pretty=format: 2>/dev/null \
+  | grep -c '^\.claude/memory/decisions\.md$')
+dec_logged=${dec_logged:-0}
+dec_entry_today=$(grep -c "^### ${today} " .claude/memory/decisions.md 2>/dev/null); dec_entry_today=${dec_entry_today:-0}
+if [ "$commits" = "0" ]; then
+  : # harvest already noted there is nothing today
+elif [ "$dec_surface" -gt 0 ] && [ "$((dec_logged + dec_entry_today))" -eq 0 ]; then
+  note "decision  ${dec_surface} commit(s) today changed decision-shaped surfaces (CLAUDE.md,"
+  note "          skills, agents, hooks, evals, deploy, design/roadmap docs) but decisions.md"
+  note "          has no entry dated ${today}. If a choice among alternatives was settled,"
+  note "          log it (log-decision skill); if these were routine, ignore this."
+else
+  note "decision  no unlogged-decision signal (surfaces touched today: ${dec_surface};"
+  note "          decisions.md logged today: $((dec_logged + dec_entry_today)))."
+fi
+
 # --- the one thing this cannot check ------------------------------------------------------
 note "ci        NOT CHECKED — confirm ${head_sha:0:7} is 'completed | success' on main by hand."
 note "          This script has no GitHub access and will not guess; an unearned green here"

@@ -142,7 +142,7 @@ data arrives, so it cannot be revised to fit.
 - [ ] CI confirmed by hand for HEAD — the one condition the check refuses to guess
 - [ ] Session reconstructed from `git log` / memory-layer greps, not memory
 - [ ] Constraints updated: `seen` counts incremented, Minor entries added, promotions done
-- [ ] Any project-changing decision this session settled is logged in `decisions.md` (what won, what over, why)
+- [ ] Any project-changing decision this session settled is logged in `decisions.md` (what won, what over, why) — `debrief-check.sh` prints an advisory `decision` note when the session changed decision-shaped surfaces (CLAUDE.md, skills, agents, hooks, evals, deploy, design/roadmap docs) but logged no entry dated today
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence
 - [ ] Mechanisms grepped for before being proposed
 - [ ] New checks break-tested RED then GREEN; scanners have `gate_corpus` cases
