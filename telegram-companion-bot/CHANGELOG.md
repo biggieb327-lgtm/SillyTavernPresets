@@ -7,6 +7,43 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-25.1 — reasoning-leak guard catches the STEPPED THINKING scaffold
+
+**Root cause: the reasoning-leak guard's markers were fitted to priya's 2026-08-03
+transcript, so a cleaner render of the *same* leak slipped past.** Emily emitted her whole
+`[STEPPED THINKING]` deliberation as ordinary `content` — the six numbered steps (State /
+Motive / Epistemic check / Rule priority / Direction with Option 1/2/3 / Commit) followed by
+"Drafting the response" / "Refining" / "Final Polish" — and it went out verbatim as her
+reply. It is the identical class the guard was built for (`v2026-08-03.1`), but it evaded
+three of the four keyed markers: it named the user "Brian" (the card injects the real name,
+so `\bthe user\b` missed), it headed its draft steps "Drafting"/"Final Polish" rather than
+"let me draft", and a first-person persona wrote "She", not "Emily", so the character-name
+category was inert. Only `option \d` and the numbered-line category matched — two categories,
+one short of the floor of three — so `_looks_like_reasoning_leak` returned False and the
+completion was delivered instead of re-rolled. Confirmed: the real transcript is 2088 chars
+(clears the 2000 floor) and scored exactly 2.
+
+**Fix: added the preset's private-planning vocabulary as one more marker category.**
+`_REASONING_MARKERS` now includes `epistemic check|rule priority|anti-echo|stepped thinking`
+— step/register labels straight out of `preset.txt`'s `[STEPPED THINKING]` and register
+blocks that no delivered reply ever contains. "Epistemic check" and "Rule priority" appear
+verbatim in *both* the emily and priya leaks (they are the preset's step-3 and step-4
+labels), so this reinforces the original case rather than special-casing Emily's. This lifts
+the emily leak to three categories and it now re-rolls; the two in-character fixtures
+(short reply, long scene-mode ramble) still pass. Deliberately excluded "drafting"/"refining"
+as markers: Emily's card has her "drafting survey reports", so they are ordinary
+in-character words on this fleet. Fleet-wide — all seven bots share `preset.txt` and this
+guard, so any instance leaking the scaffold is now caught regardless of which one.
+
+**Residual risk (not fixed here, left as tuning levers):** a shorter leak that never clears
+the 2000-char floor, or one that renders steps as bullets and prose directions (dropping
+both the numbered-line and `option \d` categories), would still miss. `REASONING_LEAK_MIN_CHARS`,
+`REASONING_LEAK_MIN_MARKERS`, and the `REASONING_LEAK_GUARD` kill switch remain the
+redeploy-free levers if production shows either shape. The deeper root cause — thinking models
+externalizing the STEPPED THINKING scaffold at all — is a preset-level, fleet-wide character
+question for the owner, not a guard change; the guard is the designed backstop and this
+restores it.
+
 ## v2026-08-24.9 — surface cache-hit tokens on `/audit` (ROADMAP 6.1 step 1 instrument)
 
 **Root cause: 6.1 step 1 asks whether prompt caching is even live for this fleet's models,

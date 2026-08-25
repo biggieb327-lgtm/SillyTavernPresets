@@ -9149,6 +9149,44 @@ Done. Going with that"""
                "option 1 it is. " + "filler " * 400)
         assert not bot._looks_like_reasoning_leak(txt, "Priya")
 
+    # emily, 2026-08-25: the SAME [STEPPED THINKING] scaffold priya leaked, but a
+    # cleaner render — steps headed "Drafting"/"Refining"/"Final Polish" (not "let me
+    # draft") and the user named "Brian" (the card injects the real name, not "the
+    # user"). Before the scaffold-vocabulary marker it hit only `option \d` + the
+    # numbered-line category = 2, one short of the floor, and went out verbatim.
+    EMILY_LEAK = """1.  **State: Emily's state is contemplative and solitary, but she's tuned into Brian's frequency. She sees he's running on fumes. It's Sunday evening, late, and the apartment is quiet. She's just finished her rendering metaphor work, and she's shifting her attention to the person who actually matters. She feels a soft, protective instinct - he's her shielding, but right now he needs care.
+2.  **Motive: She wants to stop him from pushing himself further. She wants to offer a soft landing. No pressure, just observation and an invitation to stop.
+3.  **Epistemic check:** She can see his physical state - slumped, maybe moving slowly, the vibrating tension gone slack into exhaustion. She doesn't know the numbers, just the visual data.
+4.  **Rule priority:** Quiet domestic to Laning. Warm, soft, specific to her voice (biological lens). No clinical terms. No "I noticed your watch says..."
+5.  **Direction:**
+    *   *Option 1:* Tell him to go to sleep directly. (Too bossy?)
+    *   *Option 2:* Ask if he's okay. (Too generic.)
+    *   *Option 3:* Describe his state in her terms - heavy, low tide - and offer to take the weight.
+6.  **Commit:** Option 3. She'll observe his energy levels as a biological system running low and offer a directive to recharge.
+
+*Drafting the response:*
+She sees him. He's still.
+"You look like the tide's gone out. All slack water and sediment."
+She offers a transition to rest. "I'm relieving you of duty. Effective immediately."
+
+*Refining:*
+Make it physical. She sees him sitting or standing.
+"You're dragging. Like gravity has a stronger hold on you than usual."
+Action beat: reaching out or observing.
+"Just breathe. Nothing else is required tonight."
+
+*Final Polish:*
+*She glances over from where she is curled on the couch, taking in the way his shoulders have dropped - the slump that isn't relaxation so much as structural failure.* "You're running on fumes. I can practically see the empty tank." *She marks her page in the Pratchett book and sets it aside.* "Come sit. You're relieved of duty. Nothing required from you except existing." """
+
+    def test_emily_stepped_thinking_leak_trips_it(self):
+        """The scaffold vocabulary ('Epistemic check', 'Rule priority') carries the
+        third category when the leak avoids 'the user' and 'let me draft'."""
+        assert len(self.EMILY_LEAK) >= bot._REASONING_LEAK_MIN_CHARS
+        assert bot._looks_like_reasoning_leak(self.EMILY_LEAK, "Emily Harper")
+
+    def test_emily_leak_trips_without_the_name_too(self):
+        assert bot._looks_like_reasoning_leak(self.EMILY_LEAK, "")
+
     def test_ordinary_deliberative_texting_passes(self):
         """Review finding: 'let me think', 'overthinking this', 'going back and
         forth', 'option 1/2' are ordinary texting vocabulary on this fleet. A long

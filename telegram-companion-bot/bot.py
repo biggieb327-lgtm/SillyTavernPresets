@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.9"
+BOT_VERSION = "2026-08-25.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6682,6 +6682,18 @@ _REASONING_MARKERS = (
     re.compile(r"(?i)\b(?:in|out of) character\b"),
     re.compile(r"(?i)\b(?:format contract|system prompt|scene mode|the instructions say)\b"),
     re.compile(r"(?i)\boption \d\b"),
+    # The private planning vocabulary from preset.txt's [STEPPED THINKING] and
+    # register blocks. A leak of that scaffold renders these step/register labels
+    # verbatim, and no delivered reply ever contains them. Added after emily,
+    # 2026-08-25: her leak was the same STEPPED THINKING scaffold priya leaked on
+    # 2026-08-03, but cleaner — headed "Drafting"/"Final Polish", not "let me draft",
+    # and naming "Brian" (the card injects the real user name) instead of "the user"
+    # — so it hit only `option \d` + the numbered-line category and stopped one short
+    # of the floor. "epistemic check" and "rule priority" are the preset's own step-3
+    # and step-4 labels and appear verbatim in both leaks. Deliberately NOT "drafting"
+    # or "refining": Emily's card has her "drafting survey reports", so those are
+    # ordinary in-character words on this fleet.
+    re.compile(r"(?i)\b(?:epistemic check|rule priority|anti-echo|stepped thinking)\b"),
 )
 # Numbered analysis steps ("1. How does she feel about...") — one category, and only
 # when there are several lines of them: a real reply may contain a short numbered list.
