@@ -996,6 +996,93 @@ class TestTrackLlmUsage:
         assert bot._llm_stats["tok_in"] == 25
         assert bot._llm_stats["tok_out"] == 10
 
+    def test_measured_call_accumulates_cache_hit_tokens(self):
+        # ROADMAP 6.1 step 1: a usage block that reports a cached prefix lands in tok_cached.
+        bot._llm_stats["date"] = time.strftime("%Y-%m-%d")
+        bot._llm_stats["tok_cached"] = 0
+        bot._stash_call_usage(
+            {"prompt_tokens": 2000, "completion_tokens": 50, "cache_read_input_tokens": 1500})
+        bot._track_llm_usage([{"content": "x"}], "y")
+        assert bot._llm_stats["tok_cached"] == 1500
+
+    def test_estimated_call_leaves_cache_at_zero(self):
+        # No usage block -> estimated branch -> cached stays 0 (0 means "no hit", not "unknown").
+        bot._llm_stats["date"] = time.strftime("%Y-%m-%d")
+        bot._llm_stats["tok_cached"] = 7
+        bot._stash_call_usage(None)
+        bot._track_llm_usage([{"content": "x"}], "y")
+        assert bot._llm_stats["tok_cached"] == 7        # unchanged, not incremented
+
+    def test_new_day_resets_cache_counter(self):
+        bot._llm_stats["date"] = "1999-01-01"
+        bot._llm_stats["tok_cached"] = 999
+        bot._stash_call_usage(None)
+        bot._track_llm_usage([{"content": "x"}], "y")
+        assert bot._llm_stats["tok_cached"] == 0
+
+
+class TestUsageCachedTokens:
+    """ROADMAP 6.1 step 1's instrument: pull cache-hit tokens from either provider shape,
+    and never crash on a malformed usage block (accounting is not load-bearing)."""
+
+    def test_flat_anthropic_style_field(self):
+        assert bot._usage_cached_tokens({"cache_read_input_tokens": 1234}) == 1234
+
+    def test_nested_openai_style_field(self):
+        assert bot._usage_cached_tokens(
+            {"prompt_tokens_details": {"cached_tokens": 900}}) == 900
+
+    def test_flat_wins_when_both_present(self):
+        assert bot._usage_cached_tokens(
+            {"cache_read_input_tokens": 10,
+             "prompt_tokens_details": {"cached_tokens": 20}}) == 10
+
+    def test_absent_means_zero_not_missing(self):
+        assert bot._usage_cached_tokens({"prompt_tokens": 500}) == 0
+
+    def test_bad_shapes_are_zero(self):
+        assert bot._usage_cached_tokens(None) == 0
+        assert bot._usage_cached_tokens("nope") == 0
+        assert bot._usage_cached_tokens({"prompt_tokens_details": "not-a-dict"}) == 0
+        assert bot._usage_cached_tokens(
+            {"cache_read_input_tokens": "lots"}) == 0
+
+
+class TestLlmStatsLine:
+    """The /audit `LLM today:` render, exercised directly — the branch that prints the
+    cache-hit figure (ROADMAP 6.1 step 1) must be proven to print, not just grep'd for."""
+
+    def test_no_calls_is_blank(self):
+        assert bot._llm_stats_line({"calls": 0}) == ""
+        assert bot._llm_stats_line({}) == ""
+        assert bot._llm_stats_line(None) == ""
+
+    def test_measured_line_shows_cached_count(self):
+        line = bot._llm_stats_line(
+            {"calls": 5, "tok_in": 40000, "tok_out": 3000,
+             "measured": 5, "estimated": 0, "tok_cached": 12345})
+        assert "5 calls" in line and "(measured)" in line
+        assert "12,345 cached" in line          # exact, thousands-separated
+
+    def test_measured_but_zero_cached_still_shows_zero(self):
+        # The whole point of the instrument: 0 must be visible to answer "not live".
+        line = bot._llm_stats_line(
+            {"calls": 3, "tok_in": 30000, "tok_out": 900,
+             "measured": 3, "estimated": 0, "tok_cached": 0})
+        assert "0 cached" in line
+
+    def test_estimated_only_omits_cached(self):
+        line = bot._llm_stats_line(
+            {"calls": 2, "tok_in": 100, "tok_out": 40,
+             "measured": 0, "estimated": 2, "tok_cached": 0})
+        assert "(est)" in line and "cached" not in line
+
+    def test_mixed_source_label(self):
+        line = bot._llm_stats_line(
+            {"calls": 4, "tok_in": 1000, "tok_out": 200,
+             "measured": 3, "estimated": 1, "tok_cached": 50})
+        assert "3 measured / 1 est" in line and "50 cached" in line
+
 
 class TestErrorCountsPersistence:
     def test_serialize_includes_error_counts(self):

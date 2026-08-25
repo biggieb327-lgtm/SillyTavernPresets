@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-24.8"
+BOT_VERSION = "2026-08-24.9"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -208,7 +208,12 @@ _error_counts: dict[str, list[float]] = {}
 _llm_stats: dict = {"date": "", "calls": 0, "tok_in": 0, "tok_out": 0,
                     # How many of today's calls contributed MEASURED tokens rather than
                     # estimated ones — without this, /usage can't say which it is showing.
-                    "measured": 0, "estimated": 0}
+                    "measured": 0, "estimated": 0,
+                    # Cache-hit input tokens the provider reported (ROADMAP 6.1 step 1's
+                    # instrument): stays 0 unless a route actually serves a cached prefix,
+                    # so a persistent 0 across measured calls answers "caching not live for
+                    # our model routes" and a nonzero answers "it is".
+                    "tok_cached": 0}
 
 # Real usage from the last API response on THIS thread. LLM calls run inside
 # asyncio.to_thread, so a plain module global would let two concurrent calls attribute
@@ -363,6 +368,24 @@ def _usage_tokens(usage, key: str) -> int:
     return v if v > 0 else 0
 
 
+def _usage_cached_tokens(usage) -> int:
+    """Cache-hit input tokens from a provider usage block, across the two shapes seen in the
+    wild: a flat `cache_read_input_tokens` (Anthropic-style, the name NanoGPT's docs use) and
+    OpenAI's nested `prompt_tokens_details.cached_tokens`. Returns 0 when neither is present
+    — which is also what a provider/route without prompt caching returns, so 0 here means
+    "no cache hit", not "field missing". This is the read-only instrument ROADMAP 6.1 step 1
+    asks for: does this fleet's actual model ever report a cached prefix? Crash-safe like
+    `_usage_tokens`, for the same reason — accounting must never sink a reply that succeeded."""
+    flat = _usage_tokens(usage, "cache_read_input_tokens")
+    if flat:
+        return flat
+    if isinstance(usage, dict):
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            return _usage_tokens(details, "cached_tokens")
+    return 0
+
+
 def _track_llm_usage(messages: list, reply: str):
     today = time.strftime("%Y-%m-%d")
     if _llm_stats["date"] != today:
@@ -372,6 +395,7 @@ def _track_llm_usage(messages: list, reply: str):
         _llm_stats["tok_out"] = 0
         _llm_stats["measured"] = 0
         _llm_stats["estimated"] = 0
+        _llm_stats["tok_cached"] = 0
     _llm_stats["calls"] += 1
     # Prefer the provider's own count. It is produced by the real tokenizer for the real
     # model and includes the chat-template overhead we cannot see, so it is the actual
@@ -383,6 +407,8 @@ def _track_llm_usage(messages: list, reply: str):
     if real_in:
         _llm_stats["tok_in"] += real_in
         _llm_stats["tok_out"] += real_out or _est_tokens(reply)
+        # Cache-hit tokens ride the same measured usage block (ROADMAP 6.1 step 1).
+        _llm_stats["tok_cached"] += _usage_cached_tokens(usage)
         _llm_stats["measured"] += 1
         _record_token_calibration(messages, real_in)
     else:
@@ -16467,6 +16493,34 @@ def _garmin_audit_state() -> str:
     return f"on, {fresh} ({age_h:.0f}h old)"
 
 
+def _llm_stats_line(llm: dict) -> str:
+    """The `LLM today:` line for /audit, or "" when there were no calls today. Pure, so the
+    cached-token branch (ROADMAP 6.1 step 1) is testable without driving the whole audit_cmd
+    handler — the same shape as _map_stats_summary and the other /audit line helpers, and the
+    fix for the render being un-exercised by any test (C8 / delivery-gate source-assertion)."""
+    if not (isinstance(llm, dict) and llm.get("calls")):
+        return ""
+    measured, estimated = llm.get("measured", 0), llm.get("estimated", 0)
+    if measured and not estimated:
+        src = "measured"
+    elif measured:
+        src = f"{measured} measured / {estimated} est"
+    else:
+        src = "est"
+    line = (f"LLM today: {llm['calls']} calls, "
+            f"~{llm.get('tok_in', 0) // 1000}k in / ~{llm.get('tok_out', 0) // 1000}k out ({src})")
+    # ROADMAP 6.1 step 1: cache-hit tokens on the measured line so a persistent 0 answers
+    # "prompt caching not live for our routes" and a nonzero answers "it is". Shown only when
+    # there are measured calls (cached is meaningless for estimates), exactly (not //1000) so
+    # even a first small hit is visible. No percentage: whether cached is a subset of tok_in
+    # depends on the provider's usage shape (it is for the nested OpenAI field, not for the
+    # flat Anthropic-style one), so a ratio would misstate the very number this instrument
+    # exists to report — the raw count answers step 1 on its own.
+    if measured:
+        line += f"; {llm.get('tok_cached', 0):,} cached"
+    return line
+
+
 async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -16520,20 +16574,12 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("  " + ", ".join(f"{k} ~{v}t" for v, k in top[:4]))
     if d.get("memory_review_pending"):
         lines.append(f"Memory: {d['memory_review_pending']} pending review")
-    llm = d.get("llm_stats", {})
-    if llm.get("calls"):
-        # "(est)" used to be unconditional and was the honest label when every figure was
-        # len//4. Now most calls carry the provider's real count, so the line says which.
-        measured, estimated = llm.get("measured", 0), llm.get("estimated", 0)
-        if measured and not estimated:
-            src = "measured"
-        elif measured:
-            src = f"{measured} measured / {estimated} est"
-        else:
-            src = "est"
-        lines.append(
-            f"LLM today: {llm['calls']} calls, "
-            f"~{llm['tok_in'] // 1000}k in / ~{llm['tok_out'] // 1000}k out ({src})")
+    # "(est)" used to be unconditional and was the honest label when every figure was
+    # len//4. Now most calls carry the provider's real count, so the line says which; the
+    # cached-token figure rides it (ROADMAP 6.1 step 1). Pure helper so both are testable.
+    llm_line = _llm_stats_line(d.get("llm_stats", {}))
+    if llm_line:
+        lines.append(llm_line)
     if d.get("token_calibration"):
         lines.append("Token counts: " + d["token_calibration"])
     cw = d.get("config_warnings", [])

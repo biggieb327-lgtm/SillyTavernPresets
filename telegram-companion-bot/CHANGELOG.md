@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-24.9 — surface cache-hit tokens on `/audit` (ROADMAP 6.1 step 1 instrument)
+
+**Root cause: 6.1 step 1 asks whether prompt caching is even live for this fleet's models,
+and nothing captured the number that answers it.** NanoGPT documents implicit prompt
+caching with hits reported in the response usage block, but every default model here is an
+open-source route (`zai-org/glm-5:thinking`, `zai-org/glm-4.7-flash`) that its docs do not
+list as covered — so whether caching applies at all is a hypothesis, not a fact (ROADMAP
+6.1, C9). bot.py already stashed each call's usage block (`_stash_call_usage`) and read
+`prompt_tokens`/`completion_tokens` from it, but never looked at any cache field, so the
+data needed to answer step 1 was thrown away on every call.
+
+`_track_llm_usage` now also accumulates `_llm_stats["tok_cached"]` on measured calls, read
+by a new `_usage_cached_tokens(usage)`. That helper handles the two usage shapes seen in the
+wild — a flat `cache_read_input_tokens` (Anthropic-style, the name NanoGPT's docs use) and
+OpenAI's nested `prompt_tokens_details.cached_tokens` — and returns 0 when neither is
+present, so **0 means "no cache hit", not "field missing"**. It is crash-safe like
+`_usage_tokens`: a malformed usage block must never sink a reply that already succeeded.
+
+`/audit`'s `LLM today:` line now appends `; N cached` on the measured line (exact, not
+rounded to thousands, so even a first small hit shows). No percentage of input: whether the
+cached count is a subset of `tok_in` depends on the provider's usage shape — it is for the
+nested OpenAI `cached_tokens`, but the flat `cache_read_input_tokens` is billed separately —
+so a ratio would misstate the very number the instrument exists to report. The render moved
+into a pure `_llm_stats_line(llm)` helper (matching `_map_stats_summary` and the other
+`/audit` line helpers) so the cached-token branch is exercised by a test that prints it, not
+one that greps its source (C8 / delivery-gate source-assertion). This is the whole
+deliverable of 6.1 step 1: a persistent 0 across measured
+calls over a few days answers "caching is not live for our routes" and the item closes
+not-applicable; a nonzero answers "it is" and unblocks step 2 (the `assemble_messages`
+prefix reorder) and, downstream, 3.8 Phase 2's cost argument. **The answer needs live
+observation — read `/audit` on the fleet after this deploys; it can't be settled from the
+repo.**
+
+No kill switch: this is a passive diagnostic counter, no behavior change and no new call
+(the cached figure rides the usage block already captured), matching the `_map_stats` /
+`_prompt_stats` observability counters that ship without one — the one-line rationale
+`bot-code-invariants` #16 allows for a non-feature. No state migration needed: `tok_cached`
+defaults to 0 in `_llm_stats` and is only absent from a pre-upgrade same-day `state.json`,
+where 0 is correct.
+
 ## v2026-08-24.8 — nightly reflection drafts living-file edits for review (`/reviewlife`, ROADMAP 5.9)
 
 **Root cause: the living files were a one-way drift surface — read into every prompt, but
