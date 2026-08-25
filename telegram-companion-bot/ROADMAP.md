@@ -1508,3 +1508,73 @@ Execution maps onto the agent system: builder implements one item per dispatch,
 qa-engineer verifies against each item's "done when", research-scout owns the 3.3 gate,
 adversarial-critic reviews the 3.4 design doc, and every bot.py-touching item ships
 with the usual BOT_VERSION bump + changelog entry (the delivery gate enforces it).
+
+## Proposed sprints (grouping of open items, 2026-08-25)
+
+**What this is:** a grouping of the open Track 5/6 items by *shared code surface and risk
+class*, so related work is picked up together (one context load, one review pass, one soak)
+instead of one scattered item at a time. **This is organization, not a schedule or a
+re-prioritization** — Track 5's items remain owner-triage-pending ideas, not committed work,
+and 🧪 items still pilot one instance default-off (never batch-adopt). The two Track 5 blocks
+share numbers, so they're disambiguated here as **5-A** (the 2026-08-04 "Proposed" block) and
+**5-B** (the 2026-08-05 "Lateral exploratory" block). Sprints are ordered low→high risk, which
+is also a sensible build order: warm up on observability, end on the design-review-heavy work.
+
+### Sprint 1 — Observability & transparency (no behavior change)
+Surface existing internal state on existing commands; same "read state, render it" shape as
+the just-shipped 6.1 cache instrument. Lowest risk in the batch.
+| Item | Size | Surface | Note |
+|---|---|---|---|
+| 5.11-B nudge skip-reason on `/nudges` | S | `/nudges`, `unsent_drafts` | Carries an **owner decision**: `skip_chance` rises as mood drops (she reaches out *less* when mood is low) — intended or inverted? Record the answer near `heartbeat()` either way. |
+| 5.2-B weeks-long disengagement trend on `/audit` | M | `/audit`, rolling multi-week metric | Prove it moves *before* a visible engagement drop against one instance's real history. |
+
+### Sprint 2 — Character presentation of existing state (zero/near-zero new LLM calls)
+All hook the same reply-injection points that already read mood / fatigue / mirror / busy
+state. Mechanism risk is low; the real risk is immersion/execution, judged only in a live
+exchange.
+| Item | Size | Surface | Note |
+|---|---|---|---|
+| 5.5-A chronotype + user-clock noticing | S | timestamp arithmetic, `STYLE_MIRROR`-shaped | Zero LLM calls: fixed per-character trait + arithmetic on existing message timestamps. |
+| 5.1-A constancy override ("lighthouse") | S | suppression flag at the fatigue/busy/mirror injection points | A bypass, no new state to compute. Open question: reads as caring or as "personality off on command"? |
+| 5.4-A in-character introspection query | S/M | template already-computed state in-voice | Likely no new call. Risk: reads as a settings panel, not reflection. |
+
+### Sprint 3 — Recall & memory-surfacing behaviors
+All live on the semantic-recall / memory-scoring path; all small and bounded there.
+| Item | Size | Surface | Note |
+|---|---|---|---|
+| 5.8-A tip-of-the-tongue near-miss recall | S | the embedding *discard band* (currently silence) | Nearly free; reuses existing embedding infra. Tune frequency low or it reads as a bug. |
+| 5.4-B rising urgency floor for neglected memories | S | recall-scoring path | Priority *rises* the longer a worth-saying memory goes unsaid. Feeds Sprint 4's shared score if built. |
+| 5.9-A user-named transition ("ferryman") | S | date-aware follow-up machinery | Weakest of 5-A — consider folding into existing follow-ups rather than standalone. |
+
+### Sprint 4 — Proactive-send unification (medium risk; soak required)
+All touch the proactive-send scheduler. Build **5.1-B first as the spine** (one shared urgency
+score); the other two are new proactive *sources* that ride it, and 5.4-B's urgency floor feeds
+its score. Touches every proactive feature at once — reproduce the collision/silent-day failure
+before building the fix, and soak before trusting it over today's independent gates.
+| Item | Size | Surface | Note |
+|---|---|---|---|
+| 5.1-B shared proactive triage queue | M | every proactive send path | The architectural centerpiece: one re-ranked queue, send only the top-scored candidate. |
+| 5.2-A vigil mode for anticipated hard events | M | extraction + proactive scheduler + tone | Conservative-parse discipline (3.6's shape) against false triggers on loosely-worded "hard events". |
+| 5.7-A message-in-a-bottle capsule | M | sealed-entry queue + resurfacing distribution | Lives or dies on the surprise landing right, not the mechanism. |
+
+### Sprint 5 — Group-chat & cross-instance (needs one GROUP_CHAT_DESIGN.md review pass)
+All change bot-to-bot / cross-instance behavior. Batch so a single `group-chat-changes` +
+design-review pass covers the set; `GROUP_CHAT_DESIGN.md` survived four adversarial rounds, so
+none of these is a bolt-on. 🧪 = pilot one instance, default-off.
+| Item | Size | Surface | Note |
+|---|---|---|---|
+| 5.5-B 🧪 comping mode | S | group turn-taking | Sparse supportive signal (reaction/aside) instead of full reply or silence. |
+| 5.6-B 🧪 trading-fours mode | S | opt-in, code-enforced length cap | Self-contained mode; lowest priority of 5-B. |
+| 5.6-A invisible cross-instance query bridge | M | admin-API / claim-file plumbing | Needs a real design pass against the private/group memory boundary first. |
+
+### Standalone / gated — not sprinted, each needs its own decision
+| Item | Why it stands alone |
+|---|---|
+| 5.10-B `/mixtape` (S) | Self-contained product feature over shipped pipelines (milestones + TTS + `/imagine`); a good low-risk "anytime" pickup, unrelated to any other item. |
+| 3.8 Phase 2 — pre-reply thinking call (S/M) | Default-off, A/B-gated, first #3 loosening. **Standing rec: measure whether the free `STEP_INTENT` seed + preset work already delivered the target before building.** |
+| 6.1 step 2 — `assemble_messages` prefix reorder | **Gated on the pending live cache read** (the Notion follow-up). Do not start until the read shows caching is active. |
+| 6.3 reply advisor (L) | **Owner-gated:** needs a new `bot-code-invariants` #3 carve-out written into that file and owner-approved before any code. Largest blast radius in the roadmap. |
+| 5.3-A standing life-project with decay (M/L) | The biggest new-state primitive in 5-A; continuous, user-attention-responsive state — scope on its own. |
+| 5.3-B 🧪 response refinement on recurring topics (M) | A personality-shaping feedback loop — same caution class as the rejected self-evolution ideas; highest-risk 🧪. |
+| 5.7-B 🧪 inward drift detection (S) | **Check for duplication first** — may already be covered by `_CONFIG_WARNINGS` / prompt-size stats before any build. |
+| 5.8-B 🧪 banked variance (unsized) | In direct tension with the multi-release voiceprint-consistency investment (3.13); an owner call on whether to resolve that tension at all, not a build item. |
