@@ -126,6 +126,24 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-08-26 | from: claude/emily-brian-dialogue-ysmpo8 | to: reasoning-leak / preset work | status: open
+`[decision]` The STEPPED THINKING reasoning-leak (Emily/Priya) is fixed on two layers, both
+deployed to all seven bots: `v2026-08-25.1` widened `REASONING_LEAK_GUARD`'s markers (added
+`epistemic check|rule priority|anti-echo|stepped thinking`), and the preset block was reshaped from
+numbered `[STEPPED THINKING]` to prose `[BEFORE WRITING]` in BOTH `preset-stepped.txt` (the live
+`PRESET_FILES` layer) and `preset.txt` (fallback). `[observed]` 1-day watch from here: main is green
+(`a409d50`, run 1037), the guard code is intact, and NO operational-log/incident row records a leak
+recurrence. `[hypothesis]` **The two owner-only signals are still UNREAD and are the real close-out:**
+(1) `/errors` on the instances — any `reasoning_leak` count (zero = clean day; nonzero = leaks still
+occur but are caught, meaning the preset reshape isn't fully suppressing them — informative, not
+alarming); (2) whether any bot's replies feel flatter/more generic since the prose reshape.
+**Stopping rule (written before the data):** persistent zero `reasoning_leak` + no flatness report =
+close this fully. Nonzero `reasoning_leak` with no flatness = guard is carrying it, leave as-is.
+Flatness reported = one-commit revert of `preset-stepped.txt` to the enumerated version, guard
+untouched. `[decision]` Residual the guard still can't catch (recorded, not fixed): a leak under the
+2000-char floor, or one as bullets+prose (no numbered lines, no `option N`) — the
+`REASONING_LEAK_MIN_CHARS`/`_MARKERS` env levers cover it without a redeploy.
+
 ### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: open
 `[decision]` Shipped **6.1 step 1's instrument** (`v2026-08-24.9`, on `main`, CI green): `/audit`'s
 `LLM today:` line now shows `; N cached` — cache-hit input tokens from the provider usage block,

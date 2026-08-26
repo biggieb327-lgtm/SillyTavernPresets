@@ -243,7 +243,16 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 3** (2026-07-26, 2026-08-21, 2026-08-25)
+**seen: 4** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25)
+- 2026-08-25 — Closing a report, wrote "the deeper cause — thinking models externalizing the
+  `[STEPPED THINKING]` scaffold at all" as a settled mechanism, when it is inferred from the preset
+  text and the guard's docstring — I never reproduced it against a live model this session.
+  `theory-guard.sh` blocked the turn on the word "cause" + the named token. Restated as
+  `[hypothesis]`. Guard scope confirmed WIDER than its graduation note's "named function returns"
+  slice claims — it caught a behavioral claim about the model, not a function return — so no gap;
+  the guard is doing more than advertised. Second same-day occurrence (the one below is another
+  session), both caught by the same hook: the human tendency persists, which is exactly why it was
+  graduated to a mechanism rather than left as prose.
 - 2026-08-25 — A final-report line — "5.9 done-when: does a real day produce a good `/reviewlife`
   suggestion?" — read as a settled claim about what the shipped code produces, when it is an
   unverified prediction: no live instance has run it. `theory-guard.sh` blocked the turn. The tell
@@ -1132,6 +1141,25 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-26 — Reshaping the `[STEPPED THINKING]` preset block, nearly edited only `preset.txt` —
+  the file the `character-reviewer` agent had reviewed and cited by line number. The
+  `edit-cards-and-presets` skill's "check `PRESET_FILES` before assuming `preset.txt` is live" note
+  caught it: the live layer every instance loads is `preset-stepped.txt`, and `preset.txt` is only
+  the fallback when no layer resolves — so editing just `preset.txt` would have shipped a no-op to
+  all seven bots. Grepped, found the block in both, edited both. → **for any preset-content edit or
+  review, the live text is the `preset-*.txt` layer named in `PRESET_FILES`, not `preset.txt`;
+  point the `character-reviewer` at the layer, and when a block lives in both keep them in sync.**
+  An agent citing `preset.txt:657` is citing the fallback, not what the fleet reads.
+- 2026-08-26 — The exact-lock verify venv could not be built in the cloud container: the agent
+  proxy's package index lags `requirements.lock` (`garminconnect==0.3.11` and `numpy==2.5.2` both
+  absent — index tops out at 0.3.2 / 2.4.6), and `--require-hashes` aborts the whole install on one
+  missing pin. Both are optional deps (`try/except → None` in bot.py), so filtered their blocks from
+  the lock and installed `numpy==2.4.6` to get a working suite (1393 pytest green). → **when the
+  proxy index can't serve the exact lock, a functional near-lock venv (optional deps filtered,
+  nearest-available substituted) is the right fallback for a content/pure-function change — CI runs
+  the true lock and is the authoritative gate; say "near-lock, index lag" rather than claiming the
+  exact environment.** Distinct from the 2026-08-24 venv slip (that was bare python3 + relative
+  path; this is the index itself lagging the pins).
 - 2026-08-25 — Both releases this session shipped a first-draft changelog claim that overreached
   the diff, and `/code-review` (repo-change-control step 7) caught both before merge. 5.9: the
   changelog said "REVIEWLIFE=0 stops the drafting" when the kill switch gated only the *enqueue*
