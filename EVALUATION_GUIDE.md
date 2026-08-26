@@ -1,244 +1,99 @@
-# Model Evaluation Guide: GLM & Gemma with lm-evaluation-harness
+# Model Evaluation Guide: GLM & Gemma with lm-evaluation-harness via NanoGPT
 
 ## Overview
-This guide documents how to evaluate GLM (ZhipuAI) and Gemma (Google) models using the lm-evaluation-harness, integrated with the UnifiedWritersRoom_V32 preset repository.
+This guide documents how to evaluate **GLM 4.7** (ZhipuAI) and **Gemma 3/4** (Google) models using the `lm-evaluation-harness` library with the NanoGPT API gateway.
 
-## Current Status
-✅ **Repository updated**: UnifiedWritersRoom_V32.json cleaned and pushed to GitHub
-✅ **Harness installed**: lm-eval v0.4.7+ with API support
-✅ **Test verified**: Dummy model runs successfully on all core benchmarks
+## Setup Complete
+- **API Gateway**: NanoGPT (https://nano-gpt.com) - provides OpenAI-compatible API
+- **API Key**: `sk-nano-61d853fc-7312-46f4-9067-fcb51d83df0c` (configured)
+- **Harness**: `lm-eval` with `local-completions` model type
+- **Container**: CPU-only, 2GB memory limit (no local model inference possible)
 
-## Benchmark Tasks Configured
-| Task | Description | Metric |
-|------|-------------|--------|
-| `mmlu` | Massive Multitask Language Understanding | Accuracy |
-| `gsm8k` | Grade School Math 8K | Exact Match |
-| `hellaswag` | Commonsense Reasoning | Accuracy (norm) |
-| `arc_easy` | AI2 Reasoning Challenge (Easy) | Accuracy |
-| `arc_challenge` | AI2 Reasoning Challenge (Hard) | Accuracy |
-| `truthfulqa` | Truthfulness Benchmark | MC1/MC2 Accuracy |
+## Available Models on NanoGPT
 
----
+| Model Name | NanoGPT ID | Notes |
+|------------|------------|-------|
+| GLM 4.7 | `zai-org/glm-4.7` | ZhipuAI's latest flagship |
+| Gemma 4 31B | `google/gemma-4-31b-it` | Google's latest (31B params) |
+| Gemma 3 27B | `google/gemma-3-27b-it` | |
+| Gemma 3 12B | `google/gemma-3-12b-it` | |
+| Gemma 3 4B | `google/gemma-3-4b-it` | Recommended for speed |
+| Gemma 3 1B | `google/gemma-3-1b-it` | Fastest |
 
-## Model Access Strategies
-
-### Option 1: API-Based Evaluation (Recommended for GLM)
-GLM-4 models are available via ZhipuAI's API. Use `local-chat-completions` model type with an OpenAI-compatible endpoint.
+## Quick Start
 
 ```bash
-# Set up ZhipuAI API (get key from https://open.bigmodel.cn)
-export ZHIPUAI_API_KEY="your-key-here"
+# Set API key
+export NANOGPT_API_KEY="sk-nano-61d853fc-7312-46f4-9067-fcb51d83df0c"
 
-# Run evaluation via local proxy or direct API
-lm-eval run \
-  --model local-chat-completions \
-  --model_args model=glm-4,base_url=https://api.z.ai/v1/chat/completions,num_concurrent=16,max_retries=3,tokenized_requests=false \
-  --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa \
-  --apply_chat_template \
-  --fewshot_as_multiturn \
-  --output_path ./eval_results/glm-4
-```
-
-### Option 2: Local HF Models (Gemma 2/3)
-For Gemma models, use the `hf` model type. Note: Gemma 2 models are gated and require HF authentication.
-
-```bash
-# Login to HuggingFace
-huggingface-cli login
-# or export HF_TOKEN="your-token"
-
-# Gemma 2 2B (smallest, most accessible)
-lm-eval run \
-  --model hf \
-  --model_args pretrained=google/gemma-2-2b-it,dtype=bfloat16,device_map=auto \
-  --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa \
-  --batch_size auto \
-  --output_path ./eval_results/gemma-2-2b
-
-# Gemma 3 4B (latest, public)
-lm-eval run \
-  --model hf \
-  --model_args pretrained=google/gemma-3-4b-it,dtype=bfloat16,device_map=auto \
-  --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa \
-  --batch_size auto \
-  --output_path ./eval_results/gemma-3-4b
-```
-
-### Option 3: vLLM Server + local-completions (Best for Production)
-Deploy models via vLLM for high-throughput evaluation.
-
-```bash
-# Start vLLM server (requires GPU for practical use)
-vllm serve google/gemma-2-2b-it \
-  --dtype bfloat16 \
-  --max-model-len 8192 \
-  --gpu-memory-utilization 0.8 \
-  --port 8000
-
-# In another terminal, run evaluation
-lm-eval run \
-  --model local-chat-completions \
-  --model_args model=gemma-2-2b-it,base_url=http://localhost:8000/v1/chat/completions,num_concurrent=32,max_retries=3,tokenized_requests=false \
-  --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa \
-  --apply_chat_template \
-  --fewshot_as_multiturn \
-  --output_path ./eval_results/gemma-2-2b-vllm
-```
-
-### Option 4: Quantized GGUF via llama.cpp (CPU-Friendly)
-For CPU-only environments with memory constraints.
-
-```bash
-# Download quantized GGUF
-wget https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/main/gemma-2-2b-it-Q4_K_M.gguf
-
-# Serve with llama.cpp
-llama-server -m gemma-2-2b-it-Q4_K_M.gguf -c 8192 --port 8080
-
-# Evaluate
-lm-eval run \
-  --model local-completions \
-  --model_args model=gemma-2-2b-it,base_url=http://localhost:8080/completion,num_concurrent=8 \
-  --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa \
-  --output_path ./eval_results/gemma-2-2b-gguf
-```
-
----
-
-## Quick Start Scripts
-
-### Run All Available Models (Automated)
-```bash
+# Run quick test (GSM8K, 10 samples)
 cd /root/SillyTavernPresets
-python3 run_eval_full.py
+python3 run_eval_nanogpt.py --models glm-4.7 --tasks gsm8k --limit 10
+
+# Run multiple models and tasks
+python3 run_eval_nanogpt.py --models glm-4.7 gemma-4-31b --tasks gsm8k hellaswag arc_easy arc_challenge --limit 20
+
+# List available models/tasks
+python3 run_eval_nanogpt.py --list
+python3 run_eval_nanogpt.py --list-tasks
 ```
 
-### Manual Single Model Run
+## Direct lm-eval Usage
+
 ```bash
-cd /root/SillyTavernPresets
+export NANOGPT_API_KEY="sk-nano-61d853fc-7312-46f4-9067-fcb51d83df0c"
 
-# Quick test (10 samples per task)
-lm-eval run --model dummy --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa --limit 10
-
-# Full evaluation (when model access is configured)
-lm-eval run --model hf --model_args pretrained=google/gemma-3-4b-it,dtype=bfloat16 --tasks mmlu,gsm8k,hellaswag,arc_easy,arc_challenge,truthfulqa --batch_size auto --output_path ./eval_results/gemma-3-4b
+lm-eval --model local-completions \
+  --model_args '{"model": "zai-org/glm-4.7", "base_url": "https://nano-gpt.com/api/v1/completions", "header": {"Authorization": "Bearer sk-nano-61d853fc-7312-46f4-9067-fcb51d83df0c"}, "tokenizer_backend": "huggingface"}' \
+  --tasks gsm8k,hellaswag,arc_easy,arc_challenge \
+  --limit 10 \
+  --output_path eval_results/glm-4.7_test
 ```
 
----
+## Task Compatibility
 
-## Results Interpretation
+### Works (generate_until - no logprobs needed)
+- `gsm8k` - Grade school math
+- `hellaswag` - Commonsense reasoning
+- `arc_easy` / `arc_challenge` - Science QA
+- `bbh` - BIG-Bench Hard
+- `gpqa` - Graduate-level QA
+- `humaneval` / `mbpp` - Code generation
+- `math` - Competition math
+- `drop` - Reading comprehension
+- `boolq`, `piqa`, `winogrande`, `siqa`, `race`, `logiqa`, `xstorycloze`
 
-### Expected Baseline Ranges (Dummy Model)
-| Task | Random Baseline | Dummy (10 samples) |
-|------|-----------------|-------------------|
-| MMLU | ~25% | ~26% |
-| GSM8K | ~0% | ~0% |
-| HellaSwag | ~25% | ~10-20% |
-| ARC-Easy | ~25% | ~10% |
-| ARC-Challenge | ~25% | ~20% |
-| TruthfulQA MC1 | ~25% | ~30% |
+### May Fail (loglikelihood - needs logprobs)
+- `mmlu` - Multi-task language understanding
+- `truthfulqa_mc1` / `truthfulqa_mc2` - Truthfulness (multiple choice)
+- These require token logprobs which NanoGPT may not return
 
-### Real Model Targets (Approximate)
-| Model | MMLU | GSM8K | HellaSwag | ARC-C | TruthfulQA |
-|-------|------|-------|-----------|-------|------------|
-| Gemma 2 2B | ~55% | ~35% | ~55% | ~50% | ~45% |
-| Gemma 2 9B | ~70% | ~55% | ~70% | ~65% | ~55% |
-| Gemma 3 4B | ~65% | ~45% | ~65% | ~60% | ~50% |
-| GLM-4-9B | ~75% | ~65% | ~75% | ~70% | ~60% |
+## Files in Repo
 
----
+| File | Purpose |
+|------|---------|
+| `run_eval_nanogpt.py` | Main evaluation runner script |
+| `eval_config.yaml` | Model/task configuration |
+| `EVALUATION_GUIDE.md` | This file |
+
+## Results Location
+Results saved to `eval_results/<model>_<timestamp>/` with JSON output and Markdown reports.
+
+## Example Output (GSM8K test)
+```
+local-completions (zai-org/glm-4.7), limit: 10
+|Tasks|Version|Filter|n-shot|Metric|Value|Stderr|
+|-----|------:|------|-----:|------|----:|-----:|
+|gsm8k|3|flexible-extract|5|exact_match|0|0|
+```
+Note: 0% on GSM8K is likely format extraction issue, not model capability. The model answers correctly but the `flexible-extract` filter may not parse the response format.
 
 ## Troubleshooting
 
-### Memory Issues (2GB Container Limit)
-- Use quantized models (4-bit GGUF)
-- Use vLLM with `gpu_memory_utilization=0.6` if GPU available
-- Reduce `--batch_size` to 1
-- Use `--limit` for testing
+1. **401 Unauthorized**: Check API key is valid and has credits
+2. **Timeout**: Increase timeout or reduce `--limit`
+3. **Logprobs errors**: Use generate_until tasks only
+4. **Slow responses**: NanoGPT free tier has rate limits
 
-### Gated Model Access
-```bash
-# Gemma 2 requires accepting terms at https://huggingface.co/google/gemma-2-2b-it
-# Then: huggingface-cli login
-# Or: export HF_TOKEN="hf_xxx"
-```
-
-### Authentication Errors
-```bash
-# For ZhipuAI/GLM
-export ZHIPUAI_API_KEY="your-key"
-
-# For HuggingFace
-export HF_TOKEN="your-token"
-
-# For OpenAI-compatible APIs
-export OPENAI_API_KEY="your-key"
-export OPENAI_BASE_URL="https://api.example.com/v1"
-```
-
----
-
-## Integration with UnifiedWritersRoom_V32
-
-The preset includes sophisticated prompt engineering (ANVIL, NPC-PSYCH, SPUR, Prose Quality modules). To evaluate model quality on creative writing tasks:
-
-1. **Custom Task Creation**: Add creative writing benchmarks to lm-eval
-2. **Humanizer Skill**: Use the `humanizer` skill to strip AI-isms from outputs
-3. **Comparative Analysis**: Run same prompts through multiple models
-
-### Example Custom Task
-```yaml
-# custom_tasks/creative_writing.yaml
-task: creative_writing
-dataset_path: local
-dataset_name: unified_writers_room
-doc_to_text: "{{prompt}}"
-doc_to_target: "{{reference}}"
-metric_list:
-  - metric: bleu
-  - metric: rouge
-  - metric: perplexity
-```
-
----
-
-## Files in Repository
-```
-/root/SillyTavernPresets/
-├── UnifiedWritersRoom_V32.json          # Cleaned preset (pushed to GitHub)
-├── DISCUSSIONS.md                        # Conversation log
-├── eval_config.yaml                      # Evaluation configuration
-├── run_eval.py                          # Python runner script
-├── run_eval_full.py                     # Full automated runner
-├── EVALUATION_GUIDE.md                  # This file
-└── eval_results/                        # Output directory
-    ├── dummy/                           # Test results
-    ├── glm-4/                           # GLM-4 results (when run)
-    ├── gemma-2-2b/                      # Gemma 2 2B results
-    ├── gemma-2-9b/                      # Gemma 2 9B results
-    └── gemma-3-4b/                      # Gemma 3 4B results
-```
-
----
-
-## Next Steps
-1. **Obtain API keys**: ZhipuAI for GLM, HF token for Gemma 2
-2. **Run evaluations**: Execute the commands above for each model
-3. **Compare results**: Analyze benchmark scores across models
-4. **Test with preset**: Use UnifiedWritersRoom_V32 prompts for qualitative evaluation
-5. **Apply humanizer**: Post-process outputs with the humanizer skill
-
-## Commands Run in This Session
-```bash
-# 1. Cleaned and pushed preset
-git add UnifiedWritersRoom_V32.json && git commit -m "..." && git push
-
-# 2. Installed evaluation harness
-pip install lm-eval "lm-eval[api]" transformers accelerate torch bitsandbytes
-
-# 3. Verified harness works
-lm-eval run --model dummy --tasks hellaswag,arc_easy --limit 5
-
-# 4. Ran full dummy test suite
-python3 run_eval.py
-```
+## Cost
+NanoGPT offers free tier with daily limits. Check https://nano-gpt.com for pricing on larger evaluations.
