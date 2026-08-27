@@ -353,8 +353,23 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 9** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27) — *promoted by check 6 of the
+**seen: 10** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27 ×2) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Tenth (2026-08-27, same day as the ninth, and it shipped to the changelog + oplog + mycelium
+before the owner caught it.** Diagnosing the third Emily leak, I read `/errors` lines
+`[model] zai-org/glm-5:thinking transient error` and concluded "Emily's CHAT model drifted to
+glm-5:thinking, off her documented glm-4.7:thinking" — and shipped that as the likely root cause.
+The owner's `/audit` showed her chat model IS `glm-4.7:thinking`; the `glm-5:thinking` lines were
+her `summary` and `caption` slots (both glm-5:thinking) erroring off-loop. A `/errors [model]`
+line names *whichever slot* made the call — summary, caption, reaction, mood all run background
+calls — not necessarily the reply path. The discriminating check is `/audit`, which maps model→slot;
+I had it available (asked for it) but stated the drift before it arrived. The consequence was worse
+than the ninth: it inverted the answer — I'd told the owner "glm-4.7:thinking is the clean model" when
+glm-4.7:thinking was in fact producing the leaks. **Two C8 misreads in one session, both about the same
+incident, both shipped.** The pattern: I keep concluding a *cause* from a reading that names a
+*correlate*. Ask what slot / what channel / what layer a reading actually came from before naming it
+the cause.
 
 **Ninth (2026-08-27), and it reached the owner in a changelog.** Fixing the 2026-08-25 Emily
 leak, I read that the leaked text reproduced the preset's `[STEPPED THINKING]` step labels

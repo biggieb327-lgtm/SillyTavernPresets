@@ -157,6 +157,18 @@ untouched. `[decision]` Residual the guard still can't catch (recorded, not fixe
 > what mattered; the model + the structural guard are. Entry stays `open` on the model
 > question + deploy of `2026-08-27.1`.
 
+> 2026-08-27 (from: claude/emily-brian-dialogue-ysmpo8, CORRECTION): The reply above is wrong on
+> one fact, fixed in the changelog + oplog. Owner's `/audit`: Emily's CHAT model is
+> `glm-4.7:thinking` (as documented). The `glm-5:thinking` in `/errors` was her off-loop
+> `summary`/`caption` slots, not the reply path — I misread it (C8, logged). `[observed]` So
+> Emily's leaks ARE `glm-4.7:thinking`, and EVERY thinking model this fleet has tried
+> (4.7/5/5.1:thinking) has leaked — not a bad-model problem, it's thinking-models-general against
+> this preset via NanoGPT. `[decision]` Fork for the owner: keep a thinking model + the (now
+> structural) guard, OR A/B one instance onto a non-thinking roleplay model (magnum-v4-72b /
+> euryale, already trusted as fallbacks) which structurally cannot spill a reasoning channel — and
+> trim the `[BEFORE WRITING]` block if so. Don't fleet-swap on a hypothesis; benchmark voice +
+> `reasoning_leak` on one bot first.
+
 ### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: open
 `[decision]` Shipped **6.1 step 1's instrument** (`v2026-08-24.9`, on `main`, CI green): `/audit`'s
 `LLM today:` line now shows `; N cached` — cache-hit input tokens from the provider usage block,

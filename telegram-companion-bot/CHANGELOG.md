@@ -48,10 +48,17 @@ re-roll a real critique. Both new floors are env-tunable without a redeploy; the
 `REASONING_LEAK_GUARD` kill switch still turns the whole guard off.
 
 **Still the backstop, not the cure.** The guard re-rolls a leak; it does not stop the model
-producing one. These `/errors` showed Emily's chat model as `zai-org/glm-5:thinking`, not the
-`glm-4.7:thinking` CLAUDE.md records — if a specific thinking model reliably spills its
-chain-of-thought into `content`, changing Emily's model is the real source fix. That is an
-owner decision (per-instance model choice is deliberate) and is flagged, not made here.
+producing one. **Correction (2026-08-27, from the owner's `/audit`):** an earlier draft of this
+entry read the `glm-5:thinking` lines in `/errors` as Emily's chat model and inferred a drift
+off her documented `glm-4.7:thinking`. That was a misread — those lines were her `summary` and
+`caption` slots (both `glm-5:thinking`) erroring off-loop; her chat model is and has been
+`glm-4.7:thinking`. So **these are `glm-4.7:thinking` leaks**, and the leak class now spans
+every thinking model this fleet has tried (`glm-4.7:thinking`, `glm-5:thinking`,
+`glm-5.1:thinking`) — it is a property of running a *thinking* model against this preset via
+NanoGPT (planning intermittently lands in `content` instead of the reasoning channel), not one
+bad model. The source-level fork is the owner's: keep a thinking model and rely on this guard,
+or move an instance to a non-thinking roleplay model (no reasoning channel to spill) and trim
+the `[BEFORE WRITING]` planning block that assumes one. Flagged, not decided here.
 
 ## 2026-08-25 — reshape the STEPPED THINKING preset block (content only, all seven bots)
 
