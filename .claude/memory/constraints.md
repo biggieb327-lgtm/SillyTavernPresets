@@ -353,8 +353,22 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 8** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21) — *promoted by check 6 of the
+**seen: 9** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Ninth (2026-08-27), and it reached the owner in a changelog.** Fixing the 2026-08-25 Emily
+leak, I read that the leaked text reproduced the preset's `[STEPPED THINKING]` step labels
+one-to-one and concluded "the `[STEPPED THINKING]` block is the source of the reasoning-leak
+class" — shipped that in the commit and changelog, and reshaped the preset on that basis. The
+discriminating question I skipped is C8's own: *what would this reading look like under the
+other hypothesis* — that a thinking model invents its own scaffold regardless of the preset?
+Two days later Emily leaked a scaffold the preset never contained ("Analyze the Input /
+Character Voice / Goal"), which is exactly that alternative realized. The reading (leak echoes
+the preset) was true; the causal conclusion (preset is the source) did not follow from it, and
+one counterexample falsified it. The reshape was not wasted — it removed real duplication — but
+it was mis-motivated, and the fleet-wide claim overreached what the observation supported. This
+is the prose-only half of C8: no mechanism sees "a true reading used to support a claim it does
+not discriminate."
 
 **Eighth (2026-08-21), and it reached the owner as a finding.** Asked to recommend what to
 do about the startup line, I classified every constraint by whether it had a mechanism
