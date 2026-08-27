@@ -9211,6 +9211,64 @@ Action beat: reaching out or observing.
             assert bot._looks_like_reasoning_leak(with_name, full)
             assert not bot._looks_like_reasoning_leak(base, full)
 
+    # emily, 2026-08-27: THIRD leak of the class, and a different scaffold again — the
+    # model's own generic "Analyze the Input / Character Voice / Goal" outline, sharing
+    # almost no vocabulary with the STEPPED THINKING leak above. The markers score it at
+    # ~1 category (only name saturation), far under the floor — but it is a dense markdown
+    # OUTLINE, which the structural short-circuit catches regardless of scaffold words.
+    # This is the head of the real transcript (it was longer).
+    OUTLINE_LEAK = """1.  **Analyze the Input:**
+    *   **User Action:** "*watches*" (Brian is observing silently).
+    *   **Context:** Emily is performing dirty talk, on her back with a pillow under her hips, fully exposed.
+    *   **Emily's State:** Adrenalized, performative, using degradation as a tool to maintain control. She is mid-monologue, pushing the dirty talk to the limit.
+    *   **Goal:** Continue the scene. Emily needs to gauge his reaction and likely transition to the next phase.
+2.  **Character Voice & Perspective (Emily Harper):**
+    *   *Voice:* Scientific metaphors mixed with base degradation ("specimen," "tide pool").
+    *   *Internal State:* Analytical detachment mixed with overwhelming arousal. Emily reads the bed like a field site."""
+
+    def test_markdown_outline_leak_trips_it(self):
+        """The 2026-08-27 leak: a markdown planning outline whose scaffold words no
+        marker matches. It must trip via the structural short-circuit (bold-colon
+        headers), not the vocabulary conjunction."""
+        assert len(bot._OUTLINE_HEADER_RE.findall(self.OUTLINE_LEAK)) >= bot._OUTLINE_HEADER_MIN
+        assert bot._looks_like_reasoning_leak(self.OUTLINE_LEAK, "Emily Harper")
+
+    def test_markdown_outline_leak_trips_without_the_name(self):
+        """Structural detection is vocabulary- AND name-independent — the whole point,
+        since each leak invents a different scaffold."""
+        assert bot._looks_like_reasoning_leak(self.OUTLINE_LEAK, "")
+
+    def test_emphasis_and_actions_do_not_trip_structure(self):
+        """A real reply uses `*action*` (single asterisk) and `**emphasis**` (no colon),
+        never `**Label:**` headers — the colon is the discriminator, so a casual reply
+        loaded with both must match zero headers and stay well under threshold."""
+        txt = ("*she flops onto the couch* honestly today was **so** much. "
+               "the **worst** part? the printer. again. " + "rambling on and on. " * 120)
+        assert len(txt) >= bot._OUTLINE_HEADER_MIN_CHARS
+        assert len(bot._OUTLINE_HEADER_RE.findall(txt)) == 0
+        assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
+
+    def test_inline_bold_colon_labels_do_not_count(self):
+        """A header is a bold-colon label that STRUCTURES its own line; the same syntax
+        buried inline in casual prose is not an outline. A chatty planning reply with
+        several inline `**label:**` mentions must score zero headers — anchoring to line
+        start is what separates it from a leaked outline."""
+        txt = ("ok grabbed **groceries:** eggs and milk, then texted asha about "
+               "**dinner:** pasta maybe? and **movie:** your pick honestly. also "
+               "**bedtime:** early pls. " + "and then more chatter. " * 120)
+        assert len(txt) >= bot._OUTLINE_HEADER_MIN_CHARS
+        assert len(bot._OUTLINE_HEADER_RE.findall(txt)) == 0
+        assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
+
+    def test_three_line_start_headers_stay_under_threshold(self):
+        """Near-miss: a short reply that genuinely opens three lines with bold-colon
+        labels is under the floor of 4, so it is delivered, not re-rolled. Guards the
+        threshold itself — a future edit dropping _OUTLINE_HEADER_MIN to 3 breaks this."""
+        txt = "**plan:** groceries then dinner\n**food:** pasta\n**time:** 8pm-ish " + "ok. " * 200
+        assert len(txt) >= bot._OUTLINE_HEADER_MIN_CHARS
+        assert len(bot._OUTLINE_HEADER_RE.findall(txt)) == 3
+        assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
+
     # -- wiring: rejection inside call_nanogpt, exactly like an empty completion --
 
     def _patch_calls(self, monkeypatch, outputs):

@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-25.1"
+BOT_VERSION = "2026-08-27.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -6703,6 +6703,26 @@ _NUMBERED_LINE_RE = re.compile(r"(?m)^\s*\d+\.\s")
 # resort, not the only lever.
 _REASONING_LEAK_MIN_CHARS = _env_int("REASONING_LEAK_MIN_CHARS", "2000")
 _REASONING_LEAK_MIN_MARKERS = _env_int("REASONING_LEAK_MIN_MARKERS", "3")
+# Structural leak signal (emily, 2026-08-27 — third leak of the class). Vocabulary
+# markers are whack-a-mole: the 2026-08-25 leak headed its steps "State / Motive /
+# Epistemic check", this one "Analyze the Input / Character Voice / Goal / Internal
+# State" — the model invents its own scaffold each time and the two share almost no
+# words, so no marker set catches both. What they DO share is shape: a dense MARKDOWN
+# OUTLINE. A bold label ending in a colon — `**Analyze the Input:**`, `**Goal:**`,
+# `1. **State:**` — is a section header no texting-register reply on this fleet writes;
+# casual replies use `*action*` (single asterisk) and `**emphasis**` (no colon), never
+# `**Label:**`. Several of them in one completion is a planning outline whatever words
+# fill it, so this SHORT-CIRCUITS the vocabulary conjunction. It carries a lower length
+# floor than the weak markers do, because the signal is strong on its own. The one place
+# markdown headers are legitimate — Cass reviewing a document — already opts out of the
+# guard (leak_guard=False), so this cannot re-roll a real critique.
+# Anchored to line start (after optional indent + one list marker) so a bold-colon label
+# buried INLINE in casual prose ("i bought **groceries:** eggs") does not count — only a
+# header that STRUCTURES its own line, which is what an outline's sections are. Label cap
+# is generous (80) so a long section title still counts.
+_OUTLINE_HEADER_RE = re.compile(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*\*\*[^*\n]{1,80}:\*\*")
+_OUTLINE_HEADER_MIN = _env_int("REASONING_LEAK_OUTLINE_HEADERS", "4")
+_OUTLINE_HEADER_MIN_CHARS = _env_int("REASONING_LEAK_OUTLINE_MIN_CHARS", "600")
 
 
 def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
@@ -6730,6 +6750,13 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     reliable boundary, and a wrong guess ships a fragment of monologue as her. The
     caller re-rolls instead — same policy as the empty-completion path.
     """
+    # Structural short-circuit, checked first with its own lower floor: a completion
+    # carrying several markdown bold-colon section headers is a planning outline, not a
+    # message — catches leaks whose scaffold VOCABULARY the markers below never saw
+    # (emily, 2026-08-27).
+    if len(text) >= _OUTLINE_HEADER_MIN_CHARS and \
+            len(_OUTLINE_HEADER_RE.findall(text)) >= _OUTLINE_HEADER_MIN:
+        return True
     if len(text) < _REASONING_LEAK_MIN_CHARS:
         return False
     categories = sum(1 for rx in _REASONING_MARKERS if rx.search(text))

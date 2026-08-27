@@ -7,6 +7,52 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-27.1 — reasoning-leak guard: catch the outline SHAPE, not the scaffold words
+
+**Root cause: chasing scaffold vocabulary is whack-a-mole.** Emily leaked her deliberation
+as the reply a third time (after priya 2026-08-03 and emily 2026-08-25), and this scaffold
+shared almost no words with the last one: the 2026-08-25 leak headed its steps "State /
+Motive / Epistemic check / Rule priority" (the preset's `[STEPPED THINKING]` labels, which
+`v2026-08-25.1` added as markers); this one was the model's OWN generic outline — "Analyze
+the Input / Character Voice & Perspective / User Action / Goal / Internal State" — with none
+of those words. The `v2026-08-25.1` markers scored it at **one** category (character-name
+saturation), far under the floor of 3, so `_looks_like_reasoning_leak` returned False and it
+was delivered. The 2026-08-25 preset reshape was irrelevant to it: a thinking model invents
+its own planning scaffold whatever the preset says, so no marker vocabulary and no preset
+edit can enumerate them all.
+
+**Fix: a structural short-circuit keyed on shape, not words.** The two Emily leaks share no
+vocabulary but the same structure — a dense **markdown outline** of bold section headers
+ending in a colon (`**Analyze the Input:**`, `**Goal:**`, `1. **State:**`). No
+texting-register reply on this fleet writes that: casual replies use `*action*` (single
+asterisk) and `**emphasis**` (no colon), never `**Label:**`. `_looks_like_reasoning_leak`
+now returns True up front when a completion carries `REASONING_LEAK_OUTLINE_HEADERS` (4) or
+more such headers and is at least `REASONING_LEAK_OUTLINE_MIN_CHARS` (600) long — a lower
+floor than the 2000 the weak vocabulary markers need, because the shape is diagnostic on its
+own. This is vocabulary- and name-independent, so it catches the next invented scaffold too.
+The confirmed transcript scored 6 headers in its first 746 chars; break-tested RED→GREEN.
+
+The header match is **anchored to line start** (after optional indent and one list marker),
+so a bold-colon label buried inline in casual prose ("i grabbed **groceries:** eggs") is not
+counted — only a label that structures its own line, which is what an outline's sections are.
+That anchoring (and a generous 80-char label cap) came out of the `/code-review` pass, which
+flagged that a shape-only rule at a 600-char floor widens the false-positive surface, and
+most for Emily's clinical field-notes register; anchoring shrinks it back to genuine outlines
+while still scoring the real leak at 6. Regression tests pin all three edges: the real leak
+trips (with and without the name), inline `**label:**` prose scores zero, and three
+line-start headers stay under the floor.
+
+The one place markdown section headers are legitimate — Cass reviewing a document/card — is
+already outside the guard (`leak_guard=False` on document-analysis paths), so this cannot
+re-roll a real critique. Both new floors are env-tunable without a redeploy; the
+`REASONING_LEAK_GUARD` kill switch still turns the whole guard off.
+
+**Still the backstop, not the cure.** The guard re-rolls a leak; it does not stop the model
+producing one. These `/errors` showed Emily's chat model as `zai-org/glm-5:thinking`, not the
+`glm-4.7:thinking` CLAUDE.md records — if a specific thinking model reliably spills its
+chain-of-thought into `content`, changing Emily's model is the real source fix. That is an
+owner decision (per-instance model choice is deliberate) and is flagged, not made here.
+
 ## 2026-08-25 — reshape the STEPPED THINKING preset block (content only, all seven bots)
 
 Follow-up to v2026-08-25.1 (the guard fix). The `[STEPPED THINKING]` block is the
