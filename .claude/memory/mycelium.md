@@ -144,6 +144,19 @@ untouched. `[decision]` Residual the guard still can't catch (recorded, not fixe
 2000-char floor, or one as bullets+prose (no numbered lines, no `option N`) — the
 `REASONING_LEAK_MIN_CHARS`/`_MARKERS` env levers cover it without a redeploy.
 
+> 2026-08-27 (from: claude/emily-brian-dialogue-ysmpo8): The residual bit — Emily leaked a
+> THIRD time within a day, a different self-invented scaffold ("Analyze the Input / Character
+> Voice / Goal") the vocabulary markers scored at 1 category. `[decision]` Shipped a
+> STRUCTURAL fix (`v2026-08-27.1`, on main, CI green): `_looks_like_reasoning_leak` now
+> short-circuits on >=4 line-anchored markdown bold-colon headers over a 600-char floor —
+> vocabulary-independent, so it stops chasing scaffold words. **This closes the "novel
+> scaffold evades the guard" thread.** `[hypothesis]` But the guard is a backstop: `/errors`
+> showed Emily on `glm-5:thinking`, not the `glm-4.7:thinking` CLAUDE.md records — the real
+> cure is a model decision (does glm-5:thinking spill CoT into `content`?), raised with the
+> owner, not made. The voice-flatness watch below is now moot — the preset reshape was not
+> what mattered; the model + the structural guard are. Entry stays `open` on the model
+> question + deploy of `2026-08-27.1`.
+
 ### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: open
 `[decision]` Shipped **6.1 step 1's instrument** (`v2026-08-24.9`, on `main`, CI green): `/audit`'s
 `LLM today:` line now shows `; N cached` — cache-hit input tokens from the provider usage block,
