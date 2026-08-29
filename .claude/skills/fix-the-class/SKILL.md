@@ -43,6 +43,27 @@ Each was found by a scanner written in the moment. Those scanners are now
    across the repo before shipping. If it finds anything, add a scanner to `sweep.py`
    in the same change.
 
+   **Before trusting a *clean* sweep, prove the pattern catches the original.** A grep
+   that finds no siblings is evidence only if it would have matched the bug you just
+   fixed — run it against the pre-fix source (`git show HEAD~1:<file>`, or the diff's
+   `-` lines) and confirm it hits. A pattern that matches nothing in the pre-fix file is
+   broken, not reassuring: "no other instances" and "my regex is wrong" produce the
+   identical clean result, and shipping on the second is a false all-clear — the same
+   can't-fail failure the break-test below guards against, one step earlier in the
+   pipeline. (Borrowed from the `bug-echo` skill's self-validation step — the one idea in
+   it this skill didn't already have.)
+
+   **First check the bug is even grep-shaped.** Read the removed lines alone: can you
+   tell they are a bug with no other context? If yes, a shape grep can express the class.
+   If the line reads as ordinary and what made it a bug lived elsewhere — a guard two
+   lines up, a state set earlier, a call site that omitted an argument — the class is a
+   *relationship*, not a substring: a grep for the line finds nothing useful, and the
+   check has to assert on the behaviour instead. The 2026-08-27 reasoning-leak fix was
+   this shape. It *added* a guard rather than changing a buggy line, so its diff had no
+   anti-pattern substring to sweep for; the class ("a model completion reaches the user
+   without passing the leak guard") could only be proven by a test that runs each send
+   path — see `test_send_triggered_rerolls_leak_end_to_end` in `tests/test_pure.py`.
+
 3. **Prefer a generalised guard over a point test.** A test asserting `/audit` has no
    `parse_mode` catches one regression. A test that re-derives the offender list from
    source and fails on any new one catches the class forever. See

@@ -9337,6 +9337,52 @@ Action beat: reaching out or observing.
             [{"role": "user", "content": "card"}], model="doc", leak_guard=False))
         assert out == review
 
+    def test_send_triggered_rerolls_leak_end_to_end(self, monkeypatch):
+        """The CLASS, proven by running the path — not by reading it. send_triggered
+        is the shared choke point for every UNPROMPTED user-facing message: proactive
+        heartbeats (send_proactive) and cron jobs (run_cron_job) both funnel through
+        it. It calls reply_with_typing WITHOUT passing leak_guard, so it rides the
+        default of True — a leak on the first attempt must re-roll, and the user
+        (send_bubbles) must receive the clean second reply, never the outline.
+
+        Nothing else pins this. The generate_reply tests prove the guard fires WHEN
+        asked; only this proves send_triggered asks. A future edit that threads
+        leak_guard=False through this path, or a new unprompted sender that reaches
+        the user without going through reply_with_typing, turns this red — which is
+        the whole point, since the leak class recurred three times (priya 2026-08-03,
+        emily 2026-08-25 and 2026-08-27) and the reply path is not the only way a
+        model completion reaches a user."""
+        captured = []
+
+        async def _anoop(*a, **k):
+            return None
+
+        async def _capture_bubbles(context, chat_id, text, *a, **k):
+            captured.append(text)
+
+        async def _search_passthrough(context, chat_id, messages, ai_response, uname, *a, **k):
+            return ai_response
+
+        # First model attempt leaks; second is a clean reply. Same _one_call seam
+        # the generate_reply wiring tests use, so this exercises the real guard.
+        self._patch_calls(monkeypatch, [self.LEAK, "hey. come here."])
+        monkeypatch.setattr(bot, "ensure_weather", _anoop)
+        monkeypatch.setattr(bot, "assemble_messages",
+                            lambda *a, **k: [{"role": "user", "content": "x"}])
+        monkeypatch.setattr(bot, "_keep_typing", _anoop)
+        monkeypatch.setattr(bot, "maybe_search", _search_passthrough)
+        monkeypatch.setattr(bot, "send_bubbles", _capture_bubbles)
+        monkeypatch.setattr(bot, "remember", lambda *a, **k: None)
+        monkeypatch.setattr(bot, "maintain_memory", _anoop)
+        monkeypatch.setattr(bot, "update_mood", _anoop)
+
+        ctx = SimpleNamespace(bot=object())
+        out = asyncio.run(bot.send_triggered(ctx, 1, "[SYSTEM: reach out first]"))
+
+        assert captured == ["hey. come here."]
+        assert self.LEAK not in captured
+        assert out == "hey. come here."
+
 
 # ── Offline life events (2026-08-04, reimplemented from b0eb485, never merged) ─────
 
