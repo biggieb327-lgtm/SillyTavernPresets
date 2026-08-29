@@ -51,7 +51,19 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
-### 2026-08-23 — .claude/tools/*.sh have weaker integrity coverage than hooks/*.sh | status: graduated
+### 2026-08-29 — risk-guard.sh matches `git checkout <dirty-file>` inside heredoc/quoted bodies, not just executable positions | status: open
+While committing the debrief, `risk-guard.sh` blocked `git commit -F - <<EOF … EOF` because
+the C15 description *inside the commit message* contained the literal string of the forbidden
+command over a then-dirty file. The block is content-blind: it scans the whole Bash command
+text and cannot tell a real checkout from the same words quoted in a message body. Cost this
+session was one reword — cheap. It is the correct trade (a guard that under-blocks is the
+dangerous one), and it fired 100% correctly on the *actual* checkout attempt earlier the same
+session, so this is a precision note, not a demand to loosen it.
+**Graduates when:** the false positive blocks real work more than trivially — e.g. a session
+has to fight it repeatedly, or it blocks a commit whose message legitimately must quote the
+command — at which point narrow the match to executable positions (skip heredoc/quoted bodies)
+and break-test in a throwaway repo. Until then, rewording the message is the right move and no
+change is warranted.
 `shell-scripts-parse` globbed only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
 no tool shell script was `bash -n`'d; `tools/prose-constraint-check.sh` was run by no eval
 either, so its syntax was checked by nothing.
