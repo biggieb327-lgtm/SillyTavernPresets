@@ -37,12 +37,10 @@ HONEST LIMITS
     each qualifying prompt needs its OWN nudge about THAT prompt — capping would
     silently stop rewriting prompt #N+1. The gate is the cost control.
 
-ENABLE FLAG (this hook INVERTS the repo's default-ON kill-switch norm on purpose)
-  PROMPTER=1 / on / true      -> enabled
-  unset / 0 / off / false     -> disabled (no-op)  [default]
-  The repo ships fleet features default-ON. This one reshapes the human's own
-  prompt loop, so it should be chosen, not sprung on a session unannounced.
-  Turn it on with `export PROMPTER=1`.
+KILL SWITCH (repo policy: new features default ON with a mandatory switch)
+  unset / anything else       -> enabled (default)
+  PROMPTER=0 / off / false / no -> disabled (no-op)
+  Disable for a session with `export PROMPTER=0`.
 """
 
 import json
@@ -62,7 +60,7 @@ BODY = (
     "asking. No rewrite is a successful outcome."
 )
 
-_ENABLED = {"1", "on", "true", "yes"}
+_DISABLED = {"0", "off", "false", "no"}
 
 # Whole-message operational responses — never a new task to rewrite. Matched
 # against the entire stripped prompt, not searched, so "proceed with the audit"
@@ -196,7 +194,7 @@ def main() -> int:
     if "--selftest" in sys.argv:
         return _selftest()
 
-    if os.environ.get("PROMPTER", "").strip().lower() not in _ENABLED:
+    if os.environ.get("PROMPTER", "").strip().lower() in _DISABLED:
         return 0
 
     # Always drain stdin so the CLI never blocks on an unread pipe.
