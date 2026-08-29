@@ -79,6 +79,32 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-08-29 | prompter concept adopted as a hook, not the skill; default-ON with PROMPTER kill switch | status: current
+**Decided:** rebuild the `prompter` concept (github.com/Terryc21/prompter) as a
+`UserPromptSubmit` hook, `.claude/hooks/prompt-rewrite.py`, wired in `settings.json` beside
+`agent-authorization.py`. A deterministic regex gate (`should_rewrite`) decides *whether* to
+nudge; the model does the rewrite. Ships **default-ON** with a `PROMPTER=0` kill switch, and no
+per-session emit cap.
+**Over:** (a) installing prompter's own SKILL.md as-is — rejected: a skill cannot intercept a
+prompt (it is invoked mid-turn by the model's choice), so its "rewrite every prompt this
+session / via CLAUDE.md" behavior is advisory, and the model just runs the task; the hook is the
+only mechanism that fires before the model acts. (b) opt-in default (`PROMPTER=1` to enable) —
+built first, then reversed by the owner: it reshapes the human's own prompt loop, so I defaulted
+it off to avoid springing it on a session; owner chose default-ON, which also restores the
+repo's standard kill-switch polarity (unset = active, `0` = off) instead of inverting it.
+(c) a per-session emit cap like agent-authorization's `MAX_EMITS` — rejected: agent-auth caps
+because CLAUDE.md carries its standing grant afterward, but each qualifying prompt needs its own
+nudge about *that* prompt, so a cap would silently stop rewriting prompt N+1; cost is instead
+held down by the tight gate + short body (F4 additionalContext-accumulation lesson).
+**Why:** the mechanism, not the packaging, was the whole value — interception is a hook's job.
+Default-ON matches repo policy (new features default ON with a mandatory switch) and the owner
+ratified it.
+**By:** a session, 2026-08-29, built at owner request; default-ON flip owner-settled. Gate
+behavior break-tested red then green, pinned by the `prompt-rewrite-gate` eval (18 cases); full
+suite exit 0.
+**Detail:** commits 4b391dd (hook + eval) and d2ea508 (default-ON flip); hook docstring carries
+the mechanism rationale.
+
 ### 2026-08-29 | bug-echo not adopted as a plugin; its one new idea folded into fix-the-class | status: current
 **Decided:** do not install the external `bug-echo` skill (github.com/Terryc21/bug-echo); keep
 `fix-the-class` as the repo's post-fix sweep and add bug-echo's one non-redundant idea to it —
