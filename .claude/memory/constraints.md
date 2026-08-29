@@ -243,7 +243,18 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 4** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25)
+**seen: 5** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29)
+- 2026-08-29 — Assessing bug-echo, wrote the whole send-path conclusion ("both deliver via
+  reply_with_typing → generate_reply, which defaults leak_guard=True"; "none deliver a
+  free-form persona reply to the user") as settled fact when it was a source trace — I had
+  read the call graph, not run it. `theory-guard.sh` blocked the turn (C5's own line:
+  reading source tells you what code says; only running tells you what it produces). Split
+  the claim: verified the two checkable facts by command (the `leak_guard=True` defaults;
+  the commit's only removed line was the version bump) and hedged the "class is covered"
+  conclusion as source-traced — then closed it properly by writing
+  `test_send_triggered_rerolls_leak_end_to_end`, which *runs* the path. Mechanism fired
+  correctly; the tell was the same one every time — a behavioural claim built from reading,
+  not execution.
 - 2026-08-25 — Closing a report, wrote "the deeper cause — thinking models externalizing the
   `[STEPPED THINKING]` scaffold at all" as a settled mechanism, when it is inferred from the preset
   text and the guard's docstring — I never reproduced it against a live model this session.
@@ -792,11 +803,24 @@ on all three branches with the surrounding prose left intact.
 ---
 
 ### C15 — Never `git checkout -- <file>` to revert a break-test edit; re-edit instead
-**seen: 2** — documented once already, in `repo-change-control`'s own "Common mistakes"
-("this destroyed ~700 lines once"), and repeated 2026-08-01 mid-session on bot.py's
-uncommitted command-menu fix. *Promoted directly on the repeat rather than waiting for a
-third occurrence — the first was already written down as exactly this trap, which makes
-repeating it the more damning of the two, not the more forgivable.*
+**seen: 3** (third: 2026-08-29 — impulse recurred, mechanism caught it, zero damage)
+- 2026-08-29 — Break-testing `test_send_triggered_rerolls_leak_end_to_end`, reached for
+  `git checkout -- bot.py` as the revert step while `tests/test_pure.py` held uncommitted
+  work — the exact C15 impulse, made *while editing the fix-the-class skill whose own text
+  says "never `git checkout` a file holding uncommitted work to undo a test injection."*
+  Read the caution, agreed with it, did not check my own next command against it (working
+  principle #8). `risk-guard.sh` blocked the whole Bash command PreToolUse before anything
+  ran; nothing was lost. Reverted the injection by re-edit instead, as C15 requires. The
+  guard blocks a checkout whenever the tree is dirty, not only when the checkout *target*
+  is dirty — a safe over-trigger that held here even though the injection heredoc in the
+  same command had not yet run. Mechanism worked; the impulse is stubborn, which is why it
+  is graduated.
+
+First two occurrences: documented once already, in `repo-change-control`'s own "Common
+mistakes" ("this destroyed ~700 lines once"), and repeated 2026-08-01 mid-session on
+bot.py's uncommitted command-menu fix. *Promoted directly on the repeat rather than waiting
+for a third occurrence — the first was already written down as exactly this trap, which
+makes repeating it the more damning of the two, not the more forgivable.*
 
 While break-testing a new regression eval (proving it fails RED before trusting it
 GREEN — the correct instinct), a single deliberately-broken line was stripped out of

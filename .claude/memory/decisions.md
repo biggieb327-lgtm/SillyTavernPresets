@@ -79,6 +79,25 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-08-29 | bug-echo not adopted as a plugin; its one new idea folded into fix-the-class | status: current
+**Decided:** do not install the external `bug-echo` skill (github.com/Terryc21/bug-echo); keep
+`fix-the-class` as the repo's post-fix sweep and add bug-echo's one non-redundant idea to it —
+validate a search pattern against the pre-fix source before trusting a *clean* sweep.
+**Over:** (a) installing bug-echo as a standing Claude Code plugin — rejected: it is
+functionally the same discipline as `fix-the-class` (which is already wired into CLAUDE.md's
+working principles and the `the class` vocabulary term), and it is Swift/SwiftUI-shaped
+(`**/*.swift` default, AST-grep Swift path, `#if os()` handling, >500-file sub-agent batching)
+— all inert on a single-file Python bot, so it would add a redundant, mostly-dead skill to the
+surface. (b) Ignoring it entirely — rejected: its self-validation step ("prove the pattern
+matches the original bug before believing a zero-match result") was the one thing `fix-the-class`
+genuinely lacked, and it closes a real false-all-clear gap.
+**Why:** the value was one idea, not a tool; harvesting the idea keeps the surface small (the
+repo's standing anti-bloat + `skill-index-integrity` posture) while capturing the gain.
+**By:** a session, 2026-08-29 — verification: read the whole skill, traced its flagship mode
+against our latest fix (the additive reasoning-leak guard, which it cannot seed from), confirmed
+redundancy against `fix-the-class`.
+**Detail:** commit b064813 (fix-the-class edit + `test_send_triggered_rerolls_leak_end_to_end`).
+
 ### 2026-08-25 | Decision log lives in its own durable file, not in mycelium | status: current
 **Decided:** the consolidated decision log is `.claude/memory/decisions.md`, a system-of-record
 file alongside `operational-log.md` and `constraints.md`.
