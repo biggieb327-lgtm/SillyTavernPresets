@@ -20,6 +20,12 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-authorization.py\"",
             "timeout": 10,
             "statusMessage": "Agent authorization"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/prompt-rewrite.py\"",
+            "timeout": 10,
+            "statusMessage": "Prompt rewrite"
           }
         ]
       }

@@ -264,6 +264,20 @@ else
   bad "hook-refs-exist" "hook wrapper(s) invoke missing file(s):$ref_missing — the interpreter runs on a nonexistent path, exits nonzero, and the hook fails open"
 fi
 
+# --- prompt-rewrite-gate ---------------------------------------------------------------
+# prompt-rewrite.py's whole value is its gate (should_rewrite): fire on short/under-specified
+# task prompts, skip operational responses and already-specified ones. A gutted gate (always
+# False = never nudge, or always True = nudge every "yes") passes hook-python-compiles while
+# doing nothing useful or spamming every turn. Its --selftest pins both directions against
+# fixtures and exits nonzero on any miss; run it here so a regression goes red in CI, not live.
+if [ -f .claude/hooks/prompt-rewrite.py ]; then
+  if pr_out=$(python3 .claude/hooks/prompt-rewrite.py --selftest 2>&1); then
+    ok "prompt-rewrite-gate: should_rewrite fires/skips per fixtures (${pr_out##*ok })"
+  else
+    bad "prompt-rewrite-gate" "$pr_out"
+  fi
+fi
+
 # --- stop-guards-behavioral ------------------------------------------------------------
 # hook-python-compiles proves the four Python Stop-guards COMPILE; nothing exercised them.
 # All four fail OPEN (a broken guard returns 0/allow), so a gutted regex passes every other
