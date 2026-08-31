@@ -2103,6 +2103,24 @@ class TestReviewlifeSuggestions:
         queue = bot._load_life_review()
         assert [q["line"] for q in queue] == ["line1", "line2"]  # oldest dropped
 
+    def test_duplicate_and_replayed_suggestions_are_deduped(self, tmp_path, monkeypatch):
+        # A durable detail can resurface across nights before the owner reviews it; the
+        # (file, line) dedup keeps it queued once — both within one batch and against what
+        # is already pending. Its sibling _enqueue_audit_proposals pins the same class in
+        # test_already_pending_skipped; this covers the reviewlife queue. (Sprint B:
+        # duplicate/replayed input.)
+        self._isolate(tmp_path, monkeypatch)
+        first = bot._enqueue_life_suggestions([
+            {"file": "people", "line": "Marco — new dispatcher", "source": "quote one"},
+            {"file": "people", "line": "Marco — new dispatcher", "source": "quote two"},
+        ])
+        assert first == 1                                   # intra-batch duplicate collapsed
+        replay = bot._enqueue_life_suggestions([
+            {"file": "people", "line": "Marco — new dispatcher", "source": "a later night"}])
+        assert replay == 0                                  # replay against the queue skipped
+        queue = bot._load_life_review()
+        assert [(q["file"], q["line"]) for q in queue] == [("people", "Marco — new dispatcher")]
+
     # ── _append_life_line ──────────────────────────────────────────────────────
     def test_append_adds_one_line_no_date_stamp_no_cross_contamination(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
