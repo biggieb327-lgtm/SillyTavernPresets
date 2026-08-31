@@ -243,7 +243,20 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 5** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29)
+**seen: 6** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31)
+- 2026-08-31 — In the context-architecture report, classified three cleanup items
+  (`routines.md` move, `constraints.md` split, retiring two historical skills) as "low-risk"
+  and offered to execute them — before checking any against the repo's referential-integrity
+  evals. Investigation then showed all three coupled: `routines.md` is backtick-referenced in
+  CLAUDE.md (moving it fails `claude-md-refs-resolve`), the two skills are gated both ways by
+  `skill-index-integrity`, and `constraints.md` has no clean cut (its bulk is active
+  constraints + an active Minor log). Withdrew the label and re-scoped to the genuinely
+  uncoupled set (stale-doc archival) before touching anything. The tell was C5's own line:
+  confidence followed fluency, not evidence — I called it low-risk because it *read*
+  low-risk, not because I had checked the coupling. No mechanism sees this: a planning-risk
+  classification stated to the owner is not a function-return claim, so it is C5's uncovered
+  general half (`theory-guard.sh` catches only "what a named function returns/produces/causes"),
+  consistent with the graduation note's scope — no guard gap.
 - 2026-08-29 — Assessing bug-echo, wrote the whole send-path conclusion ("both deliver via
   reply_with_typing → generate_reply, which defaults leak_guard=True"; "none deliver a
   free-form persona reply to the user") as settled fact when it was a source trace — I had
