@@ -189,3 +189,22 @@ not drift.
 **Why:** owner preference for that instance's voice.
 **By:** owner-confirmed, 2026-07-25.
 **Detail:** `CLAUDE.md` → "Known-deliberate".
+
+### 2026-08-31 | /update self-deploy permanently retired (unconditional, no re-enable) | status: current
+**Decided:** `/update` and admin `/admin/update` are retired unconditionally — `perform_self_update`
+returns `reason: "retired"` before any network/filesystem work, with no env flag to turn it back
+on. `/admin/update` returns 410 Gone. Shipped v2026-08-31.2.
+**Over:** three alternatives — (a) an env opt-in `LEGACY_SELF_UPDATE` (default off) re-enabling the
+old in-place swap for emergencies; built and shipped as the unmerged v2026-08-31.1, then removed at
+owner request; (b) a bare unconditional gate leaving the fetch/swap body as dead code — the
+`/code-review` objection that first drove (a); (c) deleting the fetch/swap body outright — rejected
+because it scatters the same vestige across an unused `_RAW_BOT_URL` and a host-wide lock that then
+guards nothing.
+**Why:** the repo going public (2026-08-31) re-armed the path — its raw fetch resolves again, so it
+would SUCCEED at an in-place bot.py swap that bypasses the immutable-release/selector/locked-venv
+deploy and is erased by the next `vps-sync.sh` hard-reset (silent divergence). Owner wants zero
+re-enable capability, so no toggle. The now-unreachable body is retained as one commented, tested
+block so the concurrency lock + reason-branch regression tests stay meaningful.
+**By:** owner, 2026-08-31 ("zero re-enable capability").
+**Detail:** `CHANGELOG.md` → v2026-08-31.2; `_perform_self_update_locked` / `update_cmd` in `bot.py`;
+deploy stays `deploy/vps-sync.sh` per instance.

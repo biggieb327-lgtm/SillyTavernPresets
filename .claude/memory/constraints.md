@@ -1207,6 +1207,15 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-08-31 — Building the verify venv, wrote `pip install … | tail -5` then `echo "EXIT=$?"`
+  and read the pipeline's status as pip's — it is `tail`'s (exit 0). A hard install failure
+  (`garminconnect==0.3.11` absent from the proxy index, `--require-hashes` aborting the whole
+  install) reported "EXIT=0", so I briefly believed the venv was built; caught one step later
+  when `import telegram` raised `ModuleNotFoundError`. → **`$?` after a pipeline is the LAST
+  command's status; to check an earlier stage use `set -o pipefail`, `${PIPESTATUS[0]}`, or run
+  the command without the trailing pipe.** Cost a few minutes and one wrong belief; no damage.
+  Same family as C23 (a shell semantic the command text does not show) but a distinct idiom, so
+  logged here rather than folded into it.
 - 2026-08-26 — Reshaping the `[STEPPED THINKING]` preset block, nearly edited only `preset.txt` —
   the file the `character-reviewer` agent had reviewed and cited by line number. The
   `edit-cards-and-presets` skill's "check `PRESET_FILES` before assuming `preset.txt` is live" note

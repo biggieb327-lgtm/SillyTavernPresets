@@ -64,6 +64,13 @@ has to fight it repeatedly, or it blocks a commit whose message legitimately mus
 command — at which point narrow the match to executable positions (skip heredoc/quoted bodies)
 and break-test in a throwaway repo. Until then, rewording the message is the right move and no
 change is warranted.
+**Recurred 2026-08-31 (different matcher, same root cause):** the `git add … .env` staging
+matcher (not the C15 checkout matcher) blocked a `git commit -F - <<EOF` whose message body
+contained the literal `git add .env` as prose. Same content-blind whole-command scan; the class
+has now bitten two of risk-guard's matchers. Workaround was again cheap — wrote the message to a
+file and used `git commit -F <file>`. Still under the graduation bar (rewording sufficed), but
+the two-matcher spread is the argument for the eventual fix: strip heredoc + `-F` message bodies
+before matching, then break-test both matchers.
 `shell-scripts-parse` globbed only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
 no tool shell script was `bash -n`'d; `tools/prose-constraint-check.sh` was run by no eval
 either, so its syntax was checked by nothing.
