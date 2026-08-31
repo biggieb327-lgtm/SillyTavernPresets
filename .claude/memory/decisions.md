@@ -182,13 +182,20 @@ depends on shipping one file.
 **By:** owner (standing).
 **Detail:** `CLAUDE.md` → "Known-deliberate — do not 'fix' these".
 
-### (seed) Emily runs glm-4.7:thinking, not glm-5 | status: current
+### (seed) Emily runs glm-4.7:thinking, not glm-5 | status: superseded
 **Decided:** the `emily` instance runs `zai-org/glm-4.7:thinking`.
 **Over:** moving her to glm-5 with the rest — rejected; per-instance model choice is expected,
 not drift.
 **Why:** owner preference for that instance's voice.
 **By:** owner-confirmed, 2026-07-25.
 **Detail:** `CLAUDE.md` → "Known-deliberate".
+**Superseded 2026-08-31 (owner):** retired from the decision log at owner request — this is a
+log cleanup, NOT a config reversal. Emily still runs `zai-org/glm-4.7:thinking`. The live
+"do not 'correct' it to glm-5" guard-rail lives in the `bot-config-reference` skill (its model
+table + Common-mistakes list), which is where a session actually looks before touching an
+instance's `.env`, so nothing about her config or its protection changes. The `CLAUDE.md` →
+"Known-deliberate" pointer above is stale (that note was removed 2026-08-31); the skill
+guard-rail is intact.
 
 ### 2026-08-31 | /update self-deploy permanently retired (unconditional, no re-enable) | status: current
 **Decided:** `/update` and admin `/admin/update` are retired unconditionally — `perform_self_update`
