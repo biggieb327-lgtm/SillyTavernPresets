@@ -71,6 +71,14 @@ has now bitten two of risk-guard's matchers. Workaround was again cheap — wrot
 file and used `git commit -F <file>`. Still under the graduation bar (rewording sufficed), but
 the two-matcher spread is the argument for the eventual fix: strip heredoc + `-F` message bodies
 before matching, then break-test both matchers.
+**Same class, a third guard (2026-08-31):** `theory-guard.sh` fired twice on chat prose that
+*quoted or retrospectively described* a behavioral claim ("… returns retired …") rather than
+asserting it fresh — the claim was already proven by an executed, pasted pytest run. Same
+content-blind root cause (a guard scanning text it cannot tell is a live claim vs. a mention);
+now spanning risk-guard (commit-message bodies) and theory-guard (retrospective narrative). The
+class fix is the same shape: a guard's matcher should exempt quoted/retrospective context, or
+the author must cite the already-run evidence inline. Cost is trivial each time; logged for the
+pattern, not as a demand to loosen either guard.
 `shell-scripts-parse` globbed only `.claude/hooks/*.sh` and `telegram-companion-bot/*.sh`, so
 no tool shell script was `bash -n`'d; `tools/prose-constraint-check.sh` was run by no eval
 either, so its syntax was checked by nothing.
