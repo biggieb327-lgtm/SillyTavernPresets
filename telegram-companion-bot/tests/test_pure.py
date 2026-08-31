@@ -5334,6 +5334,18 @@ class TestSelfUpdateLock:
         assert "flock" in inspect.getsource(bot.perform_self_update)
         assert "flock" not in inspect.getsource(bot._perform_self_update_locked)
 
+    def test_update_is_retired_when_the_lock_is_free(self):
+        # v2026-08-31.1: /update is retired. With the lock free, perform_self_update
+        # reaches the body and must refuse with `retired` BEFORE any network or filesystem
+        # work — its in-place bot.py swap bypasses the immutable-release deploy.
+        from pathlib import Path as _P
+        tmp = _P(bot.__file__).resolve().parent / "bot.py.new"
+        existed = tmp.exists()
+        r = bot.perform_self_update()
+        assert r["ok"] is False and r["reason"] == "retired"
+        assert "vps-sync.sh" in r["detail"]
+        assert tmp.exists() == existed, "a retired update must not write bot.py.new"
+
 
 class TestUpdateCmdNeverRepliesSilently:
     def test_every_failure_reason_gets_a_reply(self):
@@ -8285,6 +8297,7 @@ class TestEveryBooleanFlagDefault:
         "PAYMENTS_ENABLED": False,
         "PLACE_ANCHOR_HER": True,
         "PRESET_COMMAND": True,
+        "LEGACY_SELF_UPDATE": False,
         "PROMPT_BALANCE": True,
         "PROMPT_STATS": True,
         "REACTIONS_AUTO": True,
@@ -8342,6 +8355,9 @@ class TestEveryBooleanFlagDefault:
         assert off == ["ADMIN_API_ENABLED", "CLOSENESS_ENABLED", "DEVICE_RENDER",
                        "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
                        "GROUP_MODE", "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
+                       # /update retirement gate (v2026-08-31.1): default off = retired;
+                       # the in-place swap bypasses the immutable-release deploy.
+                       "LEGACY_SELF_UPDATE",
                        # Off on NAMED instances only (`not IS_NAMED_INSTANCE`), which
                        # the fixture is. Added v2026-08-12.2 when it stopped being
                        # hand-rolled; its default was pinned by nothing before that.
@@ -8790,15 +8806,30 @@ class TestEveryCommandHandlerActuallyRuns:
         asyncio.run(bot.gif_cmd(u, _cmd_ctx()))
         assert m.sent and "Usage" in m.sent[0]
 
-    def test_update_cmd_reports_the_dead_deploy_path(self, monkeypatch):
-        """/update downloads over raw URLs, which 404 on the private repo. It must SAY
-        so — the handler is kept for exactly that reply."""
+    def test_update_cmd_replies_for_the_legacy_repo_not_readable_reason(self, monkeypatch):
+        """repo_not_readable is now unreachable in normal operation (the fetch is gated
+        off), but its branch is kept for the admin HTTP path and a possible revert. If it
+        is ever returned, update_cmd must still SAY so, not go silent."""
         monkeypatch.setattr(bot, "perform_self_update",
                             lambda force: {"ok": False, "reason": "repo_not_readable",
                                            "detail": "404"})
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.update_cmd(u, _cmd_ctx()))
         assert m.sent
+
+    def test_update_cmd_is_retired_and_points_to_vps_sync(self):
+        """v2026-08-31.1: /update is retired. The REAL perform_self_update returns
+        `retired` before any fetch/swap, so the handler must reply with the retirement
+        notice + the vps-sync.sh path, and must not have swapped anything."""
+        from pathlib import Path as _P
+        tmp = _P(bot.__file__).resolve().parent / "bot.py.new"
+        existed = tmp.exists()
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.update_cmd(u, _cmd_ctx()))
+        assert m.sent, "a retired /update must still reply, not go silent"
+        reply = m.sent[0]
+        assert "retired" in reply.lower() and "vps-sync.sh" in reply
+        assert tmp.exists() == existed, "a retired /update must not write bot.py.new"
 
     # ── allowed-user gated ────────────────────────────────────────────────────
     def test_stress_cmd_explains_why_it_is_off(self):

@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-27.1"
+BOT_VERSION = "2026-08-31.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -16745,6 +16745,12 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _RAW_BOT_URL = ("https://raw.githubusercontent.com/biggieb327-lgtm/"
                 "SillyTavernPresets/main/telegram-companion-bot/bot.py")
 
+# Retirement gate for /update and admin /admin/update (v2026-08-31.1). Default False =
+# retired: the in-place bot.py swap below bypasses the immutable-release / selector /
+# locked-venv deploy and is erased by the next vps-sync.sh. Emergency opt-in only — see
+# .env.example. Read as an import-time global (a change needs a /restart, like every flag).
+LEGACY_SELF_UPDATE = _env_bool("LEGACY_SELF_UPDATE", False)
+
 
 def _schedule_exit(delay_s: float = 1.0):
     """Save state and exit after a short delay, instead of immediately.
@@ -16815,6 +16821,21 @@ def perform_self_update(force: bool = False) -> dict:
 
 def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: Path) -> dict:
     """The body of perform_self_update, run under the host-wide update lock."""
+    # /update is RETIRED as a deploy path by default (2026-08-31). Its raw-URL fetch resolves
+    # again now the repo is public, so the old repo_not_readable 404 no longer fires and it
+    # would otherwise SUCCEED — doing an in-place single-file swap of bot.py in the running
+    # release dir. That bypasses the immutable-release / selector / locked-venv deploy: it does
+    # not update the venv or move the `current`/`previous` selector pointers, the release dir
+    # may be read-only to the bot, and the next `vps-sync.sh` hard-reset erases the swap —
+    # silent divergence. Refuse before any network or filesystem work unless an operator
+    # deliberately opts back in with LEGACY_SELF_UPDATE=1 (emergency use only, documented in
+    # .env.example). The gate sits AFTER lock acquisition so a held lock still reports
+    # `update_in_progress`, not `retired`.
+    if not LEGACY_SELF_UPDATE:
+        return {"ok": False, "reason": "retired",
+                "detail": "in-place bot.py swap bypasses the immutable-release deploy; use "
+                          "vps-sync.sh (set LEGACY_SELF_UPDATE=1 to force, emergency only)",
+                "version": BOT_VERSION}
     try:
         # Cache-bust: GitHub's raw CDN caches main/bot.py for ~5 min, so an /update run
         # shortly after a push can fetch the stale prior version and wrongly report
@@ -16862,11 +16883,12 @@ def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: 
 
 
 async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Self-deploy: fetch latest bot.py from main, verify it compiles, restart.
+    """RETIRED (2026-08-31): replies that /update is retired and points at vps-sync.sh.
 
-    The supervisor (run-bot.sh, or systemd on a VPS) restarts the process
-    automatically, so exiting after a successful swap is all it takes to come back on
-    the new code.
+    `perform_self_update` now returns `retired` before any fetch/swap (its in-place
+    single-file swap bypasses the immutable-release deploy), so this handler's job is to
+    say so. The other reason branches are kept for the admin HTTP path and in case the
+    gate is ever reverted; the reason-branch regression test pins them.
     """
     if not _is_admin(update.effective_user.id):
         return
@@ -16874,7 +16896,15 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await asyncio.to_thread(perform_self_update, force)
     if not result["ok"]:
         reason = result["reason"]
-        if reason == "download_failed":
+        if reason == "retired":
+            await update.message.reply_text(
+                "🚫 /update is retired. It swaps bot.py in place, which bypasses the "
+                "immutable-release deploy and is erased on the next sync. Deploy from the "
+                "VPS instead:\n"
+                "  /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh "
+                "<instance>\n"
+                f"Still on v{result.get('version', BOT_VERSION)}; nothing changed.")
+        elif reason == "download_failed":
             await update.message.reply_text(f"⚠️ Download failed: {result['detail']}")
         elif reason == "already_current":
             await update.message.reply_text(
@@ -16887,8 +16917,7 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif reason == "repo_not_readable":
             await update.message.reply_text(
                 f"⚠️ /update can't reach the repo ({result['detail']}).\n\n"
-                f"This is expected if the repo is private — raw URLs can't "
-                f"authenticate. Deploy from the VPS instead:\n"
+                f"Deploy from the VPS instead:\n"
                 f"  /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh "
                 f"<instance>\n\n"
                 f"Still on v{result.get('version', BOT_VERSION)}; nothing changed.")
@@ -16995,7 +17024,10 @@ class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             force = qs.get("force", ["0"])[0].lower() in ("1", "true", "yes")
             result = perform_self_update(force)
-            self._json(200 if result["ok"] else 409, result)
+            # 410 Gone for the retired path (permanent — a control-panel client should stop
+            # retrying); 409 stays for the transient `update_in_progress` lock conflict.
+            status = 410 if result.get("reason") == "retired" else (200 if result["ok"] else 409)
+            self._json(status, result)
             if result["ok"]:
                 _schedule_exit()
         elif path == "/admin/restart":

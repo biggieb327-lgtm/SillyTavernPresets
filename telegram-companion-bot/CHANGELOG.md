@@ -7,6 +7,37 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-08-31.1 — /update retired: its in-place swap bypasses the immutable-release deploy
+
+**Root cause: going public silently re-armed a hazardous deploy path.** `/update` (and the
+admin HTTP `/admin/update`) fetch `bot.py` over an anonymous `raw.githubusercontent.com`
+URL and swap it in place. While the repo was private (2026-07-28 → 2026-08-31) that fetch
+404'd, so `perform_self_update` returned `repo_not_readable` and the command was effectively
+dead — but only by accident of the 404. The repo is public again as of 2026-08-31, so the
+fetch RESOLVES and `/update` would once more SUCCEED: `perform_self_update` does an in-place
+single-file swap of `bot.py` in the running release directory, which bypasses the
+immutable-release / selector / locked-venv deploy — it never updates the venv, never moves
+the `current`/`previous` selector pointers, the release dir may be read-only to the bot, and
+the next `vps-sync.sh` hard-reset erases the swap. An admin running `/update` would see
+"⬆️ Updated… Restarting" and get silent divergence from the deployed release.
+
+**Fix: hard-gate the self-update off at the shared choke point.**
+`_perform_self_update_locked` now returns `{"reason": "retired"}` before any network or
+filesystem work whenever `LEGACY_SELF_UPDATE` is unset (the default) — placed AFTER the
+host-wide update lock is acquired, so a genuinely concurrent update still reports
+`update_in_progress` rather than `retired`. The fetch/compile/swap body stays reachable
+only behind that opt-in flag (emergency use, documented in `.env.example`), so it is not
+dead code and the concurrency lock and its regression tests stay meaningful. `update_cmd`
+gains an explicit `retired` branch that names `vps-sync.sh`; its stale `repo_not_readable`
+reply lost the now-false "expected if the repo is private" claim. Both entry points are
+covered: the admin HTTP `/admin/update` calls the same gated function and returns the
+`retired` result as **410 Gone** (permanent), so a control-panel client stops retrying.
+
+Tests: `perform_self_update` returns `retired` with the lock free and writes no
+`bot.py.new`; `update_cmd` replies with the retirement notice + `vps-sync.sh` on a real
+(un-monkeypatched) call; the reason-branch regression test now pins the `retired` branch.
+Deploy path unchanged — `vps-sync.sh` per instance.
+
 ## v2026-08-27.1 — reasoning-leak guard: catch the outline SHAPE, not the scaffold words
 
 **Root cause: chasing scaffold vocabulary is whack-a-mole.** Emily leaked her deliberation
