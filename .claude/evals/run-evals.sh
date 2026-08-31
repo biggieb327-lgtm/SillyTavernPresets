@@ -73,14 +73,21 @@ else
 fi
 
 # Tokens must never land in the repo. The risk-guard hook blocks `git add .env`, but a
-# token pasted into a card, a doc, or a committed backup file would slip past it — this
-# repo is pulled from over raw public URLs, so a leaked token is instantly public.
-# Patterns: Telegram bot token (digits:35-char secret), OpenAI-style sk- key, AWS key ID.
-leaks=$(git grep -InE '[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|\bsk-[A-Za-z0-9]{32,}|\bAKIA[0-9A-Z]{16}\b' -- . ':!.claude/evals/run-evals.sh' 2>/dev/null || true)
+# secret pasted into a card, a doc, or a committed backup file would slip past it — the
+# repo is PUBLIC again (2026-08-31), so anything committed is world-readable the instant
+# it lands. Broadened 2026-08-31 (security pass after the repo went public) beyond the
+# original three shapes to the credential prefixes most likely to appear in this stack —
+# a full tree+history scan the same day was clean, so this pins that clean state forward.
+# Shapes: Telegram bot token (digits:35-char), OpenAI sk- key, Anthropic sk-ant- key,
+# AWS AKIA key id, PEM PRIVATE KEY block, Google/Gemini AIza key, GitHub gh?_/github_pat_
+# token, xAI xai- key, Stripe sk_live_ key, and Slack/Discord webhook URLs. NanoGPT keys
+# have no fixed shape and cannot be regex-matched; that .env is gitignored and risk-guard
+# blocks `git add .env` is that key's real defense.
+leaks=$(git grep -InE '[0-9]{8,10}:[A-Za-z0-9_-]{35}([^A-Za-z0-9_-]|$)|\bsk-ant-[A-Za-z0-9_-]{40,}|\bsk-[A-Za-z0-9]{32,}|\bAKIA[0-9A-Z]{16}\b|BEGIN [A-Z ]*PRIVATE KEY|\bAIza[0-9A-Za-z_-]{35}|\bgh[posu]_[A-Za-z0-9]{36,}|\bgithub_pat_[A-Za-z0-9_]{40,}|\bxai-[A-Za-z0-9]{40,}|\bsk_live_[A-Za-z0-9]{24,}|hooks\.slack\.com/services/[A-Za-z0-9/]{20,}|discord(app)?\.com/api/webhooks/[0-9]{5,}/[A-Za-z0-9_-]{20,}' -- . ':!.claude/evals/run-evals.sh' 2>/dev/null || true)
 if [ -z "$leaks" ]; then
   ok "secret-scan: no token-shaped strings in tracked files"
 else
-  bad "secret-scan" "possible credential committed: $(echo "$leaks" | head -3 | tr '\n' ' ')"
+  bad "secret-scan" "possible credential committed (rotate it AND purge from git history — the repo is public): $(echo "$leaks" | head -3 | tr '\n' ' ')"
 fi
 
 # The delivery gate checks that BOT_VERSION and CHANGELOG.md both changed, but not that
