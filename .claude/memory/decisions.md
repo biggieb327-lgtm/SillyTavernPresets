@@ -79,6 +79,32 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-08-31 | MECHANISM REVIEW surfaces recurrence by freshness, not presence | status: current
+**Decided:** the `session-audit.sh` MECHANISM REVIEW startup line now names a guarded
+constraint only when its newest `seen:` date is on/after the last debrief date — i.e. the
+guard failed again and nobody has triaged it yet. Recurrences that predate the last debrief
+(already reviewed) collapse to a one-number "already reviewed" line. C8 (last recurrence
+2026-08-27, before the 2026-08-31 debrief) therefore drops off the loud line; it returns only
+if it recurs again. The `mechanism-recurrence-surfaced` eval gained a fixture case (C84,
+recurred-but-reviewed) that must NOT reach the loud line; break-tested red then green.
+**Over:** (a) more prose against C8 — rejected: C8 is at seen 10 and has survived a hook
+(`theory-guard`), a constraint, and an OPERATING_MANUAL rule; the owner-asked "fix" was not
+another restatement. (b) a "prune guards with zero catches" meta-eval (the second half the
+2026-08-23 mycelium finding named) — rejected as unsound: this repo has no catch-counter, and
+a break-tested guard that never fires is working as designed (it prevents a rare disaster), so
+"never fired" is not evidence it is dead. (c) leaving MECHANISM REVIEW as a presence list —
+rejected: it named the same ~9 constraints every session, was at its own watchlist wallpaper
+trigger, and a signal that never changes stops being read (C8's own shape).
+**Why:** the one sound, in-scope lever on C8 was the meta-signal's quality, not its wording —
+turn a permanent list into a delta that goes quiet until a guard actually fails again. Reuses
+data already present (seen dates + the last-debrief date the hook already reads), so no new
+state file.
+**By:** a session, 2026-08-31, at owner request ("do what you think will actually fix it and
+put it to bed"). Break-tested via the eval; full `run-evals.sh` exit 0.
+**Detail:** hook block in `.claude/hooks/session-audit.sh` (the `last_debrief_date` /
+`recurred_fresh` / `recurred_stale` split, rationale in-comment); eval C84 case in
+`run-evals.sh`.
+
 ### 2026-08-29 | prompter concept adopted as a hook, not the skill; default-ON with PROMPTER kill switch | status: current
 **Decided:** rebuild the `prompter` concept (github.com/Terryc21/prompter) as a
 `UserPromptSubmit` hook, `.claude/hooks/prompt-rewrite.py`, wired in `settings.json` beside

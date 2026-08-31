@@ -108,7 +108,7 @@ debrief", so it's plausibly firing — but nobody has checked the log has grown 
 cadence check or threshold in session-audit), OR a stretch of working sessions shows no new row
 (the nudge isn't firing — an operational-log incident, the dormancy shape C-class).
 
-### 2026-08-23 — the MECHANISM REVIEW startup line could grow into wallpaper | status: open
+### 2026-08-23 — the MECHANISM REVIEW startup line could grow into wallpaper | status: graduated
 The new `session-audit.sh` MECHANISM REVIEW line names every guarded constraint whose
 mistake recurred after its guard shipped — today six (C1, C3, C7, C8, C13, C14), and it
 will keep naming roughly that set every session because those recurrences are in the
@@ -119,3 +119,8 @@ watching.
 **Graduates when:** the list reaches ~10 names, or a session is observed skipping past it —
 at which point it should switch to counting-plus-top-N-by-seen, the same shape the PROSE
 ONLY and OVERDUE lines already use. Until then, no change; a fix now would be speculative.
+**Graduated 2026-08-31:** at 9 names (its trigger), reworked rather than deferred — the line
+now shows only recurrences *since the last debrief* (fresh/unreviewed) and collapses the
+already-reviewed ones to a count, so it goes quiet unless a guard actually fails again. Decision
+logged in `decisions.md` (2026-08-31); pinned by the extended `mechanism-recurrence-surfaced`
+eval. Prune at the next hygiene pass.

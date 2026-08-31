@@ -1685,7 +1685,18 @@ else
 ### C83 — recurred, but graduation is undated so timing is undecidable (must not flag)
 **seen: 2** (2026-01-01, 2026-03-01)
 **Graduated:** guard.sh — a Stop hook.
+
+### C84 — recurred after its guard but BEFORE the last debrief (reviewed; must NOT be in MECHANISM REVIEW)
+**seen: 2** (2026-01-01, 2026-02-10)
+**Graduated 2026-02-01:** guard.sh — a Stop hook.
 FIX
+  # A last-debrief date makes the recurrence check a FRESHNESS check: C81's newest date
+  # (2026-03-01) postdates this, so it is unreviewed and stays loud; C84's (2026-02-10)
+  # predates it, so it was already triaged and must demote to the reviewed count.
+  cat > "$mrs_tmp/.claude/memory/debrief-log.md" <<'DBRF'
+# debrief log
+| 2026-02-15 | abc1234 | a session |
+DBRF
   # 2>&1 so a parser death lands in the captured text; the git/mycelium/debrief lines of the
   # hook noop harmlessly in a bare temp dir.
   mrs_out=$(CLAUDE_PROJECT_DIR="$mrs_tmp" bash "$mrs_abs" 2>&1)
@@ -1698,12 +1709,16 @@ FIX
     bad "mechanism-recurrence-surfaced" "C81 recurred after its dated guard yet MECHANISM REVIEW did not name it — the post-graduation-recurrence check is dead or its timing compare is broken"
   elif printf '%s' "$mrs_review" | grep -qE 'C82|C83'; then
     bad "mechanism-recurrence-surfaced" "MECHANISM REVIEW named C82 (recurred only before its guard) or C83 (undated guard) — flagging a case whose timing is not after a dated mechanism is a false accusation (hubris rule 1)"
+  elif printf '%s' "$mrs_review" | grep -q 'C84'; then
+    bad "mechanism-recurrence-surfaced" "C84 recurred after its guard but BEFORE the last debrief (already reviewed) yet MECHANISM REVIEW named it — the freshness split is broken; a triaged recurrence must demote to the reviewed count, not stay in the loud line that C8 turned into wallpaper"
+  elif ! printf '%s\n' "$mrs_out" | grep -q 'already reviewed at the last debrief'; then
+    bad "mechanism-recurrence-surfaced" "C84 recurred before the last debrief but no 'already reviewed at the last debrief' line appeared — the demoted-recurrence count is dead, so stale recurrences vanish silently instead of collapsing to a count (fails toward silence, C13)"
   elif ! printf '%s' "$mrs_undated" | grep -q 'C83'; then
     bad "mechanism-recurrence-surfaced" "C83 has an undated graduation yet UNDATED GRADUATION did not name it — an uncheckable guard is being skipped silently, the blind spot this widening closed (C8 at seen 8)"
   elif printf '%s' "$mrs_undated" | grep -qE 'C81|C82'; then
     bad "mechanism-recurrence-surfaced" "UNDATED GRADUATION named C81 or C82, which carry dated graduations — the undated detector is misfiring on dated guards"
   else
-    ok "mechanism-recurrence-surfaced: dated recurrence flagged for review, pre-guard/undated kept out of it, and undated graduations surfaced to be dated"
+    ok "mechanism-recurrence-surfaced: recurrence since the last debrief flagged loud, pre-guard/undated kept out of it, already-reviewed recurrence demoted to a count, and undated graduations surfaced to be dated"
   fi
 fi
 

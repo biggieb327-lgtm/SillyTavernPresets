@@ -60,7 +60,27 @@ def dates(text):
             pass  # a malformed date is not a date; do not let it become one
     return out
 
-bare, overdue, recurred, undated, total = [], [], [], [], 0
+def last_debrief_date():
+    # The cutoff for "already reviewed": recurrences are triaged at session-debrief, so a
+    # recurrence dated on/after the last debrief has NOT been reviewed yet. No debrief log →
+    # None, and the caller treats every recurrence as fresh (never hide one on a "could not
+    # determine"; hubris rule 1).
+    try:
+        text = Path(".claude/memory/debrief-log.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    last = None
+    for m in re.finditer(r'^\| (\d{4})-(\d{2})-(\d{2}) \| [0-9a-f]{7,} \|', text, re.M):
+        last = m
+    if not last:
+        return None
+    try:
+        return datetime.date(int(last.group(1)), int(last.group(2)), int(last.group(3)))
+    except ValueError:
+        return None
+
+debrief_cutoff = last_debrief_date()
+bare, overdue, recurred_fresh, recurred_stale, undated, total = [], [], [], [], [], 0
 for i in range(1, len(blocks), 2):
     cid, body = blocks[i], blocks[i + 1].split("\n### ")[0]
     total += 1
@@ -82,7 +102,17 @@ for i in range(1, len(blocks), 2):
             undated.append(cid)
         elif seen and max(seen) > min(grad):
             n = re.search(r'\*\*seen: (\d+)\*\*', body)
-            recurred.append(f"{cid}" + (f" (seen {n.group(1)})" if n else ""))
+            label = f"{cid}" + (f" (seen {n.group(1)})" if n else "")
+            # Fresh = the newest recurrence postdates the last debrief, so it has not been
+            # triaged yet — the guard just failed again. Older recurrences were already
+            # reviewed at a debrief; they collapse to a count so the loud line goes quiet
+            # unless something new landed, instead of naming the same set every session
+            # (the wallpaper the watchlist flagged). C8's own shape: a signal that never
+            # changes stops being read.
+            if debrief_cutoff is None or max(seen) >= debrief_cutoff:
+                recurred_fresh.append(label)
+            else:
+                recurred_stale.append(label)
         continue
     seen = re.search(r'\*\*seen: (\d+)\*\*', body)
     n = int(seen.group(1)) if seen else 1
@@ -98,10 +128,14 @@ if total:
     if overdue:
         print("OVERDUE A MECHANISM (prose-only and already repeating — constraints.md rule "
               "4): " + " · ".join(overdue))
-    if recurred:
-        print("MECHANISM REVIEW — recurred after its guard shipped; read the prose to see "
-              "whether the guard's covered half failed or its acknowledged prose-only half "
-              "recurred (do not assume the guard failed): " + " · ".join(recurred))
+    if recurred_fresh:
+        print("MECHANISM REVIEW — recurred since the last debrief (unreviewed — the guard "
+              "just failed again; read the prose to see whether its covered half failed or "
+              "its acknowledged prose-only half recurred, do not assume the guard failed): "
+              + " · ".join(recurred_fresh))
+    if recurred_stale:
+        print(f"mechanism recurrences already reviewed at the last debrief ({len(recurred_stale)}"
+              " — read constraints.md, not surfaced again unless one recurs)")
     if undated:
         print("UNDATED GRADUATION — the guard has no dated **Graduated line, so recurrence "
               "cannot be timing-checked; date it: " + " · ".join(undated))
