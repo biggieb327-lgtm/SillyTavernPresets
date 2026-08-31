@@ -8297,7 +8297,6 @@ class TestEveryBooleanFlagDefault:
         "PAYMENTS_ENABLED": False,
         "PLACE_ANCHOR_HER": True,
         "PRESET_COMMAND": True,
-        "LEGACY_SELF_UPDATE": False,
         "PROMPT_BALANCE": True,
         "PROMPT_STATS": True,
         "REACTIONS_AUTO": True,
@@ -8355,9 +8354,6 @@ class TestEveryBooleanFlagDefault:
         assert off == ["ADMIN_API_ENABLED", "CLOSENESS_ENABLED", "DEVICE_RENDER",
                        "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
                        "GROUP_MODE", "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
-                       # /update retirement gate (v2026-08-31.1): default off = retired;
-                       # the in-place swap bypasses the immutable-release deploy.
-                       "LEGACY_SELF_UPDATE",
                        # Off on NAMED instances only (`not IS_NAMED_INSTANCE`), which
                        # the fixture is. Added v2026-08-12.2 when it stopped being
                        # hand-rolled; its default was pinned by nothing before that.

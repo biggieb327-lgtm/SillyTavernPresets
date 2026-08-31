@@ -7,7 +7,7 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
-## v2026-08-31.1 — /update retired: its in-place swap bypasses the immutable-release deploy
+## v2026-08-31.2 — /update retired: its in-place swap bypasses the immutable-release deploy
 
 **Root cause: going public silently re-armed a hazardous deploy path.** `/update` (and the
 admin HTTP `/admin/update`) fetch `bot.py` over an anonymous `raw.githubusercontent.com`
@@ -21,17 +21,22 @@ the `current`/`previous` selector pointers, the release dir may be read-only to 
 the next `vps-sync.sh` hard-reset erases the swap. An admin running `/update` would see
 "⬆️ Updated… Restarting" and get silent divergence from the deployed release.
 
-**Fix: hard-gate the self-update off at the shared choke point.**
+**Fix: hard-gate the self-update off at the shared choke point, unconditionally.**
 `_perform_self_update_locked` now returns `{"reason": "retired"}` before any network or
-filesystem work whenever `LEGACY_SELF_UPDATE` is unset (the default) — placed AFTER the
-host-wide update lock is acquired, so a genuinely concurrent update still reports
-`update_in_progress` rather than `retired`. The fetch/compile/swap body stays reachable
-only behind that opt-in flag (emergency use, documented in `.env.example`), so it is not
-dead code and the concurrency lock and its regression tests stay meaningful. `update_cmd`
-gains an explicit `retired` branch that names `vps-sync.sh`; its stale `repo_not_readable`
-reply lost the now-false "expected if the repo is private" claim. Both entry points are
-covered: the admin HTTP `/admin/update` calls the same gated function and returns the
-`retired` result as **410 Gone** (permanent), so a control-panel client stops retrying.
+filesystem work — with **no re-enable flag** — placed AFTER the host-wide update lock is
+acquired, so a genuinely concurrent update still reports `update_in_progress` rather than
+`retired`. The fetch/compile/swap body is retained (now unreachable) as one coherent,
+tested unit so the concurrency lock and its regression tests stay meaningful; deleting it
+would only scatter the same vestige across an unused `_RAW_BOT_URL` and a lock that then
+guards nothing. `update_cmd` gains an explicit `retired` branch that names `vps-sync.sh`;
+its stale `repo_not_readable` reply lost the now-false "expected if the repo is private"
+claim. Both entry points are covered: the admin HTTP `/admin/update` calls the same gated
+function and returns the `retired` result as **410 Gone** (permanent), so a control-panel
+client stops retrying.
+
+(v2026-08-31.1 was the same fix behind a `LEGACY_SELF_UPDATE` opt-in flag; the flag was
+removed before shipping — owner wanted zero re-enable capability — so this superseding
+`.2` is the build that actually reaches the fleet.)
 
 Tests: `perform_self_update` returns `retired` with the lock free and writes no
 `bot.py.new`; `update_cmd` replies with the retirement notice + `vps-sync.sh` on a real

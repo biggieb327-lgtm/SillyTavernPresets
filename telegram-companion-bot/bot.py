@@ -134,7 +134,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-31.1"
+BOT_VERSION = "2026-08-31.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -16745,12 +16745,6 @@ async def errors_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _RAW_BOT_URL = ("https://raw.githubusercontent.com/biggieb327-lgtm/"
                 "SillyTavernPresets/main/telegram-companion-bot/bot.py")
 
-# Retirement gate for /update and admin /admin/update (v2026-08-31.1). Default False =
-# retired: the in-place bot.py swap below bypasses the immutable-release / selector /
-# locked-venv deploy and is erased by the next vps-sync.sh. Emergency opt-in only — see
-# .env.example. Read as an import-time global (a change needs a /restart, like every flag).
-LEGACY_SELF_UPDATE = _env_bool("LEGACY_SELF_UPDATE", False)
-
 
 def _schedule_exit(delay_s: float = 1.0):
     """Save state and exit after a short delay, instead of immediately.
@@ -16821,21 +16815,21 @@ def perform_self_update(force: bool = False) -> dict:
 
 def _perform_self_update_locked(force: bool, code_dir: Path, target: Path, tmp: Path) -> dict:
     """The body of perform_self_update, run under the host-wide update lock."""
-    # /update is RETIRED as a deploy path by default (2026-08-31). Its raw-URL fetch resolves
-    # again now the repo is public, so the old repo_not_readable 404 no longer fires and it
-    # would otherwise SUCCEED — doing an in-place single-file swap of bot.py in the running
-    # release dir. That bypasses the immutable-release / selector / locked-venv deploy: it does
-    # not update the venv or move the `current`/`previous` selector pointers, the release dir
-    # may be read-only to the bot, and the next `vps-sync.sh` hard-reset erases the swap —
-    # silent divergence. Refuse before any network or filesystem work unless an operator
-    # deliberately opts back in with LEGACY_SELF_UPDATE=1 (emergency use only, documented in
-    # .env.example). The gate sits AFTER lock acquisition so a held lock still reports
-    # `update_in_progress`, not `retired`.
-    if not LEGACY_SELF_UPDATE:
-        return {"ok": False, "reason": "retired",
-                "detail": "in-place bot.py swap bypasses the immutable-release deploy; use "
-                          "vps-sync.sh (set LEGACY_SELF_UPDATE=1 to force, emergency only)",
-                "version": BOT_VERSION}
+    # /update is RETIRED as a deploy path (2026-08-31), unconditionally — there is no
+    # re-enable flag. Its raw-URL fetch resolves again now the repo is public, so it would
+    # otherwise SUCCEED: an in-place single-file swap of bot.py in the running release dir
+    # that bypasses the immutable-release / selector / locked-venv deploy (no venv update,
+    # no selector move, the release dir may be read-only, and the next `vps-sync.sh`
+    # hard-reset erases the swap → silent divergence). Refuse before any network or
+    # filesystem work. The fetch/compile/swap body below is retained (now unreachable) as one
+    # coherent, tested unit so the host-wide update lock and its regression tests stay
+    # meaningful; deleting it would only scatter the same vestige across an unused
+    # _RAW_BOT_URL and a lock that then guards nothing. The gate sits AFTER lock acquisition
+    # so a held lock still reports `update_in_progress`, not `retired`.
+    return {"ok": False, "reason": "retired",
+            "detail": "in-place bot.py swap bypasses the immutable-release deploy; "
+                      "use vps-sync.sh",
+            "version": BOT_VERSION}
     try:
         # Cache-bust: GitHub's raw CDN caches main/bot.py for ~5 min, so an /update run
         # shortly after a push can fetch the stale prior version and wrongly report
