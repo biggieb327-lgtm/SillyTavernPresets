@@ -31,8 +31,8 @@ instance) → 7-day soak → migrate the rest one at a time → retire the phone
 2. **Backup before stopping anything:** `bash ~/telegram-bot/backup-all.sh` on the
    phone. State files are the character's memory — unrecoverable if lost.
 3. **`.env` files move by hand, never through git** (tokens must never land in the
-   repo — it was public via raw URLs until 2026-07-28 and is private now, but the rule
-   holds either way). scp them; the secret-scan eval and risk-guard exist because of this.
+   repo — it is public, so anything committed is world-readable; the rule holds in every
+   visibility state). scp them; the secret-scan eval and risk-guard exist because of this.
 4. **Rollback stays available:** don't delete the phone-side instance directory
    until the runbook's soak criteria pass (7 days for the pilot). `MIGRATION.md`
    § Rollback is the procedure — phone restart is always the fallback.

@@ -8,9 +8,9 @@ The phone is empty — its tooling (`/update`, `update-all.sh`, `sync-cards.sh`,
 `watchdog.sh`, tmux) manages nothing now. Everything below runs as root on the VPS
 unless it says otherwise.
 
-**The repo is private since 2026-07-28**, so `raw.githubusercontent.com` URLs 404 and
-`BASE=<raw url>` no longer works. Everything deploys from the authenticated checkout
-already on the box:
+**The repo is public again as of 2026-08-31** (private 2026-07-28 → 2026-08-31), so
+`raw.githubusercontent.com` URLs resolve again — but don't curl-pipe them. Everything
+deploys from the checkout already on the box:
 `REPO=/opt/telegram-bots/.repo/telegram-companion-bot`
 
 ## Telegram (any bot, no shell needed)

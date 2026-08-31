@@ -8,8 +8,10 @@ description: End-to-end procedure for shipping any bot.py change (feature, bugfi
 All seven instances deploy from `main` via `deploy/vps-sync.sh` (one invocation per
 instance, run on the VPS as root) — see `deploy-and-verify-fleet` for the full command
 and the instance list. Merging to main = making it deployable; the user (or you, if you
-have VPS access this session) then runs `vps-sync.sh` per instance. `/update` is dead:
-the handler still exists but downloads over raw URLs, which 404 on the private repo.
+have VPS access this session) then runs `vps-sync.sh` per instance. `/update` is retired:
+the handler still exists but does an in-place single-file swap that bypasses the
+immutable-release deploy (its raw fetch works again now the repo is public — that is not
+a reason to use it).
 Your job ends at "merged, green, deploy instructions given."
 
 ## When NOT to use

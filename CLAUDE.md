@@ -61,10 +61,9 @@ The machinery that enforces this is real, not advisory:
 
 - **`.claude/evals/run-evals.sh`** — past incidents pinned as runnable checks.
   **Run it before claiming any change done.** A failure recurring twice earns a new
-  eval. Includes a secret scan (the repo is private since 2026-07-28, but cards and
-  presets were public via raw URLs for months — assume anything committed before then
-  is exposed) and
-  BOT_VERSION↔changelog sync.
+  eval. Includes a secret scan (the repo is **public again as of 2026-08-31** after a
+  private window from 2026-07-28 — everything committed is public, so treat any secret
+  ever committed as exposed) and BOT_VERSION↔changelog sync.
 - **`.claude/tools/verify.sh`** — the standing verification block as one command
   (compile, pytest, evals, gate corpus, then the advisory sweep). Run this rather than
   four remembered invocations; `--quick` drops the sweep and is not enough for a release.
@@ -153,8 +152,6 @@ Two composition facts the per-skill descriptions can't tell you:
 
 ## Known-deliberate — do not "fix" these
 
-- **Emily runs `zai-org/glm-4.7:thinking`**, not glm-5 (owner-confirmed 2026-07-25).
-  Per-instance model choice is expected, not drift.
 - **bot.py stays a single file.** The whole deploy model depends on it. Recorded
   non-goal — don't propose splitting it.
 - **`AUDIT-2026-07-10.md` records rejected claims.** Check it before "fixing" a
@@ -189,12 +186,6 @@ The instance directory is the basename on the `=== STARTUP AUDIT === … Instanc
 line — **that runtime value is authoritative** if it ever disagrees with this table.
 The authoritative instance list is the set of `bot@<instance>` systemd units.
 
-**Phone-era tooling is historical.** `update-all.sh`, `sync-cards.sh`,
-`watchdog.sh`, `run-bot.sh` and the `.supervise.sh` supervisor were Termux-only and
-now manage nothing; VPS deploys go through `deploy/vps-sync.sh` (see Deployment
-below). The phone's rollback dirs (`~/<name>-bot.migrated`) were retained through a
-14-day soak that ended 2026-08-09; they may still exist but are no longer load-bearing.
-
 ## Stack
 
 - Python **3.12** on the VPS (Ubuntu 24.04) — the `=== STARTUP AUDIT ===` line reports
@@ -207,9 +198,12 @@ below). The phone's rollback dirs (`~/<name>-bot.migrated`) were retained throug
   `asyncio.get_event_loop()` call is worked around in `main()` — don't remove it.
 - NanoGPT — OpenAI-compatible API at `https://nano-gpt.com/api/v1`.
 - SillyTavern `chara_card_v2` JSON cards.
-- Repo `biggieb327-lgtm/SillyTavernPresets` — **private since 2026-07-28**. Anonymous
-  `raw.githubusercontent.com` URLs 404, so any doc or script still telling you to `curl`
-  one is stale. Deploys read from the checkout at `/opt/telegram-bots/.repo`.
+- Repo `biggieb327-lgtm/SillyTavernPresets` — **public again as of 2026-08-31**
+  (owner-confirmed) after a private window from 2026-07-28. Anonymous
+  `raw.githubusercontent.com` URLs resolve again, but the deploy model is unchanged:
+  deploys read from the checkout at `/opt/telegram-bots/.repo` via `vps-sync.sh`, never
+  a curl-piped raw file, so the exact locked release lands. `/update`'s in-place swap
+  stays retired — see Deployment.
 - **Trained knowledge of these APIs drifts; the pins above don't.** Before relying on
   undocumented `python-telegram-bot` or NanoGPT behavior, check the current source
   rather than memory — this file only records traps already hit (the
@@ -237,14 +231,19 @@ restarts and enables the unit, then prints release + hash + STARTUP AUDIT verifi
 
 It fetches and hard-resets the checkout to `origin/main` before copying anything, so
 running the on-disk copy is correct even when the checkout is stale. **Not** curl-piped —
-the repo is private and raw URLs 404.
+deploys read the whole locked release from the checkout, not a single raw file.
 
 Exact commands, verification, and rollback: **`deploy-and-verify-fleet`**.
 
-**`/update` is dead as a deploy path.** The handler still exists, but it downloads over
-raw URLs, so on the private repo it fails with `repo_not_readable` and replies telling the
-owner to run `vps-sync.sh` instead (see `update_cmd` in bot.py). `update-all.sh` and
-`sync-cards.sh` are historical for the same reason.
+**`/update` stays retired as a deploy path.** Now that the repo is public its raw-URL
+fetch resolves again, so the old `repo_not_readable` reply no longer fires — but
+`perform_self_update` does an **in-place single-file swap** of `bot.py` in the running
+directory, which bypasses the immutable-release / selector / locked-venv model, and the
+next `vps-sync.sh` hard-reset erases it. So the retirement reason changed from "raw URLs
+404" to "the swap model is incompatible with the immutable-release deploy." `update_cmd`'s
+reply still says "expected if the repo is private," which is now stale — hard-gating
+`/update` off is a pending code follow-up. `update-all.sh` and `sync-cards.sh` are
+historical.
 
 **Bump `BOT_VERSION` on every release** — it's how `/audit` proves a deploy landed.
 The delivery gate enforces this.
@@ -363,9 +362,6 @@ above. `ls` it for the rest. The non-obvious bits:
   generated, exact, hashed install contract shared by CI and VPS releases. Regenerate it
   with the command in its header; never hand-edit it.
 - `preset.txt` is the shared voiceprint — editing it changes **all seven** bots.
-- `watchdog.sh`, `backup-all.sh`, `cleanup-all.sh` are phone-era leftovers: they were
-  curl-installed onto the phone once, and no VPS deploy path touches them. Editing them
-  in-repo ships nothing.
 - `character-review/` (root) is the card inbox for the character pass. The
   `character-pass-monthly` Routine used to read it and write proposals; that Routine is
   **retired here (2026-08-22)**, so the pass is now on-demand — ask the

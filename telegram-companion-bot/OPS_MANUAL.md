@@ -86,8 +86,8 @@ card from `main`, atomically selects the release (keeping `previous`), normalize
 `CHARACTER_CARD`, restarts + enables the unit, and prints release, hash, and STARTUP
 AUDIT verification:
 ```bash
-# host: VPS (as root). NOT curl-piped — the repo is private since 2026-07-28 and
-# raw.githubusercontent.com 404s. The script fetches + hard-resets the checkout to
+# host: VPS (as root). NOT curl-piped — the deploy reads the whole locked release from
+# the checkout, not a single raw file. The script fetches + hard-resets the checkout to
 # origin/main before copying, so the on-disk copy is correct even if it looks stale.
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
 ```
@@ -298,7 +298,7 @@ These files shape what the character knows and references. All are editable from
 | `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health. Marks the preset line `(via /preset)` when an override is active |
 | `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
-| `/update` | Dead as a deploy path on this private repo — downloads over a raw URL that 404s. Replies pointing at `vps-sync.sh` instead of silently failing. |
+| `/update` | Retired as a deploy path — does an in-place `bot.py` swap that bypasses the immutable-release deploy (its raw fetch works again now the repo is public; that is not a reason to use it). Deploy with `vps-sync.sh`. |
 | `/restart` | Clean restart via systemd — picks up `.env` edits and a swapped `bot.py` |
 
 If a bot never responds to any of these either, it's not an app-level problem — see
@@ -409,8 +409,8 @@ delete so the previous database remains recoverable.
 ### Automated fleet backup — no VPS equivalent shipped yet
 
 `backup-all.sh` (phone-era, kept only for its rclone/cron notes — DEAD as a runnable
-script: it targets Android shared storage at `~/telegram-bot`, and its curl-based fetch
-404s now that the repo is private) archived every instance's state files (same list as
+script: it targets Android shared storage at `~/telegram-bot`) archived every instance's
+state files (same list as
 `/backup`, `.env` always excluded) and could push off-phone via rclone. Nothing on the
 VPS replaces it yet — the only current backup path is per-instance, either `/backup`
 from Telegram or manually copying each instance's `state.json` (see "Memory System"
@@ -629,9 +629,10 @@ Samsung battery management, the `.alive` heartbeat watchdog.sh needed) doesn't a
 **Install** (Ubuntu 24.04 recommended, e.g. Contabo's ~€4.50/mo 4 vCPU/6GB RAM tier —
 best RAM headroom per dollar for running all seven bots comfortably as of mid-2026 pricing):
 ```bash
-# First install on a fresh box: the repo is private, so fetch install-vps.sh over
-# authenticated git rather than raw HTTP — clone once with the read-only deploy key
-# (see deploy/MIGRATION.md § "Private-repo deploys"), then run it from the clone.
+# First install on a fresh box: clone the repo to the checkout and run install-vps.sh
+# from the clone — not a raw curl (you need the whole locked release, and the deploy
+# reads from the checkout). Public HTTPS clone works now the repo is public; the
+# read-only deploy key also still works (see deploy/MIGRATION.md § "Private-repo deploys").
 sudo git clone git@github.com:biggieb327-lgtm/SillyTavernPresets.git /opt/telegram-bots/.repo
 sudo bash /opt/telegram-bots/.repo/telegram-companion-bot/deploy/install-vps.sh
 ```
@@ -644,9 +645,10 @@ Telegram token, NanoGPT key, and character card filename, and generates an
 **Supervision**: `systemctl {status,restart,stop} bot@nora`, logs via
 `journalctl -u bot@nora -f` (see "VPS operations" at the top). `/restart` from Telegram
 works as before — systemd's `Restart=always` picks the process back up. **`/update`
-does not**: it downloads over a raw GitHub URL, which 404s on this private repo; the
-handler detects that and replies pointing at `vps-sync.sh` instead. Deploy with
-`vps-sync.sh`, not `/update` (see "Deploying" above).
+must not be used to deploy**: its raw-URL fetch resolves again now the repo is public,
+but it does an in-place `bot.py` swap that bypasses the immutable-release deploy and the
+next `vps-sync.sh` erases it. Deploy with `vps-sync.sh`, not `/update` (see "Deploying"
+above).
 
 **Admin HTTP API**: opt-in (`ADMIN_API_ENABLED=1`), mirrors `/audit /errors /backup
 /update /restart` over HTTP for a non-Telegram client (e.g. a future control-panel

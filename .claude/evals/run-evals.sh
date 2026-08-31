@@ -356,11 +356,15 @@ if [ -f .claude/settings.json ]; then
   fi
 fi
 
-# The repo went private 2026-07-28, so every raw.githubusercontent.com URL 404s. On
-# 2026-07-29 a runnable `curl -fsSL <raw-base>/deploy/vps-sync.sh` was handed to the
-# operator straight out of CLAUDE.md's Deployment block — it failed twice over, once on
-# the literal placeholder and once because the URL is dead. Docs are where deploy
-# commands get copied from, so a stale one is an outage waiting for someone to trust it.
+# Docs are where deploy commands get copied from, so a curl-piped raw-URL install is a
+# trap: the sanctioned deploy reads the whole locked release from the git checkout via
+# vps-sync.sh, never a single raw file. Original trigger, 2026-07-29: a runnable
+# `curl -fsSL <raw-base>/deploy/vps-sync.sh` was handed to the operator straight out of
+# CLAUDE.md's Deployment block and failed twice over — once on the literal placeholder,
+# once because the repo was private and the URL 404'd. The repo is public again as of
+# 2026-08-31, so such a URL now RESOLVES — which makes it more dangerous, not less: it
+# runs and silently bypasses the immutable-release/locked-venv model. The check is
+# unchanged; only its rationale moved from "these 404" to "these bypass the deploy".
 # Runnable = the line starts with curl/wget or assigns a BASE/REPO var. Annotated
 # history is fine: mark the block DEAD, Historical, or Superseded within 3 lines above.
 if ! raw_stale=$(python3 - 2>&1 <<'PY'
@@ -400,7 +404,7 @@ fi
 if [ -z "$raw_stale" ]; then
   ok "no-live-raw-urls: no runnable raw.githubusercontent command left unannotated"
 else
-  bad "no-live-raw-urls" "raw URLs 404 (private repo) but these still read as runnable: $raw_stale"
+  bad "no-live-raw-urls" "a curl-piped raw-URL install bypasses the vps-sync/locked-release deploy; these read as runnable: $raw_stale"
 fi
 
 # Nora's instance dir drifted twice (table drift 2026-07-11; launch/sync scripts still

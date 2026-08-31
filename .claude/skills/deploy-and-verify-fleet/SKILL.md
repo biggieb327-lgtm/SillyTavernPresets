@@ -6,8 +6,9 @@ description: Choosing the correct deploy path for merged work and verifying it l
 # Deploy and verify the fleet
 
 All seven instances run on the VPS under systemd. Deploys read from a git checkout at
-`/opt/telegram-bots/.repo` (a read-only deploy key, not raw URLs — the repo has been
-private since 2026-07-28 and anonymous `raw.githubusercontent.com` URLs 404). Claude
+`/opt/telegram-bots/.repo` (a read-only deploy key, not raw URLs — the deploy reads the
+whole locked release from the checkout, not a single file; the repo is public again as
+of 2026-08-31, so this is a deploy-model choice, not a visibility workaround). Claude
 cannot run this from a session without VPS access — give the user exact commands and
 tell them what output proves success.
 
@@ -28,17 +29,20 @@ phone fleet anymore (empty since 2026-07-26; the 14-day rollback soak on the pho
 2026-08-09). One deploy path covers all seven — no decision tree, no per-instance path
 letter.
 
-**`/update` is dead as a deploy path**, though the handler still exists: on the private
-repo it hits `repo_not_readable` and replies telling the owner to run `vps-sync.sh`
-instead (`update_cmd` in bot.py). **`update-all.sh` and `sync-cards.sh` are phone-era
+**`/update` stays retired as a deploy path**, though the handler still exists. Its
+raw-URL fetch resolves again now that the repo is public, but `perform_self_update` does
+an in-place single-file swap of `bot.py` that bypasses the immutable-release / selector /
+locked-venv model and is erased by the next `vps-sync.sh` hard-reset — so never hand it
+to the user as a deploy path (its `repo_not_readable` reply is now stale; hard-gating it
+off is a pending code follow-up). **`update-all.sh` and `sync-cards.sh` are phone-era
 and manage nothing now** — do not hand them to the user.
 
 ## Procedure
 
 **Start with one canary** — this covers code, card, and preset layers for that instance:
 ```bash
-# host: VPS (as root). NOT curl-piped: the repo is private and raw URLs 404.
-# vps-sync.sh fetches and hard-resets the checkout to origin/main before copying,
+# host: VPS (as root). NOT curl-piped: the deploy reads the whole locked release from
+# the checkout. vps-sync.sh fetches and hard-resets the checkout to origin/main before copying,
 # so running it is correct even when the on-disk checkout looks stale.
 /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh nora
 ```
