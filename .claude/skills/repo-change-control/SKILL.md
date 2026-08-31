@@ -63,6 +63,15 @@ Your job ends at "merged, green, deploy instructions given."
    - Add a `## v<exact BOT_VERSION>` entry at the TOP of CHANGELOG.md, **root cause
      first, fix second**. The `version-changelog-sync` eval fails if the newest
      `## v` heading ≠ BOT_VERSION.
+   - **Prove every behavioral claim against the final diff, not the design.** A sentence
+     asserting what the change *does* — "adds no model call", "net-neutral", "kill switch
+     stops drafting", "cannot send twice", "cached tokens are N% of input", "this path
+     never reaches Telegram" — needs one of: a test that demonstrates it, a before/after
+     runtime observation, or a complete code-path trace where it is unambiguous. Intent is
+     not evidence, and this is a repeat class: `/reviewlife`'s kill switch first stopped the
+     enqueue but not the model call, and the cached-token percentage held for one usage
+     shape but not all — both written from the feature's design, both caught only at review
+     (step 7). Verify each claim against the diff *before* it reaches review.
 
 6. **Verify** — one command, and paste its real output:
    ```bash
@@ -126,6 +135,8 @@ Your job ends at "merged, green, deploy instructions given."
 - Every invariant in `bot-code-invariants` checked against the final diff.
 - Changelog entry explains the root cause well enough that a future session
   won't re-diagnose it from scratch.
+- Every behavioral claim in the changelog/docs is backed by a test, a runtime
+  observation, or a full code-path trace — not the feature's intent.
 
 ## Verification checklist
 
@@ -133,6 +144,8 @@ Your job ends at "merged, green, deploy instructions given."
 - [ ] `/code-review` run on the diff; every finding fixed or refuted in the report
 - [ ] No `*_cmd` the diff touches is left un-called by tests (the delivery gate blocks it)
 - [ ] BOT_VERSION bumped and equals the newest `## v` changelog heading
+- [ ] Every behavioral changelog/doc claim proven against the final diff (test, runtime
+      observation, or full code-path trace) — not asserted from intent
 - [ ] New env vars in `.env.example`, unset = old behavior
 - [ ] New pure functions have tests
 - [ ] Merged to main and pushed; CI (`evals` workflow) **polled** on main and

@@ -84,7 +84,7 @@ Each was found by a scanner written in the moment. Those scanners are now
    For an eval, the equivalent is `add-regression-eval`'s red-green procedure — and
    never `git checkout` a file holding uncommitted work to undo a test injection.
 
-## The three questions that catch what greps miss
+## The four questions that catch what greps miss
 
 **"Is X referenced?" is strictly weaker than "does X do what the docs claim?"**
 `BOT_TIMEZONE` passed a referenced-anywhere check for months: it *was* read — inside
@@ -116,6 +116,20 @@ source before concluding from an empty result; a log tail proves what was *writt
 what is *happening*, so for "now" use a bounded time window with a count; and any reading
 taken earlier in a session is a historical claim, not a live one — re-read before acting
 on it. No scanner can catch this one, which is why it lives here.
+
+**"What would this reading look like under the other explanation?"** The three above ask
+what a reading *is*; this asks whether it *discriminates*. A timestamp, a correlation, an
+aggregate count, or a matching log line can be true and still fit a rival explanation just
+as well — and a true reading used to support a claim it does not distinguish is the
+prose-only half of C8 (constraints.md), the half no mechanism sees. Before you promote an
+explanation past `[hypothesis]` in a changelog, report, or commit, name at least one
+competing explanation and the observation that would tell them apart, then check whether
+that observation was actually measured: measured and consistent → promote; not measured →
+it stays `[hypothesis]`. This is the confirm/refute discipline `.claude/OPERATING_MANUAL.md`
+already states for any diagnosis, applied to the causal *sentence* rather than to the
+investigation. The 2026-08-27 C8 pair was exactly this: a leak that echoed the preset read
+as "the preset is the source" — a rival the same reading fit equally (a thinking model
+invents its own scaffold), falsified two days later by a leak the preset never contained.
 
 ## Quality bar
 
