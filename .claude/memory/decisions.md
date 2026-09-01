@@ -79,6 +79,35 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-01 | The offline life becomes subordinate to relationship memory (read-ground, write-firewalled) | status: current
+**Decided:** the offline-life generators (`_generate_life_event`, `_maybe_rotate_life_arc`) will
+READ the owner chat's relationship memory (long-term `summaries` + durable `facts` + recent summary,
+via `get_owner()`) for grounding, so the arc can no longer drift into contradicting threads the
+relationship already resolved. Memory is the source of truth; the life defers to it. Behind a new
+default-ON `LIFE_GROUNDING` kill switch. Signed off; not yet implemented (plan:
+`telegram-companion-bot/PLAN-lifearc-memory-grounding.md`).
+**Over:**
+- *Rebuild/fix the memory system* — rejected: the VPS `state.json` dump proved memory is the
+  strongest subsystem (174-word long-term summary + 15 accurate facts, promoting weekly). It isn't
+  broken; the arc is.
+- *Texture-only / kill the arc rotation* — rejected: owner wants grounded continuity, a followable
+  personal storyline, not just disposable daily flavor.
+- *Ground both directions (life writes into memory too)* — rejected: violates memory-provenance
+  invariants #10/#17 (invented events becoming "things that happened with the user"). The existing
+  `[own-day]` write firewall stays closed; grounding is READ-only.
+- *Exclude NSFW specifics from the grounding block* — rejected (owner-surfaced): Emily is an NSFW
+  companion whose intimate dynamic is her core emotional throughline; filtering it flattens her and
+  re-creates the disconnect. The guard is content-neutral — provenance (don't re-narrate grounding as
+  events) + domain (solo events stay in her own world), not an NSFW filter.
+**Why:** the life arc was a closed generative loop isolated from memory, so it froze stale/wrong
+threads (Warren "was it a test", "photo series") verbatim while the real relationship moved on and
+resolved them — the arc *contradicted* her own memory. Grounding on the reliable store fixes the
+class at its source; the firewall keeps provenance intact.
+**By:** owner (brianault327), interactively, 2026-09-01 — answered all four forks (grounding depth,
+weekly cadence kept, near-duplicate dedup, no NSFW filter).
+**Detail:** `telegram-companion-bot/PLAN-lifearc-memory-grounding.md`; diagnosis in this session's
+mycelium entry.
+
 ### 2026-08-31 | MECHANISM REVIEW surfaces recurrence by freshness, not presence | status: current
 **Decided:** the `session-audit.sh` MECHANISM REVIEW startup line now names a guarded
 constraint only when its newest `seen:` date is on/after the last debrief date — i.e. the
