@@ -1226,6 +1226,26 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-01 — Implementing the near-duplicate event guard, picked the similarity metric/threshold
+  by feel and it was wrong into a test twice before it was right: first word-set Jaccard ≥ 0.8 (the
+  real near-dup scored 0.71, missed), then `SequenceMatcher` ≥ 0.75 which over-triggered on short
+  templated strings (`event 12` vs `event 11` = 0.88, breaking the existing cap test). It came right
+  only after I computed the metric in a scratch script against the actual positive AND negative cases
+  (real Warren near-dup, role-reversal, short strings) — which is what should have preceded the first
+  threshold. → **a similarity/threshold heuristic gets computed against the real positive and negative
+  examples before it is written, not after a test fails; a number chosen by feel passes the case you
+  imagined and fails the two you didn't.** Caught by my own tests pre-merge; no bad code shipped.
+- 2026-09-01 — Merged the release with `git push origin HEAD:main` (correct), but `main` had advanced
+  mid-session (another session's `skillforge/`), so the push had already required a fetch + rebase of
+  the branch onto the new `main`. That rewrote the branch's two earlier (pushed) plan-doc commits, so
+  updating the remote branch ref then needed a force-push — which a repo ruleset blocks ("declined due
+  to repository rule violations"). Reconciled without force by recording a `git merge -s ours
+  origin/<branch>` (keeps HEAD's tree exactly, adds the stale tip as a parent → branch fast-forwards).
+  Cost ~5 extra git ops and a confusing debrief-check "not merged" (HEAD ends up ahead of main by
+  content-free commits). → **before rebasing an already-pushed branch, remember this repo blocks
+  force-push; if main only advanced, prefer merging main INTO the branch over rebasing, or accept that
+  the branch ref reconciles via a `-s ours` merge, not a force-push.** Main was correct throughout; no
+  deploy impact.
 - 2026-09-01 — Drafting the life-arc→memory grounding plan, wrote a guardrail "exclude NSFW
   specifics from the grounding block" and put it in the signed-off-track plan. The owner asked *why*,
   and answering forced the check I'd skipped: Emily is an NSFW companion whose intimate dynamic is the
