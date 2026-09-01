@@ -1294,17 +1294,17 @@ four adversarial review rounds) already covers the pattern, and the live-collabo
 shape most 2026 frameworks assume runs straight into `bot-code-invariants` #3 (no new
 per-message LLM side calls) with no case strong enough to argue an exception.
 
-### 6.1 Prompt caching on the `assemble_messages` prefix — step 1 instrument SHIPPED v2026-08-24.9; awaiting live read
-- **Step 1 instrument shipped (2026-08-24, `v2026-08-24.9`):** `/audit`'s `LLM today:` line
-  now shows `; N cached` (cache-hit input tokens the provider reported), via
-  `_usage_cached_tokens` reading both the flat `cache_read_input_tokens` and nested
-  `prompt_tokens_details.cached_tokens` usage shapes. **Step 1 is not yet answered** — the
-  code that produces the number shipped, but the number itself needs a live read. **Deployed
-  2026-08-25 (owner); the live read is now a tracked follow-up** (Notion Fleet KB,
-  `Category=follow-up`). Check `/audit` on a busy instance over a day or two. A persistent `0 cached`
-  across measured calls closes this item "checked, not applicable" (step 3); a nonzero opens
-  step 2 (the `assemble_messages` prefix reorder). Do not touch `assemble_messages` until the
-  live read says caching is active — that is the whole point of gating step 2 on step 1.
+### 6.1 ~~Prompt caching on the `assemble_messages` prefix~~ — checked, not applicable (2026-09-01)
+- **Closed 2026-09-01: checked, not applicable.** Step 1's instrument shipped
+  (v2026-08-24.9, deployed 2026-08-25); the live read on Emily (2026-09-01, `journalctl`
+  grep for `cached`/`cache_read` across a day's traffic) returned no output — NanoGPT's
+  usage responses carry no `cache_read_input_tokens` or `prompt_tokens_details.cached_tokens`
+  field for this fleet's model routes. Caching is not active; steps 2-3 do not apply.
+  The `assemble_messages` prefix reorder is not worth doing (nothing to preserve), and
+  3.8 Phase 2's cost argument ("re-pays the entire ~17k-token prompt every call") stands
+  unchanged. The `/audit` instrument (`_usage_cached_tokens`) remains in the code — if
+  NanoGPT adds caching for open-source routes later, `/audit`'s `; N cached` figure will
+  surface it without a new change.
 - **Evidence:** NanoGPT (this fleet's provider) documents automatic implicit prompt
   caching — no request changes needed — for "OpenAI and Gemini model families plus
   many open-source provider/model routes," with cache hits reported via
@@ -1501,7 +1501,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.11 per-instance systemd sandbox~~ | ✅ **Shipped 2026-08-24** — one-bot canary and explicit promotion of a root-owned sandbox drop-in; narrow writable paths and a release-independent rollback command. |
 | **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
-| **Someday** | 6.1 prompt-caching verification, ~~6.2 nightly-consolidation extension~~ | 6.1's step 1 (confirm `cache_read_input_tokens`) is cheap enough to pick up anytime; steps 2-3 depend on its answer. **6.2's first slice shipped v2026-08-24.6** (proactive-hook pre-draft, `NIGHTLY_PREDRAFT`) with a standing "what nightly can absorb" list for further slices. |
+| ~~**Someday**~~ | ~~6.1 prompt-caching verification~~, ~~6.2 nightly-consolidation extension~~ | **6.1 closed 2026-09-01: checked, not applicable** — live read on Emily showed NanoGPT returns no cache-hit fields for this fleet's model routes; steps 2-3 do not apply. **6.2's first slice shipped v2026-08-24.6** (proactive-hook pre-draft, `NIGHTLY_PREDRAFT`) with a standing "what nightly can absorb" list for further slices. |
 | **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
 
 Execution maps onto the agent system: builder implements one item per dispatch,
@@ -1572,7 +1572,7 @@ none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 |---|---|
 | 5.10-B `/mixtape` (S) | Self-contained product feature over shipped pipelines (milestones + TTS + `/imagine`); a good low-risk "anytime" pickup, unrelated to any other item. |
 | 3.8 Phase 2 — pre-reply thinking call (S/M) | Default-off, A/B-gated, first #3 loosening. **Standing rec: measure whether the free `STEP_INTENT` seed + preset work already delivered the target before building.** |
-| 6.1 step 2 — `assemble_messages` prefix reorder | **Gated on the pending live cache read** (the Notion follow-up). Do not start until the read shows caching is active. |
+| ~~6.1 step 2 — `assemble_messages` prefix reorder~~ | **Closed 2026-09-01** — the live cache read returned nothing; caching is not active for this fleet's model routes, so the reorder has nothing to preserve. |
 | 6.3 reply advisor (L) | **Owner-gated:** needs a new `bot-code-invariants` #3 carve-out written into that file and owner-approved before any code. Largest blast radius in the roadmap. |
 | 5.3-A standing life-project with decay (M/L) | The biggest new-state primitive in 5-A; continuous, user-attention-responsive state — scope on its own. |
 | 5.3-B 🧪 response refinement on recurring topics (M) | A personality-shaping feedback loop — same caution class as the rejected self-evolution ideas; highest-risk 🧪. |
