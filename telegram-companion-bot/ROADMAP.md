@@ -1299,12 +1299,13 @@ per-message LLM side calls) with no case strong enough to argue an exception.
   (v2026-08-24.9, deployed 2026-08-25); the live read on Emily (2026-09-01, `journalctl`
   grep for `cached`/`cache_read` across a day's traffic) returned no output — NanoGPT's
   usage responses carry no `cache_read_input_tokens` or `prompt_tokens_details.cached_tokens`
-  field for this fleet's model routes. Caching is not active; steps 2-3 do not apply.
-  The `assemble_messages` prefix reorder is not worth doing (nothing to preserve), and
-  3.8 Phase 2's cost argument ("re-pays the entire ~17k-token prompt every call") stands
-  unchanged. The `/audit` instrument (`_usage_cached_tokens`) remains in the code — if
-  NanoGPT adds caching for open-source routes later, `/audit`'s `; N cached` figure will
-  surface it without a new change.
+  field for this fleet's model routes. Confirmed on both Emily (`glm-5:thinking`) and
+  Jules (non-thinking model) — neither returns cache-hit data. Caching is not active;
+  steps 2-3 do not apply. The `assemble_messages` prefix reorder is not worth doing
+  (nothing to preserve), and 3.8 Phase 2's cost argument ("re-pays the entire ~17k-token
+  prompt every call") stands unchanged. The `/audit` instrument (`_usage_cached_tokens`)
+  remains in the code — if NanoGPT adds caching for open-source routes later, `/audit`'s
+  `; N cached` figure will surface it without a new change.
 - **Evidence:** NanoGPT (this fleet's provider) documents automatic implicit prompt
   caching — no request changes needed — for "OpenAI and Gemini model families plus
   many open-source provider/model routes," with cache hits reported via
