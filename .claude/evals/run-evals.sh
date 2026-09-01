@@ -1779,6 +1779,43 @@ DBRF
   fi
 fi
 
+# --- causal-claim-discriminator --------------------------------------------------------
+# C8 (seen 11) — the most recurrent constraint. A true reading used to support a claim
+# it does not discriminate: /errors slot read as chat model (#10), memories.txt grep
+# read as all of relationship memory (#11), a preset echo read as the leak's source (#9),
+# a size match read as identity confirmation (#6), a substring test read as semantic
+# classification (#8). The fix-the-class skill's fourth question (lines 120-133) states
+# the discriminator procedure; this eval proves the procedure's rules, as formalized in
+# causal_claim_check.py, correctly classify the historical failures.
+# Two parts: (a) the checker's selftest against RED/GREEN fixtures from real incidents,
+# (b) the skill text still contains the procedure's load-bearing elements.
+ccd_err=""
+if ! ccd_out=$(python3 .claude/tools/causal_claim_check.py --selftest 2>&1); then
+  ccd_err="selftest failed: $(echo "$ccd_out" | grep 'FAIL' | head -3)"
+fi
+ftc=.claude/skills/fix-the-class/SKILL.md
+if [ ! -f "$ftc" ]; then
+  ccd_err="${ccd_err:+$ccd_err; }fix-the-class skill missing"
+else
+  ccd_drift=""
+  grep -q 'competing explanation' "$ftc" \
+    || ccd_drift="competing explanation"
+  grep -q 'tell them apart' "$ftc" \
+    || ccd_drift="${ccd_drift:+$ccd_drift, }tell them apart"
+  grep -q 'actually measured' "$ftc" \
+    || ccd_drift="${ccd_drift:+$ccd_drift, }actually measured"
+  grep -q '\[hypothesis\]' "$ftc" \
+    || ccd_drift="${ccd_drift:+$ccd_drift, }[hypothesis]"
+  if [ -n "$ccd_drift" ]; then
+    ccd_err="${ccd_err:+$ccd_err; }fix-the-class skill missing discriminator elements: $ccd_drift — the procedure that blocks C8's historical patterns has drifted"
+  fi
+fi
+if [ -z "$ccd_err" ]; then
+  ok "causal-claim-discriminator: scope-mismatch and non-discriminating-evidence patterns correctly classified against C8 historical fixtures, skill text intact"
+else
+  bad "causal-claim-discriminator" "$ccd_err"
+fi
+
 # --- fleet-config-drift -----------------------------------------------------------------
 # All 7 instances share one bot.py but differ in context files, cards, and preset layers.
 # Drift accumulates silently — a new context file added to 4 instances but not the other
