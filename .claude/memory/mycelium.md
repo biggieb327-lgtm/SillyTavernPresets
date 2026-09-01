@@ -126,7 +126,12 @@ Newest first, same as the operational log.
 
 ## Entries
 
-### 2026-09-01 | from: claude/arxiv-2608-27454-build-b1epe6 | to: `.claude/memory/` | status: open
+### 2026-09-01 | from: claude/arxiv-2608-27454-build-b1epe6 | to: `.claude/memory/` | status: done
+**[done 2026-09-01]** Owner approved the graft. Shipped `.claude/memory/skill-impact.md`
+(charter + the reasoning-leak arc seeded as 4 rows), surfaced by `session-audit.sh` (pending
+count), written at `session-debrief` (outputs table + checklist), and guarded by the
+break-tested `skill-impact-format` eval. Original note kept below for the record.
+
 Built `skillforge/` (a standalone WikiSkill / arXiv:2608.27454 reimplementation — separate
 project, bot rules do not apply). While doing it, the finding worth acting on: this repo's
 `.claude/` layer already implements ~85% of WikiSkill by hand, and the ONE real gap is

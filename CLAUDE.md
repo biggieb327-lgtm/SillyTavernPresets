@@ -32,6 +32,9 @@ All under `telegram-companion-bot/` unless noted:
 - `.claude/memory/watchlist.md` — low-level observations not yet worth a failure,
   constraint, or finding record; each names the trigger that graduates it out. Reviewed at
   debrief; open count surfaces at startup.
+- `.claude/memory/skill-impact.md` — did an intervention hold? One row per change to the
+  machinery that targeted a failure class, tracking forward whether the class recurred
+  (`pending`/`holding`/`recurred`). Written at debrief; `pending` count surfaces at startup.
 
 ## Operating rule
 

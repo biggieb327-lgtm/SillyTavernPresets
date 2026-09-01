@@ -1609,6 +1609,63 @@ PYEOF
   fi
 fi
 
+# --- skill-impact-format ----------------------------------------------------------------
+# session-audit.sh tells each new session how many interventions are still `pending` — the
+# class-targeting changes whose efficacy is unconfirmed — by grepping the entry header. A
+# drifted header (renamed status, trailing space, missing field) does not error; it drops
+# out of the count and the next session is told nothing is waiting. Identical C13/silence
+# shape to mycelium-format, so it is guarded identically: parse every non-fenced header
+# independently, compare `pending` against the hook's own grep, and run the parser with
+# 2>&1 + exit-status test so a broken parser fails loud, not green (the gate-corpus finding).
+si=.claude/memory/skill-impact.md
+if [ ! -f "$si" ]; then
+  bad "skill-impact-format" "$si missing — session-audit.sh will silently stop reporting pending interventions"
+else
+  hook_pending=$(grep '^### 20' "$si" 2>/dev/null | grep -c '| status: pending$'); hook_pending=${hook_pending:-0}
+  if ! si_err=$(python3 - "$si" "$hook_pending" 2>&1 <<'PYEOF'
+import re, sys
+path, hook_pending = sys.argv[1], int(sys.argv[2])
+HEADER = re.compile(
+    r"^### 20\d{2}-\d{2}-\d{2} \| intervention: .+ \| class: .+ \| status: (pending|holding|recurred)$")
+bad_headers, statuses, in_fence = [], [], False
+for n, line in enumerate(open(path, encoding="utf-8"), 1):
+    line = line.rstrip("\n")
+    # C14: the Entry format section documents the header shape inside a fence; that example
+    # is not a row and must not be counted.
+    if line.startswith("```"):
+        in_fence = not in_fence
+        continue
+    if in_fence:
+        continue
+    if not line.startswith("### 20"):
+        continue
+    m = HEADER.match(line)
+    if m:
+        statuses.append(m.group(1))
+    else:
+        bad_headers.append(f"line {n}: {line[:90]}")
+if bad_headers:
+    print("row header(s) session-audit.sh cannot count: " + "; ".join(bad_headers) +
+          " — required shape: '### YYYY-MM-DD | intervention: X | class: Y | status: pending|holding|recurred'")
+elif not statuses:
+    print("parsed 0 rows out of the file — the parser broke, which is exactly the "
+          "silent-green shape this check exists for")
+else:
+    parsed_pending = statuses.count("pending")
+    if parsed_pending != hook_pending:
+        print(f"the hook counts {hook_pending} pending row(s), an independent parse finds "
+              f"{parsed_pending} — session-audit.sh and {path} disagree about the format")
+PYEOF
+  ); then
+    si_err="the parser itself exited non-zero: ${si_err:-(no output)} — a check that goes green when its own parser dies is not a check"
+  fi
+  if [ -z "$si_err" ]; then
+    ok "skill-impact-format: every row header is countable, and the hook's pending count matches an independent parse"
+  else
+    bad "skill-impact-format" "$si_err"
+  fi
+fi
+
 # --- mycelium-startup-routing -----------------------------------------------------------
 # 2026-08-24: Mycelium was wired into Claude Code's SessionStart hook, but the Codex
 # entrypoint only described the repo's context system in general. A new Codex session
