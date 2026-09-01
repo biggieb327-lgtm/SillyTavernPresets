@@ -1,0 +1,17 @@
+# skillforge demo benchmark. Two convention families a skill must teach:
+#   house-date-format : YYYY.<zero-padded day-of-year>
+#   release-tag-format: v<YYYY-MM-DD>.<revision>
+{"id": "date-2026-01-01", "x": "Convert the date 2026-01-01 to the house date format.", "y": "2026.001", "split": "train", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-02-01", "x": "Convert the date 2026-02-01 to the house date format.", "y": "2026.032", "split": "train", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-06-15", "x": "Convert the date 2026-06-15 to the house date format.", "y": "2026.166", "split": "train", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-08-31", "x": "Convert the date 2026-08-31 to the house date format.", "y": "2026.243", "split": "val", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-11-01", "x": "Convert the date 2026-11-01 to the house date format.", "y": "2026.305", "split": "val", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-12-25", "x": "Convert the date 2026-12-25 to the house date format.", "y": "2026.359", "split": "test", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "date-2026-07-04", "x": "Convert the date 2026-07-04 to the house date format.", "y": "2026.185", "split": "test", "grader": "exact", "meta": {"family": "date", "skill": "house-date-format"}}
+{"id": "tag-2026-01-15-1", "x": "Give the release tag for a build on 2026-01-15 that is revision 1 of that day.", "y": "v2026-01-15.1", "split": "train", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-03-02-3", "x": "Give the release tag for a build on 2026-03-02 that is revision 3 of that day.", "y": "v2026-03-02.3", "split": "train", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-05-20-2", "x": "Give the release tag for a build on 2026-05-20 that is revision 2 of that day.", "y": "v2026-05-20.2", "split": "train", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-08-25-1", "x": "Give the release tag for a build on 2026-08-25 that is revision 1 of that day.", "y": "v2026-08-25.1", "split": "val", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-09-09-4", "x": "Give the release tag for a build on 2026-09-09 that is revision 4 of that day.", "y": "v2026-09-09.4", "split": "val", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-08-31-2", "x": "Give the release tag for a build on 2026-08-31 that is revision 2 of that day.", "y": "v2026-08-31.2", "split": "test", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}
+{"id": "tag-2026-12-31-1", "x": "Give the release tag for a build on 2026-12-31 that is revision 1 of that day.", "y": "v2026-12-31.1", "split": "test", "grader": "exact", "meta": {"family": "tag", "skill": "release-tag-format"}}

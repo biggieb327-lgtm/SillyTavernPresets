@@ -370,6 +370,9 @@ above. `ls` it for the rest. The non-obvious bits:
 - `caa16137-nora.json` (root) is a SillyTavern archive copy that has **diverged** from
   the bot's `nora.json` — not a mirror, never sync them.
 - `voicekit-starter/` is a separate project; none of the bot's rules apply to it.
+- `skillforge/` is a separate project too (a WikiSkill / arXiv:2608.27454 reimplementation:
+  a skill-evolution loop + skill-quality benchmark). None of the bot's rules apply; it never
+  reads or writes `.claude/`. Runs offline (`PYTHONPATH=src python3 -m skillforge demo`).
 - `idea-scraper-actor/` (root) is a custom Apify actor built for the
   `improvement-loop-monthly` and `character-pass-monthly` Routines' Reddit + Substack
   idea scans. **Both Routines are retired here (2026-08-22)**, so nothing in this repo

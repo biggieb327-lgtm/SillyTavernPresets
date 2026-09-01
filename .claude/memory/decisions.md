@@ -241,3 +241,27 @@ block so the concurrency lock + reason-branch regression tests stay meaningful.
 **By:** owner, 2026-08-31 ("zero re-enable capability").
 **Detail:** `CHANGELOG.md` → v2026-08-31.2; `_perform_self_update_locked` / `update_cmd` in `bot.py`;
 deploy stays `deploy/vps-sync.sh` per instance.
+
+### 2026-08-31 | WikiSkill built as a standalone offline-testable project, not grafted into .claude/ | status: current
+**Decided:** implemented WikiSkill (arXiv:2608.27454) as a new top-level `skillforge/` project —
+a self-contained skill-evolution loop + skill-quality benchmark, stdlib-only core, runnable
+offline with a deterministic MockLLM and against a real OpenAI-compatible endpoint. It never
+reads or writes the `.claude/` memory layer.
+**Over:** two alternatives the owner was shown — (a) analysis-doc only (map WikiSkill onto the
+existing `.claude/` layer, build nothing); (b) graft WikiSkill's one genuinely-missing piece,
+the `skill-impact.md` audit trail, directly into `.claude/memory/`. Owner chose the ambitious
+path: "build the skill-quality benchmark first, then the full evolution loop."
+**Why:** the finding is that `.claude/` already implements ~85% of WikiSkill by hand
+(operational-log/constraints/decisions = wiki pattern pages; `.claude/skills/` + evals + CI =
+the gated skill layer). The only real gap is the change→diff→did-it-work ledger. Building the
+full loop *inside* `.claude/` would (1) duplicate live systems, (2) need a skill-quality
+benchmark the repo doesn't have, and (3) risk a competing memory layer — all against the repo's
+single-system norms. A separate project (the `voicekit-starter/` precedent) delivers the full
+loop the owner asked for, offline-testable, without touching governed machinery. Whether to
+later graft just the `skill-impact.md` ledger into `.claude/memory/` is left as a separate,
+smaller decision.
+**Honesty bound:** the offline demo proves the harness mechanics (gating, skills-only rollback,
+never-rolled-back wiki, audit trail, early stop), NOT that "skill evolution works" — that claim
+is the paper's and needs a real model via `skillforge evolve`.
+**By:** owner (this session), 2026-08-31.
+**Detail:** `skillforge/README.md`; `CLAUDE.md` → Repo layout; branch `claude/arxiv-2608-27454-build-b1epe6`.

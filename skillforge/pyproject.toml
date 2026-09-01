@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skillforge"
+version = "0.1.0"
+description = "A WikiSkill-style skill-evolution loop with an objective skill-quality benchmark. Standalone research project; not part of the Telegram bot fleet."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+# Core is stdlib-only on purpose: the loop and the benchmark run offline with the
+# deterministic MockLLM, and the real-LLM client uses urllib. No third-party deps.
+dependencies = []
+
+[project.scripts]
+skillforge = "skillforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+skillforge = ["py.typed"]
