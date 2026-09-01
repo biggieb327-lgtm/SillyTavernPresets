@@ -1500,7 +1500,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.9 structured fleet operation events~~ | ✅ **Shipped v2026-08-24.3** — payload-free JSON at model, external-fetch, scheduled-job, and delivery boundaries; one journal report compares latency, outcomes, and fallback across the fleet. |
 | ~~**Next**~~ | ~~1.10 incremental transactional machine-state persistence~~ | ✅ **Shipped v2026-08-24.4** — reminders use a transactional per-instance SQLite store with verified JSON migration/export and a one-release feature rollback. |
 | ~~**Next**~~ | ~~1.11 per-instance systemd sandbox~~ | ✅ **Shipped 2026-08-24** — one-bot canary and explicit promotion of a root-owned sandbox drop-in; narrow writable paths and a release-independent rollback command. |
-| **Someday** | 5.1 shared triage queue, 5.2 disengagement indicator, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, 5.11 nudge skip-reason transparency | Not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes (forced-analogy and random-stimulus), lowest-risk of that batch. |
+| **Someday** | 5.1 shared triage queue, ~~5.2 disengagement indicator~~, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, ~~5.11 nudge skip-reason transparency~~ | ~~5.11-B shipped v2026-09-01.2; 5.2-B shipped v2026-09-01.3~~ (Sprint 1 complete). Remaining items not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes. |
 | **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | ~~**Someday**~~ | ~~6.1 prompt-caching verification~~, ~~6.2 nightly-consolidation extension~~ | **6.1 closed 2026-09-01: checked, not applicable** — live read on Emily showed NanoGPT returns no cache-hit fields for this fleet's model routes; steps 2-3 do not apply. **6.2's first slice shipped v2026-08-24.6** (proactive-hook pre-draft, `NIGHTLY_PREDRAFT`) with a standing "what nightly can absorb" list for further slices. |
 | **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
@@ -1521,13 +1521,13 @@ share numbers, so they're disambiguated here as **5-A** (the 2026-08-04 "Propose
 **5-B** (the 2026-08-05 "Lateral exploratory" block). Sprints are ordered low→high risk, which
 is also a sensible build order: warm up on observability, end on the design-review-heavy work.
 
-### Sprint 1 — Observability & transparency (no behavior change)
+### ~~Sprint 1 — Observability & transparency (no behavior change)~~ SHIPPED v2026-09-01.2/.3
 Surface existing internal state on existing commands; same "read state, render it" shape as
 the just-shipped 6.1 cache instrument. Lowest risk in the batch.
 | Item | Size | Surface | Note |
 |---|---|---|---|
-| 5.11-B nudge skip-reason on `/nudges` | S | `/nudges`, `unsent_drafts` | Carries an **owner decision**: `skip_chance` rises as mood drops (she reaches out *less* when mood is low) — intended or inverted? Record the answer near `heartbeat()` either way. |
-| 5.2-B weeks-long disengagement trend on `/audit` | M | `/audit`, rolling multi-week metric | Prove it moves *before* a visible engagement drop against one instance's real history. |
+| ~~5.11-B nudge skip-reason on `/nudges`~~ | S | `/nudges`, `unsent_drafts` | **Shipped v2026-09-01.2.** Owner decision recorded: `skip_chance` rising with low mood is intended (withdrawn = fewer nudges). |
+| ~~5.2-B weeks-long disengagement trend on `/audit`~~ | M | `/audit`, rolling multi-week metric | **Shipped v2026-09-01.3.** Instrument deployed; live validation pending — confirm the metric moves before a visible engagement drop against real instance history after deploy. |
 
 ### Sprint 2 — Character presentation of existing state (zero/near-zero new LLM calls)
 All hook the same reply-injection points that already read mood / fatigue / mirror / busy
