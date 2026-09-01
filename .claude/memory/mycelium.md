@@ -126,6 +126,20 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-01 | from: claude/arxiv-2608-27454-build-b1epe6 | to: `.claude/memory/` | status: open
+Built `skillforge/` (a standalone WikiSkill / arXiv:2608.27454 reimplementation — separate
+project, bot rules do not apply). While doing it, the finding worth acting on: this repo's
+`.claude/` layer already implements ~85% of WikiSkill by hand, and the ONE real gap is
+WikiSkill's `skill-impact.md` — an append-only ledger tying a change to the machinery (a
+skill/hook/eval/agent) to whether the failure it targeted stopped recurring. The
+`v2026-08-25.1` widened-guard-still-leaked incident is exactly what it would surface.
+`skillforge/` implements + tests that ledger in isolation. **Open follow-up (owner's call,
+not yet decided):** graft a small `skill-impact.md` into `.claude/memory/`, written at
+`session-debrief` and surfaced by `session-audit.sh`, reusing the `constraints.md`
+seen/graduation discipline. **Stopping rule:** drop this if the owner declines the graft or
+if a session finds the scattered signal (constraints `seen` + oplog + session-audit) already
+sufficient in practice. Decision + rationale: `decisions.md` 2026-08-31 entry (WikiSkill scope).
+
 ### 2026-08-26 | from: claude/emily-brian-dialogue-ysmpo8 | to: reasoning-leak / preset work | status: open
 `[decision]` The STEPPED THINKING reasoning-leak (Emily/Priya) is fixed on two layers, both
 deployed to all seven bots: `v2026-08-25.1` widened `REASONING_LEAK_GUARD`'s markers (added
