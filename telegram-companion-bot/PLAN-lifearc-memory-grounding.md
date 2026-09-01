@@ -1,6 +1,6 @@
 # PLAN — Ground the offline life in relationship memory
 
-**Status:** awaiting owner sign-off (design settled, no code written)
+**Status:** SIGNED OFF 2026-09-01 (all §11 questions resolved); no code written yet
 **Author session:** claude/roadmap-priorities-uu9fyp, 2026-09-01
 **Base:** `bot.py` v2026-08-31.2
 **Scope:** `bot.py` change, fleet-wide, behind kill switches. Not a bot.py split, not a memory-system rework.
@@ -84,13 +84,19 @@ One compact, read-only block built from the owner chat's memory:
   visible.
 Returns "" when there's no owner or no memory (degrades to today's behavior).
 
-**Domain guard (risk #6.1):** the block is labelled as *context for consistency, not
-material to restate* — "Here is how she remembers things with {user} and what they've
-actually talked about. Keep her offline life consistent with this — don't contradict
-what's resolved or known — but this is background, not events to narrate as her own day.
-Keep offline events in her own world (work, art, forum, people, cat), not the private
-specifics of the relationship." This keeps intimate/NSFW memory content from surfacing in
-"here's my day" events while still fixing the contradiction problem.
+**Guards (content-neutral — the axis is provenance + domain, NOT "is it NSFW").** Emily is
+an NSFW companion and the intimate dynamic is the core emotional throughline of her
+long-term summary; sanitizing it out of grounding would flatten her and re-create the very
+disconnect this change fixes. So:
+- **Provenance guard (both consumers):** the block is labelled *consistency context, never
+  material to restate* — "this is what she already remembers; use it only to avoid
+  contradicting it; do NOT narrate it as new events." This closes the reverse-leak path
+  (shared memory → invented own-day event → `[own-day]` store) regardless of content.
+- **Domain guard (`_generate_life_event` only):** solo-day events stay in her own-world
+  domain (work, art, forum, people, cat). A shared bedroom scene is out of scope there
+  because it is not a *solo* event — not because it is explicit.
+- **Arc (`_maybe_rotate_life_arc`) may reflect the intimate throughline** where it is
+  genuinely her arc; grounding keeps it current, not censored.
 
 ### 4.2 `_generate_life_event` — add grounding
 Insert `_relationship_grounding()` into `parts` (bot.py:1983-1990 region), and add one
@@ -133,9 +139,13 @@ secondary cleanups (4.4) ride the existing `LIFE_ROTATE`/`LIFE_SIM_ENABLED` swit
 - BOT_VERSION bump + `CHANGELOG.md` entry (root cause first) — delivery gate enforces.
 
 ## 6. Risks & guards
-1. **Intimate memory leaking into own-world events** — guarded by 4.1's domain instruction
-   (offline events stay in work/art/forum/cat domain; relationship memory is
-   consistency-context only). **Validate explicitly** in the live check (§8).
+1. **Shared memory re-narrated as invented own-day events** (the reverse-leak path) —
+   guarded by 4.1's provenance instruction (grounding is consistency context, never
+   material to restate) + the solo-domain instruction on `_generate_life_event`. This is
+   content-neutral, not an NSFW filter. **Validate explicitly** in the live check (§8):
+   confirm no shared fact (intimate or otherwise) surfaces as a fabricated solo event, and
+   confirm the arc still reflects her real emotional throughline rather than a sanitized
+   one.
 2. **Over-correction** — the arc collapsing into a summary of the relationship instead of
    keeping her own autonomous life. Guard: grounding is "don't contradict," not "be about
    the user"; keep the own-world domain instruction.
@@ -180,11 +190,10 @@ drifting the same way against their own (likely-fine) memories. The fix is fleet
 construction (default-on). Spot-check 1-2 other instances' `life.txt` vs. their long-term
 memory after deploy to confirm the class is closed (`fix-the-class`).
 
-## 11. Open questions for owner
-1. **Grounding source depth:** long-term summary + recent summary + N durable facts (this
-   plan), or long-term summary only (leaner, less current)? Recent summary is what carries
-   *just-resolved* threads, so I recommend including it.
-2. **Arc cadence:** keep weekly `LIFE_ROTATE_DAYS=7`, or slow it now that the arc will be
-   memory-corrected (drift is less likely, so weekly is fine — no change proposed)?
-3. **Dedup aggressiveness:** exact-match only, or near-duplicate (normalized) — the Warren
-   case was verbatim, so exact-match closes it; near-dup is optional.
+## 11. Open questions for owner — RESOLVED 2026-09-01
+1. **Grounding source depth:** ✅ long-term summary + recent summary + N durable facts.
+2. **Arc cadence:** ✅ keep weekly `LIFE_ROTATE_DAYS=7` (no change).
+3. **Dedup aggressiveness:** ✅ near-duplicate (normalized), not exact-match only.
+4. **NSFW in grounding (raised by owner):** ✅ do NOT filter by NSFW. The guard is
+   provenance + domain (§4.1), content-neutral — grounding stays faithful to her intimate
+   throughline rather than sanitizing it.
