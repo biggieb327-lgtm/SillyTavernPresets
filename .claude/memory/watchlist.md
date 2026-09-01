@@ -51,6 +51,19 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
+### 2026-09-01 — grounded offline life can carry owner-private memory into group/non-owner chats | status: open
+`v2026-09-01.1` made `_generate_life_event` / `_maybe_rotate_life_arc` read the owner's relationship
+memory (intimate specifics included, for an NSFW companion) for grounding. Their outputs
+(`life_events.txt`, `life.txt`) are injected into every chat, including groups (no owner-gate, predates
+this change). The guard against an owner-private detail surfacing in a group is prompt-only
+("consistency context, do not restate") + the solo-domain event scoping. Not a problem yet: no leak
+observed, and the event prompt is strongly scoped to her own-world domain. Owner accepted the residual
+(decisions.md 2026-09-01) rather than gate the injection.
+**Graduates when:** any owner-private/relationship detail is seen in a group or non-owner chat — then
+it's an operational-log incident, and the fix is to gate `life.txt`/`life_events.txt` injection to the
+owner chat (`get_owner()`), which needs `group-chat-changes`. Immediate mitigation meanwhile:
+`LIFE_GROUNDING=0`.
+
 ### 2026-08-29 — risk-guard.sh matches `git checkout <dirty-file>` inside heredoc/quoted bodies, not just executable positions | status: open
 While committing the debrief, `risk-guard.sh` blocked `git commit -F - <<EOF … EOF` because
 the C15 description *inside the commit message* contained the literal string of the forbidden

@@ -8290,6 +8290,7 @@ class TestEveryBooleanFlagDefault:
         "IMAGE_RETRY_TRANSIENT": True,
         "INNER_VOICE_ENABLED": False,
         "JOKE_CANDIDATES": False,
+        "LIFE_GROUNDING": True,
         "LIFE_ROTATE": True,
         "LIFE_SIM_ENABLED": True,
         "LINK_READING": True,
@@ -9508,6 +9509,111 @@ class TestLifeEvents:
         asyncio.run(bot.update_life_event())
         assert called == []
         assert bot._read_life_events() == []
+
+
+# ── Offline life grounded in relationship memory (v2026-09-01.1) ──────────────────
+
+class TestLifeGrounding:
+    def _memory(self, monkeypatch, owner=9700):
+        monkeypatch.setattr(bot, "get_owner", lambda: owner)
+        monkeypatch.setattr(bot, "LIFE_GROUNDING", True)
+        bot.summaries[owner] = "She and the owner resolved the Warren photo; it was nothing."
+        bot.facts[owner] = ["Emily paints watercolor leaves.", "[own-day Aug 27] she walked to the falls."]
+        bot.recent_summaries[owner] = "Lately she mailed a pressed leaf to Mika."
+        return owner
+
+    def test_grounding_includes_memory_when_enabled(self, monkeypatch):
+        self._memory(monkeypatch)
+        g = bot._relationship_grounding()
+        assert "Warren photo" in g            # long-term summary
+        assert "watercolor leaves" in g       # a durable fact
+        assert "mailed a pressed leaf" in g    # recent summary
+
+    def test_grounding_excludes_own_day_facts(self, monkeypatch):
+        # own-day fiction must not be fed back in as relationship memory (provenance firewall).
+        self._memory(monkeypatch)
+        assert "walked to the falls" not in bot._relationship_grounding()
+
+    def test_grounding_empty_when_switch_off(self, monkeypatch):
+        self._memory(monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_GROUNDING", False)
+        assert bot._relationship_grounding() == ""
+
+    def test_grounding_empty_with_no_owner(self, monkeypatch):
+        monkeypatch.setattr(bot, "get_owner", lambda: None)
+        monkeypatch.setattr(bot, "LIFE_GROUNDING", True)
+        assert bot._relationship_grounding() == ""
+
+    def test_event_prompt_carries_grounding_when_on(self, monkeypatch):
+        self._memory(monkeypatch)
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "work all day")
+        captured = {}
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda messages, model=None: captured.update(user=messages[-1]["content"]) or "none")
+        bot._generate_life_event()
+        assert "Warren photo" in captured["user"]
+
+    def test_event_prompt_omits_grounding_when_off(self, monkeypatch):
+        self._memory(monkeypatch)
+        monkeypatch.setattr(bot, "LIFE_GROUNDING", False)
+        monkeypatch.setattr(bot, "_read_schedule_today", lambda: "work all day")
+        captured = {}
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda messages, model=None: captured.update(user=messages[-1]["content"]) or "none")
+        bot._generate_life_event()
+        assert "Warren photo" not in captured["user"]
+
+
+class TestNearDupLifeEvent:
+    def test_exact_repeat_is_dup(self):
+        existing = ["[Aug 28] Warren replied 'that's great' to a coworker's photo."]
+        assert bot._is_near_dup_event("Warren replied 'that's great' to a coworker's photo.", existing)
+
+    def test_near_repeat_is_dup(self):
+        existing = ["[Aug 28] Warren accidentally replied that's great to a photo of Dr Yuen."]
+        assert bot._is_near_dup_event("Warren replied that's great to a photo of Dr Yuen at the conference.", existing)
+
+    def test_distinct_event_is_not_dup(self):
+        existing = ["[Aug 28] Warren replied 'that's great' to a coworker's photo."]
+        assert not bot._is_near_dup_event("Whiskers knocked a mug off the windowsill.", existing)
+
+    def test_role_reversal_is_not_dup(self):
+        # same words, different roles -> a genuinely different event, must NOT be dropped
+        existing = ["[Aug 28] Warren praised Mika's photo."]
+        assert not bot._is_near_dup_event("Mika praised Warren's photo.", existing)
+
+    def test_append_skips_near_duplicate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bot, "LIFE_EVENTS_FILE", tmp_path / "life_events.txt")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        bot._append_life_event("Warren replied 'that's great' to a coworker's photo of Dr Yuen.")
+        bot._append_life_event("Warren replied that's great to a coworker's photo of Dr Yuen.")
+        bot._life_events_cache.update({"text": None, "ts": 0.0})
+        assert len(bot._read_life_events()) == 1
+
+
+class TestOwnDayNote:
+    def test_keeps_only_the_first_event_line(self):
+        day = "*First event, one sentence.*\n\n*Second event, another sentence.*"
+        note = bot._own_day_note(day, "Sep 01")
+        assert note.startswith("[own-day Sep 01] ")
+        assert "First event" in note
+        assert "Second event" not in note
+
+    def test_long_first_line_truncates_on_a_word_boundary(self):
+        day = "word " * 100
+        note = bot._own_day_note(day, "Sep 01")
+        assert note.endswith("…")
+        assert "wor…" not in note  # no mid-word cut
+
+    def test_empty_day_is_empty(self):
+        assert bot._own_day_note("", "Sep 01") == ""
+        assert bot._own_day_note("   \n  ", "Sep 01") == ""
+
+    def test_decorative_first_line_is_skipped(self):
+        # a '***'/'*' first line must not yield an empty note that drops the whole day
+        day = "***\n\n*The real event happened at the falls.*"
+        note = bot._own_day_note(day, "Sep 01")
+        assert "real event happened at the falls" in note
 
 
 class TestAssembleMessagesLifeEvents:

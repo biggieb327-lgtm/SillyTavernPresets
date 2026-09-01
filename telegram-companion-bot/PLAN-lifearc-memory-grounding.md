@@ -1,6 +1,9 @@
 # PLAN — Ground the offline life in relationship memory
 
-**Status:** SIGNED OFF 2026-09-01 (all §11 questions resolved); no code written yet
+**Status:** SHIPPED v2026-09-01.1 (2026-09-01). §11 forks resolved; `/code-review` finding 3
+(cross-chat injection of owner-private memory) owner-accepted as residual — see CHANGELOG,
+decisions.md, and watchlist.md. Findings 1 (order-sensitive near-dup) and 2 (decorative own-day
+line) fixed.
 **Author session:** claude/roadmap-priorities-uu9fyp, 2026-09-01
 **Base:** `bot.py` v2026-08-31.2
 **Scope:** `bot.py` change, fleet-wide, behind kill switches. Not a bot.py split, not a memory-system rework.

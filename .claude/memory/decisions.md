@@ -84,7 +84,7 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 READ the owner chat's relationship memory (long-term `summaries` + durable `facts` + recent summary,
 via `get_owner()`) for grounding, so the arc can no longer drift into contradicting threads the
 relationship already resolved. Memory is the source of truth; the life defers to it. Behind a new
-default-ON `LIFE_GROUNDING` kill switch. Signed off; not yet implemented (plan:
+default-ON `LIFE_GROUNDING` kill switch. **Implemented and shipped v2026-09-01.1** (plan:
 `telegram-companion-bot/PLAN-lifearc-memory-grounding.md`).
 **Over:**
 - *Rebuild/fix the memory system* — rejected: the VPS `state.json` dump proved memory is the
@@ -103,8 +103,17 @@ default-ON `LIFE_GROUNDING` kill switch. Signed off; not yet implemented (plan:
 threads (Warren "was it a test", "photo series") verbatim while the real relationship moved on and
 resolved them — the arc *contradicted* her own memory. Grounding on the reliable store fixes the
 class at its source; the firewall keeps provenance intact.
-**By:** owner (brianault327), interactively, 2026-09-01 — answered all four forks (grounding depth,
-weekly cadence kept, near-duplicate dedup, no NSFW filter).
+**Residual accepted (fifth fork, at implementation):** `/code-review` found that `life.txt` and
+`life_events.txt` are injected into group and non-owner chats (no owner-gate, predating this change),
+so grounding now feeds owner-private/intimate memory into generators whose output can reach a group —
+guarded only by the prompt ("consistency context, do not restate") + solo-domain scoping. Owner chose
+to **accept the risk** over gating the injection to the owner chat (would strip her offline-life texture
+from groups) or dropping facts from grounding. Revisit by owner-gating `life.txt`/`life_events.txt`
+injection if a leak is ever observed; `LIFE_GROUNDING=0` is the off-switch. (Two other review findings
+were fixed, not accepted: order-sensitive near-dup, decorative-line own-day note.) Tracked in
+`watchlist.md`.
+**By:** owner (brianault327), interactively, 2026-09-01 — answered all five forks (grounding depth,
+weekly cadence kept, near-duplicate dedup, no NSFW filter, accept the cross-chat injection residual).
 **Detail:** `telegram-companion-bot/PLAN-lifearc-memory-grounding.md`; diagnosis in this session's
 mycelium entry.
 

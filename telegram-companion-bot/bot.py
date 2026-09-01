@@ -6,6 +6,7 @@ import math
 import fcntl
 import random
 import asyncio
+from difflib import SequenceMatcher
 # Python 3.14 removed the auto-create fallback from asyncio.get_event_loop().
 # PTB v21 calls it internally in multiple places; patch it once here so the
 # library's assumption holds regardless of Python version.
@@ -134,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-08-31.2"
+BOT_VERSION = "2026-09-01.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1172,6 +1173,13 @@ LIFE_ARC_FILE = BASE_DIR / "life.txt"  # seeded by hand, then evolved (v2026-08-
 LIFE_ROTATE = _env_bool("LIFE_ROTATE", True)
 LIFE_ROTATE_DAYS = _env_int("LIFE_ROTATE_DAYS", "7")
 LIFE_STAMP_FILE = BASE_DIR / ".life_rotated"
+# Grounding (2026-09-01): the offline-life generators (arc rotation + daily events) read the
+# owner chat's relationship memory so her off-screen life stays consistent with threads the
+# relationship has actually resolved, instead of drifting into a self-consistent parallel life
+# that contradicts what she and the owner discussed. READ-only — the [own-day] write firewall
+# (bot-code-invariants #10) is untouched; grounding is never written back into memory. Kill
+# switch LIFE_GROUNDING=0 restores the pre-grounding (isolated) behavior without a redeploy.
+LIFE_GROUNDING = _env_bool("LIFE_GROUNDING", True)
 # Schedule-driven unavailability (ROADMAP 3.6): when the current time falls inside an
 # explicit HH:MM-HH:MM range in today's schedule section, she answers in stolen moments —
 # shorter register, slower typing, license to leave. Kill switch: SCHED_BUSY=0.
@@ -1934,6 +1942,55 @@ def _read_life_events() -> list[str]:
             if ln.strip() and not ln.strip().startswith("#")]
 
 
+def _norm_event(s: str) -> str:
+    """Normalize an event line for duplicate comparison: drop a leading [date] stamp,
+    lowercase, strip punctuation/italics, collapse whitespace."""
+    s = re.sub(r"^\[[^\]]*\]\s*", "", s or "")
+    s = re.sub(r"[^\w\s]", " ", s.lower())
+    return " ".join(s.split())
+
+
+def _is_near_dup_event(new_line: str, existing: list[str], threshold: float = 0.75) -> bool:
+    """True if new_line repeats a recent event verbatim or near-verbatim. The offline-life
+    generator sometimes re-emits the same beat for days (Emily's Warren event, 5x, 2026-08);
+    the anti-repeat prompt instruction alone did not stop it, so this is the code-side guard.
+    Uses an ORDER-SENSITIVE similarity (difflib) so a role-reversal that reuses the same words
+    ('Mika praised Warren's photo' vs 'Warren praised Mika's photo') is NOT treated as a
+    duplicate — a word-set overlap metric would wrongly drop it."""
+    n = _norm_event(new_line)
+    if not n:
+        return False
+    for e in existing:
+        en = _norm_event(e)
+        if not en:
+            continue
+        if en == n:
+            return True
+        # Fuzzy match only for sentence-length events. Short/templated strings share
+        # prefixes ('event 12' vs 'event 11' -> 0.88) and would false-positive; real
+        # events are full sentences (the generator caps them at ~25 words).
+        if min(len(n.split()), len(en.split())) >= 6 and \
+                SequenceMatcher(None, n, en).ratio() >= threshold:
+            return True
+    return False
+
+
+def _own_day_note(day_ctx: str, label: str) -> str:
+    """One clean single-line own-day continuity note from day.txt. day.txt holds 2-3
+    multi-line events; the old code stored day_ctx[:300] verbatim, which truncated mid-word
+    and dumped several events into one 'fact' (seen in Emily's recent_facts, 2026-09-01).
+    Keep the first event only, whole words. Empty day -> '' (caller skips)."""
+    first = ""
+    for line in (day_ctx or "").splitlines():
+        cleaned = line.strip().strip("*").strip()
+        if cleaned:                       # skip blank / decorative (e.g. '***') lines
+            first = cleaned
+            break
+    if len(first) > 200:
+        first = first[:200].rsplit(" ", 1)[0].rstrip() + "…"
+    return f"[own-day {label}] {first}" if first else ""
+
+
 def _append_life_event(line: str):
     line = line.strip().strip('"').strip()
     if not line:
@@ -1941,6 +1998,9 @@ def _append_life_event(line: str):
     existing = []
     if LIFE_EVENTS_FILE.exists():
         existing = [l for l in LIFE_EVENTS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if _is_near_dup_event(line, existing):
+        print(f"[life] skipped near-duplicate event: {line[:60]}…")
+        return
     stamp = (datetime.now(TZ) if TZ else datetime.now()).strftime("%b %d")
     existing.append(f"[{stamp}] {line}")
     if len(existing) > LIFE_EVENTS_MAX:
@@ -1968,6 +2028,36 @@ def _append_life_line(path: Path, cache: dict, line: str) -> bool:
     return True
 
 
+def _relationship_grounding() -> str:
+    """Read-only view of how she actually remembers her closest relationship — the owner
+    chat's long-term summary + durable facts + recent summary — so the offline-life
+    generators stay consistent with threads the relationship has resolved instead of
+    drifting into a parallel version (Emily's arc froze 'Warren, was it a test?' after the
+    conversation had already put it to rest, 2026-09-01).
+
+    Consistency context ONLY, never material to restate as her own events: this READS
+    memory, it never writes to it, so the [own-day] provenance firewall (bot-code-invariants
+    #10) is untouched. Content-neutral — it does not filter by topic; the domain of an
+    invented *event* is scoped in the generator prompt, not here. Returns '' when grounding
+    is off, there is no owner, or memory is empty (degrading to the pre-grounding behavior)."""
+    if not LIFE_GROUNDING:
+        return ""
+    owner = get_owner()
+    if owner is None:
+        return ""
+    parts = []
+    summ = (summaries.get(owner) or "").strip()
+    if summ:
+        parts.append(summ[:600])
+    real_facts, _ = _split_own_day_facts(facts.get(owner))
+    if real_facts:
+        parts.append("Known: " + "; ".join(real_facts[:8]))
+    rsumm = (recent_summaries.get(owner) or "").strip()
+    if rsumm:
+        parts.append("Lately: " + rsumm[:400])
+    return "\n".join(parts)
+
+
 def _generate_life_event() -> str:
     """Invent ONE concrete thing that happened in her own life, grounded in her routine/people."""
     parts = []
@@ -1983,6 +2073,11 @@ def _generate_life_event() -> str:
     arc = _read_life_arc()
     if arc:
         parts.append(f"Her life right now:\n{arc[:400]}")
+    grounding = _relationship_grounding()
+    if grounding:
+        parts.append("How she remembers things with the person she is closest to — use this "
+                     "only to stay consistent (do NOT restate any of it as a new event):\n"
+                     + grounding)
     recent = _read_life_events()
     if recent:
         parts.append("Recent events (do NOT repeat these or rehash the same beat):\n"
@@ -1995,8 +2090,9 @@ def _generate_life_event() -> str:
         f"world: something a teammate or coworker did, a bit of news, a small win or mishap, a "
         f"moment at practice or on a shift. Past tense, third person, ONE specific sentence under "
         f"25 words. It must be an EVENT in her own day — NOT a feeling, NOT reflection, NOT about "
-        f"her phone or who she's texting. Make it fit her routine and the real people named. Vary "
-        f"it from the recent events. Reply with just the sentence, or the word none."
+        f"her phone or who she's texting. It must not contradict what she already knows or has "
+        f"resolved with the people in her life. Make it fit her routine and the real people named. "
+        f"Vary it from the recent events. Reply with just the sentence, or the word none."
     )
     try:
         raw = call_nanogpt(
@@ -14118,18 +14214,28 @@ async def _maybe_rotate_life_arc():
         recent = sorted(BASE_DIR.glob("day_*.txt"))[-LIFE_ROTATE_DAYS:]
         happened = "\n".join(p.read_text(encoding="utf-8").strip()[:300] for p in recent)
         projects = _read_projects()
+        grounding = _relationship_grounding()
         prompt = (
             f"Here is {NAME}'s current life arc — the slow-moving stuff going on with her "
             f"right now:\n\n{current}\n\n"
             + (f"What actually happened over the last stretch:\n{happened}\n\n" if happened else "")
             + (f"Her standing projects:\n{projects}\n\n" if projects else "")
+            + (f"How she actually remembers things with the person she is closest to — use this "
+               f"to keep the arc consistent with reality; correct or drop any thread it "
+               f"contradicts. Do NOT copy it in as new arc material:\n{grounding}\n\n"
+               if grounding else "")
             + "Write the UPDATED arc, as it stands now. Rules:\n"
               "- Same shape as the current one: one short paragraph, present tense, "
               "about 40-60 words. No headings, no list.\n"
               "- This is an EVOLUTION, not a replacement. Threads that have not resolved "
               "carry over, in the same words where nothing has changed about them.\n"
-              "- Let exactly ONE thing move: something resolves, worsens, or a new thread "
-              "starts. Not all of it. An arc that turns over completely is not an arc.\n"
+              "- BUT if a thread in the current arc has actually been resolved, or is "
+              "contradicted by how she now remembers things above, correct it or drop it — "
+              "do not carry a stale thread forward just because the arc still lists it. "
+              "Fixing a thread reality has moved past does NOT count as the one move below.\n"
+              "- Beyond any such correction, let exactly ONE thing move: something resolves, "
+              "worsens, or a new thread starts. Not all of it. An arc that turns over "
+              "completely is not an arc.\n"
               "- Stay concrete and specific. No 'she has been reflecting on things'. Name "
               "the actual thing.\n"
               "- Keep the small grievance she is taking personally, or replace it with "
@@ -14172,8 +14278,8 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
             log.error("[day-rotate] archive failed: %s", e)
         # Save a compact continuity note — tagged as her OWN day so memory consumers
         # never present it as a fact about the user (see _OWN_DAY_PREFIX).
-        if owner is not None:
-            fact = f"[own-day {yesterday.strftime('%b %d')}] {day_ctx[:300]}"
+        fact = _own_day_note(day_ctx, yesterday.strftime('%b %d'))
+        if owner is not None and fact:
             rfts = recent_facts.setdefault(owner, [])
             rfts.append(fact)
             own = [f for f in rfts if _is_own_day_fact(f)]

@@ -7,6 +7,66 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-01.1 — the offline life reads relationship memory instead of drifting into a parallel one
+
+**Root cause: the offline-life generators were a closed loop, blind to what actually happened
+with the owner.** `_maybe_rotate_life_arc` rebuilt `life.txt` weekly from *previous arc + last 7
+`day_*.txt` + projects only*, and `_generate_life_event` invented daily events from
+schedule/people/projects/arc only — neither ever read the relationship memory
+(`summaries`/`facts`/`recent_summaries`, injected everywhere else by `memory_block`). Because the
+rotation rule also said "carry unresolved threads over in the same words," any thread the arc
+picked up got re-entrenched verbatim every week while the real relationship moved on. Diagnosed
+on Emily 2026-09-01: her `/life` arc still read "Warren's Slack still sits unanswered — four
+drafts — can't decide if it was a test" and "finishing a photo series she's been putting off,"
+while her actual memory recorded the Warren photo as resolved ("it's just a weird thing he did")
+and the activity as watercolor leaf-painting + forum photo IDs. The arc had become an accurate
+summary of a *parallel* life that contradicted the one she shares with the owner. (The `state.json`
+dump also disproved the initial guess that memory was weak — her long-term summary was a rich,
+current 174-word narrative; the arc was the drifting artifact, not memory.)
+
+**Fix — grounding is READ-only; the write firewall is untouched.**
+- New `_relationship_grounding()` returns a compact read of the owner chat's long-term summary +
+  up to 8 durable facts + recent summary (via `get_owner()`), or `''` when there is no owner or no
+  memory. `_generate_life_event` and `_maybe_rotate_life_arc` now include it so the offline life
+  stays consistent with resolved/known threads. The rotation prompt gains a rule: a thread the
+  memory shows resolved or contradicted must be corrected or dropped, and that correction does not
+  count as the "one thing that moves" (so genuine evolution still happens on top).
+- It is **consistency context only** — the prompts forbid restating it as new events, and the
+  daily-event domain stays her own world (work/art/people/cat). Nothing is written back to memory:
+  the `[own-day]` provenance firewall (bot-code-invariants #10/#17) is unchanged. Grounding is
+  content-neutral — it does not filter by topic, so an NSFW companion's real throughline is kept,
+  not sanitized. Zero new LLM calls (larger prompts on the existing weekly-rotation and
+  twice-daily-event calls, both off the reply path — invariant #3 satisfied).
+- Kill switch `LIFE_GROUNDING` (default on; `=0` restores the isolated pre-grounding behavior).
+
+**Known residual risk (owner-accepted 2026-09-01).** `life.txt` and `life_events.txt` are
+injected into every chat, including group and non-owner chats (no owner-gate; predates this
+change). Grounding now feeds the owner's relationship memory — which for an NSFW companion
+includes intimate specifics — into the generators that write those two files, so the guard
+against an owner-private detail surfacing in a group is prompt-only ("consistency context, do
+not restate") plus the solo-domain scoping on events. The `/code-review` pass flagged this
+(finding 3). The owner chose to accept it rather than gate the injection to the owner chat
+(which would have removed her offline-life texture from group chats) or drop facts from
+grounding. Revisit — gate `life.txt`/`life_events.txt` injection to the owner chat — if a
+leak is ever observed; `LIFE_GROUNDING=0` is the immediate off-switch. Two `/code-review`
+findings were fixed rather than accepted: `_is_near_dup_event` now uses order-sensitive
+similarity (a role-reversal is not a duplicate) with a min-length guard, and `_own_day_note`
+skips a decorative first line instead of emitting an empty note.
+
+**Two cleanups in the same subsystem (found in the same diagnosis):**
+- `_append_life_event` now drops a near-duplicate event (`_is_near_dup_event`, normalized word-set
+  Jaccard ≥ 0.7 or exact match). The generator had re-emitted the identical "Warren accidentally
+  replied 'that's great'…" event 5× across Aug 28–31 despite the prompt's anti-repeat instruction;
+  there was no code-side guard.
+- `_own_day_note` replaces the `day_ctx[:300]` verbatim own-day storage in `_rotate_day_context`,
+  which dumped 2-3 multi-line events into one "fact" truncated mid-word. It now keeps a single clean
+  first-event line (whole words).
+
+**Verification:** py_compile clean; pytest via a loose-dep venv (the exact-lock venv is unbuildable
+in the cloud container — proxy index lags `requirements.lock`) — 1402 baseline + new tests for
+`_relationship_grounding`, `_is_near_dup_event`, `_own_day_note`, and grounding presence/absence in
+the event prompt; `run-evals.sh` green. CI on the branch is the exact-lock check of record.
+
 ## v2026-08-31.2 — /update retired: its in-place swap bypasses the immutable-release deploy
 
 **Root cause: going public silently re-armed a hazardous deploy path.** `/update` (and the
