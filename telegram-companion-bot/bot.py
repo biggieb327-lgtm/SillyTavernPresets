@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-01.1"
+BOT_VERSION = "2026-09-01.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -9997,10 +9997,20 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = nb.get("limit", 3)
     sent = nb.get("sent_today", 0)
     limit_str = "unlimited" if limit == 0 else f"{sent}/{limit}"
-    await update.message.reply_text(
-        f"💓 Nudge budget today: {limit_str}\n"
-        f"Use /nudges <N> to change the daily limit (0 = unlimited)."
-    )
+    lines = [f"\U0001f493 Nudge budget today: {limit_str}"]
+    cutoff = time.time() - 48 * 3600
+    drafts = unsent_drafts.get(chat_id) or []
+    fresh = [d for d in drafts if d.get("ts", 0) > cutoff]
+    if fresh:
+        last = fresh[-1]
+        ago = time.time() - last["ts"]
+        if ago < 3600:
+            ago_str = f"{int(ago / 60)}m ago"
+        else:
+            ago_str = f"{ago / 3600:.1f}h ago"
+        lines.append(f"Last skipped nudge ({ago_str}): {last['reason']}")
+    lines.append("Use /nudges <N> to change the daily limit (0 = unlimited).")
+    await update.message.reply_text("\n".join(lines))
 
 
 # --- Inline keyboard menu ---
@@ -13411,6 +13421,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         print("[heartbeat] Nudge budget exhausted; saved draft.")
         return
     s = mood_now(owner)
+    # Owner decision 2026-09-01: intended — low mood = withdrawn = fewer nudges.
     skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
     if skip_chance and random.random() < skip_chance:
         _save_draft(owner, "wasn't quite feeling up to reaching out")

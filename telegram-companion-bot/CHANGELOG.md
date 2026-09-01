@@ -7,6 +7,18 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-01.2 — `/nudges` shows the last skip reason (ROADMAP 5.11-B)
+
+**Root cause: the heartbeat's restraint was invisible.** `heartbeat()` already saved a
+reason to `unsent_drafts` whenever it skipped a nudge (quiet hours, mood, budget), but
+`/nudges` only showed `sent_today/limit`. The only way to see a skip reason was if the 40%
+weave-in roll surfaced it in a later proactive message.
+
+**Fix:** `/nudges` now shows the most recent `unsent_drafts` entry within the existing 48h
+freshness window (matching `_pop_draft`'s cutoff), with a relative timestamp. Also recorded
+the owner decision that `skip_chance` rising with low mood (withdrawn = fewer nudges) is
+the intended emotional read, as a comment near `heartbeat()`.
+
 ## v2026-09-01.1 — the offline life reads relationship memory instead of drifting into a parallel one
 
 **Root cause: the offline-life generators were a closed loop, blind to what actually happened

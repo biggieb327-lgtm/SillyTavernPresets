@@ -8895,6 +8895,30 @@ class TestEveryCommandHandlerActuallyRuns:
         asyncio.run(bot.energy_cmd(u, _cmd_ctx()))
         assert m.sent
 
+    def test_nudges_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.nudges_cmd(u, _cmd_ctx()))
+        assert m.sent and "Nudge budget" in m.sent[0]
+
+    def test_nudges_cmd_shows_last_skip_reason(self):
+        cid = 9001
+        old = bot.unsent_drafts.get(cid)
+        try:
+            bot.unsent_drafts[cid] = [
+                {"reason": "wasn't quite feeling up to reaching out",
+                 "ts": time.time() - 600}
+            ]
+            u, m = _cmd_update(self.UID, chat_id=cid)
+            asyncio.run(bot.nudges_cmd(u, _cmd_ctx()))
+            assert m.sent
+            assert "Last skipped nudge" in m.sent[0]
+            assert "wasn't quite feeling up to reaching out" in m.sent[0]
+        finally:
+            if old is None:
+                bot.unsent_drafts.pop(cid, None)
+            else:
+                bot.unsent_drafts[cid] = old
+
     def test_schedule_cmd_shows_the_schedule(self, tmp_path, monkeypatch):
         monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")
         u, m = _cmd_update(self.UID)

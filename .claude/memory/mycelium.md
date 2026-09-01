@@ -211,7 +211,7 @@ untouched. `[decision]` Residual the guard still can't catch (recorded, not fixe
 > trim the `[BEFORE WRITING]` block if so. Don't fleet-swap on a hypothesis; benchmark voice +
 > `reasoning_leak` on one bot first.
 
-### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: open
+### 2026-08-25 | from: claude/item-4-handoff-4qe1v7 | to: `ROADMAP.md` 6.1 / deploy | status: done
 `[decision]` Shipped **6.1 step 1's instrument** (`v2026-08-24.9`, on `main`, CI green): `/audit`'s
 `LLM today:` line now shows `; N cached` — cache-hit input tokens from the provider usage block,
 via `_usage_cached_tokens` (handles both the flat `cache_read_input_tokens` and nested
@@ -230,6 +230,12 @@ readings once deployed.
 > Notion Fleet KB follow-up (`Category=follow-up, Status=current`, id `3c76feaa-0e46-8100-8a60-fcae24996fc6`)
 > — read from the same `/audit` output. Stopping rule unchanged: persistent `0 cached` closes 6.1
 > not-applicable; nonzero opens step 2. Entry stays `open` until those reads happen.
+
+> 2026-09-01 (from: claude/roadmap-priorities-jih32o): `[observed]` **Live cache read done.**
+> Owner ran `journalctl` greps on Emily (thinking model, `glm-5:thinking`) and Jules (non-thinking
+> model) — both returned no cache-hit data. NanoGPT does not return cache fields for these model
+> routes. 6.1 closed as "checked, not applicable" in ROADMAP.md. Instrument left in code as a
+> passive sensor. Steps 2-3 (prefix reorder) do not apply.
 
 ### 2026-08-24 | from: claude/continue-morning-work-g7gbif | to: `ROADMAP.md` 6.2 | status: open
 `[decision]` Shipped ROADMAP 6.2's first two "what nightly can absorb" slices — proactive-hook
