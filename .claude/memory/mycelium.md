@@ -144,6 +144,29 @@ not yet decided):** graft a small `skill-impact.md` into `.claude/memory/`, writ
 seen/graduation discipline. **Stopping rule:** drop this if the owner declines the graft or
 if a session finds the scattered signal (constraints `seen` + oplog + session-audit) already
 sufficient in practice. Decision + rationale: `decisions.md` 2026-08-31 entry (WikiSkill scope).
+### 2026-09-01 | from: claude/roadmap-priorities-uu9fyp | to: bot.py life/memory work | status: open
+`[decision]` Owner signed off a plan (NOT yet implemented):
+`telegram-companion-bot/PLAN-lifearc-memory-grounding.md`, decision logged in `decisions.md`
+(2026-09-01). Start there, not from scratch. **Diagnosis (VPS-verified):** Emily's `/life` arc read as
+foreign/stale because the offline-life loop (`_generate_life_event`, `_maybe_rotate_life_arc`) reads
+only its own `day_*.txt` + prev arc + projects — never relationship memory — and its rotation rule
+carries "unresolved threads" verbatim. So it froze threads (Warren "was it a test", "photo series")
+that the real relationship already resolved; the arc *contradicts* memory. `[observed]` The
+`state.json` dump disproved the premise that memory is weak: private chat `8121667008` had a rich
+174-word long-term summary + 15 accurate facts (promoted 2026-08-31). **Memory is the strong
+subsystem; the arc is the drifting one.** Fix = life READS memory (`get_owner()` →
+`summaries`/`facts`/`recent_summaries`), write firewall (`[own-day]`) untouched, new default-ON
+`LIFE_GROUNDING` kill switch; plus own-day-trim (`_rotate_day_context` stores `day_ctx[:300]` verbatim,
+truncated mid-word) and near-dup dedup in `_append_life_event` (life_events.txt had the same Warren
+event 5×). `[hypothesis]` **Almost certainly fleet-wide** — every instance runs the same isolated
+loop; spot-check 1-2 others' `life.txt` vs. their long-term memory after deploy (`fix-the-class`).
+**Two owner-only close-outs, pending:** (1) immediate remediation not yet applied — `/life <corrected
+arc>` on Emily + truncate the repeating `life_events.txt`; (2) live done-when after deploy — one real
+day on ONE bot. **Stopping rule (written before the data):** the fix is done when, on that bot, the
+arc no longer contradicts a resolved thread AND no shared fact (intimate or not) surfaces as a
+fabricated solo event AND the arc still reflects her real emotional throughline (not sanitized) AND
+`life_events.txt` stops repeating. If intimate content leaks into solo events, tighten the domain
+guard, don't add an NSFW filter (see the plan's §4.1 + the decision's rejected alternatives).
 
 ### 2026-08-26 | from: claude/emily-brian-dialogue-ysmpo8 | to: reasoning-leak / preset work | status: open
 `[decision]` The STEPPED THINKING reasoning-leak (Emily/Priya) is fixed on two layers, both

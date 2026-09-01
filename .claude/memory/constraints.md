@@ -243,7 +243,15 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 6** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31)
+**seen: 7** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01)
+- 2026-09-01 — Same claim shape as the 2026-08-25 occurrence below, recurred. Answering "what's
+  next on the roadmap", I wrote "5.9 `/reviewlife`… no one has watched a real day produce a *good*
+  suggestion" as settled fact about the shipped code. `theory-guard.sh` blocked the turn. It was not
+  my observation at all — it is the `[hypothesis]` tag on a mycelium handoff entry
+  (claude/item-4-handoff-4qe1v7); I relayed another session's prediction as an established fact.
+  Corrected by attributing it to that entry and restating as unverified. The mechanism caught it
+  (guard working); the tell is C5's own line — a claim about what deployed code *produces*, held
+  from reading/handoffs, never from watching it run. Within the guard's covered half, no gap.
 - 2026-08-31 — In the context-architecture report, classified three cleanup items
   (`routines.md` move, `constraints.md` split, retiring two historical skills) as "low-risk"
   and offered to execute them — before checking any against the repo's referential-integrity
@@ -377,8 +385,19 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 10** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27 ×2) — *promoted by check 6 of the
+**seen: 11** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27 ×2, 2026-09-01) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Eleventh (2026-09-01), self-caught before it shipped.** Diagnosing why Emily's `/life` arc read as
+foreign, I grepped `memories.txt`, found only two faint art/photo traces, and told the owner "the
+real relationship memory is sparse." A grep of `memories.txt` measures only the keyword/embedding RAG
+store — NOT the relationship memory, which lives in the tiered `summaries`/`facts`/`recent_summaries`
+state (injected by `memory_block`). Dumping `state.json` showed a rich 174-word long-term summary + 15
+accurate facts: memory was the *strongest* subsystem, not the weakest — the opposite of what I'd
+stated. Caught by dumping the real store one turn later and explicitly retracting. Same pattern as the
+tenth: concluded a property of "memory" from a reading of *one* of several stores. Ask which store /
+slot / layer a reading came from before generalizing it to the whole. No mechanism sees an ad-hoc
+grep's scope; this stays C8's prose half.
 
 **Tenth (2026-08-27, same day as the ninth, and it shipped to the changelog + oplog + mycelium
 before the owner caught it.** Diagnosing the third Emily leak, I read `/errors` lines
@@ -1207,6 +1226,17 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-01 — Drafting the life-arc→memory grounding plan, wrote a guardrail "exclude NSFW
+  specifics from the grounding block" and put it in the signed-off-track plan. The owner asked *why*,
+  and answering forced the check I'd skipped: Emily is an NSFW companion whose intimate dynamic is the
+  **core emotional throughline** of her long-term summary — filtering it out would have flattened her
+  and re-created the exact disconnect the plan fixes. The real axis was never NSFW; it is provenance
+  (don't re-narrate grounding as invented events) + domain (solo events stay in her own world), both
+  content-neutral. Rewrote the guard. → **a guardrail written into a plan is a claim to check against
+  the actual subject before it ships, not a safe default; "filter out the sensitive stuff" is
+  especially suspect on a character whose sensitive material is the point.** Self/owner-corrected at
+  the plan stage, no code shipped. Adjacent to C8 (didn't ask what the filter would actually remove)
+  but the cause is distinct — a reflexive-caution guard, not a misread reading — so logged here.
 - 2026-08-31 — Building the verify venv, wrote `pip install … | tail -5` then `echo "EXIT=$?"`
   and read the pipeline's status as pip's — it is `tail`'s (exit 0). A hard install failure
   (`garminconnect==0.3.11` absent from the proxy index, `--require-hashes` aborting the whole
