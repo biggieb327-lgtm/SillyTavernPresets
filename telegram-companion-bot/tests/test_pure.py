@@ -8274,6 +8274,7 @@ class TestEveryBooleanFlagDefault:
         # that already failed to embed, so off means those stay permanently invisible to
         # semantic recall.
         "EMBED_BACKFILL": True,
+        "ENGAGEMENT_TREND": True,
         # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
@@ -12745,3 +12746,73 @@ class TestAmbientNewsDigest:
         monkeypatch.setattr(bot, "_fetch_morning_news", lambda: ([], True))  # all feeds failed
         asyncio.run(bot._refresh_ambient_news())
         assert bot._ambient_news_cache["text"] == "yesterday"  # not clobbered with empty
+
+
+class TestEngagementTrend:
+    CID = 7001
+
+    def setup_method(self):
+        self._old_trend = bot.engagement_trend.get(self.CID)
+        self._old_today = bot._engagement_today.get(self.CID)
+        bot.engagement_trend.pop(self.CID, None)
+        bot._engagement_today.pop(self.CID, None)
+
+    def teardown_method(self):
+        bot.engagement_trend.pop(self.CID, None)
+        bot._engagement_today.pop(self.CID, None)
+        if self._old_trend is not None:
+            bot.engagement_trend[self.CID] = self._old_trend
+        if self._old_today is not None:
+            bot._engagement_today[self.CID] = self._old_today
+
+    def test_tick_engagement_counts_user_and_bot(self):
+        bot._tick_engagement(self.CID, "user", 100)
+        bot._tick_engagement(self.CID, "user", 50)
+        bot._tick_engagement(self.CID, "assistant", 200)
+        day = bot._engagement_today[self.CID]
+        assert day["um"] == 2
+        assert day["uc"] == 150
+        assert day["bm"] == 1
+
+    def test_snapshot_engagement_saves_and_clears(self):
+        bot._tick_engagement(self.CID, "user", 80)
+        bot._tick_engagement(self.CID, "assistant", 120)
+        bot._snapshot_engagement(self.CID)
+        assert self.CID not in bot._engagement_today
+        hist = bot.engagement_trend[self.CID]
+        assert len(hist) == 1
+        assert hist[0]["um"] == 1
+        assert hist[0]["uc"] == 80
+        assert hist[0]["bm"] == 1
+
+    def test_snapshot_skips_empty_day(self):
+        bot._snapshot_engagement(self.CID)
+        assert self.CID not in bot.engagement_trend
+
+    def test_trend_line_needs_7_days(self):
+        assert bot._engagement_trend_line(self.CID) == ""
+        bot.engagement_trend[self.CID] = [
+            {"d": f"2026-08-{20 + i:02d}", "um": 5, "uc": 500, "bm": 3}
+            for i in range(6)
+        ]
+        assert bot._engagement_trend_line(self.CID) == ""
+
+    def test_trend_line_with_enough_data(self):
+        bot.engagement_trend[self.CID] = [
+            {"d": f"2026-08-{i + 1:02d}", "um": 5, "uc": 500, "bm": 3}
+            for i in range(14)
+        ]
+        line = bot._engagement_trend_line(self.CID)
+        assert line.startswith("Engagement:")
+        assert "msg/d" in line
+        assert "ch/msg" in line
+        assert "u:b" in line
+
+    def test_rolling_window_trims_to_28_days(self):
+        bot.engagement_trend[self.CID] = [
+            {"d": f"2026-07-{i + 1:02d}", "um": 1, "uc": 10, "bm": 1}
+            for i in range(30)
+        ]
+        bot._tick_engagement(self.CID, "user", 50)
+        bot._snapshot_engagement(self.CID)
+        assert len(bot.engagement_trend[self.CID]) == 28

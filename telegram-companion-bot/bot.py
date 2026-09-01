@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-01.2"
+BOT_VERSION = "2026-09-01.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -698,6 +698,7 @@ MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reas
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
 # Assembled-prompt size tracking. Set 0 to disable the bookkeeping entirely.
 PROMPT_STATS = _env_bool("PROMPT_STATS", True)
+ENGAGEMENT_TREND = _env_bool("ENGAGEMENT_TREND", True)
 # In-memory only (like _recent_questions): a restart resets it. Persisting would add a
 # state-serialization path for numbers whose whole purpose is answering "what is this
 # instance doing right now".
@@ -3934,6 +3935,8 @@ current_vibe = {}   # chat_id -> {"name": str, "expires_at": float|None}
 vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
+engagement_trend = {}  # chat_id -> [{"d": "YYYY-MM-DD", "um": int, "uc": int, "bm": int}] (28-day rolling)
+_engagement_today = {}  # chat_id -> {"um": int, "uc": int, "bm": int}
 predrafted_hooks = {}  # chat_id -> [str]; nightly-prepared proactive hooks, consumed at send time (ROADMAP 6.2)
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
 quiet_until = {}    # chat_id -> float (unix ts); suppress proactives until then
@@ -4035,6 +4038,10 @@ def load_state():
         user_energy[int(cid)] = ue
     for cid, ud in data.get("unsent_drafts", {}).items():
         unsent_drafts[int(cid)] = ud
+    for cid, et in data.get("engagement_trend", {}).items():
+        engagement_trend[int(cid)] = et[-_ENGAGEMENT_DAYS:]
+    for cid, ed in data.get("_engagement_today", {}).items():
+        _engagement_today[int(cid)] = ed
     for cid, ph in data.get("predrafted_hooks", {}).items():
         predrafted_hooks[int(cid)] = ph
     for cid, nb in data.get("nudge_budget", {}).items():
@@ -4132,6 +4139,8 @@ def _serialize_state() -> str:
         "vent_mode": {str(k): v for k, v in vent_mode.items()},
         "user_energy": {str(k): v for k, v in user_energy.items()},
         "unsent_drafts": {str(k): v for k, v in unsent_drafts.items()},
+        "engagement_trend": {str(k): v for k, v in engagement_trend.items()},
+        "_engagement_today": {str(k): v for k, v in _engagement_today.items()},
         "predrafted_hooks": {str(k): v for k, v in predrafted_hooks.items()},
         "nudge_budget": {str(k): v for k, v in nudge_budget.items()},
         "quiet_until": {str(k): v for k, v in quiet_until.items()},
@@ -8540,7 +8549,55 @@ def remember(chat_id: int, role: str, content: str):
     hard_cap = MAX_HISTORY * 4
     if len(hist) > hard_cap:
         del hist[:-hard_cap]
+    if ENGAGEMENT_TREND:
+        _tick_engagement(chat_id, role, len(content or ""))
     save_state()
+
+
+def _tick_engagement(chat_id: int, role: str, chars: int):
+    day = _engagement_today.setdefault(chat_id, {"um": 0, "uc": 0, "bm": 0})
+    if role == "user":
+        day["um"] += 1
+        day["uc"] += chars
+    elif role == "assistant":
+        day["bm"] += 1
+
+
+_ENGAGEMENT_DAYS = 28
+
+
+def _snapshot_engagement(chat_id: int):
+    day = _engagement_today.pop(chat_id, None)
+    if not day or (day["um"] == 0 and day["bm"] == 0):
+        return
+    today = _today_str()
+    hist = engagement_trend.setdefault(chat_id, [])
+    hist.append({"d": today, "um": day["um"], "uc": day["uc"], "bm": day["bm"]})
+    if len(hist) > _ENGAGEMENT_DAYS:
+        del hist[:-_ENGAGEMENT_DAYS]
+
+
+def _engagement_trend_line(chat_id: int) -> str:
+    hist = engagement_trend.get(chat_id, [])
+    if len(hist) < 7:
+        return ""
+    weeks = []
+    for i in range(0, len(hist), 7):
+        chunk = hist[i:i + 7]
+        u = sum(d["um"] for d in chunk)
+        c = sum(d["uc"] for d in chunk)
+        b = sum(d["bm"] for d in chunk)
+        days = len(chunk)
+        avg_msgs = u / days if days else 0
+        avg_len = c / u if u else 0
+        ratio = u / b if b else 0
+        weeks.append((avg_msgs, avg_len, ratio))
+    if not weeks:
+        return ""
+    parts = []
+    for j, (msgs, length, ratio) in enumerate(weeks[-4:]):
+        parts.append(f"w{j + 1}: {msgs:.1f}msg/d {length:.0f}ch/msg {ratio:.1f}u:b")
+    return "Engagement: " + " | ".join(parts)
 
 
 def _short_term_overflow(chat_id: int) -> int:
@@ -13925,6 +13982,9 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
         log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
     _overnight_mood_reset(owner)
+    if ENGAGEMENT_TREND:
+        _snapshot_engagement(owner)
+        save_state()
     try:
         await _predraft_proactive_hooks(owner)
     except Exception as e:
@@ -16738,6 +16798,11 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(llm_line)
     if d.get("token_calibration"):
         lines.append("Token counts: " + d["token_calibration"])
+    owner = get_owner()
+    if ENGAGEMENT_TREND and owner is not None:
+        eline = _engagement_trend_line(owner)
+        if eline:
+            lines.append(eline)
     cw = d.get("config_warnings", [])
     if cw:
         lines.append(f"Config warnings: {len(cw)}")
