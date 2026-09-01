@@ -8275,6 +8275,7 @@ class TestEveryBooleanFlagDefault:
         # semantic recall.
         "EMBED_BACKFILL": True,
         "ENGAGEMENT_TREND": True,
+        "CHRONOTYPE_NOTICE": True,
         # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
@@ -12816,3 +12817,128 @@ class TestEngagementTrend:
         bot._tick_engagement(self.CID, "user", 50)
         bot._snapshot_engagement(self.CID)
         assert len(bot.engagement_trend[self.CID]) == 28
+
+
+class TestChronotypeNote:
+    def setup_method(self):
+        from zoneinfo import ZoneInfo
+        self._orig_chrono = bot.CHRONOTYPE
+        self._orig_name = bot.NAME
+        self._orig_tz = bot.TZ
+        bot.NAME = "TestBot"
+        self.ZI = ZoneInfo
+
+    def teardown_method(self):
+        bot.CHRONOTYPE = self._orig_chrono
+        bot.NAME = self._orig_name
+        bot.TZ = self._orig_tz
+
+    def test_returns_empty_when_unset(self):
+        bot.CHRONOTYPE = ""
+        assert bot._chronotype_note() == ""
+
+    def test_returns_empty_for_unknown_chronotype(self):
+        bot.CHRONOTYPE = "vampire"
+        assert bot._chronotype_note() == ""
+
+    def test_night_owl_late_evening(self):
+        import unittest.mock
+        bot.CHRONOTYPE = "night_owl"
+        bot.TZ = self.ZI("UTC")
+        with unittest.mock.patch("bot.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 1, 23, 0, tzinfo=self.ZI("UTC"))
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = bot._chronotype_note()
+        assert "Body clock" in result
+        assert "night owl" in result
+        assert "hitting her stride" in result
+
+    def test_early_bird_early_morning(self):
+        import unittest.mock
+        bot.CHRONOTYPE = "early_bird"
+        bot.TZ = self.ZI("UTC")
+        with unittest.mock.patch("bot.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 1, 6, 0, tzinfo=self.ZI("UTC"))
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = bot._chronotype_note()
+        assert "Body clock" in result
+        assert "early bird" in result
+        assert "sharpest" in result
+
+    def test_returns_empty_outside_bands(self):
+        import unittest.mock
+        bot.CHRONOTYPE = "night_owl"
+        bot.TZ = self.ZI("UTC")
+        with unittest.mock.patch("bot.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 9, 1, 14, 0, tzinfo=self.ZI("UTC"))
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = bot._chronotype_note()
+        assert result == ""
+
+
+class TestUserClockNote:
+    CID = 99887766
+
+    def setup_method(self):
+        from zoneinfo import ZoneInfo
+        self._orig_notice = bot.CHRONOTYPE_NOTICE
+        self._orig_tz = bot.TZ
+        self._orig_history = bot.conversation_history.get(self.CID)
+        self._orig_names = bot.user_names.get(self.CID)
+        bot.CHRONOTYPE_NOTICE = True
+        bot.TZ = ZoneInfo("UTC")
+        bot.user_names[self.CID] = "Alice"
+        self.ZI = ZoneInfo
+
+    def teardown_method(self):
+        bot.CHRONOTYPE_NOTICE = self._orig_notice
+        bot.TZ = self._orig_tz
+        bot.conversation_history.pop(self.CID, None)
+        bot.user_names.pop(self.CID, None)
+        if self._orig_history is not None:
+            bot.conversation_history[self.CID] = self._orig_history
+        if self._orig_names is not None:
+            bot.user_names[self.CID] = self._orig_names
+
+    def test_returns_empty_when_disabled(self):
+        bot.CHRONOTYPE_NOTICE = False
+        bot.conversation_history[self.CID] = [
+            {"role": "user", "content": "hi", "ts": datetime(2026, 9, 1, 2, 0, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "hi", "ts": datetime(2026, 9, 1, 3, 0, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "hi", "ts": datetime(2026, 9, 1, 4, 0, tzinfo=self.ZI("UTC")).timestamp()},
+        ]
+        assert bot._user_clock_note(self.CID) == ""
+
+    def test_returns_empty_with_no_history(self):
+        bot.conversation_history[self.CID] = []
+        assert bot._user_clock_note(self.CID) == ""
+
+    def test_detects_late_night_messaging(self):
+        bot.conversation_history[self.CID] = [
+            {"role": "user", "content": "a", "ts": datetime(2026, 9, 1, 1, 30, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "b", "ts": datetime(2026, 9, 1, 2, 15, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "c", "ts": datetime(2026, 9, 1, 3, 0, tzinfo=self.ZI("UTC")).timestamp()},
+        ]
+        result = bot._user_clock_note(self.CID)
+        assert "Noticing" in result
+        assert "Alice" in result
+        assert "past midnight" in result
+
+    def test_below_threshold_returns_empty(self):
+        bot.conversation_history[self.CID] = [
+            {"role": "user", "content": "a", "ts": datetime(2026, 9, 1, 1, 30, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "b", "ts": datetime(2026, 9, 1, 10, 0, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "c", "ts": datetime(2026, 9, 1, 14, 0, tzinfo=self.ZI("UTC")).timestamp()},
+        ]
+        assert bot._user_clock_note(self.CID) == ""
+
+    def test_skips_assistant_messages(self):
+        bot.conversation_history[self.CID] = [
+            {"role": "user", "content": "a", "ts": datetime(2026, 9, 1, 2, 0, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "assistant", "content": "x", "ts": datetime(2026, 9, 1, 2, 5, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "b", "ts": datetime(2026, 9, 1, 3, 0, tzinfo=self.ZI("UTC")).timestamp()},
+            {"role": "user", "content": "c", "ts": datetime(2026, 9, 1, 4, 0, tzinfo=self.ZI("UTC")).timestamp()},
+        ]
+        result = bot._user_clock_note(self.CID)
+        assert "Noticing" in result
+        assert "3 of the last 3" in result

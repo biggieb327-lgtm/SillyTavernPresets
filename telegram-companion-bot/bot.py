@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-01.3"
+BOT_VERSION = "2026-09-01.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -797,6 +797,8 @@ STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many befo
 # her schedule, the weather) was either passive or told NOT to be foregrounded. Set 0 to
 # restore the pre-v2026-07-25.1 prompt text exactly.
 PROMPT_BALANCE = _env_bool("PROMPT_BALANCE", True)
+CHRONOTYPE = os.getenv("CHRONOTYPE", "").strip().lower()
+CHRONOTYPE_NOTICE = _env_bool("CHRONOTYPE_NOTICE", True)
 TYPING_DELAY = _env_bool("TYPING_DELAY", True)
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
@@ -6121,6 +6123,58 @@ def _user_style_note(chat_id: int) -> str:
             + "; ".join(traits) + ".")
 
 
+_CHRONOTYPE_BANDS = {
+    "night_owl": {
+        (0, 5): "in her element — this is her real time, alert and unhurried",
+        (5, 8): "barely awake, dragging herself toward coffee",
+        (8, 11): "still warming up — mornings are not her time",
+        (22, 24): "hitting her stride — late evening suits her",
+    },
+    "early_bird": {
+        (5, 8): "at her sharpest — early mornings are when she feels most herself",
+        (8, 11): "in her groove, awake and present",
+        (21, 24): "winding down, slower to respond, ready for sleep",
+        (0, 5): "up unusually late — something kept her awake",
+    },
+}
+
+
+def _chronotype_note() -> str:
+    if not CHRONOTYPE or CHRONOTYPE not in _CHRONOTYPE_BANDS:
+        return ""
+    now = datetime.now(TZ) if TZ else datetime.now()
+    h = now.hour
+    bands = _CHRONOTYPE_BANDS[CHRONOTYPE]
+    for (lo, hi), desc in bands.items():
+        if lo <= h < hi:
+            return f"# Body clock\n{NAME} is a {CHRONOTYPE.replace('_', ' ')} — right now she's {desc}."
+    return ""
+
+
+def _user_clock_note(chat_id: int) -> str:
+    if not CHRONOTYPE_NOTICE:
+        return ""
+    msgs = conversation_history.get(chat_id, [])
+    if not msgs:
+        return ""
+    tz = TZ
+    late_count = 0
+    checked = 0
+    for m in msgs:
+        if m.get("role") != "user" or not m.get("ts"):
+            continue
+        checked += 1
+        dt = datetime.fromtimestamp(m["ts"], tz=tz) if tz else datetime.fromtimestamp(m["ts"])
+        if 0 <= dt.hour < 5:
+            late_count += 1
+    if late_count >= 2 and checked >= 3:
+        uname = user_names.get(chat_id, "they")
+        return (f"# Noticing\n{uname} has been messaging past midnight recently "
+                f"({late_count} of the last {checked} messages). "
+                f"Worth a gentle, natural check-in if it fits — not a lecture.")
+    return ""
+
+
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
                       query_vec: list[float] | None = None, distress: bool = False):
@@ -6471,6 +6525,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         snote = _user_style_note(chat_id)
         if snote:
             messages.append({"role": "system", "content": snote})
+
+    chrono = _chronotype_note()
+    if chrono:
+        messages.append({"role": "system", "content": chrono})
+    uclock = _user_clock_note(chat_id)
+    if uclock:
+        messages.append({"role": "system", "content": uclock})
 
     # Live context (local time + weather) kept near the end so it's salient.
     messages.append({"role": "system", "content": environment_note()})

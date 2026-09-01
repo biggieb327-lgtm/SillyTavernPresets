@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-01.4 — chronotype body-clock and user late-night noticing (ROADMAP 5.5-A)
+
+**Root cause: every instance replied the same way at 3am as at 3pm.** The system prompt
+carried current time via `environment_note()`, but nothing told the model how the
+character experiences that hour — whether she is a night owl hitting her stride or an
+early bird fighting to stay awake. And when the user messaged consistently past midnight,
+nothing noticed.
+
+**Fix:** Two new prompt injections in `assemble_messages`, zero LLM calls:
+- `_chronotype_note()` maps the current hour against `CHRONOTYPE` bands (`night_owl` or
+  `early_bird`) and injects a one-line body-clock descriptor. Disabled when `CHRONOTYPE`
+  is unset (the default — opt-in per instance).
+- `_user_clock_note()` scans recent `conversation_history` timestamps; when 2+ of 3+
+  checked user messages fall between midnight and 5am, it injects a gentle noticing hint.
+  Controlled by `CHRONOTYPE_NOTICE` (default on, kill switch).
+
+Both follow the `_user_style_note` pattern: pure functions returning prompt text, injected
+after the style-mirror block in `assemble_messages`.
+
 ## v2026-09-01.3 — multi-week engagement trend on `/audit` (ROADMAP 5.2-B)
 
 **Root cause: every signal operated per-message or per-day.** Mood, fatigue, distress
