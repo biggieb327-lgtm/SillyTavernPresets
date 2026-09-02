@@ -7,6 +7,46 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-02.5 — proactive triage + vigil mode + bottle capsule (ROADMAP 5.1-B, 5.2-A, 5.7-A)
+
+**Root cause (5.1-B): budget-consuming proactive sends competed blindly.** Heartbeat,
+note follow-ups, health alerts, and any future proactive source all drew from the same
+daily nudge budget with no coordination. A low-priority heartbeat could consume the budget
+slot that a health alert needed minutes later. No mechanism for a higher-priority sender
+to pre-empt a lower one.
+
+**Fix:** Shared proactive triage queue. Budget-consuming senders register intent with a
+priority tier (`_triage_register`), check whether something higher-priority is pending
+(`_triage_should_yield`), and clear after sending (`_triage_clear`). Priority ordering:
+health (40) > vigil (30) > transition_followup (25) > note_followup (20) > bottle (15) >
+heartbeat (10). Coordination-only: each job still does its own sending and post-send
+bookkeeping. Controlled by `PROACTIVE_TRIAGE` kill switch (default on). Integrated into
+heartbeat, note_followup_job, `_run_health_alert_job`, and `rhr_monitor_job`.
+
+**Root cause (5.2-A): no awareness of imminent hard events.** `SAFETY_ENABLED` handles
+acute distress; ordinary proactive check-ins are generic and date-agnostic. Nothing
+distinguished "she knows something hard is coming" from either of those, so the character
+couldn't modulate tone ahead of a surgery, court date, or funeral.
+
+**Fix:** Vigil mode. `_vigil_detect` scans `user_notes.txt` for hard-event keywords
+(surgery, court date, funeral, biopsy, etc.) with due dates within a lookahead window
+(default 3 days). `_vigil_hint` injects a tone modifier into `assemble_messages` when a
+hard event is imminent: quieter, warmer, low-pressure. `vigil_checkin_job` sends a daily
+proactive check-in via the triage queue at vigil priority (30). Requires a `(due ...)` date
+on the note to trigger. Controlled by `VIGIL_MODE` kill switch (default on), window
+tunable via `VIGIL_LOOKAHEAD_DAYS`.
+
+**Root cause (5.7-A): no write-now, deliver-later-blind mechanism.** `/remindme` is
+user-scheduled with a fixed date. `ONTHISDAY`/`EPISODIC_RECALL` resurface things that
+actually happened. Nothing let the user seal a message for the character to deliver back
+at an unpredictable future time.
+
+**Fix:** `/bottle <message>` seals a message in `bottles.json` with a random delivery
+window (default 7-60 days). `bottle_resurfacing_job` runs daily, checks for bottles whose
+window has opened, and delivers via triage queue at bottle priority (15). The character
+frames it as finding an old note she wrote. Controlled by `BOTTLE_CAPSULE` kill switch
+(default on), window tunable via `BOTTLE_MIN_DAYS`/`BOTTLE_MAX_DAYS`.
+
 ## v2026-09-02.4 — user-named transition marking (ROADMAP 5.9-A)
 
 **Root cause: major life transitions had no distinct ritual or recurring awareness.**

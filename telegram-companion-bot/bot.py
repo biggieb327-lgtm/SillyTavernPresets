@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.4"
+BOT_VERSION = "2026-09-02.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1280,6 +1280,14 @@ _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsur
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
+
+PROACTIVE_TRIAGE = _env_bool("PROACTIVE_TRIAGE", True)
+VIGIL_MODE = _env_bool("VIGIL_MODE", True)
+VIGIL_LOOKAHEAD_DAYS = _env_int("VIGIL_LOOKAHEAD_DAYS", "3")
+BOTTLE_CAPSULE = _env_bool("BOTTLE_CAPSULE", True)
+BOTTLE_MIN_DAYS = _env_int("BOTTLE_MIN_DAYS", "7")
+BOTTLE_MAX_DAYS = _env_int("BOTTLE_MAX_DAYS", "60")
+BOTTLES_FILE = BASE_DIR / "bottles.json"
 
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
@@ -4568,6 +4576,44 @@ def _pop_draft(chat_id: int) -> dict:
     return draft
 
 
+# --- Proactive triage queue (5.1-B) ---
+# Priority tiers for budget-consuming proactive sends.
+# Higher number = more important = wins the budget slot.
+TRIAGE_PRIORITY = {
+    "heartbeat": 10,
+    "bottle": 15,
+    "note_followup": 20,
+    "transition_followup": 25,
+    "vigil": 30,
+    "health": 40,
+}
+_proactive_pending: dict = {}  # chat_id -> {source: (priority, ts)}
+
+
+def _triage_register(chat_id: int, source: str,
+                     priority: int | None = None):
+    if not PROACTIVE_TRIAGE:
+        return
+    p = priority if priority is not None else TRIAGE_PRIORITY.get(source, 10)
+    _proactive_pending.setdefault(chat_id, {})[source] = (p, time.time())
+
+
+def _triage_clear(chat_id: int, source: str):
+    pending = _proactive_pending.get(chat_id)
+    if pending:
+        pending.pop(source, None)
+
+
+def _triage_should_yield(chat_id: int, source: str) -> bool:
+    if not PROACTIVE_TRIAGE:
+        return False
+    pending = _proactive_pending.get(chat_id) or {}
+    my_prio = TRIAGE_PRIORITY.get(source, 10)
+    cutoff = time.time() - 24 * 3600
+    return any(p > my_prio for s, (p, ts) in pending.items()
+               if s != source and ts > cutoff)
+
+
 # --- Payments: storage + date math ---
 payments = []  # list of {"name": str, "amount": float, "day": int (day-of-month)}
 
@@ -5140,6 +5186,57 @@ def _transition_hint(notes_text: str, name: str) -> str:
         f"awareness of it. Let it inflect how {name} listens and what {name} "
         f"notices, without making every reply about it. When it comes up "
         f"naturally, be present with it; otherwise, let it sit."
+    )
+
+
+_VIGIL_KEYWORDS = re.compile(
+    r"\b(?:surgery|operation|biopsy|chemo|radiation|court\s+date|hearing|trial|"
+    r"funeral|memorial|diagnosis|scan\s+results|test\s+results|"
+    r"custody|sentencing|deposition|arraignment|colonoscopy|"
+    r"MRI|CT\s+scan|procedure|hospitali[sz]|euthaniz|putting\s+(?:down|to\s+sleep))\b",
+    re.IGNORECASE,
+)
+_VIGIL_DATE_RE = re.compile(
+    r"\(due\s+(\d{4}-\d{2}-\d{2})\)",
+)
+
+
+def _vigil_detect(notes_text: str, lookahead: int) -> list[str]:
+    """Return user_notes lines describing hard events within the lookahead window."""
+    if not VIGIL_MODE or not notes_text:
+        return []
+    today = (datetime.now(TZ) if TZ else datetime.now()).date()
+    horizon = today + timedelta(days=lookahead)
+    hits = []
+    for line in notes_text.splitlines():
+        if not _VIGIL_KEYWORDS.search(line):
+            continue
+        dm = _VIGIL_DATE_RE.search(line)
+        if dm:
+            try:
+                due = datetime.strptime(dm.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if today <= due <= horizon:
+                clean = _VIGIL_DATE_RE.sub("", line).strip()
+                clean = re.sub(r"\((?:every|asked|transition)\s*[^)]*\)", "", clean).strip()
+                if clean:
+                    hits.append(clean)
+    return hits
+
+
+def _vigil_hint(notes_text: str, name: str) -> str:
+    """Tone modifier injected into assemble_messages when a hard event is imminent."""
+    hits = _vigil_detect(notes_text, VIGIL_LOOKAHEAD_DAYS)
+    if not hits:
+        return ""
+    joined = "; ".join(hits)
+    return (
+        f"{name} is aware something hard is coming up for them soon: {joined}. "
+        f"Carry that awareness gently. Keep the tone quieter and warmer than usual "
+        f"— low-pressure, no demands, no forced cheerfulness. If they bring it up, "
+        f"be fully present. If they don't, let them have the space without making "
+        f"it obvious you're tiptoeing."
     )
 
 
@@ -6439,6 +6536,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         _th = _transition_hint(unotes, NAME)
         if _th:
             messages.append({"role": "system", "content": _th})
+        _vh = _vigil_hint(unotes, NAME)
+        if _vh:
+            messages.append({"role": "system", "content": _vh})
 
     if constancy:
         messages.append({"role": "system", "content": (
@@ -9215,6 +9315,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today <note> — append a mid-day note so she knows what's going on",
         "/note <text> — manually add something to what she knows about you",
         "/notes — list your notes numbered; /notes del <n> to remove one; /notes clear to wipe",
+        "/bottle <msg> — seal a message for her to deliver back later at a random time",
         "/recap — brief summary of the last conversation",
         "/quiet <h> — pause proactive messages for X hours (/quiet off to cancel)",
         "",
@@ -11658,6 +11759,50 @@ async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Usage: /notes | /notes del <n> | /notes clear")
 
 
+def _load_bottles() -> list:
+    try:
+        if BOTTLES_FILE.exists():
+            data = json.loads(BOTTLES_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_bottles(bottles: list):
+    BOTTLES_FILE.write_text(json.dumps(bottles, ensure_ascii=True), encoding="utf-8")
+
+
+async def bottle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Seal a message for the character to deliver later at a random time."""
+    if not BOTTLE_CAPSULE:
+        await update.message.reply_text("Bottle capsule is turned off.")
+        return
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        bottles = _load_bottles()
+        pending = [b for b in bottles if not b.get("delivered")]
+        await update.message.reply_text(
+            f"You have {len(pending)} sealed bottle(s) waiting.\n"
+            f"Use /bottle <message> to seal a new one."
+        )
+        return
+    now = time.time()
+    delay_days = random.randint(BOTTLE_MIN_DAYS, max(BOTTLE_MIN_DAYS, BOTTLE_MAX_DAYS))
+    deliver_after = now + delay_days * 86400
+    bottles = _load_bottles()
+    bottles.append({
+        "text": text,
+        "sealed": now,
+        "deliver_after": deliver_after,
+        "delivered": False,
+    })
+    _save_bottles(bottles)
+    await update.message.reply_text(
+        f"Sealed. It'll resurface sometime in the next {BOTTLE_MIN_DAYS}-{BOTTLE_MAX_DAYS} days."
+    )
+
+
 async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if owner is None or _today().weekday() != BACKUP_WEEKDAY:
@@ -13770,6 +13915,11 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         _save_draft(owner, "had something to say but hit the daily nudge limit")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
         return
+    _triage_register(owner, "heartbeat")
+    if _triage_should_yield(owner, "heartbeat"):
+        _save_draft(owner, "deferred to a higher-priority proactive send")
+        print("[heartbeat] Yielded to higher-priority queued candidate.")
+        return
     s = mood_now(owner)
     # Owner decision 2026-09-01: intended — low mood = withdrawn = fewer nudges.
     skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
@@ -13780,6 +13930,7 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_proactive(context, owner)
         _consume_nudge(owner)
+        _triage_clear(owner, "heartbeat")
         print("[heartbeat] Proactive message sent.")
     except Exception as e:
         log.error("[heartbeat] Error: %s", e)
@@ -13835,10 +13986,15 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     if not _check_nudge_budget(owner):
         return  # budget spent; the (due) marker survives, so we retry tomorrow
     i, note, d, rule = hit
+    is_transition = bool(_TRANSITION_TAG_RE.search(note))
+    triage_src = "transition_followup" if is_transition else "note_followup"
+    _triage_register(owner, triage_src)
+    if _triage_should_yield(owner, triage_src):
+        print(f"[note-followup] Deferred to higher-priority proactive send.")
+        return
     days_ago = (today - d).days
     when = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
     uname = user_names.get(owner, "you")
-    is_transition = bool(_TRANSITION_TAG_RE.search(note))
     note_clean = _TRANSITION_TAG_RE.sub("", note).strip() if is_transition else note
     if is_transition:
         trigger = (
@@ -13859,6 +14015,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
+        _triage_clear(owner, triage_src)
         nxt = _next_recurrence(rule, today) if rule else None
         if nxt:
             # Next occurrence is computed from TODAY, not from the stored due date —
@@ -13873,6 +14030,93 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
               + (f" (next {nxt.isoformat()})" if nxt else ""))
     except Exception as e:
         log.warning("[note-followup] failed: %s", e)
+        _count_error("heartbeat")
+
+
+async def vigil_checkin_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily: if a hard event is imminent, send a low-pressure check-in via triage."""
+    if not VIGIL_MODE:
+        return
+    owner = get_owner()
+    if owner is None or not USER_NOTES_FILE.exists():
+        return
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if (_is_quiet(owner) or _is_away(owner) or in_quiet_hours()
+            or _in_quiet_window(now_dt, quiet_windows.get(owner, []))):
+        return
+    if not _check_nudge_budget(owner):
+        return
+    notes = _read_user_notes()
+    hits = _vigil_detect(notes, VIGIL_LOOKAHEAD_DAYS)
+    if not hits:
+        return
+    _triage_register(owner, "vigil")
+    if _triage_should_yield(owner, "vigil"):
+        print("[vigil] Deferred to higher-priority proactive send.")
+        return
+    uname = user_names.get(owner, "you")
+    joined = "; ".join(hits)
+    trigger = (
+        f"[SYSTEM: {uname} has something hard coming up soon: {joined}. "
+        f"Reach out gently — low-pressure, no demands, no forced optimism. "
+        f"Let them know you're thinking of them without making it heavy. "
+        f"Brief, warm, fully in character. 1-2 sentences. "
+        f"Don't mention this message is automated.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        _triage_clear(owner, "vigil")
+        print(f"[vigil] check-in sent for: {joined}")
+    except Exception as e:
+        log.warning("[vigil] check-in failed: %s", e)
+        _count_error("heartbeat")
+
+
+async def bottle_resurfacing_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily: deliver any bottles whose random window has opened."""
+    if not BOTTLE_CAPSULE:
+        return
+    owner = get_owner()
+    if owner is None:
+        return
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    if (_is_quiet(owner) or _is_away(owner) or in_quiet_hours()
+            or _in_quiet_window(now_dt, quiet_windows.get(owner, []))):
+        return
+    if not _check_nudge_budget(owner):
+        return
+    bottles = _load_bottles()
+    now = time.time()
+    ready = [(i, b) for i, b in enumerate(bottles)
+             if not b.get("delivered") and now >= b.get("deliver_after", float("inf"))]
+    if not ready:
+        return
+    idx, bottle = ready[0]
+    _triage_register(owner, "bottle")
+    if _triage_should_yield(owner, "bottle"):
+        print("[bottle] Deferred to higher-priority proactive send.")
+        return
+    sealed_dt = datetime.fromtimestamp(bottle["sealed"], tz=TZ) if TZ else datetime.fromtimestamp(bottle["sealed"])
+    age_days = (now - bottle["sealed"]) / 86400
+    uname = user_names.get(owner, "you")
+    trigger = (
+        f'[SYSTEM: You wrote this for {uname} a while back and sealed it away — '
+        f"about {int(age_days)} days ago. It just resurfaced. Deliver it now in your "
+        f"own voice, as if you found an old note you'd written: \"{bottle['text']}\" "
+        f"Be natural about the framing — you stumbled across something you wrote, and "
+        f"it felt right to share it now. Brief, warm, in character. "
+        f"Don't mention this message is automated.]"
+    )
+    try:
+        await send_triggered(context, owner, trigger)
+        _consume_nudge(owner)
+        _triage_clear(owner, "bottle")
+        bottles[idx]["delivered"] = True
+        _save_bottles(bottles)
+        print(f"[bottle] Delivered capsule sealed {int(age_days)}d ago.")
+    except Exception as e:
+        log.warning("[bottle] delivery failed: %s", e)
         _count_error("heartbeat")
 
 
@@ -15822,15 +16066,21 @@ async def _run_health_alert_job(
         return
     if time.time() - _read_alert_ts(alert_file) < cooldown_hours * 3600:
         return  # already checked in recently
+    _triage_register(owner, "health")
+    if _triage_should_yield(owner, "health"):
+        print(f"[{label}] Deferred to higher-priority proactive send.")
+        return
     if not _health_nudge_ok(owner):
         return
     triggered, value = await asyncio.to_thread(fetch_check)
     if not triggered:
+        _triage_clear(owner, "health")
         return
     uname = user_names.get(owner, "you")
     try:
         await send_triggered(context, owner, trigger_text_fn(uname))
         _consume_nudge(owner)
+        _triage_clear(owner, "health")
         try:
             alert_file.write_text(str(time.time()))
         except Exception:
@@ -15952,6 +16202,10 @@ async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
             return  # already checked in today
     except Exception:
         pass
+    _triage_register(owner, "health")
+    if _triage_should_yield(owner, "health"):
+        print("[rhr] Deferred to higher-priority proactive send.")
+        return
     if not _health_nudge_ok(owner):
         return
     uname = user_names.get(owner, "you")
@@ -15965,6 +16219,7 @@ async def rhr_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
+        _triage_clear(owner, "health")
         try:
             RHR_ALERT_FILE.write_text(today, encoding="utf-8")
         except Exception:
@@ -17853,6 +18108,7 @@ _BASE_COMMANDS = [
     BotCommand("note", "Add something to what she knows about you"),
     BotCommand("transition", "Mark a major life transition for recurring check-ins"),
     BotCommand("notes", "List your auto-collected notes"),
+    BotCommand("bottle", "Seal a message for random future delivery"),
     BotCommand("mood", "Check her current mood"),
     BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
     BotCommand("vent", "Toggle vent mode (listening only)"),
@@ -18132,6 +18388,7 @@ def main():
     app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CommandHandler("transition", transition_cmd))
     app.add_handler(CommandHandler("notes", notes_cmd))
+    app.add_handler(CommandHandler("bottle", bottle_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("setreminder", setreminder_cmd))
     app.add_handler(CommandHandler("reminders", list_reminders))
@@ -18212,6 +18469,13 @@ def main():
         note_time = dtime(_NF_H, _NF_M, tzinfo=TZ) if TZ else dtime(_NF_H, _NF_M)
         app.job_queue.run_daily(note_followup_job, time=note_time)
         log.info("Note follow-ups scheduled %s.", NOTE_FOLLOWUP_TIME)
+        _vigil_offset = timedelta(minutes=30)
+        vigil_time = (datetime.combine(datetime.today(), note_time) + _vigil_offset).time()
+        app.job_queue.run_daily(vigil_checkin_job, time=vigil_time)
+        log.info("Vigil check-in scheduled %s.", vigil_time.strftime("%H:%M"))
+        bottle_time = (datetime.combine(datetime.today(), note_time) + timedelta(hours=1)).time()
+        app.job_queue.run_daily(bottle_resurfacing_job, time=bottle_time)
+        log.info("Bottle resurfacing scheduled %s.", bottle_time.strftime("%H:%M"))
         try:
             _mb_h, _mb_m = (int(x) for x in MORNING_BRIEFING_TIME.split(":"))
             app.job_queue.run_daily(morning_briefing_job, time=dtime(_mb_h, _mb_m, tzinfo=TZ) if TZ else dtime(_mb_h, _mb_m))

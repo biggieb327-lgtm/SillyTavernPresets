@@ -8352,6 +8352,9 @@ class TestEveryBooleanFlagDefault:
         "THREADS_ENABLED": False,
         "TIP_OF_TONGUE": True,
         "TOKEN_CALIBRATION": True,
+        "PROACTIVE_TRIAGE": True,
+        "VIGIL_MODE": True,
+        "BOTTLE_CAPSULE": True,
         "TRANSITION_MARK": True,
         "TYPING_DELAY": True,
         "VOICE_ENABLED": True,
@@ -13306,3 +13309,316 @@ class TestDaysRecurrence:
         from datetime import date as _date
         d = _date(2026, 9, 29)
         assert bot._next_recurrence("days:3", d) == _date(2026, 10, 2)
+
+
+# ── 5.1-B: Proactive triage queue ────────────────────────────────────────────
+
+
+class TestTriageQueue:
+    """5.1-B: priority-based coordination for budget-consuming proactive sends."""
+
+    def setup_method(self):
+        self._orig_triage = bot.PROACTIVE_TRIAGE
+        bot.PROACTIVE_TRIAGE = True
+        bot._proactive_pending.clear()
+
+    def teardown_method(self):
+        bot.PROACTIVE_TRIAGE = self._orig_triage
+        bot._proactive_pending.clear()
+
+    def test_register_and_clear(self):
+        bot._triage_register(123, "heartbeat")
+        assert 123 in bot._proactive_pending
+        assert "heartbeat" in bot._proactive_pending[123]
+        bot._triage_clear(123, "heartbeat")
+        assert "heartbeat" not in bot._proactive_pending.get(123, {})
+
+    def test_yield_to_higher_priority(self):
+        bot._triage_register(123, "health")
+        assert bot._triage_should_yield(123, "heartbeat") is True
+        assert bot._triage_should_yield(123, "health") is False
+
+    def test_no_yield_to_lower_priority(self):
+        bot._triage_register(123, "heartbeat")
+        assert bot._triage_should_yield(123, "health") is False
+
+    def test_no_yield_to_same_source(self):
+        bot._triage_register(123, "health")
+        assert bot._triage_should_yield(123, "health") is False
+
+    def test_stale_entry_ignored(self):
+        bot._triage_register(123, "health")
+        bot._proactive_pending[123]["health"] = (40, time.time() - 25 * 3600)
+        assert bot._triage_should_yield(123, "heartbeat") is False
+
+    def test_disabled_register_is_noop(self):
+        bot.PROACTIVE_TRIAGE = False
+        bot._triage_register(123, "health")
+        assert 123 not in bot._proactive_pending
+
+    def test_disabled_yield_always_false(self):
+        bot.PROACTIVE_TRIAGE = False
+        bot._proactive_pending[123] = {"health": (40, time.time())}
+        assert bot._triage_should_yield(123, "heartbeat") is False
+
+    def test_priority_ordering(self):
+        p = bot.TRIAGE_PRIORITY
+        assert p["heartbeat"] < p["bottle"] < p["note_followup"]
+        assert p["note_followup"] < p["transition_followup"] < p["vigil"]
+        assert p["vigil"] < p["health"]
+
+    def test_custom_priority(self):
+        bot._triage_register(123, "custom", priority=50)
+        assert bot._triage_should_yield(123, "health") is True
+
+    def test_multiple_chats_independent(self):
+        bot._triage_register(100, "health")
+        bot._triage_register(200, "heartbeat")
+        assert bot._triage_should_yield(100, "heartbeat") is True
+        assert bot._triage_should_yield(200, "heartbeat") is False
+
+
+# ── 5.2-A: Vigil mode ────────────────────────────────────────────────────────
+
+
+class TestVigilDetect:
+    """5.2-A: _vigil_detect scans user_notes for upcoming hard events."""
+
+    def setup_method(self):
+        self._orig = bot.VIGIL_MODE
+        bot.VIGIL_MODE = True
+
+    def teardown_method(self):
+        bot.VIGIL_MODE = self._orig
+
+    def test_empty_notes_returns_empty(self):
+        assert bot._vigil_detect("", 3) == []
+
+    def test_disabled_returns_empty(self):
+        bot.VIGIL_MODE = False
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"surgery Tuesday (due {tomorrow.isoformat()})"
+        assert bot._vigil_detect(notes, 3) == []
+
+    def test_detects_surgery_within_window(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"surgery at the hospital (due {tomorrow.isoformat()})"
+        hits = bot._vigil_detect(notes, 3)
+        assert len(hits) == 1
+        assert "surgery at the hospital" in hits[0]
+
+    def test_ignores_past_events(self):
+        from datetime import datetime as _dt, timedelta as _td
+        yesterday = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() - _td(days=1)
+        notes = f"surgery done (due {yesterday.isoformat()})"
+        assert bot._vigil_detect(notes, 3) == []
+
+    def test_ignores_events_beyond_window(self):
+        from datetime import datetime as _dt, timedelta as _td
+        far = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=10)
+        notes = f"surgery next month (due {far.isoformat()})"
+        assert bot._vigil_detect(notes, 3) == []
+
+    def test_ignores_non_hard_events(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"dentist appointment (due {tomorrow.isoformat()})"
+        assert bot._vigil_detect(notes, 3) == []
+
+    def test_detects_court_date(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"court date for custody hearing (due {tomorrow.isoformat()})"
+        hits = bot._vigil_detect(notes, 3)
+        assert len(hits) == 1
+
+    def test_detects_funeral(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=2)
+        notes = f"grandma's funeral (due {tomorrow.isoformat()})"
+        hits = bot._vigil_detect(notes, 3)
+        assert len(hits) == 1
+
+    def test_strips_markers(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"surgery at Mass General (transition) (every days:3) (due {tomorrow.isoformat()})"
+        hits = bot._vigil_detect(notes, 3)
+        assert len(hits) == 1
+        assert "(due" not in hits[0]
+        assert "(every" not in hits[0]
+        assert "(transition)" not in hits[0]
+
+    def test_no_due_date_ignored(self):
+        notes = "surgery scheduled soon"
+        assert bot._vigil_detect(notes, 3) == []
+
+
+class TestVigilHint:
+    """5.2-A: _vigil_hint returns a tone modifier for assemble_messages."""
+
+    def setup_method(self):
+        self._orig = bot.VIGIL_MODE
+        bot.VIGIL_MODE = True
+
+    def teardown_method(self):
+        bot.VIGIL_MODE = self._orig
+
+    def test_no_hits_returns_empty(self):
+        assert bot._vigil_hint("", "Nora") == ""
+
+    def test_returns_hint_with_event(self):
+        from datetime import datetime as _dt, timedelta as _td
+        tomorrow = (_dt.now(bot.TZ) if bot.TZ else _dt.now()).date() + _td(days=1)
+        notes = f"surgery at the hospital (due {tomorrow.isoformat()})"
+        result = bot._vigil_hint(notes, "Nora")
+        assert "surgery at the hospital" in result
+        assert "Nora" in result
+        assert "low-pressure" in result
+
+
+class TestVigilCheckinJob:
+    """5.2-A: vigil_checkin_job sends a proactive check-in for imminent hard events."""
+
+    UID = 7001
+
+    def setup_method(self):
+        self._orig_vigil = bot.VIGIL_MODE
+        self._orig_triage = bot.PROACTIVE_TRIAGE
+        self._orig_notes = bot.USER_NOTES_FILE.read_text(encoding="utf-8") if bot.USER_NOTES_FILE.exists() else None
+        self._orig_owner = bot.OWNER_FILE.read_text(encoding="utf-8").strip() if bot.OWNER_FILE.exists() else None
+        bot.VIGIL_MODE = True
+        bot.PROACTIVE_TRIAGE = True
+        bot._proactive_pending.clear()
+        bot.OWNER_FILE.write_text(str(self.UID), encoding="utf-8")
+        bot.user_names[self.UID] = "Tester"
+        bot.nudge_budget.clear()
+        bot.quiet_until.clear()
+        bot.away.clear()
+
+    def teardown_method(self):
+        bot.VIGIL_MODE = self._orig_vigil
+        bot.PROACTIVE_TRIAGE = self._orig_triage
+        if self._orig_notes is not None:
+            bot.USER_NOTES_FILE.write_text(self._orig_notes, encoding="utf-8")
+        else:
+            bot.USER_NOTES_FILE.unlink(missing_ok=True)
+        bot._user_notes_cache["text"] = None
+        if self._orig_owner is not None:
+            bot.OWNER_FILE.write_text(self._orig_owner, encoding="utf-8")
+        bot._proactive_pending.clear()
+
+    def test_disabled_exits_early(self):
+        bot.VIGIL_MODE = False
+        ctx = _cmd_ctx()
+        asyncio.run(bot.vigil_checkin_job(ctx))
+
+    def test_no_notes_exits_early(self):
+        bot.USER_NOTES_FILE.unlink(missing_ok=True)
+        ctx = _cmd_ctx()
+        asyncio.run(bot.vigil_checkin_job(ctx))
+
+
+# ── 5.7-A: Bottle capsule ────────────────────────────────────────────────────
+
+
+class TestBottleCmd:
+    """5.7-A: /bottle seals a message for random future delivery."""
+
+    def setup_method(self):
+        self._orig_bottle = bot.BOTTLE_CAPSULE
+        self._orig_file = bot.BOTTLES_FILE.read_text(encoding="utf-8") if bot.BOTTLES_FILE.exists() else None
+        bot.BOTTLE_CAPSULE = True
+        bot.BOTTLES_FILE.unlink(missing_ok=True)
+
+    def teardown_method(self):
+        bot.BOTTLE_CAPSULE = self._orig_bottle
+        if self._orig_file is not None:
+            bot.BOTTLES_FILE.write_text(self._orig_file, encoding="utf-8")
+        else:
+            bot.BOTTLES_FILE.unlink(missing_ok=True)
+
+    def test_bare_shows_count(self):
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx()
+        asyncio.run(bot.bottle_cmd(upd, ctx))
+        assert any("0" in s and "bottle" in s.lower() for s in msg.sent)
+
+    def test_seal_stores_bottle(self):
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx("remember", "to", "be", "kind")
+        asyncio.run(bot.bottle_cmd(upd, ctx))
+        bottles = bot._load_bottles()
+        assert len(bottles) == 1
+        assert bottles[0]["text"] == "remember to be kind"
+        assert bottles[0]["delivered"] is False
+        assert bottles[0]["deliver_after"] > bottles[0]["sealed"]
+
+    def test_disabled_replies_off(self):
+        bot.BOTTLE_CAPSULE = False
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx("something")
+        asyncio.run(bot.bottle_cmd(upd, ctx))
+        assert any("off" in s.lower() or "turned off" in s.lower() for s in msg.sent)
+
+    def test_sealed_reply_mentions_window(self):
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx("test", "message")
+        asyncio.run(bot.bottle_cmd(upd, ctx))
+        assert any("sealed" in s.lower() for s in msg.sent)
+
+    def test_multiple_bottles(self):
+        upd1, _ = _cmd_update()
+        asyncio.run(bot.bottle_cmd(upd1, _cmd_ctx("first")))
+        upd2, _ = _cmd_update()
+        asyncio.run(bot.bottle_cmd(upd2, _cmd_ctx("second")))
+        bottles = bot._load_bottles()
+        assert len(bottles) == 2
+
+    def test_bare_shows_pending_count(self):
+        upd1, _ = _cmd_update()
+        asyncio.run(bot.bottle_cmd(upd1, _cmd_ctx("one")))
+        upd2, msg = _cmd_update()
+        asyncio.run(bot.bottle_cmd(upd2, _cmd_ctx()))
+        assert any("1" in s and "bottle" in s.lower() for s in msg.sent)
+
+    def test_delivery_delay_within_range(self):
+        upd, _ = _cmd_update()
+        ctx = _cmd_ctx("test")
+        asyncio.run(bot.bottle_cmd(upd, ctx))
+        bottles = bot._load_bottles()
+        delay = bottles[0]["deliver_after"] - bottles[0]["sealed"]
+        assert bot.BOTTLE_MIN_DAYS * 86400 <= delay <= bot.BOTTLE_MAX_DAYS * 86400
+
+
+class TestBottleStorage:
+    """5.7-A: _load_bottles / _save_bottles round-trip correctly."""
+
+    def setup_method(self):
+        self._orig = bot.BOTTLES_FILE.read_text(encoding="utf-8") if bot.BOTTLES_FILE.exists() else None
+        bot.BOTTLES_FILE.unlink(missing_ok=True)
+
+    def teardown_method(self):
+        if self._orig is not None:
+            bot.BOTTLES_FILE.write_text(self._orig, encoding="utf-8")
+        else:
+            bot.BOTTLES_FILE.unlink(missing_ok=True)
+
+    def test_empty_when_no_file(self):
+        assert bot._load_bottles() == []
+
+    def test_round_trip(self):
+        data = [{"text": "hello", "sealed": 1.0, "deliver_after": 2.0, "delivered": False}]
+        bot._save_bottles(data)
+        loaded = bot._load_bottles()
+        assert loaded == data
+
+    def test_corrupt_file_returns_empty(self):
+        bot.BOTTLES_FILE.write_text("not json", encoding="utf-8")
+        assert bot._load_bottles() == []
+
+    def test_non_list_returns_empty(self):
+        bot.BOTTLES_FILE.write_text('{"key": "value"}', encoding="utf-8")
+        assert bot._load_bottles() == []
