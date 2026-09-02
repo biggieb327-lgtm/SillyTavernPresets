@@ -1500,8 +1500,8 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Next**~~ | ~~1.9 structured fleet operation events~~ | ✅ **Shipped v2026-08-24.3** — payload-free JSON at model, external-fetch, scheduled-job, and delivery boundaries; one journal report compares latency, outcomes, and fallback across the fleet. |
 | ~~**Next**~~ | ~~1.10 incremental transactional machine-state persistence~~ | ✅ **Shipped v2026-08-24.4** — reminders use a transactional per-instance SQLite store with verified JSON migration/export and a one-release feature rollback. |
 | ~~**Next**~~ | ~~1.11 per-instance systemd sandbox~~ | ✅ **Shipped 2026-08-24** — one-bot canary and explicit promotion of a root-owned sandbox drop-in; narrow writable paths and a release-independent rollback command. |
-| **Someday** | 5.1 shared triage queue, ~~5.2 disengagement indicator~~, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, ~~5.11 nudge skip-reason transparency~~ | ~~5.11-B shipped v2026-09-01.2; 5.2-B shipped v2026-09-01.3~~ (Sprint 1 complete). Remaining items not scheduled — pilot candidates from the 2026-08-05 lateral-thinking passes. |
-| **Not scheduled** | 5.3, 5.5, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
+| **Someday** | 5.1 shared triage queue, ~~5.2 disengagement indicator~~, 5.4 rising urgency floor, 5.9 `/reviewlife`, 5.10 `/mixtape`, ~~5.11 nudge skip-reason transparency~~ | ~~5.11-B shipped v2026-09-01.2; 5.2-B shipped v2026-09-01.3~~ (Sprint 1 complete). ~~5.5-A shipped v2026-09-01.4; 5.1-A shipped v2026-09-02.1; 5.4-A shipped v2026-09-02.2~~ (Sprint 2 complete). Remaining items not scheduled. |
+| **Not scheduled** | 5.3, 5.6, 5.7, 5.8 (all 🧪 Experimental) | Recorded for deliberate one-instance piloting only, per Track 5's header — do not batch-adopt or sweep to default-on. |
 | ~~**Someday**~~ | ~~6.1 prompt-caching verification~~, ~~6.2 nightly-consolidation extension~~ | **6.1 closed 2026-09-01: checked, not applicable** — live read on Emily showed NanoGPT returns no cache-hit fields for this fleet's model routes; steps 2-3 do not apply. **6.2's first slice shipped v2026-08-24.6** (proactive-hook pre-draft, `NIGHTLY_PREDRAFT`) with a standing "what nightly can absorb" list for further slices. |
 | **Not scheduled** | 6.3 reply advisor | Design recorded, not started — needs the `bot-code-invariants` #3 carve-out written and owner-approved before any code exists, per the item's own "done when." Largest/highest-risk item in the roadmap by blast radius (changes every message on the pilot instance); default-off, one-instance pilot only when picked up. |
 
@@ -1535,9 +1535,9 @@ state. Mechanism risk is low; the real risk is immersion/execution, judged only 
 exchange.
 | Item | Size | Surface | Note |
 |---|---|---|---|
-| 5.5-A chronotype + user-clock noticing | S | timestamp arithmetic, `STYLE_MIRROR`-shaped | Zero LLM calls: fixed per-character trait + arithmetic on existing message timestamps. |
-| 5.1-A constancy override ("lighthouse") | S | suppression flag at the fatigue/busy/mirror injection points | A bypass, no new state to compute. Open question: reads as caring or as "personality off on command"? |
-| 5.4-A in-character introspection query | S/M | template already-computed state in-voice | Likely no new call. Risk: reads as a settings panel, not reflection. |
+| ~~5.5-A chronotype + user-clock noticing~~ | S | timestamp arithmetic, `STYLE_MIRROR`-shaped | **Shipped v2026-09-01.4.** `_chronotype_note()` + `_user_clock_note()` injected in `assemble_messages`. `CHRONOTYPE` opt-in per instance; `CHRONOTYPE_NOTICE` default on. |
+| ~~5.1-A constancy override ("lighthouse")~~ | S | suppression flag at the fatigue/busy/mirror injection points | **Shipped v2026-09-02.1.** Natural-language trigger phrases suppress mood/fatigue/busy/mirror for one exchange. `CONSTANCY_OVERRIDE` default on. Open question resolved in practice: needs live exchange to judge. |
+| ~~5.4-A in-character introspection query~~ | S/M | template already-computed state in-voice | **Shipped v2026-09-02.2.** `/reflect` command — reads mood, fatigue, engagement trend, user-clock, energy; composes in-character paragraph. Zero LLM calls. `INTROSPECTION_QUERY` default on. |
 
 ### Sprint 3 — Recall & memory-surfacing behaviors
 All live on the semantic-recall / memory-scoring path; all small and bounded there.
