@@ -1226,6 +1226,20 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-02 — Wrote `TestTruncateAtWord.test_truncates_at_word_boundary` with a logically
+  wrong assertion: `" " not in result or result == result.rsplit(" ", 1)[0]` — this is always
+  False for any multi-word truncation result, because the first clause fails and the second
+  compares to a shorter prefix. The assertion tested the wrong invariant (it tried to say
+  "the result ends at a word boundary" but actually said "the result contains no spaces OR
+  equals itself minus its last word"). Caught by pytest on first run; fixed to
+  `text.startswith(result.rstrip(...))`. Cost: one edit cycle. -> **when testing a truncation
+  function, the invariant is "the output is a prefix of the input", not an assertion about
+  internal structure.**
+- 2026-09-02 — Added three `_env_bool` flags (GROUP_COMPING, GROUP_TRADING_FOURS, CROSS_QUERY)
+  without updating the `TestEveryBooleanFlagDefault.DEFAULTS` census table in the same edit.
+  The test caught it immediately (designed to). Cost: one pytest round-trip. ->
+  **update the DEFAULTS census table in the same edit that adds a new `_env_bool` flag, not
+  as a separate step — the test exists because this slip is the norm, not the exception.**
 - 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
   `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
   existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
