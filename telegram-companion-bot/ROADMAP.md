@@ -1554,9 +1554,9 @@ its score. Touches every proactive feature at once — reproduce the collision/s
 before building the fix, and soak before trusting it over today's independent gates.
 | Item | Size | Surface | Note |
 |---|---|---|---|
-| 5.1-B shared proactive triage queue | M | every proactive send path | The architectural centerpiece: one re-ranked queue, send only the top-scored candidate. |
-| 5.2-A vigil mode for anticipated hard events | M | extraction + proactive scheduler + tone | Conservative-parse discipline (3.6's shape) against false triggers on loosely-worded "hard events". |
-| 5.7-A message-in-a-bottle capsule | M | sealed-entry queue + resurfacing distribution | Lives or dies on the surprise landing right, not the mechanism. |
+| 5.1-B shared proactive triage queue | M | every proactive send path | **SHIPPED v2026-09-02.5** — `_triage_register`/`_triage_should_yield`/`_triage_clear` coordinate by priority (health>vigil>transition>note>bottle>heartbeat). |
+| 5.2-A vigil mode for anticipated hard events | M | extraction + proactive scheduler + tone | **SHIPPED v2026-09-02.5** — `_vigil_detect` scans user_notes for hard-event keywords + due dates; `_vigil_hint` tone modifier + `vigil_checkin_job` daily check-in via triage. |
+| 5.7-A message-in-a-bottle capsule | M | sealed-entry queue + resurfacing distribution | **SHIPPED v2026-09-02.5** — `/bottle` seals messages; `bottle_resurfacing_job` delivers at random 7-60 day window via triage. |
 
 ### Sprint 5 — Group-chat & cross-instance (needs one GROUP_CHAT_DESIGN.md review pass)
 All change bot-to-bot / cross-instance behavior. Batch so a single `group-chat-changes` +
