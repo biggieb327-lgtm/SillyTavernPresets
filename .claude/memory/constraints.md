@@ -1226,6 +1226,13 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
+  `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
+  existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
+  uses `_cmd_update()` / `_cmd_ctx()` / `asyncio.run()`. Caught by reading the existing
+  tests before running; rewrote before any failure. Cost: one wasted edit cycle. ->
+  **check the test file's existing patterns before writing new tests; the same file may
+  use a non-standard async harness.**
 - 2026-09-01 — Implementing the near-duplicate event guard, picked the similarity metric/threshold
   by feel and it was wrong into a test twice before it was right: first word-set Jaccard ≥ 0.8 (the
   real near-dup scored 0.71, missed), then `SequenceMatcher` ≥ 0.75 which over-triggered on short
