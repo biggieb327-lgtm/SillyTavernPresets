@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-01.4"
+BOT_VERSION = "2026-09-02.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -799,6 +799,7 @@ STYLE_MIN_MSGS = _env_int("STYLE_MIN_MSGS", "6")  # need at least this many befo
 PROMPT_BALANCE = _env_bool("PROMPT_BALANCE", True)
 CHRONOTYPE = os.getenv("CHRONOTYPE", "").strip().lower()
 CHRONOTYPE_NOTICE = _env_bool("CHRONOTYPE_NOTICE", True)
+CONSTANCY_OVERRIDE = _env_bool("CONSTANCY_OVERRIDE", True)
 TYPING_DELAY = _env_bool("TYPING_DELAY", True)
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
@@ -6175,6 +6176,16 @@ def _user_clock_note(chat_id: int) -> str:
     return ""
 
 
+_CONSTANCY_TRIGGERS = re.compile(
+    r"(?:just (?:be (?:normal|yourself|you)|talk (?:normal|normally))|"
+    r"drop the (?:act|mood|tone)|"
+    r"can you (?:just )?be (?:straight|normal|yourself) (?:with me |for a )?(?:for a )?(?:sec|second|minute|moment|bit)?|"
+    r"cut the (?:act|performance)|"
+    r"real talk|straight with me)",
+    re.IGNORECASE,
+)
+
+
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
                       query_vec: list[float] | None = None, distress: bool = False):
@@ -6186,6 +6197,8 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     Everything else keyed by chat_id is the group's own state and stays."""
     uname = user_names.get(chat_id, "you")
     history = conversation_history.get(chat_id, [])
+    constancy = (CONSTANCY_OVERRIDE
+                 and bool(_CONSTANCY_TRIGGERS.search(latest_user_content)))
 
     messages = [{"role": "system", "content": fill(SYSTEM_PROMPT_RAW, NAME, uname)}]
 
@@ -6327,11 +6340,18 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"# Things you know {uname} has going on\n{unotes}\n{_unote_tail}"
         )})
 
-    messages.append({"role": "system", "content": mood_note(chat_id)})
+    if constancy:
+        messages.append({"role": "system", "content": (
+            f"# Constancy\n{uname} asked {NAME} to drop the performance layer. "
+            f"For this one reply: no mood coloring, no fatigue, no busy shorthand, "
+            f"no style-mirroring. Just {NAME} — present, direct, herself."
+        )})
+    else:
+        messages.append({"role": "system", "content": mood_note(chat_id)})
 
     # Stepped-thinking seed: the frame of mind the last analysis pass read for her,
     # placed right after mood so it's salient for this reply. Ephemeral + freshness-gated.
-    if STEP_INTENT:
+    if STEP_INTENT and not constancy:
         seed = _step_intent_seed(next_intent.get(chat_id) or {}, time.time(), _STEP_INTENT_TTL)
         if seed:
             messages.append({"role": "system", "content": (
@@ -6342,8 +6362,8 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # ROADMAP 3.7: social battery + minimal-reply license. Schedule is read once here
     # and reused by the schedule section below.
     sched = _read_schedule_today()
-    busy_activity = _busy_now(sched) if SCHED_BUSY else ""
-    if FATIGUE_STATE:
+    busy_activity = _busy_now(sched) if SCHED_BUSY and not constancy else ""
+    if FATIGUE_STATE and not constancy:
         f = fatigue.get(chat_id) or {}
         eff = _fatigue_effective(f.get("level", 0.0), f.get("ts", 0.0), time.time(),
                                  FATIGUE_DECAY_PER_HOUR)
@@ -6521,7 +6541,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         for _lname, _ltext in PRESET_LAYERS:
             messages.append({"role": "system", "content": fill(_ltext, NAME, uname)})
 
-    if STYLE_MIRROR:
+    if STYLE_MIRROR and not constancy:
         snote = _user_style_note(chat_id)
         if snote:
             messages.append({"role": "system", "content": snote})

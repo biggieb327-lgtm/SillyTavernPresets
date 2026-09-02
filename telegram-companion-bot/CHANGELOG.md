@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-02.1 — constancy override "lighthouse" (ROADMAP 5.1-A)
+
+**Root cause: every modulation feature was instance-authored; the user had no lever to
+ask for the unmodulated baseline.** Mood coloring, fatigue, busy shorthand, and style
+mirroring all shaped every reply. When the user wanted the character to just be
+themselves — present, direct, without the performance layer — there was no way to ask.
+
+**Fix:** When `CONSTANCY_OVERRIDE=1` (default on) and the user's message matches a
+natural-language trigger phrase ("just be normal", "be yourself", "drop the act", "real
+talk", "straight with me"), `assemble_messages` sets a local `constancy` flag for that
+one exchange. The flag suppresses: mood note, stepped-thinking seed, fatigue/social
+battery, busy-activity register, minimal-reply license, and style mirroring. In their
+place, a single "Constancy" system block tells the model to be present and direct
+without the performance layer. Chronotype, environment, schedule, and all factual blocks
+are unaffected — constancy removes modulation, not identity.
+
 ## v2026-09-01.4 — chronotype body-clock and user late-night noticing (ROADMAP 5.5-A)
 
 **Root cause: every instance replied the same way at 3am as at 3pm.** The system prompt

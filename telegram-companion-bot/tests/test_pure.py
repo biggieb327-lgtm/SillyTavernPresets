@@ -8276,6 +8276,7 @@ class TestEveryBooleanFlagDefault:
         "EMBED_BACKFILL": True,
         "ENGAGEMENT_TREND": True,
         "CHRONOTYPE_NOTICE": True,
+        "CONSTANCY_OVERRIDE": True,
         # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
@@ -12942,3 +12943,65 @@ class TestUserClockNote:
         result = bot._user_clock_note(self.CID)
         assert "Noticing" in result
         assert "3 of the last 3" in result
+
+
+class TestConstancyOverride:
+
+    def test_trigger_matches_just_be_normal(self):
+        assert bot._CONSTANCY_TRIGGERS.search("just be normal")
+
+    def test_trigger_matches_just_be_yourself(self):
+        assert bot._CONSTANCY_TRIGGERS.search("can you just be yourself for a sec")
+
+    def test_trigger_matches_drop_the_act(self):
+        assert bot._CONSTANCY_TRIGGERS.search("drop the act")
+
+    def test_trigger_matches_real_talk(self):
+        assert bot._CONSTANCY_TRIGGERS.search("hey real talk")
+
+    def test_trigger_matches_straight_with_me(self):
+        assert bot._CONSTANCY_TRIGGERS.search("be straight with me")
+
+    def test_trigger_no_match_normal_text(self):
+        assert not bot._CONSTANCY_TRIGGERS.search("how was your day")
+
+    def test_trigger_no_match_partial(self):
+        assert not bot._CONSTANCY_TRIGGERS.search("I just wanted to be nice")
+
+    def test_constancy_suppresses_mood_in_assemble(self):
+        cid = 98761234
+        bot.conversation_history[cid] = []
+        bot.user_names[cid] = "Tester"
+        msgs = bot.assemble_messages(cid, "just be normal for a sec")
+        contents = " ".join(m["content"] for m in msgs)
+        assert "Constancy" in contents
+        assert "# Mood" not in contents
+        bot.conversation_history.pop(cid, None)
+        bot.user_names.pop(cid, None)
+
+    def test_normal_text_keeps_mood_in_assemble(self):
+        cid = 98761235
+        bot.conversation_history[cid] = []
+        bot.user_names[cid] = "Tester"
+        msgs = bot.assemble_messages(cid, "how was your day")
+        contents = " ".join(m["content"] for m in msgs)
+        assert "Constancy" not in contents
+        assert "# Mood" in contents
+        bot.conversation_history.pop(cid, None)
+        bot.user_names.pop(cid, None)
+
+    def test_constancy_disabled_by_kill_switch(self):
+        orig = bot.CONSTANCY_OVERRIDE
+        try:
+            bot.CONSTANCY_OVERRIDE = False
+            cid = 98761236
+            bot.conversation_history[cid] = []
+            bot.user_names[cid] = "Tester"
+            msgs = bot.assemble_messages(cid, "just be normal for a sec")
+            contents = " ".join(m["content"] for m in msgs)
+            assert "Constancy" not in contents
+            assert "# Mood" in contents
+        finally:
+            bot.CONSTANCY_OVERRIDE = orig
+            bot.conversation_history.pop(cid, None)
+            bot.user_names.pop(cid, None)
