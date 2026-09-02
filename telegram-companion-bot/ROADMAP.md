@@ -1564,9 +1564,9 @@ design-review pass covers the set; `GROUP_CHAT_DESIGN.md` survived four adversar
 none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 | Item | Size | Surface | Note |
 |---|---|---|---|
-| 5.5-B 🧪 comping mode | S | group turn-taking | Sparse supportive signal (reaction/aside) instead of full reply or silence. |
-| 5.6-B 🧪 trading-fours mode | S | opt-in, code-enforced length cap | Self-contained mode; lowest priority of 5-B. |
-| 5.6-A invisible cross-instance query bridge | M | admin-API / claim-file plumbing | Needs a real design pass against the private/group memory boundary first. |
+| 5.5-B 🧪 comping mode | S | group turn-taking | **SHIPPED v2026-09-02.6** — `_group_comp_react` sends reaction emoji on claim-lost/declined; no ledger entry, no budget, no flat-file writes. `GROUP_COMPING` kill switch (default off). |
+| 5.6-B 🧪 trading-fours mode | S | opt-in, code-enforced length cap | **SHIPPED v2026-09-02.6** — `_truncate_at_word` + `max_reply_chars` param on `_group_deliver`; applied only in `_maybe_reply_to_bot`. `GROUP_TRADING_FOURS` kill switch (default off). |
+| 5.6-A invisible cross-instance query bridge | M | admin-API / claim-file plumbing | **SHIPPED v2026-09-02.6** — `_cross_query_detect`/`_cross_query_fetch` + `/admin/peer-view` endpoint; DM-only, one-shot system context injection. `CROSS_QUERY` kill switch (default on). |
 
 ### Standalone / gated — not sprinted, each needs its own decision
 | Item | Why it stands alone |

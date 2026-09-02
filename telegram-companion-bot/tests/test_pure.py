@@ -8274,6 +8274,7 @@ class TestEveryBooleanFlagDefault:
         "BB_ALERTS": True,
         "CLOSENESS_ENABLED": False,
         "CRIME_ALERTS": True,
+        "CROSS_QUERY": True,
         "DAY_MOOD_RESIDUE": True,
         "DEVICE_RENDER": False,
         "DIRECTIVE_LEAK_GUARD": True,
@@ -8297,7 +8298,9 @@ class TestEveryBooleanFlagDefault:
         "GARMIN_FEED": True,
         "GIF_ENABLED": True,
         "GROUP_BANTER": True,
+        "GROUP_COMPING": False,
         "GROUP_MODE": False,
+        "GROUP_TRADING_FOURS": False,
         "IMAGE_RETRY_TRANSIENT": True,
         "INNER_VOICE_ENABLED": False,
         "JOKE_CANDIDATES": False,
@@ -8389,7 +8392,8 @@ class TestEveryBooleanFlagDefault:
         off = sorted(n for n, v in self.DEFAULTS.items() if v is False)
         assert off == ["ADMIN_API_ENABLED", "CLOSENESS_ENABLED", "DEVICE_RENDER",
                        "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
-                       "GROUP_MODE", "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
+                       "GROUP_COMPING", "GROUP_MODE", "GROUP_TRADING_FOURS",
+                       "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
                        # Off on NAMED instances only (`not IS_NAMED_INSTANCE`), which
                        # the fixture is. Added v2026-08-12.2 when it stopped being
                        # hand-rolled; its default was pinned by nothing before that.
@@ -13622,3 +13626,95 @@ class TestBottleStorage:
     def test_non_list_returns_empty(self):
         bot.BOTTLES_FILE.write_text('{"key": "value"}', encoding="utf-8")
         assert bot._load_bottles() == []
+
+
+# ── 5.5-B comping mode ──────────────────────────────────────────────────────
+
+class TestTruncateAtWord:
+    def test_short_text_unchanged(self):
+        assert bot._truncate_at_word("hello world", 200) == "hello world"
+
+    def test_truncates_at_word_boundary(self):
+        text = "the quick brown fox jumps over the lazy dog"
+        result = bot._truncate_at_word(text, 20)
+        assert len(result) <= 20
+        assert text.startswith(result.rstrip(".,;:!? "))
+
+    def test_strips_trailing_punctuation(self):
+        result = bot._truncate_at_word("hello, world, and more", 13)
+        assert not result.endswith(",")
+
+    def test_single_long_word_gets_hard_cut(self):
+        result = bot._truncate_at_word("superlongword", 5)
+        assert result == "super"
+
+    def test_exact_boundary(self):
+        assert bot._truncate_at_word("hello", 5) == "hello"
+
+
+class TestCompingDefaults:
+    def test_kill_switch_default_off(self):
+        assert bot.GROUP_COMPING is False
+
+    def test_comp_prob_in_range(self):
+        assert 0 < bot.GROUP_COMP_PROB <= 1.0
+
+    def test_comp_reactions_are_all_allowed(self):
+        for r in bot.GROUP_COMP_REACTIONS:
+            assert r in bot.ALLOWED_REACTIONS
+
+
+# ── 5.6-B trading-fours mode ────────────────────────────────────────────────
+
+class TestTradingFoursDefaults:
+    def test_kill_switch_default_off(self):
+        assert bot.GROUP_TRADING_FOURS is False
+
+    def test_max_chars_positive(self):
+        assert bot.GROUP_FOURS_MAX_CHARS > 0
+
+    def test_max_chars_enforces_short_replies(self):
+        assert bot.GROUP_FOURS_MAX_CHARS <= 300
+
+
+# ── 5.6-A cross-instance query bridge ───────────────────────────────────────
+
+class TestCrossQueryDetect:
+    _peers = [("priya", "127.0.0.1", 8080), ("jules", "127.0.0.1", 8081)]
+
+    def test_detects_perspective_question(self):
+        assert bot._cross_query_detect("what does priya think of me?", self._peers) == "priya"
+
+    def test_detects_feel_question(self):
+        assert bot._cross_query_detect("how does jules feel about us?", self._peers) == "jules"
+
+    def test_detects_say_question(self):
+        assert bot._cross_query_detect("what would priya say about that?", self._peers) == "priya"
+
+    def test_no_match_without_peer_name(self):
+        assert bot._cross_query_detect("what does bonnie think?", self._peers) is None
+
+    def test_no_match_without_perspective_phrase(self):
+        assert bot._cross_query_detect("priya is cool", self._peers) is None
+
+    def test_empty_peers(self):
+        assert bot._cross_query_detect("what does priya think?", []) is None
+
+    def test_empty_text(self):
+        assert bot._cross_query_detect("", self._peers) is None
+
+    def test_case_insensitive(self):
+        assert bot._cross_query_detect("What Does Priya Think of you?", self._peers) == "priya"
+
+    def test_between_you_and_peer(self):
+        assert bot._cross_query_detect("between you and jules", self._peers) == "jules"
+
+
+class TestCrossQueryDefaults:
+    def test_kill_switch_default_on(self):
+        assert bot.CROSS_QUERY is True
+
+
+class TestCrossQueryFetch:
+    def test_returns_none_for_unknown_peer(self):
+        assert bot._cross_query_fetch("unknown", 123) is None

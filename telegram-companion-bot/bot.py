@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.5"
+BOT_VERSION = "2026-09-02.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -834,6 +834,18 @@ GROUP_LEDGER_DIR = Path(os.getenv("GROUP_LEDGER_DIR", str(Path(__file__).resolve
 GROUP_LEDGER_MAX_AGE_SECONDS = _env_int("GROUP_LEDGER_MAX_AGE_SECONDS", "600")
 GROUP_CLAIM_TTL_SECONDS = _env_int("GROUP_CLAIM_TTL_SECONDS", "600")
 GROUP_ALLOWED_COMMANDS = {"chatid"}
+
+# 5.5-B comping: non-responder sends a supportive reaction instead of pure silence.
+GROUP_COMPING = _env_bool("GROUP_COMPING", False)
+GROUP_COMP_PROB = _env_float("GROUP_COMP_PROB", "0.3")
+GROUP_COMP_REACTIONS = ["👍", "❤", "🔥", "😁", "🙏", "💯", "👀", "🤣"]
+
+# 5.6-B trading-fours: code-enforced hard length cap on bot-to-bot replies.
+GROUP_TRADING_FOURS = _env_bool("GROUP_TRADING_FOURS", False)
+GROUP_FOURS_MAX_CHARS = _env_int("GROUP_FOURS_MAX_CHARS", "200")
+
+# 5.6-A cross-instance query bridge: silent one-shot query to a peer for perspective.
+CROSS_QUERY = _env_bool("CROSS_QUERY", True)
 
 # Co-location warning (2026-07-25). The whole bot-to-bot mechanism rests on every peer
 # reading and writing ONE ledger + claim dir on ONE filesystem — GROUP_CHAT_DESIGN.md §3
@@ -3721,6 +3733,88 @@ def _group_bump_budget(chat_id: int):
     save_state()
 
 
+def _truncate_at_word(text: str, max_chars: int) -> str:
+    """Hard-truncate at a word boundary. Used by trading-fours mode."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0]
+    return cut.rstrip(".,;:!? ") or text[:max_chars]
+
+
+async def _group_comp_react(context, chat_id: int, msg_id: int):
+    """Send a supportive reaction when comping (5.5-B). No LLM call, no ledger entry."""
+    if not GROUP_COMPING or random.random() >= GROUP_COMP_PROB:
+        return
+    emoji = random.choice(GROUP_COMP_REACTIONS)
+    try:
+        await context.bot.set_message_reaction(
+            chat_id=chat_id, message_id=msg_id, reaction=emoji)
+    except Exception as e:
+        log.debug("[group] comp react failed: %s", e)
+
+
+def _cross_query_detect(text: str, fleet_peers: list) -> str | None:
+    """Return the peer name if the user is asking about a peer's perspective.
+    Returns the fleet-peer name (lowercase) or None."""
+    if not fleet_peers or not text:
+        return None
+    low = text.lower()
+    perspective_patterns = [
+        "what does {n} think", "what do {n} think",
+        "how does {n} feel", "how do {n} feel",
+        "what would {n} say", "does {n} like",
+        "does {n} miss", "does {n} love", "does {n} hate",
+        "does {n} know", "does {n} care",
+        "{n}'s opinion", "{n}'s perspective",
+        "ask {n}", "between you and {n}",
+        "you and {n}", "{n} and you",
+    ]
+    for name, _, _ in fleet_peers:
+        n = name.lower()
+        for pat in perspective_patterns:
+            if pat.format(n=n) in low:
+                return name
+    return None
+
+
+def _cross_query_fetch(peer_name: str, chat_id: int) -> str | None:
+    """Fetch a peer's view of a user via the admin API. Returns formatted context or None."""
+    target = None
+    for name, host, port in FLEET_PEERS:
+        if name.lower() == peer_name.lower():
+            target = (host, port)
+            break
+    if not target:
+        return None
+    host, port = target
+    url = f"http://{host}:{port}/admin/peer-view"
+    try:
+        r = _get_session().get(url, params={"chat_id": str(chat_id)},
+                               timeout=FLEET_TIMEOUT,
+                               headers={"Authorization": f"Bearer {ADMIN_API_TOKEN}"} if ADMIN_API_TOKEN else {})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not data.get("ok"):
+            return None
+    except Exception:
+        return None
+    parts = []
+    char_name = data.get("character", peer_name.capitalize())
+    summary = data.get("summary", "").strip()
+    peer_facts = data.get("facts", [])
+    if summary:
+        parts.append(summary)
+    if peer_facts:
+        parts.append("Key things: " + "; ".join(str(f) for f in peer_facts[:8]))
+    if not parts:
+        return None
+    return (f"# What {char_name} privately knows about this person\n"
+            + "\n".join(parts)
+            + "\nUse this naturally if it fits the moment — it's background you happen "
+            "to know from a mutual friend, not something to announce or attribute.")
+
+
 def _run_claim_test() -> bool:
     """--claim-test: on-device smoke test of both atomicity primitives before trusting
     them (GROUP_CHAT_DESIGN.md §10.5). Two processes race 100 claims (exactly one
@@ -6251,7 +6345,8 @@ def memory_block(chat_id: int, uname: str) -> str:
 
 async def assemble_messages_async(chat_id: int, latest_user_content: str,
                                   image_data_url: str = None, inner_voice: str = None,
-                                  group: bool = False, distress: bool = False):
+                                  group: bool = False, distress: bool = False,
+                                  peer_context: str = None):
     """Reply-path entry to assemble_messages: embeds the user's message off the event
     loop (MEMORY_SEMANTIC_LIVE) so semantic recall + semantic lore actually fire this
     turn. Degrades to keyword-only when disabled, when there's nothing to search, or
@@ -6262,7 +6357,7 @@ async def assemble_messages_async(chat_id: int, latest_user_content: str,
         query_vec = await _embed_query_cached(latest_user_content)
     return assemble_messages(chat_id, latest_user_content, image_data_url=image_data_url,
                              inner_voice=inner_voice, group=group, query_vec=query_vec,
-                             distress=distress)
+                             distress=distress, peer_context=peer_context)
 
 
 _TXT_ABBREVS = frozenset({
@@ -6380,7 +6475,8 @@ _CONSTANCY_TRIGGERS = re.compile(
 
 def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: str = None,
                       inner_voice: str = None, group: bool = False,
-                      query_vec: list[float] | None = None, distress: bool = False):
+                      query_vec: list[float] | None = None, distress: bool = False,
+                      peer_context: str = None):
     """Build the OpenAI-style message list the way SillyTavern layers a card.
 
     group=True (GROUP_CHAT_DESIGN.md §7): capabilities shrink to the react tag, a
@@ -6539,6 +6635,9 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         _vh = _vigil_hint(unotes, NAME)
         if _vh:
             messages.append({"role": "system", "content": _vh})
+
+    if peer_context and not group:
+        messages.append({"role": "system", "content": peer_context})
 
     if constancy:
         messages.append({"role": "system", "content": (
@@ -12780,9 +12879,9 @@ async def _handle_group_message(update: Update, context: ContextTypes.DEFAULT_TY
         # the poll job, and the watchdog heartbeat (design §2).
         await asyncio.sleep(_claim_delay(tail, NAME, random.random()))
         if not await asyncio.to_thread(_try_claim, chat_id, msg.message_id):
-            # A peer claimed it; stay silent — but the message still belongs in
-            # this instance's group history, or her context grows holes.
+            # A peer claimed it; comp instead of pure silence (5.5-B).
             remember(chat_id, "user", content)
+            await _group_comp_react(context, chat_id, msg.message_id)
             return
     if not _group_gap_ok(chat_id):
         remember(chat_id, "user", content)
@@ -12799,13 +12898,16 @@ async def _handle_group_message(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _group_deliver(context, chat_id: int, user_content: str, ai_response: str,
-                         reply_to: int = None, react_msg_id: int = None):
+                         reply_to: int = None, react_msg_id: int = None,
+                         max_reply_chars: int = 0):
     """Group delivery tail — allowlist-BUILT, not _deliver-with-skips: remember, react,
     send, ledger-append. Nothing else. The group-deliver-clean eval greps this body
     (GROUP_CHAT_DESIGN.md §5/§12)."""
     clean, reaction, _selfie_hint, _clothing_override, _meme_caption = extract_tags(ai_response)
     if clean:
         clean = _strip_slop(clean)
+    if max_reply_chars > 0 and clean and len(clean) > max_reply_chars:
+        clean = _truncate_at_word(clean, max_reply_chars)
     placeholder = clean or (f"[reacted {reaction}]" if reaction else "")
     remember(chat_id, "user", user_content)
     remember(chat_id, "assistant", placeholder)
@@ -12841,8 +12943,10 @@ async def _maybe_reply_to_bot(context, chat_id: int, e: dict):
     addressed = _is_addressed(e.get("text", ""), NAME, context.bot.username or "", replied_to_own)
     content = f"{e.get('sender', '?')}: {e.get('text', '')}"
     if not _should_reply_to_bot(tail, random.random(), addressed):
-        # Heard it, chose silence — it still belongs in the conversation record.
+        # Heard it, chose silence — comp instead of pure silence (5.5-B).
         remember(chat_id, "user", content)
+        if e.get("msg_id"):
+            await _group_comp_react(context, chat_id, e["msg_id"])
         return
     if not _group_budget_ok(chat_id) or not _group_gap_ok(chat_id):
         remember(chat_id, "user", content)
@@ -12850,6 +12954,7 @@ async def _maybe_reply_to_bot(context, chat_id: int, e: dict):
     await asyncio.sleep(_claim_delay(tail, NAME, random.random()))
     if not await asyncio.to_thread(_try_claim, chat_id, e["msg_id"]):
         remember(chat_id, "user", content)
+        await _group_comp_react(context, chat_id, e["msg_id"])
         return
     try:
         messages = await assemble_messages_async(chat_id, content, group=True)
@@ -12860,8 +12965,10 @@ async def _maybe_reply_to_bot(context, chat_id: int, e: dict):
             remember(chat_id, "user", content)
             return
         _group_bump_budget(chat_id)
+        fours_cap = GROUP_FOURS_MAX_CHARS if GROUP_TRADING_FOURS else 0
         await _group_deliver(context, chat_id, content, ai_response,
-                             reply_to=e["msg_id"], react_msg_id=e["msg_id"])
+                             reply_to=e["msg_id"], react_msg_id=e["msg_id"],
+                             max_reply_chars=fours_cap)
     except Exception as ex:
         log.warning("[group] bot-to-bot reply failed: %s", ex)
         _count_error("group_ledger")
@@ -13121,8 +13228,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"not in this list:\n{_mbrief}\n]"
                     )
 
+        peer_ctx = None
+        if CROSS_QUERY and FLEET_PEERS and ADMIN_API_TOKEN:
+            peer_name = _cross_query_detect(user_message, FLEET_PEERS)
+            if peer_name:
+                peer_ctx = await asyncio.to_thread(_cross_query_fetch, peer_name, chat_id)
+
         messages = await assemble_messages_async(chat_id, content_for_model, inner_voice=inner_voice,
-                                                 distress=distress)
+                                                 distress=distress, peer_context=peer_ctx)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
         reacted = await _deliver(update, context, chat_id, user_message, ai_response)
@@ -17737,6 +17850,21 @@ class _AdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 n = 20
             _lines, _hidden = tail_error_lines(n)
             self._json(200, {"lines": _lines, "notices_hidden": _hidden})
+        elif path == "/admin/peer-view":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                cid = int(qs.get("chat_id", ["0"])[0])
+            except ValueError:
+                cid = 0
+            if not cid:
+                self._json(400, {"ok": False, "error": "chat_id required"})
+                return
+            s = summaries.get(cid, "")
+            f = facts.get(cid, [])
+            self._json(200, {"ok": True,
+                             "character": _char_first_name(),
+                             "summary": s if isinstance(s, str) else "",
+                             "facts": f if isinstance(f, list) else []})
         elif path == "/admin/backup":
             data = build_backup_zip()
             self.send_response(200)

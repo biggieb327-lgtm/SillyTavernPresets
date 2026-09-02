@@ -7,6 +7,45 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-02.6 — comping mode + trading-fours + cross-instance query bridge (ROADMAP 5.5-B, 5.6-B, 5.6-A)
+
+**Root cause (5.5-B): claim-lost bots disappeared completely.** When a bot lost the
+atomic claim in group chat (or declined via the probability gate), it went fully silent.
+No middle ground between a full reply and nothing — the losing bot's presence vanished
+from the conversation until the next claim win.
+
+**Fix:** Comping mode. A bot that loses the claim or declines to reply may send a
+reaction emoji (from `GROUP_COMP_REACTIONS`) on the message instead of staying silent.
+Probability-gated (`GROUP_COMP_PROB`, default 0.3). Reactions are not ledgered, consume
+no budget, write no flat files, and don't go through `_group_deliver` — they are
+invisible to the group-deliver-clean eval by design. Controlled by `GROUP_COMPING` kill
+switch (default off, experimental).
+
+**Root cause (5.6-B): bot-to-bot exchanges had no length discipline.** When two bots
+traded replies in group chat, each sent full-length responses. The resulting wall of text
+drowned out the human participant and consumed budget faster than necessary.
+
+**Fix:** Trading-fours mode. Opt-in hard reply-length cap on bot-to-bot exchanges.
+`_group_deliver` accepts a `max_reply_chars` parameter; when set, it truncates the
+reply at a word boundary via `_truncate_at_word` after slop-stripping. Only applied
+to `_maybe_reply_to_bot`, not to human-addressed replies. Controlled by
+`GROUP_TRADING_FOURS` kill switch (default off, experimental), cap tunable via
+`GROUP_FOURS_MAX_CHARS` (default 200).
+
+**Root cause (5.6-A): no way to answer "what does Priya think of you?"** A user could
+ask one bot about another bot's perspective, but the answering bot had zero data — the
+peer's summary and facts live in the peer's instance directory, unreachable.
+
+**Fix:** Cross-instance query bridge. `_cross_query_detect` pattern-matches perspective
+questions against `FLEET_PEERS` names. On match, `_cross_query_fetch` calls the peer's
+new `/admin/peer-view` endpoint (HTTP GET, authenticated via `ADMIN_API_TOKEN`) to
+retrieve that peer's `summaries[chat_id]` and `facts[chat_id]`. The result is injected
+as one-shot system context via the new `peer_context` parameter on `assemble_messages`.
+DM-only (never triggers in group chat). Returns None on any failure (graceful
+degradation — the bot answers without the peer data). Controlled by `CROSS_QUERY` kill
+switch (default on, per new-feature policy). Requires `FLEET_PEERS` and
+`ADMIN_API_TOKEN`.
+
 ## v2026-09-02.5 — proactive triage + vigil mode + bottle capsule (ROADMAP 5.1-B, 5.2-A, 5.7-A)
 
 **Root cause (5.1-B): budget-consuming proactive sends competed blindly.** Heartbeat,
