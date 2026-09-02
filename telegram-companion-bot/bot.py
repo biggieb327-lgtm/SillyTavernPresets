@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.3"
+BOT_VERSION = "2026-09-02.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1278,6 +1278,9 @@ MEMORY_URGENCY_CEILING = _env_int("MEMORY_URGENCY_CEILING", "20")
 MEMORY_URGENCY_BOOST = _env_float("MEMORY_URGENCY_BOOST", "2.0")
 _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsurfaced}
 
+TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
+TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
+
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
 # loop). These make the reply path embed the user's message once — off the loop, via
@@ -2287,11 +2290,14 @@ _WEEKDAY_ABBREVS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def _parse_recurrence(raw) -> str:
-    """Normalize a recurrence rule to 'weekly:thu' | 'monthly:15' | 'yearly:07-22'.
+    """Normalize a recurrence rule to 'days:3' | 'weekly:thu' | 'monthly:15' | 'yearly:07-22'.
     Returns "" for anything else — a garbled model rule (or a hand-edited note)
     must degrade to a one-off note, never crash the analysis or follow-up pass."""
     if not isinstance(raw, str):
         return ""
+    m = re.match(r"^days:(\d{1,3})$", raw.strip().lower())
+    if m and 1 <= int(m.group(1)) <= 365:
+        return f"days:{int(m.group(1))}"
     m = re.match(r"^weekly:([a-z]+)$", raw.strip().lower())
     if m:
         day = m.group(1)[:3]
@@ -2310,6 +2316,8 @@ def _next_recurrence(rule: str, after: date):
     Monthly/yearly days that overflow a short month clamp to its last day (a
     'monthly:31' note fires Apr 30). Returns None for an unparseable rule."""
     kind, _, arg = rule.partition(":")
+    if kind == "days" and arg.isdigit() and int(arg) >= 1:
+        return after + timedelta(days=int(arg))
     if kind == "weekly" and arg in _WEEKDAY_ABBREVS:
         days = (_WEEKDAY_ABBREVS.index(arg) - after.weekday()) % 7 or 7
         return after + timedelta(days=days)
@@ -5110,6 +5118,31 @@ def _tip_of_tongue_hint(query_vec: list[float] | None, chat_id: int | None,
     )
 
 
+_TRANSITION_TAG_RE = re.compile(r"\(transition\)")
+
+
+def _transition_hint(notes_text: str, name: str) -> str:
+    if not TRANSITION_MARK or not notes_text:
+        return ""
+    active = []
+    for line in notes_text.splitlines():
+        if _TRANSITION_TAG_RE.search(line):
+            clean = _TRANSITION_TAG_RE.sub("", line).strip()
+            clean = re.sub(r"\((?:due|every|asked)\s+[^)]*\)", "", clean).strip()
+            if clean:
+                active.append(clean)
+    if not active:
+        return ""
+    joined = "; ".join(active)
+    return (
+        f"{name} knows {name}'s person is going through something significant "
+        f"right now: {joined}. This is a named life transition — carry quiet "
+        f"awareness of it. Let it inflect how {name} listens and what {name} "
+        f"notices, without making every reply about it. When it comes up "
+        f"naturally, be present with it; otherwise, let it sit."
+    )
+
+
 def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
                         enabled: bool) -> tuple[list[str], bool]:
     """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
@@ -6401,6 +6434,11 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         messages.append({"role": "system", "content": (
             f"# Things you know {uname} has going on\n{unotes}\n{_unote_tail}"
         )})
+
+    if not group:
+        _th = _transition_hint(unotes, NAME)
+        if _th:
+            messages.append({"role": "system", "content": _th})
 
     if constancy:
         messages.append({"role": "system", "content": (
@@ -11546,6 +11584,34 @@ async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Noted: {text}")
 
 
+async def transition_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mark a major life transition so the bot carries awareness of it.
+    /transition <what's changing> — stores a recurring note with check-ins.
+    Remove with /notes del <n> when it no longer applies."""
+    if not TRANSITION_MARK:
+        await update.message.reply_text("Transition marking is disabled.")
+        return
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text:
+        existing = USER_NOTES_FILE.read_text(encoding="utf-8").strip() if USER_NOTES_FILE.exists() else ""
+        active = [l for l in existing.splitlines() if _TRANSITION_TAG_RE.search(l)]
+        if active:
+            msg = "Active transitions:\n" + "\n".join(f"  - {l}" for l in active)
+        else:
+            msg = "No active transitions."
+        await update.message.reply_text(
+            f"{msg}\n\nUsage: /transition <what's changing>\nRemove with /notes del <n>")
+        return
+    now_dt = datetime.now(TZ) if TZ else datetime.now()
+    due = (now_dt.date() + timedelta(days=TRANSITION_CHECKIN_DAYS)).isoformat()
+    rule = f"days:{TRANSITION_CHECKIN_DAYS}"
+    _append_user_note(f"{text} (transition)", due=due, every=rule)
+    _user_notes_cache["text"] = None
+    await update.message.reply_text(
+        f"Transition marked: {text}\nShe'll check in every {TRANSITION_CHECKIN_DAYS} days. "
+        f"Remove with /notes when it no longer applies.")
+
+
 async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View and manage user_notes.txt entries.
     /notes           — list numbered
@@ -13772,14 +13838,24 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     days_ago = (today - d).days
     when = "today" if days_ago == 0 else ("yesterday" if days_ago == 1 else f"{days_ago} days ago")
     uname = user_names.get(owner, "you")
-    trigger = (
-        f'[SYSTEM: {uname} mentioned this: "{note}" — that was {when}. Reach out unprompted '
-        f"and ask how it went, specific and in character, 1-2 sentences. If it clearly hasn't "
-        f"happened yet today, wish them luck instead. BUT if the note actually describes "
-        f"{NAME}'s own event rather than something in {uname}'s life, do NOT ask {uname} how "
-        f"it went — it's {NAME}'s news: tell them briefly how it went for her instead. "
-        f"Don't mention this message is automated.]"
-    )
+    is_transition = bool(_TRANSITION_TAG_RE.search(note))
+    note_clean = _TRANSITION_TAG_RE.sub("", note).strip() if is_transition else note
+    if is_transition:
+        trigger = (
+            f'[SYSTEM: {uname} is going through a life transition: "{note_clean}". '
+            f"Check in — ask how it's going, how they're feeling about it, or what's "
+            f"changed since last time. Be present and specific, not generic. 1-2 sentences, "
+            f"in character. Don't mention this message is automated.]"
+        )
+    else:
+        trigger = (
+            f'[SYSTEM: {uname} mentioned this: "{note}" — that was {when}. Reach out unprompted '
+            f"and ask how it went, specific and in character, 1-2 sentences. If it clearly hasn't "
+            f"happened yet today, wish them luck instead. BUT if the note actually describes "
+            f"{NAME}'s own event rather than something in {uname}'s life, do NOT ask {uname} how "
+            f"it went — it's {NAME}'s news: tell them briefly how it went for her instead. "
+            f"Don't mention this message is automated.]"
+        )
     try:
         await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
@@ -17775,6 +17851,7 @@ _BASE_COMMANDS = [
     BotCommand("schedule", "View or replace her weekly schedule"),
     BotCommand("today", "Append a mid-day note (what's happening today)"),
     BotCommand("note", "Add something to what she knows about you"),
+    BotCommand("transition", "Mark a major life transition for recurring check-ins"),
     BotCommand("notes", "List your auto-collected notes"),
     BotCommand("mood", "Check her current mood"),
     BotCommand("vibe", "Set a timed vibe (cozy/flirty/serious…)"),
@@ -18053,6 +18130,7 @@ def main():
     app.add_handler(CommandHandler("schedule", schedule_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
+    app.add_handler(CommandHandler("transition", transition_cmd))
     app.add_handler(CommandHandler("notes", notes_cmd))
     app.add_handler(CommandHandler("remindme", remindme))
     app.add_handler(CommandHandler("setreminder", setreminder_cmd))

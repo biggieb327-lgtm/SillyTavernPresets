@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-02.4 — user-named transition marking (ROADMAP 5.9-A)
+
+**Root cause: major life transitions had no distinct ritual or recurring awareness.**
+Events like a new job, a move, or a breakup flowed into ordinary memory extraction with
+no mechanism to carry ongoing awareness or schedule recurring check-ins. The bot either
+forgot about it or the user had to keep mentioning it.
+
+**Fix:** `/transition <description>` stores a `(transition)`-tagged note with recurring
+check-ins (default every 3 days via the `days:N` recurrence extension to
+`_parse_recurrence`/`_next_recurrence`). `_transition_hint` injects a system prompt in
+`assemble_messages` giving the character quiet awareness of active transitions — present
+but not forced into every reply. `note_followup_job` uses transition-specific language
+when checking in on `(transition)` notes. Remove with `/notes del <n>` when the
+transition no longer applies. Controlled by `TRANSITION_MARK` kill switch (default on),
+check-in interval tunable via `TRANSITION_CHECKIN_DAYS`.
+
 ## v2026-09-02.3 — tip-of-the-tongue near-miss recall + rising urgency floor (ROADMAP 5.8-A, 5.4-B)
 
 **Root cause (5.8-A): the discard band between "confident match" and "no match" was

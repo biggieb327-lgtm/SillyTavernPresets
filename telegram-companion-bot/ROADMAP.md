@@ -1543,9 +1543,9 @@ exchange.
 All live on the semantic-recall / memory-scoring path; all small and bounded there.
 | Item | Size | Surface | Note |
 |---|---|---|---|
-| 5.8-A tip-of-the-tongue near-miss recall | S | the embedding *discard band* (currently silence) | Nearly free; reuses existing embedding infra. Tune frequency low or it reads as a bug. |
-| 5.4-B rising urgency floor for neglected memories | S | recall-scoring path | Priority *rises* the longer a worth-saying memory goes unsaid. Feeds Sprint 4's shared score if built. |
-| 5.9-A user-named transition ("ferryman") | S | date-aware follow-up machinery | Weakest of 5-A — consider folding into existing follow-ups rather than standalone. |
+| 5.8-A tip-of-the-tongue near-miss recall | S | the embedding *discard band* (currently silence) | **SHIPPED v2026-09-02.3** — `_tip_of_tongue_hint` fires on 0.15-0.3 cosine band when no confident hits exist. |
+| 5.4-B rising urgency floor for neglected memories | S | recall-scoring path | **SHIPPED v2026-09-02.3** — `_urgency_boost` in `triggered_memories` rises linearly over MEMORY_URGENCY_CEILING turns. |
+| 5.9-A user-named transition ("ferryman") | S | date-aware follow-up machinery | **SHIPPED v2026-09-02.4** — `/transition` stores a `(transition)`-tagged note; `_transition_hint` + `days:N` recurrence for check-ins. |
 
 ### Sprint 4 — Proactive-send unification (medium risk; soak required)
 All touch the proactive-send scheduler. Build **5.1-B first as the spine** (one shared urgency

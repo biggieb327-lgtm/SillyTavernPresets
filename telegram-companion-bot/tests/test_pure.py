@@ -8352,6 +8352,7 @@ class TestEveryBooleanFlagDefault:
         "THREADS_ENABLED": False,
         "TIP_OF_TONGUE": True,
         "TOKEN_CALIBRATION": True,
+        "TRANSITION_MARK": True,
         "TYPING_DELAY": True,
         "VOICE_ENABLED": True,
         "VOICE_TONE_ENABLED": True,
@@ -13187,3 +13188,121 @@ class TestUrgencyBoost:
             bot.MEMORY_URGENCY_FLOOR = orig_floor
             bot._mem_urgency = orig_urg
             bot.MEMORY_REPEAT_SUPPRESS_TURNS = orig_suppress
+
+
+class TestTransitionHint:
+    """5.9-A: _transition_hint returns a system prompt when (transition) notes exist."""
+
+    def test_disabled_returns_empty(self):
+        orig = bot.TRANSITION_MARK
+        try:
+            bot.TRANSITION_MARK = False
+            assert bot._transition_hint("new job (transition) (every days:3) (due 2026-10-01)", "Nora") == ""
+        finally:
+            bot.TRANSITION_MARK = orig
+
+    def test_empty_notes_returns_empty(self):
+        assert bot._transition_hint("", "Nora") == ""
+
+    def test_no_transition_tag_returns_empty(self):
+        assert bot._transition_hint("working on a project (due 2026-10-01)", "Nora") == ""
+
+    def test_fires_on_transition_note(self):
+        result = bot._transition_hint(
+            "starting new job at Acme (transition) (every days:3) (due 2026-10-01)",
+            "Nora"
+        )
+        assert "starting new job at Acme" in result
+        assert "Nora" in result
+        assert "(transition)" not in result
+        assert "(due" not in result
+        assert "(every" not in result
+
+    def test_multiple_transitions(self):
+        notes = (
+            "starting new job at Acme (transition) (every days:3) (due 2026-10-01)\n"
+            "regular note no tag\n"
+            "moving to Portland (transition) (every days:3) (due 2026-10-04)"
+        )
+        result = bot._transition_hint(notes, "Nora")
+        assert "starting new job at Acme" in result
+        assert "moving to Portland" in result
+        assert "regular note no tag" not in result
+
+
+class TestTransitionCmd:
+    """5.9-A: /transition stores a (transition)-tagged note with recurring check-ins."""
+
+    def setup_method(self):
+        self._orig_mark = bot.TRANSITION_MARK
+        self._orig_checkin = bot.TRANSITION_CHECKIN_DAYS
+        self._orig_notes = bot.USER_NOTES_FILE.read_text(encoding="utf-8") if bot.USER_NOTES_FILE.exists() else None
+        bot.USER_NOTES_FILE.write_text("", encoding="utf-8")
+        bot._user_notes_cache["text"] = None
+        bot.TRANSITION_MARK = True
+        bot.TRANSITION_CHECKIN_DAYS = 3
+
+    def teardown_method(self):
+        bot.TRANSITION_MARK = self._orig_mark
+        bot.TRANSITION_CHECKIN_DAYS = self._orig_checkin
+        if self._orig_notes is not None:
+            bot.USER_NOTES_FILE.write_text(self._orig_notes, encoding="utf-8")
+        else:
+            bot.USER_NOTES_FILE.unlink(missing_ok=True)
+        bot._user_notes_cache["text"] = None
+
+    def test_stores_transition_note(self):
+        import asyncio
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx("new", "job", "at", "Acme")
+        asyncio.run(bot.transition_cmd(upd, ctx))
+        content = bot.USER_NOTES_FILE.read_text(encoding="utf-8")
+        assert "(transition)" in content
+        assert "new job at Acme" in content
+        assert "(every days:3)" in content
+        assert "(due " in content
+
+    def test_disabled_replies_disabled(self):
+        import asyncio
+        bot.TRANSITION_MARK = False
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx("something")
+        asyncio.run(bot.transition_cmd(upd, ctx))
+        assert any("disabled" in s.lower() for s in msg.sent)
+
+    def test_bare_shows_active(self):
+        import asyncio
+        bot.USER_NOTES_FILE.write_text(
+            "new job at Acme (transition) (every days:3) (due 2026-10-01)",
+            encoding="utf-8"
+        )
+        bot._user_notes_cache["text"] = None
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx()
+        asyncio.run(bot.transition_cmd(upd, ctx))
+        assert any("new job at Acme" in s for s in msg.sent)
+
+
+class TestDaysRecurrence:
+    """days:N recurrence support for _parse_recurrence and _next_recurrence."""
+
+    def test_parse_days(self):
+        assert bot._parse_recurrence("days:3") == "days:3"
+        assert bot._parse_recurrence("days:1") == "days:1"
+        assert bot._parse_recurrence("days:365") == "days:365"
+
+    def test_parse_days_invalid(self):
+        assert bot._parse_recurrence("days:0") == ""
+        assert bot._parse_recurrence("days:366") == ""
+        assert bot._parse_recurrence("days:abc") == ""
+
+    def test_next_days(self):
+        from datetime import date as _date
+        d = _date(2026, 9, 1)
+        assert bot._next_recurrence("days:3", d) == _date(2026, 9, 4)
+        assert bot._next_recurrence("days:1", d) == _date(2026, 9, 2)
+
+    def test_next_days_crosses_month(self):
+        from datetime import date as _date
+        d = _date(2026, 9, 29)
+        assert bot._next_recurrence("days:3", d) == _date(2026, 10, 2)
