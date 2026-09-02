@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.1"
+BOT_VERSION = "2026-09-02.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -800,6 +800,7 @@ PROMPT_BALANCE = _env_bool("PROMPT_BALANCE", True)
 CHRONOTYPE = os.getenv("CHRONOTYPE", "").strip().lower()
 CHRONOTYPE_NOTICE = _env_bool("CHRONOTYPE_NOTICE", True)
 CONSTANCY_OVERRIDE = _env_bool("CONSTANCY_OVERRIDE", True)
+INTROSPECTION_QUERY = _env_bool("INTROSPECTION_QUERY", True)
 TYPING_DELAY = _env_bool("TYPING_DELAY", True)
 TYPING_WPM = _env_float("TYPING_WPM", "120")
 TYPING_DELAY_MIN = _env_float("TYPING_DELAY_MIN", "0.5")
@@ -9083,6 +9084,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/vibe <name> [Xh] — set a timed vibe (cozy/flirty/serious/chaotic/low-energy/playful/chill/in-person)",
         "/vent — toggle vent mode (listening only)",
         "/energy <high|low|crash> — set your energy level",
+        "/reflect — ask what she notices about you lately",
         "",
         "*Inside jokes & wardrobe*",
         "/addjoke phrase | meaning | tone — add an inside joke",
@@ -9975,6 +9977,85 @@ async def energy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_energy[chat_id] = {"level": lvl, "ts": time.time()}
     save_state()
     await update.message.reply_text(f"Energy set to {lvl}. Use /energy off to clear.")
+
+
+async def reflect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not INTROSPECTION_QUERY:
+        await update.message.reply_text("/reflect is disabled.")
+        return
+    chat_id = update.effective_chat.id
+    uname = user_names.get(chat_id, "you")
+    observations = []
+
+    label = mood_label(chat_id)
+    s = mood_now(chat_id)
+    if label:
+        observations.append(f"I'd say you seem {label.lower()} lately.")
+    elif s >= 1.2:
+        observations.append("You seem settled. Lighter than usual, in a good way.")
+    elif s >= 0.4:
+        observations.append("You seem... okay. Comfortable. Present.")
+    elif s > -0.4:
+        pass
+    elif s > -1.2:
+        observations.append("Something feels a little off with you. Quieter, maybe.")
+    else:
+        observations.append("You've been pulling back. I notice that.")
+
+    f_data = fatigue.get(chat_id) or {}
+    eff = _fatigue_effective(f_data.get("level", 0.0), f_data.get("ts", 0.0),
+                             time.time(), FATIGUE_DECAY_PER_HOUR)
+    if eff >= FATIGUE_THRESHOLD:
+        observations.append(
+            "We've been talking a lot. I can feel the weight of it "
+            "-- not bad, just... full."
+        )
+
+    trend = engagement_trend.get(chat_id, [])
+    if len(trend) >= 14:
+        recent_week = trend[-7:]
+        prev_week = trend[-14:-7]
+        recent_avg = sum(d["um"] for d in recent_week) / 7
+        prev_avg = sum(d["um"] for d in prev_week) / 7
+        if prev_avg > 0:
+            ratio = recent_avg / prev_avg
+            if ratio < 0.5:
+                observations.append(
+                    "You've been quieter this week. Fewer messages, longer gaps. "
+                    "I'm not worried -- just noticing."
+                )
+            elif ratio > 1.5:
+                observations.append(
+                    "You've been around more this week. More messages, longer ones too. "
+                    "I like it when you're here."
+                )
+
+    uclock = _user_clock_note(chat_id)
+    if uclock:
+        observations.append(
+            "You've been up late a lot. I'm not going to lecture you, "
+            "but I see it."
+        )
+
+    ue = user_energy.get(chat_id) or {}
+    lvl = ue.get("level")
+    if lvl == "low":
+        observations.append(
+            "Your energy has been low -- you told me that, and I can feel it "
+            "in how you write."
+        )
+    elif lvl == "high":
+        observations.append("You've had a lot of energy. It shows.")
+
+    if not observations:
+        text = (
+            f"Honestly? I don't have a strong read right now, {uname}. "
+            f"You seem like yourself. If something's going on, I haven't caught it yet."
+        )
+    else:
+        text = " ".join(observations)
+
+    await update.message.reply_text(text)
 
 
 # --- Inside joke bank ---
@@ -17924,6 +18005,7 @@ def main():
     app.add_handler(CommandHandler("vibe", vibe_cmd))
     app.add_handler(CommandHandler("vent", vent_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
+    app.add_handler(CommandHandler("reflect", reflect_cmd))
     app.add_handler(CommandHandler("addjoke", add_joke_cmd))
     app.add_handler(CommandHandler("jokes", list_jokes_cmd))
     app.add_handler(CommandHandler("deljoke", del_joke_cmd))

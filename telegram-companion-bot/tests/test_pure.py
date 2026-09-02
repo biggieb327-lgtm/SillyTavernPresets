@@ -8277,6 +8277,7 @@ class TestEveryBooleanFlagDefault:
         "ENGAGEMENT_TREND": True,
         "CHRONOTYPE_NOTICE": True,
         "CONSTANCY_OVERRIDE": True,
+        "INTROSPECTION_QUERY": True,
         # Gated by MEMORY_SEMANTIC_LIVE too, which is itself default-on.
         "EPISODIC_RECALL": True,
         "FATIGUE_STATE": True,
@@ -8896,6 +8897,11 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_energy_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.energy_cmd(u, _cmd_ctx()))
+        assert m.sent
+
+    def test_reflect_cmd_answers(self):
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
         assert m.sent
 
     def test_nudges_cmd_answers(self):
@@ -13005,3 +13011,73 @@ class TestConstancyOverride:
             bot.CONSTANCY_OVERRIDE = orig
             bot.conversation_history.pop(cid, None)
             bot.user_names.pop(cid, None)
+
+
+class TestReflectCmd:
+    CID = 98769876
+
+    def setup_method(self):
+        self._orig_query = bot.INTROSPECTION_QUERY
+        self._orig_history = bot.conversation_history.get(self.CID)
+        self._orig_names = bot.user_names.get(self.CID)
+        self._orig_moods = bot.moods.get(self.CID)
+        self._orig_fatigue = bot.fatigue.get(self.CID)
+        self._orig_energy = bot.user_energy.get(self.CID)
+        bot.INTROSPECTION_QUERY = True
+        bot.user_names[self.CID] = "TestUser"
+        bot.conversation_history[self.CID] = []
+
+    def teardown_method(self):
+        bot.INTROSPECTION_QUERY = self._orig_query
+        bot.conversation_history.pop(self.CID, None)
+        bot.user_names.pop(self.CID, None)
+        bot.moods.pop(self.CID, None)
+        bot.fatigue.pop(self.CID, None)
+        bot.user_energy.pop(self.CID, None)
+        bot.engagement_trend.pop(self.CID, None)
+        if self._orig_history is not None:
+            bot.conversation_history[self.CID] = self._orig_history
+        if self._orig_names is not None:
+            bot.user_names[self.CID] = self._orig_names
+        if self._orig_moods is not None:
+            bot.moods[self.CID] = self._orig_moods
+        if self._orig_fatigue is not None:
+            bot.fatigue[self.CID] = self._orig_fatigue
+        if self._orig_energy is not None:
+            bot.user_energy[self.CID] = self._orig_energy
+
+    def test_reflect_cmd_runs_neutral(self):
+        u, m = _cmd_update(chat_id=self.CID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "don't have a strong read" in m.sent[0] or len(m.sent[0]) > 10
+
+    def test_reflect_cmd_picks_up_low_mood(self):
+        bot.moods[self.CID] = {"score": -1.5, "label": "withdrawn", "ts": time.time()}
+        u, m = _cmd_update(chat_id=self.CID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
+        assert m.sent
+        reply = m.sent[0].lower()
+        assert "pulling back" in reply or "withdrawn" in reply
+
+    def test_reflect_cmd_picks_up_positive_mood(self):
+        bot.moods[self.CID] = {"score": 1.5, "label": "warm and open", "ts": time.time()}
+        u, m = _cmd_update(chat_id=self.CID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
+        assert m.sent
+        reply = m.sent[0].lower()
+        assert "warm and open" in reply or "settled" in reply
+
+    def test_reflect_cmd_disabled(self):
+        bot.INTROSPECTION_QUERY = False
+        u, m = _cmd_update(chat_id=self.CID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "disabled" in m.sent[0].lower()
+
+    def test_reflect_cmd_picks_up_low_energy(self):
+        bot.user_energy[self.CID] = {"level": "low", "ts": time.time()}
+        u, m = _cmd_update(chat_id=self.CID)
+        asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
+        assert m.sent
+        assert "energy" in m.sent[0].lower()
