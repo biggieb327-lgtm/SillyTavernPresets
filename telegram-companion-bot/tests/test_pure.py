@@ -2639,6 +2639,8 @@ class TestTriggeredMemoriesRepeatSuppression:
         self._orig_meta = dict(bot._memory_meta)
         self._orig_budget = bot.MEMORY_TOKEN_BUDGET
         self._orig_suppress = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        self._orig_urgency_floor = bot.MEMORY_URGENCY_FLOOR
+        self._orig_urgency = dict(bot._mem_urgency)
         bot.MEMORIES_FILE.write_text(self.LINE_A + "\n" + self.LINE_B + "\n",
                                      encoding="utf-8")
         bot._memories_cache["text"] = None
@@ -2648,6 +2650,8 @@ class TestTriggeredMemoriesRepeatSuppression:
         bot._embeddings_cache[self.LINE_B] = [0.8, 0.6]   # cosine 0.8 vs the query
         bot._mem_inject_turn.clear()
         bot._mem_last_injected.clear()
+        bot._mem_urgency.clear()
+        bot.MEMORY_URGENCY_FLOOR = False
         # Budget fits exactly one line (equal length → equal cost), so ranking decides.
         bot.MEMORY_TOKEN_BUDGET = bot._est_tokens(self.LINE_A)
         bot.MEMORY_REPEAT_SUPPRESS_TURNS = 6
@@ -2659,6 +2663,9 @@ class TestTriggeredMemoriesRepeatSuppression:
         bot._memory_meta.update(self._orig_meta)
         bot.MEMORY_TOKEN_BUDGET = self._orig_budget
         bot.MEMORY_REPEAT_SUPPRESS_TURNS = self._orig_suppress
+        bot.MEMORY_URGENCY_FLOOR = self._orig_urgency_floor
+        bot._mem_urgency.clear()
+        bot._mem_urgency.update(self._orig_urgency)
         bot._mem_inject_turn.clear()
         bot._mem_last_injected.clear()
 
@@ -8308,6 +8315,7 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_AUTO": True,
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
+        "MEMORY_URGENCY_FLOOR": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         "NOTE_GROUNDED": True,
@@ -8342,6 +8350,7 @@ class TestEveryBooleanFlagDefault:
         "STYLE_MIRROR": True,
         "TEXTING_REALISM": True,
         "THREADS_ENABLED": False,
+        "TIP_OF_TONGUE": True,
         "TOKEN_CALIBRATION": True,
         "TYPING_DELAY": True,
         "VOICE_ENABLED": True,
@@ -13081,3 +13090,100 @@ class TestReflectCmd:
         asyncio.run(bot.reflect_cmd(u, _cmd_ctx()))
         assert m.sent
         assert "energy" in m.sent[0].lower()
+
+
+class TestTipOfTongue:
+    def setup_method(self):
+        self._orig_tot = bot.TIP_OF_TONGUE
+        self._orig_cooldown = bot.TIP_OF_TONGUE_COOLDOWN
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_fired = dict(bot._tot_last_fired)
+        self._orig_turn = dict(bot._mem_inject_turn)
+        bot.TIP_OF_TONGUE = True
+        bot.TIP_OF_TONGUE_COOLDOWN = 1
+
+    def teardown_method(self):
+        bot.TIP_OF_TONGUE = self._orig_tot
+        bot.TIP_OF_TONGUE_COOLDOWN = self._orig_cooldown
+        bot._embeddings_cache = self._orig_cache
+        bot._tot_last_fired = self._orig_fired
+        bot._mem_inject_turn = self._orig_turn
+
+    def test_returns_empty_when_disabled(self):
+        bot.TIP_OF_TONGUE = False
+        assert bot._tip_of_tongue_hint([0.1, 0.2], 999, 0) == ""
+
+    def test_returns_empty_when_confident_hits_exist(self):
+        assert bot._tip_of_tongue_hint([0.1, 0.2], 999, 3) == ""
+
+    def test_returns_empty_when_no_query_vec(self):
+        assert bot._tip_of_tongue_hint(None, 999, 0) == ""
+
+    def test_fires_on_near_miss(self):
+        import unittest.mock
+        bot._embeddings_cache["near miss memory"] = [0.5, 0.5]
+        with unittest.mock.patch.object(bot, "_read_memories", return_value=["near miss memory"]):
+            with unittest.mock.patch.object(bot, "_cosine_sim", return_value=0.22):
+                result = bot._tip_of_tongue_hint([0.1, 0.2], 999, 0)
+        assert "tip-of-the-tongue" in result or "nagging" in result
+
+    def test_cooldown_prevents_rapid_fire(self):
+        import unittest.mock
+        bot.TIP_OF_TONGUE_COOLDOWN = 8
+        bot._mem_inject_turn[888] = 5
+        bot._tot_last_fired[888] = 4
+        bot._embeddings_cache["test mem"] = [0.5, 0.5]
+        with unittest.mock.patch.object(bot, "_read_memories", return_value=["test mem"]):
+            with unittest.mock.patch.object(bot, "_cosine_sim", return_value=0.22):
+                result = bot._tip_of_tongue_hint([0.1, 0.2], 888, 0)
+        assert result == ""
+
+    def test_returns_empty_when_no_near_misses(self):
+        import unittest.mock
+        bot._embeddings_cache["exact match"] = [0.5, 0.5]
+        with unittest.mock.patch.object(bot, "_read_memories", return_value=["exact match"]):
+            with unittest.mock.patch.object(bot, "_cosine_sim", return_value=0.05):
+                result = bot._tip_of_tongue_hint([0.1, 0.2], 999, 0)
+        assert result == ""
+
+
+class TestUrgencyBoost:
+    def test_neutral_when_no_waiting(self):
+        assert bot._urgency_boost(0, 20, 2.0) == 1.0
+
+    def test_neutral_when_disabled(self):
+        assert bot._urgency_boost(5, 0, 2.0) == 1.0
+
+    def test_grows_linearly(self):
+        half = bot._urgency_boost(10, 20, 2.0)
+        assert abs(half - 2.0) < 0.01
+
+    def test_caps_at_ceiling(self):
+        capped = bot._urgency_boost(30, 20, 2.0)
+        assert abs(capped - 3.0) < 0.01
+
+    def test_full_ceiling(self):
+        full = bot._urgency_boost(20, 20, 2.0)
+        assert abs(full - 3.0) < 0.01
+
+    def test_urgency_tracked_in_triggered_memories(self):
+        import unittest.mock
+        orig_floor = bot.MEMORY_URGENCY_FLOOR
+        orig_urg = dict(bot._mem_urgency)
+        orig_suppress = bot.MEMORY_REPEAT_SUPPRESS_TURNS
+        try:
+            bot.MEMORY_URGENCY_FLOOR = True
+            bot._mem_urgency = {}
+            bot.MEMORY_REPEAT_SUPPRESS_TURNS = 0
+            bot._embeddings_cache["urgency test line"] = [0.5, 0.5]
+            with unittest.mock.patch.object(bot, "_read_memories",
+                                            return_value=["urgency test line"]):
+                with unittest.mock.patch.object(bot, "MEMORY_TOKEN_BUDGET", 1):
+                    bot.triggered_memories("urgency test", query_vec=[0.5, 0.5],
+                                           chat_id=7777)
+            urg = bot._mem_urgency.get(7777, {})
+            assert urg.get("urgency test line", 0) > 0
+        finally:
+            bot.MEMORY_URGENCY_FLOOR = orig_floor
+            bot._mem_urgency = orig_urg
+            bot.MEMORY_REPEAT_SUPPRESS_TURNS = orig_suppress

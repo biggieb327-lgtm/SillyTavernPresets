@@ -7,6 +7,31 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-02.3 — tip-of-the-tongue near-miss recall + rising urgency floor (ROADMAP 5.8-A, 5.4-B)
+
+**Root cause (5.8-A): the discard band between "confident match" and "no match" was
+silent.** Semantic recall either surfaced a memory (cosine >= 0.3) or dropped it entirely.
+Entries scoring 0.15-0.3 — genuinely related but below confidence — produced no behavior,
+missing the realistic "I know I know this..." sensation.
+
+**Fix:** `_tip_of_tongue_hint` injects a system prompt giving the character a nagging
+almost-remembering feeling when near-misses exist but no confident hits surfaced. Rate-
+limited per chat (default 8-turn cooldown) to avoid reading as a bug. No new LLM calls.
+Controlled by `TIP_OF_TONGUE` kill switch (default on), tunable via
+`TIP_OF_TONGUE_COOLDOWN`.
+
+**Root cause (5.4-B): a memory that kept scoring but never won the budget sank further
+over time.** The existing `_recency_weight` decays older memories, and
+`_repeat_penalty` demotes recently-injected ones — but a memory that was relevant (scored
+positively) yet never made the budget cut had no compensating boost. Its priority could
+only fall.
+
+**Fix:** `_urgency_boost` in `triggered_memories` tracks per-chat how many turns each
+memory scored above threshold but was not injected. The multiplier rises linearly from
+1.0 to 1.0 + `MEMORY_URGENCY_BOOST` (default 2.0) over `MEMORY_URGENCY_CEILING` turns
+(default 20). When a memory is finally surfaced, its counter resets. Controlled by
+`MEMORY_URGENCY_FLOOR` kill switch (default on).
+
 ## v2026-09-02.2 — in-character introspection query `/reflect` (ROADMAP 5.4-A)
 
 **Root cause: the character's read on the user was only ever implicit.** `/audit` and

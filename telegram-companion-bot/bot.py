@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.2"
+BOT_VERSION = "2026-09-02.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1268,6 +1268,15 @@ MEMORY_REPEAT_SUPPRESS_TURNS = _env_int("MEMORY_REPEAT_SUPPRESS_TURNS", "6")
 MEMORY_REPEAT_PENALTY = _env_float("MEMORY_REPEAT_PENALTY", "0.15")
 _mem_inject_turn: dict = {}    # chat_id -> per-chat reply-turn counter
 _mem_last_injected: dict = {}  # chat_id -> {memory line: turn last injected}
+
+TIP_OF_TONGUE = _env_bool("TIP_OF_TONGUE", True)
+TIP_OF_TONGUE_COOLDOWN = _env_int("TIP_OF_TONGUE_COOLDOWN", "8")
+_tot_last_fired: dict = {}     # chat_id -> turn number when hint last fired
+
+MEMORY_URGENCY_FLOOR = _env_bool("MEMORY_URGENCY_FLOOR", True)
+MEMORY_URGENCY_CEILING = _env_int("MEMORY_URGENCY_CEILING", "20")
+MEMORY_URGENCY_BOOST = _env_float("MEMORY_URGENCY_BOOST", "2.0")
+_mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsurfaced}
 
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
@@ -5062,6 +5071,45 @@ def _repeat_penalty(last_turn, current_turn: int, window: int, floor: float) -> 
     return floor + (1.0 - floor) * (max(ago - 1, 0) / window)
 
 
+def _urgency_boost(turns_waiting: int, ceiling: int, max_boost: float) -> float:
+    if turns_waiting <= 0 or ceiling <= 0:
+        return 1.0
+    return 1.0 + min(turns_waiting / ceiling, 1.0) * max_boost
+
+
+def _tip_of_tongue_hint(query_vec: list[float] | None, chat_id: int | None,
+                        confident_count: int) -> str:
+    if not TIP_OF_TONGUE or not query_vec or chat_id is None:
+        return ""
+    if confident_count > 0:
+        return ""
+    turn = _mem_inject_turn.get(chat_id, 0)
+    last = _tot_last_fired.get(chat_id, -TIP_OF_TONGUE_COOLDOWN)
+    if turn - last < TIP_OF_TONGUE_COOLDOWN:
+        return ""
+    entries = _read_memories()
+    if not entries:
+        return ""
+    near = []
+    for line in entries:
+        vec = _embeddings_cache.get(line.strip())
+        if not vec:
+            continue
+        sim = _cosine_sim(query_vec, vec)
+        if 0.15 <= sim < 0.3:
+            near.append(line.strip())
+    if not near:
+        return ""
+    _tot_last_fired[chat_id] = turn
+    return (
+        f"You have a nagging feeling you know something related to what "
+        f"they just said, but you can not quite place it — a tip-of-the-tongue "
+        f"moment. Let this color one small beat in your reply if it fits "
+        f"naturally (a brief aside, trailing off, half-starting a thought) — "
+        f"do not force it or explain it."
+    )
+
+
 def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
                         enabled: bool) -> tuple[list[str], bool]:
     """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
@@ -5152,10 +5200,13 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
         turn, seen, win = 0, {}, 0
 
     all_lines = set(keyword_scored) | set(sem_scored)
+    urg = (_mem_urgency.setdefault(chat_id, {})
+           if MEMORY_URGENCY_FLOOR and chat_id is not None else {})
     merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
                                  now, MEMORY_DECAY_HALFLIFE_DAYS)
-               * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY), l)
+               * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY)
+               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST), l)
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
@@ -5176,6 +5227,16 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     if suppress:                                  # record winners on the raw lines,
         for line in out:                          # before _hedge rewrites them for display
             seen[line] = turn
+    if urg is not None and chat_id is not None and MEMORY_URGENCY_FLOOR:
+        out_set = set(out)
+        for l in all_lines:
+            if l in out_set:
+                urg.pop(l, None)
+            else:
+                urg[l] = urg.get(l, 0) + 1
+        for k in list(urg):
+            if k not in all_lines and urg[k] > MEMORY_URGENCY_CEILING * 2:
+                del urg[k]
     return out
 
 
@@ -6510,6 +6571,10 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
                       f" up again if you've referenced it recently; let it go unless"
                       f" {uname} raises it.")
         messages.append(_sys_opt(block))
+
+    tot = _tip_of_tongue_hint(query_vec, chat_id, len(mems))
+    if tot:
+        messages.append({"role": "system", "content": tot})
 
     episode = triggered_episode(query_vec)
     if episode:
