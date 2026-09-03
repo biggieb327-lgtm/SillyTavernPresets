@@ -1241,19 +1241,10 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
   one-line `/reviewlife` suggestion; rejecting it changes nothing; accepting it appends
   to the correct living file with a visible log line.
 
-### 5.10 `/mixtape` — composed highlight-reel send — S
-- **Evidence:** mixtape domain (random-stimulus lateral-thinking pass, 2026-08-05) — a
-  curated sequence says something the giver couldn't say directly. `milestones`
-  (nightly-extracted relationship firsts, already curated) and TTS/`/imagine` are both
-  shipped but never combined.
-- **Idea:** a `/mixtape` command pulling 3-5 entries from `milestones`, voicing one or
-  two via existing TTS, illustrating one via existing `/imagine`, sent as a short
-  sequenced burst rather than a flat `/milestones` text dump. Pure composition over
-  shipped pipelines — no new curation or generation mechanism needed.
-- **Risk:** low — reuses existing TTS/imagine/milestones paths; cost is per-invocation
-  (manual command), not proactive, so no budget interaction needed for a first version.
-- **Done when:** `/mixtape` reliably produces a sequenced 3-part send (voice + image +
-  text) from real milestone data on at least one live instance.
+### ~~5.10 `/mixtape` — composed highlight-reel send — S~~ SHIPPED v2026-09-03.1
+- **Shipped:** temporal-spread bucket sampling over `milestones`, voice + text + image
+  burst via existing TTS and selfie pipelines. Kill switches: `MIXTAPE_ENABLED`,
+  `MIXTAPE_COUNT`.
 
 ### 5.11 Rhythm transparency — skip-reason on `/nudges` — S
 - **Evidence:** lighthouse domain (random-stimulus lateral-thinking pass, 2026-08-05) —
@@ -1571,7 +1562,7 @@ none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 ### Standalone / gated — not sprinted, each needs its own decision
 | Item | Why it stands alone |
 |---|---|
-| 5.10-B `/mixtape` (S) | Self-contained product feature over shipped pipelines (milestones + TTS + `/imagine`); a good low-risk "anytime" pickup, unrelated to any other item. |
+| ~~5.10-B `/mixtape` (S)~~ | **Shipped v2026-09-03.1.** |
 | 3.8 Phase 2 — pre-reply thinking call (S/M) | Default-off, A/B-gated, first #3 loosening. **Standing rec: measure whether the free `STEP_INTENT` seed + preset work already delivered the target before building.** |
 | ~~6.1 step 2 — `assemble_messages` prefix reorder~~ | **Closed 2026-09-01** — the live cache read returned nothing; caching is not active for this fleet's model routes, so the reorder has nothing to preserve. |
 | 6.3 reply advisor (L) | **Owner-gated:** needs a new `bot-code-invariants` #3 carve-out written into that file and owner-approved before any code. Largest blast radius in the roadmap. |
