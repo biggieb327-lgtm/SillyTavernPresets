@@ -5869,12 +5869,21 @@ class TestCommandMenuMirrorsHandlers:
         )
         return direct | registered_specs
 
-    def test_every_registered_command_is_in_the_full_menu(self):
+    def test_every_registered_command_is_in_the_uncapped_menu(self):
         names = self._registered_command_names()
         assert len(names) > 50, "sanity check: extraction found suspiciously few commands"
-        menu = {c.command for c in bot._build_command_menu(True, True, True, True)}
-        missing = names - menu
+        base = bot._BASE_COMMANDS + bot._command_menu_entries(
+            bot._maps_command_specs(True))
+        base += bot._PAYMENT_COMMANDS
+        base += bot._command_menu_entries(bot._health_command_specs(True))
+        base += bot._PRESET_COMMANDS
+        uncapped = {c.command for c in base}
+        missing = names - uncapped
         assert not missing, f"registered but not in any menu list: {sorted(missing)}"
+
+    def test_capped_menu_stays_within_telegram_limit(self):
+        menu = bot._build_command_menu(True, True, True, True)
+        assert len(menu) <= bot._TG_COMMAND_LIMIT
 
     def test_the_full_menu_has_no_entries_without_a_handler(self):
         names = self._registered_command_names()
@@ -6000,6 +6009,27 @@ class TestCommandAndJobRegistries:
         monkeypatch.setattr(bot, "_Garmin", None)
 
         assert bot._health_job_specs() == ()
+
+
+class TestCommandMenuLimit:
+    """Telegram's set_my_commands rejects >100 commands with BadRequest:
+    Bot_commands_too_much.  _build_command_menu must cap the list."""
+
+    def test_all_features_on_stays_within_limit(self):
+        cmds = bot._build_command_menu(True, True, True, True)
+        assert len(cmds) <= bot._TG_COMMAND_LIMIT
+
+    def test_cap_truncates_excess(self, monkeypatch):
+        orig = bot._BASE_COMMANDS
+        monkeypatch.setattr(
+            bot, "_BASE_COMMANDS",
+            orig + [bot.BotCommand(f"fake{i}", "x") for i in range(50)],
+        )
+        cmds = bot._build_command_menu(True, True, True, True)
+        assert len(cmds) == bot._TG_COMMAND_LIMIT
+
+    def test_limit_constant_is_100(self):
+        assert bot._TG_COMMAND_LIMIT == 100
 
 
 class TestModelInfoShowsEveryRole:

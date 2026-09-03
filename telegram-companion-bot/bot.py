@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.4"
+BOT_VERSION = "2026-09-03.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -18658,6 +18658,8 @@ _PRESET_COMMANDS = [
     BotCommand("preset", "Show or switch preset (voice) layers"),
 ]
 
+_TG_COMMAND_LIMIT = 100
+
 def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
                         garmin_enabled: bool = False,
                         preset_enabled: bool = True) -> list:
@@ -18668,13 +18670,21 @@ def _build_command_menu(traffic_enabled: bool, payments_enabled: bool,
     cmds += _command_menu_entries(_health_command_specs(garmin_enabled))
     if preset_enabled:
         cmds += _PRESET_COMMANDS
+    if len(cmds) > _TG_COMMAND_LIMIT:
+        log.warning("[config] %d commands exceed Telegram's %d limit; dropping %d from menu",
+                    len(cmds), _TG_COMMAND_LIMIT,
+                    len(cmds) - _TG_COMMAND_LIMIT)
+        cmds = cmds[:_TG_COMMAND_LIMIT]
     return cmds
 
 
 async def _register_commands(application):
-    await application.bot.set_my_commands(
-        _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED,
-                            PRESET_COMMAND))
+    try:
+        await application.bot.set_my_commands(
+            _build_command_menu(TRAFFIC_ENABLED, PAYMENTS_ENABLED, GARMIN_ENABLED,
+                                PRESET_COMMAND))
+    except Exception as exc:
+        log.warning("[startup] command menu registration failed: %s — bot runs without autocomplete", exc)
 
 
 async def _post_init(application):

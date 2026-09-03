@@ -7,6 +7,22 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.5 — Fix startup crash: command menu exceeds Telegram's 100 limit
+
+**Root cause: Telegram's `set_my_commands` API rejects more than 100 commands with
+`BadRequest: Bot_commands_too_much`.** The base command list grew to 86 over recent
+sprints (mixtape, project, transition, reflect, reviewlife, fleet, etc.). With maps (7),
+preset (1), and payments (7), instances with `PAYMENTS_ENABLED=1` reached 101 — one over
+the limit. The crash happened in `_post_init` before any message handling, so the bot
+never started. 5 of 7 VPS instances crashed on the v2026-09-03.4 deploy; rollback
+hardening restored them.
+
+**Fix:** `_build_command_menu` now caps the returned list at `_TG_COMMAND_LIMIT` (100),
+dropping excess commands from the end of the list with a log warning. `_register_commands`
+also wraps `set_my_commands` in a try/except so a future API rejection degrades to missing
+autocomplete instead of a crash. Command handlers are registered separately and are
+unaffected by the menu truncation.
+
 ## v2026-09-03.4 — Recast post-processing pipeline
 
 **Root cause: the fleet's reply quality depends entirely on one model call.** A single
