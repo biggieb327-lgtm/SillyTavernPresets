@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.7 — CRUD consolidation: 18 commands merged into 6
+
+**Root cause: after v2026-09-03.6 pruned 11 admin commands from the menu, the base count
+was 75 (95 all-features-on). Six CRUD groups (jokes, wardrobe, pins, boundaries, reminders,
+crons) each used 2-4 separate commands for add/list/del — 18 menu entries total — when a
+single command with subcommand dispatch does the same job.**
+
+**Fix:** each group is now one unified command with subcommand routing:
+- `/jokes` (absorbs `addjoke`, `deljoke`) — saves 2 menu entries
+- `/wardrobe` (absorbs `addoutfit`, `outfit`, `deloutfit`) — saves 3 menu entries
+- `/pin` (absorbs `pinned`, `unpin`) — saves 2 menu entries
+- `/boundary` (absorbs `boundaries`) — saves 1 menu entry
+- `/reminder` (absorbs `remindme`, `setreminder`, `reminders`, `delreminder`) — saves 3 menu entries
+- `/cron` (absorbs `crons`, `crondel`) — saves 2 menu entries
+
+Total: 13 commands removed from the menu. Base drops from 75 to 62; all-features-on
+from 95 to 82. Old command names stay registered as backward-compatible aliases (thin
+wrappers that inject the subcommand prefix), so existing muscle memory still works.
+
 ## v2026-09-03.6 — Prune command menu: admin/diagnostic commands hidden from autocomplete
 
 **Root cause: the autocomplete menu was at 86 base commands (95 with all features),

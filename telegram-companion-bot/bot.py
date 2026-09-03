@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.6"
+BOT_VERSION = "2026-09-03.7"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8321,7 +8321,7 @@ def _pick_daily_outfit():
     """Choose today's outfit: weather-appropriate, not one of the last few days'.
 
     Prefers the owner-curated wardrobe and falls back to the built-in pool when it is
-    empty, so an instance with no /addoutfit history still changes clothes daily.
+    empty, so an instance with no /wardrobe add history still changes clothes daily.
     Returns None when there is genuinely nothing to pick."""
     recent = wardrobe.get("recent") or []
     for source in (wardrobe.get("outfits") or [], SELFIE_OUTFITS):
@@ -9580,10 +9580,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/exportmemory — export full memory as text",
         "/milestones — view relationship milestones",
         "/pin <fact> — pin something I always carry",
-        "/pinned — list pinned memories",
-        "/unpin <n> — remove a pinned memory",
+        "/pin — list pinned memories",
+        "/pin del <n> — remove a pinned memory",
         "/boundary <text> — add a soft boundary note",
-        "/boundaries — list boundaries",
+        "/boundary — list boundaries",
+        "/boundary remove <n> — remove a boundary",
         "",
         "*Mood & modes*",
         "/mood — check her current mood",
@@ -9593,13 +9594,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reflect — ask what she notices about you lately",
         "",
         "*Inside jokes & wardrobe*",
-        "/addjoke phrase | meaning | tone — add an inside joke",
         "/jokes — list inside jokes",
-        "/deljoke <id> — remove a joke",
+        "/jokes add phrase | meaning [| tone] — add an inside joke",
+        "/jokes del <id> — remove a joke",
         "/wardrobe — list outfits",
-        "/addoutfit <desc> — add an outfit",
-        "/outfit <n> — set current outfit (used in selfies)",
-        "/deloutfit <n> — remove an outfit",
+        "/wardrobe add <desc> — add an outfit",
+        "/wardrobe set <n or desc> — set current outfit (used in selfies)",
+        "/wardrobe del <n> — remove an outfit",
         "",
         "*Selfie*",
         "/selfie [hint] — generate a selfie",
@@ -9626,13 +9627,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/quiet <h> — pause proactive messages for X hours (/quiet off to cancel)",
         "",
         "*Reminders & tasks*",
-        "/remindme <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
-        "/setreminder HH:MM <task> — daily recurring reminder",
-        "/reminders — list reminders",
-        "/delreminder <n> — remove a reminder",
-        "/cron <schedule> | <instruction> — recurring task",
-        "/crons — list recurring tasks",
-        "/crondel <id> — remove a recurring task",
+        "/reminder <time> <task> — one-off reminder (30m, 2h, 18:30, tomorrow 9:00)",
+        "/reminder daily HH:MM <task> — daily recurring reminder",
+        "/reminder — list reminders",
+        "/reminder del <n> — remove a reminder",
+        "/cron <schedule> <instruction> — recurring task",
+        "/cron — list recurring tasks",
+        "/cron del <id> — remove a recurring task",
         "",
         "*Traffic (Western Washington)*",
         "/traffic — current congestion (near you if location shared)",
@@ -10406,41 +10407,35 @@ async def export_memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Pinned memories ---
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text:
-        await update.message.reply_text("Usage: /pin <fact that should never be forgotten>")
-        return
-    pl = pinned.setdefault(chat_id, [])
-    if text not in pl:
-        pl.append(text)
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    if sub == "del":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.message.reply_text("Usage: /pin del <number from /pin>")
+            return
+        pl = pinned.get(chat_id) or []
+        idx = int(args[1]) - 1
+        if not 0 <= idx < len(pl):
+            await update.message.reply_text("No pinned memory with that number.")
+            return
+        removed = pl.pop(idx)
         save_state()
-    await update.message.reply_text(f"📌 Pinned: {text}")
-
-
-async def pinned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    pl = pinned.get(chat_id) or []
-    if not pl:
-        await update.message.reply_text("Nothing pinned yet. Use /pin <fact> to add one.")
-        return
-    lines = [f"{i}. {p}" for i, p in enumerate(pl, 1)]
-    await _reply_chunked(update, "📌 Pinned memories:\n\n" + "\n".join(lines)
-                         + "\n\nUse /unpin <number> to remove one.")
-
-
-async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /unpin <number from /pinned>")
-        return
-    pl = pinned.get(chat_id) or []
-    idx = int(context.args[0]) - 1
-    if not 0 <= idx < len(pl):
-        await update.message.reply_text("No pinned memory with that number.")
-        return
-    removed = pl.pop(idx)
-    save_state()
-    await update.message.reply_text(f"🗑️ Unpinned: {removed}")
+        await update.message.reply_text(f"🗑️ Unpinned: {removed}")
+    elif sub:
+        text = " ".join(args).strip()
+        pl = pinned.setdefault(chat_id, [])
+        if text not in pl:
+            pl.append(text)
+            save_state()
+        await update.message.reply_text(f"📌 Pinned: {text}")
+    else:
+        pl = pinned.get(chat_id) or []
+        if not pl:
+            await update.message.reply_text("Nothing pinned yet. Use /pin <fact> to add one.")
+            return
+        lines = [f"{i}. {p}" for i, p in enumerate(pl, 1)]
+        await _reply_chunked(update, "📌 Pinned memories:\n\n" + "\n".join(lines)
+                             + "\n\nUse /pin del <number> to remove one.")
 
 
 # --- Boundaries ---
@@ -10448,13 +10443,21 @@ async def boundary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args or []
     if not args:
-        await update.message.reply_text(
-            "Usage:\n/boundary <text>  — add a constraint\n/boundary remove <number>  — remove one"
-        )
+        bl = boundaries.get(chat_id) or []
+        if not bl:
+            await update.message.reply_text(
+                "No boundaries set. Use /boundary <text> to add one.\n\n"
+                "Example: /boundary Don't tease me about sleep\n"
+                "Example: /boundary Keep romantic tone low unless I initiate"
+            )
+            return
+        lines = [f"{i}. {b}" for i, b in enumerate(bl, 1)]
+        await _reply_chunked(update, "🚧 Active boundaries:\n\n" + "\n".join(lines)
+                             + "\n\nUse /boundary remove <number> to remove one.")
         return
     if args[0].lower() == "remove":
         if len(args) < 2 or not args[1].isdigit():
-            await update.message.reply_text("Usage: /boundary remove <number from /boundaries>")
+            await update.message.reply_text("Usage: /boundary remove <number from /boundary>")
             return
         bl = boundaries.get(chat_id) or []
         idx = int(args[1]) - 1
@@ -10471,21 +10474,6 @@ async def boundary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bl.append(text)
         save_state()
     await update.message.reply_text(f"🚧 Boundary set: {text}")
-
-
-async def boundaries_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    bl = boundaries.get(chat_id) or []
-    if not bl:
-        await update.message.reply_text(
-            "No boundaries set. Use /boundary <text> to add one.\n\n"
-            "Example: /boundary Don't tease me about sleep\n"
-            "Example: /boundary Keep romantic tone low unless I initiate"
-        )
-        return
-    lines = [f"{i}. {b}" for i, b in enumerate(bl, 1)]
-    await _reply_chunked(update, "🚧 Active boundaries:\n\n" + "\n".join(lines)
-                         + "\n\nUse /boundary remove <number> to remove one.")
 
 
 # --- Vibe mode ---
@@ -10653,138 +10641,131 @@ async def reflect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Inside joke bank ---
-async def add_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text or "|" not in text:
-        await update.message.reply_text(
-            "Usage: /addjoke <phrase> | <meaning> [| tone]\n\n"
-            "Example: /addjoke the soup incident | failed at reheating soup | playful\n"
-            "Tone defaults to 'playful' if not specified."
-        )
-        return
-    parts = [p.strip() for p in text.split("|")]
-    phrase = parts[0]
-    meaning = parts[1] if len(parts) > 1 else ""
-    tone = parts[2] if len(parts) > 2 else "playful"
-    if not phrase or not meaning:
-        await update.message.reply_text("Need at least a phrase and a meaning.")
-        return
-    inside_jokes.append({
-        "id": _new_joke_id(),
-        "phrase": phrase[:80],
-        "meaning": meaning[:160],
-        "tone": tone[:30],
-        "last_used": 0,
-        "cooldown_days": 7,
-    })
-    save_jokes()
-    await update.message.reply_text(f'😂 Added joke: "{phrase}"')
-
-
-async def list_jokes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not inside_jokes:
-        await update.message.reply_text(
-            "No inside jokes yet. Use /addjoke to add one.\n\n"
-            "Format: /addjoke <phrase> | <meaning> [| tone]"
-        )
-        return
-    now = time.time()
-    lines = []
-    for j in inside_jokes:
-        last = j.get("last_used", 0)
-        cd = j.get("cooldown_days", 7)
-        ready_in = max(0, (last + cd * 86400 - now) / 3600)
-        status = "ready" if ready_in <= 0 else f"on cooldown ({round(ready_in)}h left)"
-        lines.append(f"{j['id']}. \"{j['phrase']}\" ({j['tone']}) — {j['meaning']} [{status}]")
-    await _reply_chunked(update, "😂 Inside jokes:\n\n" + "\n".join(lines)
-                         + "\n\nUse /deljoke <id> to remove one.")
-
-
-async def del_joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /deljoke <id from /jokes>")
-        return
-    jid = int(context.args[0])
-    target = next((j for j in inside_jokes if j["id"] == jid), None)
-    if not target:
-        await update.message.reply_text("No joke with that id.")
-        return
-    inside_jokes.remove(target)
-    save_jokes()
-    await update.message.reply_text(f'🗑️ Removed joke: "{target["phrase"]}"')
+async def jokes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    if sub == "add":
+        text = " ".join(args[1:]).strip()
+        if not text or "|" not in text:
+            await update.message.reply_text(
+                "Usage: /jokes add <phrase> | <meaning> [| tone]\n\n"
+                "Example: /jokes add the soup incident | failed at reheating soup | playful\n"
+                "Tone defaults to 'playful' if not specified."
+            )
+            return
+        parts = [p.strip() for p in text.split("|")]
+        phrase = parts[0]
+        meaning = parts[1] if len(parts) > 1 else ""
+        tone = parts[2] if len(parts) > 2 else "playful"
+        if not phrase or not meaning:
+            await update.message.reply_text("Need at least a phrase and a meaning.")
+            return
+        inside_jokes.append({
+            "id": _new_joke_id(),
+            "phrase": phrase[:80],
+            "meaning": meaning[:160],
+            "tone": tone[:30],
+            "last_used": 0,
+            "cooldown_days": 7,
+        })
+        save_jokes()
+        await update.message.reply_text(f'😂 Added joke: "{phrase}"')
+    elif sub == "del":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.message.reply_text("Usage: /jokes del <id from /jokes>")
+            return
+        jid = int(args[1])
+        target = next((j for j in inside_jokes if j["id"] == jid), None)
+        if not target:
+            await update.message.reply_text("No joke with that id.")
+            return
+        inside_jokes.remove(target)
+        save_jokes()
+        await update.message.reply_text(f'🗑️ Removed joke: "{target["phrase"]}"')
+    else:
+        if not inside_jokes:
+            await update.message.reply_text(
+                "No inside jokes yet. Use /jokes add to add one.\n\n"
+                "Format: /jokes add <phrase> | <meaning> [| tone]"
+            )
+            return
+        now = time.time()
+        lines = []
+        for j in inside_jokes:
+            last = j.get("last_used", 0)
+            cd = j.get("cooldown_days", 7)
+            ready_in = max(0, (last + cd * 86400 - now) / 3600)
+            status = "ready" if ready_in <= 0 else f"on cooldown ({round(ready_in)}h left)"
+            lines.append(f"{j['id']}. \"{j['phrase']}\" ({j['tone']}) — {j['meaning']} [{status}]")
+        await _reply_chunked(update, "😂 Inside jokes:\n\n" + "\n".join(lines)
+                             + "\n\nUse /jokes del <id> to remove one.")
 
 
 # --- Wardrobe ---
 async def wardrobe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    outfits = wardrobe.get("outfits") or []
-    current = wardrobe.get("current")
-    if not outfits and not current:
-        await update.message.reply_text(
-            "Wardrobe is empty.\n/addoutfit <description>  — add an outfit\n"
-            "/outfit <number or description>  — set what she's currently wearing"
-        )
-        return
-    lines = []
-    for i, o in enumerate(outfits, 1):
-        marker = " ← wearing now" if o == current else ""
-        lines.append(f"{i}. {o}{marker}")
-    if current and current not in outfits:
-        lines.insert(0, f"Currently wearing: {current} (not in wardrobe)")
-    await update.message.reply_text(
-        "👗 Wardrobe:\n\n" + "\n".join(lines)
-        + "\n\n/outfit <number or description> to change\n/deloutfit <number> to remove"
-    )
-
-
-async def add_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text:
-        await update.message.reply_text("Usage: /addoutfit <description>\nExample: /addoutfit oversized cream sweater")
-        return
-    outfits = wardrobe.setdefault("outfits", [])
-    if text not in outfits:
-        outfits.append(text)
-        save_wardrobe()
-    await update.message.reply_text(f"👗 Added to wardrobe: {text}")
-
-
-async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = " ".join(context.args).strip() if context.args else ""
-    if not text:
-        current = wardrobe.get("current") or "(none set)"
-        await update.message.reply_text(f"Currently wearing: {current}\nUsage: /outfit <number or description>")
-        return
-    # allow picking by number
-    outfits = wardrobe.get("outfits") or []
-    if text.isdigit():
-        idx = int(text) - 1
-        if not 0 <= idx < len(outfits):
-            await update.message.reply_text(f"No outfit #{text}. Run /wardrobe to see the list.")
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    if sub == "add":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            await update.message.reply_text("Usage: /wardrobe add <description>\nExample: /wardrobe add oversized cream sweater")
             return
-        text = outfits[idx]
-    wardrobe["current"] = text
-    # A hand-picked outfit is owner intent: never weather-filtered, and it holds for the
-    # rest of today by claiming today's rotation stamp. Rotation resumes tomorrow.
-    wardrobe["auto"] = False
-    wardrobe["picked"] = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
-    save_wardrobe()
-    await update.message.reply_text(f"👗 Now wearing: {text}")
-
-
-async def del_outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: /deloutfit <number from /wardrobe>")
-        return
-    outfits = wardrobe.get("outfits") or []
-    idx = int(context.args[0]) - 1
-    if not 0 <= idx < len(outfits):
-        await update.message.reply_text("No outfit with that number.")
-        return
-    removed = outfits.pop(idx)
-    if wardrobe.get("current") == removed:
-        wardrobe["current"] = None
-    save_wardrobe()
-    await update.message.reply_text(f"🗑️ Removed: {removed}")
+        outfits = wardrobe.setdefault("outfits", [])
+        if text not in outfits:
+            outfits.append(text)
+            save_wardrobe()
+        await update.message.reply_text(f"👗 Added to wardrobe: {text}")
+    elif sub == "set":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            current = wardrobe.get("current") or "(none set)"
+            await update.message.reply_text(f"Currently wearing: {current}\nUsage: /wardrobe set <number or description>")
+            return
+        outfits = wardrobe.get("outfits") or []
+        if text.isdigit():
+            idx = int(text) - 1
+            if not 0 <= idx < len(outfits):
+                await update.message.reply_text(f"No outfit #{text}. Run /wardrobe to see the list.")
+                return
+            text = outfits[idx]
+        wardrobe["current"] = text
+        wardrobe["auto"] = False
+        wardrobe["picked"] = (datetime.now(TZ) if TZ else datetime.now()).date().isoformat()
+        save_wardrobe()
+        await update.message.reply_text(f"👗 Now wearing: {text}")
+    elif sub == "del":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.message.reply_text("Usage: /wardrobe del <number from /wardrobe>")
+            return
+        outfits = wardrobe.get("outfits") or []
+        idx = int(args[1]) - 1
+        if not 0 <= idx < len(outfits):
+            await update.message.reply_text("No outfit with that number.")
+            return
+        removed = outfits.pop(idx)
+        if wardrobe.get("current") == removed:
+            wardrobe["current"] = None
+        save_wardrobe()
+        await update.message.reply_text(f"🗑️ Removed: {removed}")
+    else:
+        outfits = wardrobe.get("outfits") or []
+        current = wardrobe.get("current")
+        if not outfits and not current:
+            await update.message.reply_text(
+                "Wardrobe is empty.\n/wardrobe add <description>  -- add an outfit\n"
+                "/wardrobe set <number or description>  -- set what she's currently wearing"
+            )
+            return
+        lines = []
+        for i, o in enumerate(outfits, 1):
+            marker = " <- wearing now" if o == current else ""
+            lines.append(f"{i}. {o}{marker}")
+        if current and current not in outfits:
+            lines.insert(0, f"Currently wearing: {current} (not in wardrobe)")
+        await update.message.reply_text(
+            "👗 Wardrobe:\n\n" + "\n".join(lines)
+            + "\n\n/wardrobe set <number or description> to change\n/wardrobe del <number> to remove"
+        )
 
 
 # --- Nudge budget ---
@@ -11003,7 +10984,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd:jokes":
         if not inside_jokes:
-            await _send("No inside jokes yet. Use /addjoke.")
+            await _send("No inside jokes yet. Use /jokes add.")
         else:
             now = time.time()
             lines = []
@@ -11019,7 +11000,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         outfits = wardrobe.get("outfits") or []
         current = wardrobe.get("current")
         if not outfits and not current:
-            await _send("Wardrobe empty. Use /addoutfit.")
+            await _send("Wardrobe empty. Use /wardrobe add.")
         else:
             lines = [f"{i}. {o}" + (" ← now" if o == current else "")
                      for i, o in enumerate(outfits, 1)]
@@ -12284,83 +12265,83 @@ def schedule_reminder(job_queue, r: dict):
     job_queue.run_once(fire_reminder, when=when, data=r["id"])
 
 
-async def remindme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    due, text = parse_when(context.args or [])
-    if due is None or not text:
-        await update.message.reply_text(
-            "Usage: /remindme <when> <message>\n"
-            "When can be:\n"
-            "• 30m / 2h / 3d  (in N minutes/hours/days)\n"
-            "• 18:30          (today, or tomorrow if it's passed)\n"
-            "• tomorrow 9:00\n"
-            "• 2026-07-01 14:30\n\n"
-            "Example: /remindme 2h take the chicken out"
-        )
-        return
-    rid = _new_reminder_id()
-    r = {"id": rid, "chat_id": update.effective_chat.id, "due": due.isoformat(), "text": text}
-    reminders.append(r)
-    save_reminders()
-    schedule_reminder(context.job_queue, r)
-    await update.message.reply_text(f"⏰ Got it — I'll remind you {fmt_due_dt(due)}: {text}")
-
-
-async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
-                  key=lambda r: r["due"])
-    if not mine:
-        await update.message.reply_text("No reminders set. Add one with /remindme <when> <message>.")
-        return
-    lines = [f"{i}. {fmt_due_dt(datetime.fromisoformat(r['due']))} — {r['text']}  (id {r['id']})"
-             for i, r in enumerate(mine, 1)]
-    await update.message.reply_text("⏰ Your reminders:\n\n" + "\n".join(lines))
-
-
-async def delreminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /delreminder <number from /reminders, or id>")
-        return
-    arg = context.args[0]
-    mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
-                  key=lambda r: r["due"])
-    target = None
-    if arg.isdigit():
-        n = int(arg)
-        target = next((r for r in mine if r["id"] == n), None)  # by id
-        if target is None and 1 <= n <= len(mine):
-            target = mine[n - 1]  # by position
-    if target is None:
-        await update.message.reply_text("Couldn't find that reminder. Run /reminders to see them.")
-        return
-    reminders.remove(target)
-    save_reminders()
-    await update.message.reply_text(f"🗑️ Cancelled: {target['text']}")
-
-
-async def setreminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args or []
-    if len(args) < 2:
-        await update.message.reply_text(
-            "Usage: /setreminder HH:MM message\n"
-            "Example: /setreminder 08:30 take meds\n\n"
-            "Sets a reminder that fires every day at that time.\n"
-            "Use /reminders to list and /delreminder to cancel."
-        )
-        return
-    try:
-        h, m = [int(x) for x in args[0].split(":")]
-        assert 0 <= h < 24 and 0 <= m < 60
-    except Exception:
-        await update.message.reply_text("Time must be HH:MM (e.g. 08:30 or 14:00)")
-        return
-    text = " ".join(args[1:])
-    rid = _new_reminder_id()
-    r = {"id": rid, "chat_id": update.effective_chat.id,
-         "due": f"{h:02d}:{m:02d}", "text": text, "daily": True}
-    reminders.append(r)
-    save_reminders()
-    schedule_reminder(context.job_queue, r)
-    await update.message.reply_text(f"⏰ Got it — I'll remind you daily at {h:02d}:{m:02d}: {text}")
+    sub = args[0].lower() if args else ""
+    if sub == "daily":
+        if len(args) < 3:
+            await update.message.reply_text(
+                "Usage: /reminder daily HH:MM message\n"
+                "Example: /reminder daily 08:30 take meds\n\n"
+                "Sets a reminder that fires every day at that time."
+            )
+            return
+        try:
+            h, m = [int(x) for x in args[1].split(":")]
+            assert 0 <= h < 24 and 0 <= m < 60
+        except Exception:
+            await update.message.reply_text("Time must be HH:MM (e.g. 08:30 or 14:00)")
+            return
+        text = " ".join(args[2:])
+        rid = _new_reminder_id()
+        r = {"id": rid, "chat_id": update.effective_chat.id,
+             "due": f"{h:02d}:{m:02d}", "text": text, "daily": True}
+        reminders.append(r)
+        save_reminders()
+        schedule_reminder(context.job_queue, r)
+        await update.message.reply_text(f"⏰ Got it — I'll remind you daily at {h:02d}:{m:02d}: {text}")
+    elif sub == "del":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /reminder del <number from /reminder, or id>")
+            return
+        arg = args[1]
+        mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
+                      key=lambda r: r["due"])
+        target = None
+        if arg.isdigit():
+            n = int(arg)
+            target = next((r for r in mine if r["id"] == n), None)
+            if target is None and 1 <= n <= len(mine):
+                target = mine[n - 1]
+        if target is None:
+            await update.message.reply_text("Couldn't find that reminder. Run /reminder to see them.")
+            return
+        reminders.remove(target)
+        save_reminders()
+        await update.message.reply_text(f"🗑️ Cancelled: {target['text']}")
+    elif not sub:
+        mine = sorted([r for r in reminders if r["chat_id"] == update.effective_chat.id],
+                      key=lambda r: r["due"])
+        if not mine:
+            await update.message.reply_text(
+                "No reminders set. Add one with /reminder <when> <message>.\n\n"
+                "When can be: 30m, 2h, 3d, 18:30, tomorrow 9:00\n"
+                "/reminder daily HH:MM <msg> for a daily recurring reminder."
+            )
+            return
+        lines = [f"{i}. {fmt_due_dt(datetime.fromisoformat(r['due']))} — {r['text']}  (id {r['id']})"
+                 for i, r in enumerate(mine, 1)]
+        await update.message.reply_text("⏰ Your reminders:\n\n" + "\n".join(lines))
+    else:
+        due, text = parse_when(args)
+        if due is None or not text:
+            await update.message.reply_text(
+                "Usage: /reminder <when> <message>\n"
+                "When can be:\n"
+                "• 30m / 2h / 3d  (in N minutes/hours/days)\n"
+                "• 18:30          (today, or tomorrow if it's passed)\n"
+                "• tomorrow 9:00\n"
+                "• 2026-07-01 14:30\n\n"
+                "Example: /reminder 2h take the chicken out\n"
+                "/reminder daily HH:MM <msg> for daily recurring."
+            )
+            return
+        rid = _new_reminder_id()
+        r = {"id": rid, "chat_id": update.effective_chat.id, "due": due.isoformat(), "text": text}
+        reminders.append(r)
+        save_reminders()
+        schedule_reminder(context.job_queue, r)
+        await update.message.reply_text(f"⏰ Got it — I'll remind you {fmt_due_dt(due)}: {text}")
 
 
 def _transcribe_audio(data: bytes, filename: str, mime: str) -> str:
@@ -14281,58 +14262,58 @@ async def morning_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=owner, text=chunk)
 
 
-async def cron_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cron_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args = context.args or []
-    if len(args) < 3 or args[0].lower() not in ("daily", "every"):
+    sub = args[0].lower() if args else ""
+    if sub == "del":
+        if len(args) < 2 or not args[1].isdigit():
+            await update.message.reply_text("Usage: /cron del <id> (see /cron for ids)")
+            return
+        job_id = int(args[1])
+        job = next((j for j in cron_jobs if j["id"] == job_id and j["chat_id"] == chat_id), None)
+        if not job:
+            await update.message.reply_text("No scheduled task with that ID.")
+            return
+        cron_jobs.remove(job)
+        save_cron_jobs()
+        if context.job_queue is not None:
+            for jb in context.job_queue.get_jobs_by_name(f"cron_{job_id}"):
+                jb.schedule_removal()
+        await update.message.reply_text(f"🗑️ Removed #{job_id}.")
+    elif sub in ("daily", "every"):
+        if len(args) < 3:
+            await update.message.reply_text(
+                "Usage: /cron <schedule> <what to do>\n"
+                "Schedule is \"daily HH:MM\" or \"every Nh\"/\"every Nm\".\n\n"
+                "Example: /cron daily 08:00 check the news and tell me something interesting"
+            )
+            return
+        schedule = parse_cron_schedule(" ".join(args[:2]))
+        instruction = " ".join(args[2:]).strip()
+        if not schedule or not instruction:
+            await update.message.reply_text("Couldn't parse that. Try: /cron daily 08:00 <what to do>")
+            return
+        job = {"id": _new_cron_id(), "chat_id": chat_id, "schedule": schedule, "instruction": instruction}
+        cron_jobs.append(job)
+        save_cron_jobs()
+        if context.job_queue is not None:
+            schedule_cron_job(context.job_queue, job)
         await update.message.reply_text(
-            "Usage: /cron <schedule> <what to do>\n"
-            "Schedule is \"daily HH:MM\" or \"every Nh\"/\"every Nm\".\n\n"
-            "Example: /cron daily 08:00 check the news and tell me something interesting"
+            f"⏰ Scheduled (#{job['id']}, {describe_cron_schedule(schedule)}): {instruction}"
         )
-        return
-    schedule = parse_cron_schedule(" ".join(args[:2]))
-    instruction = " ".join(args[2:]).strip()
-    if not schedule or not instruction:
-        await update.message.reply_text("Couldn't parse that. Try: /cron daily 08:00 <what to do>")
-        return
-    job = {"id": _new_cron_id(), "chat_id": chat_id, "schedule": schedule, "instruction": instruction}
-    cron_jobs.append(job)
-    save_cron_jobs()
-    if context.job_queue is not None:
-        schedule_cron_job(context.job_queue, job)
-    await update.message.reply_text(
-        f"⏰ Scheduled (#{job['id']}, {describe_cron_schedule(schedule)}): {instruction}"
-    )
-
-
-async def cron_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    jobs = [j for j in cron_jobs if j["chat_id"] == chat_id]
-    if not jobs:
-        await update.message.reply_text("No scheduled tasks. Add one with /cron.")
-        return
-    lines = [f"#{j['id']} ({describe_cron_schedule(j['schedule'])}): {j['instruction']}" for j in jobs]
-    await update.message.reply_text("⏰ Scheduled tasks:\n" + "\n".join(lines))
-
-
-async def cron_del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args = context.args or []
-    if not args or not args[0].isdigit():
-        await update.message.reply_text("Usage: /crondel <id> (see /crons for ids)")
-        return
-    job_id = int(args[0])
-    job = next((j for j in cron_jobs if j["id"] == job_id and j["chat_id"] == chat_id), None)
-    if not job:
-        await update.message.reply_text("No scheduled task with that ID.")
-        return
-    cron_jobs.remove(job)
-    save_cron_jobs()
-    if context.job_queue is not None:
-        for jb in context.job_queue.get_jobs_by_name(f"cron_{job_id}"):
-            jb.schedule_removal()
-    await update.message.reply_text(f"🗑️ Removed #{job_id}.")
+    else:
+        jobs = [j for j in cron_jobs if j["chat_id"] == chat_id]
+        if not jobs:
+            await update.message.reply_text(
+                "No scheduled tasks.\n\n"
+                "Usage: /cron daily HH:MM <instruction>\n"
+                "       /cron every Nh <instruction>"
+            )
+            return
+        lines = [f"#{j['id']} ({describe_cron_schedule(j['schedule'])}): {j['instruction']}" for j in jobs]
+        await update.message.reply_text("⏰ Scheduled tasks:\n" + "\n".join(lines)
+                                        + "\n\nUse /cron del <id> to remove one.")
 
 
 def schedule_next_heartbeat(job_queue):
@@ -18575,11 +18556,8 @@ _BASE_COMMANDS = [
     BotCommand("milestones", "View relationship milestones"),
     BotCommand("mixtape", "Highlight reel: milestones as voice + image + text"),
     BotCommand("news", "See what's been happening in her life"),
-    BotCommand("pin", "Pin something I always carry"),
-    BotCommand("pinned", "List pinned memories"),
-    BotCommand("unpin", "Remove a pinned memory"),
-    BotCommand("boundary", "Add a soft boundary note"),
-    BotCommand("boundaries", "List boundaries"),
+    BotCommand("pin", "Pinned memories (add/del/list)"),
+    BotCommand("boundary", "Boundaries (add/remove/list)"),
     BotCommand("life", "View or replace the character's current life arc"),
     BotCommand("people", "View or replace the people in her life"),
     BotCommand("projects", "View or replace her ongoing projects"),
@@ -18602,20 +18580,10 @@ _BASE_COMMANDS = [
     BotCommand("selfimage", "View current self-image"),
     BotCommand("reflect", "Trigger nightly reflection now"),
     BotCommand("meme", "Send a meme (optional hint)"),
-    BotCommand("addjoke", "Add an inside joke"),
-    BotCommand("jokes", "List inside jokes"),
-    BotCommand("deljoke", "Remove a joke"),
-    BotCommand("wardrobe", "List outfits"),
-    BotCommand("addoutfit", "Add an outfit"),
-    BotCommand("outfit", "Set current outfit"),
-    BotCommand("deloutfit", "Remove an outfit"),
-    BotCommand("remindme", "One-off reminder (30m, 2h, 18:30…)"),
-    BotCommand("setreminder", "Daily recurring reminder"),
-    BotCommand("reminders", "List reminders"),
-    BotCommand("delreminder", "Remove a reminder"),
-    BotCommand("cron", "Add a recurring scheduled task"),
-    BotCommand("crons", "List recurring tasks"),
-    BotCommand("crondel", "Remove a recurring task"),
+    BotCommand("jokes", "Inside jokes (add/del/list)"),
+    BotCommand("wardrobe", "Outfits (add/set/del/list)"),
+    BotCommand("reminder", "Reminders (set/daily/del/list)"),
+    BotCommand("cron", "Recurring tasks (add/del/list)"),
     BotCommand("nudges", "View today's proactive message budget"),
     BotCommand("quiet", "Pause proactive messages for X hours (/quiet 3, /quiet off)"),
     BotCommand("quietwin", "Manage recurring quiet windows (add/list/del)"),
@@ -18780,6 +18748,61 @@ def _run_config_check() -> bool:
     return failed == 0
 
 
+# --- Legacy command aliases (inject subcommand prefix so the unified handler routes correctly) ---
+
+async def _addjoke_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["add"] + list(context.args or [])
+    await jokes_cmd(update, context)
+
+async def _deljoke_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["del"] + list(context.args or [])
+    await jokes_cmd(update, context)
+
+async def _addoutfit_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["add"] + list(context.args or [])
+    await wardrobe_cmd(update, context)
+
+async def _outfit_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["set"] + list(context.args or [])
+    await wardrobe_cmd(update, context)
+
+async def _deloutfit_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["del"] + list(context.args or [])
+    await wardrobe_cmd(update, context)
+
+async def _pinned_list_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = []
+    await pin_cmd(update, context)
+
+async def _unpin_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["del"] + list(context.args or [])
+    await pin_cmd(update, context)
+
+async def _boundaries_list_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = []
+    await boundary_cmd(update, context)
+
+async def _setreminder_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["daily"] + list(context.args or [])
+    await reminder_cmd(update, context)
+
+async def _reminders_list_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = []
+    await reminder_cmd(update, context)
+
+async def _delreminder_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["del"] + list(context.args or [])
+    await reminder_cmd(update, context)
+
+async def _crons_list_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = []
+    await cron_cmd(update, context)
+
+async def _crondel_compat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.args = ["del"] + list(context.args or [])
+    await cron_cmd(update, context)
+
+
 def main():
     if "--check-config" in sys.argv:
         # Preflight only — validate and exit before any Telegram/provider setup.
@@ -18875,30 +18898,31 @@ def main():
     app.add_handler(CommandHandler("transition", transition_cmd))
     app.add_handler(CommandHandler("notes", notes_cmd))
     app.add_handler(CommandHandler("bottle", bottle_cmd))
-    app.add_handler(CommandHandler("remindme", remindme))
-    app.add_handler(CommandHandler("setreminder", setreminder_cmd))
-    app.add_handler(CommandHandler("reminders", list_reminders))
-    app.add_handler(CommandHandler("delreminder", delreminder))
-    app.add_handler(CommandHandler("cron", cron_add))
-    app.add_handler(CommandHandler("crons", cron_list_cmd))
-    app.add_handler(CommandHandler("crondel", cron_del_cmd))
+    app.add_handler(CommandHandler("reminder", reminder_cmd))
+    app.add_handler(CommandHandler("remindme", reminder_cmd))
+    app.add_handler(CommandHandler("setreminder", _setreminder_compat))
+    app.add_handler(CommandHandler("reminders", _reminders_list_compat))
+    app.add_handler(CommandHandler("delreminder", _delreminder_compat))
+    app.add_handler(CommandHandler("cron", cron_cmd))
+    app.add_handler(CommandHandler("crons", _crons_list_compat))
+    app.add_handler(CommandHandler("crondel", _crondel_compat))
     app.add_handler(CommandHandler("pin", pin_cmd))
-    app.add_handler(CommandHandler("pinned", pinned_cmd))
-    app.add_handler(CommandHandler("unpin", unpin_cmd))
+    app.add_handler(CommandHandler("pinned", _pinned_list_compat))
+    app.add_handler(CommandHandler("unpin", _unpin_compat))
     app.add_handler(CommandHandler("boundary", boundary_cmd))
-    app.add_handler(CommandHandler("boundaries", boundaries_cmd))
+    app.add_handler(CommandHandler("boundaries", _boundaries_list_compat))
     app.add_handler(CommandHandler("mood", mood_cmd))
     app.add_handler(CommandHandler("vibe", vibe_cmd))
     app.add_handler(CommandHandler("vent", vent_cmd))
     app.add_handler(CommandHandler("energy", energy_cmd))
     app.add_handler(CommandHandler("reflect", reflect_cmd))
-    app.add_handler(CommandHandler("addjoke", add_joke_cmd))
-    app.add_handler(CommandHandler("jokes", list_jokes_cmd))
-    app.add_handler(CommandHandler("deljoke", del_joke_cmd))
+    app.add_handler(CommandHandler("jokes", jokes_cmd))
+    app.add_handler(CommandHandler("addjoke", _addjoke_compat))
+    app.add_handler(CommandHandler("deljoke", _deljoke_compat))
     app.add_handler(CommandHandler("wardrobe", wardrobe_cmd))
-    app.add_handler(CommandHandler("addoutfit", add_outfit_cmd))
-    app.add_handler(CommandHandler("outfit", outfit_cmd))
-    app.add_handler(CommandHandler("deloutfit", del_outfit_cmd))
+    app.add_handler(CommandHandler("addoutfit", _addoutfit_compat))
+    app.add_handler(CommandHandler("outfit", _outfit_compat))
+    app.add_handler(CommandHandler("deloutfit", _deloutfit_compat))
     app.add_handler(CommandHandler("nudges", nudges_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))

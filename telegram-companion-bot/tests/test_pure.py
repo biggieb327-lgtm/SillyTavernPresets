@@ -5873,6 +5873,10 @@ class TestCommandMenuMirrorsHandlers:
         "errors", "restart", "update", "fleet", "diag",
         "chatid", "dupefacts", "exportmemory", "sourcemem",
         "editmem", "newsnow",
+        "addjoke", "deljoke", "addoutfit", "outfit", "deloutfit",
+        "pinned", "unpin", "boundaries",
+        "remindme", "setreminder", "reminders", "delreminder",
+        "crons", "crondel",
     }
 
     def test_every_registered_command_is_in_menu_or_hidden(self):
@@ -14102,3 +14106,159 @@ class TestRecastPipeline:
         assert bot._RECAST_TAG_RE.sub("", "text [gif: funny cat] end") == "text  end"
         assert bot._RECAST_TAG_RE.sub("", "text [mood: happy] end") == "text  end"
         assert bot._RECAST_TAG_RE.sub("", "clean prose with no tags") == "clean prose with no tags"
+
+
+class TestCrudConsolidation:
+
+    UID = 7001
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+        self._jokes = list(bot.inside_jokes)
+        self._wardrobe = dict(bot.wardrobe)
+        self._pinned = dict(bot.pinned)
+        self._boundaries = dict(bot.boundaries)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+        bot.inside_jokes[:] = self._jokes
+        bot.wardrobe.clear()
+        bot.wardrobe.update(self._wardrobe)
+        bot.pinned.clear()
+        bot.pinned.update(self._pinned)
+        bot.boundaries.clear()
+        bot.boundaries.update(self._boundaries)
+
+    def test_jokes_list_empty(self):
+        bot.inside_jokes.clear()
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.jokes_cmd(up, _cmd_ctx()))
+        assert msg.sent and "no inside jokes" in msg.sent[0].lower()
+
+    def test_jokes_add_and_list(self):
+        bot.inside_jokes.clear()
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.jokes_cmd(up, _cmd_ctx("add", "soup", "|", "burned", "it", "|", "playful")))
+        assert msg.sent and "added" in msg.sent[0].lower()
+        assert len(bot.inside_jokes) == 1
+
+    def test_jokes_del(self):
+        bot.inside_jokes.clear()
+        bot.inside_jokes.append({"id": 99, "phrase": "test", "meaning": "m", "tone": "playful",
+                                 "last_used": 0, "cooldown_days": 7})
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.jokes_cmd(up, _cmd_ctx("del", "99")))
+        assert msg.sent and "removed" in msg.sent[0].lower()
+        assert len(bot.inside_jokes) == 0
+
+    def test_wardrobe_list_empty(self):
+        bot.wardrobe["outfits"] = []
+        bot.wardrobe["current"] = None
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.wardrobe_cmd(up, _cmd_ctx()))
+        assert msg.sent and "empty" in msg.sent[0].lower()
+
+    def test_wardrobe_add(self):
+        bot.wardrobe["outfits"] = []
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.wardrobe_cmd(up, _cmd_ctx("add", "red", "dress")))
+        assert msg.sent and "added" in msg.sent[0].lower()
+        assert "red dress" in bot.wardrobe["outfits"]
+
+    def test_wardrobe_set(self):
+        bot.wardrobe["outfits"] = ["blue jeans"]
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.wardrobe_cmd(up, _cmd_ctx("set", "1")))
+        assert msg.sent and "wearing" in msg.sent[0].lower()
+        assert bot.wardrobe["current"] == "blue jeans"
+
+    def test_wardrobe_del(self):
+        bot.wardrobe["outfits"] = ["blue jeans"]
+        bot.wardrobe["current"] = None
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot.wardrobe_cmd(up, _cmd_ctx("del", "1")))
+        assert msg.sent and "removed" in msg.sent[0].lower()
+        assert bot.wardrobe["outfits"] == []
+
+    def test_pin_add_and_list(self):
+        bot.pinned.clear()
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.pin_cmd(up, _cmd_ctx("cats", "are", "great")))
+        assert msg.sent and "pinned" in msg.sent[0].lower()
+        up2, msg2 = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.pin_cmd(up2, _cmd_ctx()))
+        assert msg2.sent and "cats are great" in msg2.sent[0]
+
+    def test_pin_del(self):
+        bot.pinned[9001] = ["test fact"]
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.pin_cmd(up, _cmd_ctx("del", "1")))
+        assert msg.sent and "unpinned" in msg.sent[0].lower()
+        assert bot.pinned[9001] == []
+
+    def test_boundary_list_empty(self):
+        bot.boundaries.clear()
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.boundary_cmd(up, _cmd_ctx()))
+        assert msg.sent and "no boundaries" in msg.sent[0].lower()
+
+    def test_boundary_add_and_list(self):
+        bot.boundaries.clear()
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.boundary_cmd(up, _cmd_ctx("no", "teasing")))
+        assert msg.sent and "boundary set" in msg.sent[0].lower()
+        up2, msg2 = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.boundary_cmd(up2, _cmd_ctx()))
+        assert msg2.sent and "no teasing" in msg2.sent[0]
+
+    def test_cron_cmd_list_empty(self):
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.cron_cmd(up, _cmd_ctx()))
+        assert msg.sent and "no scheduled" in msg.sent[0].lower()
+
+    def test_reminder_cmd_list_empty(self):
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot.reminder_cmd(up, _cmd_ctx()))
+        assert msg.sent and "no reminders" in msg.sent[0].lower()
+
+    def test_addjoke_compat_wrapper(self):
+        bot.inside_jokes.clear()
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot._addjoke_compat(up, _cmd_ctx("soup", "|", "burned", "it")))
+        assert msg.sent and "added" in msg.sent[0].lower()
+
+    def test_pinned_list_compat_wrapper(self):
+        bot.pinned[9001] = ["test fact"]
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot._pinned_list_compat(up, _cmd_ctx()))
+        assert msg.sent and "test fact" in msg.sent[0]
+
+    def test_unpin_compat_wrapper(self):
+        bot.pinned[9001] = ["test fact"]
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot._unpin_compat(up, _cmd_ctx("1")))
+        assert msg.sent and "unpinned" in msg.sent[0].lower()
+
+    def test_outfit_compat_wrapper(self):
+        bot.wardrobe["outfits"] = ["blue jeans"]
+        up, msg = _cmd_update(uid=self.UID)
+        asyncio.run(bot._outfit_compat(up, _cmd_ctx("1")))
+        assert msg.sent and "wearing" in msg.sent[0].lower()
+
+    def test_boundaries_list_compat_wrapper(self):
+        bot.boundaries[9001] = ["no yelling"]
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot._boundaries_list_compat(up, _cmd_ctx()))
+        assert msg.sent and "no yelling" in msg.sent[0]
+
+    def test_crons_list_compat_wrapper(self):
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot._crons_list_compat(up, _cmd_ctx()))
+        assert msg.sent and "no scheduled" in msg.sent[0].lower()
+
+    def test_reminders_list_compat_wrapper(self):
+        up, msg = _cmd_update(uid=self.UID, chat_id=9001)
+        asyncio.run(bot._reminders_list_compat(up, _cmd_ctx()))
+        assert msg.sent and "no reminders" in msg.sent[0].lower()

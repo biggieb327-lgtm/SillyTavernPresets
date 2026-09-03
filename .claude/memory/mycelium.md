@@ -126,6 +126,21 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-03 | from: claude/recast-post-processing-fleet-t2bnod | to: bot.py command work | status: open
+
+Telegram's `set_my_commands` API hard-rejects more than 100 commands with
+`BadRequest: Bot_commands_too_much` — the bot crashes on startup, no fallback.
+[observed] 5/7 instances crashed on the v2026-09-03.4 deploy (nora, emily, priya,
+jules, marcus); bonnie and cass survived, likely because they lack `PAYMENTS_ENABLED=1`.
+
+Current count after v2026-09-03.6 prune: 75 base, 95 all-features-on. The cap in
+`_build_command_menu` and try/except in `_register_commands` prevent future crashes,
+but any session adding a new `/command` should check the math: 5 slots remain before
+the cap truncates again. CRUD consolidation (jokes, wardrobe, pins, reminders, crons
+into single commands with subargs) is the next structural fix if slots run out.
+
+---
+
 ### 2026-09-01 | from: claude/arxiv-2608-27454-build-b1epe6 | to: `.claude/memory/` | status: done
 **[done 2026-09-01]** Owner approved the graft. Shipped `.claude/memory/skill-impact.md`
 (charter + the reasoning-leak arc seeded as 4 rows), surfaced by `session-audit.sh` (pending
