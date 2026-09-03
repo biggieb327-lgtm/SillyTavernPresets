@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.7"
+BOT_VERSION = "2026-09-03.8"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4140,6 +4140,7 @@ vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
 unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
 engagement_trend = {}  # chat_id -> [{"d": "YYYY-MM-DD", "um": int, "uc": int, "bm": int}] (28-day rolling)
+_ENGAGEMENT_DAYS = 28
 _engagement_today = {}  # chat_id -> {"um": int, "uc": int, "bm": int}
 predrafted_hooks = {}  # chat_id -> [str]; nightly-prepared proactive hooks, consumed at send time (ROADMAP 6.2)
 nudge_budget = {}   # chat_id -> {"limit": int, "sent_today": int, "reset_date": str}
@@ -9149,9 +9150,6 @@ def _tick_engagement(chat_id: int, role: str, chars: int):
         day["uc"] += chars
     elif role == "assistant":
         day["bm"] += 1
-
-
-_ENGAGEMENT_DAYS = 28
 
 
 def _snapshot_engagement(chat_id: int):

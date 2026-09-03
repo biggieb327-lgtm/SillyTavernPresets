@@ -7,6 +7,16 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.8 — Fix startup crash: _ENGAGEMENT_DAYS forward reference
+
+**Root cause: `_ENGAGEMENT_DAYS` was defined at line 9154 but used in `load_state` at
+line 4247, which runs at module load (line 4492) — before the definition was reached.**
+Every instance with saved `engagement_trend` data in `state.json` crashed on startup with
+`NameError`. Emily confirmed in a restart loop (62+ cycles). Moved the constant to its
+declaration site near `engagement_trend`.
+
+---
+
 ## v2026-09-03.7 — CRUD consolidation: 18 commands merged into 6
 
 **Root cause: after v2026-09-03.6 pruned 11 admin commands from the menu, the base count
