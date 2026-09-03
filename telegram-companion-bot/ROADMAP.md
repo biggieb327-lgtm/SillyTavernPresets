@@ -1003,6 +1003,11 @@ Track 3 (with a real spec) only once the owner picks it.
   conservative-parse discipline 3.6 used for schedule blocks.
 
 ### 5.3 Standing life-project with decay
+- **5.3-A shipped (v2026-09-03.3).** One standing project per instance, persisted in
+  `project.json` with momentum float (0.0-1.0) and stage (thriving/active/stalling/abandoned).
+  Engagement detection via `post_reply_analysis` (no new LLM calls), nightly decay in
+  `_rotate_day_context`, stage-aware context injection in `assemble_messages`. `/project`
+  command to set/view/clear. Kill switch `LIFE_PROJECT` (default OFF — Track 5 pilot).
 - **Idea:** a slow-arc thread in the character's own life (learning guitar, training for
   a race) that persists and drifts on its own — decaying or changing direction if
   neglected, growing if the user asks about it. Continuous state, not a discrete event.
@@ -1564,7 +1569,7 @@ none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 | 3.8 Phase 2 — pre-reply thinking call (S/M) | Default-off, A/B-gated, first #3 loosening. **Standing rec: measure whether the free `STEP_INTENT` seed + preset work already delivered the target before building.** |
 | ~~6.1 step 2 — `assemble_messages` prefix reorder~~ | **Closed 2026-09-01** — the live cache read returned nothing; caching is not active for this fleet's model routes, so the reorder has nothing to preserve. |
 | 6.3 reply advisor (L) | **Owner-gated:** needs a new `bot-code-invariants` #3 carve-out written into that file and owner-approved before any code. Largest blast radius in the roadmap. |
-| 5.3-A standing life-project with decay (M/L) | The biggest new-state primitive in 5-A; continuous, user-attention-responsive state — scope on its own. |
+| ~~5.3-A standing life-project with decay (M/L)~~ | **Shipped v2026-09-03.3.** One project per instance, momentum float + nightly decay + stage-aware context injection. Default OFF (Track 5 pilot, `LIFE_PROJECT`). |
 | 5.3-B 🧪 response refinement on recurring topics (M) | A personality-shaping feedback loop — same caution class as the rejected self-evolution ideas; highest-risk 🧪. |
 | ~~5.7-B 🧪 inward drift detection (S)~~ | **Closed 2026-09-03** — duplication check done; existing machinery covers the valuable parts, uncovered gap (phrase repetition) too narrow to build speculatively. |
 | 5.8-B 🧪 banked variance (unsized) | In direct tension with the multi-release voiceprint-consistency investment (3.13); an owner call on whether to resolve that tension at all, not a build item. |
