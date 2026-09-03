@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.1"
+BOT_VERSION = "2026-09-03.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4070,6 +4070,7 @@ quiet_windows = {}  # chat_id -> [{"dow": int (0=Mon), "start": int (minutes), "
 away = {}           # chat_id -> {"reason": str, "since": float, "origin": str, "expires": float|None}
 _just_returned = {} # chat_id -> {"reason": str} — ephemeral, cleared after one reply
 next_intent = {}    # chat_id -> {"text": str, "ts": float} — stepped-thinking frame-of-mind seed for the next reply; ephemeral, not persisted, overwritten each exchange
+_intent_stats = {"generated": 0, "consumed": 0, "expired": 0}
 voice_reply = {}    # chat_id -> bool  (TTS replies enabled)
 inside_jokes = []   # [{"id":int,"phrase":str,"meaning":str,"tone":str,"last_used":float,"cooldown_days":int}]
 wardrobe = {"outfits": [], "current": None}  # loaded from wardrobe.json
@@ -5942,6 +5943,7 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                 _MAIN_LOOP.call_soon_threadsafe(next_intent.__setitem__, chat_id, value)
             else:
                 next_intent[chat_id] = value
+            _intent_stats["generated"] += 1
             print(f"[intent] {intent_txt}")
 
 
@@ -6654,12 +6656,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     # Stepped-thinking seed: the frame of mind the last analysis pass read for her,
     # placed right after mood so it's salient for this reply. Ephemeral + freshness-gated.
     if STEP_INTENT and not constancy:
-        seed = _step_intent_seed(next_intent.get(chat_id) or {}, time.time(), _STEP_INTENT_TTL)
+        raw_intent = next_intent.get(chat_id) or {}
+        seed = _step_intent_seed(raw_intent, time.time(), _STEP_INTENT_TTL)
         if seed:
+            _intent_stats["consumed"] += 1
             messages.append({"role": "system", "content": (
                 f"[Going into this reply, {NAME}'s frame of mind: {seed}. Let it shape "
                 f"her tone and what she reaches for — don't state it outright.]"
             )})
+        elif raw_intent.get("text"):
+            _intent_stats["expired"] += 1
 
     # ROADMAP 3.7: social battery + minimal-reply license. Schedule is read once here
     # and reused by the schedule section below.
@@ -17427,6 +17433,7 @@ def gather_audit_data() -> dict:
         "preset_layers": [(n, _tokens(t)) for n, t in PRESET_LAYERS],
         "preset_override": list(preset_override),
         "token_calibration": _token_confidence(),
+        "intent_stats": dict(_intent_stats),
     }
 
 
@@ -17561,6 +17568,10 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         eline = _engagement_trend_line(owner)
         if eline:
             lines.append(eline)
+    ist = d.get("intent_stats") or {}
+    if ist.get("generated"):
+        lines.append(f"Intent seed: {ist['generated']} generated, "
+                     f"{ist['consumed']} consumed, {ist['expired']} expired")
     cw = d.get("config_warnings", [])
     if cw:
         lines.append(f"Config warnings: {len(cw)}")

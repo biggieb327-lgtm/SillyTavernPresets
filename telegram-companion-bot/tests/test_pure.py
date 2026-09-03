@@ -1109,6 +1109,16 @@ class TestGatherAuditData:
         assert "llm_stats" in d
         assert "calls" in d["llm_stats"]
 
+    def test_includes_intent_stats(self):
+        d = bot.gather_audit_data()
+        assert "intent_stats" in d
+        for k in ("generated", "consumed", "expired"):
+            assert k in d["intent_stats"]
+
+    def test_intent_stats_rendered_in_audit(self):
+        import inspect
+        assert "intent_stats" in inspect.getsource(bot.audit_cmd)
+
 
 # ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
 
@@ -3486,6 +3496,13 @@ class TestStepIntentSeed:
     def test_strips_whitespace(self):
         now = 1000.0
         assert bot._step_intent_seed({"text": "  leaning in  ", "ts": now}, now, 21600) == "leaning in"
+
+    def test_intent_stats_dict_exists(self):
+        s = bot._intent_stats
+        assert isinstance(s, dict)
+        for k in ("generated", "consumed", "expired"):
+            assert k in s
+            assert isinstance(s[k], int)
 
 
 # ── Note confidence gating (anti-hallucination, v2026-07-23.2) ──────────────

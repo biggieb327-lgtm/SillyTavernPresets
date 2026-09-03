@@ -7,6 +7,21 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.2 — STEP_INTENT utilization counters (ROADMAP 3.8 measurement)
+
+**Root cause: no visibility into whether the free STEP_INTENT mechanism is reaching
+replies.** Phase 1 (v2026-07-23.1) generates a frame-of-mind seed after each exchange and
+injects it into the next reply if fresh enough (6h TTL). But nothing tracked whether
+intents were being consumed before expiring, so the ROADMAP 3.8 Phase 2 measurement
+question ("did the free mechanism already deliver the proactivity target?") had no data.
+
+**Fix:** three since-restart counters (`_intent_stats`): generated (post_reply_analysis
+produced an intent), consumed (the seed made it into a reply before TTL expiry), expired
+(intent existed but was too old). Exposed on `/audit` as one line. No new LLM calls, no
+persistence, no behavior change — pure instrumentation.
+
+---
+
 ## v2026-09-03.1 — /mixtape highlight reel (ROADMAP 5.10-B)
 
 **Root cause: milestones, TTS, and selfie generation existed but had no composed
