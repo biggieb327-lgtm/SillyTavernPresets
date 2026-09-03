@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.3 — Standing life-project with momentum decay (ROADMAP 5.3-A)
+
+**Root cause: characters have no persistent relationship to a user-facing project that
+responds to attention.** Projects in `projects.txt` are static text injected verbatim —
+the character talks about them the same way whether the user mentioned them yesterday or
+two weeks ago. Life arcs evolve weekly but on their own clock, not in response to user
+engagement. There was no mechanism for a project's perceived importance to rise when the
+user engages with it and fade when they stop.
+
+**Fix:** one standing life-project per instance, persisted in `project.json` with a
+momentum float (0.0-1.0) and stage label (thriving/active/stalling/abandoned). Momentum
+rises (+0.15) when post_reply_analysis detects the user mentioned the project (rides the
+existing combined LLM call, no new calls). Momentum decays nightly in
+`_rotate_day_context` by `PROJECT_DECAY_RATE` (default 0.08, so ~12 silent days to
+abandoned). Stage thresholds: >=0.70 thriving, >=0.40 active, >=0.15 stalling, <0.15
+abandoned. Context injection in `assemble_messages` frames the project with stage-aware
+language so the character talks about a thriving project with energy and a stalling one
+with avoidance. `/project` command to set/view/clear. Kill switch: `LIFE_PROJECT`
+(default OFF — Track 5 experimental pilot). Shown on `/audit` when active. 18 tests
+covering I/O, decay math, boost math, stage transitions, command handler, and wiring.
+
+---
+
 ## v2026-09-03.2 — STEP_INTENT utilization counters (ROADMAP 3.8 measurement)
 
 **Root cause: no visibility into whether the free STEP_INTENT mechanism is reaching

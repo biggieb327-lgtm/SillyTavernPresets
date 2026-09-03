@@ -8322,6 +8322,7 @@ class TestEveryBooleanFlagDefault:
         "INNER_VOICE_ENABLED": False,
         "JOKE_CANDIDATES": False,
         "LIFE_GROUNDING": True,
+        "LIFE_PROJECT": False,
         "LIFE_ROTATE": True,
         "LIFE_SIM_ENABLED": True,
         "LINK_READING": True,
@@ -8412,6 +8413,7 @@ class TestEveryBooleanFlagDefault:
                        "FEEDBACK_REACTIONS", "FOLLOWUP_ENABLED", "FOOD_SUGGESTIONS",
                        "GROUP_COMPING", "GROUP_MODE", "GROUP_TRADING_FOURS",
                        "INNER_VOICE_ENABLED", "JOKE_CANDIDATES",
+                       "LIFE_PROJECT",
                        # Off on NAMED instances only (`not IS_NAMED_INSTANCE`), which
                        # the fixture is. Added v2026-08-12.2 when it stopped being
                        # hand-rolled; its default was pinned by nothing before that.
@@ -13840,3 +13842,137 @@ class TestMixtapeCmd:
             bot.selfie_ready = orig_selfie_ready
         text_msgs = [s for s in sent if s[0] == "text"]
         assert len(text_msgs) >= 3
+
+
+class TestLifeProject:
+    def setup_method(self):
+        import tempfile
+        from pathlib import Path
+        self._orig_file = bot.PROJECT_FILE
+        self._orig_enabled = bot.LIFE_PROJECT
+        self._orig_rate = bot.PROJECT_DECAY_RATE
+        self._tmpdir = tempfile.mkdtemp()
+        bot.PROJECT_FILE = Path(self._tmpdir) / "project.json"
+        bot.LIFE_PROJECT = True
+        bot.PROJECT_DECAY_RATE = 0.08
+
+    def teardown_method(self):
+        import shutil
+        bot.PROJECT_FILE = self._orig_file
+        bot.LIFE_PROJECT = self._orig_enabled
+        bot.PROJECT_DECAY_RATE = self._orig_rate
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_read_empty(self):
+        assert bot._read_project() is None
+
+    def test_save_and_read(self):
+        data = {"name": "painting", "momentum": 0.8, "stage": "thriving",
+                "last_engaged": time.time()}
+        bot._save_project(data)
+        loaded = bot._read_project()
+        assert loaded["name"] == "painting"
+        assert loaded["momentum"] == 0.8
+
+    def test_save_none_removes_file(self):
+        bot._save_project({"name": "test", "momentum": 1.0, "stage": "thriving"})
+        assert bot.PROJECT_FILE.exists()
+        bot._save_project(None)
+        assert not bot.PROJECT_FILE.exists()
+
+    def test_project_stage_thresholds(self):
+        assert bot._project_stage(1.0) == "thriving"
+        assert bot._project_stage(0.7) == "thriving"
+        assert bot._project_stage(0.5) == "active"
+        assert bot._project_stage(0.4) == "active"
+        assert bot._project_stage(0.2) == "stalling"
+        assert bot._project_stage(0.15) == "stalling"
+        assert bot._project_stage(0.1) == "abandoned"
+        assert bot._project_stage(0.0) == "abandoned"
+
+    def test_decay_reduces_momentum(self):
+        data = {"name": "painting", "momentum": 0.8, "stage": "thriving"}
+        result = bot._decay_project(data, 0.08)
+        assert result["momentum"] == pytest.approx(0.72, abs=0.001)
+        assert result["stage"] == "thriving"
+
+    def test_decay_floors_at_zero(self):
+        data = {"name": "painting", "momentum": 0.03, "stage": "abandoned"}
+        result = bot._decay_project(data, 0.08)
+        assert result["momentum"] == 0.0
+
+    def test_decay_triggers_stage_change(self):
+        data = {"name": "painting", "momentum": 0.42, "stage": "active"}
+        result = bot._decay_project(data, 0.08)
+        assert result["stage"] == "stalling"
+        assert "stage_changed" in result
+
+    def test_boost_raises_momentum(self):
+        data = {"name": "painting", "momentum": 0.5, "stage": "active"}
+        result = bot._boost_project(data)
+        assert result["momentum"] == pytest.approx(0.65, abs=0.001)
+        assert "last_engaged" in result
+
+    def test_boost_caps_at_one(self):
+        data = {"name": "painting", "momentum": 0.95, "stage": "thriving"}
+        result = bot._boost_project(data)
+        assert result["momentum"] == 1.0
+
+    def test_boost_triggers_stage_change(self):
+        data = {"name": "painting", "momentum": 0.65, "stage": "active"}
+        result = bot._boost_project(data)
+        assert result["stage"] == "thriving"
+        assert "stage_changed" in result
+
+    def test_audit_includes_life_project(self):
+        bot._save_project({"name": "painting", "momentum": 0.75, "stage": "thriving"})
+        d = bot.gather_audit_data()
+        assert d["life_project"] is not None
+        assert d["life_project"]["name"] == "painting"
+
+    def test_audit_life_project_none_when_disabled(self):
+        bot.LIFE_PROJECT = False
+        d = bot.gather_audit_data()
+        assert d["life_project"] is None
+
+    def _admin_update(self):
+        uid = 7001
+        bot.ALLOWED_USERS.add(uid)
+        upd, _ = _cmd_update(uid=uid)
+        return upd
+
+    def test_project_cmd_runs(self):
+        upd = self._admin_update()
+        ctx = type("C", (), {"args": []})()
+        asyncio.run(bot.project_cmd(upd, ctx))
+
+    def test_project_cmd_set(self):
+        upd = self._admin_update()
+        ctx = type("C", (), {"args": ["set", "painting"]})()
+        asyncio.run(bot.project_cmd(upd, ctx))
+        proj = bot._read_project()
+        assert proj["name"] == "painting"
+        assert proj["momentum"] == 1.0
+        assert proj["stage"] == "thriving"
+
+    def test_project_cmd_clear(self):
+        bot._save_project({"name": "painting", "momentum": 0.5, "stage": "active"})
+        upd = self._admin_update()
+        ctx = type("C", (), {"args": ["clear"]})()
+        asyncio.run(bot.project_cmd(upd, ctx))
+        assert bot._read_project() is None
+
+    def test_project_in_assemble_messages(self):
+        import inspect
+        src = inspect.getsource(bot.assemble_messages)
+        assert "life_project" in src.lower() or "LIFE_PROJECT" in src or "_read_project" in src
+
+    def test_project_engaged_in_post_reply_analysis(self):
+        import inspect
+        src = inspect.getsource(bot._post_reply_analysis)
+        assert "project_engaged" in src
+
+    def test_project_registered_as_command(self):
+        import inspect
+        src = inspect.getsource(bot.main)
+        assert '"project"' in src

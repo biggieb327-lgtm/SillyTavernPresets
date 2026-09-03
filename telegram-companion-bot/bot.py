@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.2"
+BOT_VERSION = "2026-09-03.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1233,6 +1233,19 @@ LIFE_EVENT_TIMES = os.getenv("LIFE_EVENT_TIMES", "13:00,20:30")
 LIFE_EVENTS_FILE = BASE_DIR / "life_events.txt"
 _life_events_cache: dict = {"text": None, "ts": 0.0}
 
+# Standing life-project with momentum decay (ROADMAP 5.3-A): one persistent project per
+# instance whose momentum rises on engagement and decays nightly, surfacing stage changes
+# in context. Track 5 experimental pilot — default OFF.
+LIFE_PROJECT = _env_bool("LIFE_PROJECT", False)
+PROJECT_DECAY_RATE = _env_float("PROJECT_DECAY_RATE", "0.08")
+PROJECT_FILE = BASE_DIR / "project.json"
+_PROJECT_STAGES = (
+    (0.70, "thriving"),
+    (0.40, "active"),
+    (0.15, "stalling"),
+    (0.0, "abandoned"),
+)
+
 # NPC / world relationship memories (memories.txt) — keyword-triggered RAG injection
 MEMORIES_FILE = BASE_DIR / "memories.txt"
 MEMORY_TOKEN_BUDGET = _env_int("MEMORY_TOKEN_BUDGET", "300")
@@ -2013,6 +2026,53 @@ def _is_near_dup_event(new_line: str, existing: list[str], threshold: float = 0.
                 SequenceMatcher(None, n, en).ratio() >= threshold:
             return True
     return False
+
+
+def _read_project() -> dict | None:
+    if not PROJECT_FILE.exists():
+        return None
+    try:
+        data = json.loads(PROJECT_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("name"):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _save_project(data: dict | None):
+    if data is None:
+        if PROJECT_FILE.exists():
+            PROJECT_FILE.unlink()
+        return
+    _atomic_write_text(PROJECT_FILE, json.dumps(data, ensure_ascii=True) + "\n")
+
+
+def _project_stage(momentum: float) -> str:
+    for threshold, label in _PROJECT_STAGES:
+        if momentum >= threshold:
+            return label
+    return "abandoned"
+
+
+def _decay_project(data: dict, rate: float) -> dict:
+    m = max(0.0, data.get("momentum", 0.0) - rate)
+    old_stage = data.get("stage", "active")
+    new_stage = _project_stage(m)
+    out = {**data, "momentum": round(m, 4), "stage": new_stage}
+    if new_stage != old_stage:
+        out["stage_changed"] = time.time()
+    return out
+
+
+def _boost_project(data: dict) -> dict:
+    m = min(1.0, data.get("momentum", 0.0) + 0.15)
+    old_stage = data.get("stage", "active")
+    new_stage = _project_stage(m)
+    out = {**data, "momentum": round(m, 4), "stage": new_stage, "last_engaged": time.time()}
+    if new_stage != old_stage:
+        out["stage_changed"] = time.time()
+    return out
 
 
 def _own_day_note(day_ctx: str, label: str) -> str:
@@ -5756,6 +5816,12 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             f"going, leaning in'). One short present-tense clause about {NAME} herself, "
             f"never a plan for {uname}. null if nothing notable."
         )
+    proj = _read_project() if LIFE_PROJECT else None
+    if proj:
+        sys_prompt += (
+            f'\n"project_engaged": true if {uname} mentioned, asked about, or discussed '
+            f'"{proj["name"]}" in this exchange. false otherwise.'
+        )
     now_local = datetime.now(TZ) if TZ else datetime.now()
     user = (f"Today is {now_local.strftime('%A, %Y-%m-%d')}.\n"
             f"Current mood: {cur.get('label') or 'neutral'} (valence {round(cur.get('score', 0), 1)}).{gap_note}\n\n"
@@ -5945,6 +6011,14 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
                 next_intent[chat_id] = value
             _intent_stats["generated"] += 1
             print(f"[intent] {intent_txt}")
+
+    if proj and data.get("project_engaged") is True:
+        boosted = _boost_project(proj)
+        if _MAIN_LOOP:
+            _MAIN_LOOP.call_soon_threadsafe(lambda: _save_project(boosted))
+        else:
+            _save_project(boosted)
+        print(f"[project] engagement detected, momentum {proj.get('momentum', 0):.2f} -> {boosted['momentum']:.2f}")
 
 
 async def post_reply_analysis(chat_id: int, user_msg: str):
@@ -6511,6 +6585,23 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
         messages.append({"role": "system", "content": (
             f"# What {NAME} has going on / is working on\n{projects}"
         )})
+
+    if LIFE_PROJECT and not group:
+        lp = _read_project()
+        if lp and lp.get("name"):
+            stage = lp.get("stage", "active")
+            m = lp.get("momentum", 0.0)
+            stage_framing = {
+                "thriving": f"is energized and making real progress on {lp['name']}",
+                "active": f"has {lp['name']} going and checks in on it",
+                "stalling": f"has been meaning to get back to {lp['name']} but keeps putting it off",
+                "abandoned": f"quietly dropped {lp['name']} — it faded out",
+            }
+            framing = stage_framing.get(stage, stage_framing["active"])
+            messages.append({"role": "system", "content": (
+                f"# Standing project\n{NAME} {framing} (momentum {m:.0%}). "
+                f"Let this color how she talks about it if it comes up — don't force it."
+            )})
 
     life_arc = _read_life_arc()
     if life_arc:
@@ -9418,6 +9509,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/people add <text> — append a person/note",
         "/projects [text] — view or replace her ongoing projects",
         "/projects add <text> — append a project",
+        "/project — view standing life-project momentum/stage",
+        "/project set <name> — set a tracked life-project",
+        "/project clear — remove the standing project",
         "/schedule [text] — view or replace her weekly schedule",
         "/schedule add <text> — append a schedule entry",
         "/today <note> — append a mid-day note so she knows what's going on",
@@ -11850,6 +11944,54 @@ async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = " ".join(args).strip()
         SCHEDULE_FILE.write_text(text, encoding="utf-8")
         await update.message.reply_text(f"Schedule updated.")
+
+
+async def project_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/project — view standing project state
+    /project set <name> — set the standing project
+    /project clear — remove the standing project"""
+    if not _is_admin(update.effective_user.id):
+        return
+    if not LIFE_PROJECT:
+        await update.message.reply_text("LIFE_PROJECT is disabled on this instance.")
+        return
+    args = context.args or []
+    if not args:
+        proj = _read_project()
+        if not proj:
+            await update.message.reply_text(
+                "No standing project set.\n/project set <name> to start one.")
+            return
+        stage = proj.get("stage", "active")
+        m = proj.get("momentum", 0.0)
+        last = proj.get("last_engaged")
+        ago = ""
+        if last:
+            h = (time.time() - last) / 3600
+            ago = f" (last engaged {h:.0f}h ago)" if h >= 1 else " (engaged recently)"
+        await update.message.reply_text(
+            f"Project: {proj['name']}\n"
+            f"Stage: {stage} ({m:.0%}){ago}\n\n"
+            f"/project set <name> — change\n"
+            f"/project clear — remove")
+        return
+    sub = args[0].lower()
+    if sub == "clear":
+        _save_project(None)
+        await update.message.reply_text("Standing project cleared.")
+        return
+    if sub == "set":
+        name = " ".join(args[1:]).strip()
+        if not name:
+            await update.message.reply_text("Usage: /project set <name>")
+            return
+        data = {"name": name, "momentum": 1.0, "stage": "thriving",
+                "last_engaged": time.time(), "created": time.time()}
+        _save_project(data)
+        await update.message.reply_text(f"Standing project set: {name} (thriving, 100%)")
+        return
+    await update.message.reply_text(
+        "Usage: /project | /project set <name> | /project clear")
 
 
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15150,6 +15292,13 @@ async def _rotate_day_context(context: ContextTypes.DEFAULT_TYPE):
         _day_cache["text"] = ""
         _day_cache["ts"] = time.time()
 
+    if LIFE_PROJECT:
+        proj = _read_project()
+        if proj:
+            decayed = _decay_project(proj, PROJECT_DECAY_RATE)
+            _save_project(decayed)
+            print(f"[project] nightly decay: {proj.get('momentum', 0):.2f} -> {decayed['momentum']:.2f} ({decayed['stage']})")
+
     # Slower than the day: checked nightly, acts weekly. After day generation so the arc
     # update sees today's events already written.
     await _maybe_rotate_life_arc()
@@ -17434,6 +17583,7 @@ def gather_audit_data() -> dict:
         "preset_override": list(preset_override),
         "token_calibration": _token_confidence(),
         "intent_stats": dict(_intent_stats),
+        "life_project": (_read_project() if LIFE_PROJECT else None),
     }
 
 
@@ -17572,6 +17722,9 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     if ist.get("generated"):
         lines.append(f"Intent seed: {ist['generated']} generated, "
                      f"{ist['consumed']} consumed, {ist['expired']} expired")
+    lp = d.get("life_project")
+    if lp:
+        lines.append(f"Project: {lp['name']} ({lp.get('stage', '?')}, {lp.get('momentum', 0):.0%})")
     cw = d.get("config_warnings", [])
     if cw:
         lines.append(f"Config warnings: {len(cw)}")
@@ -18330,6 +18483,7 @@ _BASE_COMMANDS = [
     BotCommand("life", "View or replace the character's current life arc"),
     BotCommand("people", "View or replace the people in her life"),
     BotCommand("projects", "View or replace her ongoing projects"),
+    BotCommand("project", "Standing life-project momentum/stage"),
     BotCommand("schedule", "View or replace her weekly schedule"),
     BotCommand("today", "Append a mid-day note (what's happening today)"),
     BotCommand("note", "Add something to what she knows about you"),
@@ -18611,6 +18765,7 @@ def main():
     app.add_handler(CommandHandler("life", life_cmd))
     app.add_handler(CommandHandler("people", people_cmd))
     app.add_handler(CommandHandler("projects", projects_cmd))
+    app.add_handler(CommandHandler("project", project_cmd))
     app.add_handler(CommandHandler("schedule", schedule_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("note", note_cmd))
