@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.5"
+BOT_VERSION = "2026-09-03.6"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -18569,17 +18569,12 @@ _BASE_COMMANDS = [
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
     BotCommand("episodes", "How many past conversations are archived"),
-    BotCommand("editmem", "Edit a memory note by number"),
-    BotCommand("sourcemem", "Show source/provenance of a memory"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
     BotCommand("reviewlife", "Review nightly-suggested living-file edits"),
-    BotCommand("dupefacts", "Diagnostic: flag near-duplicate facts (reports only, no merge)"),
     BotCommand("recall", "Search memory for a keyword"),
-    BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
     BotCommand("mixtape", "Highlight reel: milestones as voice + image + text"),
     BotCommand("news", "See what's been happening in her life"),
-    BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
     BotCommand("pinned", "List pinned memories"),
     BotCommand("unpin", "Remove a pinned memory"),
@@ -18632,15 +18627,8 @@ _BASE_COMMANDS = [
     BotCommand("setmodel", "Change a model setting"),
     BotCommand("settings", "Show current settings"),
     BotCommand("usage", "Token usage stats"),
-    BotCommand("chatid", "Show your chat ID"),
     BotCommand("backup", "Download a memory backup"),
     BotCommand("audit", "Bot health and error report"),
-    BotCommand("diag", "Show this bot's behavior-toggle status"),
-    BotCommand("errors", "Show recent errors.log lines (admin only)"),
-    BotCommand("restart", "Clean restart via the supervisor (admin only)"),
-    BotCommand("update", "Self-deploy from main — dead on the private repo, "
-                          "replies with vps-sync.sh instructions (admin only)"),
-    BotCommand("fleet", "Fleet console: probe every peer's admin API (admin only)"),
 ]
 
 _PAYMENT_COMMANDS = [

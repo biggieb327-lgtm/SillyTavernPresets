@@ -5869,7 +5869,13 @@ class TestCommandMenuMirrorsHandlers:
         )
         return direct | registered_specs
 
-    def test_every_registered_command_is_in_the_uncapped_menu(self):
+    _HIDDEN_FROM_MENU = {
+        "errors", "restart", "update", "fleet", "diag",
+        "chatid", "dupefacts", "exportmemory", "sourcemem",
+        "editmem", "newsnow",
+    }
+
+    def test_every_registered_command_is_in_menu_or_hidden(self):
         names = self._registered_command_names()
         assert len(names) > 50, "sanity check: extraction found suspiciously few commands"
         base = bot._BASE_COMMANDS + bot._command_menu_entries(
@@ -5878,8 +5884,13 @@ class TestCommandMenuMirrorsHandlers:
         base += bot._command_menu_entries(bot._health_command_specs(True))
         base += bot._PRESET_COMMANDS
         uncapped = {c.command for c in base}
-        missing = names - uncapped
-        assert not missing, f"registered but not in any menu list: {sorted(missing)}"
+        missing = names - uncapped - self._HIDDEN_FROM_MENU
+        assert not missing, f"registered but not in any menu list or _HIDDEN_FROM_MENU: {sorted(missing)}"
+
+    def test_hidden_commands_still_have_handlers(self):
+        names = self._registered_command_names()
+        orphans = self._HIDDEN_FROM_MENU - names
+        assert not orphans, f"in _HIDDEN_FROM_MENU but no handler: {sorted(orphans)}"
 
     def test_capped_menu_stays_within_telegram_limit(self):
         menu = bot._build_command_menu(True, True, True, True)
