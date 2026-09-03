@@ -8353,6 +8353,9 @@ class TestEveryBooleanFlagDefault:
         "PROMPT_STATS": True,
         "REACTIONS_AUTO": True,
         "REASONING_LEAK_GUARD": True,
+        "RECAST_ENABLED": True,
+        "RECAST_PROSE": True,
+        "RECAST_VALIDATOR": True,
         "REMINDERS_SQLITE": True,
         "REVIEWLIFE": True,
         "RHR_ALERTS": True,
@@ -13976,3 +13979,77 @@ class TestLifeProject:
         import inspect
         src = inspect.getsource(bot.main)
         assert '"project"' in src
+
+
+# ── Recast post-processing ───────────────────────────────────────────────────
+
+class TestRecastPipeline:
+    def test_recast_env_vars_exist(self):
+        assert hasattr(bot, "RECAST_ENABLED")
+        assert hasattr(bot, "RECAST_MODEL")
+        assert hasattr(bot, "RECAST_MIN_CHARS")
+        assert hasattr(bot, "RECAST_VALIDATOR")
+        assert hasattr(bot, "RECAST_PROSE")
+        assert hasattr(bot, "RECAST_CONTEXT")
+        assert hasattr(bot, "RECAST_TIMEOUT")
+
+    def test_recast_pipeline_skips_when_disabled(self):
+        original = bot.RECAST_ENABLED
+        try:
+            bot.RECAST_ENABLED = False
+            result = asyncio.get_event_loop().run_until_complete(
+                bot._recast_pipeline(12345, "hello world this is a test message that is long enough")
+            )
+            assert result == "hello world this is a test message that is long enough"
+        finally:
+            bot.RECAST_ENABLED = original
+
+    def test_recast_pipeline_skips_short_text(self):
+        original = bot.RECAST_ENABLED
+        try:
+            bot.RECAST_ENABLED = True
+            result = asyncio.get_event_loop().run_until_complete(
+                bot._recast_pipeline(12345, "hi")
+            )
+            assert result == "hi"
+        finally:
+            bot.RECAST_ENABLED = original
+
+    def test_recast_pipeline_skips_empty(self):
+        result = asyncio.get_event_loop().run_until_complete(
+            bot._recast_pipeline(12345, "")
+        )
+        assert result == ""
+
+    def test_recast_pipeline_skips_none(self):
+        result = asyncio.get_event_loop().run_until_complete(
+            bot._recast_pipeline(12345, None)
+        )
+        assert result is None
+
+    def test_recast_pipeline_called_in_deliver(self):
+        import inspect
+        src = inspect.getsource(bot._deliver)
+        assert "_recast_pipeline" in src
+
+    def test_recast_pipeline_after_extract_tags_before_strip_slop(self):
+        import inspect
+        src = inspect.getsource(bot._deliver)
+        extract_pos = src.index("extract_tags")
+        recast_pos = src.index("_recast_pipeline")
+        slop_pos = src.index("_strip_slop")
+        assert extract_pos < recast_pos < slop_pos
+
+    def test_recast_model_defaults_to_reaction_model(self):
+        assert bot.RECAST_MODEL == bot.REACTION_MODEL
+
+    def test_recast_min_chars_default(self):
+        assert bot.RECAST_MIN_CHARS == 60
+
+    def test_recast_pass_function_exists(self):
+        import inspect
+        assert inspect.iscoroutinefunction(bot._recast_pass)
+
+    def test_recast_pipeline_function_exists(self):
+        import inspect
+        assert inspect.iscoroutinefunction(bot._recast_pipeline)

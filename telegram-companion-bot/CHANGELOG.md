@@ -7,6 +7,47 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.4 — Recast post-processing pipeline
+
+**Root cause: the fleet's reply quality depends entirely on one model call.** A single
+completion generates both the character behavior and the prose quality in one shot.
+Out-of-character slips or awkward phrasing that the primary model produces reach the user
+with only mechanical guards (_strip_slop, _strip_persona_breaks) between them — there
+was no opportunity for a second opinion on the reply before delivery.
+
+**Fix:** two sequential post-processing passes on each reply, reverse-engineered from the
+SillyTavern Recast extension (closuretxt/recast-post-processing) and adapted for the
+fleet. After `extract_tags` strips bracket tags and before `_strip_slop` runs, the clean
+prose text goes through:
+
+1. **Validator pass** (`RECAST_VALIDATOR`): checks dialogue, tone, and knowledge against
+   the character card (first 800 chars of SYSTEM_PROMPT_RAW) and recent conversation
+   context. Corrects out-of-character behavior.
+2. **Prose pass** (`RECAST_PROSE`): improves rhythm, flow, and naturalness without
+   changing content, meaning, or voice. Scene context only, no char card.
+
+Both passes use `RECAST_MODEL` (defaults to `REACTION_MODEL`, i.e. glm-4.7-flash) — a
+cheap/fast model separate from the primary chat model. Each pass wraps the text in a
+`<text_to_transform>` XML block (matching Recast's convention) with optional
+`<scene_context>` from recent conversation history (`RECAST_CONTEXT` messages, default 7).
+
+bot-code-invariants rule 3 carve-out (owner-approved): two new per-message completion
+calls. Approved because the owner explicitly requested the feature, both passes use a
+cheap model that carries only the reply text + short scene context (not the full ~17k
+assembled prompt), and the feature has a default-on kill switch (`RECAST_ENABLED=0`).
+
+Latency: 4-10 seconds per message depending on model speed and response length. Responses
+shorter than `RECAST_MIN_CHARS` (default 60) skip post-processing entirely. Each pass has
+a `RECAST_TIMEOUT` (default 15s) — a timeout or error silently returns the original text.
+A pass result shorter than 30% of the input is discarded as a sanity check.
+
+Tags (react, selfie, meme, gif, memcheck) are never seen by the post-processing model —
+they are already extracted by `extract_tags` before the pipeline runs, and `_deliver`
+uses the original tag values for reactions/selfies/memes/gifs.
+
+Env vars: `RECAST_ENABLED` (default ON), `RECAST_MODEL`, `RECAST_MIN_CHARS`,
+`RECAST_VALIDATOR`, `RECAST_PROSE`, `RECAST_CONTEXT`, `RECAST_TIMEOUT`.
+
 ## v2026-09-03.3 — Standing life-project with momentum decay (ROADMAP 5.3-A)
 
 **Root cause: characters have no persistent relationship to a user-facing project that

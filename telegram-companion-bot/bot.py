@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.3"
+BOT_VERSION = "2026-09-03.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -761,6 +761,24 @@ SAFETY_RESOURCES = os.getenv(
     "SAFETY_RESOURCES",
     "in the US, the 988 Suicide & Crisis Lifeline (call or text 988) is there 24/7",
 )
+# Recast post-processing (reverse-engineered from closuretxt/recast-post-processing,
+# adapted for the fleet). Two sequential LLM passes on the reply text: a character-
+# behavior validator and a prose-rhythm editor, each using a cheap/fast model.
+# bot-code-invariants rule 3 carve-out (owner-approved 2026-09-03): these are two new
+# per-message completion calls, which rule 3 bars. Approved because the user explicitly
+# requested the feature ("Ignore the rule that says don't add a LLM call") and chose a
+# different/cheaper model slot to limit cost. Both passes carry only the clean reply text
+# plus a short scene-context snippet, not the full ~17k-token assembled prompt rule 3's
+# cost argument is about. Off-loop (runs between maybe_search and _deliver, so the user
+# sees typing indicator throughout), best-effort (any failure returns the original text),
+# default-on kill switch.
+RECAST_ENABLED = _env_bool("RECAST_ENABLED", True)
+RECAST_MODEL = os.getenv("RECAST_MODEL", REACTION_MODEL)
+RECAST_MIN_CHARS = _env_int("RECAST_MIN_CHARS", "60")
+RECAST_VALIDATOR = _env_bool("RECAST_VALIDATOR", True)
+RECAST_PROSE = _env_bool("RECAST_PROSE", True)
+RECAST_CONTEXT = _env_int("RECAST_CONTEXT", "7")
+RECAST_TIMEOUT = _env_int("RECAST_TIMEOUT", "15")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-1")
 # Voice tone: a short pace/volume/tone/pause note alongside the transcript -- local FFT
 # analysis via vendored acoustic_ears.py (MIT, menelly/AI_Ears), no network call, no
@@ -7750,6 +7768,85 @@ def _safety_prompt(uname: str) -> str:
     )
 
 
+async def _recast_pass(text: str, sys_prompt: str, scene: str) -> str:
+    """One Recast post-processing pass: send clean reply text through the cheap model."""
+    user_parts = []
+    if scene:
+        user_parts.append(f"<scene_context>\n{scene}\n</scene_context>")
+    user_parts.append(f"<text_to_transform>\n{text}\n</text_to_transform>")
+    result = await asyncio.to_thread(
+        call_nanogpt,
+        [{"role": "system", "content": sys_prompt},
+         {"role": "user", "content": "\n\n".join(user_parts)}],
+        RECAST_MODEL,
+    )
+    return _strip_thinking(result).strip()
+
+
+async def _recast_pipeline(chat_id: int, clean: str) -> str:
+    """Run enabled Recast passes on the tag-stripped reply text.
+
+    Called inside _deliver after extract_tags and before _strip_slop.  Returns the
+    post-processed text, or the original if every pass fails or is disabled."""
+    if not RECAST_ENABLED or not clean or len(clean) < RECAST_MIN_CHARS:
+        return clean
+
+    recent = conversation_history.get(chat_id, [])[-RECAST_CONTEXT:]
+    scene = "\n".join(
+        f"{'assistant' if m['role'] == 'assistant' else 'user'}: "
+        f"{m['content'][:200].strip()}"
+        for m in recent
+    ) if recent else ""
+
+    working = clean
+
+    if RECAST_VALIDATOR:
+        validator_sys = (
+            f"You are a character consistency editor for {NAME}.\n\n"
+            f"Character reference:\n{SYSTEM_PROMPT_RAW[:800]}\n\n"
+            "Review the response below and ensure all dialogue, tone, and knowledge "
+            "align with this character. Correct anything that breaks character while "
+            "preserving the original style, format, and approximate length. Return "
+            "the corrected text exactly as it should read -- plain text only."
+        )
+        try:
+            result = await asyncio.wait_for(
+                _recast_pass(working, validator_sys, scene),
+                timeout=RECAST_TIMEOUT,
+            )
+            if result and len(result) > len(working) * 0.3:
+                working = result
+            else:
+                log.warning("[recast] validator returned suspiciously short output, skipping")
+        except asyncio.TimeoutError:
+            log.warning("[recast] validator timed out after %ds", RECAST_TIMEOUT)
+        except Exception as exc:
+            log.warning("[recast] validator failed: %s", type(exc).__name__)
+
+    if RECAST_PROSE:
+        prose_sys = (
+            "You are a prose editor for casual texting. Improve the rhythm, flow, "
+            "and naturalness of the text below while preserving all content, meaning, "
+            "and voice. Keep the same approximate length and format. Return the "
+            "improved text exactly as it should read -- plain text only."
+        )
+        try:
+            result = await asyncio.wait_for(
+                _recast_pass(working, prose_sys, scene),
+                timeout=RECAST_TIMEOUT,
+            )
+            if result and len(result) > len(working) * 0.3:
+                working = result
+            else:
+                log.warning("[recast] prose returned suspiciously short output, skipping")
+        except asyncio.TimeoutError:
+            log.warning("[recast] prose timed out after %ds", RECAST_TIMEOUT)
+        except Exception as exc:
+            log.warning("[recast] prose failed: %s", type(exc).__name__)
+
+    return working
+
+
 def _decide_reaction(user_message: str) -> str:
     """Cheap second pass: would she tap an emoji on this message? Returns emoji or None."""
     allowed = " ".join(sorted(ALLOWED_REACTIONS))
@@ -12876,6 +12973,7 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
     gif_query = _gif_query(ai_response)
     clean, reaction, selfie_hint, clothing_override, meme_caption = extract_tags(ai_response)
     if clean:
+        clean = await _recast_pipeline(chat_id, clean)
         clean = _strip_slop(clean)
         clean = _strip_persona_breaks(clean)
     placeholder = clean or (
