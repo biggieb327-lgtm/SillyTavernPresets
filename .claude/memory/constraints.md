@@ -1240,6 +1240,8 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   The test caught it immediately (designed to). Cost: one pytest round-trip. ->
   **update the DEFAULTS census table in the same edit that adds a new `_env_bool` flag, not
   as a separate step — the test exists because this slip is the norm, not the exception.**
+  - 2026-09-03 — Same slip with MIXTAPE_ENABLED. Caught by pytest on first run, one edit
+    to fix. The existing test is the mechanism; the slip is the norm.
 - 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
   `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
   existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
