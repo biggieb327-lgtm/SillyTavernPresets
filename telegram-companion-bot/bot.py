@@ -7768,6 +7768,9 @@ def _safety_prompt(uname: str) -> str:
     )
 
 
+_RECAST_TAG_RE = re.compile(r"\[(?:react|selfie|clothing|outfit|meme|gif|search|memcheck|mood):\s*[^\]]*\]", re.IGNORECASE)
+
+
 async def _recast_pass(text: str, sys_prompt: str, scene: str) -> str:
     """One Recast post-processing pass: send clean reply text through the cheap model."""
     user_parts = []
@@ -7780,7 +7783,9 @@ async def _recast_pass(text: str, sys_prompt: str, scene: str) -> str:
          {"role": "user", "content": "\n\n".join(user_parts)}],
         RECAST_MODEL,
     )
-    return _strip_thinking(result).strip()
+    result = _strip_thinking(result).strip()
+    result = _RECAST_TAG_RE.sub("", result).strip()
+    return result
 
 
 async def _recast_pipeline(chat_id: int, clean: str) -> str:
@@ -7807,7 +7812,8 @@ async def _recast_pipeline(chat_id: int, clean: str) -> str:
             "Review the response below and ensure all dialogue, tone, and knowledge "
             "align with this character. Correct anything that breaks character while "
             "preserving the original style, format, and approximate length. Return "
-            "the corrected text exactly as it should read -- plain text only."
+            "the corrected text exactly as it should read -- plain prose only, with "
+            "no bracketed directives or control tags of any kind."
         )
         try:
             result = await asyncio.wait_for(
@@ -7828,7 +7834,8 @@ async def _recast_pipeline(chat_id: int, clean: str) -> str:
             "You are a prose editor for casual texting. Improve the rhythm, flow, "
             "and naturalness of the text below while preserving all content, meaning, "
             "and voice. Keep the same approximate length and format. Return the "
-            "improved text exactly as it should read -- plain text only."
+            "improved text exactly as it should read -- plain prose only, with "
+            "no bracketed directives or control tags of any kind."
         )
         try:
             result = await asyncio.wait_for(

@@ -14053,3 +14053,11 @@ class TestRecastPipeline:
     def test_recast_pipeline_function_exists(self):
         import inspect
         assert inspect.iscoroutinefunction(bot._recast_pipeline)
+
+    def test_recast_tag_stripping_regex(self):
+        assert bot._RECAST_TAG_RE.sub("", "hello [selfie: park] world") == "hello  world"
+        assert bot._RECAST_TAG_RE.sub("", "text [react: heart] end") == "text  end"
+        assert bot._RECAST_TAG_RE.sub("", "text [meme: top|bottom] end") == "text  end"
+        assert bot._RECAST_TAG_RE.sub("", "text [gif: funny cat] end") == "text  end"
+        assert bot._RECAST_TAG_RE.sub("", "text [mood: happy] end") == "text  end"
+        assert bot._RECAST_TAG_RE.sub("", "clean prose with no tags") == "clean prose with no tags"
