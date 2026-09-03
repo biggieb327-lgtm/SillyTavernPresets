@@ -1185,17 +1185,15 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
   picked up soon.
 - **Risk:** low — self-contained mode, opt-in.
 
-### 5.7 🧪 Experimental — inward drift detection — S
-- **Evidence:** immune-system domain (self/non-self tolerance — the same detector
-  that recognizes threats must also learn what's normal self-tissue, or it attacks
-  the host).
-- **Idea:** point the existing distress-detection machinery at the bot's own output
-  occasionally — repetitive phrasing, forgotten commitments — as a drift signal, not
-  just at the user's state.
-- **Why experimental:** the weakest-ranked transplant of the batch; may turn out to
-  duplicate observability Track 4 already built (`_CONFIG_WARNINGS`, prompt-size
-  stats) — check for duplication before building anything.
-- **Risk:** low to prototype, but likely low value.
+### ~~5.7 🧪 Experimental — inward drift detection — S~~ Closed 2026-09-03
+- **Closed (2026-09-03):** duplication check done. `reflect()` already covers
+  self-image trait drift (bounded by `BELIEF_DRIFT_MAX`), `_memory_audit_scan` catches
+  factual contradictions, `_engagement_trend` tracks user-side staleness. The one
+  uncovered gap — repetitive phrasing in reply text — is real but narrow, and
+  `reflect()` could absorb it as a single schema field if it ever surfaces as a
+  problem. Not worth building speculatively; the item's own assessment was "likely
+  low value."
+- **Risk:** n/a — closed without building.
 
 ### 5.8 🧪 Experimental — banked variance as resilience — (unsized, direction only)
 - **Evidence:** coral-bleaching domain (reefs that survive bleaching events are ones
@@ -1568,5 +1566,5 @@ none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 | 6.3 reply advisor (L) | **Owner-gated:** needs a new `bot-code-invariants` #3 carve-out written into that file and owner-approved before any code. Largest blast radius in the roadmap. |
 | 5.3-A standing life-project with decay (M/L) | The biggest new-state primitive in 5-A; continuous, user-attention-responsive state — scope on its own. |
 | 5.3-B 🧪 response refinement on recurring topics (M) | A personality-shaping feedback loop — same caution class as the rejected self-evolution ideas; highest-risk 🧪. |
-| 5.7-B 🧪 inward drift detection (S) | **Check for duplication first** — may already be covered by `_CONFIG_WARNINGS` / prompt-size stats before any build. |
+| ~~5.7-B 🧪 inward drift detection (S)~~ | **Closed 2026-09-03** — duplication check done; existing machinery covers the valuable parts, uncovered gap (phrase repetition) too narrow to build speculatively. |
 | 5.8-B 🧪 banked variance (unsized) | In direct tension with the multi-release voiceprint-consistency investment (3.13); an owner call on whether to resolve that tension at all, not a build item. |
