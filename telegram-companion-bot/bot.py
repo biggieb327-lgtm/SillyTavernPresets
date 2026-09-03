@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-02.6"
+BOT_VERSION = "2026-09-03.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1300,6 +1300,9 @@ BOTTLE_CAPSULE = _env_bool("BOTTLE_CAPSULE", True)
 BOTTLE_MIN_DAYS = _env_int("BOTTLE_MIN_DAYS", "7")
 BOTTLE_MAX_DAYS = _env_int("BOTTLE_MAX_DAYS", "60")
 BOTTLES_FILE = BASE_DIR / "bottles.json"
+
+MIXTAPE_ENABLED = _env_bool("MIXTAPE_ENABLED", True)
+MIXTAPE_COUNT = _env_int("MIXTAPE_COUNT", "5")
 
 # Live semantic recall (v2026-07-12.2): the vectors we already write on every memory
 # add were never read during a live reply (semantic_recall was skipped on the event
@@ -10049,6 +10052,90 @@ async def milestones_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply_chunked(update, "🏆 Milestones\n\n" + "\n".join(lines))
 
 
+def _mixtape_select(ms_list, count=5):
+    """Pick milestones with temporal spread for /mixtape.
+
+    Divides the sorted timeline into equal buckets and samples one from each,
+    so the selection spans the full relationship history."""
+    n = min(count, len(ms_list))
+    sorted_ms = sorted(ms_list, key=lambda m: m["ts"])
+    if n >= len(sorted_ms):
+        picks = list(sorted_ms)
+        random.shuffle(picks)
+        return picks
+    bucket_size = len(sorted_ms) / n
+    picks = []
+    for i in range(n):
+        start = int(i * bucket_size)
+        end = int((i + 1) * bucket_size)
+        picks.append(random.choice(sorted_ms[start:end]))
+    random.shuffle(picks)
+    return picks
+
+
+async def mixtape_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Composed highlight reel: 3-5 milestones sent as voice + image + text."""
+    chat_id = update.effective_chat.id
+    if not MIXTAPE_ENABLED:
+        await update.message.reply_text("Mixtape is turned off.")
+        return
+    ms_list = milestones.get(chat_id) or []
+    if len(ms_list) < 3:
+        await update.message.reply_text(
+            f"Not enough milestones yet ({len(ms_list)}/3). "
+            "Keep talking and they'll build up."
+        )
+        return
+
+    picks = _mixtape_select(ms_list, MIXTAPE_COUNT)
+
+    voice_count = 2 if len(picks) >= 4 else 1
+    voice_picks = picks[:voice_count]
+    image_pick = picks[-1] if selfie_ready() else None
+    text_start = voice_count
+    text_end = len(picks) - (1 if image_pick else 0)
+    text_picks = picks[text_start:text_end]
+    if not image_pick and text_end < len(picks):
+        text_picks.append(picks[-1])
+
+    def _fmt_date(m):
+        ts = datetime.fromtimestamp(m["ts"], tz=TZ) if TZ else datetime.fromtimestamp(m["ts"])
+        return ts.strftime("%b %Y")
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    for m in voice_picks:
+        spoken = f"{m['text']}. {_fmt_date(m)}."
+        if VOICE_ENABLED:
+            try:
+                tts_fn = _inworld_tts if INWORLD_API_KEY else _nanogpt_tts
+                audio = await asyncio.to_thread(tts_fn, spoken)
+                await context.bot.send_voice(chat_id=chat_id, voice=BytesIO(audio))
+            except Exception as exc:
+                log.warning("[mixtape] TTS failed, falling back to text: %s", exc)
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"\U0001f3b5 {m['text']}  —  {_fmt_date(m)}"
+                )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id, text=f"\U0001f3b5 {m['text']}  —  {_fmt_date(m)}"
+            )
+        await asyncio.sleep(1.5)
+
+    for m in text_picks:
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"\U0001f4ad {m['text']}  —  {_fmt_date(m)}"
+        )
+        await asyncio.sleep(1.0)
+
+    if image_pick:
+        await send_selfie(context, chat_id, image_pick["text"], announce_errors=False)
+
+    log.info("[mixtape] sent %d picks (voice=%d, text=%d, image=%s) for chat %d",
+             len(picks), len(voice_picks), len(text_picks),
+             "yes" if image_pick else "no", chat_id)
+
+
 def _memory_export_text(chat_id) -> str:
     """Shared by /exportmemory and the menu button — both dumped the same fields
     with slightly different section labels before this dedup; wording now follows
@@ -18221,6 +18308,7 @@ _BASE_COMMANDS = [
     BotCommand("recall", "Search memory for a keyword"),
     BotCommand("exportmemory", "Export full memory as text"),
     BotCommand("milestones", "View relationship milestones"),
+    BotCommand("mixtape", "Highlight reel: milestones as voice + image + text"),
     BotCommand("news", "See what's been happening in her life"),
     BotCommand("newsnow", "Generate a life event now"),
     BotCommand("pin", "Pin something I always carry"),
@@ -18478,6 +18566,7 @@ def main():
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("exportmemory", export_memory_cmd))
     app.add_handler(CommandHandler("milestones", milestones_cmd))
+    app.add_handler(CommandHandler("mixtape", mixtape_cmd))
     app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(CommandHandler("newsnow", newsnow_cmd))
     app.add_handler(CommandHandler("remember", remember_cmd))

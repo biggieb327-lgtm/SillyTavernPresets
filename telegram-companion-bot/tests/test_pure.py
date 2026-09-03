@@ -8358,6 +8358,7 @@ class TestEveryBooleanFlagDefault:
         "PROACTIVE_TRIAGE": True,
         "VIGIL_MODE": True,
         "BOTTLE_CAPSULE": True,
+        "MIXTAPE_ENABLED": True,
         "TRANSITION_MARK": True,
         "TYPING_DELAY": True,
         "VOICE_ENABLED": True,
@@ -13718,3 +13719,107 @@ class TestCrossQueryDefaults:
 class TestCrossQueryFetch:
     def test_returns_none_for_unknown_peer(self):
         assert bot._cross_query_fetch("unknown", 123) is None
+
+
+# ── mixtape ──────────────────────────────────────────────────────────────────
+
+
+class TestMixtapeSelect:
+    """5.10-B: _mixtape_select picks milestones with temporal spread."""
+
+    def _ms(self, texts):
+        return [{"text": t, "ts": float(i)} for i, t in enumerate(texts)]
+
+    def test_returns_requested_count(self):
+        ms = self._ms(["a", "b", "c", "d", "e", "f", "g", "h"])
+        picks = bot._mixtape_select(ms, count=5)
+        assert len(picks) == 5
+
+    def test_fewer_than_count_returns_all(self):
+        ms = self._ms(["a", "b"])
+        picks = bot._mixtape_select(ms, count=5)
+        assert len(picks) == 2
+
+    def test_exact_count(self):
+        ms = self._ms(["a", "b", "c"])
+        picks = bot._mixtape_select(ms, count=3)
+        assert len(picks) == 3
+
+    def test_each_pick_is_from_source(self):
+        ms = self._ms(["a", "b", "c", "d", "e"])
+        picks = bot._mixtape_select(ms, count=3)
+        texts = {p["text"] for p in picks}
+        assert texts <= {m["text"] for m in ms}
+
+    def test_no_duplicates(self):
+        ms = self._ms([f"m{i}" for i in range(20)])
+        picks = bot._mixtape_select(ms, count=5)
+        assert len(picks) == len(set(p["text"] for p in picks))
+
+
+class TestMixtapeCmd:
+    """5.10-B: /mixtape sends milestones as voice + image + text burst."""
+
+    def setup_method(self):
+        self._orig_enabled = bot.MIXTAPE_ENABLED
+        self._orig_count = bot.MIXTAPE_COUNT
+        self._orig_voice = bot.VOICE_ENABLED
+        self._orig_milestones = dict(bot.milestones)
+        bot.MIXTAPE_ENABLED = True
+        bot.MIXTAPE_COUNT = 5
+        bot.VOICE_ENABLED = False
+
+    def teardown_method(self):
+        bot.MIXTAPE_ENABLED = self._orig_enabled
+        bot.MIXTAPE_COUNT = self._orig_count
+        bot.VOICE_ENABLED = self._orig_voice
+        bot.milestones.clear()
+        bot.milestones.update(self._orig_milestones)
+
+    def _make_ctx(self):
+        sent = []
+
+        async def _send_chat_action(chat_id, action):
+            sent.append(("action", action))
+
+        async def _send_message(chat_id, text, **kw):
+            sent.append(("text", text))
+
+        async def _send_voice(chat_id, voice, **kw):
+            sent.append(("voice", True))
+
+        fake_bot = SimpleNamespace(
+            send_chat_action=_send_chat_action,
+            send_message=_send_message,
+            send_voice=_send_voice,
+        )
+        ctx = SimpleNamespace(args=[], bot=fake_bot)
+        return ctx, sent
+
+    def test_disabled_replies_off(self):
+        bot.MIXTAPE_ENABLED = False
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx()
+        asyncio.run(bot.mixtape_cmd(upd, ctx))
+        assert any("off" in s.lower() or "turned off" in s.lower() for s in msg.sent)
+
+    def test_too_few_milestones(self):
+        bot.milestones[9001] = [{"text": "one", "ts": 1.0}]
+        upd, msg = _cmd_update()
+        ctx = _cmd_ctx()
+        asyncio.run(bot.mixtape_cmd(upd, ctx))
+        assert any("1/3" in s for s in msg.sent)
+
+    def test_happy_path_sends_messages(self):
+        ms = [{"text": f"milestone {i}", "ts": float(i * 86400)} for i in range(5)]
+        bot.milestones[9001] = ms
+        upd, _ = _cmd_update()
+        ctx, sent = self._make_ctx()
+        orig_selfie_ready = bot.selfie_ready
+        bot.selfie_ready = lambda: False
+        try:
+            asyncio.run(bot.mixtape_cmd(upd, ctx))
+        finally:
+            bot.selfie_ready = orig_selfie_ready
+        text_msgs = [s for s in sent if s[0] == "text"]
+        assert len(text_msgs) >= 3

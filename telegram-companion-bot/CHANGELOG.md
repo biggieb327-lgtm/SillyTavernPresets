@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-03.1 — /mixtape highlight reel (ROADMAP 5.10-B)
+
+**Root cause: milestones, TTS, and selfie generation existed but had no composed
+output.** Each pipeline worked standalone (`/milestones`, `/selfie`, voice replies), but
+there was no way to get a multi-format highlight reel from accumulated milestone data.
+
+**Fix:** `/mixtape` command. Pulls 3-5 entries from `milestones` using temporal-spread
+bucket sampling (divides the sorted timeline into equal segments, picks one per bucket,
+then shuffles). Sends the first 1-2 as TTS voice messages (falls back to text if
+`VOICE_ENABLED` is off or TTS fails), middle entries as text with date stamps, and the
+last as a selfie illustration (if `selfie_ready()`). Pure composition over existing
+shipped pipelines — no new LLM calls. Kill switches: `MIXTAPE_ENABLED` (default on),
+`MIXTAPE_COUNT` (default 5, how many milestones to pull). Requires at least 3 milestones
+to run.
+
+---
+
 ## v2026-09-02.6 — comping mode + trading-fours + cross-instance query bridge (ROADMAP 5.5-B, 5.6-B, 5.6-A)
 
 **Root cause (5.5-B): claim-lost bots disappeared completely.** When a bot lost the
