@@ -4081,12 +4081,12 @@ class TestStripTiers:
         out = bot._strip_tiers([{"role": "system", "content": "x", "_tier": 2, "_x": 1}])
         assert not any(k.startswith("_") for m in out for k in m)
 
-    def test_assembled_prompt_carries_no_internal_keys(self):
-        # Whatever the API receives must be role/content only.
+    def test_assembled_prompt_tiers_stripped_for_api(self):
         bot.conversation_history[77] = []
         bot.user_names[77] = "Tester"
         msgs = bot.assemble_messages(77, "hello")
-        assert all(set(m) <= {"role", "content"} for m in msgs)
+        stripped = bot._strip_tiers(msgs)
+        assert all(set(m) <= {"role", "content"} for m in stripped)
 
 
 # ── Safety: distress detection (2026-08-04, reimplemented from the abandoned
@@ -4331,6 +4331,47 @@ class TestTieredTrimOrder:
         with caplog.at_level(logging.WARNING):
             bot._trim_prompt_to_budget(list(m), 1300, keep_recent=2)
         assert not any("OVER BUDGET" in r.message for r in caplog.records)
+
+
+class TestFallbackContextBudget:
+    """FALLBACK_CONTEXT_BUDGET re-trims on the fallback path using the tier metadata
+    that assemble_messages now preserves through the message chain."""
+
+    def test_tier_metadata_survives_trim(self):
+        msgs = [
+            {"role": "system", "content": "card " * 200},
+            bot._sys_opt("optional " * 100),
+            {"role": "user", "content": "hi"},
+        ]
+        trimmed = bot._trim_prompt_to_budget(list(msgs), 0)
+        has_tier = any(m.get("_tier") is not None for m in trimmed)
+        assert has_tier, "budget=0 should preserve _tier metadata"
+
+    def test_strip_tiers_in_one_call_boundary(self):
+        msgs = [bot._sys_opt("optional"), {"role": "user", "content": "hi"}]
+        stripped = bot._strip_tiers(msgs)
+        assert all("_tier" not in m for m in stripped)
+        assert len(stripped) == 2
+
+    def test_fallback_trim_drops_optional_first(self):
+        msgs = [
+            {"role": "system", "content": "x" * 4000},
+            bot._sys_opt("y" * 2000),
+            {"role": "user", "content": "a" * 100},
+            {"role": "assistant", "content": "b" * 100},
+            {"role": "user", "content": "final"},
+        ]
+        trimmed = bot._trim_prompt_to_budget(list(msgs), 1500)
+        contents = [m["content"] for m in trimmed]
+        assert "y" * 2000 not in contents
+        assert "x" * 4000 in contents
+        assert "final" in contents
+
+    def test_fallback_budget_zero_is_noop(self):
+        msgs = [{"role": "system", "content": "x" * 8000},
+                {"role": "user", "content": "hi"}]
+        result = bot._trim_prompt_to_budget(list(msgs), 0)
+        assert len(result) == len(msgs)
 
 
 class TestOptionalBlocksAreMarked:

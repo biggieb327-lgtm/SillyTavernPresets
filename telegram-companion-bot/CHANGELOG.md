@@ -7,6 +7,27 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-04.1 — Fallback-aware prompt trimming: FALLBACK_CONTEXT_BUDGET
+
+**Root cause: when the primary model fails and falls back, the fallback model may
+have a smaller context window (e.g. 16k vs 128k). The assembled prompt (~20k tokens
+for Emily) was sent unmodified to the fallback, causing `context_length_exceeded`
+errors — the bot silently failed to reply.**
+
+**Fix:** new `FALLBACK_CONTEXT_BUDGET` env var. When the retry loop falls back to
+the secondary model, the prompt is re-trimmed to fit the fallback's context window.
+Drops optional blocks (lore, memories, inside jokes, open threads, day context)
+first, then older history — same priority order as `CONTEXT_TOKEN_BUDGET` but
+applied only on fallback. The tier metadata (`_sys_opt` markers) that identifies
+droppable blocks now travels through the message chain instead of being stripped at
+assembly time; `_strip_tiers` moved to `_one_call` so the API never sees internal
+keys. Usage tracking updated to reflect the trimmed prompt on fallback calls.
+
+Default 0 (disabled) — existing behavior unchanged. For a 16k fallback model with
+`MAX_TOKENS=4096`, set `FALLBACK_CONTEXT_BUDGET=12000`.
+
+---
+
 ## v2026-09-03.8 — Fix startup crash: _ENGAGEMENT_DAYS forward reference
 
 **Root cause: `_ENGAGEMENT_DAYS` was defined at line 9154 but used in `load_state` at

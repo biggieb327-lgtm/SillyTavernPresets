@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-03.8"
+BOT_VERSION = "2026-09-04.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -696,6 +696,7 @@ USAGE_BUDGET_MONTHLY = _env_float("USAGE_BUDGET_MONTHLY", "0")
 STREAM_TIMEOUT = _env_int("STREAM_TIMEOUT", "90")    # max silence between chunks
 MAX_TOKENS = _env_int("MAX_TOKENS", "4096")  # room for a thinking model to reason AND answer
 CONTEXT_TOKEN_BUDGET = _env_int("CONTEXT_TOKEN_BUDGET", "0")
+FALLBACK_CONTEXT_BUDGET = _env_int("FALLBACK_CONTEXT_BUDGET", "0")
 # Assembled-prompt size tracking. Set 0 to disable the bookkeeping entirely.
 PROMPT_STATS = _env_bool("PROMPT_STATS", True)
 ENGAGEMENT_TREND = _env_bool("ENGAGEMENT_TREND", True)
@@ -7043,7 +7044,7 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     if distress:  # kept last = highest salience, same reason inner_voice sits here
         messages.append({"role": "system", "content": _safety_prompt(uname)})
 
-    final = _strip_tiers(_trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET))
+    final = _trim_prompt_to_budget(messages, CONTEXT_TOKEN_BUDGET)
     if PROMPT_STATS:
         _record_prompt_size(final, chat_id)
     return final
@@ -7235,7 +7236,7 @@ def _do_request(payload: dict, model: str, stream: bool) -> str:
 
 def _one_call(messages: list, model: str) -> str:
     use_stream = model not in _no_stream_models
-    payload: dict = {"model": model, "messages": messages}
+    payload: dict = {"model": model, "messages": _strip_tiers(messages)}
     # A streaming response carries no usage block unless it is asked for, which is why
     # every streamed call used to be accounted by character estimate. Asked for per
     # model, and dropped for any model that rejects the field — see the 400 handling.
@@ -7395,6 +7396,14 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
     for i, m in enumerate(models):
         if operation_state is not None:
             operation_state["model"] = m
+        call_messages = messages
+        if i > 0 and FALLBACK_CONTEXT_BUDGET > 0:
+            call_messages = _trim_prompt_to_budget(list(messages), FALLBACK_CONTEXT_BUDGET)
+            trimmed_total = _prompt_token_total(call_messages)
+            log.info("[fallback-trim] trimmed prompt from ~%dk to ~%dk tokens "
+                     "(budget %dk) for fallback model %s",
+                     _prompt_token_total(messages) // 1000,
+                     trimmed_total // 1000, FALLBACK_CONTEXT_BUDGET // 1000, m)
         for attempt in range(_CHAT_RETRIES):
             if time.time() - t0 > _CALL_BUDGET and i < len(models) - 1:
                 log.warning("[model] %s: budget exceeded (%.0fs), falling back to %s",
@@ -7403,7 +7412,7 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                 _count_error("fallback")
                 break
             try:
-                result = _one_call(messages, m)
+                result = _one_call(call_messages, m)
                 # A completion can be unusable two ways, handled identically — refuse
                 # to deliver, retry, then fall through to the non-thinking fallback
                 # model. "empty": a reasoning model burned its token budget thinking
@@ -7429,7 +7438,7 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                     # A rejected completion still cost real tokens — up to a full
                     # thinking-budget's worth for a leak — so it must reach the
                     # usage stats even though it never reaches the user.
-                    _track_llm_usage(messages, result)
+                    _track_llm_usage(call_messages, result)
                     _count_error("api")
                     last_err = last_err or RuntimeError(f"{reject} completion")
                     if attempt < _CHAT_RETRIES - 1:
@@ -7443,7 +7452,7 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                                    m, reject, _CHAT_RETRIES, models[i + 1])
                         _count_error("fallback")
                     break
-                _track_llm_usage(messages, result)
+                _track_llm_usage(call_messages, result)
                 return result
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
                     requests.exceptions.ConnectionError) as e:
