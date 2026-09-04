@@ -64,6 +64,11 @@ try:
 except Exception:
     _np = None
 
+try:
+    import proactive_receipts as _proactive_receipts
+except Exception:
+    _proactive_receipts = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -135,7 +140,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-04.1"
+BOT_VERSION = "2026-09-04.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1325,6 +1330,8 @@ _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsur
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
+PROACTIVE_RECEIPTS = _env_bool("PROACTIVE_RECEIPTS", True)
+PROACTIVE_RECEIPTS_FILE = BASE_DIR / "proactive-receipts.jsonl"
 PROACTIVE_TRIAGE = _env_bool("PROACTIVE_TRIAGE", True)
 VIGIL_MODE = _env_bool("VIGIL_MODE", True)
 VIGIL_LOOKAHEAD_DAYS = _env_int("VIGIL_LOOKAHEAD_DAYS", "3")
@@ -4752,6 +4759,53 @@ def _pop_draft(chat_id: int) -> dict:
     unsent_drafts[chat_id] = fresh
     save_state()
     return draft
+
+
+def _collision_window_id(now: datetime | None = None) -> str:
+    """Return the UTC half-hour bucket used to compare proactive candidates."""
+    stamp = now or datetime.now(timezone.utc)
+    stamp = stamp.astimezone(timezone.utc)
+    return stamp.strftime("%Y%m%dT%H") + f"{(stamp.minute // 30) * 30:02d}Z"
+
+
+def _emit_proactive_receipt(
+    chat_id: int, source: str, decision: str, reason: str, *,
+    text: str = "", hard_veto: str | None = None,
+) -> None:
+    """Record a proactive decision without affecting the decision itself."""
+    if not PROACTIVE_RECEIPTS or _proactive_receipts is None:
+        return
+    try:
+        _proactive_receipts.record_receipt(
+            PROACTIVE_RECEIPTS_FILE,
+            chat_id=chat_id,
+            source=source,
+            decision=decision,
+            reason=reason,
+            text=text,
+            hard_veto=hard_veto,
+            collision_window=_collision_window_id(),
+        )
+    except Exception as exc:
+        log.warning("[proactive-receipts] write failed: %s", type(exc).__name__)
+
+
+def _recent_receipt_skips(chat_id: int, limit: int = 3) -> list[dict]:
+    """Read recent skipped/drafted receipts for /nudges without changing state."""
+    if not PROACTIVE_RECEIPTS_FILE.exists() or limit <= 0:
+        return []
+    rows = []
+    try:
+        for line in PROACTIVE_RECEIPTS_FILE.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if row.get("chat_id") == chat_id and row.get("decision") in {"skipped", "drafted"}:
+                rows.append(row)
+    except OSError:
+        return []
+    return rows[-limit:]
 
 
 # --- Proactive triage queue (5.1-B) ---
@@ -10810,6 +10864,8 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             ago_str = f"{ago / 3600:.1f}h ago"
         lines.append(f"Last skipped nudge ({ago_str}): {last['reason']}")
+    for receipt in _recent_receipt_skips(chat_id):
+        lines.append(f"Receipt {receipt['decision']}: {receipt['reason']}")
     lines.append("Use /nudges <N> to change the daily limit (0 = unlimited).")
     await update.message.reply_text("\n".join(lines))
 
@@ -11676,13 +11732,21 @@ async def payments_reminder(context: ContextTypes.DEFAULT_TYPE):
     if owner is None:
         return
     if _today().weekday() != REMINDER_WEEKDAY:
+        _emit_proactive_receipt(owner, "reminder", "skipped", "payment reminder is not due today")
         return
     start, end = week_window()
     due = due_between(start, end)
     if not due:
+        _emit_proactive_receipt(owner, "reminder", "skipped", "no payments due this week")
         return  # quiet weeks stay quiet
     uname = user_names.get(owner, "you")
-    await context.bot.send_message(chat_id=owner, text=format_due(due, uname, start, end))
+    text = format_due(due, uname, start, end)
+    try:
+        await context.bot.send_message(chat_id=owner, text=text)
+        _emit_proactive_receipt(owner, "reminder", "sent", "payment reminder was due", text=text)
+    except Exception:
+        _emit_proactive_receipt(owner, "reminder", "failed", "payment reminder send failed", text=text)
+        raise
     print(f"[payments] Reminder sent: {len(due)} due {start} → {end}.")
 
 
@@ -12244,8 +12308,17 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     rid = context.job.data
     r = next((x for x in reminders if x["id"] == rid), None)
     if not r:
+        chat_id = getattr(context.job, "chat_id", None)
+        if chat_id is not None:
+            _emit_proactive_receipt(chat_id, "reminder", "skipped", "reminder was cancelled")
         return  # was cancelled
-    await context.bot.send_message(chat_id=r["chat_id"], text=f"⏰ Reminder: {r['text']}")
+    text = f"⏰ Reminder: {r['text']}"
+    try:
+        await context.bot.send_message(chat_id=r["chat_id"], text=text)
+        _emit_proactive_receipt(r["chat_id"], "reminder", "sent", "scheduled reminder fired", text=text)
+    except Exception:
+        _emit_proactive_receipt(r["chat_id"], "reminder", "failed", "scheduled reminder send failed", text=text)
+        raise
     if not r.get("daily"):
         if r in reminders:
             reminders.remove(r)
@@ -13975,6 +14048,7 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     date_note = _todays_memory_note(chat_id)
     if date_note:
         trigger = trigger[:-1] + date_note + "]"
+    source = "memory" if date_note else "check_in"
     sched_today = _read_schedule_today()
     if sched_today:
         trigger = trigger[:-1] + (
@@ -13999,7 +14073,7 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                 f"back ({draft['reason']}). If it fits, mention it in passing — the way "
                 f"you'd say 'I almost texted you earlier.' Don't make a thing of it.]"
             )
-    return await send_triggered(context, chat_id, trigger)
+    return source, await send_triggered(context, chat_id, trigger)
 
 
 # --- Recurring tasks ("cron jobs") ---
@@ -14029,9 +14103,12 @@ async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
     uname = user_names.get(job["chat_id"], "you")
     trigger = CRON_INSTRUCTION.format(instruction=job["instruction"], user=uname)
     try:
-        await send_triggered(context, job["chat_id"], trigger)
+        preview = await send_triggered(context, job["chat_id"], trigger)
+        _emit_proactive_receipt(job["chat_id"], "reminder", "sent",
+                                "scheduled task passed existing gates", text=preview)
         print(f"[cron #{job_id}] Ran: {job['instruction']}")
     except Exception as e:
+        _emit_proactive_receipt(job["chat_id"], "reminder", "failed", "scheduled task send failed")
         log.error("[cron #%s] Error: %s", job_id, e)
         _count_error("cron")
 
@@ -14336,29 +14413,36 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         print("[heartbeat] No owner yet — send /start to the bot first.")
         return
     if time.time() - last_seen.get(owner, 0) < HEARTBEAT_MIN * 0.9:
+        _emit_proactive_receipt(owner, "check_in", "skipped", "owner recently active")
         print("[heartbeat] Owner recently active; skipping this tick.")
         return
     if in_quiet_hours():
         _save_draft(owner, "wanted to check in but it was quiet hours")
+        _emit_proactive_receipt(owner, "check_in", "drafted", "quiet hours", hard_veto="quiet_hours")
         print("[heartbeat] Quiet hours; saved draft.")
         return
     if _is_quiet(owner):
+        _emit_proactive_receipt(owner, "check_in", "skipped", "user /quiet active", hard_veto="quiet_hours")
         print("[heartbeat] User /quiet active; skipping.")
         return
     now_dt = datetime.now(TZ) if TZ else datetime.now()
     if _in_quiet_window(now_dt, quiet_windows.get(owner, [])):
+        _emit_proactive_receipt(owner, "check_in", "skipped", "recurring quiet window", hard_veto="quiet_hours")
         print("[heartbeat] In recurring quiet window; skipping.")
         return
     if _is_away(owner):
+        _emit_proactive_receipt(owner, "check_in", "skipped", "user /away active", hard_veto="safety_privacy")
         print("[heartbeat] User /away active; skipping.")
         return
     if not _check_nudge_budget(owner):
         _save_draft(owner, "had something to say but hit the daily nudge limit")
+        _emit_proactive_receipt(owner, "check_in", "drafted", "daily nudge budget exhausted", hard_veto="budget_exhausted")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
         return
     _triage_register(owner, "heartbeat")
     if _triage_should_yield(owner, "heartbeat"):
         _save_draft(owner, "deferred to a higher-priority proactive send")
+        _emit_proactive_receipt(owner, "check_in", "drafted", "deferred to higher-priority proactive send")
         print("[heartbeat] Yielded to higher-priority queued candidate.")
         return
     s = mood_now(owner)
@@ -14366,14 +14450,17 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
     if skip_chance and random.random() < skip_chance:
         _save_draft(owner, "wasn't quite feeling up to reaching out")
+        _emit_proactive_receipt(owner, "check_in", "drafted", "mood was low")
         print(f"[heartbeat] Mood is low ({s:+.1f}); saved draft.")
         return
     try:
-        await send_proactive(context, owner)
+        source, preview = await send_proactive(context, owner)
         _consume_nudge(owner)
         _triage_clear(owner, "heartbeat")
+        _emit_proactive_receipt(owner, source, "sent", "heartbeat passed existing gates", text=preview)
         print("[heartbeat] Proactive message sent.")
     except Exception as e:
+        _emit_proactive_receipt(owner, "check_in", "failed", "heartbeat send failed")
         log.error("[heartbeat] Error: %s", e)
         _count_error("heartbeat")
 
@@ -14425,12 +14512,16 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     if hit is None:
         return
     if not _check_nudge_budget(owner):
+        _emit_proactive_receipt(owner, "day_life", "skipped", "daily nudge budget exhausted",
+                                hard_veto="budget_exhausted")
         return  # budget spent; the (due) marker survives, so we retry tomorrow
     i, note, d, rule = hit
     is_transition = bool(_TRANSITION_TAG_RE.search(note))
     triage_src = "transition_followup" if is_transition else "note_followup"
     _triage_register(owner, triage_src)
     if _triage_should_yield(owner, triage_src):
+        _emit_proactive_receipt(owner, "day_life", "skipped",
+                                "deferred to higher-priority proactive send")
         print(f"[note-followup] Deferred to higher-priority proactive send.")
         return
     days_ago = (today - d).days
@@ -14454,9 +14545,11 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
             f"Don't mention this message is automated.]"
         )
     try:
-        await send_triggered(context, owner, trigger)
+        preview = await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
         _triage_clear(owner, triage_src)
+        _emit_proactive_receipt(owner, "day_life", "sent", "due note follow-up passed existing gates",
+                                text=preview)
         nxt = _next_recurrence(rule, today) if rule else None
         if nxt:
             # Next occurrence is computed from TODAY, not from the stored due date —
@@ -14470,6 +14563,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"[note-followup] asked about: {note}"
               + (f" (next {nxt.isoformat()})" if nxt else ""))
     except Exception as e:
+        _emit_proactive_receipt(owner, "day_life", "failed", "due note follow-up send failed")
         log.warning("[note-followup] failed: %s", e)
         _count_error("heartbeat")
 
@@ -16516,25 +16610,33 @@ async def _run_health_alert_job(
         return  # already checked in recently
     _triage_register(owner, "health")
     if _triage_should_yield(owner, "health"):
+        _emit_proactive_receipt(owner, "health", "skipped",
+                                "deferred to higher-priority proactive send")
         print(f"[{label}] Deferred to higher-priority proactive send.")
         return
     if not _health_nudge_ok(owner):
+        _emit_proactive_receipt(owner, "health", "skipped", "health nudge gate blocked candidate")
         return
     triggered, value = await asyncio.to_thread(fetch_check)
     if not triggered:
         _triage_clear(owner, "health")
+        _emit_proactive_receipt(owner, "health", "skipped", "health check found no alert",
+                                hard_veto="stale_source")
         return
     uname = user_names.get(owner, "you")
     try:
-        await send_triggered(context, owner, trigger_text_fn(uname))
+        preview = await send_triggered(context, owner, trigger_text_fn(uname))
         _consume_nudge(owner)
         _triage_clear(owner, "health")
+        _emit_proactive_receipt(owner, "health", "sent", "health alert passed existing gates",
+                                text=preview)
         try:
             alert_file.write_text(str(time.time()))
         except Exception:
             pass
         print(f"[{label}] check-in sent ({value}).")
     except Exception as e:
+        _emit_proactive_receipt(owner, "health", "failed", "health alert send failed")
         log.warning("[%s] alert failed: %s", label, type(e).__name__)
         _count_error("garmin")
 

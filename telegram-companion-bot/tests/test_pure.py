@@ -1232,7 +1232,7 @@ class TestSummarizeSemaphore:
 
 # ── _in_quiet_window ─────────────────────────────────────────────────────────
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class TestInQuietWindow:
@@ -14303,3 +14303,22 @@ class TestCrudConsolidation:
         up, msg = _cmd_update(uid=self.UID, chat_id=9001)
         asyncio.run(bot._reminders_list_compat(up, _cmd_ctx()))
         assert msg.sent and "no reminders" in msg.sent[0].lower()
+
+    def test_proactive_receipt_collision_window_uses_utc_half_hours(self):
+        stamp = datetime(2026, 9, 4, 7, 59, tzinfo=timezone.utc)
+        assert bot._collision_window_id(stamp) == "20260904T0730Z"
+        stamp = datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc)
+        assert bot._collision_window_id(stamp) == "20260904T0800Z"
+
+    def test_recent_receipt_skips_is_read_only(self, tmp_path, monkeypatch):
+        path = tmp_path / "proactive-receipts.jsonl"
+        path.write_text(
+            '{"chat_id": 7, "decision": "skipped", "reason": "quiet"}\n'
+            '{"chat_id": 7, "decision": "sent", "reason": "sent"}\n'
+            '{"chat_id": 7, "decision": "drafted", "reason": "budget"}\n'
+            '{"chat_id": 8, "decision": "skipped", "reason": "other"}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(bot, "PROACTIVE_RECEIPTS_FILE", path)
+        assert [row["reason"] for row in bot._recent_receipt_skips(7)] == ["quiet", "budget"]
+        assert path.read_text(encoding="utf-8").count("\n") == 4
