@@ -12308,7 +12308,9 @@ async def fire_reminder(context: ContextTypes.DEFAULT_TYPE):
     rid = context.job.data
     r = next((x for x in reminders if x["id"] == rid), None)
     if not r:
-        _emit_proactive_receipt(0, "reminder", "skipped", "reminder was cancelled")
+        chat_id = getattr(context.job, "chat_id", None)
+        if chat_id is not None:
+            _emit_proactive_receipt(chat_id, "reminder", "skipped", "reminder was cancelled")
         return  # was cancelled
     text = f"⏰ Reminder: {r['text']}"
     try:
@@ -14102,11 +14104,11 @@ async def run_cron_job(context: ContextTypes.DEFAULT_TYPE):
     trigger = CRON_INSTRUCTION.format(instruction=job["instruction"], user=uname)
     try:
         preview = await send_triggered(context, job["chat_id"], trigger)
-        _emit_proactive_receipt(job["chat_id"], "other", "sent",
+        _emit_proactive_receipt(job["chat_id"], "reminder", "sent",
                                 "scheduled task passed existing gates", text=preview)
         print(f"[cron #{job_id}] Ran: {job['instruction']}")
     except Exception as e:
-        _emit_proactive_receipt(job["chat_id"], "other", "failed", "scheduled task send failed")
+        _emit_proactive_receipt(job["chat_id"], "reminder", "failed", "scheduled task send failed")
         log.error("[cron #%s] Error: %s", job_id, e)
         _count_error("cron")
 
@@ -14510,7 +14512,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     if hit is None:
         return
     if not _check_nudge_budget(owner):
-        _emit_proactive_receipt(owner, "memory", "skipped", "daily nudge budget exhausted",
+        _emit_proactive_receipt(owner, "day_life", "skipped", "daily nudge budget exhausted",
                                 hard_veto="budget_exhausted")
         return  # budget spent; the (due) marker survives, so we retry tomorrow
     i, note, d, rule = hit
@@ -14518,7 +14520,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
     triage_src = "transition_followup" if is_transition else "note_followup"
     _triage_register(owner, triage_src)
     if _triage_should_yield(owner, triage_src):
-        _emit_proactive_receipt(owner, "memory", "skipped",
+        _emit_proactive_receipt(owner, "day_life", "skipped",
                                 "deferred to higher-priority proactive send")
         print(f"[note-followup] Deferred to higher-priority proactive send.")
         return
@@ -14546,7 +14548,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         preview = await send_triggered(context, owner, trigger)
         _consume_nudge(owner)
         _triage_clear(owner, triage_src)
-        _emit_proactive_receipt(owner, "memory", "sent", "due note follow-up passed existing gates",
+        _emit_proactive_receipt(owner, "day_life", "sent", "due note follow-up passed existing gates",
                                 text=preview)
         nxt = _next_recurrence(rule, today) if rule else None
         if nxt:
@@ -14561,7 +14563,7 @@ async def note_followup_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"[note-followup] asked about: {note}"
               + (f" (next {nxt.isoformat()})" if nxt else ""))
     except Exception as e:
-        _emit_proactive_receipt(owner, "memory", "failed", "due note follow-up send failed")
+        _emit_proactive_receipt(owner, "day_life", "failed", "due note follow-up send failed")
         log.warning("[note-followup] failed: %s", e)
         _count_error("heartbeat")
 
