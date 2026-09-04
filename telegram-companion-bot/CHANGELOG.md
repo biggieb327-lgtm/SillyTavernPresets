@@ -7,7 +7,7 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
-## v2026-09-04.2 — Admin API bind guard + seven-bot fleet ports
+## v2026-09-04.3 — Admin API bind guard + seven-bot fleet ports
 
 **Root cause: `_start_admin_api` called `ThreadingHTTPServer(...)` unguarded. The
 default `ADMIN_API_PORT` (8765) is the same for every instance, so enabling
