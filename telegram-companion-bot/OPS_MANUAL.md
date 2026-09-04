@@ -1,1 +1,1 @@
-file:///workspace/OPS_MANUAL.md.new
+${file:/workspace/OPS_MANUAL.md.new}
