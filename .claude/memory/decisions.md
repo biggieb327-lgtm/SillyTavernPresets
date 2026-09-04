@@ -79,6 +79,28 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-04 | Model context windows are measured against the live endpoint, never read from a spec | status: current
+**Decided:** the served context window of any model this fleet uses is established by probing
+the live NanoGPT endpoint (`probe-context.py`), and `FALLBACK_CONTEXT_BUDGET` is set from that
+measurement.
+**Over:** (a) the provider's own model listing — `/v1/models` exposes no context field at all;
+(b) public aggregators (OpenRouter, Puter, hfviewer) — they disagree with each other and with
+reality; (c) the base model's native window from its HuggingFace config — describes the
+weights, not what the provider chose to serve; (d) leaving `FALLBACK_CONTEXT_BUDGET=0` and
+letting oversize prompts fail — that is the `context_length_exceeded` bug the var exists for.
+**Why:** measured `anthracite-org/magnum-v4-72b` at ~19,859 tokens. The published figures were
+32,768 and 131,072 — wrong by 1.65x and 6.6x, both in the direction that ships prompts the
+model rejects. A number that decides whether a prompt is accepted cannot come from a source
+that is wrong this often, and every off-box source is egress-blocked from a Claude Code
+session anyway (nano-gpt.com, huggingface.co, openrouter.ai all 403 or unreachable), so the
+measurement has to run on the VPS.
+**By:** a session, settled by running the probe against the live endpoint from the VPS and
+recording the accept/reject boundary (accepted 19,859, rejected 20,375).
+**Detail:** `telegram-companion-bot/probe-context.py`; `.env.example` FALLBACK_CONTEXT_BUDGET
+block; commits 26facec, 8e74cc2, 157b447. Open: `Sao10K/L3.3-70B-Euryale-v2.3` is still
+unmeasured (blocked by a 429 quota exhaustion), so the choice to stay on magnum is provisional
+rather than a comparison won on merit.
+
 ### 2026-09-01 | The offline life becomes subordinate to relationship memory (read-ground, write-firewalled) | status: current
 **Decided:** the offline-life generators (`_generate_life_event`, `_maybe_rotate_life_arc`) will
 READ the owner chat's relationship memory (long-term `summaries` + durable `facts` + recent summary,

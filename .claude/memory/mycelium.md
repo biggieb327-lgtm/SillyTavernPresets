@@ -126,6 +126,29 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-04 | from: claude/roadmap-priorities-esayr8 | to: whoever restarts the fleet | status: open
+**The fleet is deliberately STOPPED** (all seven `systemctl stop bot@<instance>`), because the
+NanoGPT account hit its weekly included input-token limit. This is not a fault — do not
+"fix" it by restarting. A stopped bot still shows as a stopped bot; the units are
+`Restart=always` but `WantedBy=multi-user.target`, so a VPS reboot WILL bring them back and
+resume spending. `vps-sync.sh` also restarts + enables (lines 329-333), so **do not deploy
+while paused** — and three merged-but-undeployed changes are waiting (shared preset trim,
+Jules card compression, Chirp Bank rewrite), all content-only, none urgent.
+`FALLBACK_CONTEXT_BUDGET=15700` is already set in all seven `.env` files and takes effect on
+start; `.env.bak-2026-09-04` sits beside each one. Restart with `systemctl start` once the
+owner confirms quota, then `vps-sync.sh <instance>` per bot for the pending content.
+
+### 2026-09-04 | from: claude/roadmap-priorities-esayr8 | to: model/context work | status: open
+`Sao10K/L3.3-70B-Euryale-v2.3` is **unmeasured** — a 429 (quota) blocked the probe, which
+says nothing about its window. Re-probe with
+`python3 /opt/telegram-bots/.repo/telegram-companion-bot/probe-context.py --env /opt/telegram-bots/jules --budget 80000 Sao10K/L3.3-70B-Euryale-v2.3`.
+**Stopping rule, set before the data arrives:** magnum's measured ~19,859 already clears every
+instance (tightest is jules at 12,305 protected, +3,458 room). So Euryale is worth switching
+to ONLY if it measures ≥32,000; anything less is churn for no gained history, and a
+non-size failure (404 = NanoGPT does not carry the ID) means drop the candidate and correct
+`.env.example`, which still recommends it. Do not re-run the probe on a hunch — it spends
+the same quota the fleet needs.
+
 ### 2026-09-03 | from: claude/recast-post-processing-fleet-t2bnod | to: bot.py command work | status: open
 
 Telegram's `set_my_commands` API hard-rejects more than 100 commands with

@@ -245,7 +245,26 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 7** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01)
+**seen: 9** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04)
+- 2026-09-04 — Wrote "a rejected call bills nothing" into `probe-context.py`'s docstring as a
+  statement of fact about NanoGPT's metering. I had never checked it, and no source says it.
+  The script was then designed around it — binary-searching DOWN from a 140,000-token ceiling,
+  so its largest requests came first — and that run exhausted the account's weekly input
+  allowance, leaving the second candidate model unmeasurable and the fleet exposed (bot.py
+  escalates a 429 to the fallback model, which bills the same quota). Whether oversize
+  rejections are metered is *still* unknown; the docstring now says so. Same tell as
+  2026-08-31: confidence followed fluency. Not a guard gap — `theory-guard.sh` covers claims
+  about what a named function returns, and this was a billing property of an external service,
+  squarely in C5's acknowledged uncovered half.
+- 2026-09-04 — Sized an entire card-compression pass against a 16k fallback context window,
+  told the owner Jules "can't fit a 16k fallback at all" and was "~1,800 over before a single
+  word of history", and only measured the real window afterward. It is ~19,859, so she fit the
+  whole time — before the compression as well as after. The 16k figure came from an "e.g. 16k
+  vs 128k" *illustration* in the FALLBACK_CONTEXT_BUDGET changelog entry, read as a
+  measurement. The work was independently justified (one rule stated four times across four
+  files) but the urgency was invented, and it was stated to the owner in the assertive voice.
+  → **before optimizing against a limit, measure the limit; an "e.g." in a doc is an
+  illustration, not a measurement.**
 - 2026-09-01 — Same claim shape as the 2026-08-25 occurrence below, recurred. Answering "what's
   next on the roadmap", I wrote "5.9 `/reviewlife`… no one has watched a real day produce a *good*
   suggestion" as settled fact about the shipped code. `theory-guard.sh` blocked the turn. It was not
@@ -1228,22 +1247,10 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
-- 2026-09-04 — Wrote a context-probe that binary-searched DOWN from a 140,000-token
-  ceiling, so its first two calls were the largest it would ever send: ~380k input tokens
-  to measure one model. That ran the shared NanoGPT account into "Weekly included input
-  token limit exceeded", left the second model unmeasurable, and — because bot.py
-  escalates a 429 to the fallback model on the same quota — put the whole fleet at risk
-  from a diagnostic. The docstring claimed "a rejected call bills nothing", which was an
-  assumption written as fact; whether oversize rejections are metered is still unknown.
-  → **a probe that spends a shared, exhaustible resource ramps UP from small and stops at
-  the first rejection, never searches down from a maximum; and it carries a cumulative
-  spend cap. Never state a billing/metering property as fact without a source.**
-- 2026-09-04 — Sized an entire card-compression pass against an assumed 16k fallback
-  window, called Jules "unable to fit at all", and only measured the real window after the
-  work was done. The true served window was ~19,859, so she fit the whole time. The
-  compression was independently justified (one rule stated four times) but the urgency was
-  invented. → **before optimizing against a limit, measure the limit. An "e.g." in a
-  changelog is an illustration, not a measurement.**
+- 2026-09-04 — A probe that spends a shared, exhaustible resource searched DOWN from its
+  maximum, so its most expensive calls came first. → **ramp UP from small and stop at the
+  first rejection; carry a cumulative spend cap.** (Root cause folded into C5 — the design
+  followed from an unverified billing assumption; kept here for the design rule itself.)
 - 2026-09-04 — Assumed a deploy landed because the user said "I deployed" and launched a
   thorough code sweep for a "second crash" that didn't exist. The VPS journal still showed
   the SAME `_ENGAGEMENT_DAYS` NameError — the fix wasn't deployed. The code analysis (no
