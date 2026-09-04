@@ -1228,6 +1228,22 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-04 — Wrote a context-probe that binary-searched DOWN from a 140,000-token
+  ceiling, so its first two calls were the largest it would ever send: ~380k input tokens
+  to measure one model. That ran the shared NanoGPT account into "Weekly included input
+  token limit exceeded", left the second model unmeasurable, and — because bot.py
+  escalates a 429 to the fallback model on the same quota — put the whole fleet at risk
+  from a diagnostic. The docstring claimed "a rejected call bills nothing", which was an
+  assumption written as fact; whether oversize rejections are metered is still unknown.
+  → **a probe that spends a shared, exhaustible resource ramps UP from small and stops at
+  the first rejection, never searches down from a maximum; and it carries a cumulative
+  spend cap. Never state a billing/metering property as fact without a source.**
+- 2026-09-04 — Sized an entire card-compression pass against an assumed 16k fallback
+  window, called Jules "unable to fit at all", and only measured the real window after the
+  work was done. The true served window was ~19,859, so she fit the whole time. The
+  compression was independently justified (one rule stated four times) but the urgency was
+  invented. → **before optimizing against a limit, measure the limit. An "e.g." in a
+  changelog is an illustration, not a measurement.**
 - 2026-09-04 — Assumed a deploy landed because the user said "I deployed" and launched a
   thorough code sweep for a "second crash" that didn't exist. The VPS journal still showed
   the SAME `_ENGAGEMENT_DAYS` NameError — the fix wasn't deployed. The code analysis (no

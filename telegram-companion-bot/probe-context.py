@@ -20,10 +20,22 @@ takes it, binary-search the boundary.
     python3 probe-context.py Sao10K/L3.3-70B-Euryale-v2.3
     python3 probe-context.py --env /opt/telegram-bots/jules anthracite-org/magnum-v4-72b
 
-Costs a handful of cheap calls per model (max_tokens=16, and a rejected call bills
-nothing). Sizes are approximate tokens at the chars/4 estimate bot.py itself uses
-(_est_tokens), so the answer is directly comparable to CONTEXT_TOKEN_BUDGET and
-FALLBACK_CONTEXT_BUDGET, which are denominated in those same units.
+COST: this spends real input tokens against the account's quota, and the first version
+of this script spent far too many. It binary-searched down from a 140,000-token ceiling,
+so the very first probes were the largest possible - roughly 380,000 input tokens to
+measure one model, which on 2026-09-04 ran the account into "Weekly included input token
+limit exceeded" and left the second model unmeasurable. Whether a rejected oversize
+request is metered is NOT known; the original script asserted it was free, which was an
+assumption stated as fact.
+
+So it now ramps UP by doubling and stops at the first rejection, then binary-searches
+only inside that bracket. A ~20k window costs about 60k tokens instead of 380k, and the
+large probes only ever happen for models that actually have large windows. --budget caps
+cumulative spend and the run reports what it used.
+
+Sizes are approximate tokens at the chars/4 estimate bot.py itself uses (_est_tokens),
+so the answer is directly comparable to CONTEXT_TOKEN_BUDGET and FALLBACK_CONTEXT_BUDGET,
+which are denominated in those same units.
 
 Reports UNKNOWN rather than a number when the failure is not clearly a context
 rejection - an auth error, a rate limit, or a model that is simply down says nothing
@@ -103,41 +115,88 @@ def attempt(model, approx_tokens, key, timeout):
         return None, f"{type(e).__name__}: {e}"
 
 
-def probe(model, key, lo, hi, timeout):
+class Spend:
+    """Cumulative input tokens sent. The cap exists because the runaway case here is
+    not a wrong answer, it is an exhausted weekly quota that takes the FLEET down with
+    it - every instance shares the account, and bot.py escalates a 429 to the fallback
+    model, which draws on that same quota."""
+
+    def __init__(self, cap):
+        self.used = 0
+        self.cap = cap
+
+    def allows(self, n):
+        return self.cap <= 0 or self.used + n <= self.cap
+
+    def add(self, n):
+        self.used += n
+
+
+def probe(model, key, lo, cap, timeout, spend):
     print(f"\n=== {model} ===")
 
-    ok, detail = attempt(model, lo, key, timeout)
+    def shot(n):
+        if not spend.allows(n):
+            print(f"  stopping: ~{n} tok probe would pass the --budget cap "
+                  f"({spend.used} of {spend.cap} used)")
+            return "capped", None
+        spend.add(n)
+        ok, detail = attempt(model, n, key, timeout)
+        if ok is not None:
+            print(f"  ~{n:>7} tok  {'accepted' if ok else 'rejected'}")
+        return ok, detail
+
+    ok, detail = shot(lo)
+    if ok == "capped":
+        return None
     if ok is None:
         print(f"  UNKNOWN - probe at ~{lo} tok failed for a non-size reason: {detail}")
         return None
     if ok is False:
         print(f"  served window is under ~{lo} tok (floor probe was rejected)")
         return 0
-    print(f"  ~{lo:>7} tok  accepted")
 
-    ok, detail = attempt(model, hi, key, timeout)
-    if ok is True:
-        print(f"  ~{hi:>7} tok  accepted  -> at least {hi}, ceiling not found")
-        return hi
-    if ok is None:
-        print(f"  UNKNOWN - ceiling probe failed for a non-size reason: {detail}")
-        return None
-    print(f"  ~{hi:>7} tok  rejected")
+    # Ramp up by doubling. Stops at the first rejection, so a small window is found
+    # with small requests and only a genuinely large model ever sees a large one.
+    hi = None
+    cur = lo
+    while cur < cap:
+        nxt = min(cur * 2, cap)
+        ok, detail = shot(nxt)
+        if ok == "capped":
+            print(f"  --> served context is at least ~{cur} tok (stopped on budget)")
+            return cur
+        if ok is None:
+            print(f"  UNKNOWN - probe at ~{nxt} tok failed for a non-size reason: {detail}")
+            return None
+        if ok:
+            cur = nxt
+            if cur >= cap:
+                print(f"  --> accepted at the ~{cap} tok cap; ceiling not found")
+                return cur
+        else:
+            hi = nxt
+            break
 
-    # Invariant: lo accepted, hi rejected. Narrow to 5%.
-    while hi - lo > max(1024, lo // 20):
-        mid = (lo + hi) // 2
-        ok, detail = attempt(model, mid, key, timeout)
+    if hi is None:
+        print(f"  --> served context is at least ~{cur} tok")
+        return cur
+
+    # Invariant: cur accepted, hi rejected. Narrow to 5%.
+    while hi - cur > max(1024, cur // 20):
+        mid = (cur + hi) // 2
+        ok, detail = shot(mid)
+        if ok == "capped":
+            break
         if ok is None:
             print(f"  stopped at ~{mid} tok: {detail}")
             break
-        print(f"  ~{mid:>7} tok  {'accepted' if ok else 'rejected'}")
         if ok:
-            lo = mid
+            cur = mid
         else:
             hi = mid
-    print(f"  --> served context is between ~{lo} and ~{hi} tok")
-    return lo
+    print(f"  --> served context is between ~{cur} and ~{hi} tok")
+    return cur
 
 
 def main():
@@ -145,15 +204,20 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("models", nargs="+", help="model ids to probe")
     p.add_argument("--env", metavar="DIR", help="instance dir to read .env from")
-    p.add_argument("--lo", type=int, default=8000, help="floor probe (default 8000)")
-    p.add_argument("--hi", type=int, default=140000, help="ceiling probe (default 140000)")
+    p.add_argument("--lo", type=int, default=8000, help="first probe (default 8000)")
+    p.add_argument("--cap", type=int, default=140000,
+                   help="stop ramping at this size (default 140000)")
+    p.add_argument("--budget", type=int, default=250000,
+                   help="max cumulative input tokens to spend across all models "
+                        "(default 250000; 0 disables the cap)")
     p.add_argument("--timeout", type=int, default=180)
     a = p.parse_args()
 
     key = load_key(a.env)
+    spend = Spend(a.budget)
     results = {}
     for m in a.models:
-        results[m] = probe(m, key, a.lo, a.hi, a.timeout)
+        results[m] = probe(m, key, a.lo, a.cap, a.timeout, spend)
 
     print("\n=== summary ===")
     for m, v in results.items():
@@ -164,7 +228,9 @@ def main():
         else:
             print(f"  {m:52} >= ~{v} tok   "
                   f"(FALLBACK_CONTEXT_BUDGET ~{max(0, v - 4096)})")
-    print("\nBudget suggestion subtracts MAX_TOKENS=4096 for the reply, matching the\n"
+    print(f"\nspent ~{spend.used} input tokens"
+          + (f" of the {spend.cap} --budget cap" if spend.cap > 0 else " (uncapped)"))
+    print("Budget suggestion subtracts MAX_TOKENS=4096 for the reply, matching the\n"
           "rule in .env.example. Lower it if that instance sets MAX_TOKENS higher.")
 
 
