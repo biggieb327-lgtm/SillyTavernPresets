@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # fleet-status.sh — one command to answer "is everyone up, what version, any errors."
 #
 # Hits each instance's /admin/health endpoint and prints a summary table.
