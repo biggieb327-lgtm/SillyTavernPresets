@@ -73,4 +73,3 @@ Aftermath:
 4. Action → consequence → next beat?
 5. Mid-act dialogue broken by breath?
 6. Aftermath beat present if the scene crested?
-```
