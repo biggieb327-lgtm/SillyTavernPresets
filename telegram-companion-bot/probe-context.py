@@ -8,6 +8,11 @@ you get is the provider's choice, and magnum-v4-72b is reported at both numbers 
 different aggregators. Guessing that number wrong sets FALLBACK_CONTEXT_BUDGET wrong,
 which either wastes context or ships a prompt the model rejects.
 
+First run (2026-09-04) settled that case and vindicated the approach: NanoGPT serves
+magnum-v4-72b at ~19,859 tokens. Not 32,768, not 131,072 - every published figure for
+that model was off by 1.6x or more, in the direction that would have had the bot ship
+prompts the model rejects.
+
 So this measures instead of asking: send filler of a known size, see whether the model
 takes it, binary-search the boundary.
 
