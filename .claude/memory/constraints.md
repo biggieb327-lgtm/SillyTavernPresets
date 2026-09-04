@@ -34,7 +34,9 @@ The test: *did a bot misbehave, or did we?* Bot → operational log. Us → here
 ## Active constraints
 
 ### C1 — Confirm the host before any host-specific command
-**seen: 8** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1, 2026-08-25 ×1)
+**seen: 9** (2026-07-19 ×1, 2026-07-26 ×3, 2026-08-01 ×1, 2026-08-02 ×1, 2026-08-03 ×1, 2026-08-25 ×1, 2026-09-04 ×1)
+- 2026-09-04 — Deploy command for Emily (`/opt/telegram-bots/.repo/.../vps-sync.sh emily`)
+  written without host label. `host-guard.sh` blocked the turn (seen 8→9).
 - 2026-08-25 — A final-report deploy block (`/opt/telegram-bots/.repo/.../vps-sync.sh <instance>`)
   was written with no host named. `host-guard.sh` blocked the turn (seen 7→8) — the guard doing
   exactly its job. Fixed by prefixing `# host: vps (as root)`. The guard covers only the agent's
@@ -1226,6 +1228,13 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-04 — Assumed a deploy landed because the user said "I deployed" and launched a
+  thorough code sweep for a "second crash" that didn't exist. The VPS journal still showed
+  the SAME `_ENGAGEMENT_DAYS` NameError — the fix wasn't deployed. The code analysis (no
+  other forward references) was correct but not the bottleneck; the bottleneck was verifying
+  the deploy. -> **when a fix is deployed and the problem persists, verify the deploy landed
+  before looking for a second bug. Ask for the journal output or suggest checking the
+  release hash.**
 - 2026-09-02 — Wrote `TestTruncateAtWord.test_truncates_at_word_boundary` with a logically
   wrong assertion: `" " not in result or result == result.rsplit(" ", 1)[0]` — this is always
   False for any multi-word truncation result, because the first clause fails and the second
