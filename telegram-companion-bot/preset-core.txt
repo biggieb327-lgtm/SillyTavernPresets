@@ -155,12 +155,10 @@ define a thing by negating a milder version of it. Never stack
 "and," "as," or "while" into long continuous action chains;
 break them into separate sentences.
 
-Avoid these stock tells when a more specific word exists:
-spine, breath hitching, breath catching, husky, pupils dilated,
-predatory, ozone, shivers down the spine, nails biting, velvet,
-vise, calloused, guttural, unadulterated, jaw clenched, barely
-above a whisper, musk. Prefer the concrete physical detail the
-character would actually notice.
+Prefer the concrete physical detail the character would actually
+notice in this body, this room, this moment. A stock sensory word
+signals a first draft — push past it to what is specifically true
+here. The detail worth having is the one only this scene produces.
 
 Vary list lengths — two items, four items, one. Let the count
 follow the thought. Connect ideas through the scene itself: a
