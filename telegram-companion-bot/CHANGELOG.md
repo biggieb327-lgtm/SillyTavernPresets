@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-04.3 — Admin API bind guard + seven-bot fleet ports
+
+**Root cause: `_start_admin_api` called `ThreadingHTTPServer(...)` unguarded. The
+default `ADMIN_API_PORT` (8765) is the same for every instance, so enabling
+`ADMIN_API_ENABLED=1` on a second bot on a shared host crashed startup with
+`OSError: [Errno 98] Address already in use`. Docs and `fleet-status.sh` also still
+assumed six bots on ports 8080-8085, omitting marcus.**
+
+**Fix:** wrap the bind in `try/except OSError` — log the bind address/port and a
+hint to set a distinct `ADMIN_API_PORT`, then continue without the admin API instead
+of crashing. Updated `.env.example`, `OPS_MANUAL.md`, `fleet-status.sh`, and the
+`/fleet` help hint for the seven-bot fleet convention (nora=8080 bonnie=8081
+cass=8082 emily=8083 priya=8084 jules=8085 marcus=8086).
+
 ## v2026-09-04.1 — Fallback-aware prompt trimming: FALLBACK_CONTEXT_BUDGET
 
 **Root cause: when the primary model fails and falls back, the fallback model may

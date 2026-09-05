@@ -654,8 +654,15 @@ above).
 /update /restart` over HTTP for a non-Telegram client (e.g. a future control-panel
 app). Reachable only over a private Tailscale network — the installer prints
 Tailscale setup instructions and the API stays bound to loopback (unreachable) until
-you set `ADMIN_API_BIND` to the host's tailnet IP. See `.env.example` for the full
-`ADMIN_API_*` reference and `CHANGELOG.md` (v2026-07-05.12) for the design rationale.
+you set `ADMIN_API_BIND` to the host's tailnet IP. Each of the seven instances needs
+its own distinct `ADMIN_API_PORT` — the default (8765) is the same for every instance,
+so enabling the admin API on a second bot without changing the port collides on bind.
+A bind failure (`Address already in use`) no longer crashes startup: it's caught,
+logged, and that instance just runs without the admin API. Fleet convention:
+`nora=8080 bonnie=8081 cass=8082 emily=8083 priya=8084 jules=8085 marcus=8086` — wire
+the peers into `FLEET_PEERS` for `/fleet`. See `.env.example` for the full
+`ADMIN_API_*` reference, and `CHANGELOG.md` (v2026-07-05.12 for the design rationale,
+v2026-09-04.2 for the bind guard).
 
 The native Android control-panel app itself is a separate, later phase — not part of
 this installer.

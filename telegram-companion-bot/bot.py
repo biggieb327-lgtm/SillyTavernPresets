@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-04.1"
+BOT_VERSION = "2026-09-04.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -18252,8 +18252,15 @@ async def _start_admin_api(application):
         log.warning("[admin-api] ADMIN_API_ENABLED is set but ADMIN_API_TOKEN is "
                     "empty — refusing to start rather than serve an unauthenticated API.")
         return
-    _admin_httpd = http.server.ThreadingHTTPServer(
-        (ADMIN_API_BIND, ADMIN_API_PORT), _AdminRequestHandler)
+    try:
+        _admin_httpd = http.server.ThreadingHTTPServer(
+            (ADMIN_API_BIND, ADMIN_API_PORT), _AdminRequestHandler)
+    except OSError as e:
+        log.error("[admin-api] bind failed on %s:%d (%s) — set a distinct "
+                  "ADMIN_API_PORT for this instance; continuing without the admin API.",
+                  ADMIN_API_BIND, ADMIN_API_PORT, e)
+        _admin_httpd = None
+        return
     threading.Thread(target=_admin_httpd.serve_forever, name="admin-api", daemon=True).start()
     log.info("[admin-api] listening on %s:%d", ADMIN_API_BIND, ADMIN_API_PORT)
 
@@ -18362,7 +18369,7 @@ async def fleet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not FLEET_PEERS:
         await update.message.reply_text(
             "No peers configured. Set FLEET_PEERS in this instance's .env, e.g.\n"
-            "FLEET_PEERS=nora=8080,bonnie=8081,jules=100.x.y.z:8085\n"
+            "FLEET_PEERS=nora=8080,bonnie=8081,cass=8082,emily=8083,priya=8084,jules=8085,marcus=8086\n"
             "(each peer needs ADMIN_API_ENABLED=1; port = its ADMIN_API_PORT)")
         return
     rows = await asyncio.gather(
