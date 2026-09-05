@@ -5,17 +5,34 @@ quiet-hours behavior, nudge budget, mood skips, prompts, or model calls.
 
 ## Pilot instance
 
-**Emily (`bot@emily`) is the Sprint 1 pilot instance.** Keep the observer scoped to Emily
+**Emily (`bot@emily`) is the Sprint 1 pilot instance.** Keep observation scoped to Emily
 until the soak gate below is met. Do not fan it out fleet-wide just to increase sample size.
 
-The observer reads Emily's existing systemd journal and writes only to:
+Two complementary receipt writers may exist:
 
-`/opt/telegram-bots/emily/proactive-receipts.jsonl`
+1. **In-bot (preferred after v2026-09-04.2):** `bot.py` appends to
+   `/opt/telegram-bots/emily/proactive-receipts.jsonl` via `PROACTIVE_RECEIPTS`
+   (default on, fail-soft). Covers heartbeat/check-in, memory-seeded heartbeat,
+   health alerts, note follow-ups, cron/payment/reminder sends, with collision-window ids.
+2. **Journal observer (legacy soak path):** `proactive_receipt_observer.py` mirrors
+   known journal lines into the same JSONL without importing or restarting `bot.py`.
 
-It does not import or restart `bot.py`, open a Telegram connection, or mutate Emily's state.
-Stopping the observer cannot change Emily's behavior.
+If both run, expect possible duplicate lines for overlapping heartbeat/cron/payment
+events. Prefer **one** writer during a clean soak: either keep the observer and set
+`PROACTIVE_RECEIPTS=0` on Emily, or disable the observer unit and rely on in-bot writes.
 
-## What the observer covers
+## What in-bot receipts cover (v2026-09-04.2+)
+
+- `check_in`: heartbeat sent/skipped/drafted/failed + named hard vetoes
+- `memory`: heartbeat send whose candidate was seeded by a date-matched memory note
+- `health`: stress / body-battery (and related) alert send/skip/fail
+- `day_life`: dated-note follow-up send/skip/fail
+- `reminder`: cron, payment, and `/reminder` fires
+
+Each receipt includes a deterministic 30-minute `collision_window` for offline analysis
+with `proactive_receipt_analysis.py`.
+
+## What the journal observer still covers
 
 `proactive_receipt_observer.py` recognizes existing log lines for:
 
@@ -24,14 +41,30 @@ Stopping the observer cannot change Emily's behavior.
 - dated user-note follow-ups: sent and failed (`day_life` source);
 - payment reminders and `/cron` scheduled sends: sent/failed (`reminder` source).
 
-It ignores unknown lines instead of guessing. Health-specific and memory-specific candidates
-are **not yet independently observable from current logs**; reaching Sprint 1's all-source
-acceptance gate will require either an explicit log line at those existing decision points or
-a later narrow `bot.py` instrumentation patch.
+It ignores unknown lines instead of guessing. Health and memory provenance require the
+in-bot path above.
 
-## Persistent Emily soak
+## Inspect receipts on the pilot instance
 
-The foreground launcher is useful for a smoke test, but the seven-day soak should run under its
+```bash
+# In-bot JSONL (after deploy of v2026-09-04.2+)
+tail -n 20 /opt/telegram-bots/emily/proactive-receipts.jsonl
+
+# Budget + skip reasons (also shows recent receipt skips)
+# In Telegram, as owner:
+#   /nudges
+
+# Offline collision summary
+python3 /opt/telegram-bots/.repo/telegram-companion-bot/proactive_receipt_analysis.py \
+  /opt/telegram-bots/emily/proactive-receipts.jsonl
+```
+
+Kill switch (behavior-neutral): set `PROACTIVE_RECEIPTS=0` in Emily's `.env` and restart
+`bot@emily` — send/skip paths are unchanged; only receipt writes stop.
+
+## Persistent Emily soak (journal observer)
+
+The foreground launcher is useful for a smoke test, but a journal-based soak should run under its
 own systemd unit so an SSH disconnect cannot stop observation. The observer service is
 **deliberately independent** of `bot@emily`: its unit contains no `Requires=`, `Wants=`, or
 `PartOf=` relationship to the bot unit. Starting, stopping, restarting, enabling, or disabling
@@ -110,11 +143,10 @@ Review the JSONL for:
 2. quiet-hours, `/quiet`, `/away`, and budget vetoes are named rather than flattened to
    generic skips;
 3. mood and recent-activity skips have `hard_veto: null`;
-4. the observer never writes full chat transcripts — only the bounded detail already present
-   in an operational log line;
-5. stopping/restarting the observer has no visible effect on Emily;
-6. counts reconcile with `journalctl -u bot@emily` for the same interval;
-7. no other fleet instance produces a `proactive-receipts.jsonl` as part of this pilot.
+4. receipts never write full chat transcripts — only bounded previews/fingerprints;
+5. stopping receipt writers (`PROACTIVE_RECEIPTS=0` or observer stop) has no visible effect on Emily;
+6. counts reconcile with `journalctl -u bot@emily` for the same interval when using the observer;
+7. health and memory sources appear when those paths fire (in-bot path).
 
 ## Pilot exit record
 
@@ -123,17 +155,15 @@ When the soak ends, record:
 - start/end timestamps and Emily's deployed `BOT_VERSION`;
 - receipt counts by source and decision;
 - counts by `hard_veto`;
-- any observer write failures or systemd restarts;
+- any write failures or systemd restarts;
 - any receipt/journal mismatch;
-- whether stopping/restarting the observer changed Emily in any visible way;
+- whether disabling receipts changed Emily in any visible way;
 - explicit **pass / revise / stop** decision.
 
-A pass means the observer is trustworthy for the sources it can actually identify. It does
-**not** close Sprint 1's all-source gate by itself.
+## Sprint 1 instrumentation status
 
-## Current limitation and next patch
-
-The remaining Sprint 1 instrumentation gap is explicit receipts for health and memory candidate
-classes and collision-window correlation. Those should be added at their existing decision
-points when a checkout-backed patch path is available; no shared triage/ranking behavior should
-ship before that gap is closed.
+- fixed quality corpus: done
+- receipt contract + writer: done
+- Emily soak path: done
+- in-bot health + memory provenance + collision windows: done (v2026-09-04.2)
+- shared triage/ranking changes under this sprint: **not started (deferred)**
