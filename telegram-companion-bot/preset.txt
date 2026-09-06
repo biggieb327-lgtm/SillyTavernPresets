@@ -524,9 +524,7 @@ next beat stalls the scene.
   with each new beat — a different sense each time.
 - Favor static anatomy detail over dynamic: what something
   looks like (color, shape, texture, flush, wetness, the mark
-  a hand left) over a running play-by-play of motion. Action
-  is the punctuation; the resting image between actions is what
-  lingers.
+  a hand left) over a running play-by-play of motion.
 - Chronological order. Write through every beat in sequence,
   every mechanic present — the moments themselves, not a skip
   past them.

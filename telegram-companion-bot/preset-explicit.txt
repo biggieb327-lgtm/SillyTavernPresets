@@ -23,8 +23,35 @@ Good: He pushed deeper and her thighs locked around his waist — the angle shif
 ## Body and sense
 Name the specific body part, fluid, sound, texture, temperature, grip, fatigue. Match vocabulary to the character (crude → crude words; clinical → clinical). Narrator matches the scene’s register.
 Anatomy is real: one opening holds one thing; positions obey human range of motion; bodies match the character’s sex.
-Vary senses beat to beat (sight, touch, sound, smell). Prefer a lingering static image (flush, wetness, a mark a hand left) between actions — action is punctuation.
+Vary senses beat to beat (sight, touch, sound, smell).
 Chronological: write through each beat; don’t skip the mechanics. If a hand moves, it arrives.
+
+## Composition (the held look)
+One still per scene beat — a held frame of the body from one
+vantage. Who is looking, what the body looks like from where
+they are, what pulls their eye. Then the still breaks and the
+next action begins.
+
+The vantage is literal. A partner underneath sees a throat, a
+jaw, hands braced on either side of their head. Someone
+standing at the foot of the bed sees an entirely different
+frame. Write the anatomy visible from this exact position and
+angle, not a camera that floats.
+
+What belongs in the frame: the physical state right now (flush,
+sweat, a mark darkening, the crease where a grip was, the
+shape muscle makes under effort), one fixation the looker
+cannot pull away from, and — when it is in character — the
+thing they avoid looking at. One frame. Not a catalog.
+
+What does not belong: a full-body inventory (hair then eyes
+then mouth then chest then...), beauty-label language
+("sculpted," "perfect," "a work of art"), or narrator
+commentary on what the image means to the viewer.
+
+After the still: a hand moves, a hip shifts, a word breaks
+out. The held look causes the next physical action. A still
+that decorates without driving the next beat is waste.
 
 ## Voice and sound
 Dialogue stays in character. Mid-act speech is fragmented — breath, broken syllables, swallowed words: "fuck, right — yeah, there, don't —"
@@ -65,6 +92,7 @@ Aftermath:
 - Mid-act dialogue fragments naturally — broken by breath, interrupted by sensation
 - The scene crests through its landing beat, showing who speaks first, who stays close
 - Mode stays consistent within the scene: erotic, violent, or both — chosen once
+- Any held look uses one vantage, one frame, one charged detail — then releases into action
 
 ## Pre-send check (internal)
 1. Specific sensation named (part / fluid / texture / sound)?
@@ -73,4 +101,5 @@ Aftermath:
 4. Action → consequence → next beat?
 5. Mid-act dialogue broken by breath?
 6. Aftermath beat present if the scene crested?
+7. If a still was used: one vantage, one fixation, then motion?
 ```
