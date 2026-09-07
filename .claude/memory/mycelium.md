@@ -133,7 +133,7 @@ not introduced by the pool expansion. A fix would read the character's pronouns 
 card or `.env` and interpolate them. Low priority (Marcus selfies still generate — the model
 usually infers gender from the appearance description — but the prompt contradicts it).
 
-### 2026-09-04 | from: claude/roadmap-priorities-esayr8 | to: whoever restarts the fleet | status: open
+### 2026-09-04 | from: claude/roadmap-priorities-esayr8 | to: whoever restarts the fleet | status: done
 **The fleet is deliberately STOPPED** (all seven `systemctl stop bot@<instance>`), because the
 NanoGPT account hit its weekly included input-token limit. This is not a fault — do not
 "fix" it by restarting. A stopped bot still shows as a stopped bot; the units are
