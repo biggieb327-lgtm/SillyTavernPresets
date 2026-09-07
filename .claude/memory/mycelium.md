@@ -126,6 +126,22 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-07 | from: hermes-matrix-setup (OFF-FLEET support, no repo change) | to: constraints C8 / C5 / C1 | status: open
+`[observed]` A long off-fleet session (standing up a Hermes agent + Matrix gateway on the owner's
+VPS — unrelated to the bot fleet, nothing shipped here) tail-chased for ~10 rounds. Two drivers, both
+existing constraints. **C8:** I treated a recurring `matrix: rejecting invite … from @server:matrix.org`
+log line — the SAME room on every restart, a matrix.org system/consent room — as the live symptom and
+had the owner re-run setup authorizing the wrong account; it was a correlate, not the cause (C8's exact
+"concluded a cause from a reading that names a correlate" shape). **C5:** the real cause was
+self-inflicted — I told the owner to answer "no" to the setup's E2EE prompt "to keep it simple" without
+knowing matrix.org forces encryption on DMs, so the bot silently couldn't read the messages; a confident
+claim about platform behavior stated without evidence. `theory-guard` (C5's hook) and `host-guard` (C1's,
+on a Tailscale-on-the-phone wrong-host slip) both fired live and I corrected in-turn. `[decision]` The one
+lesson NOT already a constraint: with several hypotheses open, test the **cheapest decisive** one first —
+here, "is there a padlock on the chat?" was one yes/no question that would have collapsed the whole tree —
+and surface a platform's DEFAULT before recommending a config value. Seen once; a constraint candidate only
+if it recurs. Owner's call whether to increment C8/C5/C1 `seen` for off-fleet work.
+
 ### 2026-08-26 | from: claude/emily-brian-dialogue-ysmpo8 | to: reasoning-leak / preset work | status: open
 `[decision]` The STEPPED THINKING reasoning-leak (Emily/Priya) is fixed on two layers, both
 deployed to all seven bots: `v2026-08-25.1` widened `REASONING_LEAK_GUARD`'s markers (added
