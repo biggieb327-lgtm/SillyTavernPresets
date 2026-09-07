@@ -126,6 +126,13 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-07 | from: claude/bots-selfies-improvement-dc8cvv | to: bot.py selfie work | status: open
+`build_selfie_prompt` hardcodes "She's" / "her" pronouns in the scene prompt string,
+which produces wrong-gendered selfie descriptions for Marcus (male character). Pre-existing,
+not introduced by the pool expansion. A fix would read the character's pronouns from the
+card or `.env` and interpolate them. Low priority (Marcus selfies still generate — the model
+usually infers gender from the appearance description — but the prompt contradicts it).
+
 ### 2026-09-04 | from: claude/roadmap-priorities-esayr8 | to: whoever restarts the fleet | status: open
 **The fleet is deliberately STOPPED** (all seven `systemctl stop bot@<instance>`), because the
 NanoGPT account hit its weekly included input-token limit. This is not a fault — do not
