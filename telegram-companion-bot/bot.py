@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-04.1"
+BOT_VERSION = "2026-09-07.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8103,6 +8103,10 @@ SELFIE_EXPRESSIONS = [
     "biting back a laugh", "a deadpan stare", "eyebrows raised, mid-sentence",
     "a crooked, embarrassed smile", "pouting on purpose", "blowing a kiss at the camera",
     "yawning, half-asleep", "a wide goofy open-mouth grin", "squinting at a bright screen",
+    "a knowing side-eye", "genuinely surprised, eyebrows up", "concentrating hard, brow furrowed",
+    "nose scrunched up mid-laugh", "barely awake, heavy-lidded", "one eyebrow raised, skeptical",
+    "a tiny conspiratorial grin", "chin in hand, zoned out", "mid-sentence, mouth half-open",
+    "laughing so hard eyes are shut",
 ]
 SELFIE_FRAMINGS = [
     "a close arm's-length selfie", "a mirror selfie", "a slightly-too-close front-camera shot",
@@ -8112,11 +8116,16 @@ SELFIE_FRAMINGS = [
     "a selfie with her face half-cut-off the frame", "a selfie held up high looking down",
     "a tight crop on just her face and shoulders", "a bathroom mirror selfie with phone visible",
     "a selfie peeking out from under a blanket",
+    "a selfie with arm stretched way out for distance", "phone propped up on something, timed shot",
+    "a selfie where the phone is slightly tilted", "a snap taken mid-activity, not quite posed",
+    "a front-camera shot from across the table", "a selfie squeezed into the corner of the frame",
 ]
 SELFIE_OUTFITS = [
     "an oversized hoodie", "a loose t-shirt", "a tank top", "a flannel shirt",
     "a comfy sweater", "her usual layers", "a band tee", "an oversized button-up",
     "a cropped sweatshirt", "pajamas", "a beanie and a hoodie", "a zip-up over a tee",
+    "a sundress", "jeans and a plain tee", "gym clothes", "a denim jacket",
+    "a turtleneck", "a big cozy cardigan",
 ]
 # What she's doing in the shot
 SELFIE_ACTIVITIES = [
@@ -8128,9 +8137,17 @@ SELFIE_ACTIVITIES = [
     "fresh out of the shower with damp hair",
     "in the middle of doing something and stopping to take the pic", "sprawled on the floor",
     "leaning against a doorway", "wrapped in a blanket like a burrito",
+    "sitting at a cafe, drink on the table", "waiting at a bus stop or crosswalk",
+    "browsing shelves at a bookstore or shop", "cooking something, sleeves pushed up",
+    "sitting on the floor sorting through a pile of stuff", "on the couch with a laptop open",
+    "standing at a window, looking outside", "in the passenger seat of a parked car",
+    "sitting on the front steps outside", "doing hair or makeup in the bathroom mirror",
 ]
 # Activities that put her outside -- this is when Ingrid's jacket comes out.
-SELFIE_OUTDOOR_ACTIVITIES = {"out walking somewhere", "bundled up against the cold"}
+SELFIE_OUTDOOR_ACTIVITIES = {
+    "out walking somewhere", "bundled up against the cold",
+    "waiting at a bus stop or crosswalk", "sitting on the front steps outside",
+}
 # Scene fragments that read as cold weather to an image model. Picked at random from the
 # pools above they will contradict a warm live reading, and the image follows the scene
 # (see v2026-08-01.7) -- so they are filtered out above SELFIE_WARM_F.
@@ -8141,6 +8158,7 @@ SELFIE_COLD_ACTIVITIES = {
 SELFIE_COLD_OUTFITS = {
     "an oversized hoodie", "a comfy sweater", "a beanie and a hoodie", "her usual layers",
     "a cropped sweatshirt", "a zip-up over a tee",
+    "a turtleneck", "a big cozy cardigan",
 }
 SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
 SELFIE_COLD_F = _env_float("SELFIE_COLD_F", "50")  # at/below this, bare-skin outfits are dropped
@@ -8176,6 +8194,10 @@ SELFIE_CAMERA = [
     "warm lamplight, cozy and dim", "cool blue late-night screen glow on her face",
     "crisp and bright daylight", "a tiny bit out of focus", "shot from just slightly too close up",
     "flat overhead lighting", "backlit so she's a little in shadow",
+    "warm tungsten indoor light", "portrait mode, background gently blurred",
+    "harsh fluorescent overhead, slightly unflattering",
+    "natural window light from one side, the other side darker",
+    "phone HDR processing, everything a little too vivid",
 ]
 # Fixed rules appended to every selfie prompt. Generic (not per-instance), so they live
 # in code next to the other SELFIE_* pools rather than in a per-instance file like
@@ -8221,6 +8243,10 @@ SELFIE_SOFT_FRAMINGS = {
     "a selfie with her face half-cut-off the frame",
     "a bathroom mirror selfie with phone visible",
     "a selfie peeking out from under a blanket",
+    "a selfie with arm stretched way out for distance",
+    "a snap taken mid-activity, not quite posed",
+    "a front-camera shot from across the table",
+    "a selfie squeezed into the corner of the frame",
 }
 SELFIE_SOFT_CAMERA = {
     "harsh on-camera flash, slightly washed out", "grainy low-light phone photo",
@@ -8228,6 +8254,7 @@ SELFIE_SOFT_CAMERA = {
     "overexposed light from a window behind her",
     "cool blue late-night screen glow on her face", "a tiny bit out of focus",
     "backlit so she's a little in shadow", "flat overhead lighting",
+    "harsh fluorescent overhead, slightly unflattering",
 }
 # Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
 SELFIE_IDENTITY_GUARD = _env_bool("SELFIE_IDENTITY_GUARD", True)

@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-07.1 — Selfie pool expansion: more settings, more moments
+
+**Root cause: the selfie pools were built for a home-centric default and never expanded.**
+15 activities (12 indoor/at-home), 14 framings, 12 outfits, 13 camera presets, and 21
+expressions meant selfies started repeating patterns quickly despite the 6-entry dedup
+ring buffer. A character who only appears curled up on the couch, at her desk, or in bed
+reads as stock, not lived-in.
+
+Expanded every pool — expressions (21 to 31), framings (14 to 20), activities (15 to 25),
+outfits (12 to 18), camera presets (13 to 18) — weighted toward out-of-home and
+mid-moment scenarios: cafes, bus stops, bookstores, car seats, front steps, cooking,
+sorting through stuff, doing hair. New outdoor activities (`waiting at a bus stop or
+crosswalk`, `sitting on the front steps outside`) added to `SELFIE_OUTDOOR_ACTIVITIES` so
+they get the outdoor jacket and weather filtering. New cold outfits (`a turtleneck`,
+`a big cozy cardigan`) added to `SELFIE_COLD_OUTFITS` so they drop in warm weather. New
+soft framings (arm stretched out, mid-activity snap, across the table, corner of frame)
+added to `SELFIE_SOFT_FRAMINGS`, and `harsh fluorescent overhead` to `SELFIE_SOFT_CAMERA`,
+so the identity guard still avoids stacking two face-obscuring draws.
+
+No new logic, no new LLM calls, no new env vars. The existing weather filtering,
+identity guard, wardrobe rotation, and dedup all apply to the new entries through the
+same keyword and set-membership mechanisms.
+
 ## v2026-09-04.1 — Fallback-aware prompt trimming: FALLBACK_CONTEXT_BUDGET
 
 **Root cause: when the primary model fails and falls back, the fallback model may
