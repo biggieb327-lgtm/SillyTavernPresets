@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from voicekit import __version__
 from voicekit.core import build_profile, generate, judge
 from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
 from voicekit.batch import batch_build_profiles, batch_generate, batch_judge
 from voicekit.analysis import compare_profiles, track_evolution
+from voicekit.multi_author import detect_authors, attribute_text, build_collaborative_profile
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -182,6 +185,30 @@ def main() -> None:
     te.add_argument("--author", required=True, help="Author name")
     te.add_argument("--out", help="Output path for evolution report")
 
+    # detect-authors
+    da = subparsers.add_parser(
+        "detect-authors",
+        help="Detect distinct authors in a corpus directory",
+    )
+    da.add_argument("corpus_dir", help="Directory containing writing samples")
+
+    # attribute-text
+    at = subparsers.add_parser(
+        "attribute-text",
+        help="Attribute text to a known author",
+    )
+    at.add_argument("text_file", help="Path to text file to attribute")
+    at.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
+
+    # collaborative-profile
+    cp = subparsers.add_parser(
+        "collaborative-profile",
+        help="Build a collaborative voice profile from multiple authors",
+    )
+    cp.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
+    cp.add_argument("--name", required=True, help="Name for the collaborative profile")
+    cp.add_argument("--out", help="Output path for the collaborative profile")
+
     args = parser.parse_args()
 
     try:
@@ -290,6 +317,27 @@ def main() -> None:
                     print(f"  - {detail}")
             if args.out:
                 print(f"\nReport saved to {args.out}")
+
+        elif args.command == "detect-authors":
+            authors = detect_authors(args.corpus_dir)
+            print(f"Detected {len(authors)} author(s):")
+            for author in authors:
+                print(f"  - {author.get('name', 'Unknown')} ({len(author.get('sample_paths', []))} samples)")
+
+        elif args.command == "attribute-text":
+            text = Path(args.text_file).read_text(encoding="utf-8")
+            profiles = [json.loads(Path(p).read_text()) for p in args.profiles]
+            result = attribute_text(text, profiles)
+            print(f"Attributed to: {result.get('author', 'Unknown')} (confidence: {result.get('confidence', 0):.0%})")
+            if result.get("reasoning"):
+                print(f"Reasoning: {result['reasoning']}")
+
+        elif args.command == "collaborative-profile":
+            profiles = [json.loads(Path(p).read_text()) for p in args.profiles]
+            result = build_collaborative_profile(profiles, args.name, args.out)
+            print(f"Collaborative profile created: {args.name}")
+            if args.out:
+                print(f"Saved to: {args.out}")
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
