@@ -1,0 +1,133 @@
+task_id: "skill_trigger_eval"
+description: "Verify each project skill triggers on an appropriate prompt"
+initial_prompt: "${row.prompt}"
+tags: [skills, smoke]
+
+run_limits:
+  max_turns: 5
+  turn_timeout: 120
+  task_timeout: 120
+
+agent:
+  type: "claude-code"
+  permission_mode: "acceptEdits"
+  allowed_tools: ["Read", "Write", "Bash", "Glob", "Grep", "Skill"]
+
+sandbox:
+  template_sources:
+    - type: "template_dir"
+      path: "../.claude/skills"
+      mount_point: ".claude/skills"
+    - type: "starter_files"
+      files:
+        - path: "CLAUDE.md"
+          content: |
+            # SillyTavernPresets
+            A Python Telegram companion bot system with seven AI character instances.
+            Skills are available for specific tasks. Use the Skill tool when a task
+            matches a skill's trigger. Check .claude/skills/ for available skills.
+        - path: "telegram-companion-bot/bot.py"
+          content: |
+            BOT_VERSION = "2.99.0"
+            # Telegram companion bot - stub for eval
+            import os
+            def main():
+                pass
+        - path: "telegram-companion-bot/CHANGELOG.md"
+          content: |
+            # Changelog
+            ## 2.99.0
+            - Stub release for eval
+        - path: "telegram-companion-bot/preset.txt"
+          content: "Shared voiceprint preset text."
+        - path: ".claude/memory/operational-log.md"
+          content: "| Date | Event |\n|---|---|\n"
+        - path: ".claude/memory/decisions.md"
+          content: "# Decision Log\n"
+        - path: ".claude/memory/constraints.md"
+          content: "# Constraints\n"
+
+dataset:
+  rows:
+    - id: add-regression-eval
+      prompt: "The timezone parsing bug crashed Nora again -- that's the second time this month. Pin it with an eval so it can't recur."
+      skill_name: "add-regression-eval"
+    - id: artifact-first-delivery
+      prompt: "Write up a summary report of the group chat rate-limiting analysis."
+      skill_name: "artifact-first-delivery"
+    - id: bot-code-invariants
+      prompt: "Review the latest bot.py changes for invariant violations before we ship."
+      skill_name: "bot-code-invariants"
+    - id: bot-config-reference
+      prompt: "Emily is getting 400 errors on vision requests. What should VISION_MODEL be set to in her .env?"
+      skill_name: "bot-config-reference"
+    - id: caveman
+      prompt: "/caveman"
+      skill_name: "caveman"
+    - id: deploy-and-verify-fleet
+      prompt: "The fix is merged to main. Deploy it to all seven bot instances on the VPS."
+      skill_name: "deploy-and-verify-fleet"
+    - id: edit-cards-and-presets
+      prompt: "Update Bonnie's character card to soften her confrontational tone in the personality section."
+      skill_name: "edit-cards-and-presets"
+    - id: fix-the-class
+      prompt: "I fixed the Markdown-injection bug in the /audit command handler. Check if the same pattern exists elsewhere before we ship."
+      skill_name: "fix-the-class"
+    - id: grilling
+      prompt: "Grill me on this plan for adding voice message support to group chat before I start building."
+      skill_name: "grilling"
+    - id: group-chat-changes
+      prompt: "Add a /mute command to the group chat command allowlist in bot.py."
+      skill_name: "group-chat-changes"
+    - id: hubris
+      prompt: "Write a checker that validates all lorebook entries have the required 15 fields."
+      skill_name: "hubris"
+    - id: log-decision
+      prompt: "We decided to keep bot.py as a single file instead of splitting into modules. Log the decision."
+      skill_name: "log-decision"
+    - id: ponytail
+      prompt: "/ponytail"
+      skill_name: "ponytail"
+    - id: repo-change-control
+      prompt: "Add a /status command to bot.py that shows uptime and message count."
+      skill_name: "repo-change-control"
+    - id: repo-debugging-playbook
+      prompt: "Nora has been silent for 20 minutes and is not responding to /audit. Diagnose the issue."
+      skill_name: "repo-debugging-playbook"
+    - id: repo-validation-gate
+      prompt: "I think the fix is ready. Verify everything passes before I call it done."
+      skill_name: "repo-validation-gate"
+    - id: session-debrief
+      prompt: "We're wrapping up this session. Run the debrief."
+      skill_name: "session-debrief"
+    - id: ship
+      prompt: "The feature is written and all tests pass. Ship it as a release."
+      skill_name: "ship"
+    - id: skill-router
+      prompt: "Which skill should I load for editing the .env configuration file?"
+      skill_name: "skill-router"
+    - id: termux-device-ops
+      prompt: "Why did the bots keep getting SIGKILL on the old Android phone back in July?"
+      skill_name: "termux-device-ops"
+    - id: unattended-loops
+      prompt: "Set up an overnight loop to systematically harden the error-handling paths in bot.py."
+      skill_name: "unattended-loops"
+    - id: verify-external-audit
+      prompt: "Here are 12 bugs an external LLM audit found in bot.py. Triage them for real issues."
+      skill_name: "verify-external-audit"
+    - id: voicekit-work
+      prompt: "Add a --format flag to the voicekit-starter extract command."
+      skill_name: "voicekit-work"
+    - id: vps-migration
+      prompt: "I want to add an 8th bot instance called alex to the VPS fleet."
+      skill_name: "vps-migration"
+  id_field: "id"
+
+success_criteria:
+  - type: "skill_triggered"
+    description: "The correct skill must be triggered by the prompt"
+    skill_name: "${row.skill_name}"
+    expected_skill: "${row.skill_name}"
+    stop_early:
+      on_pass: stop
+      decide_within: 4
