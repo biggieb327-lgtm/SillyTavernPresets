@@ -8,6 +8,7 @@ import sys
 from voicekit import __version__
 from voicekit.core import build_profile, generate, judge
 from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
+from voicekit.batch import batch_build_profiles, batch_generate, batch_judge
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -138,6 +139,31 @@ def main() -> None:
     )
     vp.add_argument("profile", help="Path to profile JSON file")
 
+    # batch-build
+    bb = subparsers.add_parser(
+        "batch-build",
+        help="Build profiles for multiple authors in parallel",
+    )
+    bb.add_argument("config", help="Path to batch config JSON file")
+    bb.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+    bb.add_argument("--no-resume", action="store_true", help="Don't resume from progress file")
+
+    # batch-generate
+    bg = subparsers.add_parser(
+        "batch-generate",
+        help="Generate multiple drafts in parallel",
+    )
+    bg.add_argument("config", help="Path to batch config JSON file")
+    bg.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+
+    # batch-judge
+    bj = subparsers.add_parser(
+        "batch-judge",
+        help="Judge multiple drafts in parallel",
+    )
+    bj.add_argument("config", help="Path to batch config JSON file")
+    bj.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+
     args = parser.parse_args()
 
     try:
@@ -210,6 +236,24 @@ def main() -> None:
                 print(f"✗ Invalid profile:")
                 for err in report["errors"]:
                     print(f"  - {err}")
+
+        elif args.command == "batch-build":
+            results = batch_build_profiles(args.config, args.workers, not args.no_resume)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "batch-generate":
+            results = batch_generate(args.config, args.workers)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "batch-judge":
+            results = batch_judge(args.config, args.workers)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
