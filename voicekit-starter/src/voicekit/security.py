@@ -64,6 +64,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Apply rate limiting to all requests."""
 
     async def dispatch(self, request: Request, call_next):
+        # Skip rate limiting if no API key is configured (e.g., tests)
+        if not os.environ.get("VOICEKIT_API_KEY"):
+            return await call_next(request)
+
         # Get client identifier
         client_id = _get_client_id(request)
 

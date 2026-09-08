@@ -141,18 +141,17 @@ class TestCLIDispatcher:
 
     def test_serve_requires_no_args(self, capsys):
         """Should accept no args (uses defaults)."""
-        with pytest.raises(SystemExit) as exc_info:
+        with patch("voicekit.cli.start_server") as mock_start:
             with patch.object(sys, 'argv', ['voicekit', 'serve']):
                 main()
-        # Will fail because uvicorn can't start in test, but parsing should work
-        assert exc_info.value.code == 1
+            mock_start.assert_called_once_with("0.0.0.0", 8000)
 
     def test_serve_with_custom_host_port(self, capsys):
         """Should accept custom host and port."""
-        with pytest.raises(SystemExit) as exc_info:
+        with patch("voicekit.cli.start_server") as mock_start:
             with patch.object(sys, 'argv', ['voicekit', 'serve', '--host', '127.0.0.1', '--port', '9000']):
                 main()
-        assert exc_info.value.code == 1
+            mock_start.assert_called_once_with("127.0.0.1", 9000)
 
 
 class TestCLIErrorHandling:
@@ -160,21 +159,21 @@ class TestCLIErrorHandling:
 
     def test_handles_runtime_error(self, capsys):
         """Should handle RuntimeError gracefully."""
-        with pytest.raises(SystemExit) as exc_info:
-            with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'samples/', '--author', 'Test']):
+        with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'samples/', '--author', 'Test']):
+            with pytest.raises(SystemExit) as exc_info:
                 main()
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 1
 
     def test_handles_value_error(self, capsys):
         """Should handle ValueError gracefully."""
-        with pytest.raises(SystemExit) as exc_info:
-            with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'samples/', '--author', 'Test']):
+        with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'samples/', '--author', 'Test']):
+            with pytest.raises(SystemExit) as exc_info:
                 main()
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 1
 
     def test_handles_file_not_found(self, capsys):
         """Should handle FileNotFoundError gracefully."""
-        with pytest.raises(SystemExit) as exc_info:
-            with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'samples/', '--author', 'Test']):
+        with patch.object(sys, 'argv', ['voicekit', 'build-profile', 'nonexistent/', '--author', 'Test']):
+            with pytest.raises(SystemExit) as exc_info:
                 main()
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 1
