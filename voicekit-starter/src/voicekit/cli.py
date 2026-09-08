@@ -7,6 +7,7 @@ import sys
 
 from voicekit import __version__
 from voicekit.core import build_profile, generate, judge
+from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -114,6 +115,29 @@ def main() -> None:
     )
     jdg.add_argument("--model", help="Override the LLM model")
 
+    # list-profiles
+    lp = subparsers.add_parser(
+        "list-profiles",
+        help="List and validate all profiles in a directory",
+    )
+    lp.add_argument("directory", help="Directory containing profile JSON files")
+
+    # merge-profiles
+    mp = subparsers.add_parser(
+        "merge-profiles",
+        help="Merge multiple profiles into one",
+    )
+    mp.add_argument("profiles", nargs="+", help="Paths to profiles to merge")
+    mp.add_argument("--author", required=True, help="Author name for merged profile")
+    mp.add_argument("--out", help="Output path for merged profile")
+
+    # validate-profile
+    vp = subparsers.add_parser(
+        "validate-profile",
+        help="Validate a voice profile against the schema",
+    )
+    vp.add_argument("profile", help="Path to profile JSON file")
+
     args = parser.parse_args()
 
     try:
@@ -161,6 +185,31 @@ def main() -> None:
             if evaluation:
                 _print_judge_summary(evaluation)
             print(f"Evaluation saved to {out_path}")
+
+        elif args.command == "list-profiles":
+            profiles = list_profiles(args.directory)
+            if not profiles:
+                print("No profiles found.")
+            else:
+                for p in profiles:
+                    status = "✓" if p["valid"] else "✗"
+                    print(f"  {status} {p['author']} ({p['version']}) - {p['path']}")
+
+        elif args.command == "merge-profiles":
+            out_path = merge_profiles(args.profiles, args.author, args.out)
+            print(f"Merged profile saved to {out_path}")
+
+        elif args.command == "validate-profile":
+            report = validate_profile_cmd(args.profile)
+            if report["valid"]:
+                print(f"✓ Valid profile: {report['stats'].get('author', 'unknown')}")
+                print(f"  Traits: {report['stats'].get('traits', 0)}")
+                print(f"  Exemplars: {report['stats'].get('exemplars', 0)}")
+                print(f"  Registers: {report['stats'].get('registers', 0)}")
+            else:
+                print(f"✗ Invalid profile:")
+                for err in report["errors"]:
+                    print(f"  - {err}")
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)

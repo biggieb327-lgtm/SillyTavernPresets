@@ -1,7 +1,6 @@
-"""Shared fixtures for voicekit tests."""
+"""Shared test fixtures for voicekit tests."""
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -12,126 +11,133 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 @pytest.fixture
-def sample_corpus(tmp_path):
-    """Create a sample corpus for testing."""
-    corpus_dir = tmp_path / "corpus"
-    corpus_dir.mkdir()
-    (corpus_dir / "essay1.md").write_text(
-        "# On Writing\n\nWriting is thinking made visible. "
-        "When we write clearly, we think clearly."
-    )
-    (corpus_dir / "essay2.md").write_text(
-        "# On Revision\n\nThe first draft is just you telling yourself the story. "
-        "The real work begins when you shape that story for someone else."
-    )
-    return corpus_dir
-
-
-@pytest.fixture
 def valid_profile():
-    """Return a valid voice profile dict."""
+    """A minimal valid voice profile matching the schema."""
     return {
         "schema_version": "1.0",
         "profile_type": "author_voice",
-        "meta": {"author": "Test Author", "generated_at": "2026-09-08"},
+        "meta": {
+            "author": "Test Author",
+            "generated_at": "2026-09-08T00:00:00Z",
+            "project_name": "Test Project",
+            "source_type": "essays",
+            "use_cases": ["blog", "email"],
+        },
         "corpus": {
             "file_count": 2,
-            "total_words": 500,
+            "total_words": 1500,
             "sources": [
-                {"label": "essay1", "word_count": 250},
-                {"label": "essay2", "word_count": 250},
+                {"label": "sample1", "word_count": 750},
+                {"label": "sample2", "word_count": 750},
             ],
         },
         "core_voice": {
             "rhythm": {
-                "avg_sentence_length": "medium",
-                "variation_pattern": "varied",
-                "paragraph_cadence": "moderate",
+                "avg_sentence_length": "15-20 words",
+                "variation_pattern": "mixed long and short",
+                "paragraph_cadence": "3-5 sentences",
             },
             "syntax": {
-                "sentence_openers": ["First", "Then"],
+                "sentence_openers": ["However", "Moreover", "In contrast"],
                 "clause_complexity": "moderate",
-                "signature_structures": ["parallelism"],
+                "signature_structures": ["parallelism", "rhetorical questions"],
             },
             "punctuation": {
-                "em_dash_usage": "frequent",
+                "em_dash_usage": "frequent for emphasis",
                 "semicolon_frequency": "rare",
-                "parenthetical_style": "em-dash",
-                "list_style": "bullets",
+                "parenthetical_style": "em-dashes",
+                "list_style": "bullet points",
             },
             "lexicon": {
                 "formality_band": "semi-formal",
-                "jargon_density": "low",
-                "metaphor_family": ["architecture"],
-                "filler_words": ["very"],
+                "jargon_density": "moderate",
+                "metaphor_family": ["construction", "nature"],
+                "filler_words": ["very", "really"],
             },
             "rhetoric": {
-                "persuasion_mode": "logical",
-                "evidence_style": "anecdotal",
-                "humor_type": "dry",
-                "concession_pattern": "acknowledge-counter",
+                "persuasion_mode": "inductive",
+                "evidence_style": "anecdotal and statistical",
+                "humor_type": "dry wit",
+                "concession_pattern": "acknowledge then refute",
             },
             "stance": {
-                "authority_posture": "confident",
-                "reader_relationship": "peer",
+                "authority_posture": "authoritative yet approachable",
+                "reader_relationship": "moderate",
                 "hedging_level": "low",
-                "conviction_markers": ["clearly"],
+                "conviction_markers": ["indeed", "fundamentally"],
             },
         },
         "registers": {
             "essay": {
-                "tone_shift": "reflective",
-                "formality_delta": "+1",
-                "typical_length": "800-1200 words",
-                "distinguishing_markers": ["first person"],
+                "tone_shift": "formal",
+                "formality_delta": "+2",
+                "typical_length": "1000-2000 words",
+                "distinguishing_markers": ["citations", "structured arguments"],
             },
             "email": {
-                "tone_shift": "direct",
+                "tone_shift": "casual",
                 "formality_delta": "-1",
-                "typical_length": "100-300 words",
-                "distinguishing_markers": ["short paragraphs"],
+                "typical_length": "200-500 words",
+                "distinguishing_markers": ["greeting", "sign-off"],
             },
             "dialogue": {
-                "tone_shift": "casual",
+                "tone_shift": "conversational",
                 "formality_delta": "-2",
-                "typical_length": "varied",
-                "distinguishing_markers": ["contractions"],
+                "typical_length": "varies",
+                "distinguishing_markers": ["questions", "interruptions"],
             },
             "sales": {
                 "tone_shift": "persuasive",
                 "formality_delta": "0",
-                "typical_length": "500-800 words",
-                "distinguishing_markers": ["benefit-driven"],
+                "typical_length": "500-1000 words",
+                "distinguishing_markers": ["call to action", "benefits"],
             },
         },
         "exemplars": {
             "signature_sentences": [
-                "Writing is thinking made visible.",
-                "Clarity is kindness.",
-                "Every word must earn its place.",
+                "Indeed, the fundamental challenge lies not in the complexity of the problem, but in our approach to solving it.",
+                "Moreover, the evidence suggests a different conclusion entirely.",
+                "In contrast, the alternative offers little improvement.",
             ],
             "signature_paragraphs": [
-                "I've spent years editing, and the pattern is always the same.",
+                "The opening paragraph establishes the thesis with clarity and purpose, setting up the argument that follows.",
             ],
         },
         "constraints": {
-            "hard_rules": ["No exclamation marks"],
-            "anti_rules": ["Avoid corporate jargon"],
-            "safety_notes": ["Check facts before publishing"],
+            "hard_rules": ["use active voice", "vary sentence length"],
+            "anti_rules": ["passive voice", "jargon without explanation"],
+            "safety_notes": ["maintain consistent tone", "cite sources"],
         },
         "evaluation": {
             "weights": {
                 "rhythm": 0.2,
                 "lexicon": 0.2,
-                "stance": 0.25,
+                "stance": 0.2,
                 "rhetoric": 0.2,
-                "constraints": 0.15,
+                "constraints": 0.2,
             },
             "pass_threshold": 0.7,
         },
         "generation_recipes": {
-            "rewrite": {"goal": "Transform text", "steps": ["Step 1"]},
-            "draft_from_bullets": {"goal": "Expand bullets", "steps": ["Step 1"]},
-            "voice_judge": {"goal": "Evaluate draft", "steps": ["Step 1"]},
+            "rewrite": {
+                "goal": "Rewrite text to match voice profile",
+                "steps": ["Analyze source text", "Extract key points", "Regenerate in target voice"],
+            },
+            "draft_from_bullets": {
+                "goal": "Create draft from bullet points",
+                "steps": ["Expand bullets into sentences", "Apply voice traits", "Polish and refine"],
+            },
+            "voice_judge": {
+                "goal": "Evaluate draft against profile",
+                "steps": ["Score each dimension", "Identify gaps", "Suggest revisions"],
+            },
         },
     }
+
+
+@pytest.fixture
+def valid_profile_file(valid_profile, tmp_path):
+    """Write a valid profile to a temp file."""
+    path = tmp_path / "test-profile.json"
+    path.write_text(json.dumps(valid_profile, indent=2))
+    return path
