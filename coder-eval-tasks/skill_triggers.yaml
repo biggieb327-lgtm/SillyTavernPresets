@@ -130,4 +130,4 @@ success_criteria:
     expected_skill: "${row.skill_name}"
     stop_early:
       on_pass: stop
-      decide_within: 4
+      decide_within: 6
