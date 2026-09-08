@@ -7,6 +7,7 @@ telegram-bot/
 substack-articles/
 .claude/.runtime/
 .claude/settings.local.json
+.claude/memory/permission-prompts.log
 CLAUDE.local.md
 
 # Self-update runtime artifacts in the shared code dir (host-local, never committed).
