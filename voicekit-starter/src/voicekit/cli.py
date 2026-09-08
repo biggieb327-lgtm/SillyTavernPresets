@@ -13,6 +13,8 @@ from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profil
 from voicekit.batch import batch_build_profiles, batch_generate, batch_judge
 from voicekit.analysis import compare_profiles, track_evolution
 from voicekit.multi_author import detect_authors, attribute_text, build_collaborative_profile
+from voicekit.semantic import analyze_semantic_patterns
+from voicekit.api import start_server
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -201,13 +203,30 @@ def main() -> None:
     at.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
 
     # collaborative-profile
-    cp = subparsers.add_parser(
+    clp = subparsers.add_parser(
         "collaborative-profile",
         help="Build a collaborative voice profile from multiple authors",
     )
-    cp.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
-    cp.add_argument("--name", required=True, help="Name for the collaborative profile")
-    cp.add_argument("--out", help="Output path for the collaborative profile")
+    clp.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
+    clp.add_argument("--name", required=True, help="Name for the collaborative profile")
+    clp.add_argument("--out", help="Output path for the collaborative profile")
+
+    # semantic-analysis
+    sa = subparsers.add_parser(
+        "semantic-analysis",
+        help="Analyze voice patterns using Propose-Prove pattern",
+    )
+    sa.add_argument("sample", help="Path to sample text file")
+    sa.add_argument("corpus", help="Path to full corpus text file")
+    sa.add_argument("--author", required=True, help="Author name")
+
+    # serve (API server)
+    sv = subparsers.add_parser(
+        "serve",
+        help="Start the REST API server",
+    )
+    sv.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    sv.add_argument("--port", type=int, default=8000, help="Port to bind to")
 
     args = parser.parse_args()
 
@@ -338,6 +357,18 @@ def main() -> None:
             print(f"Collaborative profile created: {args.name}")
             if args.out:
                 print(f"Saved to: {args.out}")
+
+        elif args.command == "semantic-analysis":
+            sample_text = Path(args.sample).read_text(encoding="utf-8")
+            corpus_text = Path(args.corpus).read_text(encoding="utf-8")
+            result = analyze_semantic_patterns(sample_text, corpus_text, args.author)
+            print(result["summary"])
+            print(f"\nVerified markers: {result['verified_count']}/{result['proposed_count']}")
+            for marker in result.get("verified_markers", [])[:5]:
+                print(f"  - {marker.get('marker', '')}")
+
+        elif args.command == "serve":
+            start_server(args.host, args.port)
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
