@@ -9,6 +9,7 @@ from voicekit import __version__
 from voicekit.core import build_profile, generate, judge
 from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
 from voicekit.batch import batch_build_profiles, batch_generate, batch_judge
+from voicekit.analysis import compare_profiles, track_evolution
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -164,6 +165,23 @@ def main() -> None:
     bj.add_argument("config", help="Path to batch config JSON file")
     bj.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
 
+    # compare-profiles
+    cp = subparsers.add_parser(
+        "compare-profiles",
+        help="Compare two voice profiles and show similarity",
+    )
+    cp.add_argument("profile_a", help="Path to first profile JSON")
+    cp.add_argument("profile_b", help="Path to second profile JSON")
+
+    # track-evolution
+    te = subparsers.add_parser(
+        "track-evolution",
+        help="Track voice evolution across multiple profiles",
+    )
+    te.add_argument("profiles", nargs="+", help="Paths to profile JSON files (chronological order)")
+    te.add_argument("--author", required=True, help="Author name")
+    te.add_argument("--out", help="Output path for evolution report")
+
     args = parser.parse_args()
 
     try:
@@ -254,6 +272,24 @@ def main() -> None:
             success = sum(1 for r in results if r["status"] == "success")
             failed = sum(1 for r in results if r["status"] == "failed")
             print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "compare-profiles":
+            result = compare_profiles(args.profile_a, args.profile_b)
+            print(f"Overall similarity: {result['overall_similarity']:.0%}")
+            print(f"\nDimension scores:")
+            for dim, score in result["dimension_scores"].items():
+                print(f"  {dim:<12} {score:.0%}")
+            print(f"\n{result['summary']}")
+
+        elif args.command == "track-evolution":
+            result = track_evolution(args.profiles, args.author, args.out)
+            print(result["summary"])
+            if result["drift_detected"]:
+                print("\nDrift details:")
+                for detail in result["drift_details"]:
+                    print(f"  - {detail}")
+            if args.out:
+                print(f"\nReport saved to {args.out}")
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)
