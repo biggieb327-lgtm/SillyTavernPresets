@@ -16,7 +16,11 @@ from voicekit.prompts import GENERATOR_SYSTEM
 
 
 def compare_profiles(profile_path_a: str, profile_path_b: str) -> dict:
-    """Compare two voice profiles and return similarity analysis."""
+    """Compare two voice profiles and return similarity analysis.
+
+    Uses LLM-based semantic comparison for accurate similarity scoring
+    instead of naive key matching.
+    """
     profile_a = json.loads(Path(profile_path_a).read_text(encoding="utf-8"))
     profile_b = json.loads(Path(profile_path_b).read_text(encoding="utf-8"))
 
@@ -26,77 +30,38 @@ def compare_profiles(profile_path_a: str, profile_path_b: str) -> dict:
     author_a = profile_a.get("meta", {}).get("author", "Unknown")
     author_b = profile_b.get("meta", {}).get("author", "Unknown")
 
-    # Calculate similarity scores for each dimension
-    scores = {}
-    details = {}
+    # Use LLM for semantic similarity
+    client = get_client()
+    model = get_model(None)
 
-    # Compare core voice dimensions
-    core_a = profile_a.get("core_voice", {})
-    core_b = profile_b.get("core_voice", {})
+    prompt = f"""Compare these two voice profiles and rate their similarity.
 
-    for dimension in ["rhythm", "syntax", "punctuation", "lexicon", "rhetoric", "stance"]:
-        dim_a = core_a.get(dimension, {})
-        dim_b = core_b.get(dimension, {})
+Return JSON in this format:
+{{"overall_similarity": 0.75, "dimension_scores": {{"rhythm": 0.8, "syntax": 0.7, ...}}, "summary": "brief explanation"}}
 
-        if not dim_a or not dim_b:
-            scores[dimension] = 0.0
-            details[dimension] = "Missing data"
-            continue
+Profile A ({author_a}):
+{json.dumps(profile_a, indent=2)}
 
-        # Simple similarity: count matching keys
-        all_keys = set(dim_a.keys()) | set(dim_b.keys())
-        matching = sum(1 for k in all_keys if dim_a.get(k) == dim_b.get(k))
-        similarity = matching / len(all_keys) if all_keys else 0.0
-        scores[dimension] = round(similarity, 2)
+Profile B ({author_b}):
+{json.dumps(profile_b, indent=2)}"""
 
-    # Compare registers
-    reg_a = set(profile_a.get("registers", {}).keys())
-    reg_b = set(profile_b.get("registers", {}).keys())
-    if reg_a or reg_b:
-        intersection = reg_a & reg_b
-        union = reg_a | reg_b
-        scores["registers"] = round(len(intersection) / len(union), 2) if union else 0.0
-    else:
-        scores["registers"] = 0.0
+    raw = call_llm(client, model, GENERATOR_SYSTEM, prompt, json_mode=True)
+    raw = strip_markdown_fences(raw)
 
-    # Overall similarity
-    overall = round(sum(scores.values()) / len(scores), 2) if scores else 0.0
+    result = json.loads(raw)
+    result["author_a"] = author_a
+    result["author_b"] = author_b
 
-    return {
-        "author_a": author_a,
-        "author_b": author_b,
-        "overall_similarity": overall,
-        "dimension_scores": scores,
-        "summary": _generate_comparison_summary(author_a, author_b, overall, scores),
-    }
+    return result
 
 
-def _generate_comparison_summary(author_a: str, author_b: str, overall: float, scores: dict) -> str:
-    """Generate a human-readable comparison summary."""
-    if overall >= 0.8:
-        similarity = "very similar"
-    elif overall >= 0.6:
-        similarity = "moderately similar"
-    elif overall >= 0.4:
-        similarity = "somewhat different"
-    else:
-        similarity = "very different"
-
-    # Find most and least similar dimensions
-    sorted_dims = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    most_similar = sorted_dims[0] if sorted_dims else (None, 0)
-    least_similar = sorted_dims[-1] if sorted_dims else (None, 0)
-
-    parts = [
-        f"{author_a} and {author_b} have {similarity} writing styles (overall: {overall:.0%}).",
-    ]
-
-    if most_similar[0]:
-        parts.append(f"Most similar dimension: {most_similar[0]} ({most_similar[1]:.0%}).")
-    if least_similar[0] and least_similar != most_similar:
-        parts.append(f"Least similar dimension: {least_similar[0]} ({least_similar[1]:.0%}).")
-
-    return " ".join(parts)
+def strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences wrapping JSON output."""
+    text = text.strip()
+    import re
+    text = re.sub(r"^```(?:json)?\s*\n", "", text)
+    text = re.sub(r"\n```\s*$", "", text)
+    return text
 
 
 def track_evolution(

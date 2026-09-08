@@ -9,6 +9,7 @@ import re
 import sys
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import jsonschema
 from openai import APIConnectionError, APIStatusError, OpenAI, OpenAIError
@@ -64,11 +65,7 @@ def _collect_from_dir(d: Path, paths: set[Path]) -> int:
 
 
 def collect_samples(files: list[str] | None, samples_dir: str | None) -> list[Path]:
-    """Collect and de-duplicate sample file paths, reporting skipped files.
-
-    Entries in ``files`` may be individual files or directories; directories
-    are expanded to their supported files.
-    """
+    """Collect and de-duplicate sample file paths, reporting skipped files."""
     paths: set[Path] = set()
     skipped: list[str] = []
     if files:
@@ -147,6 +144,7 @@ def call_llm(
     system: str,
     user: str,
     json_mode: bool = False,
+    temperature: float = 0.4,
 ) -> str:
     """Single LLM call returning the assistant message content."""
     kwargs: dict = {
@@ -155,7 +153,7 @@ def call_llm(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.4,
+        "temperature": temperature,
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
@@ -267,11 +265,13 @@ def generate(
     register: str,
     out: str | None = None,
     model: str | None = None,
-) -> tuple[str, Path | None]:
+    retries: int = 2,
+    temperature: float = 0.7,
+) -> tuple[str, Optional[Path]]:
     """Generate a draft using a voice profile.
 
     Returns the draft text and the path it was written to (None when no
-    output path was given — the caller decides how to present the text).
+    output path was given).
     """
     profile_json = Path(profile_path).read_text(encoding="utf-8")
     task_text = Path(task_file).read_text(encoding="utf-8")
@@ -289,15 +289,22 @@ def generate(
         facts_text=facts_text,
     )
 
-    print(f"Generating {register} draft with {resolved_model}...", file=sys.stderr)
-    result = call_llm(client, resolved_model, GENERATOR_SYSTEM, user_prompt)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        print(f"Generating {register} draft with {resolved_model} (attempt {attempt}/{retries})...", file=sys.stderr)
+        try:
+            result = call_llm(
+                client, resolved_model, GENERATOR_SYSTEM, user_prompt,
+                temperature=temperature,
+            )
+            return _write_output(result, out)
+        except RuntimeError as e:
+            last_error = str(e)
+            if attempt == retries:
+                raise RuntimeError(f"Generation failed after {retries} attempts: {last_error}")
+            print(f"Generation failed; retrying: {last_error}", file=sys.stderr)
 
-    if not out:
-        return result, None
-    out_path = Path(out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(result, encoding="utf-8")
-    return result, out_path
+    raise RuntimeError(f"Generation failed after {retries} attempts: {last_error}")
 
 
 def judge(
@@ -306,12 +313,12 @@ def judge(
     register: str,
     out: str | None = None,
     model: str | None = None,
-) -> tuple[dict | None, Path]:
+    retries: int = 2,
+) -> tuple[Optional[dict], Path]:
     """Judge a draft against a voice profile.
 
     Returns the parsed evaluation (None if the model returned unparseable
-    JSON) and the path the evaluation was written to. Defaults the output
-    path to ``<draft-stem>-eval.json`` next to the draft.
+    JSON) and the path the evaluation was written to.
     """
     draft_path = Path(draft_file)
     profile_json = Path(profile_path).read_text(encoding="utf-8")
@@ -325,23 +332,40 @@ def judge(
         draft_text=draft_text,
     )
 
-    print(f"Judging draft with {resolved_model}...", file=sys.stderr)
-    raw = call_llm(client, resolved_model, JUDGE_SYSTEM, user_prompt, json_mode=True)
-    raw = strip_markdown_fences(raw)
+    last_error = None
+    for attempt in range(1, retries + 1):
+        print(f"Judging draft with {resolved_model} (attempt {attempt}/{retries})...", file=sys.stderr)
+        raw = call_llm(client, resolved_model, JUDGE_SYSTEM, user_prompt, json_mode=True)
+        raw = strip_markdown_fences(raw)
 
-    # Validate that judge output is parseable JSON before saving
-    parsed: dict | None = None
-    try:
-        loaded = json.loads(raw)
-        if isinstance(loaded, dict):
-            parsed = loaded
-        result = json.dumps(loaded, indent=2, ensure_ascii=False)
-    except json.JSONDecodeError:
-        # Save raw output but warn the user
-        result = raw
-        print("Warning: judge output is not valid JSON; saving raw response.", file=sys.stderr)
+        try:
+            loaded = json.loads(raw)
+            if not isinstance(loaded, dict):
+                raise ValueError("Expected JSON object")
+            result = json.dumps(loaded, indent=2, ensure_ascii=False)
+            out_path = Path(out) if out else draft_path.with_name(f"{draft_path.stem}-eval.json")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(result, encoding="utf-8")
+            return loaded, out_path
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = f"Invalid JSON: {e}"
+            if attempt == retries:
+                # Save raw output on final failure
+                out_path = Path(out) if out else draft_path.with_name(f"{draft_path.stem}-eval.json")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(raw, encoding="utf-8")
+                print(f"Warning: judge output is not valid JSON after {retries} attempts; saving raw response.", file=sys.stderr)
+                return None, out_path
+            print(f"Invalid JSON; retrying: {last_error}", file=sys.stderr)
 
-    out_path = Path(out) if out else draft_path.with_name(f"{draft_path.stem}-eval.json")
+    raise RuntimeError("Unreachable: retry loop exited without return or raise")
+
+
+def _write_output(text: str, out: str | None) -> tuple[str, Optional[Path]]:
+    """Write output to file if path provided, return (text, path)."""
+    if not out:
+        return text, None
+    out_path = Path(out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(result, encoding="utf-8")
-    return parsed, out_path
+    out_path.write_text(text, encoding="utf-8")
+    return text, out_path

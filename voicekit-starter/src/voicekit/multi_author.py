@@ -11,7 +11,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from voicekit.core import slugify, get_client, get_model, call_llm
+from voicekit.core import slugify, get_client, get_model, call_llm, strip_markdown_fences
 from voicekit.prompts import GENERATOR_SYSTEM
 
 
@@ -33,13 +33,13 @@ def detect_authors(corpus_dir: str) -> list[dict]:
     if not text_files:
         raise ValueError(f"No text files found in {corpus_dir}")
 
-    # Read samples
+    # Read samples (full content, no truncation)
     samples = []
     for f in sorted(text_files):
         try:
             content = f.read_text(encoding="utf-8")
             if len(content) > 100:  # Skip very short files
-                samples.append({"path": str(f), "content": content[:3000]})
+                samples.append({"path": str(f), "content": content})
         except Exception:
             continue
 
@@ -60,10 +60,7 @@ Writing samples:
     model = get_model(None)
     raw = call_llm(client, model, GENERATOR_SYSTEM, prompt, json_mode=True)
 
-    # Parse response
-    import re
-    raw = re.sub(r"^```(?:json)?\s*\n", "", raw.strip())
-    raw = re.sub(r"\n```\s*$", "", raw)
+    raw = strip_markdown_fences(raw)
 
     result = json.loads(raw)
     return result.get("authors", [])
@@ -90,9 +87,7 @@ Text to attribute:
     model = get_model(None)
     raw = call_llm(client, model, GENERATOR_SYSTEM, prompt, json_mode=True)
 
-    import re
-    raw = re.sub(r"^```(?:json)?\s*\n", "", raw.strip())
-    raw = re.sub(r"\n```\s*$", "", raw)
+    raw = strip_markdown_fences(raw)
 
     return json.loads(raw)
 
@@ -120,9 +115,7 @@ Author profiles:
     model = get_model(None)
     raw = call_llm(client, model, GENERATOR_SYSTEM, prompt, json_mode=True)
 
-    import re
-    raw = re.sub(r"^```(?:json)?\s*\n", "", raw.strip())
-    raw = re.sub(r"\n```\s*$", "", raw)
+    raw = strip_markdown_fences(raw)
 
     profile = json.loads(raw)
 
