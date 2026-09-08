@@ -2,7 +2,7 @@
 """FastAPI server for voicekit-starter.
 
 Provides REST API for voice profile operations with OpenAPI docs,
-authentication, and input validation."""
+authentication, rate limiting, and input validation."""
 
 import json
 import os
@@ -24,6 +24,13 @@ from voicekit.core import build_profile, generate, judge, validate_profile
 from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
 from voicekit.analysis import compare_profiles, track_evolution
 from voicekit.schemas import VOICE_PROFILE_SCHEMA
+from voicekit.security import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    validate_author_name,
+    validate_register,
+    sanitize_text_input,
+)
 
 
 # ── Security ──────────────────────────────────────────────────────────────────
@@ -35,7 +42,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     """Verify the bearer token matches the configured API key."""
     expected = os.environ.get("VOICEKIT_API_KEY")
     if not expected:
-        # No key configured — allow local development
+        # No key configured — allow local development but warn
         return True
     if not credentials:
         raise HTTPException(
@@ -54,7 +61,6 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    # Verify API key is configured in production
     if os.environ.get("VOICEKIT_API_KEY") is None:
         print(
             "⚠️  Warning: VOICEKIT_API_KEY not set. API is unauthenticated. "
@@ -73,24 +79,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add security middleware
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 ALLOWED_EXTENSIONS = {".txt", ".md", ".markdown", ".json"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 
 def _safe_filename(filename: str) -> str:
-    """Sanitize uploaded filename to prevent path traversal.
-
-    Returns just the basename with null bytes and path separators stripped.
-    """
-    # Decode URL-encoded characters
+    """Sanitize uploaded filename to prevent path traversal."""
     name = unquote(filename)
-    # Take only the basename
     name = Path(name).name
-    # Strip null bytes
     name = name.replace("\x00", "")
-    # Ensure it's not empty or just dots
     name = name.strip(".")
     if not name:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -134,7 +138,7 @@ async def build_profile_endpoint(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    # Validate all files first
+    author = validate_author_name(author)
     for file in files:
         _validate_upload_file(file)
 
@@ -144,8 +148,7 @@ async def build_profile_endpoint(
             safe_name = _safe_filename(file.filename)
             file_path = Path(tmpdir) / safe_name
             content = await file.read()
-            # Limit file size (10MB per file)
-            if len(content) > 10 * 1024 * 1024:
+            if len(content) > MAX_FILE_SIZE:
                 raise HTTPException(status_code=400, detail=f"File too large: {file.filename}")
             file_path.write_bytes(content)
             file_paths.append(str(file_path))
@@ -171,12 +174,16 @@ async def generate_draft_endpoint(
 ):
     """Generate a draft using a voice profile."""
     _validate_upload_file(profile)
+    register = validate_register(register)
+    task = sanitize_text_input(task)
+    if facts:
+        facts = sanitize_text_input(facts)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         safe_name = _safe_filename(profile.filename)
         profile_path = Path(tmpdir) / safe_name
         content = await profile.read()
-        if len(content) > 10 * 1024 * 1024:
+        if len(content) > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail="Profile file too large")
         profile_path.write_bytes(content)
 
@@ -210,12 +217,14 @@ async def judge_draft_endpoint(
 ):
     """Judge a draft against a voice profile."""
     _validate_upload_file(profile)
+    register = validate_register(register)
+    draft = sanitize_text_input(draft)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         safe_name = _safe_filename(profile.filename)
         profile_path = Path(tmpdir) / safe_name
         content = await profile.read()
-        if len(content) > 10 * 1024 * 1024:
+        if len(content) > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail="Profile file too large")
         profile_path.write_bytes(content)
 
