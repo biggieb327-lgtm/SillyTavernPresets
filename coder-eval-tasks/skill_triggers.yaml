@@ -80,7 +80,7 @@ dataset:
       prompt: "Add a /mute command to the group chat command allowlist in bot.py."
       skill_name: "group-chat-changes"
     - id: hubris
-      prompt: "Write a checker that validates all lorebook entries have the required 15 fields."
+      prompt: "I need to report findings from a geocoding validation tool that checked lorebook place names. Some lookups got HTTP 429s and some entries were descriptions, not real places. Help me write up the results correctly."
       skill_name: "hubris"
     - id: log-decision
       prompt: "We decided to keep bot.py as a single file instead of splitting into modules. Log the decision."
@@ -104,7 +104,7 @@ dataset:
       prompt: "The feature is written and all tests pass. Ship it as a release."
       skill_name: "ship"
     - id: skill-router
-      prompt: "Which skill should I load for editing the .env configuration file?"
+      prompt: "I have a task but I am not sure which skill applies. Load the skill router to figure out the right one for debugging a bot that keeps restarting."
       skill_name: "skill-router"
     - id: termux-device-ops
       prompt: "Why did the bots keep getting SIGKILL on the old Android phone back in July?"
