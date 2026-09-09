@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-09.2"
+BOT_VERSION = "2026-09-09.3"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1328,6 +1328,9 @@ _bm25_index: dict = {"retriever": None, "corpus": None}  # rebuilt on memory mut
 MEMORY_CORE = _env_bool("MEMORY_CORE", True)
 MEMORY_CORE_MAX = _env_int("MEMORY_CORE_MAX", "10")
 _CORE_MARKER = "# CORE"
+
+MEMORY_TEMPORAL = _env_bool("MEMORY_TEMPORAL", True)
+MEMORY_TEMPORAL_BOOST = _env_float("MEMORY_TEMPORAL_BOOST", "3.0")
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
@@ -5410,6 +5413,110 @@ def _urgency_boost(turns_waiting: int, ceiling: int, max_boost: float) -> float:
     return 1.0 + min(turns_waiting / ceiling, 1.0) * max_boost
 
 
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+_DAY = 86400
+
+
+def _extract_time_anchor(text: str) -> tuple[float, float] | None:
+    """Extract a temporal reference from natural language and resolve it to
+    (center_epoch, radius_seconds).  Returns None when no time reference is found."""
+    low = text.lower()
+    now = datetime.now(TZ) if TZ else datetime.now()
+    now_ts = now.timestamp()
+
+    m = re.search(r"\b(\d+)\s+(days?|weeks?|months?)\s+ago\b", low)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).rstrip("s")
+        days = {"day": n, "week": n * 7, "month": n * 30}[unit]
+        center = now_ts - days * _DAY
+        radius = max(days * 0.3, 2) * _DAY
+        return center, radius
+
+    if re.search(r"\b(a few|couple|several)\s+(days?|weeks?|months?)\s+ago\b", low):
+        m2 = re.search(r"\b(a few|couple|several)\s+(days?|weeks?|months?)\s+ago\b", low)
+        approx = {"a few": 3, "couple": 2, "several": 5}[m2.group(1)]
+        unit = m2.group(2).rstrip("s")
+        days = {"day": approx, "week": approx * 7, "month": approx * 30}[unit]
+        center = now_ts - days * _DAY
+        radius = max(days * 0.5, 3) * _DAY
+        return center, radius
+
+    if re.search(r"\byesterday\b", low):
+        center = now_ts - _DAY
+        return center, _DAY
+
+    if re.search(r"\blast\s+weekend\b", low):
+        days_since_sun = (now.weekday() + 1) % 7
+        last_sun = now - timedelta(days=days_since_sun)
+        center = (last_sun.replace(hour=12, minute=0, second=0)).timestamp()
+        return center, 1.5 * _DAY
+
+    for kw, back in (("last week", 7), ("last month", 30), ("last year", 365)):
+        if kw in low:
+            center = now_ts - back * _DAY
+            radius = back * 0.4 * _DAY
+            return center, radius
+
+    for pattern in (r"\b(?:in|back in|last)\s+(\w+)\b", r"\b(\w+)\s+\d{4}\b"):
+        m3 = re.search(pattern, low)
+        if m3:
+            word = m3.group(1)
+            month_num = _MONTH_NAMES.get(word)
+            if month_num:
+                year = now.year
+                if month_num > now.month:
+                    year -= 1
+                ym = re.search(r"\b(\w+)\s+(\d{4})\b", low)
+                if ym and _MONTH_NAMES.get(ym.group(1)) == month_num:
+                    year = int(ym.group(2))
+                try:
+                    center_dt = datetime(year, month_num, 15,
+                                         tzinfo=TZ) if TZ else datetime(year, month_num, 15)
+                    return center_dt.timestamp(), 15 * _DAY
+                except ValueError:
+                    pass
+
+    if re.search(r"\b(?:last\s+)?christmas\b", low):
+        year = now.year if now.month == 12 and now.day >= 25 else now.year - 1
+        dt = datetime(year, 12, 25, tzinfo=TZ) if TZ else datetime(year, 12, 25)
+        return dt.timestamp(), 5 * _DAY
+
+    if re.search(r"\b(?:last\s+)?thanksgiving\b", low):
+        year = now.year - 1 if now.month < 11 else now.year
+        dt = datetime(year, 11, 25, tzinfo=TZ) if TZ else datetime(year, 11, 25)
+        return dt.timestamp(), 5 * _DAY
+
+    if re.search(r"\bnew\s+year'?s?\b", low):
+        year = now.year if now.month == 1 and now.day <= 7 else now.year - 1
+        dt = datetime(year + 1, 1, 1, tzinfo=TZ) if TZ else datetime(year + 1, 1, 1)
+        return dt.timestamp(), 5 * _DAY
+
+    return None
+
+
+def _temporal_affinity(mem_ts, anchor: tuple[float, float] | None,
+                       max_boost: float) -> float:
+    """Gaussian affinity: full boost at the center, fading to 1.0 at the edges.
+    Returns 1.0 (neutral) when there is no anchor or the memory has no timestamp."""
+    if anchor is None or not isinstance(mem_ts, (int, float)) or mem_ts <= 0:
+        return 1.0
+    center, radius = anchor
+    if radius <= 0:
+        return 1.0
+    dist = abs(mem_ts - center)
+    if dist > radius * 3:
+        return 1.0
+    sigma = radius / 2.0
+    boost = max_boost * math.exp(-0.5 * (dist / sigma) ** 2)
+    return 1.0 + boost
+
+
 def _tip_of_tongue_hint(query_vec: list[float] | None, chat_id: int | None,
                         confident_count: int) -> str:
     if not TIP_OF_TONGUE or not query_vec or chat_id is None:
@@ -5622,6 +5729,8 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     else:
         turn, seen, win = 0, {}, 0
 
+    time_anchor = _extract_time_anchor(scan_text) if MEMORY_TEMPORAL else None
+
     all_lines = set(keyword_scored) | set(sem_scored) | set(bm25_scored)
     urg = (_mem_urgency.setdefault(chat_id, {})
            if MEMORY_URGENCY_FLOOR and chat_id is not None else {})
@@ -5629,7 +5738,9 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
                                  now, MEMORY_DECAY_HALFLIFE_DAYS)
                * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY)
-               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST), l)
+               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST)
+               * _temporal_affinity(_memory_meta.get(l.strip(), {}).get("ts"),
+                                    time_anchor, MEMORY_TEMPORAL_BOOST), l)
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 

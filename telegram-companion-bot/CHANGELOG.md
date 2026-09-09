@@ -7,6 +7,25 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-09.3 — Time-anchored retrieval scoring
+
+**Root cause: temporal references in conversation had no effect on which memories
+surfaced.** A user saying "remember a few weeks ago" or "back in July" triggered the
+same retrieval as any other message. Memories from the referenced period had no scoring
+advantage over memories from yesterday or six months ago, because recency decay is
+monotonic — it favors recent memories uniformly, not memories whose timestamps match what
+the user is actually asking about.
+
+**Fix:** `_extract_time_anchor(text)` parses natural-language temporal references
+("3 weeks ago", "last month", "in July", "yesterday", holiday names) into a
+`(center_epoch, radius_seconds)` tuple. `_temporal_affinity(mem_ts, anchor, max_boost)`
+applies a Gaussian bell curve boost — full boost for memories at the center of the
+referenced period, fading smoothly to 1.0 (neutral) outside `3 * radius`. The affinity
+is multiplicative alongside recency_weight, repeat_penalty, and urgency_boost in
+`triggered_memories()`.
+
+New env vars: `MEMORY_TEMPORAL` (default: on), `MEMORY_TEMPORAL_BOOST` (default: 3.0).
+
 ## v2026-09-09.2 — Core/archival memory split
 
 **Root cause: all 200 memory lines compete equally for the token budget.** Ground-truth

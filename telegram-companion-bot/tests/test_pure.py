@@ -2857,6 +2857,105 @@ class TestCoreArchivalSplit:
         assert core[0] == self.CORE_A
 
 
+class TestExtractTimeAnchor:
+    def test_n_days_ago(self):
+        result = bot._extract_time_anchor("remember 5 days ago")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 5 * 86400
+        assert abs(center - expected) < 60
+        assert radius == max(5 * 0.3, 2) * 86400
+
+    def test_n_weeks_ago(self):
+        result = bot._extract_time_anchor("about 2 weeks ago")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 14 * 86400
+        assert abs(center - expected) < 60
+
+    def test_a_few_weeks_ago(self):
+        result = bot._extract_time_anchor("a few weeks ago we talked")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 21 * 86400
+        assert abs(center - expected) < 60
+        assert radius == max(21 * 0.5, 3) * 86400
+
+    def test_yesterday(self):
+        result = bot._extract_time_anchor("what happened yesterday")
+        assert result is not None
+        center, radius = result
+        assert abs(center - (time.time() - 86400)) < 60
+        assert radius == 86400
+
+    def test_last_week(self):
+        result = bot._extract_time_anchor("last week you said")
+        assert result is not None
+        _, radius = result
+        assert abs(radius - 7 * 0.4 * 86400) < 1
+
+    def test_last_month(self):
+        result = bot._extract_time_anchor("last month something")
+        assert result is not None
+        _, radius = result
+        assert abs(radius - 30 * 0.4 * 86400) < 1
+
+    def test_no_temporal_reference(self):
+        assert bot._extract_time_anchor("hello how are you") is None
+        assert bot._extract_time_anchor("what is the weather") is None
+
+    def test_month_name(self):
+        result = bot._extract_time_anchor("in July we went hiking")
+        assert result is not None
+        _, radius = result
+        assert radius == 15 * 86400
+
+    def test_christmas(self):
+        result = bot._extract_time_anchor("remember last christmas")
+        assert result is not None
+        _, radius = result
+        assert radius == 5 * 86400
+
+
+class TestTemporalAffinity:
+    def test_no_anchor_returns_neutral(self):
+        assert bot._temporal_affinity(time.time(), None, 3.0) == 1.0
+
+    def test_no_timestamp_returns_neutral(self):
+        anchor = (time.time() - 86400, 86400.0)
+        assert bot._temporal_affinity(None, anchor, 3.0) == 1.0
+        assert bot._temporal_affinity(0, anchor, 3.0) == 1.0
+
+    def test_exact_center_gives_full_boost(self):
+        center = time.time() - 7 * 86400
+        anchor = (center, 3 * 86400)
+        result = bot._temporal_affinity(center, anchor, 3.0)
+        assert abs(result - 4.0) < 0.01
+
+    def test_far_away_returns_neutral(self):
+        center = time.time() - 30 * 86400
+        anchor = (center, 3 * 86400)
+        far_ts = time.time()
+        result = bot._temporal_affinity(far_ts, anchor, 3.0)
+        assert result == 1.0
+
+    def test_edge_of_radius_partial_boost(self):
+        center = time.time() - 14 * 86400
+        radius = 7 * 86400
+        anchor = (center, radius)
+        edge_ts = center + radius
+        result = bot._temporal_affinity(edge_ts, anchor, 3.0)
+        assert 1.0 < result < 4.0
+
+    def test_kill_switch_prevents_anchor(self):
+        orig = bot.MEMORY_TEMPORAL
+        try:
+            bot.MEMORY_TEMPORAL = False
+            assert bot._extract_time_anchor("5 days ago") is not None
+        finally:
+            bot.MEMORY_TEMPORAL = orig
+
+
 from datetime import date as _date
 
 
@@ -8568,6 +8667,7 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_AUTO": True,
         "MEMORY_BM25": True,
         "MEMORY_CORE": True,
+        "MEMORY_TEMPORAL": True,
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MEMORY_URGENCY_FLOOR": True,
