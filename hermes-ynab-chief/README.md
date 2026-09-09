@@ -1,59 +1,73 @@
-# Hermes YNAB Financial Chief
+# YNAB Financial Chief — Hermes Agent Tools
 
-A conversational finance agent that uses a Nous Hermes model (via NanoGPT) with
-tool-calling to manage your YNAB budget.
+YNAB budget management tools for the Hermes agent. Registers 8 tools via
+`tools.registry` that let the agent read and write your YNAB budget through
+natural conversation in Matrix.
 
-## What it does
+## Tools registered
 
-Ask natural-language questions about your budget and the agent fetches real data
-from YNAB to answer. It can also write: create transactions, move money between
-categories, and help with budget planning.
+| Tool | Type | What it does |
+|------|------|--------------|
+| `ynab_budget_overview` | read | Account balances, month income/spending/to-be-budgeted |
+| `ynab_categories` | read | All categories with budgeted/activity/balance and goal progress |
+| `ynab_transactions` | read | Recent transactions, filterable by date/category/account |
+| `ynab_month_summary` | read | Per-category breakdown for any month |
+| `ynab_spending_trends` | read | Compare income and spending across recent months |
+| `ynab_scheduled_transactions` | read | Upcoming bills, subscriptions, and recurring transfers |
+| `ynab_create_transaction` | write | Log a new transaction |
+| `ynab_move_money` | write | Adjust a category's budget (move money between envelopes) |
 
-**Read operations:** budget summaries, account balances, category breakdowns,
-transaction history, month-over-month trends, scheduled transactions, payee lists.
+All tools auto-resolve the default budget (most recently modified, or set via
+`YNAB_DEFAULT_BUDGET`), so the model never needs to ask "which budget?"
 
-**Write operations:** create transactions, adjust category budgets (move money).
+## Install
 
-## Setup
+1. Copy both files into the Hermes tools directory:
+   ```bash
+   cp ynab_client.py ~/.hermes/hermes-agent/tools/
+   cp ynab_tools.py ~/.hermes/hermes-agent/tools/
+   ```
 
-```bash
-cd hermes-ynab-chief
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
+2. Add your YNAB API key to `~/.hermes/.env`:
+   ```
+   YNAB_API_KEY=your-key-here
+   ```
+   Generate one at https://app.ynab.com/settings/developer
 
-Edit `.env` with:
-- `YNAB_API_KEY` — generate at https://app.ynab.com/settings/developer
-- `NANOGPT_API_KEY` — your NanoGPT key
-- `HERMES_MODEL` — the model ID on NanoGPT (default: `nousresearch/hermes-3-llama-3.1-70b`)
+3. Optionally set a default budget:
+   ```
+   YNAB_DEFAULT_BUDGET=last-used
+   ```
+   Use `last-used` (auto-selects most recently modified) or a specific budget ID.
+
+4. Restart the Hermes gateway:
+   ```bash
+   systemctl --user restart hermes-gateway
+   ```
 
 ## Usage
 
-```bash
-python3 main.py
-```
-
-Then ask questions:
+Talk to Hermes in Matrix:
 
 ```
-You: How much have I spent on groceries this month?
-You: What categories are overspent?
-You: Move $50 from Dining Out to Groceries
-You: Log a $12.50 purchase at Walgreens under Health
-You: Show me my spending trends for the last 3 months
+"How's my budget looking?"
+"What categories are overspent?"
+"How much have I spent on dining out this month?"
+"Log a $35.50 purchase at Target under Household"
+"Move $100 from Entertainment to Groceries"
+"What bills are coming up this week?"
+"Compare my spending to last month"
 ```
 
 ## Files
 
-- `main.py` — CLI entry point with interactive REPL
-- `agent.py` — Hermes agent loop (NanoGPT + tool calling)
-- `tools.py` — YNAB tool definitions (OpenAI function-calling format) and dispatch
-- `ynab_client.py` — YNAB v1 API wrapper
+- `ynab_client.py` — YNAB v1 API wrapper (handles milliunit conversion, auth, error handling)
+- `ynab_tools.py` — 8 tool registrations via `tools.registry.register()`, all in the `ynab` toolset
 
 ## Notes
 
-- This is a standalone project, unrelated to the Telegram bot fleet.
-- YNAB amounts use milliunits internally (1000 = $1.00); the client handles conversion.
-- The agent confirms before executing write operations (transactions, money moves).
-- Conversation history is trimmed to `MAX_HISTORY` turns to stay within context limits.
+- YNAB uses milliunits internally (1000 = $1.00); the client handles conversion both ways.
+- Negative transaction amounts are outflows (spending); positive are inflows (income).
+- The `check_requirements()` function gates all tools on `YNAB_API_KEY` being set — if the
+  key is missing, the tools won't appear in the model's tool list.
+- The YNAB client and resolved budget ID are cached at module level for the process lifetime.
