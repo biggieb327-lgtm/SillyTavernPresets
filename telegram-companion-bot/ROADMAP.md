@@ -1585,7 +1585,7 @@ memory audit + decay + dedup + backfill) is more capable than either. But the re
 surfaced five incremental improvements to the existing engine, all adoptable without new
 infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 
-### 7.1 Hybrid BM25 + semantic retrieval — S/M
+### 7.1 ~~Hybrid BM25 + semantic retrieval~~ ✅ (shipped v2026-09-09.1)
 - **Evidence:** the recall path is semantic-only (cosine similarity against embeddings).
   Semantic search is weak on exact names, dates, and specific terms that keyword match
   nails. Research (Mem0 ECAI 2025 benchmarks, general RAG literature) consistently shows
@@ -1605,7 +1605,7 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   floor, and the BM25 index rebuilds correctly on memory add/delete via
   `_memory_replace`.
 
-### 7.2 Core/archival memory split — S
+### 7.2 ~~Core/archival memory split~~ ✅ (shipped v2026-09-09.2)
 - **Evidence:** MemGPT/Letta's architecture separates a small "core memory" block
   (always injected, ground-truth relationship facts) from a larger searchable pool
   (retrieved on relevance). Currently `memories.txt` is both — the top-scoring lines
@@ -1624,7 +1624,7 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   present in the injection regardless of query, and `/editmem` can promote or demote
   a line between core and archival.
 
-### 7.3 Time-anchored retrieval scoring — S
+### 7.3 ~~Time-anchored retrieval scoring~~ ✅ (shipped v2026-09-09.3)
 - **Evidence:** Mem0 ECAI 2025 benchmarks found temporal queries are the biggest gap
   for pure-vector systems — a +29.6 point jump from explicit temporal handling. The
   bot has decay (halflife-based down-weighting of old memories) but nothing that
@@ -1641,7 +1641,7 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   in late December over a more-recent but less temporally relevant one, and the
   temporal boost is visible in `/audit` or log output.
 
-### 7.4 Episodic consolidation — M
+### 7.4 ~~Episodic consolidation~~ ✅ (shipped v2026-09-09.4)
 - **Evidence:** TiMem (ACL 2026) and "Episodic Memory is the Missing Piece"
   (arXiv:2502.06975, Feb 2026) both argue that periodically consolidating raw episodes
   into compact reusable summaries beats storing raw chunks. The weekly memory audit
@@ -1664,7 +1664,7 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   conversations is at least as good as before (tested by checking that a consolidated
   summary still surfaces for a relevant query).
 
-### 7.5 Embedding model upgrade — S (if NanoGPT supports it)
+### 7.5 Embedding model upgrade — S (blocked: precondition unverified)
 - **Evidence:** `text-embedding-3-large` (3072-dim) outperforms `-small` (1536-dim) on
   retrieval benchmarks (MTEB 64.6 vs 62.3, MIRACL 54.9 vs 44.0). The model guard in
   `_load_embeddings` already handles a model switch cleanly — it invalidates the cache
@@ -1677,6 +1677,14 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **Precondition:** verify NanoGPT serves `text-embedding-3-large` before changing
   anything. If it does not, this item is closed as not applicable, same disposition
   as 6.1.
+- **Status (2026-09-09):** blocked. `nano-gpt.com` is unreachable from cloud sessions
+  (egress 403, documented in CLAUDE.md). Cannot verify whether NanoGPT exposes
+  `text-embedding-3-large`. The code change is trivial (one default value) and the
+  pipeline already handles model switches. **To unblock:** check the NanoGPT dashboard
+  or models endpoint for `text-embedding-3-large` availability, then set
+  `EMBEDDING_MODEL=text-embedding-3-large` in one instance's `.env` to test. If it
+  works, changing the default in bot.py is a one-line diff. Any instance can already
+  opt in today via the env var — no code change required for a per-instance trial.
 - **Risk:** low — the model guard and backfill make the switch self-healing. The cost
   increase is the only real consideration, bounded by the fleet's low embed volume.
 - **Done when:** `/audit` shows the new model in use, embeddings are rebuilt via
