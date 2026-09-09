@@ -7,6 +7,31 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-09.2 — Core/archival memory split
+
+**Root cause: all 200 memory lines compete equally for the token budget.** Ground-truth
+relationship facts ("Brian's dog is named Scout", "they live in Austin") had to outscore
+transient observations on every turn or risk being displaced. Decay, eviction, and
+repeat-suppression all treated relationship anchors identically to yesterday's grocery
+note. A character who sometimes forgets a partner's name because a newer memory
+outscored it reads as broken, not forgetful.
+
+**Fix:** memories.txt now supports an optional `# CORE` section. Lines above a `# CORE`
+marker are core memories — always injected on every turn (no scoring, no decay, no
+eviction, no repeat suppression), deducted from the token budget before archival lines
+are ranked. Lines below the marker remain archival and are scored, decayed, and evicted
+as before. If no marker exists, all memories are archival (backward compatible).
+
+New command: `/coremem` — list core memories, `/coremem promote <n>` to move a /mems
+entry into core, `/coremem demote <n>` to move it back to archival. `/mems` now shows
+`--- CORE ---` and `--- ARCHIVAL ---` section headers. `/audit` shows the core count.
+
+`_evict_by_value` protects core lines and the marker from eviction. `triggered_memories`
+injects core lines first, then fills remaining budget from scored archival entries.
+
+New env vars: `MEMORY_CORE` (default: on), `MEMORY_CORE_MAX` (default: 10).
+New command: `/coremem`.
+
 ## v2026-09-09.1 — BM25 hybrid retrieval for memory recall
 
 **Root cause: memory recall relied on simple keyword intersection counting alongside

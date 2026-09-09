@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-09.1"
+BOT_VERSION = "2026-09-09.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1325,6 +1325,10 @@ _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsur
 MEMORY_BM25 = _env_bool("MEMORY_BM25", True)
 _bm25_index: dict = {"retriever": None, "corpus": None}  # rebuilt on memory mutation
 
+MEMORY_CORE = _env_bool("MEMORY_CORE", True)
+MEMORY_CORE_MAX = _env_int("MEMORY_CORE_MAX", "10")
+_CORE_MARKER = "# CORE"
+
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
@@ -2246,6 +2250,37 @@ def _read_memories() -> list[str]:
             if ln.strip() and not ln.strip().startswith("#")]
 
 
+def _read_core_memories() -> list[str]:
+    if not MEMORY_CORE:
+        return []
+    text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    raw_lines = text.splitlines()
+    has_marker = any(ln.strip() == _CORE_MARKER for ln in raw_lines)
+    if not has_marker:
+        return []
+    core = []
+    for ln in raw_lines:
+        stripped = ln.strip()
+        if stripped == _CORE_MARKER:
+            break
+        if stripped and not stripped.startswith("#"):
+            core.append(stripped)
+    return core[:MEMORY_CORE_MAX]
+
+
+def _read_archival_memories() -> list[str]:
+    text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    raw_lines = text.splitlines()
+    try:
+        marker_idx = next(i for i, ln in enumerate(raw_lines)
+                          if ln.strip() == _CORE_MARKER)
+    except StopIteration:
+        return [ln.strip() for ln in raw_lines
+                if ln.strip() and not ln.strip().startswith("#")]
+    return [ln.strip() for ln in raw_lines[marker_idx + 1:]
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
 def _read_schedule_today() -> str:
     """Return today's section from schedule.txt (lines under today's day name)."""
     if not SCHEDULE_FILE.exists():
@@ -2474,9 +2509,17 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
     """Trim `lines` to `cap` by dropping the lowest-value entries first, where value
     = recorded confidence (default 5 for legacy/no-meta), ties broken by oldest ts.
     Returns (kept_lines_in_original_order, dropped_keys). A hand-corrected conf-10
-    fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO."""
+    fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO.
+    Core lines (above the # CORE marker) and the marker itself are never evicted."""
     if len(lines) <= cap:
         return lines, []
+
+    protected: set[int] = set()
+    if MEMORY_CORE:
+        for i, l in enumerate(lines):
+            if l.strip() == _CORE_MARKER:
+                protected = set(range(i + 1))
+                break
 
     def _score(line: str, idx: int) -> tuple:
         m = meta.get(line.strip(), {}) or {}
@@ -2484,11 +2527,12 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
         conf = conf if isinstance(conf, int) else 5
         ts = m.get("ts")
         ts = ts if isinstance(ts, (int, float)) else 0.0
-        # Higher = more worth keeping. Insertion index as final tie-break (newer wins).
         return (conf, ts, idx)
 
-    ranked = sorted(range(len(lines)), key=lambda i: _score(lines[i], i))
-    drop_idx = set(ranked[: len(lines) - cap])
+    evictable = [i for i in range(len(lines)) if i not in protected]
+    ranked = sorted(evictable, key=lambda i: _score(lines[i], i))
+    to_drop = len(lines) - cap
+    drop_idx = set(ranked[:to_drop])
     kept = [l for i, l in enumerate(lines) if i not in drop_idx]
     dropped_keys = [lines[i].strip() for i in drop_idx]
     return kept, dropped_keys
@@ -5509,33 +5553,47 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     entries = _read_memories()
     if not entries:
         return []
+
+    core_lines = _read_core_memories()
+    core_set = set(core_lines)
+    archival = [e for e in entries if e not in core_set] if core_lines else entries
+
+    out = []
+    budget = MEMORY_TOKEN_BUDGET
+
+    if core_lines:
+        for line in core_lines:
+            cost = _tokens(line)
+            if cost > budget:
+                break
+            out.append(line)
+            budget -= cost
+
+    if not archival:
+        return out
+
     char_name = NAME.lower() if NAME else ""
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     low = scan_text.lower()
     scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
 
-    # Keyword scoring (original path — always runs)
     keyword_scored: dict[str, float] = {}
-    for line in entries:
+    for line in archival:
         words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                  if w not in stopwords}
         hits = len(words & scan_words)
         if hits > 0:
             keyword_scored[line] = float(hits)
 
-    # Semantic scoring (additive). Preferred path: the handler already embedded the
-    # user message off-loop and passed query_vec, so we rank with pure cosine here —
-    # no HTTP, safe on the event loop. Fallback (query_vec=None): only embed inline
-    # when NOT on the loop (e.g. /recall), never blocking a live reply.
     if query_vec:
-        sem_results = _semantic_recall_vec(query_vec, entries, top_k=8)
+        sem_results = _semantic_recall_vec(query_vec, archival, top_k=8)
     else:
         try:
             asyncio.get_running_loop()
             on_event_loop = True
         except RuntimeError:
             on_event_loop = False
-        sem_results = semantic_recall(scan_text, entries, top_k=8) if not on_event_loop else []
+        sem_results = semantic_recall(scan_text, archival, top_k=8) if not on_event_loop else []
     sem_scored: dict[str, float] = {}
     if sem_results:
         max_sim = max(s for s, _ in sem_results) or 1.0
@@ -5543,30 +5601,21 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
             if sim > 0.3:
                 sem_scored[line] = (sim / max_sim) * 3.0
 
-    # BM25 scoring (ROADMAP 7.1): proper term-frequency + IDF keyword scoring,
-    # stronger than the simple intersection count above on exact names and dates.
     bm25_scored: dict[str, float] = {}
     if MEMORY_BM25:
-        raw_bm25 = _bm25_score(scan_text, entries)
+        raw_bm25 = _bm25_score(scan_text, archival)
         if raw_bm25:
             max_bm25 = max(raw_bm25.values()) or 1.0
             bm25_scored = {l: (s / max_bm25) * 2.0 for l, s in raw_bm25.items()}
 
-    # Merge: union of all scorers, sum their scores, then age-decay the ranking
-    # (MEMORY_DECAY_HALFLIFE_DAYS; default 90 since v2026-07-27.1, 0 = off,
-    # no-ts legacy entries neutral).
     now = time.time()
 
-    # Repeat-injection suppression: down-weight lines injected on recent turns so one
-    # theme can't win the budget every turn. Only on the live reply path (a chat_id is
-    # passed) and when enabled — /recall-style callers pass chat_id=None and are
-    # unaffected, so their ranking and existing tests stay byte-identical.
     suppress = chat_id is not None and MEMORY_REPEAT_SUPPRESS_TURNS > 0
     if suppress:
         turn = _mem_inject_turn.get(chat_id, 0) + 1
         _mem_inject_turn[chat_id] = turn
         seen = _mem_last_injected.setdefault(chat_id, {})
-        for l, t in list(seen.items()):          # prune aged-out / deleted lines
+        for l, t in list(seen.items()):
             if turn - t >= MEMORY_REPEAT_SUPPRESS_TURNS:
                 del seen[l]
         win = MEMORY_REPEAT_SUPPRESS_TURNS
@@ -5584,23 +5633,16 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
-    out = []
-    budget = MEMORY_TOKEN_BUDGET
     for _, line in merged:
-        # Calibrated as of ROADMAP 4.4 (owner-approved 2026-08-01): MEMORY_TOKEN_BUDGET
-        # now means real tokens, not the raw 4-chars-per-token guess. Every instance's
-        # .env was multiplied by its own measured calibration ratio at cutover (captured
-        # from /audit at that moment) so effective recall didn't move for anyone when
-        # this shipped — the switch itself is not the retune. TOKEN_CALIBRATION=0 reverts
-        # this budget check to the raw unit too, same as every other calibrated number.
         cost = _tokens(line)
         if cost > budget:
             continue
         out.append(line)
         budget -= cost
-    if suppress:                                  # record winners on the raw lines,
-        for line in out:                          # before _hedge rewrites them for display
-            seen[line] = turn
+    if suppress:
+        for line in out:
+            if line not in core_set:
+                seen[line] = turn
     if urg is not None and chat_id is not None and MEMORY_URGENCY_FLOOR:
         out_set = set(out)
         for l in all_lines:
@@ -11201,9 +11243,20 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not entries:
         await update.message.reply_text("[no NPC memories yet]")
         return
-    lines = [f"{i+1}. {e}" for i, e in enumerate(entries)]
+    core = _read_core_memories()
+    core_set = set(core)
+    display_lines = []
+    if core:
+        display_lines.append("--- CORE ---")
+        for i, e in enumerate(entries):
+            if e in core_set:
+                display_lines.append(f"{i+1}. {e}")
+        display_lines.append("--- ARCHIVAL ---")
+    for i, e in enumerate(entries):
+        if e not in core_set:
+            display_lines.append(f"{i+1}. {e}")
     chunk, chunks, size = [], [], 0
-    for line in lines:
+    for line in display_lines:
         if size + len(line) + 1 > 3800:
             chunks.append("\n".join(chunk))
             chunk, size = [], 0
@@ -11316,6 +11369,107 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if meta.get("source"):
         lines.append(f'Source: "{meta["source"]}"')
     await update.message.reply_text("\n".join(lines))
+
+
+async def coremem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/coremem — list core memories. /coremem promote <n> — move memory #n to core.
+    /coremem demote <n> — move core memory #n back to archival."""
+    if not MEMORY_CORE:
+        await update.message.reply_text("Core memory is disabled (MEMORY_CORE=0).")
+        return
+    args = " ".join(context.args).strip() if context.args else ""
+    if not args:
+        core = _read_core_memories()
+        if not core:
+            await update.message.reply_text(
+                "No core memories yet. Use /coremem promote <n> "
+                "(where n is the /mems number) to promote one.")
+            return
+        numbered = [f"{i+1}. {e}" for i, e in enumerate(core)]
+        await update.message.reply_text(
+            f"Core memories ({len(core)}/{MEMORY_CORE_MAX}):\n\n" + "\n".join(numbered))
+        return
+
+    parts = args.split(None, 1)
+    action = parts[0].lower()
+    if action not in ("promote", "demote") or len(parts) < 2 or not parts[1].isdigit():
+        await update.message.reply_text(
+            "Usage:\n/coremem — list core memories\n"
+            "/coremem promote <n> — promote /mems entry #n to core\n"
+            "/coremem demote <n> — demote core memory #n to archival")
+        return
+    idx = int(parts[1]) - 1
+
+    if action == "promote":
+        entries = _read_memories()
+        if not (0 <= idx < len(entries)):
+            await update.message.reply_text("No memory at that number.")
+            return
+        target = entries[idx]
+        core = _read_core_memories()
+        if target in core:
+            await update.message.reply_text("That memory is already core.")
+            return
+        if len(core) >= MEMORY_CORE_MAX:
+            await update.message.reply_text(
+                f"Core section full ({MEMORY_CORE_MAX} lines). "
+                "Demote one first with /coremem demote <n>.")
+            return
+        with _memory_lock:
+            raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+            raw_lines = raw.splitlines()
+            stripped_lines = [l.strip() for l in raw_lines]
+            try:
+                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
+            except StopIteration:
+                await update.message.reply_text("Memory not found in file.")
+                return
+            raw_lines.pop(file_idx)
+            try:
+                marker_idx = next(i for i, l in enumerate(raw_lines)
+                                  if l.strip() == _CORE_MARKER)
+                raw_lines.insert(marker_idx, target)
+            except StopIteration:
+                raw_lines.insert(0, target)
+                raw_lines.insert(1, _CORE_MARKER)
+            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _bm25_index["retriever"] = None
+            _bm25_index["corpus"] = None
+        _memory_log("CORE-PROMOTE", target)
+        await update.message.reply_text(f"Promoted to core: {target}")
+
+    elif action == "demote":
+        core = _read_core_memories()
+        if not (0 <= idx < len(core)):
+            await update.message.reply_text(
+                f"No core memory #{idx+1}. Use /coremem to list them.")
+            return
+        target = core[idx]
+        with _memory_lock:
+            raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+            raw_lines = raw.splitlines()
+            stripped_lines = [l.strip() for l in raw_lines]
+            try:
+                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
+            except StopIteration:
+                await update.message.reply_text("Memory not found in file.")
+                return
+            raw_lines.pop(file_idx)
+            try:
+                marker_idx = next(i for i, l in enumerate(raw_lines)
+                                  if l.strip() == _CORE_MARKER)
+                raw_lines.insert(marker_idx + 1, target)
+            except StopIteration:
+                raw_lines.append(target)
+            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _bm25_index["retriever"] = None
+            _bm25_index["corpus"] = None
+        _memory_log("CORE-DEMOTE", target)
+        await update.message.reply_text(f"Demoted from core: {target}")
 
 
 async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -17997,8 +18151,12 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GARMIN_ENABLED:
         age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
         lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
+    _all_mem = _read_memories()
+    _core_mem = _read_core_memories()
+    _core_label = f" ({len(_core_mem)} core)" if _core_mem else ""
     lines.append(
-        f"Memory: {len(_read_memories())} NPC notes · {len(milestones.get(chat_id) or [])} "
+        f"Memory: {len(_all_mem)} NPC notes{_core_label} · "
+        f"{len(milestones.get(chat_id) or [])} "
         f"milestones · {len([r for r in reminders if r['chat_id'] == chat_id])} reminders"
     )
     await _reply_chunked(update, "\n".join(lines))
@@ -18649,6 +18807,7 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("coremem", "Core memories (list/promote/demote)"),
     BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
     BotCommand("reviewlife", "Review nightly-suggested living-file edits"),
@@ -18969,6 +19128,7 @@ def main():
     app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
+    app.add_handler(CommandHandler("coremem", coremem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
     app.add_handler(CommandHandler("reviewlife", reviewlife_cmd))
     app.add_handler(CommandHandler("dupefacts", dupefacts_cmd))

@@ -2761,6 +2761,102 @@ class TestBM25HybridRetrieval:
         assert scores == {}
 
 
+class TestCoreArchivalSplit:
+    """MEMORY_CORE: core lines always injected regardless of query, never decayed,
+    never evicted. Archival lines fill the remaining budget via scoring."""
+
+    CORE_A = "Brian lives in Austin"
+    CORE_B = "Brian's dog is named Scout"
+    ARCH_C = "[auto 2026-09-01] went to the grocery store yesterday"
+    ARCH_D = "[auto 2026-09-02] mentioned a dentist appointment next week"
+
+    def _write_file(self, core_lines, archival_lines):
+        parts = list(core_lines) + [bot._CORE_MARKER] + list(archival_lines)
+        bot.MEMORIES_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_core = bot.MEMORY_CORE
+        self._orig_core_max = bot.MEMORY_CORE_MAX
+        self._orig_bm25 = bot.MEMORY_BM25
+        self._orig_budget = bot.MEMORY_TOKEN_BUDGET
+        self._orig_max = bot.MEMORIES_MAX
+        bot.MEMORY_CORE = True
+        bot.MEMORY_CORE_MAX = 10
+        bot.MEMORY_BM25 = False
+        bot._embeddings_cache.clear()
+        bot._memory_meta.clear()
+        self._write_file([self.CORE_A, self.CORE_B], [self.ARCH_C, self.ARCH_D])
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_CORE = self._orig_core
+        bot.MEMORY_CORE_MAX = self._orig_core_max
+        bot.MEMORY_BM25 = self._orig_bm25
+        bot.MEMORY_TOKEN_BUDGET = self._orig_budget
+        bot.MEMORIES_MAX = self._orig_max
+
+    def test_core_lines_always_injected(self):
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.CORE_A in out
+        assert self.CORE_B in out
+
+    def test_archival_only_when_relevant(self):
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.ARCH_C not in out
+        assert self.ARCH_D not in out
+
+    def test_archival_scored_when_relevant(self):
+        out = bot.triggered_memories("dentist appointment")
+        assert self.CORE_A in out
+        assert self.ARCH_D in out
+
+    def test_kill_switch_treats_all_as_archival(self):
+        bot.MEMORY_CORE = False
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.CORE_A not in out
+        assert self.CORE_B not in out
+
+    def test_eviction_skips_core_lines(self):
+        bot.MEMORIES_MAX = 3
+        lines = [self.CORE_A, self.CORE_B, bot._CORE_MARKER,
+                 self.ARCH_C, self.ARCH_D]
+        kept, dropped = bot._evict_by_value(lines, bot._memory_meta, 3)
+        assert self.CORE_A in [l.strip() for l in kept]
+        assert self.CORE_B in [l.strip() for l in kept]
+        assert bot._CORE_MARKER in [l.strip() for l in kept]
+
+    def test_read_core_memories(self):
+        core = bot._read_core_memories()
+        assert core == [self.CORE_A, self.CORE_B]
+
+    def test_read_archival_memories(self):
+        arch = bot._read_archival_memories()
+        assert arch == [self.ARCH_C, self.ARCH_D]
+
+    def test_no_marker_means_all_archival(self):
+        bot.MEMORIES_FILE.write_text(
+            self.ARCH_C + "\n" + self.ARCH_D + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        assert bot._read_core_memories() == []
+        assert bot._read_archival_memories() == [self.ARCH_C, self.ARCH_D]
+
+    def test_core_max_respected(self):
+        bot.MEMORY_CORE_MAX = 1
+        core = bot._read_core_memories()
+        assert len(core) == 1
+        assert core[0] == self.CORE_A
+
+
 from datetime import date as _date
 
 
@@ -8471,6 +8567,7 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_AUDIT_UNSUPPORTED": True,
         "MEMORY_AUTO": True,
         "MEMORY_BM25": True,
+        "MEMORY_CORE": True,
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MEMORY_URGENCY_FLOOR": True,
