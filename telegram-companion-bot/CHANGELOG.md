@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-09.1 — BM25 hybrid retrieval for memory recall
+
+**Root cause: memory recall relied on simple keyword intersection counting alongside
+semantic cosine similarity.** The keyword scorer counts how many query words appear in
+each memory entry — good for exact hits but blind to term frequency and corpus-level word
+importance. Common words score the same as rare names, and a memory mentioning a keyword
+once scores identically to one built around it.
+
+**Fix:** added `bm25s` (pure Python + NumPy) as a third scoring path in
+`triggered_memories()`. BM25 (Okapi BM25) scores each memory by term frequency within
+the entry, inverse document frequency across all memories, and document-length
+normalization — so a rare name in a short memory scores higher than a common word in a
+long one. The BM25 score is normalized to max 2.0 and added to the existing keyword
+(uncapped) and semantic (max 3.0) scores before recency decay, repeat suppression, and
+urgency boost.
+
+The BM25 index rebuilds lazily: `_memory_replace()` invalidates it, and the next
+`triggered_memories()` call rebuilds from the current entries. Default ON
+(`MEMORY_BM25=1`); set `MEMORY_BM25=0` to disable. Graceful degradation: if `bm25s` is
+not installed, the scorer returns empty and the existing two-path scoring is unchanged.
+
+New dependency: `bm25s>=0.2,<1.0` (requirements.txt).
+New env var: `MEMORY_BM25` (default: on).
+
 ## v2026-09-07.1 — Selfie pool expansion: more settings, more moments
 
 **Root cause: the selfie pools were built for a home-centric default and never expanded.**

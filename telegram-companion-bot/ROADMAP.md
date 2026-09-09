@@ -1573,3 +1573,112 @@ none of these is a bolt-on. 🧪 = pilot one instance, default-off.
 | 5.3-B 🧪 response refinement on recurring topics (M) | A personality-shaping feedback loop — same caution class as the rejected self-evolution ideas; highest-risk 🧪. |
 | ~~5.7-B 🧪 inward drift detection (S)~~ | **Closed 2026-09-03** — duplication check done; existing machinery covers the valuable parts, uncovered gap (phrase repetition) too narrow to build speculatively. |
 | 5.8-B 🧪 banked variance (unsized) | In direct tension with the multi-release voiceprint-consistency investment (3.13); an owner call on whether to resolve that tension at all, not a build item. |
+
+---
+
+## Track 7 — Memory system improvements (sourced 2026-09-09)
+
+Sourced from a research pass evaluating SAGE (a Mem0 fork) as a potential replacement
+for the bot's memory engine. SAGE was rejected — it's a thin cost-optimization fork of
+Mem0, and the bot's custom engine (keyword RAG + semantic recall + episodic recall +
+memory audit + decay + dedup + backfill) is more capable than either. But the research
+surfaced five incremental improvements to the existing engine, all adoptable without new
+infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
+
+### 7.1 Hybrid BM25 + semantic retrieval — S/M
+- **Evidence:** the recall path is semantic-only (cosine similarity against embeddings).
+  Semantic search is weak on exact names, dates, and specific terms that keyword match
+  nails. Research (Mem0 ECAI 2025 benchmarks, general RAG literature) consistently shows
+  hybrid retrieval outperforming either method alone.
+- **Idea:** add `bm25s` (pure Python + NumPy, no Java/server dependency) as a second
+  scoring path over `memories.txt`. Run BM25 alongside the existing cosine similarity
+  and combine scores via Reciprocal Rank Fusion (a simple formula: `1/(k+rank)` per
+  method, sum the reciprocals). Falls back to semantic-only if `bm25s` is unavailable.
+- **What changes:** `triggered_memories()` gains a keyword-score term alongside its
+  existing `_semantic_recall_vec` path. The existing keyword matching (`_keyword_match`)
+  is simple substring; BM25 is proper term-frequency scoring with IDF weighting.
+- **Risk:** low — additive scoring in the recall path. The existing keyword fallback
+  (when semantic recall is unavailable) is unchanged. Kill switch `MEMORY_BM25`
+  (default on).
+- **Done when:** a query like "what about Marcus" or "the concert in April" retrieves
+  the relevant memory line even when the embedding similarity is below the cosine
+  floor, and the BM25 index rebuilds correctly on memory add/delete via
+  `_memory_replace`.
+
+### 7.2 Core/archival memory split — S
+- **Evidence:** MemGPT/Letta's architecture separates a small "core memory" block
+  (always injected, ground-truth relationship facts) from a larger searchable pool
+  (retrieved on relevance). Currently `memories.txt` is both — the top-scoring lines
+  get injected per turn, but there is no distinction between permanent relationship
+  anchors and transient observations.
+- **Idea:** a small pinned section at the top of `memories.txt` (marked with a `# CORE`
+  header or similar), never decayed, never evicted, always injected regardless of
+  relevance score. The rest of the file stays searchable and subject to existing decay,
+  eviction, and audit. Existing `/editmem` and `/remember` can target either section.
+- **What changes:** `triggered_memories()` unconditionally includes core lines (up to a
+  small cap, e.g. 5-10 lines) before scoring the rest. `_evict_by_value` skips core
+  lines. `MEMORY_DECAY_HALFLIFE_DAYS` does not apply to core entries.
+- **Risk:** low — a partitioning of existing data, not a new store. The risk is that
+  a too-large core section wastes token budget on every turn. Cap it.
+- **Done when:** a memory marked as core survives decay and eviction, is always
+  present in the injection regardless of query, and `/editmem` can promote or demote
+  a line between core and archival.
+
+### 7.3 Time-anchored retrieval scoring — S
+- **Evidence:** Mem0 ECAI 2025 benchmarks found temporal queries are the biggest gap
+  for pure-vector systems — a +29.6 point jump from explicit temporal handling. The
+  bot has decay (halflife-based down-weighting of old memories) but nothing that
+  *boosts* memories whose timestamps match what the user is asking about.
+- **Idea:** when the user's message contains a time reference ("last Christmas",
+  "back in July", "a few weeks ago"), add a temporal affinity term to the retrieval
+  score that boosts memories whose `memory_meta.json` timestamp falls near the
+  referenced time. Reuses the existing `parse_when` function for time extraction.
+- **What changes:** `triggered_memories()` gains an optional temporal boost multiplied
+  into the final score. `memory_meta.json` already stores timestamps per entry.
+- **Risk:** low — bounded to the recall-scoring path. `parse_when` is already tested.
+  Kill switch `MEMORY_TEMPORAL` (default on).
+- **Done when:** "remember what happened last Christmas?" surfaces a memory stored
+  in late December over a more-recent but less temporally relevant one, and the
+  temporal boost is visible in `/audit` or log output.
+
+### 7.4 Episodic consolidation — M
+- **Evidence:** TiMem (ACL 2026) and "Episodic Memory is the Missing Piece"
+  (arXiv:2502.06975, Feb 2026) both argue that periodically consolidating raw episodes
+  into compact reusable summaries beats storing raw chunks. The weekly memory audit
+  already does this for `memories.txt`; the episodic archive (`.episodes.jsonl`) has
+  no equivalent — it grows without bound toward `EPISODE_MAX` (4000 chunks).
+- **Idea:** extend the nightly `reflection_job` (6.2's established pattern) to
+  periodically merge old episode chunks into denser summaries. Episodes older than
+  a threshold (e.g. 30 days) get consolidated: multiple chunks from the same
+  conversation window become one shorter summary with a fresh embedding. The
+  consolidated entry replaces the originals in `.episodes.jsonl`.
+- **What changes:** a new `_consolidate_episodes` function called from
+  `nightly_maintenance`, using the existing `SUMMARY_MODEL` (zero new model
+  dependencies). The episodic recall path (`_episode_recall`) is unchanged — it
+  already works with embedded text chunks regardless of length.
+- **Risk:** medium — irreversible consolidation loses raw detail. Mitigate by keeping
+  a dated backup before each consolidation run, same pattern as the memory auditor.
+  Kill switch `EPISODE_CONSOLIDATION` (default on).
+- **Done when:** episodes older than the threshold are consolidated into fewer, denser
+  chunks; the archive stops growing unboundedly; episodic recall quality on old
+  conversations is at least as good as before (tested by checking that a consolidated
+  summary still surfaces for a relevant query).
+
+### 7.5 Embedding model upgrade — S (if NanoGPT supports it)
+- **Evidence:** `text-embedding-3-large` (3072-dim) outperforms `-small` (1536-dim) on
+  retrieval benchmarks (MTEB 64.6 vs 62.3, MIRACL 54.9 vs 44.0). The model guard in
+  `_load_embeddings` already handles a model switch cleanly — it invalidates the cache
+  and rebuilds via `_embed_backfill_job`.
+- **Idea:** switch `EMBEDDING_MODEL` to `text-embedding-3-large` if NanoGPT exposes it.
+  The only code change is the default value; everything else (cache invalidation,
+  backfill, cosine scoring) works on arbitrary-dimension vectors already.
+- **What changes:** one env var default. Cost is ~6.5x per embed call, but volume is
+  low (memory writes + one query embed per reply).
+- **Precondition:** verify NanoGPT serves `text-embedding-3-large` before changing
+  anything. If it does not, this item is closed as not applicable, same disposition
+  as 6.1.
+- **Risk:** low — the model guard and backfill make the switch self-healing. The cost
+  increase is the only real consideration, bounded by the fleet's low embed volume.
+- **Done when:** `/audit` shows the new model in use, embeddings are rebuilt via
+  backfill, and recall quality is at least as good as before (spot-checked, not
+  formally benchmarked — the published benchmarks already show the improvement).

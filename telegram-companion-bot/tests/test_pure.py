@@ -2711,6 +2711,56 @@ class TestTriggeredMemoriesRepeatSuppression:
         assert self._call(2) == [self.LINE_A]   # chat 2 has no history → A still wins
 
 
+class TestBM25HybridRetrieval:
+    """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
+    keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
+    hit the other scorers miss, the kill switch disables it, and a missing
+    bm25s library degrades gracefully."""
+
+    LINE_RARE = "Valentina mentioned the sextant calibration yesterday"
+    LINE_COMMON = "went to the store and bought some things at the store"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_bm25 = bot.MEMORY_BM25
+        self._orig_bm25_index = dict(bot._bm25_index)
+        bot.MEMORIES_FILE.write_text(
+            self.LINE_RARE + "\n" + self.LINE_COMMON + "\n", encoding="utf-8"
+        )
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+        bot.MEMORY_BM25 = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_BM25 = self._orig_bm25
+        bot._bm25_index.clear()
+        bot._bm25_index.update(self._orig_bm25_index)
+
+    def test_bm25_surfaces_rare_term_hit(self):
+        out = bot.triggered_memories("sextant")
+        assert self.LINE_RARE in out
+
+    def test_kill_switch_disables_bm25_scoring(self):
+        bot.MEMORY_BM25 = False
+        scores = bot._bm25_score("sextant", [self.LINE_RARE, self.LINE_COMMON])
+        assert scores == {}
+
+    def test_graceful_degradation_without_library(self, monkeypatch):
+        monkeypatch.setattr(bot, "_bm25s", None)
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+        scores = bot._bm25_score("sextant", [self.LINE_RARE, self.LINE_COMMON])
+        assert scores == {}
+
+
 from datetime import date as _date
 
 
@@ -8420,6 +8470,7 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,
         "MEMORY_AUTO": True,
+        "MEMORY_BM25": True,
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MEMORY_URGENCY_FLOOR": True,

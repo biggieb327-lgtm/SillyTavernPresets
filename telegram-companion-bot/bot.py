@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-07.1"
+BOT_VERSION = "2026-09-09.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1321,6 +1321,9 @@ MEMORY_URGENCY_FLOOR = _env_bool("MEMORY_URGENCY_FLOOR", True)
 MEMORY_URGENCY_CEILING = _env_int("MEMORY_URGENCY_CEILING", "20")
 MEMORY_URGENCY_BOOST = _env_float("MEMORY_URGENCY_BOOST", "2.0")
 _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsurfaced}
+
+MEMORY_BM25 = _env_bool("MEMORY_BM25", True)
+_bm25_index: dict = {"retriever": None, "corpus": None}  # rebuilt on memory mutation
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
@@ -2527,6 +2530,8 @@ def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | Non
         _memories_cache["ts"] = 0.0
         _save_embeddings()
         _save_memory_meta()
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
     return True
 
 
@@ -5277,6 +5282,58 @@ _MEMORY_STOPWORDS = frozenset({
     "even", "both", "only", "other", "back", "then", "well", "each",
 })
 
+try:
+    import bm25s as _bm25s
+except ImportError:
+    _bm25s = None
+
+
+def _rebuild_bm25_index(entries: list[str] | None = None):
+    if not MEMORY_BM25 or _bm25s is None:
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+        return
+    if entries is None:
+        entries = _read_memories()
+    if not entries:
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+        return
+    try:
+        retriever = _bm25s.BM25()
+        corpus_tokens = _bm25s.tokenize(entries)
+        retriever.index(corpus_tokens)
+        _bm25_index["retriever"] = retriever
+        _bm25_index["corpus"] = list(entries)
+    except Exception as e:
+        log.warning("[bm25] index build failed: %s", type(e).__name__)
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+
+
+def _bm25_score(scan_text: str, entries: list[str]) -> dict[str, float]:
+    if not MEMORY_BM25 or _bm25s is None:
+        return {}
+    retriever = _bm25_index.get("retriever")
+    corpus = _bm25_index.get("corpus")
+    if retriever is None or corpus is None or corpus != entries:
+        _rebuild_bm25_index(entries)
+        retriever = _bm25_index.get("retriever")
+        corpus = _bm25_index.get("corpus")
+    if retriever is None or not corpus:
+        return {}
+    try:
+        query_tokens = _bm25s.tokenize([scan_text])
+        results, scores = retriever.retrieve(query_tokens, corpus=corpus, k=len(corpus))
+        scored = {}
+        for doc, score in zip(results[0], scores[0]):
+            if score > 0:
+                scored[doc] = float(score)
+        return scored
+    except Exception as e:
+        log.warning("[bm25] score failed: %s", type(e).__name__)
+        return {}
+
 
 def _recency_weight(ts, now: float, halflife_days: float) -> float:
     """Exponential age decay for memory ranking. Neutral (1.0) when disabled
@@ -5486,7 +5543,16 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
             if sim > 0.3:
                 sem_scored[line] = (sim / max_sim) * 3.0
 
-    # Merge: union of both, sum their scores, then age-decay the ranking
+    # BM25 scoring (ROADMAP 7.1): proper term-frequency + IDF keyword scoring,
+    # stronger than the simple intersection count above on exact names and dates.
+    bm25_scored: dict[str, float] = {}
+    if MEMORY_BM25:
+        raw_bm25 = _bm25_score(scan_text, entries)
+        if raw_bm25:
+            max_bm25 = max(raw_bm25.values()) or 1.0
+            bm25_scored = {l: (s / max_bm25) * 2.0 for l, s in raw_bm25.items()}
+
+    # Merge: union of all scorers, sum their scores, then age-decay the ranking
     # (MEMORY_DECAY_HALFLIFE_DAYS; default 90 since v2026-07-27.1, 0 = off,
     # no-ts legacy entries neutral).
     now = time.time()
@@ -5507,10 +5573,10 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     else:
         turn, seen, win = 0, {}, 0
 
-    all_lines = set(keyword_scored) | set(sem_scored)
+    all_lines = set(keyword_scored) | set(sem_scored) | set(bm25_scored)
     urg = (_mem_urgency.setdefault(chat_id, {})
            if MEMORY_URGENCY_FLOOR and chat_id is not None else {})
-    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
+    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0) + bm25_scored.get(l, 0))
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
                                  now, MEMORY_DECAY_HALFLIFE_DAYS)
                * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY)
