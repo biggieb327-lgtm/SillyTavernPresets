@@ -2956,6 +2956,116 @@ class TestTemporalAffinity:
             bot.MEMORY_TEMPORAL = orig
 
 
+class TestEpisodicConsolidation:
+    """Tests for _consolidate_episodes (ROADMAP 7.4)."""
+
+    def _setup_episodes(self, tmp_path, monkeypatch, chunks):
+        """Write chunks to a temp episodes file and load into RAM."""
+        import numpy as np
+        ep_file = tmp_path / ".episodes.jsonl"
+        model_file = tmp_path / ".episodes.model"
+        with ep_file.open("w", encoding="utf-8") as f:
+            for ts, text, vec in chunks:
+                f.write(json.dumps({"ts": ts, "text": text, "vec": vec}) + "\n")
+        model_file.write_text("test-model", encoding="utf-8")
+        monkeypatch.setattr(bot, "EPISODES_FILE", ep_file)
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", model_file)
+        monkeypatch.setattr(bot, "EMBEDDING_MODEL", "test-model")
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION", True)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_AGE_DAYS", 30)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_MIN_CLUSTER", 3)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_GAP_HOURS", 4.0)
+        ts_list = [c[0] for c in chunks]
+        text_list = [c[1] for c in chunks]
+        vecs = [c[2] for c in chunks]
+        mat = np.asarray(vecs, dtype=np.float32)
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        mat = mat / norms
+        with bot._episodes_lock:
+            bot._episodes["ts"] = ts_list
+            bot._episodes["text"] = text_list
+            bot._episodes["mat"] = mat
+            bot._episodes["loaded"] = True
+        return ep_file
+
+    def _make_vec(self, seed=1.0):
+        return [seed * 0.1] * 10
+
+    def test_consolidates_old_cluster(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Brian talked about his dog Scout", self._make_vec(1)),
+            (old + 3600, "Brian mentioned Scout likes the park", self._make_vec(2)),
+            (old + 7200, "They discussed taking Scout to the vet", self._make_vec(3)),
+            (now - 3600, "Recent conversation about dinner", self._make_vec(4)),
+        ]
+        ep_file = self._setup_episodes(tmp_path, monkeypatch, chunks)
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda msgs, model=None, **kw: "Brian discussed his dog Scout, park visits, and a vet trip.")
+        monkeypatch.setattr(bot, "_embed_text", lambda text: self._make_vec(5))
+        net = bot._consolidate_episodes()
+        assert net == 2
+        with bot._episodes_lock:
+            assert len(bot._episodes["ts"]) == 2
+
+    def test_skips_recent_chunks(self, tmp_path, monkeypatch):
+        now = time.time()
+        chunks = [
+            (now - 86400, "Yesterday chat A", self._make_vec(1)),
+            (now - 7200, "Today chat B", self._make_vec(2)),
+            (now - 3600, "Today chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        net = bot._consolidate_episodes()
+        assert net == 0
+
+    def test_skips_small_clusters(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Old chat A", self._make_vec(1)),
+            (old + 3600, "Old chat B", self._make_vec(2)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        net = bot._consolidate_episodes()
+        assert net == 0
+
+    def test_backup_created(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Chat A", self._make_vec(1)),
+            (old + 1800, "Chat B", self._make_vec(2)),
+            (old + 3600, "Chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda msgs, model=None, **kw: "Consolidated summary of chats.")
+        monkeypatch.setattr(bot, "_embed_text", lambda text: self._make_vec(5))
+        bot._consolidate_episodes()
+        backups = list(tmp_path.glob(".episodes.pre-consolidation-*.jsonl"))
+        assert len(backups) == 1
+
+    def test_survives_summarize_failure(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Chat A", self._make_vec(1)),
+            (old + 1800, "Chat B", self._make_vec(2)),
+            (old + 3600, "Chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        def _boom(*a, **kw):
+            raise RuntimeError("API down")
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        net = bot._consolidate_episodes()
+        assert net == 0
+        with bot._episodes_lock:
+            assert len(bot._episodes["ts"]) == 3
+
+
 from datetime import date as _date
 
 
@@ -8631,6 +8741,7 @@ class TestEveryBooleanFlagDefault:
         # semantic recall.
         "EMBED_BACKFILL": True,
         "ENGAGEMENT_TREND": True,
+        "EPISODE_CONSOLIDATION": True,
         "CHRONOTYPE_NOTICE": True,
         "CONSTANCY_OVERRIDE": True,
         "INTROSPECTION_QUERY": True,

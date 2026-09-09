@@ -7,6 +7,29 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-09.4 — Episodic consolidation
+
+**Root cause: the episodic archive (`.episodes.jsonl`) grows without bound toward
+`EPISODE_MAX` (4000 chunks).** Old conversation chunks accumulate at full verbosity
+forever. The weekly memory audit consolidates `memories.txt` but nothing equivalent
+existed for episodes. Once the archive hits the cap, the oldest episodes are silently
+dropped — no summarization, no density gain, just data loss.
+
+**Fix:** `_consolidate_episodes()` runs nightly inside `reflection_job`. It finds
+episode chunks older than `EPISODE_CONSOLIDATION_AGE_DAYS` (default 30), groups them
+into clusters by temporal proximity (`EPISODE_CONSOLIDATION_GAP_HOURS`, default 4h),
+and for clusters of `EPISODE_CONSOLIDATION_MIN_CLUSTER` or more chunks (default 3),
+summarizes them into one denser entry using `SUMMARY_MODEL`. The consolidated entry
+gets a fresh embedding and replaces the originals in both the file and RAM. The
+original file is backed up (`.episodes.pre-consolidation-<timestamp>.jsonl`) before
+any modification, same pattern as other irreversible mutations. The recall path
+(`triggered_episode`) is unchanged — it works on embedded text regardless of length.
+
+New env vars: `EPISODE_CONSOLIDATION` (default: on),
+`EPISODE_CONSOLIDATION_AGE_DAYS` (default: 30),
+`EPISODE_CONSOLIDATION_MIN_CLUSTER` (default: 3),
+`EPISODE_CONSOLIDATION_GAP_HOURS` (default: 4.0).
+
 ## v2026-09-09.3 — Time-anchored retrieval scoring
 
 **Root cause: temporal references in conversation had no effect on which memories

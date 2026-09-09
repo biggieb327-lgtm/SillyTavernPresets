@@ -135,7 +135,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-09.3"
+BOT_VERSION = "2026-09-09.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -2679,6 +2679,13 @@ EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
 _episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
 _episodes_lock = threading.Lock()
 
+# Episodic consolidation (ROADMAP 7.4): periodically merge old episode chunks into
+# denser summaries so the archive stops growing unboundedly toward EPISODE_MAX.
+EPISODE_CONSOLIDATION = _env_bool("EPISODE_CONSOLIDATION", True)
+EPISODE_CONSOLIDATION_AGE_DAYS = _env_int("EPISODE_CONSOLIDATION_AGE_DAYS", "30")
+EPISODE_CONSOLIDATION_MIN_CLUSTER = _env_int("EPISODE_CONSOLIDATION_MIN_CLUSTER", "3")
+EPISODE_CONSOLIDATION_GAP_HOURS = _env_float("EPISODE_CONSOLIDATION_GAP_HOURS", "4.0")
+
 # On-this-day resurfacing: once a day, check whether an archived episode's anniversary
 # (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
 # archive, so it needs no extra storage. Gated on EPISODIC_RECALL.
@@ -3110,6 +3117,97 @@ def _rewrite_episodes_file(ts_list, text_list, vecs):
         EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
     except Exception as e:
         log.warning("[episodes] file rewrite failed: %s", type(e).__name__)
+
+
+def _consolidate_episodes() -> int:
+    """Off-loop: merge old episode clusters into denser summaries.
+    Returns the number of chunks removed (net savings)."""
+    _load_episodes()
+    if _np is None:
+        return 0
+    with _episodes_lock:
+        ts_all = _episodes["ts"][:]
+        text_all = _episodes["text"][:]
+        mat = _episodes["mat"]
+    if not ts_all:
+        return 0
+    vecs_all = mat.tolist() if mat is not None else []
+    if len(vecs_all) != len(ts_all):
+        return 0
+    cutoff = time.time() - EPISODE_CONSOLIDATION_AGE_DAYS * 86400
+    old_indices = [i for i, t in enumerate(ts_all) if t < cutoff]
+    if len(old_indices) < EPISODE_CONSOLIDATION_MIN_CLUSTER:
+        return 0
+    old_indices.sort(key=lambda i: ts_all[i])
+    gap = EPISODE_CONSOLIDATION_GAP_HOURS * 3600
+    clusters: list[list[int]] = []
+    current_cluster: list[int] = [old_indices[0]]
+    for idx in old_indices[1:]:
+        if ts_all[idx] - ts_all[current_cluster[-1]] <= gap:
+            current_cluster.append(idx)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [idx]
+    clusters.append(current_cluster)
+    mergeable = [c for c in clusters if len(c) >= EPISODE_CONSOLIDATION_MIN_CLUSTER]
+    if not mergeable:
+        return 0
+    try:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = EPISODES_FILE.parent / f".episodes.pre-consolidation-{stamp}.jsonl"
+        shutil.copy2(EPISODES_FILE, backup)
+    except Exception as e:
+        log.warning("[consolidation] backup failed, aborting: %s", e)
+        return 0
+    remove_set: set[int] = set()
+    new_entries: list[tuple[float, str, list[float]]] = []
+    for cluster in mergeable:
+        texts = [text_all[i] for i in cluster]
+        mid_ts = ts_all[cluster[len(cluster) // 2]]
+        combined = "\n---\n".join(texts)
+        prompt = (
+            "Consolidate these conversation excerpts into one concise summary "
+            "that preserves the key facts, emotions, and relationship details. "
+            "Write in third person, past tense. Keep it under 400 words.\n\n"
+            + combined
+        )
+        try:
+            raw = call_nanogpt([{"role": "user", "content": prompt}], SUMMARY_MODEL)
+            summary = _strip_thinking(raw).strip()
+        except Exception as e:
+            log.warning("[consolidation] summarize failed for cluster of %d: %s",
+                        len(cluster), e)
+            continue
+        if not summary or len(summary) < 20:
+            continue
+        vec = _embed_text(summary[:EPISODE_EMBED_CHARS])
+        if vec is None:
+            log.warning("[consolidation] embed failed for cluster of %d", len(cluster))
+            continue
+        remove_set.update(cluster)
+        new_entries.append((mid_ts, summary, vec))
+    if not remove_set:
+        return 0
+    keep_ts, keep_text, keep_vecs = [], [], []
+    for i in range(len(ts_all)):
+        if i not in remove_set:
+            keep_ts.append(ts_all[i])
+            keep_text.append(text_all[i])
+            keep_vecs.append(vecs_all[i])
+    for ts, text, vec in new_entries:
+        keep_ts.append(ts)
+        keep_text.append(text)
+        keep_vecs.append(vec)
+    _rewrite_episodes_file(keep_ts, keep_text, keep_vecs)
+    new_mat = _normalize_rows(_np.asarray(keep_vecs, dtype=_np.float32)) if keep_vecs else None
+    with _episodes_lock:
+        _episodes["ts"] = keep_ts
+        _episodes["text"] = keep_text
+        _episodes["mat"] = new_mat
+    net = len(remove_set) - len(new_entries)
+    log.info("[consolidation] merged %d cluster(s): %d chunks -> %d summaries (net -%d)",
+             len(new_entries), len(remove_set), len(new_entries), net)
+    return net
 
 
 def _archive_episode_chunks(batch: list, uname: str):
@@ -15327,6 +15425,14 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
+    if EPISODE_CONSOLIDATION and EPISODIC_RECALL:
+        try:
+            async with _SUMMARIZE_SEM:
+                net = await asyncio.to_thread(_consolidate_episodes)
+            if net > 0:
+                log.info("[reflection] episode consolidation freed %d chunk(s)", net)
+        except Exception as e:
+            log.warning("[consolidation] error: %s", e)
     _overnight_mood_reset(owner)
     if ENGAGEMENT_TREND:
         _snapshot_engagement(owner)
