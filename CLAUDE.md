@@ -315,6 +315,10 @@ each with a threshold and a test, so they are not restated here. What is project
    for the format and the qualifying test; this applies to a subagent's decision too, which the
    main session records in repo terms. Routine implementation with one obvious path is not a
    decision — don't log those. `session-debrief` asks before a session closes.
+10. **Warn the owner before spending NanoGPT tokens.** Any action that sends a request
+    to the NanoGPT API — `probe-context.py`, a manual test against the live endpoint, or
+    anything else that consumes the weekly included quota — requires an explicit heads-up
+    before execution, not after. The fleet's quota is shared and finite.
 
 ## Shared brain (Notion)
 

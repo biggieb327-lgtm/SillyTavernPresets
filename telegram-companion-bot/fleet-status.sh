@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # fleet-status.sh — one command to answer "is everyone up, what version, any errors."
 #
 # Hits each instance's /admin/health endpoint and prints a summary table.
@@ -17,9 +17,10 @@ FLEET_HOST="${FLEET_HOST:-127.0.0.1}"
 ADMIN_API_TOKEN="${ADMIN_API_TOKEN:-}"
 TIMEOUT="${FLEET_TIMEOUT:-5}"
 
-# Instance list mirrors update-all.sh. Port is ADMIN_API_PORT from each instance's
-# .env — default 8080 + offset. Convention: nora=8080, bonnie=8081, cass=8082,
-# emily=8083, priya=8084, jules=8085. Override with FLEET_PORTS if needed.
+# Instance list mirrors the seven-bot VPS fleet. Port is ADMIN_API_PORT from each
+# instance's .env — must be distinct on a shared host. Convention:
+# nora=8080, bonnie=8081, cass=8082, emily=8083, priya=8084, jules=8085, marcus=8086.
+# Override with FLEET_PORT_<NAME> if needed.
 declare -A PORTS
 PORTS=(
   [nora]=8080
@@ -28,6 +29,7 @@ PORTS=(
   [emily]=8083
   [priya]=8084
   [jules]=8085
+  [marcus]=8086
 )
 
 # Allow overriding individual ports via env, e.g. FLEET_PORT_NORA=9090
@@ -42,7 +44,7 @@ done
 printf "%-10s %-8s %-16s %-12s %s\n" "INSTANCE" "STATUS" "VERSION" "UPTIME" "ERRORS(1h)"
 printf "%-10s %-8s %-16s %-12s %s\n" "--------" "------" "-------" "------" "----------"
 
-for name in nora bonnie cass emily priya jules; do
+for name in nora bonnie cass emily priya jules marcus; do
   port="${PORTS[$name]}"
   url="http://${FLEET_HOST}:${port}/admin/health"
 

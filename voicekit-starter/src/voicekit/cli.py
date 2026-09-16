@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 from voicekit import __version__
 from voicekit.core import build_profile, generate, judge
+from voicekit.profile_mgmt import list_profiles, merge_profiles, validate_profile_cmd
+from voicekit.batch import batch_build_profiles, batch_generate, batch_judge
+from voicekit.analysis import compare_profiles, track_evolution
+from voicekit.multi_author import detect_authors, attribute_text, build_collaborative_profile
+from voicekit.semantic import analyze_semantic_patterns
+from voicekit.api import start_server
 
 REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
@@ -114,6 +122,112 @@ def main() -> None:
     )
     jdg.add_argument("--model", help="Override the LLM model")
 
+    # list-profiles
+    lp = subparsers.add_parser(
+        "list-profiles",
+        help="List and validate all profiles in a directory",
+    )
+    lp.add_argument("directory", help="Directory containing profile JSON files")
+
+    # merge-profiles
+    mp = subparsers.add_parser(
+        "merge-profiles",
+        help="Merge multiple profiles into one",
+    )
+    mp.add_argument("profiles", nargs="+", help="Paths to profiles to merge")
+    mp.add_argument("--author", required=True, help="Author name for merged profile")
+    mp.add_argument("--out", help="Output path for merged profile")
+
+    # validate-profile
+    vp = subparsers.add_parser(
+        "validate-profile",
+        help="Validate a voice profile against the schema",
+    )
+    vp.add_argument("profile", help="Path to profile JSON file")
+
+    # batch-build
+    bb = subparsers.add_parser(
+        "batch-build",
+        help="Build profiles for multiple authors in parallel",
+    )
+    bb.add_argument("config", help="Path to batch config JSON file")
+    bb.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+    bb.add_argument("--no-resume", action="store_true", help="Don't resume from progress file")
+
+    # batch-generate
+    bg = subparsers.add_parser(
+        "batch-generate",
+        help="Generate multiple drafts in parallel",
+    )
+    bg.add_argument("config", help="Path to batch config JSON file")
+    bg.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+
+    # batch-judge
+    bj = subparsers.add_parser(
+        "batch-judge",
+        help="Judge multiple drafts in parallel",
+    )
+    bj.add_argument("config", help="Path to batch config JSON file")
+    bj.add_argument("--workers", type=int, default=3, help="Max parallel workers (default: 3)")
+
+    # compare-profiles
+    cp = subparsers.add_parser(
+        "compare-profiles",
+        help="Compare two voice profiles and show similarity",
+    )
+    cp.add_argument("profile_a", help="Path to first profile JSON")
+    cp.add_argument("profile_b", help="Path to second profile JSON")
+
+    # track-evolution
+    te = subparsers.add_parser(
+        "track-evolution",
+        help="Track voice evolution across multiple profiles",
+    )
+    te.add_argument("profiles", nargs="+", help="Paths to profile JSON files (chronological order)")
+    te.add_argument("--author", required=True, help="Author name")
+    te.add_argument("--out", help="Output path for evolution report")
+
+    # detect-authors
+    da = subparsers.add_parser(
+        "detect-authors",
+        help="Detect distinct authors in a corpus directory",
+    )
+    da.add_argument("corpus_dir", help="Directory containing writing samples")
+
+    # attribute-text
+    at = subparsers.add_parser(
+        "attribute-text",
+        help="Attribute text to a known author",
+    )
+    at.add_argument("text_file", help="Path to text file to attribute")
+    at.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
+
+    # collaborative-profile
+    clp = subparsers.add_parser(
+        "collaborative-profile",
+        help="Build a collaborative voice profile from multiple authors",
+    )
+    clp.add_argument("profiles", nargs="+", help="Paths to author profile JSON files")
+    clp.add_argument("--name", required=True, help="Name for the collaborative profile")
+    clp.add_argument("--out", help="Output path for the collaborative profile")
+
+    # semantic-analysis
+    sa = subparsers.add_parser(
+        "semantic-analysis",
+        help="Analyze voice patterns using Propose-Prove pattern",
+    )
+    sa.add_argument("sample", help="Path to sample text file")
+    sa.add_argument("corpus", help="Path to full corpus text file")
+    sa.add_argument("--author", required=True, help="Author name")
+
+    # serve (API server)
+    sv = subparsers.add_parser(
+        "serve",
+        help="Start the REST API server",
+    )
+    sv.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    sv.add_argument("--port", type=int, default=8000, help="Port to bind to")
+
     args = parser.parse_args()
 
     try:
@@ -161,6 +275,100 @@ def main() -> None:
             if evaluation:
                 _print_judge_summary(evaluation)
             print(f"Evaluation saved to {out_path}")
+
+        elif args.command == "list-profiles":
+            profiles = list_profiles(args.directory)
+            if not profiles:
+                print("No profiles found.")
+            else:
+                for p in profiles:
+                    status = "✓" if p["valid"] else "✗"
+                    print(f"  {status} {p['author']} ({p['version']}) - {p['path']}")
+
+        elif args.command == "merge-profiles":
+            out_path = merge_profiles(args.profiles, args.author, args.out)
+            print(f"Merged profile saved to {out_path}")
+
+        elif args.command == "validate-profile":
+            report = validate_profile_cmd(args.profile)
+            if report["valid"]:
+                print(f"✓ Valid profile: {report['stats'].get('author', 'unknown')}")
+                print(f"  Traits: {report['stats'].get('traits', 0)}")
+                print(f"  Exemplars: {report['stats'].get('exemplars', 0)}")
+                print(f"  Registers: {report['stats'].get('registers', 0)}")
+            else:
+                print(f"✗ Invalid profile:")
+                for err in report["errors"]:
+                    print(f"  - {err}")
+
+        elif args.command == "batch-build":
+            results = batch_build_profiles(args.config, args.workers, not args.no_resume)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "batch-generate":
+            results = batch_generate(args.config, args.workers)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "batch-judge":
+            results = batch_judge(args.config, args.workers)
+            success = sum(1 for r in results if r["status"] == "success")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            print(f"\nSummary: {success} succeeded, {failed} failed")
+
+        elif args.command == "compare-profiles":
+            result = compare_profiles(args.profile_a, args.profile_b)
+            print(f"Overall similarity: {result['overall_similarity']:.0%}")
+            print(f"\nDimension scores:")
+            for dim, score in result["dimension_scores"].items():
+                print(f"  {dim:<12} {score:.0%}")
+            print(f"\n{result['summary']}")
+
+        elif args.command == "track-evolution":
+            result = track_evolution(args.profiles, args.author, args.out)
+            print(result["summary"])
+            if result["drift_detected"]:
+                print("\nDrift details:")
+                for detail in result["drift_details"]:
+                    print(f"  - {detail}")
+            if args.out:
+                print(f"\nReport saved to {args.out}")
+
+        elif args.command == "detect-authors":
+            authors = detect_authors(args.corpus_dir)
+            print(f"Detected {len(authors)} author(s):")
+            for author in authors:
+                print(f"  - {author.get('name', 'Unknown')} ({len(author.get('sample_paths', []))} samples)")
+
+        elif args.command == "attribute-text":
+            text = Path(args.text_file).read_text(encoding="utf-8")
+            profiles = [json.loads(Path(p).read_text()) for p in args.profiles]
+            result = attribute_text(text, profiles)
+            print(f"Attributed to: {result.get('author', 'Unknown')} (confidence: {result.get('confidence', 0):.0%})")
+            if result.get("reasoning"):
+                print(f"Reasoning: {result['reasoning']}")
+
+        elif args.command == "collaborative-profile":
+            profiles = [json.loads(Path(p).read_text()) for p in args.profiles]
+            result = build_collaborative_profile(profiles, args.name, args.out)
+            print(f"Collaborative profile created: {args.name}")
+            if args.out:
+                print(f"Saved to: {args.out}")
+
+        elif args.command == "semantic-analysis":
+            sample_text = Path(args.sample).read_text(encoding="utf-8")
+            corpus_text = Path(args.corpus).read_text(encoding="utf-8")
+            result = analyze_semantic_patterns(sample_text, corpus_text, args.author)
+            print(result["summary"])
+            print(f"\nVerified markers: {result['verified_count']}/{result['proposed_count']}")
+            for marker in result.get("verified_markers", [])[:5]:
+                print(f"  - {marker.get('marker', '')}")
+
+        elif args.command == "serve":
+            start_server(args.host, args.port)
 
     except (RuntimeError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)

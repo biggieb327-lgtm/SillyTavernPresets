@@ -7,6 +7,145 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-15.2 — Admin API bind guard + seven-bot fleet ports
+
+**Root cause: `_start_admin_api` called `ThreadingHTTPServer(...)` unguarded. The
+default `ADMIN_API_PORT` (8765) is the same for every instance, so enabling
+`ADMIN_API_ENABLED=1` on a second bot on a shared host crashed startup with
+`OSError: [Errno 98] Address already in use`. Docs and `fleet-status.sh` also still
+assumed six bots on ports 8080-8085, omitting marcus.**
+
+**Fix:** wrap the bind in `try/except OSError` — log the bind address/port and a
+hint to set a distinct `ADMIN_API_PORT`, then continue without the admin API instead
+of crashing. Updated `.env.example`, `OPS_MANUAL.md`, `fleet-status.sh`, and the
+`/fleet` help hint for the seven-bot fleet convention (nora=8080 bonnie=8081
+cass=8082 emily=8083 priya=8084 jules=8085 marcus=8086).
+
+## v2026-09-15.1 — Proactive candidate receipts
+
+**Root cause: proactive candidates were sent or skipped at several existing decision
+points, but there was no in-bot record of the source, collision window, or skip reason
+to compare against the triage queue.**
+
+**Fix:** record behavior-neutral JSONL receipts for heartbeat, note follow-up, health,
+cron, payment, and reminder decisions, and show recent skipped/drafted reasons on
+`/nudges`. The existing send defaults and triage ranking are unchanged. Receipts are
+fail-soft and can be disabled with `PROACTIVE_RECEIPTS=0`.
+
+## v2026-09-09.4 — Episodic consolidation
+
+**Root cause: the episodic archive (`.episodes.jsonl`) grows without bound toward
+`EPISODE_MAX` (4000 chunks).** Old conversation chunks accumulate at full verbosity
+forever. The weekly memory audit consolidates `memories.txt` but nothing equivalent
+existed for episodes. Once the archive hits the cap, the oldest episodes are silently
+dropped — no summarization, no density gain, just data loss.
+
+**Fix:** `_consolidate_episodes()` runs nightly inside `reflection_job`. It finds
+episode chunks older than `EPISODE_CONSOLIDATION_AGE_DAYS` (default 30), groups them
+into clusters by temporal proximity (`EPISODE_CONSOLIDATION_GAP_HOURS`, default 4h),
+and for clusters of `EPISODE_CONSOLIDATION_MIN_CLUSTER` or more chunks (default 3),
+summarizes them into one denser entry using `SUMMARY_MODEL`. The consolidated entry
+gets a fresh embedding and replaces the originals in both the file and RAM. The
+original file is backed up (`.episodes.pre-consolidation-<timestamp>.jsonl`) before
+any modification, same pattern as other irreversible mutations. The recall path
+(`triggered_episode`) is unchanged — it works on embedded text regardless of length.
+
+New env vars: `EPISODE_CONSOLIDATION` (default: on),
+`EPISODE_CONSOLIDATION_AGE_DAYS` (default: 30),
+`EPISODE_CONSOLIDATION_MIN_CLUSTER` (default: 3),
+`EPISODE_CONSOLIDATION_GAP_HOURS` (default: 4.0).
+
+## v2026-09-09.3 — Time-anchored retrieval scoring
+
+**Root cause: temporal references in conversation had no effect on which memories
+surfaced.** A user saying "remember a few weeks ago" or "back in July" triggered the
+same retrieval as any other message. Memories from the referenced period had no scoring
+advantage over memories from yesterday or six months ago, because recency decay is
+monotonic — it favors recent memories uniformly, not memories whose timestamps match what
+the user is actually asking about.
+
+**Fix:** `_extract_time_anchor(text)` parses natural-language temporal references
+("3 weeks ago", "last month", "in July", "yesterday", holiday names) into a
+`(center_epoch, radius_seconds)` tuple. `_temporal_affinity(mem_ts, anchor, max_boost)`
+applies a Gaussian bell curve boost — full boost for memories at the center of the
+referenced period, fading smoothly to 1.0 (neutral) outside `3 * radius`. The affinity
+is multiplicative alongside recency_weight, repeat_penalty, and urgency_boost in
+`triggered_memories()`.
+
+New env vars: `MEMORY_TEMPORAL` (default: on), `MEMORY_TEMPORAL_BOOST` (default: 3.0).
+
+## v2026-09-09.2 — Core/archival memory split
+
+**Root cause: all 200 memory lines compete equally for the token budget.** Ground-truth
+relationship facts ("Brian's dog is named Scout", "they live in Austin") had to outscore
+transient observations on every turn or risk being displaced. Decay, eviction, and
+repeat-suppression all treated relationship anchors identically to yesterday's grocery
+note. A character who sometimes forgets a partner's name because a newer memory
+outscored it reads as broken, not forgetful.
+
+**Fix:** memories.txt now supports an optional `# CORE` section. Lines above a `# CORE`
+marker are core memories — always injected on every turn (no scoring, no decay, no
+eviction, no repeat suppression), deducted from the token budget before archival lines
+are ranked. Lines below the marker remain archival and are scored, decayed, and evicted
+as before. If no marker exists, all memories are archival (backward compatible).
+
+New command: `/coremem` — list core memories, `/coremem promote <n>` to move a /mems
+entry into core, `/coremem demote <n>` to move it back to archival. `/mems` now shows
+`--- CORE ---` and `--- ARCHIVAL ---` section headers. `/audit` shows the core count.
+
+`_evict_by_value` protects core lines and the marker from eviction. `triggered_memories`
+injects core lines first, then fills remaining budget from scored archival entries.
+
+New env vars: `MEMORY_CORE` (default: on), `MEMORY_CORE_MAX` (default: 10).
+New command: `/coremem`.
+
+## v2026-09-09.1 — BM25 hybrid retrieval for memory recall
+
+**Root cause: memory recall relied on simple keyword intersection counting alongside
+semantic cosine similarity.** The keyword scorer counts how many query words appear in
+each memory entry — good for exact hits but blind to term frequency and corpus-level word
+importance. Common words score the same as rare names, and a memory mentioning a keyword
+once scores identically to one built around it.
+
+**Fix:** added `bm25s` (pure Python + NumPy) as a third scoring path in
+`triggered_memories()`. BM25 (Okapi BM25) scores each memory by term frequency within
+the entry, inverse document frequency across all memories, and document-length
+normalization — so a rare name in a short memory scores higher than a common word in a
+long one. The BM25 score is normalized to max 2.0 and added to the existing keyword
+(uncapped) and semantic (max 3.0) scores before recency decay, repeat suppression, and
+urgency boost.
+
+The BM25 index rebuilds lazily: `_memory_replace()` invalidates it, and the next
+`triggered_memories()` call rebuilds from the current entries. Default ON
+(`MEMORY_BM25=1`); set `MEMORY_BM25=0` to disable. Graceful degradation: if `bm25s` is
+not installed, the scorer returns empty and the existing two-path scoring is unchanged.
+
+New dependency: `bm25s>=0.2,<1.0` (requirements.txt).
+New env var: `MEMORY_BM25` (default: on).
+
+## v2026-09-07.1 — Selfie pool expansion: more settings, more moments
+
+**Root cause: the selfie pools were built for a home-centric default and never expanded.**
+15 activities (12 indoor/at-home), 14 framings, 12 outfits, 13 camera presets, and 21
+expressions meant selfies started repeating patterns quickly despite the 6-entry dedup
+ring buffer. A character who only appears curled up on the couch, at her desk, or in bed
+reads as stock, not lived-in.
+
+Expanded every pool — expressions (21 to 31), framings (14 to 20), activities (15 to 25),
+outfits (12 to 18), camera presets (13 to 18) — weighted toward out-of-home and
+mid-moment scenarios: cafes, bus stops, bookstores, car seats, front steps, cooking,
+sorting through stuff, doing hair. New outdoor activities (`waiting at a bus stop or
+crosswalk`, `sitting on the front steps outside`) added to `SELFIE_OUTDOOR_ACTIVITIES` so
+they get the outdoor jacket and weather filtering. New cold outfits (`a turtleneck`,
+`a big cozy cardigan`) added to `SELFIE_COLD_OUTFITS` so they drop in warm weather. New
+soft framings (arm stretched out, mid-activity snap, across the table, corner of frame)
+added to `SELFIE_SOFT_FRAMINGS`, and `harsh fluorescent overhead` to `SELFIE_SOFT_CAMERA`,
+so the identity guard still avoids stacking two face-obscuring draws.
+
+No new logic, no new LLM calls, no new env vars. The existing weather filtering,
+identity guard, wardrobe rotation, and dedup all apply to the new entries through the
+same keyword and set-membership mechanisms.
+
 ## v2026-09-04.1 — Fallback-aware prompt trimming: FALLBACK_CONTEXT_BUDGET
 
 **Root cause: when the primary model fails and falls back, the fallback model may
