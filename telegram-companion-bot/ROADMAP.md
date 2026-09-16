@@ -34,29 +34,28 @@ constraints; check their assumptions before acting on them.
   six instances on the VPS under systemd; the Termux phone is empty.** Priya's and
   bonnie's cutovers each hit an incident (both in the operational log, both fixed in
   the runbook: verify state by content; rename the instance dir before any kill).
-  Remaining for 1.2's done-when: 14 days of green healthchecks, the OPS_MANUAL "VPS
-  operations" section, and marking CLAUDE.md's Termux quirks historical — plus the
-  cleanup batch below. **ROADMAP 3.8 Phase 2 is now unblocked** (see "Unlocks on
-  completion").
+  OPS_MANUAL "VPS operations" and CLAUDE.md Termux-quirks-as-historical are **done
+  2026-07-26**. ADMIN_API + `/fleet` canary is **done 2026-09-16** (seven bots). Still
+  open from the cleanup batch: per-instance `HEALTHCHECK_URL` (P0), phone/VPS leftover
+  path cleanup, and a VPS fleet backup story. The original 14-day healthcheck soak window
+  (started 2026-07-26 → 2026-08-09) is past; treat lingering healthcheck gaps as the
+  remaining monitor debt, not an open migration. **ROADMAP 3.8 Phase 2 is unblocked**
+  (see "Unlocks on completion").
 - **Plan:**
   1. Pilot with one low-state bot (jules). Cutover is per-bot and brief: stop the
      instance on the phone → restore its directory from the latest backup-all.sh
      archive onto the VPS → `systemctl start bot@jules`. Only one process may poll a
      bot token, so stop-then-start, never parallel.
   2. Set `HEALTHCHECK_URL` per migrated instance (dead man's switch already built).
-  3. `ADMIN_API_ENABLED=1`, bound to the Tailscale IP (Phase 1 auth model, never 0.0.0.0).
-     **NOT DONE — verified 2026-07-29.** `ADMIN_API_ENABLED` is unset on all six
-     instances and nothing is bound; the migration moved instance directories from the
-     phone, so no instance ever ran `install-vps.sh`, which is the only thing that writes
-     that line. Consequence: **`/fleet` and `fleet-status.sh` cannot work** — they poll
-     `/admin/health` on peers and no peer serves it. Silent, like every fail-closed
-     default (the `GROUP_MODE` class, operational log 2026-07-28).
-     **Do not enable it by adding one line to six `.env` files.** Every instance defaults
-     to `ADMIN_API_PORT=8765` (bot.py) and `_start_admin_api` calls
-     `ThreadingHTTPServer(...)` unguarded, so the second instance to start raises
-     `Address already in use` **and fails startup** — one optional feature taking down the
-     bot. Enabling means a distinct port per instance in the same edit, and the unguarded
-     bind is worth fixing first so a port clash degrades instead of crashing.
+  3. `ADMIN_API_ENABLED=1`, bound to loopback or the Tailscale IP (Phase 1 auth model,
+     never `0.0.0.0` / `::`).
+     **DONE — owner-confirmed canary 2026-09-16** on all seven VPS instances after the
+     bind-guard + wildcard-refuse code landed (`CHANGELOG` v2026-09-15.2 / v2026-09-16.1).
+     Shared offline `ADMIN_API_TOKEN`; distinct ports
+     `nora=8080 bonnie=8081 cass=8082 emily=8083 priya=8084 jules=8085 marcus=8086`;
+     `ADMIN_API_BIND=127.0.0.1` for the canary (Tailscale IP only when probing off-box);
+     `/fleet` wired on one designated instance. A port clash now logs and continues
+     without the admin API instead of crashing startup; wildcard binds are refused.
   4. Soak the pilot for a week (watch `/audit` error counts vs its phone baseline),
      then migrate the rest one at a time. Phone keeps nora last — she's the shared-venv
      home instance; retire the phone (or keep it as a spare) when she moves.
@@ -70,7 +69,8 @@ constraints; check their assumptions before acting on them.
   - [ ] VPS: delete `/opt/telegram-bots/nora.parked` — do NOT revive it for nora's
         migration (rebuild from the runbook tar instead; its `.env` has duplicate
         `TELEGRAM_BOT_TOKEN` lines and cloned state)
-  - [ ] Re-point `HEALTHCHECK_URL` to the VPS for jules + every instance as it moves
+  - [ ] Re-point `HEALTHCHECK_URL` per instance on the VPS (still open 2026-09-16 —
+        Fleet Ops P0; distinct URL each; see OPS_MANUAL)
   - [ ] Phone: delete `~/jules-migrate.tar.gz` (jules's rollback copy — keep until
         soak passes; same per-instance after each successful migration)
   - [ ] Phone: as each instance migrates, remove/rename its `~/<name>-bot/` dir —
@@ -82,9 +82,10 @@ constraints; check their assumptions before acting on them.
   - [x] OPS_MANUAL "VPS operations" section; mark CLAUDE.md Termux quirks historical
         (these two are also the 1.2 done-when criteria) — **done 2026-07-26**;
         CHEATSHEET.md rewritten for systemd in the same pass
-- **Done when:** all six instances on systemd, healthchecks green for 14 days,
-  OPS_MANUAL has a "VPS operations" section, and the Termux quirks in CLAUDE.md are
-  marked historical.
+- **Done when:** all seven instances on systemd (six migrated 2026-07-26; marcus
+  stood up on VPS 2026-07-29), OPS_MANUAL has a "VPS operations" section, Termux quirks
+  in CLAUDE.md are marked historical, ADMIN_API + `/fleet` canary complete (2026-09-16),
+  and healthchecks are green per instance (`HEALTHCHECK_URL` still open — see cleanup).
 - **Unlocked on completion:** item 3.8 Phase 2 (a pre-reply thinking *call*) was
   blocked on this item and is now open — the phone-bandwidth constraint that forbade
   per-message side completions is gone. **3.8's spec was rewritten 2026-07-26 to
@@ -96,7 +97,8 @@ constraints; check their assumptions before acting on them.
 
 ### 1.3 ~~Fleet status one-shot~~ ✅ (shipped v2026-07-06.3)
 - Committed as `telegram-companion-bot/fleet-status.sh`. Hits `/admin/health` per
-  instance, prints a six-row table. Works on-phone (localhost) or over tailnet.
+  instance, prints a seven-row table (nora…marcus). Works on-host (localhost) or over
+  tailnet.
 
 ### 1.4 ~~Degradation alerts (fallback rate + monthly spend)~~ ✅ (shipped v2026-07-06.3)
 - `_self_audit` watches fallback rate (≥3/hr → DM) and optional `USAGE_BUDGET_MONTHLY`
@@ -1487,7 +1489,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
-| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete, not just the pilot.** All seven instances (nora, bonnie, cass, emily, priya, jules, migrated 2026-07-26; marcus stood up directly on the VPS 2026-07-29) run under systemd — the Termux phone is empty. Formal done-when isn't fully closed yet: the 14-day healthcheck soak that started 2026-07-26 runs through **2026-08-09**, and several 1.2 cleanup-batch checkboxes are still open (phone-side `~/jules-migrate.tar.gz` and per-instance `~/<name>-bot/` removal, `HEALTHCHECK_URL` re-pointed per instance). OPS_MANUAL's "VPS operations" section and marking CLAUDE.md's Termux quirks historical are both done (2026-07-26). |
+| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete.** All seven instances run under systemd on the VPS; Termux phone empty. ADMIN_API + `/fleet` canary **done 2026-09-16** (ports 8080–8086, shared token, bind ≠ `0.0.0.0`). OPS_MANUAL VPS ops + CLAUDE.md Termux quirks historical **done 2026-07-26**. Still open from 1.2 cleanup: `HEALTHCHECK_URL` ×7, phone/VPS leftover paths, VPS fleet backup. |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
