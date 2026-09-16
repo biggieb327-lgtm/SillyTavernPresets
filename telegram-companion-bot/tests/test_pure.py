@@ -14682,3 +14682,61 @@ class TestCrudConsolidation:
         monkeypatch.setattr(bot, "PROACTIVE_RECEIPTS_FILE", path)
         assert [row["reason"] for row in bot._recent_receipt_skips(7)] == ["quiet", "budget"]
         assert path.read_text(encoding="utf-8").count("\n") == 4
+
+
+class TestOvernightCmd:
+    """Delivery-gate: the handler must be CALLED, not just source-inspected."""
+
+    class _Msg:
+        def __init__(self):
+            self.sent = []
+
+        async def reply_text(self, text, **kwargs):
+            self.sent.append(text)
+
+    def test_overnight_no_receipts_yet(self):
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=1))
+        orig = bot.NIGHTLY_RECEIPTS_FILE
+        try:
+            bot.NIGHTLY_RECEIPTS_FILE = Path("/nonexistent/path/nightly.jsonl")
+            asyncio.run(bot.overnight_cmd(update, SimpleNamespace(args=[])))
+        finally:
+            bot.NIGHTLY_RECEIPTS_FILE = orig
+        assert msg.sent
+        assert "No nightly receipts yet" in msg.sent[0]
+
+    def test_overnight_shows_latest_receipt(self, monkeypatch, tmp_path):
+        import nightly_receipts
+        path = tmp_path / "nightly-receipts.jsonl"
+        tasks = [
+            nightly_receipts.build_task_entry(task="reflect", outcome="applied",
+                                              detail="self-image updated"),
+            nightly_receipts.build_task_entry(task="mood_reset", outcome="nothing",
+                                              detail="no negative mood"),
+        ]
+        nightly_receipts.record_receipt(
+            path, instance="emily", chat_id=99, tasks=tasks)
+        monkeypatch.setattr(bot, "NIGHTLY_RECEIPTS_FILE", path)
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=99),
+            effective_user=SimpleNamespace(id=99))
+        asyncio.run(bot.overnight_cmd(update, SimpleNamespace(args=[])))
+        assert msg.sent
+        output = msg.sent[0]
+        assert "Applied: 1" in output
+        assert "[+] reflect" in output
+        assert "[.] mood_reset" in output
+
+    def test_overnight_disabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "NIGHTLY_RECEIPTS", False)
+        msg = self._Msg()
+        update = SimpleNamespace(
+            message=msg, effective_chat=SimpleNamespace(id=1),
+            effective_user=SimpleNamespace(id=1))
+        asyncio.run(bot.overnight_cmd(update, SimpleNamespace(args=[])))
+        assert msg.sent
+        assert "disabled" in msg.sent[0].lower()

@@ -7,6 +7,23 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-16.2 — Nightly receipts (Sprint 2)
+
+**Root cause: `reflection_job` ran eight tasks nightly (self-image reflection,
+memory promotion, memory audit, episode consolidation, mood reset, engagement
+snapshot, proactive-hook pre-drafting, ambient-news refresh) with no structured
+record of what happened. The only evidence was scattered stdout prints and
+`_count_error` ticks. Answering "what changed overnight?" required reconstructing
+events from journalctl output across eight different log prefixes.**
+
+**Fix:** new `nightly_receipts.py` module (mirrors `proactive_receipts.py` pattern)
+and instrumented `reflection_job` to collect each task's outcome — applied, drafted,
+skipped, failed, or nothing — with detail strings and error messages. Writes one
+JSONL receipt per run to `nightly-receipts.jsonl`. New `/overnight` command shows the
+latest receipt in a human-readable summary. Kill switch: `NIGHTLY_RECEIPTS=0`
+(default on). Fail-soft: receipt write errors are logged, never raised; missing
+module falls back to uninstrumented behavior.
+
 ## v2026-09-16.1 — Refuse wildcard bind on the admin API
 
 **Root cause: `_start_admin_api` defaulted `ADMIN_API_BIND` to `127.0.0.1` but

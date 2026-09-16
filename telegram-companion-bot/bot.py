@@ -69,6 +69,11 @@ try:
 except Exception:
     _proactive_receipts = None
 
+try:
+    import nightly_receipts as _nightly_receipts
+except Exception:
+    _nightly_receipts = None
+
 import concurrent.futures
 
 # Thread-local HTTP sessions — each worker thread gets its own connection pool,
@@ -140,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-16.1"
+BOT_VERSION = "2026-09-16.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1342,6 +1347,8 @@ TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
 PROACTIVE_RECEIPTS = _env_bool("PROACTIVE_RECEIPTS", True)
 PROACTIVE_RECEIPTS_FILE = BASE_DIR / "proactive-receipts.jsonl"
+NIGHTLY_RECEIPTS = _env_bool("NIGHTLY_RECEIPTS", True)
+NIGHTLY_RECEIPTS_FILE = BASE_DIR / "nightly-receipts.jsonl"
 PROACTIVE_TRIAGE = _env_bool("PROACTIVE_TRIAGE", True)
 VIGIL_MODE = _env_bool("VIGIL_MODE", True)
 VIGIL_LOOKAHEAD_DAYS = _env_int("VIGIL_LOOKAHEAD_DAYS", "3")
@@ -10057,6 +10064,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         "*Nudges*",
         "/nudges — view today's proactive message budget",
+        "/overnight — what changed or was prepared at the last nightly run",
         "/heartbeat — trigger a proactive message now",
         "/voice — toggle voice replies on/off (30% chance when on)",
         "",
@@ -11211,6 +11219,43 @@ async def nudges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for receipt in _recent_receipt_skips(chat_id):
         lines.append(f"Receipt {receipt['decision']}: {receipt['reason']}")
     lines.append("Use /nudges <N> to change the daily limit (0 = unlimited).")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def overnight_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the most recent nightly receipt so the owner can see what changed overnight."""
+    if not NIGHTLY_RECEIPTS:
+        await update.message.reply_text("Nightly receipts are disabled (NIGHTLY_RECEIPTS=0).")
+        return
+    if _nightly_receipts is None:
+        await update.message.reply_text("Nightly receipts module not available.")
+        return
+    receipts = _nightly_receipts.read_latest(NIGHTLY_RECEIPTS_FILE, count=1)
+    if not receipts:
+        await update.message.reply_text("No nightly receipts yet — runs at the first nightly reflection.")
+        return
+    r = receipts[0]
+    ts = r.get("ts", "?")
+    summary = r.get("summary", {})
+    duration = r.get("duration_s")
+    lines = [f"Last nightly run: {ts}"]
+    if duration is not None:
+        lines[0] += f" ({duration:.0f}s)"
+    lines.append(f"Applied: {summary.get('applied', 0)}  Drafted: {summary.get('drafted', 0)}  "
+                 f"Skipped: {summary.get('skipped', 0)}  Failed: {summary.get('failed', 0)}")
+    lines.append("")
+    for task in r.get("tasks", []):
+        icon = {"applied": "+", "drafted": "~", "skipped": "-",
+                "failed": "!", "nothing": "."}
+        mark = icon.get(task.get("outcome", ""), "?")
+        detail = task.get("detail", "")
+        error = task.get("error", "")
+        line = f"[{mark}] {task.get('task', '?')}"
+        if detail:
+            line += f": {detail}"
+        if error:
+            line += f" (error: {error})"
+        lines.append(line)
     await update.message.reply_text("\n".join(lines))
 
 
@@ -15501,44 +15546,139 @@ def _overnight_mood_reset(chat_id: int):
     print(f"[mood] overnight reset: {s:+.2f} -> {m['score']:+.2f} for chat {chat_id}")
 
 
+def _nightly_task(task: str, outcome: str, *, detail: str = "",
+                  error: Exception | None = None) -> dict:
+    """Build one task entry for the nightly receipt (no-op when module missing)."""
+    if _nightly_receipts is None:
+        return {"task": task, "outcome": outcome}
+    return _nightly_receipts.build_task_entry(
+        task=task, outcome=outcome, detail=detail,
+        error=str(error) if error else None)
+
+
+def _emit_nightly_receipt(chat_id: int, tasks: list[dict],
+                          started_at: "datetime | None") -> None:
+    """Write one nightly receipt to JSONL. Fail-soft — errors are logged, not raised."""
+    if not NIGHTLY_RECEIPTS or _nightly_receipts is None:
+        return
+    try:
+        finished = datetime.now(timezone.utc)
+        _nightly_receipts.record_receipt(
+            NIGHTLY_RECEIPTS_FILE,
+            instance=BASE_DIR.name,
+            chat_id=chat_id,
+            tasks=tasks,
+            started_at=started_at,
+            finished_at=finished,
+        )
+    except Exception as exc:
+        log.warning("[nightly-receipts] write failed: %s", type(exc).__name__)
+
+
 async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     owner = get_owner()
     if owner is None:
         return
+    _rj_started = datetime.now(timezone.utc) if NIGHTLY_RECEIPTS else None
+    _rj_tasks: list[dict] = []
+
     try:
         await reflect(owner)
+        _rj_tasks.append(_nightly_task("reflect", "applied",
+                                       detail="self-image + recs + milestones updated"))
     except Exception as e:
         log.error("[reflect] Error: %s", e)
+        _rj_tasks.append(_nightly_task("reflect", "failed", error=e))
+
     try:
         await maintain_long_term_memory(owner)
+        _rj_tasks.append(_nightly_task("memory_promotion", "applied",
+                                       detail="long-term memory maintenance ran"))
     except Exception as e:
         log.warning("[memory] long-term promotion error: %s", e)
         _count_error("memory")
+        _rj_tasks.append(_nightly_task("memory_promotion", "failed", error=e))
+
     try:
         await memory_audit_job(owner)
+        _rj_tasks.append(_nightly_task("memory_audit", "applied",
+                                       detail="audit scan ran"))
     except Exception as e:
         log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
+        _rj_tasks.append(_nightly_task("memory_audit", "failed", error=e))
+
     if EPISODE_CONSOLIDATION and EPISODIC_RECALL:
         try:
             async with _SUMMARIZE_SEM:
                 net = await asyncio.to_thread(_consolidate_episodes)
             if net > 0:
                 log.info("[reflection] episode consolidation freed %d chunk(s)", net)
+                _rj_tasks.append(_nightly_task("episode_consolidation", "applied",
+                                               detail=f"freed {net} chunk(s)"))
+            else:
+                _rj_tasks.append(_nightly_task("episode_consolidation", "nothing",
+                                               detail="no clusters to merge"))
         except Exception as e:
             log.warning("[consolidation] error: %s", e)
+            _rj_tasks.append(_nightly_task("episode_consolidation", "failed", error=e))
+    else:
+        _rj_tasks.append(_nightly_task("episode_consolidation", "skipped",
+                                       detail="feature disabled"))
+
+    old_mood = mood_now(owner)
     _overnight_mood_reset(owner)
+    new_mood = mood_now(owner)
+    if old_mood != new_mood:
+        _rj_tasks.append(_nightly_task("mood_reset", "applied",
+                                       detail=f"{old_mood:+.2f} -> {new_mood:+.2f}"))
+    else:
+        _rj_tasks.append(_nightly_task("mood_reset", "nothing",
+                                       detail="no negative mood to drift"))
+
     if ENGAGEMENT_TREND:
         _snapshot_engagement(owner)
         save_state()
+        _rj_tasks.append(_nightly_task("engagement_snapshot", "applied"))
+    else:
+        _rj_tasks.append(_nightly_task("engagement_snapshot", "skipped",
+                                       detail="feature disabled"))
+
     try:
+        hooks_before = len(predrafted_hooks.get(owner, []))
         await _predraft_proactive_hooks(owner)
+        hooks_after = len(predrafted_hooks.get(owner, []))
+        if not NIGHTLY_PREDRAFT:
+            _rj_tasks.append(_nightly_task("predraft_hooks", "skipped",
+                                           detail="NIGHTLY_PREDRAFT disabled"))
+        elif hooks_after > hooks_before:
+            _rj_tasks.append(_nightly_task("predraft_hooks", "drafted",
+                                           detail=f"{hooks_after - hooks_before} hook(s) pre-drafted"))
+        else:
+            _rj_tasks.append(_nightly_task("predraft_hooks", "nothing",
+                                           detail="generation produced no hooks"))
     except Exception as e:
         log.warning("[predraft] error: %s", e)
+        _rj_tasks.append(_nightly_task("predraft_hooks", "failed", error=e))
+
     try:
+        news_before = _ambient_news_cache.get("text", "")
         await _refresh_ambient_news()
+        news_after = _ambient_news_cache.get("text", "")
+        if not (AMBIENT_PREDRAFT and SEARCH_ENABLED and MORNING_NEWS and MORNING_NEWS_LIMIT):
+            _rj_tasks.append(_nightly_task("ambient_news", "skipped",
+                                           detail="prerequisites not met"))
+        elif news_after and news_after != news_before:
+            _rj_tasks.append(_nightly_task("ambient_news", "drafted",
+                                           detail="ambient digest refreshed"))
+        else:
+            _rj_tasks.append(_nightly_task("ambient_news", "nothing",
+                                           detail="no fresh news"))
     except Exception as e:
         log.warning("[ambient-news] error: %s", e)
+        _rj_tasks.append(_nightly_task("ambient_news", "failed", error=e))
+
+    _emit_nightly_receipt(owner, _rj_tasks, _rj_started)
 
 
 async def _predraft_proactive_hooks(chat_id: int):
@@ -19175,6 +19315,7 @@ _BASE_COMMANDS = [
     BotCommand("reminder", "Reminders (set/daily/del/list)"),
     BotCommand("cron", "Recurring tasks (add/del/list)"),
     BotCommand("nudges", "View today's proactive message budget"),
+    BotCommand("overnight", "What changed at the last nightly run"),
     BotCommand("quiet", "Pause proactive messages for X hours (/quiet 3, /quiet off)"),
     BotCommand("quietwin", "Manage recurring quiet windows (add/list/del)"),
     BotCommand("away", "Mark yourself away (suppresses proactives)"),
@@ -19515,6 +19656,7 @@ def main():
     app.add_handler(CommandHandler("outfit", _outfit_compat))
     app.add_handler(CommandHandler("deloutfit", _deloutfit_compat))
     app.add_handler(CommandHandler("nudges", nudges_cmd))
+    app.add_handler(CommandHandler("overnight", overnight_cmd))
     app.add_handler(CommandHandler("voice", voice_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("audit", audit_cmd))

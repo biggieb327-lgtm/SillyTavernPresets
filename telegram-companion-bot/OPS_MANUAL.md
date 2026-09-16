@@ -241,6 +241,7 @@ These files shape what the character knows and references. All are editable from
 |---|---|
 | `/heartbeat` | Trigger a proactive check-in now |
 | `/nudges` | Show today's proactive message budget |
+| `/overnight` | What changed at the last nightly run (receipts: applied/drafted/skipped/failed per task) |
 | `/quiet <h>` | Pause proactive messages for X hours (e.g. `/quiet 3`) |
 | `/quiet off` | Cancel quiet mode early |
 | `/quietwin add <day> <HH:MM-HH:MM>` | Add a recurring weekly quiet window (e.g. `/quietwin add Fri 23:00-08:00`) |
