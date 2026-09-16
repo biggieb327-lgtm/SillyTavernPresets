@@ -964,8 +964,9 @@ v2026-07-11.4–.6 — see IMPROVEMENTS_PLAN.md and CHANGELOG.md.)*
 
 ---
 
-## Track 5 — Proposed (lateral-thinking session, 2026-08-04, owner triage pending)
+## Track 5-A — Proposed (lateral-thinking session, 2026-08-04, owner triage pending)
 
+**Naming:** this is Track 5-A; the 2026-08-05 exploratory block below is Track 5-B.
 **Status of this whole track: unreviewed.** These came out of a `random-stimulus`
 lateral-thinking pass run against this roadmap (fed the full shipped list and the
 "Rejected or already covered" sections above, specifically to avoid recombining what
@@ -1099,8 +1100,9 @@ Track 3 (with a real spec) only once the owner picks it.
   session itself. It only ever produced narrative polish on a state transition the
   system already fully owns and auto-detects — tuning, not a new capability, and
   therefore out of scope for what the session was asked to find.
-## Track 5 — Lateral-thinking exploratory ideas (sourced 2026-08-05)
+## Track 5-B — Lateral-thinking exploratory ideas (sourced 2026-08-05)
 
+**Naming:** this is Track 5-B; the 2026-08-04 proposed block above is Track 5-A.
 Not a code-audit finding or an owner request — surfaced by a forced-analogy
 (Synectics) lateral-thinking pass run 2026-08-05 against the shipped feature set, to
 find directions outside the already-exhausted playbook (memory, proactivity,
@@ -1249,13 +1251,13 @@ flag with a kill switch (`bot-code-invariants` #16), never batch-adopt.
   burst via existing TTS and selfie pipelines. Kill switches: `MIXTAPE_ENABLED`,
   `MIXTAPE_COUNT`.
 
-### 5.11 Rhythm transparency — skip-reason on `/nudges` — S
+### ~~5.11 Rhythm transparency — skip-reason on `/nudges` — S~~ SHIPPED v2026-09-01.2; receipts v2026-09-04.2
 - **Evidence:** lighthouse domain (random-stimulus lateral-thinking pass, 2026-08-05) —
   a fixed, predictable signal that doesn't chase. The restraint already exists
   (`_check_nudge_budget`, mood-based `skip_chance`, quiet hours) and even carries a
   reason forward via `unsent_drafts`, but that reason only surfaces if the 40%
   weave-in roll hits a future proactive message. `/nudges` today shows only
-  `sent_today/limit`.
+  `sent_today/limit`. Receipts now add recent skipped/drafted reasons.
 - **Idea:** have `/nudges` also surface the most recent `unsent_drafts` reason (if
   any), so the existing restraint is checkable on demand instead of only occasionally
   narrated in-character.

@@ -7,6 +7,17 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-15.1 — Proactive candidate receipts
+
+**Root cause: proactive candidates were sent or skipped at several existing decision
+points, but there was no in-bot record of the source, collision window, or skip reason
+to compare against the triage queue.**
+
+**Fix:** record behavior-neutral JSONL receipts for heartbeat, note follow-up, health,
+cron, payment, and reminder decisions, and show recent skipped/drafted reasons on
+`/nudges`. The existing send defaults and triage ranking are unchanged. Receipts are
+fail-soft and can be disabled with `PROACTIVE_RECEIPTS=0`.
+
 ## v2026-09-09.4 — Episodic consolidation
 
 **Root cause: the episodic archive (`.episodes.jsonl`) grows without bound toward
