@@ -406,16 +406,48 @@ sidecars) to dated recovery names, unset the kill switch, and start the instance
 startup import will rebuild the database from `reminders.json`. Rename rather than
 delete so the previous database remains recoverable.
 
-### Automated fleet backup — no VPS equivalent shipped yet
+### Automated fleet backup
 
-`backup-all.sh` (phone-era, kept only for its rclone/cron notes — DEAD as a runnable
-script: it targets Android shared storage at `~/telegram-bot`) archived every instance's
-state files (same list as
-`/backup`, `.env` always excluded) and could push off-phone via rclone. Nothing on the
-VPS replaces it yet — the only current backup path is per-instance, either `/backup`
-from Telegram or manually copying each instance's `state.json` (see "Memory System"
-above). A cron'd fleet-backup script for `/opt/telegram-bots/` would be a reasonable
-follow-up, but does not exist today.
+`deploy/vps-backup.sh` archives every instance's mutable state (all files in each
+instance directory except `.env` and logs) plus the shared group-ledger directory.
+`.env` is always excluded — secrets do not belong in backups.
+
+**Install (one-time, as root):**
+```bash
+# Add to root's crontab:
+crontab -e
+# 30 3 * * * /opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-backup.sh >> /var/log/bot-backup.log 2>&1
+```
+
+**Off-box copy** (pick one, in `/etc/bot-backup.conf` or the environment):
+```bash
+# rsync to another host:
+BACKUP_RSYNC_DST=user@offsite:/backups/bots
+# OR rclone to cloud storage:
+BACKUP_RCLONE_REMOTE=gdrive:bot-backups
+```
+
+**Tunables** (`/etc/bot-backup.conf`):
+- `BACKUP_DIR` — where archives land (default: `/opt/telegram-bots/backups`)
+- `KEEP_DAYS` — local retention in days (default: 14)
+- `VERBOSE=1` — progress output (cron is quiet by default)
+
+**Inspect / restore:**
+```bash
+# List contents of an archive:
+deploy/vps-backup.sh --list /opt/telegram-bots/backups/bot-state-20260916-0330.tar.gz
+
+# Extract to a staging directory (nothing is overwritten):
+deploy/vps-backup.sh --restore /opt/telegram-bots/backups/bot-state-20260916-0330.tar.gz /tmp/drill
+# Then copy individual files to /opt/telegram-bots/<instance>/ as needed.
+```
+
+**Restore drill:** run `--restore`, verify the staging directory contains the expected
+state files for all instances, diff one instance's `state.json` against the live copy,
+then clean up the staging directory. Note the result in this section or the ops log.
+
+The phone-era `backup-all.sh` (root, targets Termux/Android) is kept for historical
+reference but is not runnable on the VPS.
 
 ### Editing memory directly
 ```bash
