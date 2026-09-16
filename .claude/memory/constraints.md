@@ -1247,6 +1247,10 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-16 — Wrote "all checks green on the dashboard" as a flat statement about
+  expected VPS outcomes after owner-side setup, alongside a hedged "should return 7."
+  `theory-guard.sh` caught it on the stop hook. Self-corrected to hedge both clauses.
+  C5's shape: confidence followed fluency in a report about what the owner would see.
 - 2026-09-04 — A probe that spends a shared, exhaustible resource searched DOWN from its
   maximum, so its most expensive calls came first. → **ramp UP from small and stop at the
   first rejection; carry a cumulative spend cap.** (Root cause folded into C5 — the design
