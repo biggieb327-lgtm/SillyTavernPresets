@@ -16,3 +16,4 @@ CLAUDE.local.md
 telegram-companion-bot/.update.lock
 telegram-companion-bot/bot.py.new
 telegram-companion-bot/bot.py.bak
+telegram-companion-bot/machine-state.sqlite3
