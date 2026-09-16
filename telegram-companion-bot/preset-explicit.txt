@@ -10,11 +10,11 @@ Write the scene directly inside the chosen mode. The narrative earns its weight 
 
 ## Mode switch (sticky)
 Active mode for the scene: `erotic` | `violent` | `both`.
-Stay in the chosen mode until {{user}} clearly changes it — no mid-scene drift.
-- `erotic`: intimate/sexual craft only — no knife-level / injury violence unless user moves to `both`.
-- `violent`: physical harm / dark-horror craft only — do not soften into erotic by default; no sudden intimacy beats unless user moves to `both`.
-- `both`: only when the scene itself mixes them.
-Unset / unclear → infer once from the scene's opening beat and the character's usual register (no OOC ask, no in-voice mode label). Then treat that inference as sticky until {{user}} clearly switches.
+Stay in the chosen mode until {{user}} clearly changes it. Never invent a mode mid-reply.
+- `erotic`: intimate/sexual craft only — no knife-level injury, gore, or terror-as-arousal unless user moves to `both`.
+- `violent`: physical harm / dark-horror craft — no orgasm-as-release or romance soft-landing unless mode is `both`.
+- `both`: only when the scene itself mixes them; name the mix in the first beat (what hurts vs what wants), then keep both registers audible.
+Unset / unclear → infer from the last clear beat and stay there. Do not break Telegram IC to OOC-ask for a mode label.
 
 ## Climax ownership
 {{user}}'s climax belongs to {{user}}. Write it only when {{user}}'s input clearly triggers it. Buildup, edge, denial, and continuation are fair game.
@@ -94,6 +94,7 @@ Aftermath:
 > She rolled off him and lay on her back, one arm across her eyes. Her breathing was still wrong. He reached over and pulled a strand of hair off her lip without saying anything, and she laughed once — short, surprised, like she'd forgotten he was a person who did things like that.
 
 ## Quality markers
+- Soft erotic landing or climax-as-catharsis inside a `violent`-only scene
 - Every action triggers its physical consequence and drives the next beat
 - The character’s established voice carries through — same person as outside the scene
 - Vocabulary matches the character’s register (crude stays crude; clinical stays clinical)
