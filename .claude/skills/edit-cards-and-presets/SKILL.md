@@ -147,6 +147,51 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 - Inventing fake Seattle-area geography for Priya/Emily instead of checking the
   atlas files for the places already established.
 
+## Named content anti-patterns
+
+Naming a failure shape explicitly helps models recognize and avoid it. Each pattern
+below recurs in card and preset edits — when you see one forming in your own output,
+stop and fix it before delivering.
+
+**The Quiz Card** — an OCEAN or personality section that reads like a scored
+questionnaire ("Openness: 8/10 — curious about...") instead of behavioral
+specification the model can act on. The fix: describe what the character *does* in
+situations, not what they *score*.
+
+**The Smuggled Instruction** — a lorebook entry that contains a directive
+("always respond with...", "make sure to...") instead of world/character data.
+Lorebook is for facts the model retrieves by trigger; instructions belong in
+`post_history_instructions` or the preset layer.
+
+**The Front-Loaded Anchor** — a pop culture reference placed early in `description`
+where it dominates the character instead of coloring them. Anchors go late, in
+negative framing ("has the same restless energy as X, but..."), and only for
+original characters.
+
+**The Echo Entry** — a lorebook entry that restates what `description` already says
+instead of extending it. Lorebook tokens are expensive retrieval; if the trigger
+pulls back the same paragraph the model already has in context, it is pure waste.
+
+**The Register Break** — one paragraph written in a different voice than the rest of
+the card. A card is a prompt; every section shapes every reply. One clinical
+paragraph in a casual card, or one florid paragraph in a terse card, leaks into
+output unpredictably.
+
+**The Vague Trait** — personality language generic enough for any character ("kind
+but fierce", "sharp wit hiding a warm heart", "complex and multifaceted"). If
+swapping the trait into a different character's card would not feel wrong, it is
+not specific enough. Name the *behavior* and the *situation* that reveals it.
+
+**The Negative Directive** — a preset or card instruction that names what to avoid
+("do not use purple prose", "never break character"). On CoT models, naming the
+concept to suppress it activates it in the reasoning trace. Rewrite as desired
+behavior using define-by-positive-substitution.
+
+**The Orphaned Depth Prompt** — load-bearing behavioral guidance placed anywhere
+other than `post_history_instructions`. Depth prompts go in
+`post_history_instructions`, period. A lorebook entry with depth-prompt content
+fires only on its trigger words and is invisible otherwise.
+
 ## What to report back
 
 Which files changed and why, validation output, canon constraints that shaped the

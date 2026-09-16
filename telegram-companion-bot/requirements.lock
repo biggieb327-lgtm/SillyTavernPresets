@@ -8,6 +8,10 @@ apscheduler==3.11.3 \
     --hash=sha256:bbeb2ec02d23d3c06a6c07ed7f0f3939ada6680eb121fae809a69bb42c537a30 \
     --hash=sha256:cd2fcc9330039a81a5893472ad49facf23a6d5604cbe1d918c835c6de7834d5a
     # via python-telegram-bot
+bm25s==0.3.11 \
+    --hash=sha256:3d1d28badb299d6fc9324111e5c8276927e990b908607b39ff9bd65b102e9a24 \
+    --hash=sha256:8ae0f0707d279969829383c7aaeef00fb09ca343101160222571d6bfc969f889
+    # via -r telegram-companion-bot/requirements.txt
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
@@ -405,7 +409,9 @@ numpy==2.5.2 \
     --hash=sha256:eaca7ff36f0f52e2111ec71f169d8fd3e889e7ddc0d2592e0d703fd8d3ce8fac \
     --hash=sha256:f06571a052127dc1b4e8b83029b4d1b20daa2b64a31cdd181fc6bc774e9000eb \
     --hash=sha256:fd0d703772bba096843785bd38371e31bb4a0c1151497ad5739d182114a73f7f
-    # via -r telegram-companion-bot/requirements.txt
+    # via
+    #   -r telegram-companion-bot/requirements.txt
+    #   bm25s
 pillow==10.4.0 \
     --hash=sha256:02a2be69f9c9b8c1e97cf2713e789d4e398c751ecfd9967c18d0ce304efbf885 \
     --hash=sha256:030abdbe43ee02e0de642aee345efa443740aa4d828bfe8e2eb11922ea6a21ea \

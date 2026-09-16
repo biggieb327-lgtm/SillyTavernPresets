@@ -74,6 +74,25 @@ counts and the `skill-impact-format` eval enforces — keep it exact. Newest fir
 
 ## Rows
 
+### 2026-09-04 | intervention: `probe-context.py` + "measure, don't look up" in `.env.example` | class: external-system limits adopted as fact without measurement (C5's uncovered half) | status: pending
+The failure this targets is not a wrong belief but an *unmeasurable-feeling* question: what
+context window a provider actually serves. Every readable source was wrong or absent —
+NanoGPT's `/v1/models` carries no context field, and public aggregators put
+`magnum-v4-72b` at 32,768 and 131,072 while the live endpoint serves ~19,859. Prose telling
+a session to "verify first" does not help when verifying looks impossible; so the
+intervention makes measuring cheaper than guessing (one command) and rewrites the
+`.env.example` guidance from a *guessed* worked example ("for a 16k model use 12000") into
+the measured number plus the command that reproduces it.
+**Holds when:** a later session facing a model/window question runs the probe (or cites a
+measured figure) instead of quoting a spec sheet — and no `FALLBACK_CONTEXT_BUDGET` is ever
+set from an aggregator number again. **Recurrence shape to expect:** a session reads the
+now-measured 19,859 in `.env.example` and treats it as permanent after the provider silently
+moves the window; the file says to re-probe on any `FALLBACK_MODEL` change, but nothing
+enforces it. Second residual: the probe's own cost discipline (ramp up, `--budget`) is
+prose-in-code, so a future tool that spends a shared quota gets no help from this row.
+Refs: oplog 2026-09-04 (weekly-quota fallback storm); constraints C5 (seen 9, both
+2026-09-04 occurrences); commits 26facec, 8e74cc2, 157b447.
+
 ### 2026-08-27 | intervention: v2026-08-27.1 structural short-circuit in `_looks_like_reasoning_leak` | class: reasoning-leak (model deliberation delivered as the reply) | status: pending
 Replaced vocabulary-matching with a structural rule: ≥4 line-anchored markdown bold-colon
 headers (`**Goal:**`, `1. **State:**`) over a 600-char floor → re-roll, whatever words fill

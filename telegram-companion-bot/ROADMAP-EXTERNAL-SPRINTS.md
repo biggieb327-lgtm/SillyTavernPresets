@@ -21,6 +21,20 @@ The amendment turns the strongest external-research ideas into four ordered impl
 
 **Why first:** ROADMAP 5.1 proposes a shared proactive-message triage queue, but the current done-when focuses on reproducing collisions/silent days rather than proving the messages selected by a queue are actually worth sending. Centralizing poor candidates would make the wrong behavior more consistent, not better.
 
+## Status (2026-09-04)
+
+| Deliverable | State |
+|---|---|
+| Fixed quality corpus (`evals/proactive_quality_corpus.json`) | ✅ on main |
+| Receipt contract + writer (`PROACTIVE-RECEIPTS.md`, `proactive_receipts.py`) | ✅ on main |
+| Emily journal observer + systemd soak path | ✅ on main (pilot) |
+| Offline collision-window analysis | ✅ on main |
+| `/nudges` skip-reason inspectability (5.11-B) | ✅ shipped; receipts listed as of v2026-09-04.2 |
+| In-bot receipts at existing decision points (health + memory provenance + collision ids) | ✅ v2026-09-04.2 (`PROACTIVE_RECEIPTS`, default on, fail-soft) |
+| Shared triage queue / ranking behavior | ❌ **out of scope for Sprint 1** — observe first; do not land queue changes under this sprint |
+
+Note: a separately shipped Track 5-B triage feature may already exist on main from other work. Sprint 1 still does not authorize *new* triage/ranking changes; its exit gate is inspectability and the quality corpus, not queue promotion.
+
 ## Scope
 
 1. Add a small proactive-message evaluation corpus covering the current candidate classes: reminder, health signal, memory/topic hook, day/life event, and ordinary silence-break/check-in.
@@ -52,6 +66,10 @@ Keep the existing 5.1 premise, but change the target from “one shared urgency 
 2. **Ranking:** among eligible candidates, rank urgency/relevance and send at most the highest-value candidate for that decision window. Re-score deferred candidates when new evidence arrives; stale candidates expire instead of accumulating forever.
 
 **Additional done-when for 5.1:** the queue must beat the current independent-gate baseline on the Sprint 1 corpus and in a one-instance soak: fewer same-window collisions without increasing generic or unwanted proactive sends. Every send/skip must leave an owner-readable receipt.
+
+**Hard vetoes (must never be outweighed):** quiet hours / DND, explicit user limits (`/quiet`, `/away`, feature flags), safety/privacy policy, exhausted proactive budget, stale/invalid source data.
+
+**Ranking signals (eligible candidates only):** timing quality, specificity, novelty, pressure/ease of ignoring, urgency/relevance, same-window collision with another eligible candidate.
 
 ---
 

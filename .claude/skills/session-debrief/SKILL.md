@@ -99,6 +99,37 @@ NameError" — `run-evals.sh` had had the `bot-imports` eval since 2026-07-11, a
 proposal was written into a committed autopsy before the grep happened. That is C22, made
 while documenting the session's other mistakes.
 
+### 4b. Route each correction to its narrowest home
+
+For every correction this session produced — a constraint, a fix, a new rule — ask
+these six questions in order. The first "yes" names where the fix belongs; a
+correction placed wider than its narrowest home dilutes the layer it lands in and
+gets ignored faster.
+
+1. **Is this mechanical enough to check in code?** A deterministic check (eval,
+   hook, scanner, gate-corpus case) that fires on the exact failure shape. If yes,
+   build the check and stop — prose that restates what a check enforces is redundant.
+2. **Can an existing eval or hook be widened to cover it?** Grep first (C22). A new
+   fixture on `gate_corpus`, a new pattern in `sweep.py`, or a new case in an
+   existing eval is cheaper and harder to ignore than a new standalone check.
+3. **Is it a code invariant?** A rule about how bot.py must be structured or what it
+   must never do → `bot-code-invariants`. Numbered, checkable, with a kill-switch
+   requirement if it governs a feature.
+4. **Is it a content anti-pattern?** A recurring failure shape in card, preset, or
+   seed output → the named anti-patterns section of `edit-cards-and-presets`. Name
+   the shape, describe what it looks like, and state the fix.
+5. **Is it a process constraint?** A mistake in *how we work* — wrong host, premature
+   "done", a theory stated as fact → `constraints.md`. Numbered if it recurred or
+   will; Minor if self-corrected.
+6. **Does it generalize, or is it this one instance?** A correction that only applies
+   to the exact file and context where it appeared is a commit message, not a rule.
+   If you cannot state it without naming the specific file, it probably does not
+   generalize — log it as a Minor and move on.
+
+When a correction touches multiple layers (a new eval *and* a prose constraint that
+covers the cases the eval cannot see), place both, but say in each one what the
+other covers so a future reader knows the prose is not redundant with the check.
+
 ### 5. Build it, and break-test it with the tool
 
 Any check written during a debrief goes through `.claude/tools/break-test.sh`, which proves
@@ -146,6 +177,7 @@ data arrives, so it cannot be revised to fit.
 - [ ] `skill-impact.md` updated: a class-targeting change shipped this session got a `pending` row (with a holds-when); any prior `pending` intervention observed this session was flipped to `holding`/`recurred`
 - [ ] Any project-changing decision this session settled is logged in `decisions.md` (what won, what over, why) — `debrief-check.sh` prints an advisory `decision` note when the session changed decision-shaped surfaces (CLAUDE.md, skills, agents, hooks, evals, deploy, design/roadmap docs) but logged no entry dated today
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence
+- [ ] Each correction routed via the 4b checklist (narrowest home, not widest)
 - [ ] Mechanisms grepped for before being proposed
 - [ ] New checks break-tested RED then GREEN; scanners have `gate_corpus` cases
 - [ ] (Routines retired 2026-08-22 — nothing to mirror)
