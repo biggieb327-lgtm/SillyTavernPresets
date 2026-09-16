@@ -7,6 +7,20 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-16.1 — Refuse wildcard bind on the admin API
+
+**Root cause: `_start_admin_api` defaulted `ADMIN_API_BIND` to `127.0.0.1` but
+accepted any value, including `0.0.0.0` and `::`. Four docs said "never 0.0.0.0"
+(bot.py comment, ROADMAP, CHANGELOG, .env.example); none of them enforced it. The
+empty-token guard at the same callsite showed the pattern — refuse and log — but no
+equivalent existed for wildcard addresses. Safe today by configuration and by the
+host firewall's default-drop, but a single `.env` typo would expose the admin API
+to the network.**
+
+**Fix:** check `ADMIN_API_BIND` against `0.0.0.0` and `::` before binding; refuse
+to start and log a warning naming the safe alternatives (loopback or a Tailscale IP).
+Same early-return pattern as the empty-token guard.
+
 ## v2026-09-15.2 — Admin API bind guard + seven-bot fleet ports
 
 **Root cause: `_start_admin_api` called `ThreadingHTTPServer(...)` unguarded. The

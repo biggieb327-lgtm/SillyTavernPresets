@@ -8821,6 +8821,7 @@ class TestEveryBooleanFlagDefault:
         "THREADS_ENABLED": False,
         "TIP_OF_TONGUE": True,
         "TOKEN_CALIBRATION": True,
+        "PROACTIVE_RECEIPTS": True,
         "PROACTIVE_TRIAGE": True,
         "VIGIL_MODE": True,
         "BOTTLE_CAPSULE": True,

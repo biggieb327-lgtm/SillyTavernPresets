@@ -1,8 +1,34 @@
-"""Admin API bind must degrade on port clash, not crash startup."""
+"""Admin API bind guards: degrade on port clash, refuse wildcard addresses."""
 import asyncio
 from unittest.mock import MagicMock, patch
 
 import bot
+
+
+def test_start_admin_api_refuses_wildcard_ipv4():
+    with patch.object(bot, "ADMIN_API_ENABLED", True), \
+         patch.object(bot, "ADMIN_API_TOKEN", "test-token-not-a-secret"), \
+         patch.object(bot, "ADMIN_API_BIND", "0.0.0.0"), \
+         patch.object(bot, "ADMIN_API_PORT", 18080), \
+         patch.object(bot, "_admin_httpd", None), \
+         patch("bot.http.server.ThreadingHTTPServer") as server_cls, \
+         patch("bot.threading.Thread") as thread_cls:
+        asyncio.run(bot._start_admin_api(MagicMock()))
+        server_cls.assert_not_called()
+        thread_cls.assert_not_called()
+
+
+def test_start_admin_api_refuses_wildcard_ipv6():
+    with patch.object(bot, "ADMIN_API_ENABLED", True), \
+         patch.object(bot, "ADMIN_API_TOKEN", "test-token-not-a-secret"), \
+         patch.object(bot, "ADMIN_API_BIND", "::"), \
+         patch.object(bot, "ADMIN_API_PORT", 18080), \
+         patch.object(bot, "_admin_httpd", None), \
+         patch("bot.http.server.ThreadingHTTPServer") as server_cls, \
+         patch("bot.threading.Thread") as thread_cls:
+        asyncio.run(bot._start_admin_api(MagicMock()))
+        server_cls.assert_not_called()
+        thread_cls.assert_not_called()
 
 
 def test_start_admin_api_bind_failure_degrades_without_raising():

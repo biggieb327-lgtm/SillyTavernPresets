@@ -140,7 +140,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-15.2"
+BOT_VERSION = "2026-09-16.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -18821,6 +18821,11 @@ async def _start_admin_api(application):
     if not ADMIN_API_TOKEN:
         log.warning("[admin-api] ADMIN_API_ENABLED is set but ADMIN_API_TOKEN is "
                     "empty — refusing to start rather than serve an unauthenticated API.")
+        return
+    if ADMIN_API_BIND in ("0.0.0.0", "::"):
+        log.warning("[admin-api] ADMIN_API_BIND=%s exposes the API to the network — "
+                    "refusing to start. Use 127.0.0.1 or a Tailscale IP, never a wildcard.",
+                    ADMIN_API_BIND)
         return
     try:
         _admin_httpd = http.server.ThreadingHTTPServer(
