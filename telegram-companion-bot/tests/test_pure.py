@@ -2711,6 +2711,361 @@ class TestTriggeredMemoriesRepeatSuppression:
         assert self._call(2) == [self.LINE_A]   # chat 2 has no history → A still wins
 
 
+class TestBM25HybridRetrieval:
+    """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
+    keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
+    hit the other scorers miss, the kill switch disables it, and a missing
+    bm25s library degrades gracefully."""
+
+    LINE_RARE = "Valentina mentioned the sextant calibration yesterday"
+    LINE_COMMON = "went to the store and bought some things at the store"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_bm25 = bot.MEMORY_BM25
+        self._orig_bm25_index = dict(bot._bm25_index)
+        bot.MEMORIES_FILE.write_text(
+            self.LINE_RARE + "\n" + self.LINE_COMMON + "\n", encoding="utf-8"
+        )
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+        bot.MEMORY_BM25 = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_BM25 = self._orig_bm25
+        bot._bm25_index.clear()
+        bot._bm25_index.update(self._orig_bm25_index)
+
+    def test_bm25_surfaces_rare_term_hit(self):
+        out = bot.triggered_memories("sextant")
+        assert self.LINE_RARE in out
+
+    def test_kill_switch_disables_bm25_scoring(self):
+        bot.MEMORY_BM25 = False
+        scores = bot._bm25_score("sextant", [self.LINE_RARE, self.LINE_COMMON])
+        assert scores == {}
+
+    def test_graceful_degradation_without_library(self, monkeypatch):
+        monkeypatch.setattr(bot, "_bm25s", None)
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+        scores = bot._bm25_score("sextant", [self.LINE_RARE, self.LINE_COMMON])
+        assert scores == {}
+
+
+class TestCoreArchivalSplit:
+    """MEMORY_CORE: core lines always injected regardless of query, never decayed,
+    never evicted. Archival lines fill the remaining budget via scoring."""
+
+    CORE_A = "Brian lives in Austin"
+    CORE_B = "Brian's dog is named Scout"
+    ARCH_C = "[auto 2026-09-01] went to the grocery store yesterday"
+    ARCH_D = "[auto 2026-09-02] mentioned a dentist appointment next week"
+
+    def _write_file(self, core_lines, archival_lines):
+        parts = list(core_lines) + [bot._CORE_MARKER] + list(archival_lines)
+        bot.MEMORIES_FILE.write_text("\n".join(parts) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._bm25_index["retriever"] = None
+        bot._bm25_index["corpus"] = None
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig_core = bot.MEMORY_CORE
+        self._orig_core_max = bot.MEMORY_CORE_MAX
+        self._orig_bm25 = bot.MEMORY_BM25
+        self._orig_budget = bot.MEMORY_TOKEN_BUDGET
+        self._orig_max = bot.MEMORIES_MAX
+        bot.MEMORY_CORE = True
+        bot.MEMORY_CORE_MAX = 10
+        bot.MEMORY_BM25 = False
+        bot._embeddings_cache.clear()
+        bot._memory_meta.clear()
+        self._write_file([self.CORE_A, self.CORE_B], [self.ARCH_C, self.ARCH_D])
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        bot.MEMORY_CORE = self._orig_core
+        bot.MEMORY_CORE_MAX = self._orig_core_max
+        bot.MEMORY_BM25 = self._orig_bm25
+        bot.MEMORY_TOKEN_BUDGET = self._orig_budget
+        bot.MEMORIES_MAX = self._orig_max
+
+    def test_core_lines_always_injected(self):
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.CORE_A in out
+        assert self.CORE_B in out
+
+    def test_archival_only_when_relevant(self):
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.ARCH_C not in out
+        assert self.ARCH_D not in out
+
+    def test_archival_scored_when_relevant(self):
+        out = bot.triggered_memories("dentist appointment")
+        assert self.CORE_A in out
+        assert self.ARCH_D in out
+
+    def test_kill_switch_treats_all_as_archival(self):
+        bot.MEMORY_CORE = False
+        out = bot.triggered_memories("something completely unrelated")
+        assert self.CORE_A not in out
+        assert self.CORE_B not in out
+
+    def test_eviction_skips_core_lines(self):
+        bot.MEMORIES_MAX = 3
+        lines = [self.CORE_A, self.CORE_B, bot._CORE_MARKER,
+                 self.ARCH_C, self.ARCH_D]
+        kept, dropped = bot._evict_by_value(lines, bot._memory_meta, 3)
+        assert self.CORE_A in [l.strip() for l in kept]
+        assert self.CORE_B in [l.strip() for l in kept]
+        assert bot._CORE_MARKER in [l.strip() for l in kept]
+
+    def test_read_core_memories(self):
+        core = bot._read_core_memories()
+        assert core == [self.CORE_A, self.CORE_B]
+
+    def test_read_archival_memories(self):
+        arch = bot._read_archival_memories()
+        assert arch == [self.ARCH_C, self.ARCH_D]
+
+    def test_no_marker_means_all_archival(self):
+        bot.MEMORIES_FILE.write_text(
+            self.ARCH_C + "\n" + self.ARCH_D + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        assert bot._read_core_memories() == []
+        assert bot._read_archival_memories() == [self.ARCH_C, self.ARCH_D]
+
+    def test_core_max_respected(self):
+        bot.MEMORY_CORE_MAX = 1
+        core = bot._read_core_memories()
+        assert len(core) == 1
+        assert core[0] == self.CORE_A
+
+
+class TestExtractTimeAnchor:
+    def test_n_days_ago(self):
+        result = bot._extract_time_anchor("remember 5 days ago")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 5 * 86400
+        assert abs(center - expected) < 60
+        assert radius == max(5 * 0.3, 2) * 86400
+
+    def test_n_weeks_ago(self):
+        result = bot._extract_time_anchor("about 2 weeks ago")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 14 * 86400
+        assert abs(center - expected) < 60
+
+    def test_a_few_weeks_ago(self):
+        result = bot._extract_time_anchor("a few weeks ago we talked")
+        assert result is not None
+        center, radius = result
+        expected = time.time() - 21 * 86400
+        assert abs(center - expected) < 60
+        assert radius == max(21 * 0.5, 3) * 86400
+
+    def test_yesterday(self):
+        result = bot._extract_time_anchor("what happened yesterday")
+        assert result is not None
+        center, radius = result
+        assert abs(center - (time.time() - 86400)) < 60
+        assert radius == 86400
+
+    def test_last_week(self):
+        result = bot._extract_time_anchor("last week you said")
+        assert result is not None
+        _, radius = result
+        assert abs(radius - 7 * 0.4 * 86400) < 1
+
+    def test_last_month(self):
+        result = bot._extract_time_anchor("last month something")
+        assert result is not None
+        _, radius = result
+        assert abs(radius - 30 * 0.4 * 86400) < 1
+
+    def test_no_temporal_reference(self):
+        assert bot._extract_time_anchor("hello how are you") is None
+        assert bot._extract_time_anchor("what is the weather") is None
+
+    def test_month_name(self):
+        result = bot._extract_time_anchor("in July we went hiking")
+        assert result is not None
+        _, radius = result
+        assert radius == 15 * 86400
+
+    def test_christmas(self):
+        result = bot._extract_time_anchor("remember last christmas")
+        assert result is not None
+        _, radius = result
+        assert radius == 5 * 86400
+
+
+class TestTemporalAffinity:
+    def test_no_anchor_returns_neutral(self):
+        assert bot._temporal_affinity(time.time(), None, 3.0) == 1.0
+
+    def test_no_timestamp_returns_neutral(self):
+        anchor = (time.time() - 86400, 86400.0)
+        assert bot._temporal_affinity(None, anchor, 3.0) == 1.0
+        assert bot._temporal_affinity(0, anchor, 3.0) == 1.0
+
+    def test_exact_center_gives_full_boost(self):
+        center = time.time() - 7 * 86400
+        anchor = (center, 3 * 86400)
+        result = bot._temporal_affinity(center, anchor, 3.0)
+        assert abs(result - 4.0) < 0.01
+
+    def test_far_away_returns_neutral(self):
+        center = time.time() - 30 * 86400
+        anchor = (center, 3 * 86400)
+        far_ts = time.time()
+        result = bot._temporal_affinity(far_ts, anchor, 3.0)
+        assert result == 1.0
+
+    def test_edge_of_radius_partial_boost(self):
+        center = time.time() - 14 * 86400
+        radius = 7 * 86400
+        anchor = (center, radius)
+        edge_ts = center + radius
+        result = bot._temporal_affinity(edge_ts, anchor, 3.0)
+        assert 1.0 < result < 4.0
+
+    def test_kill_switch_prevents_anchor(self):
+        orig = bot.MEMORY_TEMPORAL
+        try:
+            bot.MEMORY_TEMPORAL = False
+            assert bot._extract_time_anchor("5 days ago") is not None
+        finally:
+            bot.MEMORY_TEMPORAL = orig
+
+
+class TestEpisodicConsolidation:
+    """Tests for _consolidate_episodes (ROADMAP 7.4)."""
+
+    def _setup_episodes(self, tmp_path, monkeypatch, chunks):
+        """Write chunks to a temp episodes file and load into RAM."""
+        import numpy as np
+        ep_file = tmp_path / ".episodes.jsonl"
+        model_file = tmp_path / ".episodes.model"
+        with ep_file.open("w", encoding="utf-8") as f:
+            for ts, text, vec in chunks:
+                f.write(json.dumps({"ts": ts, "text": text, "vec": vec}) + "\n")
+        model_file.write_text("test-model", encoding="utf-8")
+        monkeypatch.setattr(bot, "EPISODES_FILE", ep_file)
+        monkeypatch.setattr(bot, "EPISODES_MODEL_FILE", model_file)
+        monkeypatch.setattr(bot, "EMBEDDING_MODEL", "test-model")
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION", True)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_AGE_DAYS", 30)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_MIN_CLUSTER", 3)
+        monkeypatch.setattr(bot, "EPISODE_CONSOLIDATION_GAP_HOURS", 4.0)
+        ts_list = [c[0] for c in chunks]
+        text_list = [c[1] for c in chunks]
+        vecs = [c[2] for c in chunks]
+        mat = np.asarray(vecs, dtype=np.float32)
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        mat = mat / norms
+        with bot._episodes_lock:
+            bot._episodes["ts"] = ts_list
+            bot._episodes["text"] = text_list
+            bot._episodes["mat"] = mat
+            bot._episodes["loaded"] = True
+        return ep_file
+
+    def _make_vec(self, seed=1.0):
+        return [seed * 0.1] * 10
+
+    def test_consolidates_old_cluster(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Brian talked about his dog Scout", self._make_vec(1)),
+            (old + 3600, "Brian mentioned Scout likes the park", self._make_vec(2)),
+            (old + 7200, "They discussed taking Scout to the vet", self._make_vec(3)),
+            (now - 3600, "Recent conversation about dinner", self._make_vec(4)),
+        ]
+        ep_file = self._setup_episodes(tmp_path, monkeypatch, chunks)
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda msgs, model=None, **kw: "Brian discussed his dog Scout, park visits, and a vet trip.")
+        monkeypatch.setattr(bot, "_embed_text", lambda text: self._make_vec(5))
+        net = bot._consolidate_episodes()
+        assert net == 2
+        with bot._episodes_lock:
+            assert len(bot._episodes["ts"]) == 2
+
+    def test_skips_recent_chunks(self, tmp_path, monkeypatch):
+        now = time.time()
+        chunks = [
+            (now - 86400, "Yesterday chat A", self._make_vec(1)),
+            (now - 7200, "Today chat B", self._make_vec(2)),
+            (now - 3600, "Today chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        net = bot._consolidate_episodes()
+        assert net == 0
+
+    def test_skips_small_clusters(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Old chat A", self._make_vec(1)),
+            (old + 3600, "Old chat B", self._make_vec(2)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        net = bot._consolidate_episodes()
+        assert net == 0
+
+    def test_backup_created(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Chat A", self._make_vec(1)),
+            (old + 1800, "Chat B", self._make_vec(2)),
+            (old + 3600, "Chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda msgs, model=None, **kw: "Consolidated summary of chats.")
+        monkeypatch.setattr(bot, "_embed_text", lambda text: self._make_vec(5))
+        bot._consolidate_episodes()
+        backups = list(tmp_path.glob(".episodes.pre-consolidation-*.jsonl"))
+        assert len(backups) == 1
+
+    def test_survives_summarize_failure(self, tmp_path, monkeypatch):
+        now = time.time()
+        old = now - 45 * 86400
+        chunks = [
+            (old, "Chat A", self._make_vec(1)),
+            (old + 1800, "Chat B", self._make_vec(2)),
+            (old + 3600, "Chat C", self._make_vec(3)),
+        ]
+        self._setup_episodes(tmp_path, monkeypatch, chunks)
+        def _boom(*a, **kw):
+            raise RuntimeError("API down")
+        monkeypatch.setattr(bot, "call_nanogpt", _boom)
+        net = bot._consolidate_episodes()
+        assert net == 0
+        with bot._episodes_lock:
+            assert len(bot._episodes["ts"]) == 3
+
+
 from datetime import date as _date
 
 
@@ -8386,6 +8741,7 @@ class TestEveryBooleanFlagDefault:
         # semantic recall.
         "EMBED_BACKFILL": True,
         "ENGAGEMENT_TREND": True,
+        "EPISODE_CONSOLIDATION": True,
         "CHRONOTYPE_NOTICE": True,
         "CONSTANCY_OVERRIDE": True,
         "INTROSPECTION_QUERY": True,
@@ -8420,6 +8776,9 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,
         "MEMORY_AUTO": True,
+        "MEMORY_BM25": True,
+        "MEMORY_CORE": True,
+        "MEMORY_TEMPORAL": True,
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MEMORY_URGENCY_FLOOR": True,

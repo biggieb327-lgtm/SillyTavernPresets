@@ -14,6 +14,11 @@ Pillow>=10.0,<11.0
 # import sites are still wrapped in try/except, so a missing wheel degrades each
 # feature independently rather than crashing the bot.
 numpy>=1.26,<3.0
+# BM25 hybrid retrieval (MEMORY_BM25, ROADMAP 7.1) — proper term-frequency + IDF
+# keyword scoring alongside the existing semantic recall path. Pure Python + NumPy,
+# no native build. Import is wrapped in try/except; a missing install degrades to
+# the existing keyword + semantic scoring without crashing.
+bm25s>=0.2,<1.0
 
 # Garmin health feed. This used to be a manual optional install in the shared legacy
 # venv, but immutable per-release environments cannot inherit it. It must therefore be

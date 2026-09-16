@@ -140,7 +140,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-04.2"
+BOT_VERSION = "2026-09-15.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1327,6 +1327,16 @@ MEMORY_URGENCY_CEILING = _env_int("MEMORY_URGENCY_CEILING", "20")
 MEMORY_URGENCY_BOOST = _env_float("MEMORY_URGENCY_BOOST", "2.0")
 _mem_urgency: dict = {}        # chat_id -> {memory line: turns scored but unsurfaced}
 
+MEMORY_BM25 = _env_bool("MEMORY_BM25", True)
+_bm25_index: dict = {"retriever": None, "corpus": None}  # rebuilt on memory mutation
+
+MEMORY_CORE = _env_bool("MEMORY_CORE", True)
+MEMORY_CORE_MAX = _env_int("MEMORY_CORE_MAX", "10")
+_CORE_MARKER = "# CORE"
+
+MEMORY_TEMPORAL = _env_bool("MEMORY_TEMPORAL", True)
+MEMORY_TEMPORAL_BOOST = _env_float("MEMORY_TEMPORAL_BOOST", "3.0")
+
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
@@ -2250,6 +2260,37 @@ def _read_memories() -> list[str]:
             if ln.strip() and not ln.strip().startswith("#")]
 
 
+def _read_core_memories() -> list[str]:
+    if not MEMORY_CORE:
+        return []
+    text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    raw_lines = text.splitlines()
+    has_marker = any(ln.strip() == _CORE_MARKER for ln in raw_lines)
+    if not has_marker:
+        return []
+    core = []
+    for ln in raw_lines:
+        stripped = ln.strip()
+        if stripped == _CORE_MARKER:
+            break
+        if stripped and not stripped.startswith("#"):
+            core.append(stripped)
+    return core[:MEMORY_CORE_MAX]
+
+
+def _read_archival_memories() -> list[str]:
+    text = _read_life_file(MEMORIES_FILE, _memories_cache)
+    raw_lines = text.splitlines()
+    try:
+        marker_idx = next(i for i, ln in enumerate(raw_lines)
+                          if ln.strip() == _CORE_MARKER)
+    except StopIteration:
+        return [ln.strip() for ln in raw_lines
+                if ln.strip() and not ln.strip().startswith("#")]
+    return [ln.strip() for ln in raw_lines[marker_idx + 1:]
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
 def _read_schedule_today() -> str:
     """Return today's section from schedule.txt (lines under today's day name)."""
     if not SCHEDULE_FILE.exists():
@@ -2478,9 +2519,17 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
     """Trim `lines` to `cap` by dropping the lowest-value entries first, where value
     = recorded confidence (default 5 for legacy/no-meta), ties broken by oldest ts.
     Returns (kept_lines_in_original_order, dropped_keys). A hand-corrected conf-10
-    fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO."""
+    fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO.
+    Core lines (above the # CORE marker) and the marker itself are never evicted."""
     if len(lines) <= cap:
         return lines, []
+
+    protected: set[int] = set()
+    if MEMORY_CORE:
+        for i, l in enumerate(lines):
+            if l.strip() == _CORE_MARKER:
+                protected = set(range(i + 1))
+                break
 
     def _score(line: str, idx: int) -> tuple:
         m = meta.get(line.strip(), {}) or {}
@@ -2488,11 +2537,12 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
         conf = conf if isinstance(conf, int) else 5
         ts = m.get("ts")
         ts = ts if isinstance(ts, (int, float)) else 0.0
-        # Higher = more worth keeping. Insertion index as final tie-break (newer wins).
         return (conf, ts, idx)
 
-    ranked = sorted(range(len(lines)), key=lambda i: _score(lines[i], i))
-    drop_idx = set(ranked[: len(lines) - cap])
+    evictable = [i for i in range(len(lines)) if i not in protected]
+    ranked = sorted(evictable, key=lambda i: _score(lines[i], i))
+    to_drop = len(lines) - cap
+    drop_idx = set(ranked[:to_drop])
     kept = [l for i, l in enumerate(lines) if i not in drop_idx]
     dropped_keys = [lines[i].strip() for i in drop_idx]
     return kept, dropped_keys
@@ -2534,6 +2584,8 @@ def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | Non
         _memories_cache["ts"] = 0.0
         _save_embeddings()
         _save_memory_meta()
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
     return True
 
 
@@ -2633,6 +2685,13 @@ EPISODES_MODEL_FILE = BASE_DIR / ".episodes.model"
 # In-RAM store: parallel lists ts/text aligned with rows of the normalized float32 matrix `mat`.
 _episodes: dict = {"ts": [], "text": [], "mat": None, "loaded": False}
 _episodes_lock = threading.Lock()
+
+# Episodic consolidation (ROADMAP 7.4): periodically merge old episode chunks into
+# denser summaries so the archive stops growing unboundedly toward EPISODE_MAX.
+EPISODE_CONSOLIDATION = _env_bool("EPISODE_CONSOLIDATION", True)
+EPISODE_CONSOLIDATION_AGE_DAYS = _env_int("EPISODE_CONSOLIDATION_AGE_DAYS", "30")
+EPISODE_CONSOLIDATION_MIN_CLUSTER = _env_int("EPISODE_CONSOLIDATION_MIN_CLUSTER", "3")
+EPISODE_CONSOLIDATION_GAP_HOURS = _env_float("EPISODE_CONSOLIDATION_GAP_HOURS", "4.0")
 
 # On-this-day resurfacing: once a day, check whether an archived episode's anniversary
 # (~1mo/6mo/1yr ago) lands today and have her bring it up warmly. Reuses the episode
@@ -3065,6 +3124,97 @@ def _rewrite_episodes_file(ts_list, text_list, vecs):
         EPISODES_MODEL_FILE.write_text(EMBEDDING_MODEL, encoding="utf-8")
     except Exception as e:
         log.warning("[episodes] file rewrite failed: %s", type(e).__name__)
+
+
+def _consolidate_episodes() -> int:
+    """Off-loop: merge old episode clusters into denser summaries.
+    Returns the number of chunks removed (net savings)."""
+    _load_episodes()
+    if _np is None:
+        return 0
+    with _episodes_lock:
+        ts_all = _episodes["ts"][:]
+        text_all = _episodes["text"][:]
+        mat = _episodes["mat"]
+    if not ts_all:
+        return 0
+    vecs_all = mat.tolist() if mat is not None else []
+    if len(vecs_all) != len(ts_all):
+        return 0
+    cutoff = time.time() - EPISODE_CONSOLIDATION_AGE_DAYS * 86400
+    old_indices = [i for i, t in enumerate(ts_all) if t < cutoff]
+    if len(old_indices) < EPISODE_CONSOLIDATION_MIN_CLUSTER:
+        return 0
+    old_indices.sort(key=lambda i: ts_all[i])
+    gap = EPISODE_CONSOLIDATION_GAP_HOURS * 3600
+    clusters: list[list[int]] = []
+    current_cluster: list[int] = [old_indices[0]]
+    for idx in old_indices[1:]:
+        if ts_all[idx] - ts_all[current_cluster[-1]] <= gap:
+            current_cluster.append(idx)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [idx]
+    clusters.append(current_cluster)
+    mergeable = [c for c in clusters if len(c) >= EPISODE_CONSOLIDATION_MIN_CLUSTER]
+    if not mergeable:
+        return 0
+    try:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = EPISODES_FILE.parent / f".episodes.pre-consolidation-{stamp}.jsonl"
+        shutil.copy2(EPISODES_FILE, backup)
+    except Exception as e:
+        log.warning("[consolidation] backup failed, aborting: %s", e)
+        return 0
+    remove_set: set[int] = set()
+    new_entries: list[tuple[float, str, list[float]]] = []
+    for cluster in mergeable:
+        texts = [text_all[i] for i in cluster]
+        mid_ts = ts_all[cluster[len(cluster) // 2]]
+        combined = "\n---\n".join(texts)
+        prompt = (
+            "Consolidate these conversation excerpts into one concise summary "
+            "that preserves the key facts, emotions, and relationship details. "
+            "Write in third person, past tense. Keep it under 400 words.\n\n"
+            + combined
+        )
+        try:
+            raw = call_nanogpt([{"role": "user", "content": prompt}], SUMMARY_MODEL)
+            summary = _strip_thinking(raw).strip()
+        except Exception as e:
+            log.warning("[consolidation] summarize failed for cluster of %d: %s",
+                        len(cluster), e)
+            continue
+        if not summary or len(summary) < 20:
+            continue
+        vec = _embed_text(summary[:EPISODE_EMBED_CHARS])
+        if vec is None:
+            log.warning("[consolidation] embed failed for cluster of %d", len(cluster))
+            continue
+        remove_set.update(cluster)
+        new_entries.append((mid_ts, summary, vec))
+    if not remove_set:
+        return 0
+    keep_ts, keep_text, keep_vecs = [], [], []
+    for i in range(len(ts_all)):
+        if i not in remove_set:
+            keep_ts.append(ts_all[i])
+            keep_text.append(text_all[i])
+            keep_vecs.append(vecs_all[i])
+    for ts, text, vec in new_entries:
+        keep_ts.append(ts)
+        keep_text.append(text)
+        keep_vecs.append(vec)
+    _rewrite_episodes_file(keep_ts, keep_text, keep_vecs)
+    new_mat = _normalize_rows(_np.asarray(keep_vecs, dtype=_np.float32)) if keep_vecs else None
+    with _episodes_lock:
+        _episodes["ts"] = keep_ts
+        _episodes["text"] = keep_text
+        _episodes["mat"] = new_mat
+    net = len(remove_set) - len(new_entries)
+    log.info("[consolidation] merged %d cluster(s): %d chunks -> %d summaries (net -%d)",
+             len(new_entries), len(remove_set), len(new_entries), net)
+    return net
 
 
 def _archive_episode_chunks(batch: list, uname: str):
@@ -5331,6 +5481,58 @@ _MEMORY_STOPWORDS = frozenset({
     "even", "both", "only", "other", "back", "then", "well", "each",
 })
 
+try:
+    import bm25s as _bm25s
+except ImportError:
+    _bm25s = None
+
+
+def _rebuild_bm25_index(entries: list[str] | None = None):
+    if not MEMORY_BM25 or _bm25s is None:
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+        return
+    if entries is None:
+        entries = _read_memories()
+    if not entries:
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+        return
+    try:
+        retriever = _bm25s.BM25()
+        corpus_tokens = _bm25s.tokenize(entries)
+        retriever.index(corpus_tokens)
+        _bm25_index["retriever"] = retriever
+        _bm25_index["corpus"] = list(entries)
+    except Exception as e:
+        log.warning("[bm25] index build failed: %s", type(e).__name__)
+        _bm25_index["retriever"] = None
+        _bm25_index["corpus"] = None
+
+
+def _bm25_score(scan_text: str, entries: list[str]) -> dict[str, float]:
+    if not MEMORY_BM25 or _bm25s is None:
+        return {}
+    retriever = _bm25_index.get("retriever")
+    corpus = _bm25_index.get("corpus")
+    if retriever is None or corpus is None or corpus != entries:
+        _rebuild_bm25_index(entries)
+        retriever = _bm25_index.get("retriever")
+        corpus = _bm25_index.get("corpus")
+    if retriever is None or not corpus:
+        return {}
+    try:
+        query_tokens = _bm25s.tokenize([scan_text])
+        results, scores = retriever.retrieve(query_tokens, corpus=corpus, k=len(corpus))
+        scored = {}
+        for doc, score in zip(results[0], scores[0]):
+            if score > 0:
+                scored[doc] = float(score)
+        return scored
+    except Exception as e:
+        log.warning("[bm25] score failed: %s", type(e).__name__)
+        return {}
+
 
 def _recency_weight(ts, now: float, halflife_days: float) -> float:
     """Exponential age decay for memory ranking. Neutral (1.0) when disabled
@@ -5361,6 +5563,110 @@ def _urgency_boost(turns_waiting: int, ceiling: int, max_boost: float) -> float:
     if turns_waiting <= 0 or ceiling <= 0:
         return 1.0
     return 1.0 + min(turns_waiting / ceiling, 1.0) * max_boost
+
+
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+_DAY = 86400
+
+
+def _extract_time_anchor(text: str) -> tuple[float, float] | None:
+    """Extract a temporal reference from natural language and resolve it to
+    (center_epoch, radius_seconds).  Returns None when no time reference is found."""
+    low = text.lower()
+    now = datetime.now(TZ) if TZ else datetime.now()
+    now_ts = now.timestamp()
+
+    m = re.search(r"\b(\d+)\s+(days?|weeks?|months?)\s+ago\b", low)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).rstrip("s")
+        days = {"day": n, "week": n * 7, "month": n * 30}[unit]
+        center = now_ts - days * _DAY
+        radius = max(days * 0.3, 2) * _DAY
+        return center, radius
+
+    if re.search(r"\b(a few|couple|several)\s+(days?|weeks?|months?)\s+ago\b", low):
+        m2 = re.search(r"\b(a few|couple|several)\s+(days?|weeks?|months?)\s+ago\b", low)
+        approx = {"a few": 3, "couple": 2, "several": 5}[m2.group(1)]
+        unit = m2.group(2).rstrip("s")
+        days = {"day": approx, "week": approx * 7, "month": approx * 30}[unit]
+        center = now_ts - days * _DAY
+        radius = max(days * 0.5, 3) * _DAY
+        return center, radius
+
+    if re.search(r"\byesterday\b", low):
+        center = now_ts - _DAY
+        return center, _DAY
+
+    if re.search(r"\blast\s+weekend\b", low):
+        days_since_sun = (now.weekday() + 1) % 7
+        last_sun = now - timedelta(days=days_since_sun)
+        center = (last_sun.replace(hour=12, minute=0, second=0)).timestamp()
+        return center, 1.5 * _DAY
+
+    for kw, back in (("last week", 7), ("last month", 30), ("last year", 365)):
+        if kw in low:
+            center = now_ts - back * _DAY
+            radius = back * 0.4 * _DAY
+            return center, radius
+
+    for pattern in (r"\b(?:in|back in|last)\s+(\w+)\b", r"\b(\w+)\s+\d{4}\b"):
+        m3 = re.search(pattern, low)
+        if m3:
+            word = m3.group(1)
+            month_num = _MONTH_NAMES.get(word)
+            if month_num:
+                year = now.year
+                if month_num > now.month:
+                    year -= 1
+                ym = re.search(r"\b(\w+)\s+(\d{4})\b", low)
+                if ym and _MONTH_NAMES.get(ym.group(1)) == month_num:
+                    year = int(ym.group(2))
+                try:
+                    center_dt = datetime(year, month_num, 15,
+                                         tzinfo=TZ) if TZ else datetime(year, month_num, 15)
+                    return center_dt.timestamp(), 15 * _DAY
+                except ValueError:
+                    pass
+
+    if re.search(r"\b(?:last\s+)?christmas\b", low):
+        year = now.year if now.month == 12 and now.day >= 25 else now.year - 1
+        dt = datetime(year, 12, 25, tzinfo=TZ) if TZ else datetime(year, 12, 25)
+        return dt.timestamp(), 5 * _DAY
+
+    if re.search(r"\b(?:last\s+)?thanksgiving\b", low):
+        year = now.year - 1 if now.month < 11 else now.year
+        dt = datetime(year, 11, 25, tzinfo=TZ) if TZ else datetime(year, 11, 25)
+        return dt.timestamp(), 5 * _DAY
+
+    if re.search(r"\bnew\s+year'?s?\b", low):
+        year = now.year if now.month == 1 and now.day <= 7 else now.year - 1
+        dt = datetime(year + 1, 1, 1, tzinfo=TZ) if TZ else datetime(year + 1, 1, 1)
+        return dt.timestamp(), 5 * _DAY
+
+    return None
+
+
+def _temporal_affinity(mem_ts, anchor: tuple[float, float] | None,
+                       max_boost: float) -> float:
+    """Gaussian affinity: full boost at the center, fading to 1.0 at the edges.
+    Returns 1.0 (neutral) when there is no anchor or the memory has no timestamp."""
+    if anchor is None or not isinstance(mem_ts, (int, float)) or mem_ts <= 0:
+        return 1.0
+    center, radius = anchor
+    if radius <= 0:
+        return 1.0
+    dist = abs(mem_ts - center)
+    if dist > radius * 3:
+        return 1.0
+    sigma = radius / 2.0
+    boost = max_boost * math.exp(-0.5 * (dist / sigma) ** 2)
+    return 1.0 + boost
 
 
 def _tip_of_tongue_hint(query_vec: list[float] | None, chat_id: int | None,
@@ -5506,33 +5812,47 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     entries = _read_memories()
     if not entries:
         return []
+
+    core_lines = _read_core_memories()
+    core_set = set(core_lines)
+    archival = [e for e in entries if e not in core_set] if core_lines else entries
+
+    out = []
+    budget = MEMORY_TOKEN_BUDGET
+
+    if core_lines:
+        for line in core_lines:
+            cost = _tokens(line)
+            if cost > budget:
+                break
+            out.append(line)
+            budget -= cost
+
+    if not archival:
+        return out
+
     char_name = NAME.lower() if NAME else ""
     stopwords = _MEMORY_STOPWORDS | ({char_name} if char_name else set())
     low = scan_text.lower()
     scan_words = set(re.findall(r"\b[a-z]{4,}\b", low))
 
-    # Keyword scoring (original path — always runs)
     keyword_scored: dict[str, float] = {}
-    for line in entries:
+    for line in archival:
         words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                  if w not in stopwords}
         hits = len(words & scan_words)
         if hits > 0:
             keyword_scored[line] = float(hits)
 
-    # Semantic scoring (additive). Preferred path: the handler already embedded the
-    # user message off-loop and passed query_vec, so we rank with pure cosine here —
-    # no HTTP, safe on the event loop. Fallback (query_vec=None): only embed inline
-    # when NOT on the loop (e.g. /recall), never blocking a live reply.
     if query_vec:
-        sem_results = _semantic_recall_vec(query_vec, entries, top_k=8)
+        sem_results = _semantic_recall_vec(query_vec, archival, top_k=8)
     else:
         try:
             asyncio.get_running_loop()
             on_event_loop = True
         except RuntimeError:
             on_event_loop = False
-        sem_results = semantic_recall(scan_text, entries, top_k=8) if not on_event_loop else []
+        sem_results = semantic_recall(scan_text, archival, top_k=8) if not on_event_loop else []
     sem_scored: dict[str, float] = {}
     if sem_results:
         max_sim = max(s for s, _ in sem_results) or 1.0
@@ -5540,55 +5860,52 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
             if sim > 0.3:
                 sem_scored[line] = (sim / max_sim) * 3.0
 
-    # Merge: union of both, sum their scores, then age-decay the ranking
-    # (MEMORY_DECAY_HALFLIFE_DAYS; default 90 since v2026-07-27.1, 0 = off,
-    # no-ts legacy entries neutral).
+    bm25_scored: dict[str, float] = {}
+    if MEMORY_BM25:
+        raw_bm25 = _bm25_score(scan_text, archival)
+        if raw_bm25:
+            max_bm25 = max(raw_bm25.values()) or 1.0
+            bm25_scored = {l: (s / max_bm25) * 2.0 for l, s in raw_bm25.items()}
+
     now = time.time()
 
-    # Repeat-injection suppression: down-weight lines injected on recent turns so one
-    # theme can't win the budget every turn. Only on the live reply path (a chat_id is
-    # passed) and when enabled — /recall-style callers pass chat_id=None and are
-    # unaffected, so their ranking and existing tests stay byte-identical.
     suppress = chat_id is not None and MEMORY_REPEAT_SUPPRESS_TURNS > 0
     if suppress:
         turn = _mem_inject_turn.get(chat_id, 0) + 1
         _mem_inject_turn[chat_id] = turn
         seen = _mem_last_injected.setdefault(chat_id, {})
-        for l, t in list(seen.items()):          # prune aged-out / deleted lines
+        for l, t in list(seen.items()):
             if turn - t >= MEMORY_REPEAT_SUPPRESS_TURNS:
                 del seen[l]
         win = MEMORY_REPEAT_SUPPRESS_TURNS
     else:
         turn, seen, win = 0, {}, 0
 
-    all_lines = set(keyword_scored) | set(sem_scored)
+    time_anchor = _extract_time_anchor(scan_text) if MEMORY_TEMPORAL else None
+
+    all_lines = set(keyword_scored) | set(sem_scored) | set(bm25_scored)
     urg = (_mem_urgency.setdefault(chat_id, {})
            if MEMORY_URGENCY_FLOOR and chat_id is not None else {})
-    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0))
+    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0) + bm25_scored.get(l, 0))
                * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
                                  now, MEMORY_DECAY_HALFLIFE_DAYS)
                * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY)
-               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST), l)
+               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST)
+               * _temporal_affinity(_memory_meta.get(l.strip(), {}).get("ts"),
+                                    time_anchor, MEMORY_TEMPORAL_BOOST), l)
               for l in all_lines]
     merged.sort(key=lambda x: x[0], reverse=True)
 
-    out = []
-    budget = MEMORY_TOKEN_BUDGET
     for _, line in merged:
-        # Calibrated as of ROADMAP 4.4 (owner-approved 2026-08-01): MEMORY_TOKEN_BUDGET
-        # now means real tokens, not the raw 4-chars-per-token guess. Every instance's
-        # .env was multiplied by its own measured calibration ratio at cutover (captured
-        # from /audit at that moment) so effective recall didn't move for anyone when
-        # this shipped — the switch itself is not the retune. TOKEN_CALIBRATION=0 reverts
-        # this budget check to the raw unit too, same as every other calibrated number.
         cost = _tokens(line)
         if cost > budget:
             continue
         out.append(line)
         budget -= cost
-    if suppress:                                  # record winners on the raw lines,
-        for line in out:                          # before _hedge rewrites them for display
-            seen[line] = turn
+    if suppress:
+        for line in out:
+            if line not in core_set:
+                seen[line] = turn
     if urg is not None and chat_id is not None and MEMORY_URGENCY_FLOOR:
         out_set = set(out)
         for l in all_lines:
@@ -8157,6 +8474,10 @@ SELFIE_EXPRESSIONS = [
     "biting back a laugh", "a deadpan stare", "eyebrows raised, mid-sentence",
     "a crooked, embarrassed smile", "pouting on purpose", "blowing a kiss at the camera",
     "yawning, half-asleep", "a wide goofy open-mouth grin", "squinting at a bright screen",
+    "a knowing side-eye", "genuinely surprised, eyebrows up", "concentrating hard, brow furrowed",
+    "nose scrunched up mid-laugh", "barely awake, heavy-lidded", "one eyebrow raised, skeptical",
+    "a tiny conspiratorial grin", "chin in hand, zoned out", "mid-sentence, mouth half-open",
+    "laughing so hard eyes are shut",
 ]
 SELFIE_FRAMINGS = [
     "a close arm's-length selfie", "a mirror selfie", "a slightly-too-close front-camera shot",
@@ -8166,11 +8487,16 @@ SELFIE_FRAMINGS = [
     "a selfie with her face half-cut-off the frame", "a selfie held up high looking down",
     "a tight crop on just her face and shoulders", "a bathroom mirror selfie with phone visible",
     "a selfie peeking out from under a blanket",
+    "a selfie with arm stretched way out for distance", "phone propped up on something, timed shot",
+    "a selfie where the phone is slightly tilted", "a snap taken mid-activity, not quite posed",
+    "a front-camera shot from across the table", "a selfie squeezed into the corner of the frame",
 ]
 SELFIE_OUTFITS = [
     "an oversized hoodie", "a loose t-shirt", "a tank top", "a flannel shirt",
     "a comfy sweater", "her usual layers", "a band tee", "an oversized button-up",
     "a cropped sweatshirt", "pajamas", "a beanie and a hoodie", "a zip-up over a tee",
+    "a sundress", "jeans and a plain tee", "gym clothes", "a denim jacket",
+    "a turtleneck", "a big cozy cardigan",
 ]
 # What she's doing in the shot
 SELFIE_ACTIVITIES = [
@@ -8182,9 +8508,17 @@ SELFIE_ACTIVITIES = [
     "fresh out of the shower with damp hair",
     "in the middle of doing something and stopping to take the pic", "sprawled on the floor",
     "leaning against a doorway", "wrapped in a blanket like a burrito",
+    "sitting at a cafe, drink on the table", "waiting at a bus stop or crosswalk",
+    "browsing shelves at a bookstore or shop", "cooking something, sleeves pushed up",
+    "sitting on the floor sorting through a pile of stuff", "on the couch with a laptop open",
+    "standing at a window, looking outside", "in the passenger seat of a parked car",
+    "sitting on the front steps outside", "doing hair or makeup in the bathroom mirror",
 ]
 # Activities that put her outside -- this is when Ingrid's jacket comes out.
-SELFIE_OUTDOOR_ACTIVITIES = {"out walking somewhere", "bundled up against the cold"}
+SELFIE_OUTDOOR_ACTIVITIES = {
+    "out walking somewhere", "bundled up against the cold",
+    "waiting at a bus stop or crosswalk", "sitting on the front steps outside",
+}
 # Scene fragments that read as cold weather to an image model. Picked at random from the
 # pools above they will contradict a warm live reading, and the image follows the scene
 # (see v2026-08-01.7) -- so they are filtered out above SELFIE_WARM_F.
@@ -8195,6 +8529,7 @@ SELFIE_COLD_ACTIVITIES = {
 SELFIE_COLD_OUTFITS = {
     "an oversized hoodie", "a comfy sweater", "a beanie and a hoodie", "her usual layers",
     "a cropped sweatshirt", "a zip-up over a tee",
+    "a turtleneck", "a big cozy cardigan",
 }
 SELFIE_WARM_F = _env_float("SELFIE_WARM_F", "68")  # at/above this, cold-weather content is dropped
 SELFIE_COLD_F = _env_float("SELFIE_COLD_F", "50")  # at/below this, bare-skin outfits are dropped
@@ -8230,6 +8565,10 @@ SELFIE_CAMERA = [
     "warm lamplight, cozy and dim", "cool blue late-night screen glow on her face",
     "crisp and bright daylight", "a tiny bit out of focus", "shot from just slightly too close up",
     "flat overhead lighting", "backlit so she's a little in shadow",
+    "warm tungsten indoor light", "portrait mode, background gently blurred",
+    "harsh fluorescent overhead, slightly unflattering",
+    "natural window light from one side, the other side darker",
+    "phone HDR processing, everything a little too vivid",
 ]
 # Fixed rules appended to every selfie prompt. Generic (not per-instance), so they live
 # in code next to the other SELFIE_* pools rather than in a per-instance file like
@@ -8275,6 +8614,10 @@ SELFIE_SOFT_FRAMINGS = {
     "a selfie with her face half-cut-off the frame",
     "a bathroom mirror selfie with phone visible",
     "a selfie peeking out from under a blanket",
+    "a selfie with arm stretched way out for distance",
+    "a snap taken mid-activity, not quite posed",
+    "a front-camera shot from across the table",
+    "a selfie squeezed into the corner of the frame",
 }
 SELFIE_SOFT_CAMERA = {
     "harsh on-camera flash, slightly washed out", "grainy low-light phone photo",
@@ -8282,6 +8625,7 @@ SELFIE_SOFT_CAMERA = {
     "overexposed light from a window behind her",
     "cool blue late-night screen glow on her face", "a tiny bit out of focus",
     "backlit so she's a little in shadow", "flat overhead lighting",
+    "harsh fluorescent overhead, slightly unflattering",
 }
 # Kill switch: unset = identity guard active, 0 = pre-v2026-08-01.9 prompt.
 SELFIE_IDENTITY_GUARD = _env_bool("SELFIE_IDENTITY_GUARD", True)
@@ -11164,9 +11508,20 @@ async def mems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not entries:
         await update.message.reply_text("[no NPC memories yet]")
         return
-    lines = [f"{i+1}. {e}" for i, e in enumerate(entries)]
+    core = _read_core_memories()
+    core_set = set(core)
+    display_lines = []
+    if core:
+        display_lines.append("--- CORE ---")
+        for i, e in enumerate(entries):
+            if e in core_set:
+                display_lines.append(f"{i+1}. {e}")
+        display_lines.append("--- ARCHIVAL ---")
+    for i, e in enumerate(entries):
+        if e not in core_set:
+            display_lines.append(f"{i+1}. {e}")
     chunk, chunks, size = [], [], 0
-    for line in lines:
+    for line in display_lines:
         if size + len(line) + 1 > 3800:
             chunks.append("\n".join(chunk))
             chunk, size = [], 0
@@ -11279,6 +11634,107 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if meta.get("source"):
         lines.append(f'Source: "{meta["source"]}"')
     await update.message.reply_text("\n".join(lines))
+
+
+async def coremem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/coremem — list core memories. /coremem promote <n> — move memory #n to core.
+    /coremem demote <n> — move core memory #n back to archival."""
+    if not MEMORY_CORE:
+        await update.message.reply_text("Core memory is disabled (MEMORY_CORE=0).")
+        return
+    args = " ".join(context.args).strip() if context.args else ""
+    if not args:
+        core = _read_core_memories()
+        if not core:
+            await update.message.reply_text(
+                "No core memories yet. Use /coremem promote <n> "
+                "(where n is the /mems number) to promote one.")
+            return
+        numbered = [f"{i+1}. {e}" for i, e in enumerate(core)]
+        await update.message.reply_text(
+            f"Core memories ({len(core)}/{MEMORY_CORE_MAX}):\n\n" + "\n".join(numbered))
+        return
+
+    parts = args.split(None, 1)
+    action = parts[0].lower()
+    if action not in ("promote", "demote") or len(parts) < 2 or not parts[1].isdigit():
+        await update.message.reply_text(
+            "Usage:\n/coremem — list core memories\n"
+            "/coremem promote <n> — promote /mems entry #n to core\n"
+            "/coremem demote <n> — demote core memory #n to archival")
+        return
+    idx = int(parts[1]) - 1
+
+    if action == "promote":
+        entries = _read_memories()
+        if not (0 <= idx < len(entries)):
+            await update.message.reply_text("No memory at that number.")
+            return
+        target = entries[idx]
+        core = _read_core_memories()
+        if target in core:
+            await update.message.reply_text("That memory is already core.")
+            return
+        if len(core) >= MEMORY_CORE_MAX:
+            await update.message.reply_text(
+                f"Core section full ({MEMORY_CORE_MAX} lines). "
+                "Demote one first with /coremem demote <n>.")
+            return
+        with _memory_lock:
+            raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+            raw_lines = raw.splitlines()
+            stripped_lines = [l.strip() for l in raw_lines]
+            try:
+                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
+            except StopIteration:
+                await update.message.reply_text("Memory not found in file.")
+                return
+            raw_lines.pop(file_idx)
+            try:
+                marker_idx = next(i for i, l in enumerate(raw_lines)
+                                  if l.strip() == _CORE_MARKER)
+                raw_lines.insert(marker_idx, target)
+            except StopIteration:
+                raw_lines.insert(0, target)
+                raw_lines.insert(1, _CORE_MARKER)
+            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _bm25_index["retriever"] = None
+            _bm25_index["corpus"] = None
+        _memory_log("CORE-PROMOTE", target)
+        await update.message.reply_text(f"Promoted to core: {target}")
+
+    elif action == "demote":
+        core = _read_core_memories()
+        if not (0 <= idx < len(core)):
+            await update.message.reply_text(
+                f"No core memory #{idx+1}. Use /coremem to list them.")
+            return
+        target = core[idx]
+        with _memory_lock:
+            raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
+            raw_lines = raw.splitlines()
+            stripped_lines = [l.strip() for l in raw_lines]
+            try:
+                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
+            except StopIteration:
+                await update.message.reply_text("Memory not found in file.")
+                return
+            raw_lines.pop(file_idx)
+            try:
+                marker_idx = next(i for i, l in enumerate(raw_lines)
+                                  if l.strip() == _CORE_MARKER)
+                raw_lines.insert(marker_idx + 1, target)
+            except StopIteration:
+                raw_lines.append(target)
+            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+            _memories_cache["text"] = None
+            _memories_cache["ts"] = 0.0
+            _bm25_index["retriever"] = None
+            _bm25_index["corpus"] = None
+        _memory_log("CORE-DEMOTE", target)
+        await update.message.reply_text(f"Demoted from core: {target}")
 
 
 async def dupefacts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15063,6 +15519,14 @@ async def reflection_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.warning("[memory-audit] error: %s", e)
         _count_error("memory")
+    if EPISODE_CONSOLIDATION and EPISODIC_RECALL:
+        try:
+            async with _SUMMARIZE_SEM:
+                net = await asyncio.to_thread(_consolidate_episodes)
+            if net > 0:
+                log.info("[reflection] episode consolidation freed %d chunk(s)", net)
+        except Exception as e:
+            log.warning("[consolidation] error: %s", e)
     _overnight_mood_reset(owner)
     if ENGAGEMENT_TREND:
         _snapshot_engagement(owner)
@@ -18006,8 +18470,12 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GARMIN_ENABLED:
         age = (time.time() - _garmin["ts"]) / 3600 if _garmin.get("ts") else None
         lines.append(f"Garmin: snapshot {('%.1fh old' % age) if age else 'none'}")
+    _all_mem = _read_memories()
+    _core_mem = _read_core_memories()
+    _core_label = f" ({len(_core_mem)} core)" if _core_mem else ""
     lines.append(
-        f"Memory: {len(_read_memories())} NPC notes · {len(milestones.get(chat_id) or [])} "
+        f"Memory: {len(_all_mem)} NPC notes{_core_label} · "
+        f"{len(milestones.get(chat_id) or [])} "
         f"milestones · {len([r for r in reminders if r['chat_id'] == chat_id])} reminders"
     )
     await _reply_chunked(update, "\n".join(lines))
@@ -18658,6 +19126,7 @@ _BASE_COMMANDS = [
     BotCommand("addmem", "Add an NPC/world memory note"),
     BotCommand("mems", "List NPC/world memory notes"),
     BotCommand("delmem", "Remove a memory note (keyword or number)"),
+    BotCommand("coremem", "Core memories (list/promote/demote)"),
     BotCommand("episodes", "How many past conversations are archived"),
     BotCommand("reviewmem", "Review pending low-confidence memories"),
     BotCommand("reviewlife", "Review nightly-suggested living-file edits"),
@@ -18978,6 +19447,7 @@ def main():
     app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
+    app.add_handler(CommandHandler("coremem", coremem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
     app.add_handler(CommandHandler("reviewlife", reviewlife_cmd))
     app.add_handler(CommandHandler("dupefacts", dupefacts_cmd))
