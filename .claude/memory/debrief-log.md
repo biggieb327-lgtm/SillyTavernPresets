@@ -75,3 +75,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | 2026-09-08 | 68f6ba0 | 3 | Usage-guard tooling session: built user-level skill (`~/.claude/skills/usage-guard/SKILL.md`) with model routing, cache-warm compaction, effort discipline; SessionStart hook surfacing orchestrator reminder; auto-compact at 140K; PermissionRequest hook logging to `.claude/memory/permission-prompts.log`; weekly Routine (`trig_01SrtxZ1GrvonR2ELn2Vm424`, Sundays 14:00 UTC) analyzing the log and writing `.claude/memory/permission-analysis.md`. 1 Minor (C23 shell-semantics guard blocked commit syntax — existing constraint, self-corrected). 0 new constraints, 0 mechanisms owed. No bot.py changes. |
 | 2026-09-09 | 4bf49c0 | 14 | |
 | 2026-09-12 | e953669 | 7 | |
+| 2026-09-16 | c926ac1 | 12 | Short session: VPS backup script + docs. One Minor (C5 theory-guard catch). |
