@@ -139,6 +139,26 @@ in the session that produced it. If the new check is a `sweep.py` scanner, add
 to any defect that only shows up on input shaped differently, which is exactly how the
 `async-blocking` allowlist shipped with a false-positive mode.
 
+### 5b. Capture sweep — dump what isn't written down
+
+Before writing outputs, ask: **what did this session learn that isn't written down yet?**
+
+Walk through the session's key moments — findings, dead ends, owner preferences, fleet
+observations, hypotheses withdrawn — and for each, check whether it already has a home
+(oplog row, constraint, mycelium entry, commit message). Anything that doesn't: write it
+to `.claude/memory/inbox.md` (one line per item) if you're unsure where it goes, or
+directly to its real file if you know.
+
+The value: findings that evaporate between sessions are the most expensive kind of lost
+work, because the next session pays full price to re-derive them.
+
+### 5c. Sort the inbox
+
+Read `.claude/memory/inbox.md`. For each item, classify it using the routing table in
+that file's header (oplog / constraint / mycelium / watchlist / decision / notion /
+dismissed) and move it to its real file. Delete sorted items from the inbox. An item
+that has survived two debriefs without being sorted is stale — dismiss it or promote it.
+
 ### 6. Write the outputs
 
 | what | where | when |
@@ -148,6 +168,7 @@ to any defect that only shows up on input shaped differently, which is exactly h
 | an **intervention to the machinery** that targeted a failure class (a new/widened guard, eval, hook, skill, or preset) → a `pending` row; or a prior `pending` intervention that this session saw **hold** or **recur** → flip it | `.claude/memory/skill-impact.md` | whenever the session shipped such a change, or observed one's outcome |
 | a **project-changing decision** — a choice among real alternatives (architecture, a contract, deploy/memory layer, a shipped default, a will/won't, an approach ruled out) | `.claude/memory/decisions.md` (`log-decision`) | whenever the session settled one and it isn't logged yet |
 | the session-level pattern analysis | `.claude/SESSION-AUTOPSY-<date>.md` | only for long/multi-release sessions |
+| raw observations captured mid-session | `.claude/memory/inbox.md` then sorted to real homes | always — the capture sweep (5b/5c) |
 | shipped item status | `ROADMAP.md` / `IMPROVEMENTS_PLAN.md` | anything moved |
 | a live Routine created | — | n/a: Routines are retired here (2026-08-22); `routines.md` is historical |
 | the fact that a debrief ran | `.claude/memory/debrief-log.md` via `bash .claude/tools/debrief-check.sh --record` | always — it is the only durable trace |
@@ -176,6 +197,7 @@ data arrives, so it cannot be revised to fit.
 - [ ] Constraints updated: `seen` counts incremented, Minor entries added, promotions done
 - [ ] `skill-impact.md` updated: a class-targeting change shipped this session got a `pending` row (with a holds-when); any prior `pending` intervention observed this session was flipped to `holding`/`recurred`
 - [ ] Any project-changing decision this session settled is logged in `decisions.md` (what won, what over, why) — `debrief-check.sh` prints an advisory `decision` note when the session changed decision-shaped surfaces (CLAUDE.md, skills, agents, hooks, evals, deploy, design/roadmap docs) but logged no entry dated today
+- [ ] Capture sweep done: session findings checked against what's already written; inbox items sorted or dismissed
 - [ ] Graduation notes of any re-fired constraint re-read against the new occurrence
 - [ ] Each correction routed via the 4b checklist (narrowest home, not widest)
 - [ ] Mechanisms grepped for before being proposed

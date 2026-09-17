@@ -25,6 +25,7 @@ not standing rules (CLAUDE.md). **Messages.**
 - Your own mistakes → `constraints.md`
 - Standing rules → `CLAUDE.md`
 - A project-changing decision (what won over what, and why) → `.claude/memory/decisions.md`
+- A raw observation you haven't classified yet → `inbox.md`
 - Fast-moving/uncommitted findings → Notion Fleet Knowledge Base
 - Full incident detail → `CHANGELOG.md`
 
@@ -115,6 +116,10 @@ should do (or not do) with it.
   `character review` means the next session touching that area. A rule (`CLAUDE.md
   §Vocabulary`, `constraints C13`) means the entry is about that rule.
 - **status** — `open` (unread), `ack` (read, no action), `done` (acted on).
+- **Related:** (optional) name 2-3 entries across memory files this connects to, by file
+  and date or ID (e.g., `Related: oplog 2026-08-27, C8, decisions 2026-09-01`). The value
+  compounds as the web of cross-links grows — a session following a thread finds the next
+  node instead of grepping.
 
 Header shape is load-bearing: `session-audit.sh` counts open entries by matching it, and
 a drifted header drops out of that count silently rather than erroring. The

@@ -14,6 +14,7 @@ Ask in this order; the first yes wins, and it is almost never this file:
 | the **work** went wrong — our wrong command, premature "done", theory-as-fact | `constraints.md` |
 | it's a **message to the next session** — a heads-up, a dead end, a handoff | `mycelium.md` |
 | it's a durable **finding or decision** | Notion Fleet Knowledge Base |
+| you noticed it mid-task but **don't know where it goes** | `inbox.md` |
 | **none of the above — it hasn't happened, it just might** | **here** |
 
 If you can name a concrete occurrence with a date, it is not a watch item any more — it has
@@ -45,6 +46,8 @@ What was observed (one or two sentences). Why it is not a problem yet.
 ```
 
 `status: open` | `watching` (seen again, still sub-threshold) | `graduated` | `dismissed`.
+**Related:** (optional) name 2-3 entries across memory files this connects to, by file
+and date or ID (e.g., `Related: oplog 2026-08-25, C13, mycelium 2026-09-01`).
 Newest first. The header shape is what `session-audit.sh` counts — keep it exact.
 
 ---

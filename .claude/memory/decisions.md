@@ -33,6 +33,7 @@ alternatives is just a changelog entry in the wrong file.
 - **Your own mistake** doing the work → `constraints.md`.
 - A **standing rule** everyone must follow → `CLAUDE.md`.
 - A **transient message** to the next session → `mycelium.md`.
+- A raw observation you haven't classified yet → `inbox.md`.
 - A fast-moving finding you don't want to commit → Notion Fleet Knowledge Base.
 
 If a decision here hardens into a rule everyone must follow, **promote it to `CLAUDE.md`**
@@ -73,6 +74,8 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
   never delete the old one — point the new entry back at it, the same append-don't-erase rule
   mycelium uses). The `decisions-format` eval counts `^### 20` headers and fails on any whose
   line does not end `| status: current` or `| status: superseded`.
+- **Related:** (optional) name 2-3 entries across memory files this connects to, by file
+  and date or ID (e.g., `Related: oplog 2026-08-25, watchlist 2026-09-01, mycelium 2026-08-26`).
 - Newest first, same as the operational log and mycelium.
 
 ---

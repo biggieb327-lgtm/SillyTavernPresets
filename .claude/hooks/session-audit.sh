@@ -223,6 +223,16 @@ if [ -f .claude/memory/skill-impact.md ]; then
     echo "[session-audit] SKILL-IMPACT: ${si_count} pending intervention(s) — .claude/memory/skill-impact.md (did the fix hold? check before trusting)"
   fi
 fi
+# Inbox — raw capture items waiting to be sorted into their real files.
+# Prints the count only. Items are one-liners starting with "- 20", which is enough
+# to distinguish from the prose header. Same safe grep -c idiom (C23).
+if [ -f .claude/memory/inbox.md ]; then
+  ib_count=$(grep -c '^- 20' .claude/memory/inbox.md 2>/dev/null)
+  ib_count=${ib_count:-0}
+  if [ "${ib_count}" != "0" ]; then
+    echo "[session-audit] INBOX: ${ib_count} unsorted item(s) — .claude/memory/inbox.md (sort at debrief)"
+  fi
+fi
 echo "[session-audit] standing rules: read telegram-companion-bot/CHANGELOG.md before bot changes; bot.py changes need BOT_VERSION bump + changelog entry (delivery gate blocks otherwise); run .claude/evals/run-evals.sh before claiming done."
 echo "[session-audit] NOTION: Fleet Knowledge Base (database 89c9e767576149a480221c10d7a97f47, data-source 2e75cb5e-bf93-4a2a-a1b8-9d7a1b415e4f) — before non-trivial work, search it for Status=current entries relevant to your task. Write findings, decisions, and state changes back when you produce them."
 if [ "${dirty}" != "0" ]; then

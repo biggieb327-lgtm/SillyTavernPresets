@@ -20,6 +20,7 @@ Ask in this order; the first yes wins:
 | a **choice among alternatives** was settled — what won, what over, why | `decisions.md` |
 | a **message to the next session** — heads-up, dead end, handoff | `mycelium.md` |
 | it **hasn't happened yet**, it just might | `watchlist.md` |
+| you noticed it mid-task but **don't know where it goes** | `inbox.md` |
 | **we shipped a change to stop a failure class, and now we track whether it held** | **here** |
 
 The line against the operational log is the sharp one. The oplog row for a fix looks
@@ -68,7 +69,10 @@ Refs: oplog YYYY-MM-DD, changelog vX, constraint CN — wherever the failure and
 ```
 
 `status: pending` | `holding` | `recurred`. The header shape is what `session-audit.sh`
-counts and the `skill-impact-format` eval enforces — keep it exact. Newest first.
+counts and the `skill-impact-format` eval enforces — keep it exact.
+**Related:** (optional) name 2-3 entries across memory files this connects to, by file
+and date or ID (e.g., `Related: oplog 2026-08-27, C8, decisions 2026-08-27`).
+Newest first.
 
 ---
 
