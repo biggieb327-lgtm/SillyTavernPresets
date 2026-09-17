@@ -76,3 +76,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | 2026-09-09 | 4bf49c0 | 14 | |
 | 2026-09-12 | e953669 | 7 | |
 | 2026-09-16 | c926ac1 | 12 | Short session: VPS backup script + docs. One Minor (C5 theory-guard catch). |
+| 2026-09-17 | 7cfdcf6 | 3 | Clean single-purpose session: added inbox capture buffer, Related: cross-link convention, and debrief capture sweep to the memory layer (inspired by an external article). 0 mistakes, 0 new constraints. 58 evals green. |
