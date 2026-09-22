@@ -1247,6 +1247,10 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-22 — Gave VPS-only commands (`crontab -l`, `ls /opt/telegram-bots/backups`, a
+  root crontab line) with no host label. `host-guard.sh` caught it on the stop hook (C1);
+  restated with `# host: vps`. The prose said "on the VPS" only in the previous message, not
+  this one. -> **label every command block with its host, even mid-thread.**
 - 2026-09-22 — Reported a memory-layer change as verified with `run-evals.sh` alone ("58 passed")
   and merged it to `main` without running `verify.sh` or reading CI. `main` had been red for
   6 days; `debrief-check.sh` surfaced it, not me. CLAUDE.md says to run `verify.sh`, not the
