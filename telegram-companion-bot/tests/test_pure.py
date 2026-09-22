@@ -2837,6 +2837,25 @@ class TestWhyMem:
         with pytest.raises(ApplicationHandlerStop):
             asyncio.run(bot.group_guard(update, _cmd_ctx()))
 
+    def test_empty_memories_overwrite_a_stale_breakdown(self):
+        self._call()
+        assert bot._mem_last_breakdown[1]["picked"]
+        bot.MEMORIES_FILE.write_text("", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        assert self._call() == []
+        assert bot._mem_last_breakdown[1]["picked"] == []
+        assert "no memories stored" in bot._mem_last_breakdown[1]["semantic"]
+
+    def test_all_cut_by_budget_is_not_reported_as_zero_scores(self):
+        bot.MEMORY_TOKEN_BUDGET = 1  # nothing fits
+        self._call()
+        bd = bot._mem_last_breakdown[1]
+        assert bd["picked"] == [] and bd["cut"]
+        text = bot._format_whymem(bd, bot._read_memories(), bd["ts"])
+        assert "every scored line was cut by the budget" in text
+        assert "scored above zero" not in text
+
     def test_format_stays_under_telegram_limit(self):
         terms = {"kw": 1, "sem": 1, "bm25": 1, "recency": 1, "repeat": 1,
                  "urgency": 1, "time": 1}

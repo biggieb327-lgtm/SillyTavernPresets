@@ -5825,6 +5825,11 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                        chat_id: int | None = None) -> list[str]:
     entries = _read_memories()
     if not entries:
+        if MEMORY_WHY and chat_id is not None:  # else /whymem would show a stale reply
+            _mem_last_breakdown[chat_id] = {
+                "ts": time.time(), "semantic": "not run (no memories stored)",
+                "bm25": "not run", "time_anchor": None, "core": [],
+                "picked": [], "cut": []}
         return []
 
     core_lines = _read_core_memories()
@@ -11749,9 +11754,14 @@ def _format_whymem(bd: dict, entries: list[str], now: float) -> str:
         out.append(f"\nCore (always injected, not scored): "
                    + ", ".join(f"#{index.get(l, '?')}" for l in core))
     picked = bd.get("picked") or []
-    out.append("\nInjected:" if picked else "\nInjected: no archival memory scored above zero.")
-    out += [_format_why_line(index.get(l), s, l, tm) for s, l, tm in picked]
     cut = bd.get("cut") or []
+    if picked:
+        out.append("\nInjected:")
+    elif cut:
+        out.append("\nInjected: none; every scored line was cut by the budget.")
+    else:
+        out.append("\nInjected: no archival memory scored above zero.")
+    out += [_format_why_line(index.get(l), s, l, tm) for s, l, tm in picked]
     if cut:
         out.append("\nScored but cut by MEMORY_TOKEN_BUDGET:")
         out += [_format_why_line(index.get(l), s, l, tm) for s, l, tm in cut]
