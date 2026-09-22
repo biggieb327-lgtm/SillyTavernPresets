@@ -1694,3 +1694,60 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **Done when:** `/audit` shows the new model in use, embeddings are rebuilt via
   backfill, and recall quality is at least as good as before (spot-checked, not
   formally benchmarked — the published benchmarks already show the improvement).
+
+### 7.6 Retrieval score breakdown (`/whymem`) — S (planned 2026-09-22, not built)
+- **Evidence:** `triggered_memories()` sums three scorer terms per memory line
+  (`keyword_scored`, `sem_scored`, `bm25_scored`), multiplies by `_recency_weight`,
+  `_repeat_penalty`, `_urgency_boost` and `_temporal_affinity`, sorts, fills
+  `MEMORY_TOKEN_BUDGET`, and discards every number. So when a bot brings up the wrong
+  memory, or misses one, nobody can tell which term caused it. It also leaves 7.3's
+  done-when unmet: `grep -n -i 'temporal\|time_anchor' bot.py` finds no log call and no
+  `/audit` use of the temporal term. Source: Challenge 4 of the GraphRAG article evaluated
+  2026-09-22 (`.claude/memory/decisions.md`, same date); the rest of that article was rejected.
+- **Idea:** keep the breakdown for the last reply in each chat and show it on request.
+  Zero LLM calls, no new file on disk.
+- **What changes (all in `bot.py`):**
+  1. Kill switch `MEMORY_WHY = _env_bool("MEMORY_WHY", True)`, next to `MEMORY_TEMPORAL`
+     (`bot-code-invariants` #16). Document it in `.env.example`. **Add it to
+     `TestEveryBooleanFlagDefault.DEFAULTS` in the same edit** — that table kept `main` red
+     for six days when `NIGHTLY_RECEIPTS` skipped it (operational-log 2026-09-22).
+  2. `_mem_last_breakdown: dict[int, dict]` beside `_mem_last_injected` (in memory only:
+     one entry per chat, overwritten each turn, empty after a restart; say so in the reply).
+  3. In `triggered_memories()`, compute the four multipliers per line once, into a tuple,
+     instead of inline in the `merged` product. When `MEMORY_WHY` and `chat_id` is set,
+     store: `ts`; which scorers ran (semantic has three states: query vector, computed,
+     or skipped because it was called on the event loop with no vector; BM25 on/off by
+     `MEMORY_BM25`); the resolved `time_anchor` or none; the core lines; and, for each
+     injected line plus the top 3 that were scored but lost on budget, `kw`, `sem`,
+     `bm25`, the four multipliers and the final score. **Ranking must not change** —
+     the refactor only names intermediate values.
+  4. `whymem_cmd`, registered next to `sourcemem`. Private chats only (`chat_id > 0`), so
+     memory lines are never dumped into a group — load `group-chat-changes` first, because
+     the handler branches on chat type. Reply shape, one block per line:
+     `#12 final 4.10 = (kw 2 + sem 2.4 + bm25 1.1) x recency 0.8 x repeat 1 x urgency 1 x
+     time 3.0`, with memory numbers matching `/mems` and `/sourcemem`, a header saying
+     how old the snapshot is and which scorers ran, and a "scored but cut by budget"
+     section. Replies stay under Telegram's 4096-character limit (truncate lines, not
+     blocks).
+  5. `OPS_MANUAL.md` command reference gains `/whymem`; 7.3 here gets a pointer to it.
+- **Tests (`tests/test_pure.py`, each calling the handler, not reading its source):**
+  ranking identical with `MEMORY_WHY` on and off on the existing `triggered_memories`
+  fixtures; each stored final score equals `(kw+sem+bm25) x` its four multipliers; a
+  temporal query stores `time 3.0` on the matching line (proves 7.3's done-when); the
+  empty state ("no reply in this chat since restart"); `MEMORY_WHY=0` replies disabled
+  and stores nothing; a group chat gets a refusal and no memory text; a long breakdown
+  stays under 4096 characters.
+- **Release:** `repo-change-control` + `bot-code-invariants`; `BOT_VERSION` bump and a
+  `CHANGELOG.md` entry (the delivery gate enforces both); `.claude/tools/verify.sh` in
+  full under Python 3.12 (the container default is 3.11 and cannot install
+  `requirements.lock`: `uv venv -p 3.12`); read CI on the pushed SHA before calling it
+  done; deploy per instance with `deploy/vps-sync.sh`.
+- **Risk:** low. Read-only view over values already computed; the only change inside
+  retrieval is naming intermediates, pinned by the ranking-identical test. Memory cost is
+  one small dict per active chat.
+- **Out of scope (follow-ups, not this change):** `triggered_lore()` and episodic recall
+  have the same blind spot; extend only if `/whymem` proves useful. Alias misses ("my
+  sister" vs "Jen") stay unmeasured; `/whymem` is what would let the owner spot one.
+- **Done when:** after deploy, the owner asks a bot about a past time ("remember last
+  Christmas?"), runs `/whymem`, and sees `time 3.0` on the line from that period; and
+  `/whymem` in a group chat shows no memory text.

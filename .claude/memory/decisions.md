@@ -82,6 +82,37 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-22 | GraphRAG is not adopted for bot memory or the dev memory layer; only per-step retrieval visibility is copied | status: current
+**Decided:** keep `triggered_memories()`'s flat hybrid scoring (keyword + semantic + BM25, summed,
+then multiplied by recency, repeat, urgency and temporal terms, capped at `MEMORY_TOKEN_BUDGET`).
+Add no knowledge graph. Copy one idea from the article, "log what each retrieval step
+contributed", as ROADMAP 7.6 (`/whymem`).
+**Over:** (a) **an LLM-extracted knowledge graph** (the base of all six patterns) -- lost because
+every memory write would spend NanoGPT quota on entity/relation extraction, and would need a graph
+database on the VPS, for a few thousand short lines per instance; (b) **Pattern 5, a router that
+picks a retrieval path per message** -- lost because it adds an LLM call before every reply,
+against the per-reply LLM-call budget in `bot-code-invariants`; (c) **Pattern 6, agentic
+retrieval** -- lost because the article itself says it takes minutes and is not for real-time
+chat; (d) **a sparse graph of key entities** (the article's cheap variant) -- already exists in the
+form that fits: `people.txt` is about six lines per instance and is always injected, so there is
+nothing to retrieve; (e) **graph retrieval over `.claude/memory/`** -- lost on the 2026-08-21
+measurement (plain grep finds the right operational-log row 9 times in 10), and the optional
+`Related:` field already links entries by hand.
+**Why:** the article targets multi-hop and aggregation questions over large document corpora.
+A companion bot's queries are single chat turns over one person's memory lines, where the
+article's recommended pattern for mixed queries (Pattern 2, parallel hybrid) is what shipped in
+ROADMAP 7.1-7.4. The one gap it names that applies here is Challenge 4: `triggered_memories()`
+computes each score term and discards it, so a wrong or missing memory cannot be traced to the
+term that caused it, and ROADMAP 7.3's done-when ("temporal boost visible in `/audit` or log
+output") is unmet -- `grep -n -i 'temporal\|time_anchor' bot.py` shows no log or `/audit` use.
+**By:** a session read the article (via Nimble extract; towardsdatascience.com is egress-blocked)
+and compared it against `bot.py`; the owner confirmed "log the decision" 2026-09-22.
+**Detail:** `telegram-companion-bot/ROADMAP.md` 7.6. Open, unmeasured: whether aliases ("my
+sister" vs "Jen") are missed by the current scorers -- no recorded miss, and checking needs real
+memory files from the VPS.
+Related: decisions 2026-09-22 (MEX not adopted), mycelium 2026-08-21 (semantic search over the
+oplog ruled out), ROADMAP Track 7 (SAGE/Mem0 rejected 2026-09-09).
+
 ### 2026-09-22 | MEX (mex-memory/mex) is not adopted as a memory layer; two of its ideas are copied by hand | status: current
 **Decided:** do not install MEX (`mex-agent` 0.8.2). Copy two ideas into the existing memory
 layer instead: an eval that checks code identifiers named in docs still exist, and a commit SHA
