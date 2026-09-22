@@ -413,6 +413,10 @@ delete so the previous database remains recoverable.
 `deploy/vps-backup.sh` archives every instance's mutable state (all files in each
 instance directory except `.env` and logs) plus the shared group-ledger directory.
 `.env` is always excluded — secrets do not belong in backups.
+`machine-state.sqlite3` is copied with SQLite's own backup API, not `cp`, so the archive
+holds one consistent database even while the bot is writing (its `-wal`/`-shm` files are
+folded in, not archived separately). First manual run on the VPS: 2026-09-23, 896 files,
+34M, all seven instances.
 
 **Install (one-time, as root):**
 ```bash

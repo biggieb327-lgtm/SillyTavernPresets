@@ -112,11 +112,31 @@ for name in "${instances[@]}"; do
   # Copy all state files, excluding secrets and non-state.
   # tar the directory with exclusions rather than listing files, so new state
   # files are picked up automatically.
+  # maxdepth 1, so every file lands directly in $STAGE/$name/ (no subpaths). `cp --`
+  # because a filename can start with "-" (a stray "-H..." file in cass made the old
+  # `dirname "$rel"` call read it as an option, 2026-09-23).
   n=0
   while IFS= read -r f; do
-    rel="${f#"$inst_dir/"}"
-    mkdir -p "$STAGE/$name/$(dirname "$rel")"
-    cp "$f" "$STAGE/$name/$rel"
+    case "$f" in
+      *.sqlite3)
+        # The bots keep machine-state.sqlite3 open in WAL mode, so a plain cp can catch
+        # the database and its -wal file at different moments. SQLite's own backup API
+        # takes a consistent snapshot while the bot is running.
+        if python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' \
+            "$f" "$STAGE/$name/$(basename -- "$f")"; then
+          :
+        else
+          log "WARN: sqlite backup of $f failed; copying the file as-is"
+          cp -- "$f" "$STAGE/$name/"
+        fi
+        ;;
+      *.sqlite3-wal|*.sqlite3-shm)
+        continue  # folded into the snapshot above
+        ;;
+      *)
+        cp -- "$f" "$STAGE/$name/"
+        ;;
+    esac
     n=$((n + 1))
   done < <(find "$inst_dir" -maxdepth 1 -type f \
     ! -name '.env' \
