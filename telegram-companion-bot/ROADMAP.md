@@ -1644,6 +1644,8 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **Done when:** "remember what happened last Christmas?" surfaces a memory stored
   in late December over a more-recent but less temporally relevant one, and the
   temporal boost is visible in `/audit` or log output.
+  *(2026-09-22: the visibility half was unmet, no log or `/audit` showed the term;
+  closed by 7.6 `/whymem`, which shows the `time` multiplier per line.)*
 
 ### 7.4 ~~Episodic consolidation~~ ✅ (shipped v2026-09-09.4)
 - **Evidence:** TiMem (ACL 2026) and "Episodic Memory is the Missing Piece"
@@ -1695,7 +1697,7 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   backfill, and recall quality is at least as good as before (spot-checked, not
   formally benchmarked — the published benchmarks already show the improvement).
 
-### 7.6 Retrieval score breakdown (`/whymem`) — S (planned 2026-09-22, not built)
+### 7.6 ~~Retrieval score breakdown (`/whymem`)~~ ✅ (shipped v2026-09-22.1)
 - **Evidence:** `triggered_memories()` sums three scorer terms per memory line
   (`keyword_scored`, `sem_scored`, `bm25_scored`), multiplies by `_recency_weight`,
   `_repeat_penalty`, `_urgency_boost` and `_temporal_affinity`, sorts, fills
@@ -1748,6 +1750,11 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **Out of scope (follow-ups, not this change):** `triggered_lore()` and episodic recall
   have the same blind spot; extend only if `/whymem` proves useful. Alias misses ("my
   sister" vs "Jen") stay unmeasured; `/whymem` is what would let the owner spot one.
-- **Done when:** after deploy, the owner asks a bot about a past time ("remember last
-  Christmas?"), runs `/whymem`, and sees `time 3.0` on the line from that period; and
-  `/whymem` in a group chat shows no memory text.
+- **Done when:** after deploy, the owner asks a bot about a past time ("remember that
+  thing 3 weeks ago?"), runs `/whymem`, and sees a `time` term above 1.00 (up to
+  `MEMORY_TEMPORAL_BOOST`, 3.0 at the center of the window) on a line from that period;
+  and `/whymem` in a group chat is refused by `group_guard`. Code side met (tests in
+  `TestWhyMem`); the live check is pending deploy.
+- **As built:** `time_anchor` is `_extract_time_anchor`'s (center, radius), shown as
+  `YYYY-MM-DD +/- N days`. No handler-level group branch was needed: `group_guard`
+  already stops every group command except `/chatid`.

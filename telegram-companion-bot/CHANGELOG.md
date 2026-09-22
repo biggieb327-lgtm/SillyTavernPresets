@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-22.1 — `/whymem`: memory scoring breakdown (ROADMAP 7.6)
+
+**Root cause: `triggered_memories()` computed every score term and threw it away.** Each
+archival memory line gets `keyword_scored + sem_scored + bm25_scored`, multiplied by
+`_recency_weight`, `_repeat_penalty`, `_urgency_boost` and `_temporal_affinity`; the
+lines are sorted and fill `MEMORY_TOKEN_BUDGET`. Only the surviving lines left the
+function. So when a bot brought up the wrong memory, or missed one, nothing could say
+which term caused it. ROADMAP 7.3's done-when ("temporal boost visible in `/audit` or log
+output") was never met: before this release `grep -n -i 'temporal\|time_anchor' bot.py`
+found no log call and no `/audit` use of the term. Found while evaluating a GraphRAG
+article (decisions.md 2026-09-22); the rest of that article was rejected.
+
+**Fix:** the score product is split into named terms, computed once per line in the same
+order as before, so the float product and the sort are unchanged. When `MEMORY_WHY` is on
+and a `chat_id` is passed (the live reply path), `triggered_memories()` stores, per chat,
+in `_mem_last_breakdown`: which scorers ran (semantic: query vector / computed / skipped on
+the event loop; BM25 on or off), the time reference found, the core lines, each injected
+line's terms and final score, and the top 3 lines cut by the budget. New `/whymem` renders
+it, with memory numbers matching `/mems` and `/sourcemem` (`#?` for a line edited since).
+In memory only, like `_mem_last_injected`: empty after a restart. No model call, no file
+written. Kill switch `MEMORY_WHY=0` (default on) records nothing and turns `/whymem` off.
+Not added to the Telegram command menu (same as `/sourcemem`), so it uses none of the
+remaining slots under the 100-command cap. Groups never reach the handler: `group_guard`
+refuses every group command except `/chatid`.
+
+**Tests (`TestWhyMem`, 11, the handler called directly):** ranking identical with the flag
+on and off across three consecutive turns; each stored final score equals its terms'
+product; budget losers land in the cut list; a "3 weeks ago" query records a time term
+above 1.0 on a memory stamped at that time; kill switch and `chat_id=None` record nothing;
+`/whymem` output, empty state and disabled state; `group_guard` raises
+`ApplicationHandlerStop` for `/whymem` in a group; a 60-line breakdown stays under 4096
+characters. The existing ranking tests (repeat suppression, BM25, temporal, urgency) pass
+unedited. `MEMORY_WHY` added to `TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
+
 ## v2026-09-16.2 — Nightly receipts (Sprint 2)
 
 **Root cause: `reflection_job` ran eight tasks nightly (self-image reflection,

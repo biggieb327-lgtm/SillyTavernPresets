@@ -2712,6 +2712,143 @@ class TestTriggeredMemoriesRepeatSuppression:
         assert self._call(2) == [self.LINE_A]   # chat 2 has no history → A still wins
 
 
+class TestWhyMem:
+    """ROADMAP 7.6 / v2026-09-22.1: triggered_memories() keeps each line's score terms
+    for /whymem. The split must not change ranking, the stored terms must reproduce the
+    final score, and the handler must run for real (not be read as source)."""
+    LINE_A = "alpha memory line"
+    LINE_B = "bravo memory line"
+    LINE_C = "charlie memory line"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig = {k: getattr(bot, k) for k in (
+            "MEMORY_TOKEN_BUDGET", "MEMORY_REPEAT_SUPPRESS_TURNS", "MEMORY_URGENCY_FLOOR",
+            "MEMORY_WHY", "MEMORY_TEMPORAL")}
+        bot.MEMORIES_FILE.write_text(
+            "\n".join([self.LINE_A, self.LINE_B, self.LINE_C]) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache[self.LINE_A] = [1.0, 0.0]
+        bot._embeddings_cache[self.LINE_B] = [0.8, 0.6]
+        bot._embeddings_cache[self.LINE_C] = [0.6, 0.8]
+        self._reset_trackers()
+        bot.MEMORY_URGENCY_FLOOR = False
+        bot.MEMORY_TOKEN_BUDGET = bot._est_tokens(self.LINE_A)  # fits one line
+        bot.MEMORY_WHY = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        for k, v in self._orig.items():
+            setattr(bot, k, v)
+        self._reset_trackers()
+
+    def _reset_trackers(self):
+        bot._mem_inject_turn.clear()
+        bot._mem_last_injected.clear()
+        bot._mem_urgency.clear()
+        bot._mem_last_breakdown.clear()
+
+    def _call(self, chat_id=1, text="tell me something"):
+        return bot.triggered_memories(text, query_vec=[1.0, 0.0], chat_id=chat_id)
+
+    def test_ranking_identical_with_breakdown_on_and_off(self):
+        runs = {}
+        for flag in (True, False):
+            self._reset_trackers()
+            bot.MEMORY_WHY = flag
+            runs[flag] = [self._call(), self._call(), self._call()]
+        assert runs[True] == runs[False]
+        assert runs[True][0] == [self.LINE_A]
+
+    def test_stored_terms_reproduce_final_score(self):
+        self._call()
+        bd = bot._mem_last_breakdown[1]
+        rows = bd["picked"] + bd["cut"]
+        assert rows
+        for score, _line, t in rows:
+            expect = ((t["kw"] + t["sem"] + t["bm25"])
+                      * t["recency"] * t["repeat"] * t["urgency"] * t["time"])
+            assert score == expect
+
+    def test_budget_losers_are_recorded_as_cut(self):
+        self._call()
+        bd = bot._mem_last_breakdown[1]
+        assert [l for _, l, _ in bd["picked"]] == [self.LINE_A]
+        assert {l for _, l, _ in bd["cut"]} == {self.LINE_B, self.LINE_C}
+        assert bd["semantic"] == "query vector"
+
+    def test_temporal_term_is_recorded(self):
+        bot.MEMORY_TEMPORAL = True
+        anchor = bot._extract_time_anchor("remember that thing 3 weeks ago")
+        assert anchor is not None
+        bot._memory_meta[self.LINE_B] = {"ts": anchor[0]}
+        self._call(text="remember that thing 3 weeks ago")
+        bd = bot._mem_last_breakdown[1]
+        terms = {l: t for _, l, t in bd["picked"] + bd["cut"]}
+        assert terms[self.LINE_B]["time"] > 1.0
+        # The anchor is computed from "now", so a second call differs by microseconds.
+        assert bd["time_anchor"][1] == anchor[1]
+        assert abs(bd["time_anchor"][0] - anchor[0]) < 60
+
+    def test_kill_switch_records_nothing(self):
+        bot.MEMORY_WHY = False
+        self._call()
+        assert bot._mem_last_breakdown == {}
+
+    def test_no_chat_id_records_nothing(self):
+        self._call(chat_id=None)
+        assert bot._mem_last_breakdown == {}
+
+    def test_whymem_cmd_shows_breakdown(self):
+        self._call(chat_id=9001)
+        update, msg = _cmd_update(chat_id=9001)
+        asyncio.run(bot.whymem_cmd(update, _cmd_ctx()))
+        text = msg.sent[-1]
+        assert "#1 alpha memory line" in text
+        assert "final" in text and "x time" in text
+        assert "cut by MEMORY_TOKEN_BUDGET" in text
+        assert "#2 bravo memory line" in text
+
+    def test_whymem_cmd_empty_state(self):
+        update, msg = _cmd_update(chat_id=9001)
+        asyncio.run(bot.whymem_cmd(update, _cmd_ctx()))
+        text = msg.sent[-1]
+        assert "No reply in this chat" in text
+
+    def test_whymem_cmd_disabled(self):
+        self._call(chat_id=9001)
+        bot.MEMORY_WHY = False
+        update, msg = _cmd_update(chat_id=9001)
+        asyncio.run(bot.whymem_cmd(update, _cmd_ctx()))
+        text = msg.sent[-1]
+        assert "MEMORY_WHY=0" in text
+        assert "alpha" not in text
+
+    def test_group_guard_stops_whymem_in_groups(self):
+        msg = SimpleNamespace(text="/whymem", reply_text=None)
+        update = SimpleNamespace(effective_chat=SimpleNamespace(id=-100123),
+                                 effective_message=msg, message=msg)
+        with pytest.raises(ApplicationHandlerStop):
+            asyncio.run(bot.group_guard(update, _cmd_ctx()))
+
+    def test_format_stays_under_telegram_limit(self):
+        terms = {"kw": 1, "sem": 1, "bm25": 1, "recency": 1, "repeat": 1,
+                 "urgency": 1, "time": 1}
+        rows = [(3.0, f"line {i} " + "x" * 300, terms) for i in range(60)]
+        bd = {"ts": 0, "semantic": "computed", "bm25": "on", "time_anchor": None,
+              "core": [], "picked": rows, "cut": rows[:3]}
+        text = bot._format_whymem(bd, [], 10.0)
+        assert len(text) <= 4096
+        assert text.endswith("(truncated)")
+        assert "#? line 0" in text  # a line not in memories.txt shows '#?'
+
+
 class TestBM25HybridRetrieval:
     """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
     keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
@@ -6268,7 +6405,7 @@ class TestCommandMenuMirrorsHandlers:
 
     _HIDDEN_FROM_MENU = {
         "errors", "restart", "update", "fleet", "diag",
-        "chatid", "dupefacts", "exportmemory", "sourcemem",
+        "chatid", "dupefacts", "exportmemory", "sourcemem", "whymem",
         "editmem", "newsnow",
         "addjoke", "deljoke", "addoutfit", "outfit", "deloutfit",
         "pinned", "unpin", "boundaries",
@@ -8783,6 +8920,8 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_HEDGE": True,
         "MEMORY_SEMANTIC_LIVE": True,
         "MEMORY_URGENCY_FLOOR": True,
+        # v2026-09-22.1, ROADMAP 7.6 /whymem. Default-on per the kill-switch policy.
+        "MEMORY_WHY": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         # Sprint 2 (c76b11f). Default-on per the kill-switch policy.

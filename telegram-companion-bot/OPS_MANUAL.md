@@ -188,6 +188,7 @@ grep -c HEALTHCHECK_URL /opt/telegram-bots/*/.env   # dead-man's-switch coverage
 | `/delmem <keyword or #>` | Remove an NPC/world memory |
 | `/editmem <n> <new text>` | Edit a memory entry by number |
 | `/sourcemem <n>` | Show a memory entry's source/provenance |
+| `/whymem` | Show why the last reply used the memories it did: each injected line's score as `(kw + sem + bm25) x recency x repeat x urgency x time`, the next 3 lines cut by `MEMORY_TOKEN_BUDGET`, which scorers ran, and any time reference found. In memory only (empty after a restart); no model call. Private chats only. Kill switch `MEMORY_WHY=0` |
 | `/reviewmem` | List memories pending review (low-confidence extractions); `/reviewmem ok <n>` or `/reviewmem no <n>` to resolve one |
 | `/dupefacts` | Diagnostic: flag near-duplicate facts in `facts`/`recent_facts` via embedding similarity (cosine ≥ `MEMORY_DEDUP_SIM`, same threshold `/addmem`'s auto-dedup uses). Reports candidate pairs only — never merges or deletes anything |
 

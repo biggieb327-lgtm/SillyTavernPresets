@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-16.2"
+BOT_VERSION = "2026-09-22.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1341,6 +1341,13 @@ _CORE_MARKER = "# CORE"
 
 MEMORY_TEMPORAL = _env_bool("MEMORY_TEMPORAL", True)
 MEMORY_TEMPORAL_BOOST = _env_float("MEMORY_TEMPORAL_BOOST", "3.0")
+
+# /whymem (ROADMAP 7.6): triggered_memories() keeps each line's score terms for the last
+# reply in each chat, instead of discarding them after the sort. In-memory only, like
+# _mem_last_injected — a restart clears it. Default ON; 0 = record nothing, /whymem off.
+MEMORY_WHY = _env_bool("MEMORY_WHY", True)
+_MEMORY_WHY_RUNNERS_UP = 3
+_mem_last_breakdown: dict = {}  # chat_id -> breakdown of the last triggered_memories call
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
@@ -5836,6 +5843,11 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
             budget -= cost
 
     if not archival:
+        if MEMORY_WHY and chat_id is not None:
+            _mem_last_breakdown[chat_id] = {
+                "ts": time.time(), "semantic": "not run (no archival memories)",
+                "bm25": "not run", "time_anchor": None, "core": list(out),
+                "picked": [], "cut": []}
         return out
 
     char_name = NAME.lower() if NAME else ""
@@ -5853,6 +5865,7 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
 
     if query_vec:
         sem_results = _semantic_recall_vec(query_vec, archival, top_k=8)
+        sem_mode = "query vector"
     else:
         try:
             asyncio.get_running_loop()
@@ -5860,6 +5873,7 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
         except RuntimeError:
             on_event_loop = False
         sem_results = semantic_recall(scan_text, archival, top_k=8) if not on_event_loop else []
+        sem_mode = "skipped (on event loop, no query vector)" if on_event_loop else "computed"
     sem_scored: dict[str, float] = {}
     if sem_results:
         max_sim = max(s for s, _ in sem_results) or 1.0
@@ -5893,22 +5907,46 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     all_lines = set(keyword_scored) | set(sem_scored) | set(bm25_scored)
     urg = (_mem_urgency.setdefault(chat_id, {})
            if MEMORY_URGENCY_FLOOR and chat_id is not None else {})
-    merged = [((keyword_scored.get(l, 0) + sem_scored.get(l, 0) + bm25_scored.get(l, 0))
-               * _recency_weight(_memory_meta.get(l.strip(), {}).get("ts"),
-                                 now, MEMORY_DECAY_HALFLIFE_DAYS)
-               * _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY)
-               * _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING, MEMORY_URGENCY_BOOST)
-               * _temporal_affinity(_memory_meta.get(l.strip(), {}).get("ts"),
-                                    time_anchor, MEMORY_TEMPORAL_BOOST), l)
-              for l in all_lines]
+    # Each term is named once so /whymem can show it; the product and the sort are
+    # the same as before this was split out (pinned by TestWhyMem ranking tests).
+    merged = []
+    for l in all_lines:
+        ts = _memory_meta.get(l.strip(), {}).get("ts")
+        terms = {
+            "kw": keyword_scored.get(l, 0),
+            "sem": sem_scored.get(l, 0),
+            "bm25": bm25_scored.get(l, 0),
+            "recency": _recency_weight(ts, now, MEMORY_DECAY_HALFLIFE_DAYS),
+            "repeat": _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY),
+            "urgency": _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING,
+                                      MEMORY_URGENCY_BOOST),
+            "time": _temporal_affinity(ts, time_anchor, MEMORY_TEMPORAL_BOOST),
+        }
+        score = ((terms["kw"] + terms["sem"] + terms["bm25"])
+                 * terms["recency"] * terms["repeat"] * terms["urgency"] * terms["time"])
+        merged.append((score, l, terms))
     merged.sort(key=lambda x: x[0], reverse=True)
 
-    for _, line in merged:
+    cut: list[tuple[float, str, dict]] = []
+    picked: list[tuple[float, str, dict]] = []
+    for score, line, terms in merged:
         cost = _tokens(line)
         if cost > budget:
+            cut.append((score, line, terms))
             continue
         out.append(line)
+        picked.append((score, line, terms))
         budget -= cost
+    if MEMORY_WHY and chat_id is not None:
+        _mem_last_breakdown[chat_id] = {
+            "ts": now,
+            "semantic": sem_mode,
+            "bm25": "on" if MEMORY_BM25 else "off (MEMORY_BM25=0)",
+            "time_anchor": time_anchor,
+            "core": [l for l in out if l in core_set],
+            "picked": picked,
+            "cut": cut[:_MEMORY_WHY_RUNNERS_UP],
+        }
     if suppress:
         for line in out:
             if line not in core_set:
@@ -11679,6 +11717,64 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if meta.get("source"):
         lines.append(f'Source: "{meta["source"]}"')
     await update.message.reply_text("\n".join(lines))
+
+
+def _format_why_line(num, score: float, line: str, terms: dict) -> str:
+    """One /whymem block: the memory, then its score as the formula that produced it."""
+    text = line if len(line) <= 120 else line[:117] + "..."
+    return (f"#{num if num else '?'} {text}\n"
+            f"  final {score:.2f} = (kw {terms['kw']:.2f} + sem {terms['sem']:.2f}"
+            f" + bm25 {terms['bm25']:.2f}) x recency {terms['recency']:.2f}"
+            f" x repeat {terms['repeat']:.2f} x urgency {terms['urgency']:.2f}"
+            f" x time {terms['time']:.2f}")
+
+
+def _format_whymem(bd: dict, entries: list[str], now: float) -> str:
+    """Render a _mem_last_breakdown entry. Pure — tested directly. Memory numbers match
+    /mems and /sourcemem (1-based position in memories.txt); a line edited or deleted
+    since the reply shows '#?'. Capped under Telegram's 4096-character limit."""
+    index = {e: i + 1 for i, e in enumerate(entries)}
+    age = max(0, int(now - bd.get("ts", now)))
+    anchor = bd.get("time_anchor")
+    if anchor:  # _extract_time_anchor's (center_epoch, radius_seconds)
+        center = (datetime.fromtimestamp(anchor[0], tz=TZ) if TZ
+                  else datetime.fromtimestamp(anchor[0]))
+        anchor_s = f"{center.strftime('%Y-%m-%d')} +/- {anchor[1] / _DAY:.0f} days"
+    else:
+        anchor_s = "none"
+    out = [f"Memory scoring for the last reply ({age}s ago).",
+           f"semantic: {bd.get('semantic')} | bm25: {bd.get('bm25')} | time reference: {anchor_s}"]
+    core = bd.get("core") or []
+    if core:
+        out.append(f"\nCore (always injected, not scored): "
+                   + ", ".join(f"#{index.get(l, '?')}" for l in core))
+    picked = bd.get("picked") or []
+    out.append("\nInjected:" if picked else "\nInjected: no archival memory scored above zero.")
+    out += [_format_why_line(index.get(l), s, l, tm) for s, l, tm in picked]
+    cut = bd.get("cut") or []
+    if cut:
+        out.append("\nScored but cut by MEMORY_TOKEN_BUDGET:")
+        out += [_format_why_line(index.get(l), s, l, tm) for s, l, tm in cut]
+    text = "\n".join(out)
+    if len(text) > 4000:
+        text = text[:3985].rsplit("\n", 1)[0] + "\n(truncated)"
+    return text
+
+
+async def whymem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Why the last reply used the memories it did (ROADMAP 7.6). Reads the breakdown
+    triggered_memories() kept for this chat; makes no model call. Groups never reach this
+    handler: group_guard refuses every command there except /chatid."""
+    if not MEMORY_WHY:
+        await update.message.reply_text("Memory scoring breakdown is disabled (MEMORY_WHY=0).")
+        return
+    bd = _mem_last_breakdown.get(update.effective_chat.id)
+    if not bd:
+        await update.message.reply_text(
+            "No reply in this chat since the bot started, so there is no scoring to show. "
+            "Send a message, then try /whymem again.")
+        return
+    await update.message.reply_text(_format_whymem(bd, _read_memories(), time.time()))
 
 
 async def coremem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -19600,6 +19696,7 @@ def main():
     app.add_handler(CommandHandler("episodes", episodes_cmd))
     app.add_handler(CommandHandler("editmem", editmem_cmd))
     app.add_handler(CommandHandler("sourcemem", sourcemem_cmd))
+    app.add_handler(CommandHandler("whymem", whymem_cmd))
     app.add_handler(CommandHandler("coremem", coremem_cmd))
     app.add_handler(CommandHandler("reviewmem", reviewmem_cmd))
     app.add_handler(CommandHandler("reviewlife", reviewlife_cmd))
