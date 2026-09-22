@@ -136,6 +136,14 @@ executed line by line and wrong when used the way operators actually use it.
 
 **Occurrence 6 (2026-08-10) — handing over a command for a directory without checking how that directory is managed.** Two in one exchange, same root. `git pull` on `/opt/telegram-bots/.repo` failed on `Permission denied (publickey)`: the remote is SSH and `vps-sync.sh` exports `GIT_SSH_COMMAND` with the read-only deploy key **per run** (line 79) rather than configuring it globally, so nothing outside the script inherits it. The script was in the repo the whole time and was not read until the second failure. Worse, the first failure was then explained with a *guess* — detached HEAD — that was stated to the owner as the likely cause and was wrong; reading `vps-sync.sh` took one grep and would have produced the real answer immediately. **When a handoff touches a directory some script owns, read that script before writing the command** — and never offer a mechanism as the explanation for a failure when the authoritative source is sitting in the repo unread. Recorded in `deploy-and-verify-fleet` so the incantation is looked up, not re-derived.
 
+**Occurrence 7 (2026-09-22) — occurrence 6 again, with the answer already on file.** Handed the
+owner `git -C /opt/telegram-bots/.repo pull --ff-only origin main` so cron would pick up a
+`vps-backup.sh` fix. Occurrence 6 and `deploy-and-verify-fleet` ("Refreshing the checkout by
+hand") both say a bare pull there fails on the deploy key. Found by this session while logging
+an unrelated slip, before the owner reported running it; corrected to the documented
+`GIT_SSH_COMMAND` + `fetch` + `reset --hard` block. **Before handing over any command against
+`/opt/telegram-bots/.repo`, copy it from `deploy-and-verify-fleet`, not from memory.**
+
 **Occurrence 5 (2026-08-10) — `python3` is not an interpreter, it is whichever one is first
 on that machine's PATH.** A handoff ran `python3 <repo>/tools/atlas_audit.py`. The fleet's
 dependencies live in a shared venv at `/opt/telegram-bots/venv/`, so the VPS's system python
