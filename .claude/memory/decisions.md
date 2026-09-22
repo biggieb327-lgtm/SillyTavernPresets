@@ -82,6 +82,38 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-22 | MEX (mex-memory/mex) is not adopted as a memory layer; two of its ideas are copied by hand | status: current
+**Decided:** do not install MEX (`mex-agent` 0.8.2). Copy two ideas into the existing memory
+layer instead: an eval that checks code identifiers named in docs still exist, and a commit SHA
+on mycelium entries so a reader can see what changed since the entry was written. Plan:
+`.claude/memory/improvement-proposals/2026-09-mex-ideas.md`.
+**Over:** (a) **full adoption** — lost because nearly every MEX feature already has a home here
+(project notes / Wiki decisions -> `decisions.md`; Relays -> `mycelium.md`; Inbox -> `inbox.md`
++ `session-debrief`; path grounding -> `claude-md-refs-resolve` / `skill-refs-resolve`; Codex
+support -> the harness-neutral mycelium rule in `CLAUDE.md`), and a parallel system beside those
+plus Notion is the drift this repo keeps paying for (F2, `.claude/SCAFFOLDING-AUDIT-2026-07-30.md`);
+(b) **the Code Graph only** (`mex graph scope`) — lost because its SQLite indexes are
+never committed, so every ephemeral cloud session would need Node >=22.5 plus a rebuild over a
+19,841-line `bot.py` before use, and its token-savings benchmark is 12 tasks run once each on one
+model, with accuracy 7/12 vs 6/12, which is inside noise; the savings are on Claude's side, not the
+NanoGPT quota; (c) **body-hash drift** (MEX flags a doc claim whenever the grounded function's body
+changes) — lost because `bot.py` changes almost every session, so nearly every claim would be
+flagged, and a check that noisy on day one gets switched off (the lesson recorded in the
+`skill-refs-resolve` comment); only the decidable half, "the named identifier no longer exists",
+is copied.
+**Why:** MEX's review step lives in a Hub bound to `127.0.0.1` on the machine running it, and the
+owner works from Android against cloud sessions, so the human-approval path it is built around is
+not usable here. Other costs: telemetry is on by default (public repo), setup writes
+`.claude/skills/mex-*` into files `skill-index-integrity` guards, and the tool is 0.8.x with a
+handoff schema already on v4.
+**By:** a session evaluated it (cloned 0.8.2, read README + `evaluate/RESULTS.md`, measured this
+repo's doc identifiers: 115 identifier-shaped names in `CLAUDE.md` + skills, 13 absent from
+`bot.py`, all 13 legitimately defined elsewhere, so zero drift today); the owner confirmed
+"log the decision" 2026-09-22.
+**Detail:** `.claude/memory/improvement-proposals/2026-09-mex-ideas.md`.
+Related: mycelium 2026-08-21 (semantic search over the oplog ruled out), mycelium 2026-08-23
+(literature scan, do not re-run).
+
 ### 2026-09-04 | Model context windows are measured against the live endpoint, never read from a spec | status: current
 **Decided:** the served context window of any model this fleet uses is established by probing
 the live NanoGPT endpoint (`probe-context.py`), and `FALLBACK_CONTEXT_BUDGET` is set from that
