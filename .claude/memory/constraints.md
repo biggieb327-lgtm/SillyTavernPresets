@@ -1247,6 +1247,13 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-22 — Gave `rm -rf ~/*-bot` to clean phone leftovers (`~/nora-bot` etc.). The glob
+  also matches `~/telegram-companion-bot`, and the owner ran the checking step on the VPS by
+  mistake, where `ls` showed `/root/telegram-companion-bot` matching. Caught before the `rm`
+  ran; nothing deleted. Two errors: a destructive command whose pattern was broader than its
+  target, and a check/delete pair split so the check could run on one host and the delete on
+  another. -> **a delete names every path explicitly (never a suffix glob); give the `rm` only
+  after the owner pastes the listing from the same host.**
 - 2026-09-22 — Gave VPS-only commands (`crontab -l`, `ls /opt/telegram-bots/backups`, a
   root crontab line) with no host label. `host-guard.sh` caught it on the stop hook (C1);
   restated with `# host: vps`. The prose said "on the VPS" only in the previous message, not

@@ -82,9 +82,10 @@ constraints; check their assumptions before acting on them.
   - [ ] Phone: as each instance migrates, remove/rename its `~/<name>-bot/` dir —
         `watchdog.sh` hard-codes the instance list and resurrects any dir it sees;
         retire watchdog.sh entirely when the phone empties
-  - [ ] Verify Jules's proactive texts stayed free of fabricated `[sent HH:MM]`
+  - [x] Verify Jules's proactive texts stayed free of fabricated `[sent HH:MM]`
         headers (card fix 2026-07-19); if recurred, ship the regex strip at the
-        `_do_request` choke point as a versioned release
+        `_do_request` choke point as a versioned release — **closed 2026-09-22**: none
+        seen by the owner since the fix, and the 2026-07-26 soak recorded no recurrence
   - [x] OPS_MANUAL "VPS operations" section; mark CLAUDE.md Termux quirks historical
         (these two are also the 1.2 done-when criteria) — **done 2026-07-26**;
         CHEATSHEET.md rewritten for systemd in the same pass
