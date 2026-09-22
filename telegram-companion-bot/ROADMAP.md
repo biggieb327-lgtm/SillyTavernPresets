@@ -75,8 +75,8 @@ constraints; check their assumptions before acting on them.
         `TELEGRAM_BOT_TOKEN` lines and cloned state) — **already gone, confirmed
         2026-09-22** (`rm -r` reported "No such file or directory" on the VPS)
   - [x] Re-point `HEALTHCHECK_URL` per instance on the VPS — **done 2026-09-23**,
-        owner-reported (all seven checks set up and up). Was:
-        Fleet Ops P0; distinct URL each; see OPS_MANUAL)
+        owner-reported (all seven checks set up and up). Was Fleet Ops P0; distinct
+        URL each; see OPS_MANUAL.
   - [ ] Phone: delete `~/jules-migrate.tar.gz` (jules's rollback copy — keep until
         soak passes; same per-instance after each successful migration)
   - [ ] Phone: as each instance migrates, remove/rename its `~/<name>-bot/` dir —
