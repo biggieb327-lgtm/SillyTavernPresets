@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 
 import bot
 
@@ -8784,6 +8785,8 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_URGENCY_FLOOR": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
+        # Sprint 2 (c76b11f). Default-on per the kill-switch policy.
+        "NIGHTLY_RECEIPTS": True,
         "NOTE_GROUNDED": True,
         "NOTE_RECURRING": True,
         "ONTHISDAY_ENABLED": True,

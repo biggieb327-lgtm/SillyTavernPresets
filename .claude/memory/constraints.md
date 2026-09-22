@@ -1247,6 +1247,12 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-22 — Reported a memory-layer change as verified with `run-evals.sh` alone ("58 passed")
+  and merged it to `main` without running `verify.sh` or reading CI. `main` had been red for
+  6 days; `debrief-check.sh` surfaced it, not me. CLAUDE.md says to run `verify.sh`, not the
+  pieces of it. -> **before pushing to `main`, run `verify.sh` in full and read the CI result
+  for the pushed SHA, even for a Markdown-only diff; the check is what's red on `main`, not only
+  what my diff could break.**
 - 2026-09-16 — Wrote "all checks green on the dashboard" as a flat statement about
   expected VPS outcomes after owner-side setup, alongside a hedged "should return 7."
   `theory-guard.sh` caught it on the stop hook. Self-corrected to hedge both clauses.
@@ -1278,6 +1284,9 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   as a separate step — the test exists because this slip is the norm, not the exception.**
   - 2026-09-03 — Same slip with MIXTAPE_ENABLED. Caught by pytest on first run, one edit
     to fix. The existing test is the mechanism; the slip is the norm.
+  - 2026-09-22 — Same slip with NIGHTLY_RECEIPTS (c76b11f), but this time it **reached
+    `main`**: pytest caught it only in CI, and nobody read CI. The test works; what failed is
+    the step of running it before merging. See operational-log 2026-09-22.
 - 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
   `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
   existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
