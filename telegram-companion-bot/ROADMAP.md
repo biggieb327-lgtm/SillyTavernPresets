@@ -36,8 +36,9 @@ constraints; check their assumptions before acting on them.
   the runbook: verify state by content; rename the instance dir before any kill).
   OPS_MANUAL "VPS operations" and CLAUDE.md Termux-quirks-as-historical are **done
   2026-07-26**. ADMIN_API + `/fleet` canary is **done 2026-09-16** (seven bots). Still
-  open from the cleanup batch: per-instance `HEALTHCHECK_URL` (P0), phone/VPS leftover
-  path cleanup. VPS fleet backup **done 2026-09-23**: `deploy/vps-backup.sh` ran by hand
+  open from the cleanup batch: phone leftover paths only. Per-instance `HEALTHCHECK_URL`
+  **done 2026-09-23** (owner-reported: all seven checks set up and up); the VPS leftover
+  files were confirmed gone 2026-09-22. VPS fleet backup **done 2026-09-23**: `deploy/vps-backup.sh` ran by hand
   (896 files, 34M, all seven instances) and is in root's crontab nightly at 03:30; an
   off-box copy (`BACKUP_RSYNC_DST` / `BACKUP_RCLONE_REMOTE`) is still unset. The original 14-day healthcheck soak window
   (started 2026-07-26 → 2026-08-09) is past; treat lingering healthcheck gaps as the
@@ -73,7 +74,8 @@ constraints; check their assumptions before acting on them.
         migration (rebuild from the runbook tar instead; its `.env` has duplicate
         `TELEGRAM_BOT_TOKEN` lines and cloned state) — **already gone, confirmed
         2026-09-22** (`rm -r` reported "No such file or directory" on the VPS)
-  - [ ] Re-point `HEALTHCHECK_URL` per instance on the VPS (still open 2026-09-16 —
+  - [x] Re-point `HEALTHCHECK_URL` per instance on the VPS — **done 2026-09-23**,
+        owner-reported (all seven checks set up and up). Was:
         Fleet Ops P0; distinct URL each; see OPS_MANUAL)
   - [ ] Phone: delete `~/jules-migrate.tar.gz` (jules's rollback copy — keep until
         soak passes; same per-instance after each successful migration)
@@ -89,7 +91,7 @@ constraints; check their assumptions before acting on them.
 - **Done when:** all seven instances on systemd (six migrated 2026-07-26; marcus
   stood up on VPS 2026-07-29), OPS_MANUAL has a "VPS operations" section, Termux quirks
   in CLAUDE.md are marked historical, ADMIN_API + `/fleet` canary complete (2026-09-16),
-  and healthchecks are green per instance (`HEALTHCHECK_URL` still open — see cleanup).
+  and healthchecks are green per instance (`HEALTHCHECK_URL` done 2026-09-23, owner-reported).
 - **Unlocked on completion:** item 3.8 Phase 2 (a pre-reply thinking *call*) was
   blocked on this item and is now open — the phone-bandwidth constraint that forbade
   per-message side completions is gone. **3.8's spec was rewritten 2026-07-26 to
@@ -1493,7 +1495,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
-| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete.** All seven instances run under systemd on the VPS; Termux phone empty. ADMIN_API + `/fleet` canary **done 2026-09-16** (ports 8080–8086, shared token, bind ≠ `0.0.0.0`). OPS_MANUAL VPS ops + CLAUDE.md Termux quirks historical **done 2026-07-26**. Still open from 1.2 cleanup: `HEALTHCHECK_URL` ×7, phone leftover paths (VPS leftovers confirmed gone 2026-09-22). VPS fleet backup **done 2026-09-23** (nightly cron; off-box copy not yet set). |
+| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete.** All seven instances run under systemd on the VPS; Termux phone empty. ADMIN_API + `/fleet` canary **done 2026-09-16** (ports 8080–8086, shared token, bind ≠ `0.0.0.0`). OPS_MANUAL VPS ops + CLAUDE.md Termux quirks historical **done 2026-07-26**. `HEALTHCHECK_URL` ×7 **done 2026-09-23** (owner-reported). Still open from 1.2 cleanup: phone leftover paths (VPS leftovers confirmed gone 2026-09-22). VPS fleet backup **done 2026-09-23** (nightly cron; off-box copy not yet set). |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |
