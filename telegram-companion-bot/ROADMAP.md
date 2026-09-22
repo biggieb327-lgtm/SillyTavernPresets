@@ -64,11 +64,13 @@ constraints; check their assumptions before acting on them.
   first start (the v2026-07-05.5 startup-crash class).
 - **Cleanup batch (owner, deferred to "all six migrated" — ask Claude to walk this
   list when Phase 2 completes; items accumulated during the 2026-07-19 pilot):**
-  - [ ] VPS: `rm /opt/telegram-bots/jules/jules.json` (stale renamed card copy;
-        `CHARACTER_CARD` now normalized to `jules_nakagawa.json`)
-  - [ ] VPS: delete `/opt/telegram-bots/nora.parked` — do NOT revive it for nora's
+  - [x] VPS: `rm /opt/telegram-bots/jules/jules.json` (stale renamed card copy;
+        `CHARACTER_CARD` now normalized to `jules_nakagawa.json`) — **already gone,
+        confirmed 2026-09-22** (`rm` reported "No such file or directory" on the VPS)
+  - [x] VPS: delete `/opt/telegram-bots/nora.parked` — do NOT revive it for nora's
         migration (rebuild from the runbook tar instead; its `.env` has duplicate
-        `TELEGRAM_BOT_TOKEN` lines and cloned state)
+        `TELEGRAM_BOT_TOKEN` lines and cloned state) — **already gone, confirmed
+        2026-09-22** (`rm -r` reported "No such file or directory" on the VPS)
   - [ ] Re-point `HEALTHCHECK_URL` per instance on the VPS (still open 2026-09-16 —
         Fleet Ops P0; distinct URL each; see OPS_MANUAL)
   - [ ] Phone: delete `~/jules-migrate.tar.gz` (jules's rollback copy — keep until
