@@ -77,3 +77,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | 2026-09-12 | e953669 | 7 | |
 | 2026-09-16 | c926ac1 | 12 | Short session: VPS backup script + docs. One Minor (C5 theory-guard catch). |
 | 2026-09-17 | 7cfdcf6 | 3 | Clean single-purpose session: added inbox capture buffer, Related: cross-link convention, and debrief capture sweep to the memory layer (inspired by an external article). 0 mistakes, 0 new constraints. 58 evals green. |
+| 2026-09-22 | 173577b | 4 | MEX evaluated and rejected (decisions.md); mycelium entries now carry a commit SHA; doc-identifier eval parked in watchlist. Found main red since c76b11f (2 test-file gaps), fixed, CI green on f26be21 and 173577b. One Minor: verified with run-evals.sh alone before merging. |
