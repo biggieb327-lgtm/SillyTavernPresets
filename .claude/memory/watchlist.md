@@ -54,6 +54,20 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
+### 2026-09-22 — keyword score may crowd out semantic and BM25 in memory ranking | status: open
+at `a530c62` — In `triggered_memories()`, `sem_scored` tops out at 3.0 and `bm25_scored` at 2.0, but
+`keyword_scored` is a raw count of shared 4+-letter words with no cap, and the scan text is the
+user's message plus the last 8 history messages. The first live `/whymem` reading (Emily,
+2026-09-22) injected #61 and #53 on `kw 5.00` with `sem 0.00`, meaning semantic search judged
+them unrelated to the message. Longer lines share more words, so they may win on length alone.
+Not a problem yet: one reading, and a keyword-heavy win can be correct.
+**Graduates when:** two or more further `/whymem` readings show a line with `sem 0.00` injected
+over a line with a higher `sem`, and the owner judges the injected one wrong for the message.
+Then it is a ROADMAP Track 7 item: normalize `kw` to the same scale as the others (divide by the
+max, like BM25) behind a kill switch. **Dismissed if** several readings show `kw`-led picks that
+fit the conversation.
+Related: decisions 2026-09-22 (GraphRAG), ROADMAP 7.6.
+
 ### 2026-09-22 — docs can name a code identifier that no longer exists, and no check catches it | status: open
 `claude-md-refs-resolve` and `skill-refs-resolve` check file paths only. A backticked function or
 env var in `CLAUDE.md` or a `SKILL.md` (`_handle_group_message`, `update_cmd`, `GROUP_CHAIN_DECAY`)

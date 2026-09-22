@@ -7,6 +7,38 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-22.2 — Undated old memories get the time boost and decay
+
+**Root cause: memories written before `memory_meta.json` existed (before v2026-07-11.1)
+have no `ts`, and both `_recency_weight` and `_temporal_affinity` return a neutral 1.0
+without one.** So those memories never decayed, and a "remember when..." question could
+never boost them, even though many carry their date in the text (`[auto 2026-07-04] ...`).
+Seen live on the first `/whymem` reading after v2026-09-22.1 deployed: all eight injected
+lines were dated 2026-07-04 to 07-10 and every one showed `recency 1.00` and `time 1.00`.
+The neutral treatment for decay was deliberate ("legacy pre-meta memories are never
+punished"); the owner reversed that on 2026-09-22 (decisions.md).
+
+**Fix:** new pure `_memory_text_date(line)` reads a leading `[auto YYYY-MM-DD]` as local
+noon. In `triggered_memories()` it is used only when the line has no recorded `ts` (a
+recorded `ts` always wins), for the time term under `MEMORY_DATE_FALLBACK` and for the
+recency term under `MEMORY_DATE_FALLBACK_DECAY`. Both default on; separate switches so the
+decay half, which changes which memories surface, can be turned off alone. Lines with no
+date anywhere stay neutral. `/whymem` marks lines whose date came from the text. The audit
+prompt and `_evict_by_value` are unchanged: the auditor already sees the date in the line,
+and eviction already ranks undated lines oldest, which every text date is.
+
+**Expected effect (from the formula, not measured live):** with the default 90-day
+half-life, a line from 2026-07-04 now scores 0.54x its old value on 2026-09-22 (80 days,
+`0.5 ** (80/90)`), so
+newer memories win more often against those early ones unless the message matches them
+strongly or names that time.
+
+**Tests (`TestMemoryDateFallback`, 9):** prefix parsing and rejection of bad dates or
+mid-line stamps; an old undated line now decays while a line with no date stays at 1.0; the
+time boost reaches an old line; a recorded `ts` wins; each kill switch works alone; both off
+restores 1.0; `/whymem` shows the marker. Both flags added to
+`TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
+
 ## v2026-09-22.1 — `/whymem`: memory scoring breakdown (ROADMAP 7.6)
 
 **Root cause: `triggered_memories()` computed every score term and threw it away.** Each

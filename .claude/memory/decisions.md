@@ -82,6 +82,23 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-22 | Pre-meta memories decay by their text date instead of staying exempt | status: current
+**Decided:** a memory with no recorded `ts` but a leading `[auto YYYY-MM-DD]` is ranked by that
+date for both recency decay and the time boost (`MEMORY_DATE_FALLBACK_DECAY`,
+`MEMORY_DATE_FALLBACK`, both default on, v2026-09-22.2).
+**Over:** (a) **keep them exempt from decay** (the rule since v2026-07-12.1, "legacy pre-meta
+memories are never punished") and apply the date to the time boost only -- the session
+recommended this, because decay changes which memories the character recalls; (b) **leave both
+neutral** -- lost because a "remember when" question could never reach the earliest
+relationship memories.
+**Why:** the owner chose to treat old memories by their real age: an exemption that exists only
+because of when the metadata file was introduced is an accident of history, not a design. The
+separate decay switch keeps the riskier half reversible without a redeploy.
+**By:** owner, 2026-09-22 ("build the time-boost fix ... and the decay one as well"), after a
+live `/whymem` reading showed every injected line at `recency 1.00`.
+**Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-22.2.
+Related: decisions 2026-09-22 (GraphRAG), watchlist 2026-09-22 (keyword crowding).
+
 ### 2026-09-22 | GraphRAG is not adopted for bot memory or the dev memory layer; only per-step retrieval visibility is copied | status: current
 **Decided:** keep `triggered_memories()`'s flat hybrid scoring (keyword + semantic + BM25, summed,
 then multiplied by recency, repeat, urgency and temporal terms, capped at `MEMORY_TOKEN_BUDGET`).

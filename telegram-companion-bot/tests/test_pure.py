@@ -2868,6 +2868,125 @@ class TestWhyMem:
         assert "#? line 0" in text  # a line not in memories.txt shows '#?'
 
 
+class TestMemoryDateFallback:
+    """v2026-09-22.2: pre-memory_meta lines have no "ts", so decay and the time boost
+    both read 1.00 (seen live via /whymem). The "[auto YYYY-MM-DD]" prefix is read as a
+    fallback; each half has its own kill switch; a recorded ts always wins."""
+    OLD = "[auto 2026-07-04] they watched the storm roll in"
+    PLAIN = "they watched the storm roll in, no date"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig = {k: getattr(bot, k) for k in (
+            "MEMORY_TOKEN_BUDGET", "MEMORY_URGENCY_FLOOR", "MEMORY_WHY", "MEMORY_TEMPORAL",
+            "MEMORY_DATE_FALLBACK", "MEMORY_DATE_FALLBACK_DECAY",
+            "MEMORY_DECAY_HALFLIFE_DAYS")}
+        bot.MEMORIES_FILE.write_text(self.OLD + "\n" + self.PLAIN + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache[self.OLD] = [1.0, 0.0]
+        bot._embeddings_cache[self.PLAIN] = [1.0, 0.0]
+        bot._memory_meta.clear()
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+        bot.MEMORY_URGENCY_FLOOR = False
+        bot.MEMORY_TOKEN_BUDGET = 10_000
+        bot.MEMORY_WHY = True
+        bot.MEMORY_TEMPORAL = True
+        bot.MEMORY_DECAY_HALFLIFE_DAYS = 90
+        bot.MEMORY_DATE_FALLBACK = True
+        bot.MEMORY_DATE_FALLBACK_DECAY = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        for k, v in self._orig.items():
+            setattr(bot, k, v)
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+
+    def _terms(self, text="tell me about the storm"):
+        bot.triggered_memories(text, query_vec=[1.0, 0.0], chat_id=1)
+        bd = bot._mem_last_breakdown[1]
+        return {l: t for _, l, t in bd["picked"] + bd["cut"]}
+
+    def test_parses_auto_prefix(self):
+        ts = bot._memory_text_date(self.OLD)
+        d = datetime.fromtimestamp(ts, tz=bot.TZ) if bot.TZ else datetime.fromtimestamp(ts)
+        assert (d.year, d.month, d.day, d.hour) == (2026, 7, 4, 12)
+
+    def test_no_prefix_or_bad_date_is_none(self):
+        assert bot._memory_text_date(self.PLAIN) is None
+        assert bot._memory_text_date("[auto 2026-13-40] bad") is None
+        assert bot._memory_text_date("mid-line [auto 2026-07-04] only") is None
+
+    def test_old_undated_line_now_decays(self):
+        t = self._terms()
+        assert t[self.OLD]["recency"] < 1.0
+        assert t[self.OLD]["date_from_text"] is True
+        assert t[self.PLAIN]["recency"] == 1.0   # no date anywhere: still neutral
+
+    def test_time_boost_reaches_old_undated_line(self):
+        center = bot._memory_text_date(self.OLD)
+        orig = bot._extract_time_anchor
+        bot._extract_time_anchor = lambda _t: (center, 7 * 86400)
+        try:
+            t = self._terms("remember the storm back then")
+        finally:
+            bot._extract_time_anchor = orig
+        assert t[self.OLD]["time"] > 1.0
+        assert t[self.PLAIN]["time"] == 1.0
+
+    def test_recorded_ts_wins_over_text_date(self):
+        bot._memory_meta[self.OLD] = {"ts": time.time()}
+        t = self._terms()
+        assert t[self.OLD]["date_from_text"] is False
+        assert t[self.OLD]["recency"] > 0.99
+
+    def test_decay_switch_is_independent(self):
+        bot.MEMORY_DATE_FALLBACK_DECAY = False
+        center = bot._memory_text_date(self.OLD)
+        orig = bot._extract_time_anchor
+        bot._extract_time_anchor = lambda _t: (center, 7 * 86400)
+        try:
+            t = self._terms("remember the storm back then")
+        finally:
+            bot._extract_time_anchor = orig
+        assert t[self.OLD]["recency"] == 1.0
+        assert t[self.OLD]["time"] > 1.0
+
+    def test_time_switch_is_independent(self):
+        bot.MEMORY_DATE_FALLBACK = False
+        center = bot._memory_text_date(self.OLD)
+        orig = bot._extract_time_anchor
+        bot._extract_time_anchor = lambda _t: (center, 7 * 86400)
+        try:
+            t = self._terms("remember the storm back then")
+        finally:
+            bot._extract_time_anchor = orig
+        assert t[self.OLD]["time"] == 1.0
+        assert t[self.OLD]["recency"] < 1.0
+
+    def test_both_off_restores_neutral(self):
+        bot.MEMORY_DATE_FALLBACK = False
+        bot.MEMORY_DATE_FALLBACK_DECAY = False
+        t = self._terms()
+        assert t[self.OLD]["recency"] == 1.0
+        assert t[self.OLD]["date_from_text"] is False
+
+    def test_whymem_marks_text_dates(self):
+        self._terms()
+        text = bot._format_whymem(bot._mem_last_breakdown[1], bot._read_memories(),
+                                  time.time())
+        assert "[date read from text]" in text
+
+
 class TestBM25HybridRetrieval:
     """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
     keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
@@ -8941,6 +9060,9 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_URGENCY_FLOOR": True,
         # v2026-09-22.1, ROADMAP 7.6 /whymem. Default-on per the kill-switch policy.
         "MEMORY_WHY": True,
+        # v2026-09-22.2: read "[auto YYYY-MM-DD]" as a fallback timestamp.
+        "MEMORY_DATE_FALLBACK": True,
+        "MEMORY_DATE_FALLBACK_DECAY": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         # Sprint 2 (c76b11f). Default-on per the kill-switch policy.

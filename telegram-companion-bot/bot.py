@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-22.1"
+BOT_VERSION = "2026-09-22.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1348,6 +1348,14 @@ MEMORY_TEMPORAL_BOOST = _env_float("MEMORY_TEMPORAL_BOOST", "3.0")
 MEMORY_WHY = _env_bool("MEMORY_WHY", True)
 _MEMORY_WHY_RUNNERS_UP = 3
 _mem_last_breakdown: dict = {}  # chat_id -> breakdown of the last triggered_memories call
+
+# Memories written before memory_meta.json existed (pre-v2026-07-11.1) have no "ts", so
+# _recency_weight and _temporal_affinity treat them as neutral. Many carry their date in
+# the text instead ("[auto 2026-07-04] ..."). These read it as a fallback timestamp.
+# Owner decision 2026-09-22, found via /whymem. Default ON; 0 = old neutral behavior.
+MEMORY_DATE_FALLBACK = _env_bool("MEMORY_DATE_FALLBACK", True)        # time boost
+MEMORY_DATE_FALLBACK_DECAY = _env_bool("MEMORY_DATE_FALLBACK_DECAY", True)  # recency decay
+_AUTO_DATE_RE = re.compile(r"^\[auto (\d{4})-(\d{2})-(\d{2})\]")
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
@@ -5548,11 +5556,25 @@ def _bm25_score(scan_text: str, entries: list[str]) -> dict[str, float]:
         return {}
 
 
+def _memory_text_date(line: str) -> float | None:
+    """Epoch (local noon) of a line's leading "[auto YYYY-MM-DD]" stamp, or None.
+    Pure. Fallback only: a recorded memory_meta "ts" always wins over this."""
+    m = _AUTO_DATE_RE.match(line.strip())
+    if not m:
+        return None
+    try:
+        d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 12, tzinfo=TZ)
+    except ValueError:
+        return None
+    return d.timestamp()
+
+
 def _recency_weight(ts, now: float, halflife_days: float) -> float:
     """Exponential age decay for memory ranking. Neutral (1.0) when disabled
-    (halflife <= 0) or when the entry has no recorded timestamp — legacy pre-meta
-    memories are never punished. Floored at 0.1 so old memories are demoted in
-    the ranking, never erased by it."""
+    (halflife <= 0) or when no timestamp is passed. Since v2026-09-22.2 the caller
+    passes a pre-meta line's "[auto YYYY-MM-DD]" date when it has one (owner decision,
+    kill switch MEMORY_DATE_FALLBACK_DECAY), so such lines now decay; undated lines stay
+    neutral. Floored at 0.1 so old memories are demoted in the ranking, never erased."""
     if halflife_days <= 0 or not isinstance(ts, (int, float)) or ts <= 0:
         return 1.0
     age_days = max(0.0, (now - ts) / 86400.0)
@@ -5917,15 +5939,23 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     merged = []
     for l in all_lines:
         ts = _memory_meta.get(l.strip(), {}).get("ts")
+        text_ts = (_memory_text_date(l)
+                   if ts is None and (MEMORY_DATE_FALLBACK or MEMORY_DATE_FALLBACK_DECAY)
+                   else None)
         terms = {
             "kw": keyword_scored.get(l, 0),
             "sem": sem_scored.get(l, 0),
             "bm25": bm25_scored.get(l, 0),
-            "recency": _recency_weight(ts, now, MEMORY_DECAY_HALFLIFE_DAYS),
+            "recency": _recency_weight(
+                ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK_DECAY else None),
+                now, MEMORY_DECAY_HALFLIFE_DAYS),
             "repeat": _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY),
             "urgency": _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING,
                                       MEMORY_URGENCY_BOOST),
-            "time": _temporal_affinity(ts, time_anchor, MEMORY_TEMPORAL_BOOST),
+            "time": _temporal_affinity(
+                ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK else None),
+                time_anchor, MEMORY_TEMPORAL_BOOST),
+            "date_from_text": text_ts is not None,
         }
         score = ((terms["kw"] + terms["sem"] + terms["bm25"])
                  * terms["recency"] * terms["repeat"] * terms["urgency"] * terms["time"])
@@ -11727,7 +11757,8 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _format_why_line(num, score: float, line: str, terms: dict) -> str:
     """One /whymem block: the memory, then its score as the formula that produced it."""
     text = line if len(line) <= 120 else line[:117] + "..."
-    return (f"#{num if num else '?'} {text}\n"
+    dated = " [date read from text]" if terms.get("date_from_text") else ""
+    return (f"#{num if num else '?'} {text}{dated}\n"
             f"  final {score:.2f} = (kw {terms['kw']:.2f} + sem {terms['sem']:.2f}"
             f" + bm25 {terms['bm25']:.2f}) x recency {terms['recency']:.2f}"
             f" x repeat {terms['repeat']:.2f} x urgency {terms['urgency']:.2f}"
