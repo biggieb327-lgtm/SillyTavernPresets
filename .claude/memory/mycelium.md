@@ -49,7 +49,9 @@ do gets checked first, exactly like a claim from anywhere else.
 1. **Read open entries before non-trivial work.** `session-audit.sh` surfaces the count;
    the entries themselves are here.
 2. **Write an entry when you learn something the next session needs.** Keep it short —
-   a sentence or two, not a report. The value is the signal, not the detail.
+   a sentence or two, not a report. The value is the signal, not the detail. Start the
+   body with `at <short sha>` (see *Entry format*), so a reader can see whether the
+   code has moved since you wrote it.
 3. **Tag load-bearing claims** with the operational log's evidence tags — `[observed]`
    `[code]` `[external]` `[decision]` `[hypothesis]`, defined at the top of
    `operational-log.md`. A message is a claim by a session nobody can interrogate. Left
@@ -106,8 +108,8 @@ person to try Reddit access will read it.
 
 ```
 ### YYYY-MM-DD | from: <context> | to: <audience> | status: open
-One or two sentences. What you found, why it matters, what the next session
-should do (or not do) with it.
+at `<short sha>` — One or two sentences. What you found, why it matters, what the
+next session should do (or not do) with it.
 ```
 
 - **from** — branch name, task description, or just the date. Enough to find the
@@ -116,6 +118,14 @@ should do (or not do) with it.
   `character review` means the next session touching that area. A rule (`CLAUDE.md
   §Vocabulary`, `constraints C13`) means the entry is about that rule.
 - **status** — `open` (unread), `ack` (read, no action), `done` (acted on).
+- **at `<short sha>`** — the body's first words: `git rev-parse --short HEAD` when you
+  write the entry. `from:` names a `claude/...` branch, and those are merged and deleted, so
+  that reference dies; a SHA does not. A reader checks whether the code under the claim has
+  moved since with `git log --oneline <sha>..origin/main -- <file the entry is about>`.
+  An empty result means the ground is unchanged; commits listed mean re-verify before acting.
+  In the body, not the header: the header regex is what `session-audit.sh` counts and
+  `mycelium-format` pins. Entries written before 2026-09-22 have no SHA and are not
+  backfilled.
 - **Related:** (optional) name 2-3 entries across memory files this connects to, by file
   and date or ID (e.g., `Related: oplog 2026-08-27, C8, decisions 2026-09-01`). The value
   compounds as the web of cross-links grows — a session following a thread finds the next

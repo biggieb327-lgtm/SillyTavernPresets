@@ -5,11 +5,12 @@ This file is the build plan. It is not a Routine proposal (see this directory's 
 it does not follow that format because neither item has a recorded failure behind it.
 Both are pre-emptive, and that is stated as a cost below, not hidden.
 
-Status: **planned, not built.** Delete this file or mark each item done when it lands.
+Status (2026-09-22, owner): **item 1 parked** in `.claude/memory/watchlist.md` until its
+trigger fires; **item 2 built** (mycelium.md Entry format).
 
 ---
 
-## Item 1 — `doc-identifiers-resolve` eval (build this one)
+## Item 1 — `doc-identifiers-resolve` eval (parked in the watchlist)
 
 **What MEX does:** links a Wiki claim to a code symbol and flags the claim when the
 symbol moves, changes, or disappears.
@@ -64,7 +65,7 @@ exists."
 
 ---
 
-## Item 2 — commit SHA on mycelium entries (small, optional)
+## Item 2 — commit SHA on mycelium entries (built 2026-09-22)
 
 **What MEX does:** a Relay records the branch, `HEAD`, and whether the tree was dirty
 when it was written, so the receiver can see how far the repo has moved.

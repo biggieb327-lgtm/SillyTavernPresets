@@ -54,6 +54,16 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
+### 2026-09-22 — docs can name a code identifier that no longer exists, and no check catches it | status: open
+`claude-md-refs-resolve` and `skill-refs-resolve` check file paths only. A backticked function or
+env var in `CLAUDE.md` or a `SKILL.md` (`_handle_group_message`, `update_cmd`, `GROUP_CHAIN_DECAY`)
+that is renamed out of the code passes both. Not a problem yet: a prototype resolver checked 80
+such names on 2026-09-22 and found 0 unresolved, and no incident has come from this.
+**Graduates when:** a session is sent to an identifier a doc names that no longer exists in code.
+Then build the `doc-identifiers-resolve` eval; the full design, prototype, and acceptance steps are
+item 1 of `.claude/memory/improvement-proposals/2026-09-mex-ideas.md`.
+Related: decisions 2026-09-22 (MEX not adopted).
+
 ### 2026-09-01 — grounded offline life can carry owner-private memory into group/non-owner chats | status: open
 `v2026-09-01.1` made `_generate_life_event` / `_maybe_rotate_life_arc` read the owner's relationship
 memory (intimate specifics included, for an NSFW companion) for grounding. Their outputs
