@@ -445,6 +445,12 @@ Once all six instances are on the VPS and stable (14-day total soak):
    rm ~/.termux/boot/termux-boot-start.sh
    rm ~/.termux/boot/start-bots.sh.disabled 2>/dev/null
    ```
+   Also cancel any Termux:API scheduled jobs, which survive reboots and relaunched
+   `watchdog.sh` for two months after this migration (operational-log 2026-09-23):
+   ```bash
+   termux-job-scheduler --pending
+   termux-job-scheduler --cancel-all
+   ```
 3. Update OPS_MANUAL.md: mark Termux-specific sections as historical.
 4. Update CLAUDE.md: move Termux quirks to a "Historical (phone era)" section.
 5. Optionally keep the phone as a cold spare — `update-all.sh` still works if
