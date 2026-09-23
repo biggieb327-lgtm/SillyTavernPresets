@@ -171,6 +171,7 @@ that has survived two debriefs without being sorted is stale — dismiss it or p
 | raw observations captured mid-session | `.claude/memory/inbox.md` then sorted to real homes | always — the capture sweep (5b/5c) |
 | shipped item status | `ROADMAP.md` / `IMPROVEMENTS_PLAN.md` | anything moved |
 | a live Routine created | — | n/a: Routines are retired here (2026-08-22); `routines.md` is historical |
+| hook/eval blocks this session (`.claude/.runtime/blocks.log`) | `.claude/memory/mechanism-tally.tsv` via `python3 .claude/tools/mechanism-tally.py harvest` | always — the runtime log dies with the container; `debrief-check.sh` notes unharvested rows |
 | the fact that a debrief ran | `.claude/memory/debrief-log.md` via `bash .claude/tools/debrief-check.sh --record` | always — it is the only durable trace |
 
 ### 7. Leave the handoff in the repo, not in chat

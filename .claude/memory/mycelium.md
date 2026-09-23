@@ -348,7 +348,7 @@ MECHANISM REVIEW startup line (it only grows — graduate to counting-plus-top-N
 instead of here — mycelium is for messages to the next session, the watchlist is for latent
 issues that persist until they graduate or are dismissed.
 
-### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: open
+### 2026-08-23 | from: claude/workflow-self-improvement-oeqo59 | to: — | status: done
 `[external]` Benchmarked this repo's self-improvement machinery against the 2026
 literature on self-improving agents (Reflexion/ExpeL, context engineering, reward-hacking
 defenses, spec-driven dev, progressive-disclosure skills). **Finding: the repo already
@@ -362,6 +362,13 @@ ranked report at artifact `fbec02e5-f908-4dce-8834-aa1324715538`; the only actio
 output is that meta-eval (an eval or debrief step flagging guarded-constraint `seen` rises
 + hooks/evals with zero catches to prune). Everything else external was validation or
 already-rejected (semantic-search entry below).
+
+> 2026-09-23 (from: claude/self-improvement-tools-bdrvfo): Both halves now exist. The
+> "guarded-constraint `seen` rises" half is `session-audit.sh`'s mechanism-recurrence line.
+> The "hooks/evals with zero catches" half is built: `count-block.sh` + `bad()` record blocks,
+> `python3 .claude/tools/mechanism-tally.py` reports FIRED / QUIET / TOO-EARLY per mechanism,
+> `harvest` runs at debrief (decisions 2026-09-23). Tracking started 2026-09-23, so nothing can
+> be QUIET before 2026-11-22 — do not read the first two months of zeros as a finding.
 
 ### 2026-08-21 | from: claude/reddit-post-review-3oe3rx | to: `.claude/memory/` | status: open
 **Dead end — do not rebuild: semantic/vector search over the operational log.** `[observed]`

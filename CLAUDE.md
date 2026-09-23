@@ -35,6 +35,9 @@ All under `telegram-companion-bot/` unless noted:
 - `.claude/memory/skill-impact.md` — did an intervention hold? One row per change to the
   machinery that targeted a failure class, tracking forward whether the class recurred
   (`pending`/`holding`/`recurred`). Written at debrief; `pending` count surfaces at startup.
+- `.claude/memory/mechanism-tally.tsv` — how often each hook and eval has blocked something.
+  Written only by `python3 .claude/tools/mechanism-tally.py harvest` at debrief; the bare
+  command reports FIRED / QUIET / TOO-EARLY per mechanism. QUIET means review, not delete.
 - `.claude/memory/inbox.md` — raw capture buffer; one-liners you noticed mid-task but
   haven't classified yet. Sorted into real files at session-debrief; unsorted count
   surfaces at startup.

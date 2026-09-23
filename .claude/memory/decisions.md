@@ -82,6 +82,20 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-23 | Hook and eval blocks are counted by a wrapper plus a debrief harvest | status: current
+**Decided:** blocking hooks run through `.claude/hooks/count-block.sh`, and `run-evals.sh`'s
+`bad()` writes a row per FAIL outside CI. Rows go to `.claude/.runtime/blocks.log` and are folded
+into the committed `.claude/memory/mechanism-tally.tsv` by `mechanism-tally.py harvest` at
+session-debrief. The `block-tally` eval pins the wrapper's exit-code passthrough.
+**Over:** (a) editing each of the 12 hooks to write its own row — 12 copies of the same code
+that drift apart; (b) writing straight into the committed file on every block — every blocked
+turn would dirty the tree mid-task; (c) counting from the evidence log — a blocked tool call
+never reaches the PostToolUse hook that writes it.
+**Why:** the 2026-08-23 benchmark (mycelium) named "nothing checks whether a mechanism ever
+fired" as the one real gap in the learning layer. The accepted cost: rows from a session that
+never debriefs are lost, so counts are a floor. QUIET (no firing in 60 days) means "review",
+never "delete" — a guard can work by being known about.
+
 ### 2026-09-22 | Pre-meta memories decay by their text date instead of staying exempt | status: current
 **Decided:** a memory with no recorded `ts` but a leading `[auto YYYY-MM-DD]` is ranked by that
 date for both recency decay and the time boost (`MEMORY_DATE_FALLBACK_DECAY`,

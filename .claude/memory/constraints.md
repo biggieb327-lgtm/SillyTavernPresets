@@ -1255,6 +1255,12 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-23 — Wrote the `block-tally` eval so it inherited `MECHANISM_TALLY` from the
+  environment, while `break-test.sh` (edited in the same change) exports `MECHANISM_TALLY=0`.
+  Under break-test the eval went red for the wrong reason, so the first six red results proved
+  nothing; `break-test.sh`'s green-after-restore step exposed it. Fixed by setting the variable
+  inside the eval. -> **an eval that tests an env-gated path sets the variable itself; never
+  let it inherit a value a harness may have changed.**
 - 2026-09-22 — Gave `rm -rf ~/*-bot` to clean phone leftovers (`~/nora-bot` etc.). The glob
   also matches `~/telegram-companion-bot`, and the owner ran the checking step on the VPS by
   mistake, where `ls` showed `/root/telegram-companion-bot` matching. Caught before the `rm`

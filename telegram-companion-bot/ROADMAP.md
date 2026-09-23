@@ -313,6 +313,67 @@ a list that cannot go stale beats a list that is correct today.
   registries remain separate changes; the rest of the direct command registrations move
   only as cohesive families, with behavior pinned before each migration.
 
+### 2.7 Reasoning-leak test set — score the detector against every leak so far — M
+
+- **Evidence:** the reasoning-leak class has come back three times. In
+  `.claude/memory/skill-impact.md`, v2026-07-29.1, v2026-08-03.1 and v2026-08-25.1 are all
+  `recurred`, and v2026-08-27.1 is `pending`. Each fix was written against the leak that had
+  just happened. The `reasoning-leak-guard` eval checks only that the guard is connected, not
+  whether `_looks_like_reasoning_leak` tells leaks from normal replies. `TestReasoningLeakGuard`
+  holds three leak excerpts (`LEAK`, `EMILY_LEAK`, `OUTLINE_LEAK`), and nothing checks a new
+  detector against all of them together with a set of normal replies.
+- **Why it needs the fleet:** the `[reasoning-leak]` log line in `_call_nanogpt_with_retries` keeps only
+  `result[:120]`, so the full text of a real leak is never kept anywhere. Leaks that got past
+  the guard exist only in the owner's Telegram history.
+- **Phase 0 (no bot.py change):** a `tests/leak_corpus/` folder with `leak/` and `clean/` text
+  files. Seed `leak/` from the existing fixtures and the excerpts quoted in the changelog and
+  operational log. Seed `clean/` with in-character replies that use bold text, numbered lists
+  or long paragraphs, since those are where the structural rule in v2026-08-27.1 could
+  wrongly flag a normal reply. A pytest scores the detector over the folder. It fails if any
+  `leak/` file passes or any `clean/` file is flagged, except files listed in a
+  `known-misses.txt` with the reason (for example, the headers-wrapped-across-lines residual
+  named in skill-impact).
+- **Phase 1 (bot.py, behind a kill switch, default on):** when the guard rejects a completion,
+  write the full text to `<instance>/leak_samples/` (capped count, oldest deleted first). The
+  owner forwards leaks that got through. Each new sample becomes a corpus file after review.
+- **Constraint: the repo is public.** Leaks quote real conversations. A sample is committed only
+  after redaction (names, places, anything owner-private) or as a paraphrase that keeps its
+  structure. Unredacted samples stay on the VPS, and the scorer runs there too
+  (`pytest -k LeakCorpus` against the private folder).
+- **Done when:** the corpus test runs in CI; every future change to `_looks_like_reasoning_leak`
+  or `_REASONING_MARKERS` must pass it; the v2026-08-27.1 row in skill-impact is judged against
+  the corpus, not against one sample.
+- **Risk:** low. Phase 0 is tests only. Phase 1 writes a bounded number of files. Cost: zero
+  NanoGPT tokens (the detector is pure).
+
+### 2.8 Render each instance's prompt offline, and compare before/after a change — M
+
+- **Evidence:** `preset.txt` changes all seven bots, and a card or preset-layer edit changes the
+  prompt in ways a reviewer cannot see from the diff. The Jules speaker-label incident
+  (operational log 2026-07-20) came from how bot.py assembled the prompt, not from the card.
+  The `character-reviewer` agent has to decide "card problem or prompt-assembly problem"
+  without seeing the assembled prompt. `test_pure.py` calls `assemble_messages` 30 times, and
+  each test checks one piece; nothing shows the whole prompt a given instance sends.
+- **Plan:** `render-prompt.py <instance> [--conversation fixture.json]` builds a temp instance
+  directory from the repo (the card, `preset*.txt` layers, the instance's context files, a
+  fixed `.env` with a placeholder API key), imports bot.py in a subprocess for that instance
+  (bot.py loads one instance per process), seeds a fixed short conversation, calls
+  `assemble_messages`, and writes the message list as JSON plus a readable text file.
+  `--all` does all seven instances. `--diff <git-ref>` renders at that ref and at the working
+  tree, and prints a per-instance unified diff.
+- **Rules it must keep:** never call NanoGPT (Working principle #10): no real key, network
+  fetches off, `query_vec=None`. Pin the clock so time-of-day and schedule blocks render the
+  same on every run.
+- **Unknown, to settle in a first spike:** how many module-level globals `assemble_messages`
+  reads that the fixture must seed (weather, news, life arc, memories, group ledger). If the
+  answer is "too many", render with those features switched off by their kill switches, and
+  say so in the output header.
+- **Done when:** `render-prompt.py --all` runs offline in under a minute; the
+  `edit-cards-and-presets` skill tells a session to attach the `--diff` output to any card or
+  preset change; an eval renders all seven instances, so a card that breaks prompt assembly
+  fails CI instead of failing on the VPS.
+- **Risk:** low. Read-only tooling, no bot.py behavior change. Cost: zero NanoGPT tokens.
+
 ---
 
 ## Track 3 — Character & product features

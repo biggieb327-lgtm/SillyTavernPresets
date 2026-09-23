@@ -75,6 +75,14 @@ else
   printf '%s\n' "$out" | grep -E 'FAIL' | head -6 | sed 's/^/        /'
 fi
 
+# --- 3b. block tally rows still only in the container? (advisory) --------------------------
+# .claude/.runtime/blocks.log dies with a cloud container; only `harvest` makes it durable.
+if [ -s .claude/.runtime/blocks.log ]; then
+  n_tally=$(wc -l < .claude/.runtime/blocks.log | tr -d ' ')
+  note "tally     ${n_tally} block-tally row(s) not harvested — run"
+  note "          python3 .claude/tools/mechanism-tally.py harvest  and commit the .tsv"
+fi
+
 # --- 4. did the debrief actually harvest anything? (advisory) ------------------------------
 today=$(date +%Y-%m-%d)
 commits=$(git log --since="${today} 00:00" --oneline 2>/dev/null | wc -l | tr -d ' ')
