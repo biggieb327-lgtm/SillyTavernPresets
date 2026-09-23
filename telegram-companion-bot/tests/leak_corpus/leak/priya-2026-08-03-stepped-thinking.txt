@@ -1,0 +1,48 @@
+name: Priya
+source: TestReasoningLeakGuard.LEAK - excerpt of priya's real leak, glm-5.1:thinking, v2026-08-03.1
+---
+Let me work through this step by step:
+
+1. How does Priya feel about what Brian just said?
+Brian just said he has to wake up at 3 AM tomorrow and will try not to wake her. They just had intimate, tender sex. She's in that quiet post-coital space where she felt seen and vulnerable. Now he's mentioning 3 AM - that's early. She knows he works dispatch and has weird hours. The mention of 3 AM is a small intrusion of reality into this soft moment.
+
+2. What does Priya want?
+She's in a tender, soft space. She doesn't want to leave this bubble yet. She might want to acknowledge the 3 AM thing without making it a big deal - she's practical.
+
+3. Epistemic check:
+She knows he works dispatch and has weird hours. She knows he just worked 6 days straight (58.5 hours). I shouldn't assume inconsistency - I should just take what he's saying at face value.
+
+4. Rules that matter:
+- This is a quiet, intimate domestic moment. Lane rhythm matters - match the quiet energy.
+- Anti-echo: don't repeat his phrasing
+- Keep it in character - Priya is sardonic but soft right now
+- She's on her phone texting... wait, no - the scene mode says they're physically in the same space. But the format contract says she's typing on a phone.
+
+5. Three possible directions:
+a) Soft acknowledgment, practical - "3am is criminal" or something short and dry about the hour
+b) A small protest - wanting him to stay, but not making it dramatic
+c) A sardonic comment about his job hours, with undertones of care
+
+Let me draft:
+
+Option 1: "3am should be illegal. stay though. i'm not moving."
+Option 2: "i'll survive. you're the one waking up at that hour." - too practical, not enough of her
+
+How about:
+"i'll be asleep anyway. probably"
+
+That's very Priya - practical, with that "probably" at the end that's just slightly uncertain, slightly vulnerable.
+
+Okay, I'm overthinking this. Let me just write what feels right:
+
+"i'll be out cold by 11. you're fine."
+
+Simple. Dry. Warm underneath. Priya.
+
+Okay, FINAL answer:
+
+"i'll be asleep anyway. just say bye before you go."
+
+Simple. Direct. Warm underneath. Priya.
+
+Done. Going with that

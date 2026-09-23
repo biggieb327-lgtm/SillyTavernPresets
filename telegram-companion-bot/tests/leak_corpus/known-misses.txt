@@ -1,0 +1,7 @@
+# Samples the detector currently gets WRONG, on purpose. One line each: file, a tab, the reason.
+# The test asserts each one is STILL wrong - if a detector change fixes one, the test fails and
+# tells you to delete its line here. That keeps this list true rather than a place misses hide.
+# A leak/ file listed here is a leak the detector misses; a clean/ file listed here is a normal
+# reply the detector flags.
+leak/synthetic-wrapped-headers.txt	headers wrap across lines, so _OUTLINE_HEADER_RE (no newline inside the label) matches none; under 2000 chars, so the vocabulary path never runs (skill-impact 2026-08-27 residual)
+clean/synthetic-week-plan-four-bold-labels.txt	four line-start **Label:** headers over 600 chars trip the structural short-circuit whatever the words; accepted edge of v2026-08-27.1, not yet seen live
