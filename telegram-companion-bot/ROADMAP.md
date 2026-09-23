@@ -39,8 +39,9 @@ constraints; check their assumptions before acting on them.
   open from the cleanup batch: nothing (phone cleared 2026-09-23). Per-instance `HEALTHCHECK_URL`
   **done 2026-09-23** (owner-reported: all seven checks set up and up); the VPS leftover
   files were confirmed gone 2026-09-22. VPS fleet backup **done 2026-09-23**: `deploy/vps-backup.sh` ran by hand
-  (896 files, 34M, all seven instances) and is in root's crontab nightly at 03:30; an
-  off-box copy (`BACKUP_RSYNC_DST` / `BACKUP_RCLONE_REMOTE`) is still unset. The original 14-day healthcheck soak window
+  (896 files, 34M, all seven instances) and is in root's crontab nightly at 03:30. Off-box copy **done 2026-09-23**: rclone
+  to an encrypted Google Drive remote (`BACKUP_RCLONE_REMOTE=gcrypt:`), upload OK and a restore
+  from Drive listed all seven instances' `state.json`; `REMOTE_KEEP_DAYS` (default 30) prunes it. The original 14-day healthcheck soak window
   (started 2026-07-26 → 2026-08-09) is past; treat lingering healthcheck gaps as the
   remaining monitor debt, not an open migration. **ROADMAP 3.8 Phase 2 is unblocked**
   (see "Unlocks on completion").
@@ -1501,7 +1502,7 @@ per-message LLM side calls) with no case strong enough to argue an exception.
 | ~~**Someday**~~ | ~~3.4 group chat~~ | ✅ Shipped (v2026-07-10.1) after 4-round design review |
 | ~~**Next**~~ | ~~4.1 memory auditor, 4.3 robustness leftovers~~ | ✅ Shipped as R1/R3 (v2026-07-11.1, .3) |
 | ~~**Someday**~~ | ~~4.2 availability awareness~~ | ✅ Shipped as R2 (v2026-07-11.2) |
-| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete.** All seven instances run under systemd on the VPS; Termux phone empty. ADMIN_API + `/fleet` canary **done 2026-09-16** (ports 8080–8086, shared token, bind ≠ `0.0.0.0`). OPS_MANUAL VPS ops + CLAUDE.md Termux quirks historical **done 2026-07-26**. `HEALTHCHECK_URL` ×7 **done 2026-09-23** (owner-reported). 1.2 cleanup batch **complete 2026-09-23** (VPS leftovers gone 2026-09-22, phone cleared 2026-09-23). VPS fleet backup **done 2026-09-23** (nightly cron; off-box copy not yet set). |
+| ~~**Now**~~ | ~~1.2 VPS Phase 2 — pilot jules~~ | **Rollout complete.** All seven instances run under systemd on the VPS; Termux phone empty. ADMIN_API + `/fleet` canary **done 2026-09-16** (ports 8080–8086, shared token, bind ≠ `0.0.0.0`). OPS_MANUAL VPS ops + CLAUDE.md Termux quirks historical **done 2026-07-26**. `HEALTHCHECK_URL` ×7 **done 2026-09-23** (owner-reported). 1.2 cleanup batch **complete 2026-09-23** (VPS leftovers gone 2026-09-22, phone cleared 2026-09-23). VPS fleet backup **done 2026-09-23** (nightly cron, encrypted off-box copy on Google Drive, restore tested). |
 | ~~**Next**~~ | ~~3.5 TomTom Phase 2 — generalized map intent~~ | ✅ Shipped (v2026-07-17.1, `MAP_INTENT`) |
 | ~~**Next**~~ | ~~3.6 schedule-driven unavailability, then 3.7 fatigue + silence license + day-mood residue~~ | ✅ Shipped (v2026-07-18.2, .3) same day as the reviews that sourced them |
 | ~~**Next**~~ | ~~1.6 lock the `vps-sync.sh` bot.py swap~~ | ✅ **Shipped and VPS-confirmed 2026-08-01** — `flock` plus a fatal backup, closing the other half of the concurrent-deploy bug bot.py fixed in v2026-07-25.11. Owner raced real `vps-sync.sh` invocations on the fleet: the loser (`cass`) hit the lock and exited before touching anything; the winner (`bonnie`) completed cleanly; `bot.py.bak` matched a pre-race baseline exactly. |

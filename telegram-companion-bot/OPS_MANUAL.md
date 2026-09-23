@@ -436,6 +436,7 @@ BACKUP_RCLONE_REMOTE=gdrive:bot-backups
 **Tunables** (`/etc/bot-backup.conf`):
 - `BACKUP_DIR` — where archives land (default: `/opt/telegram-bots/backups`)
 - `KEEP_DAYS` — local retention in days (default: 14)
+- `REMOTE_KEEP_DAYS` — retention on the rclone remote in days (default: 30; `0` = never delete there). Runs only after a successful upload, and only matches `bot-state-*.tar.gz`. The rsync destination is not pruned.
 - `VERBOSE=1` — progress output (cron is quiet by default)
 
 **Inspect / restore:**

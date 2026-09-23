@@ -18,6 +18,7 @@
 # Tunables (env or /etc/bot-backup.conf):
 #   BACKUP_DIR       — where archives land (default: /opt/telegram-bots/backups)
 #   KEEP_DAYS        — local retention in days (default: 14)
+#   REMOTE_KEEP_DAYS — rclone-remote retention in days (default: 30; 0 = never delete remotely)
 #   BACKUP_RSYNC_DST — rsync destination for off-box copy (e.g. user@offsite:/backups/bots)
 #   BACKUP_RCLONE_REMOTE — rclone remote for off-box copy (e.g. gdrive:bot-backups)
 #   VERBOSE          — set to 1 for progress output on success (cron is quiet by default)
@@ -29,6 +30,7 @@ set -euo pipefail
 BASE="${BOT_BASE:-/opt/telegram-bots}"
 BACKUP_DIR="${BACKUP_DIR:-$BASE/backups}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
+REMOTE_KEEP_DAYS="${REMOTE_KEEP_DAYS:-30}"
 VERBOSE="${VERBOSE:-0}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 
@@ -186,6 +188,16 @@ elif [ -n "${BACKUP_RCLONE_REMOTE:-}" ]; then
     if rclone copy "$ARCHIVE" "$BACKUP_RCLONE_REMOTE" 2>&1; then
       log "rclone to $BACKUP_RCLONE_REMOTE OK"
       offbox_ok=1
+      # Remote retention, run only after a successful upload so a broken remote never
+      # prunes without a fresh copy landing first. Only our own archive names match.
+      if [ "$REMOTE_KEEP_DAYS" -gt 0 ] 2>/dev/null; then
+        if rclone delete "$BACKUP_RCLONE_REMOTE" --include 'bot-state-*.tar.gz' \
+            --min-age "${REMOTE_KEEP_DAYS}d" 2>&1; then
+          vlog "remote: deleted archives older than $REMOTE_KEEP_DAYS days"
+        else
+          log "WARN: remote prune failed — old archives remain on $BACKUP_RCLONE_REMOTE"
+        fi
+      fi
     else
       log "WARN: rclone push failed — archive is still local at $ARCHIVE"
     fi
