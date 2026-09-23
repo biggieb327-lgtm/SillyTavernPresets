@@ -313,7 +313,15 @@ a list that cannot go stale beats a list that is correct today.
   registries remain separate changes; the rest of the direct command registrations move
   only as cohesive families, with behavior pinned before each migration.
 
-### 2.7 Reasoning-leak test set — score the detector against every leak so far — M
+### 2.7 Reasoning-leak test set — score the detector against every leak so far — M (Phase 0 ✅ 2026-09-23)
+
+- **Phase 0 shipped (2026-09-23):** `tests/test_leak_corpus.py` + `tests/leak_corpus/`. Holds the
+  three real leaks, one long in-character scene, three synthetic boundary samples, and every
+  card's `first_mes`/`alternate_greetings` (loaded live). Two edges are recorded in
+  `known-misses.txt` and asserted to stay wrong until fixed: a leak whose bold-colon headers wrap
+  across lines is missed, and a normal reply with four line-start `**Day:**` labels over 600 chars
+  is flagged. Break-tested: turning off either rule, lowering the marker floor to 1 or 2, fixing
+  the wrapped-header miss, and emptying the long clean texts each turn it red. Next is Phase 1.
 
 - **Evidence:** the reasoning-leak class has come back three times. In
   `.claude/memory/skill-impact.md`, v2026-07-29.1, v2026-08-03.1 and v2026-08-25.1 are all
