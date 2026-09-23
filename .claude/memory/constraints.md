@@ -1255,6 +1255,14 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-23 — Committed `render_prompt.py --check` with a determinism check (render nora
+  twice, compare) and described it as proving "the clock and RNG are pinned". Two renders
+  seconds apart agree with a live clock too, because `environment_note` shows minutes, so the
+  check could not see an unpinned clock. Caught while listing break-tests, before the push;
+  added a check for the fixed stamp. The same run showed the pre-import `random.seed(0)` did
+  nothing, so it was deleted. -> **before claiming a check covers a property, name the
+  injection that would turn it red; if none comes to mind, it doesn't cover it.**
+
 - 2026-09-23 — Wrote the `block-tally` eval so it inherited `MECHANISM_TALLY` from the
   environment, while `break-test.sh` (edited in the same change) exports `MECHANISM_TALLY=0`.
   Under break-test the eval went red for the wrong reason, so the first six red results proved
