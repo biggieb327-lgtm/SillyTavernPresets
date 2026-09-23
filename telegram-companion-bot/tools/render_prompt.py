@@ -115,7 +115,6 @@ def _child(src: str, inst_dir: str, conv_path: str, out_json: str) -> None:
             return cls(d.year, d.month, d.day)
 
     time.time = lambda: fixed.timestamp()
-    random.seed(0)
 
     sys.argv = [sys.argv[0], inst_dir]
     os.environ["BOT_HOME"] = inst_dir
@@ -124,7 +123,7 @@ def _child(src: str, inst_dir: str, conv_path: str, out_json: str) -> None:
 
     bot.datetime = _FixedDatetime
     bot.date = _FixedDate
-    random.seed(0)
+    random.seed(0)  # after the import: seeding before it was break-tested and changed nothing
 
     conv = json.loads(Path(conv_path).read_text())
     now = fixed.timestamp()
