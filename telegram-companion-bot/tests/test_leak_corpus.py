@@ -118,3 +118,76 @@ def test_corpus_can_fail():
     assert any(n >= bot._REASONING_LEAK_MIN_CHARS for n in lengths), \
         "no clean text reaches the vocabulary rule's floor — that rule is untested here"
     assert [r for r in LEAKS if r not in KNOWN], "every leak is a known miss — nothing is pinned"
+
+
+# -- Phase 1 (v2026-09-23.1): the guard saves every rejected completion in full ------------
+#
+# Driven through call_nanogpt with the same _one_call seam TestReasoningLeakGuard uses, so
+# these prove the call site saves, not just that _save_leak_sample works when called.
+
+REAL_LEAK = "leak/priya-2026-08-03-stepped-thinking.txt"
+
+
+def _patch_calls(monkeypatch, tmp_path, outputs):
+    monkeypatch.setattr(bot, "LEAK_SAMPLES_DIR", tmp_path / "leak_samples")
+    monkeypatch.setattr(bot, "REASONING_LEAK_GUARD", True)
+    monkeypatch.setattr(bot, "LEAK_SAMPLES", True)
+    monkeypatch.setattr(bot, "_one_call", lambda messages, m: outputs.pop(0))
+    monkeypatch.setattr(bot.time, "sleep", lambda s: None)
+    return tmp_path / "leak_samples"
+
+
+def _call():
+    return bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                            model="thinker", fallback="plain", leak_guard=True)
+
+
+def test_rejected_leak_is_saved_in_corpus_format(monkeypatch, tmp_path):
+    """Each rejected attempt is one file; the file loads with this module's own _load
+    and gives back the exact completion, so a reviewed sample drops into leak/ as is."""
+    _, leak = _load(CORPUS / REAL_LEAK)
+    d = _patch_calls(monkeypatch, tmp_path, [leak, leak, "hey. come here."])
+    assert _call() == "hey. come here."
+    files = sorted(d.glob("*.txt"))
+    assert len(files) == 2, [f.name for f in files]
+    for f in files:
+        name, text = _load(f)
+        assert name == bot.NAME
+        assert text == leak
+        assert bot._looks_like_reasoning_leak(text, name)
+    assert "thinker" in files[0].name
+    assert not list(d.glob("*.tmp"))
+
+
+def test_delivered_reply_is_not_saved(monkeypatch, tmp_path):
+    d = _patch_calls(monkeypatch, tmp_path, ["hey. come here."])
+    assert _call() == "hey. come here."
+    assert not d.exists()
+
+
+def test_kill_switch_saves_nothing_and_guard_still_rerolls(monkeypatch, tmp_path):
+    _, leak = _load(CORPUS / REAL_LEAK)
+    d = _patch_calls(monkeypatch, tmp_path, [leak, "hey. come here."])
+    monkeypatch.setattr(bot, "LEAK_SAMPLES", False)
+    assert _call() == "hey. come here."
+    assert not d.exists()
+
+
+def test_oldest_samples_deleted_past_the_cap(monkeypatch, tmp_path):
+    d = _patch_calls(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(bot, "LEAK_SAMPLES_MAX", 2)
+    d.mkdir()
+    for stamp in ("20260101T000000000000Z", "20260102T000000000000Z"):
+        (d / f"{stamp}-old.txt").write_text("name: x\nsource: y\n---\nold\n")
+    saved = bot._save_leak_sample("new text", "m")
+    assert sorted(p.name for p in d.glob("*.txt")) == ["20260102T000000000000Z-old.txt", saved.name]
+
+
+def test_failed_save_never_blocks_the_reroll(monkeypatch, tmp_path):
+    """The save is best-effort: if the folder cannot be created (here a FILE sits at its
+    path), the leak is still refused and the retry still delivers."""
+    _, leak = _load(CORPUS / REAL_LEAK)
+    d = _patch_calls(monkeypatch, tmp_path, [leak, "hey. come here."])
+    d.write_text("not a folder")
+    assert _call() == "hey. come here."
+    assert d.read_text() == "not a folder"

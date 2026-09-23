@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-22.2"
+BOT_VERSION = "2026-09-23.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -738,6 +738,16 @@ DIRECTIVE_LEAK_GUARD = _env_bool("DIRECTIVE_LEAK_GUARD", True)
 # v2026-07-20.1 path, no bracket syntax for _strip_directive_lines. Default ON with
 # a kill switch (owner policy 2026-07-18: unset = active, 0/off disables).
 REASONING_LEAK_GUARD = _env_bool("REASONING_LEAK_GUARD", True)
+# Leak samples (ROADMAP 2.7 Phase 1, v2026-09-23.1). The [reasoning-leak] log line keeps
+# only the first 120 chars, so the full text of a rejected completion was never kept and
+# the leak test set (tests/leak_corpus/) could only grow from what the owner pasted by
+# hand. Each rejection now writes the whole completion to <instance>/leak_samples/, in the
+# corpus file format, newest LEAK_SAMPLES_MAX kept. Default ON with a kill switch (owner
+# policy 2026-07-18). The files quote real chats: they stay on the VPS, and a sample is
+# committed to the public repo only after redaction.
+LEAK_SAMPLES = _env_bool("LEAK_SAMPLES", True)
+LEAK_SAMPLES_MAX = _env_int("LEAK_SAMPLES_MAX", "50")
+LEAK_SAMPLES_DIR = BASE_DIR / "leak_samples"
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -7828,6 +7838,35 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     return categories >= _REASONING_LEAK_MIN_MARKERS
 
 
+def _save_leak_sample(text: str, model: str):
+    """Write one rejected completion to LEAK_SAMPLES_DIR; return the path, or None.
+
+    The file uses the tests/leak_corpus/ format (name:, source:, ---, text), so after
+    review and redaction it can be copied into leak/ or clean/ unchanged. The guard is
+    not always right, so a sample is a candidate: a normal reply it flagged belongs in
+    clean/ plus known-misses.txt. Oldest files are deleted past LEAK_SAMPLES_MAX.
+    Best-effort: any failure logs and returns None; the rejection itself never depends
+    on this write."""
+    if not LEAK_SAMPLES or LEAK_SAMPLES_MAX <= 0:
+        return None
+    try:
+        LEAK_SAMPLES_DIR.mkdir(exist_ok=True)
+        now = datetime.now(timezone.utc)
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", model or "unknown")[:60]
+        path = LEAK_SAMPLES_DIR / f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{safe_model}.txt"
+        _atomic_write_text(path, (
+            f"name: {NAME}\n"
+            f"source: {BASE_DIR.name} {model} {now.isoformat(timespec='seconds')} - "
+            f"rejected by _looks_like_reasoning_leak ({len(text)} chars); unreviewed\n"
+            f"---\n{text}\n"))
+        for stale in sorted(LEAK_SAMPLES_DIR.glob("*.txt"))[:-LEAK_SAMPLES_MAX]:
+            stale.unlink(missing_ok=True)
+        return path
+    except Exception as e:
+        log.warning("[reasoning-leak] could not save the full sample: %s", e)
+        return None
+
+
 def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str = None,
                                leak_guard: bool = False, operation_state: dict = None) -> str:
     """Try each model up to _CHAT_RETRIES times with backoff; fall to fallback on transient errors.
@@ -7884,6 +7923,9 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                     # Own counter so /errors can tell "guard fired" from "API flaked";
                     # the shared "api" count below still records the wasted call.
                     _count_error("reasoning_leak")
+                    saved = _save_leak_sample(result, m)
+                    if saved:
+                        log.info("[reasoning-leak] full text saved to %s", saved)
                     reject = "reasoning-shaped"
                 if reject:
                     # A rejected completion still cost real tokens — up to a full

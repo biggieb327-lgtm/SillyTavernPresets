@@ -9039,6 +9039,8 @@ class TestEveryBooleanFlagDefault:
         "IMAGE_RETRY_TRANSIENT": True,
         "INNER_VOICE_ENABLED": False,
         "JOKE_CANDIDATES": False,
+        # v2026-09-23.1: saves each guard rejection to leak_samples/ (ROADMAP 2.7 Phase 1).
+        "LEAK_SAMPLES": True,
         "LIFE_GROUNDING": True,
         "LIFE_PROJECT": False,
         "LIFE_ROTATE": True,

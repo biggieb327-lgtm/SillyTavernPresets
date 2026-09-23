@@ -9,6 +9,7 @@ wardrobe.json
 owner_chat.txt
 bot.log
 errors.log*
+leak_samples/
 *.tmp
 *.png
 *.jpg

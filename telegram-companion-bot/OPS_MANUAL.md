@@ -787,6 +787,18 @@ after sending that bot `/audit` (`_self_audit` fires the ping inline with that j
 - Set `FALLBACK_MODEL` in `.env` to retry with a different model automatically
 - Check your provider's status page
 
+**A reply was re-rolled for "reasoning leak" (`[reasoning-leak]` in the log, `reasoning_leak` in `/errors`)**
+- The model wrote its planning as the reply, and the guard refused it. Since v2026-09-23.1
+  the full text is in `/opt/telegram-bots/<instance>/leak_samples/`, one file per rejection,
+  newest 50 kept (`LEAK_SAMPLES_MAX`). The journal line `[reasoning-leak] full text saved
+  to ...` names the file; it is INFO, so `/errors` (warnings only) does not show it.
+- The guard can be wrong. Read the file: real planning is a leak; a normal in-character
+  reply means the guard misfired, which is worth reporting.
+- To add one to the test set (`tests/leak_corpus/`, ROADMAP 2.7): redact it first, because
+  the repo is public. Then copy it to `leak/`, or for a misfire to `clean/` plus a line in
+  `known-misses.txt`. The file is already in the test-set format.
+- `LEAK_SAMPLES=0` stops saving the files; the guard keeps working.
+
 **Vision / selfie errors (503)**
 - The vision or image model is temporarily down
 - Set `VISION_FALLBACK` in `.env` to automatically try a backup model

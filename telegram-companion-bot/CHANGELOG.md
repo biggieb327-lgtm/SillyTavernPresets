@@ -7,6 +7,37 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-23.1 — Save the full text of every reply the reasoning-leak guard refuses
+
+**Root cause: the only record of a rejected leak was 120 characters.** When
+`_looks_like_reasoning_leak` refuses a completion, `_call_nanogpt_with_retries` logs
+`[reasoning-leak] ... head: %r` with `result[:120]` and discards the rest. The leak class has
+come back three times (skill-impact.md: v2026-07-29.1, v2026-08-03.1, v2026-08-25.1 all
+`recurred`), and each fix was written against one leak the owner pasted by hand, because no
+full sample was ever kept. The test set added in ROADMAP 2.7 Phase 0
+(`tests/leak_corpus/`) had the same limit: it could only grow from pasted text. It also had
+no way to see a misfire, where the guard refuses a normal reply and the user just gets a
+slower answer.
+
+**Fix (ROADMAP 2.7 Phase 1):** new `_save_leak_sample(text, model)`, called at the rejection
+in `_call_nanogpt_with_retries`. It writes the whole completion to
+`<instance>/leak_samples/<UTC stamp>-<model>.txt` in the corpus file format (`name:`,
+`source:`, `---`, text), so a reviewed sample can be copied into `leak/` or `clean/` as is.
+Files past `LEAK_SAMPLES_MAX` (default 50) are deleted oldest first. The save is
+best-effort: any error logs a WARNING and the refusal and retry go ahead unchanged. An INFO
+line `[reasoning-leak] full text saved to <path>` names the file. `LEAK_SAMPLES` (default on)
+is the kill switch; it stops the saving and leaves the guard as it was. The files quote
+real chats, so they stay on the VPS (`leak_samples/` is gitignored), and one reaches the
+public repo only after redaction. No model call is added; the only new work is one file
+write per rejected completion.
+
+**Tests (`tests/test_leak_corpus.py`, 5):** driven through `call_nanogpt` with the
+`_one_call` seam. Two rejected attempts write two files, each loads with the corpus's own
+`_load` and gives back the exact completion; a delivered reply writes nothing; the kill
+switch writes nothing and the re-roll still happens; the cap deletes the oldest file; a
+failed save (a file sits where the folder should be) still re-rolls and delivers. `LEAK_SAMPLES`
+added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+
 ## v2026-09-22.2 — Undated old memories get the time boost and decay
 
 **Root cause: memories written before `memory_meta.json` existed (before v2026-07-11.1)
