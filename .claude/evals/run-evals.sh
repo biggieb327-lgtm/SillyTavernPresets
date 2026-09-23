@@ -7,7 +7,16 @@ cd "$(dirname "$0")/../.." || exit 1
 
 pass=0; fail=0; skipped=0
 ok()  { echo "PASS  $1"; pass=$((pass+1)); }
-bad() { echo "FAIL  $1 — $2"; fail=$((fail+1)); }
+bad() { echo "FAIL  $1 — $2"; fail=$((fail+1)); _tally "$1"; }
+# Block tally (see .claude/hooks/count-block.sh): a FAIL is this eval catching something, so it
+# gets a row. Off in CI (the runner's disk is thrown away) and under MECHANISM_TALLY=0, which
+# break-test.sh and verify-can-fail.sh set because they inject defects on purpose.
+_tally() {
+  [ -n "${CI:-}" ] && return 0
+  [ "${MECHANISM_TALLY:-1}" = "0" ] && return 0
+  { mkdir -p .claude/.runtime && printf '%s\teval\t%s\n' "$(date -u +%F)" "${1%%:*}" >> .claude/.runtime/blocks.log; } 2>/dev/null
+  return 0
+}
 # skip = the check could not run in THIS environment (never in CI, which installs
 # deps first). Doesn't fail the suite, but says so loudly instead of lying either way.
 skip() { echo "SKIP  $1 — $2"; skipped=$((skipped+1)); }
@@ -1201,6 +1210,49 @@ if [ -z "$hooks_wired" ]; then
   ok "hooks-wired: every .claude/hooks/*.sh is registered in settings.json, and every registered hook exists"
 else
   bad "hooks-wired" "$hooks_wired"
+fi
+
+# --- block-tally ----------------------------------------------------------------------------
+# 2026-09-23: twelve blocking hooks now run THROUGH .claude/hooks/count-block.sh so the block
+# tally (mechanism-tally.py) can see them fire. That makes the wrapper a single point of
+# failure: if it swallowed exit 2, every guard it wraps would go silently open — the inert-
+# looks-like-working shape hooks-wired exists for. Three assertions:
+#   1. the wrapper returns the hook's exit code (0, 1, 2) and passes stdin/stdout through;
+#   2. it writes a tally row on exit 2 only, and none under MECHANISM_TALLY=0;
+#   3. every registered hook that can exit 2 is wrapped (`mechanism-tally.py check`), so a
+#      new guard cannot join settings.json uncounted; and the tool answers "could not
+#      determine" (exit 3), not a report, when its ledger is missing.
+if ! block_tally=$(bash - 2>&1 <<'SHEOF'
+set -u
+w=.claude/hooks/count-block.sh
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+probs=""
+for want in 0 1 2; do
+  out=$(printf 'in' | CLAUDE_PROJECT_DIR="$t" bash "$w" bash -c "cat; exit $want"); rc=$?
+  [ "$rc" = "$want" ] || probs="$probs; hook exit $want came back as $rc — every wrapped guard is broken"
+  [ "$out" = "in" ] || probs="$probs; stdin/stdout not passed through on exit $want (got '$out')"
+done
+rows=$(wc -l < "$t/.claude/.runtime/blocks.log" 2>/dev/null || echo 0)
+[ "$rows" -eq 1 ] || probs="$probs; expected exactly 1 tally row (for the exit-2 run), found $rows"
+MECHANISM_TALLY=0 CLAUDE_PROJECT_DIR="$t" bash "$w" bash -c 'exit 2'
+rows=$(wc -l < "$t/.claude/.runtime/blocks.log" 2>/dev/null || echo 0)
+[ "$rows" -eq 1 ] || probs="$probs; MECHANISM_TALLY=0 still wrote a row — break-tests would count as catches"
+chk=$(python3 .claude/tools/mechanism-tally.py check 2>&1); rc=$?
+[ "$rc" -eq 0 ] || probs="$probs; mechanism-tally.py check exited $rc: $chk"
+mkdir -p "$t/r/.claude/tools" "$t/r/.claude/evals" "$t/r/.claude/memory"
+cp .claude/tools/mechanism-tally.py "$t/r/.claude/tools/"; cp .claude/settings.json "$t/r/.claude/"
+cp .claude/evals/run-evals.sh "$t/r/.claude/evals/"
+python3 "$t/r/.claude/tools/mechanism-tally.py" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 3 ] || probs="$probs; with no ledger the tool exited $rc, not 3 (could not determine)"
+echo "${probs#; }"
+SHEOF
+); then
+  block_tally="the check itself exited non-zero: ${block_tally:-(no output)}"
+fi
+if [ -z "$block_tally" ]; then
+  ok "block-tally: count-block.sh keeps every hook's exit code and output, records only exit 2, and wraps every blocking hook"
+else
+  bad "block-tally" "$block_tally — see .claude/hooks/count-block.sh; if the wrapper is broken, unwrap settings.json until it is fixed"
 fi
 
 # --- oplog-search-works --------------------------------------------------------------------

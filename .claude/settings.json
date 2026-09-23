@@ -36,19 +36,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/risk-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/risk-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Risk guard"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/anchor-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/anchor-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Anchor guard (C7)"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/shell-semantics-guard.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/shell-semantics-guard.sh\""
           }
         ]
       }
@@ -64,12 +64,12 @@
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/budget-governor.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/budget-governor.sh\"",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py-syntax-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py-syntax-guard.sh\"",
             "timeout": 10
           }
         ]
@@ -80,25 +80,25 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/host-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/host-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Host guard (C1)"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Handoff guard (C1 family)"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/claim-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/claim-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Claim guard (C8 family)"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/theory-guard.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/theory-guard.sh\"",
             "timeout": 10,
             "statusMessage": "Theory guard (C5)"
           },
@@ -110,19 +110,19 @@
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/delivery-gate.sh\"",
             "timeout": 15,
             "statusMessage": "Delivery gate"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/eval-gate.sh\"",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/eval-gate.sh\"",
             "timeout": 120,
             "statusMessage": "Eval gate"
           },
           {
             "type": "command",
-            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/debrief-nudge.sh\""
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/count-block.sh\" bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/debrief-nudge.sh\""
           }
         ]
       }

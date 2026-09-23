@@ -23,6 +23,8 @@
 # hand whenever verify.sh, run-evals.sh, or gate_corpus changes.
 set -u
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 1
+# Defects injected here are not catches: keep them out of the block tally (mechanism-tally.py).
+export MECHANISM_TALLY=0
 
 BT=".claude/tools/break-test.sh"
 BOT="telegram-companion-bot/bot.py"

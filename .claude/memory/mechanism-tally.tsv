@@ -1,0 +1,5 @@
+# mechanism-tally.tsv — how often each hook and eval has blocked something. One row per mechanism.
+# Written ONLY by `python3 .claude/tools/mechanism-tally.py harvest` (run at session-debrief); never hand-edit.
+# Counts are a floor: rows from sessions that never harvested are lost. A firing is a block, not a verified catch.
+# tracking_since: 2026-09-23
+kind	name	firings	days	first	last

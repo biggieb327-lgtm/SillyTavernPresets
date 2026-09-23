@@ -35,6 +35,8 @@
 #
 # The file is restored on EVERY exit path, including a failed command, a crash, or Ctrl-C.
 set -u
+# Defects injected here are not catches: keep them out of the block tally (mechanism-tally.py).
+export MECHANISM_TALLY=0
 
 FILE=""; OLD=""; NEW=""
 while [ $# -gt 0 ]; do
