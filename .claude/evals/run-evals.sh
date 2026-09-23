@@ -1224,6 +1224,8 @@ fi
 #      determine" (exit 3), not a report, when its ledger is missing.
 if ! block_tally=$(bash - 2>&1 <<'SHEOF'
 set -u
+# Set, not inherited: break-test.sh exports MECHANISM_TALLY=0, and assertion 2 needs recording on.
+export MECHANISM_TALLY=1
 w=.claude/hooks/count-block.sh
 t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
 probs=""
