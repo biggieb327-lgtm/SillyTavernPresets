@@ -111,6 +111,17 @@ one the task names, and if the user seems to conflate them, ask which they mean.
    bash .claude/evals/run-evals.sh   # includes cards-valid-json + secret-scan
    ```
 
+   Then render the prompt the change produces and read the diff, not just the file diff:
+   ```bash
+   python3 telegram-companion-bot/tools/render_prompt.py --all --diff HEAD   # uncommitted edit
+   python3 telegram-companion-bot/tools/render_prompt.py --all --diff HEAD~1 # after committing
+   ```
+   It prints, per instance, "no change" or the unified diff of the assembled prompt. Put
+   that output in the report. A `preset.txt` or `preset-core.txt` edit shows every
+   instance it reaches; an instance you did not expect to change is a finding. PRESET_FILES
+   comes from `.env.example`'s recommended stacks, not the live `.env` (the header says so).
+   It imports bot.py, so it needs the same packages as pytest (`requirements.lock`).
+
 5. **Ship:** commit, merge to main, push (green = merge autonomously, same policy
    as code). No BOT_VERSION bump, no changelog release entry for content-only
    changes — the delivery gate won't fire. A dated changelog note
@@ -132,7 +143,8 @@ one the task names, and if the user seems to conflate them, ask which they mean.
 ## Verification checklist
 
 - [ ] `python3 -m json.tool` passes on every touched JSON file
-- [ ] `run-evals.sh` green (cards-valid-json, secret-scan)
+- [ ] `run-evals.sh` green (cards-valid-json, secret-scan, prompt-render)
+- [ ] `render_prompt.py --all --diff <ref>` output read and attached to the report
 - [ ] Cross-references checked: lorebook vs description vs seed files
 - [ ] The right copy edited (bot card vs root SillyTavern copy)
 - [ ] Deploy step communicated (or explicitly n/a for root presets)
@@ -194,5 +206,5 @@ fires only on its trigger words and is invisible otherwise.
 
 ## What to report back
 
-Which files changed and why, validation output, canon constraints that shaped the
+Which files changed and why, validation output, the `render_prompt.py --diff` output, canon constraints that shaped the
 edit, and the deploy step (`vps-sync.sh` per instance) or its inapplicability.

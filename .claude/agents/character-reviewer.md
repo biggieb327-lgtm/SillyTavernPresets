@@ -39,6 +39,10 @@ also code: both output paths fell back to `reasoning_content` when `content` was
 
 So before proposing any content change, check the assembly path:
 
+- Read the assembled prompt, not just its sources:
+  `python3 telegram-companion-bot/tools/render_prompt.py <instance>` prints the whole
+  message list the instance sends, offline (fixed clock, no NanoGPT call). Find the bad
+  text in it and note which message carries it.
 - Which prompt block does the bad text live in? Grep `bot.py` for how that block is
   built and injected — `mes_example`, preset layers, seeds, memory, day threads.
 - Is the text something the card *says*, or something the pipeline *did to* the card

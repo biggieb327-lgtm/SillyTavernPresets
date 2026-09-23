@@ -362,7 +362,26 @@ a list that cannot go stale beats a list that is correct today.
 - **Risk:** low. Phase 0 is tests only. Phase 1 writes a bounded number of files. Cost: zero
   NanoGPT tokens (the detector is pure).
 
-### 2.8 Render each instance's prompt offline, and compare before/after a change — M
+### 2.8 ~~Render each instance's prompt offline, and compare before/after a change~~ ✅ (2026-09-23) — M
+
+- **Shipped (2026-09-23):** `tools/render_prompt.py` (snake_case to match the other files
+  in `tools/`, not the `render-prompt.py` written below). `<instance>`, `--all`,
+  `--conversation`, `--env KEY=VALUE`, `--out`, `--diff <git-ref>`, `--check`.
+  All seven render in about 4 s. The spike settled the open question: `assemble_messages`
+  needed nothing seeded beyond `user_names` and `conversation_history`, so no feature is
+  switched off. The clock is fixed (`bot.datetime`, `bot.date`, `time.time`), `random` is
+  seeded, and every socket connect raises (`_block_network`). The `prompt-render` eval runs
+  `--all --check`. That check fails when a PRESET_FILES layer falls back, when a loaded layer
+  or the card's post_history_instructions is missing from the prompt, when a `{{char}}`/`{{user}}`
+  placeholder is left unfilled, or when the prompt does not open with a system message and
+  close with the user's message. It also renders nora twice and fails if the two differ.
+  `tests/test_render_prompt.py` covers `_problems`, `_block_network`, and the `INSTANCES`
+  table against the repo and against `.env.example`'s "Recommended stacks". The
+  `edit-cards-and-presets` skill and the `character-reviewer` agent now use it.
+  **Still open:** the live `.env` files are on the VPS, so PRESET_FILES comes from
+  `.env.example`'s recommended stacks. Every other variable (WEATHER_LOCATION, BOT_TIMEZONE,
+  feature switches) is its bot.py default. A render shows what the repo would send with those
+  settings; it can differ from what a live instance sends. Each render's header says this.
 
 - **Evidence:** `preset.txt` changes all seven bots, and a card or preset-layer edit changes the
   prompt in ways a reviewer cannot see from the diff. The Jules speaker-label incident

@@ -160,6 +160,22 @@ else
   fi
 fi
 
+# ROADMAP 2.8 (2026-09-23): render every instance's full prompt offline from the repo's own
+# card, context files and preset layers. bot-imports above uses a stub card, so a real card
+# or layer that breaks assemble_messages, a PRESET_FILES layer missing from the repo (the
+# bot silently falls back to preset.txt), a loaded layer or the card's
+# post_history_instructions not reaching the prompt, or an unfilled {{char}}/{{user}}
+# (v2026-07-26.4) used to surface only on the VPS. Also renders nora twice and requires
+# identical output, so `render_prompt.py --diff` shows only what a change did.
+render_out=$(python3 telegram-companion-bot/tools/render_prompt.py --all --check 2>&1); render_rc=$?
+if [ "$render_rc" -eq 0 ]; then
+  ok "prompt-render: all seven instances assemble a whole prompt offline, deterministically"
+elif printf '%s' "$render_out" | grep -q 'ModuleNotFoundError'; then
+  skip "prompt-render" "dependency missing in this environment — install telegram-companion-bot/requirements.lock to run it; NOT a card or bot.py defect"
+else
+  bad "prompt-render" "$(printf '%s' "$render_out" | grep -v ': ok' | tail -8) — run 'python3 telegram-companion-bot/tools/render_prompt.py <instance>' to see the whole prompt; a card, context file or preset layer on main would break or change that instance's prompt on its next vps-sync.sh"
+fi
+
 # v2026-07-20.1: reasoning models leaked raw chain-of-thought when `content` came back
 # empty and the code fell back to `reasoning_content` (no <think> tags, so _strip_thinking
 # couldn't clean it) — Priya sent her planning monologue as a reply. _extract_content must
