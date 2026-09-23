@@ -351,6 +351,15 @@ def main() -> int:
             failed += 1
         else:
             print("determinism: ok (two renders of nora are identical)")
+        # Two renders seconds apart agree even with a live clock (environment_note shows
+        # minutes), so the check above cannot see an unpinned clock. This one can.
+        stamp = "Tuesday, September 22, 2026, 7:30 PM"
+        if not a or not any(stamp in str(m["content"]) for m in a["messages"]):
+            print(f"clock: FAIL — nora's render does not show the fixed time '{stamp}'; "
+                  f"datetime is not pinned in bot.py's namespace")
+            failed += 1
+        else:
+            print(f"clock: ok (fixed at {stamp})")
     if out:
         print(f"wrote {len(names) - failed} render(s) to {out}")
     shutil.rmtree(tmp, ignore_errors=True)
