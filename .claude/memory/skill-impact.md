@@ -86,6 +86,9 @@ hook now builds a 3.12 venv from `requirements.lock` + the CI pytest pin, keyed 
 sha256, and puts it first on PATH via `CLAUDE_ENV_FILE`. Async (owner's choice, same day): PATH
 points at a symlink that is swapped in only after a complete install, so the first seconds of
 a session run the default 3.11 rather than a half-built venv.
+Confirmed in a fresh cloud session (owner, 2026-09-24): `command -v python3` ->
+`/root/.venvs/sillytavernpresets-py312/bin/python3`, Python 3.12.3, so `CLAUDE_ENV_FILE` is honored
+for an async hook. Still `pending`: that shows the mechanism works, not that the class stopped.
 **Holds when:** the next few cloud sessions run `verify.sh` green on the first try with no
 hand-built venv. **Recurrence shape to expect:** the hook's one-line WARNING at startup (uv
 missing, a wheel not available for 3.12, install past the 300 s timeout) goes unread (async
