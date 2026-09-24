@@ -43,7 +43,7 @@ cycle to rule out:
 | Don't | Why |
 |---|---|
 | Remove the `httpx>=0.24,<0.28` pin | httpx 0.28 dropped the `proxies=` kwarg the pinned apify SDK 1.x still passes. Every proxy call dies with `AsyncClient.__init__() got an unexpected keyword argument 'proxies'`. |
-| Switch back to the JSON endpoints | They are blocked by client fingerprinting, not by IP. See history #5. |
+| Switch back to the JSON endpoints | They return `403` whatever the exit IP (history #5) or client TLS fingerprint (2026-09-24); most likely a login requirement. See history #5 and "Every other Reddit endpoint" below. |
 | Buy more proxy types | Residential, static-datacenter and rotating-datacenter IPs all got identical 403s on JSON. The exit IP is not the variable. |
 | Set the Actor to `LIMITED_PERMISSIONS` | The scoped run token cannot read the account proxy password, so *every* proxy group fails with "Insufficient permissions". The Actor must stay `FULL_PERMISSIONS`. |
 
@@ -251,7 +251,7 @@ deliberately before leaving an unattended Routine running.
    message no longer said *"no proxy URL could be obtained"* — the request went
    out through `BUYPROXIES94952` and came back `403 Blocked`.
 
-5. **The 403 is fingerprint-based, not IP-based.** Run `pwewGtcRIBTHZavIe`
+5. **The 403 is not IP-based.** Run `pwewGtcRIBTHZavIe`
    tried five combinations — `RESIDENTIAL`, `StaticUS3` and `BUYPROXIES94952`
    against both `www.reddit.com/*.json` and `api.reddit.com` — and every one
    returned an identical `403 Blocked`. Residential proxy is confirmed
@@ -259,14 +259,54 @@ deliberately before leaving an unattended Routine running.
    `maxMonthlyResidentialProxyGbytes: 10` is the real capability signal and
    `RESIDENTIAL availableCount: 0` is a red herring, since residential is
    metered by traffic rather than IP count. A block that ignores exit IP
-   entirely is Cloudflare fingerprinting the client — `python-requests`' TLS
+   entirely was read as Cloudflare fingerprinting the client — `python-requests`' TLS
    handshake and thin header set. **Switching to the Atom feeds cleared it.**
+
+   **Correction (2026-09-24): the fingerprint explanation does not hold.** A client
+   that imitates Chrome's TLS handshake (`curl_cffi`, `impersonate="chrome"`) got
+   the same `403` on `top.json` as plain `requests`, while both got `200` on
+   `top.rss`. The `403` page says *"You've been blocked by network security"*; the
+   `old.reddit.com` version of the same block redirects to `/login/?reason=lor2`
+   and adds *"Please try to login with your Reddit account."* `[hypothesis]` Reddit
+   requires a login for everything except its feeds, rather than rejecting the
+   Python client. Caveat: tested from a Claude Code cloud container, not from
+   Apify's IPs; the Apify runs above already showed the IP is not the variable.
 
 **OAuth is not available as a fallback.** Reddit's classic script-app
 registration at `reddit.com/prefs/apps` redirects to Devvit (checked
 2026-08-11), so no new `client_id`/`client_secret` can be issued. The OAuth
 code path is retained and activates automatically if credentials ever exist,
 but nothing depends on it.
+
+### Every other Reddit endpoint (checked 2026-09-24)
+
+**Atom/RSS is the best available option — it is the only unauthenticated
+Reddit source that returns data.** Every endpoint tried that would carry `over_18`,
+`stickied` or a score was blocked. Tested with plain `requests` (and the JSON
+rows also with a Chrome-impersonating client), from a cloud container:
+
+| Endpoint | Result | NSFW / score / sticky? |
+|---|---|---|
+| `/r/{sub}/top.rss` (what this Actor uses) | `200`, Atom | no |
+| `/comments/{id}.rss` | `200`, Atom: the post plus its comments (106 comment entries on one test post; `?limit=500` returned the same count) | no |
+| `/r/{sub}/top.json`, `/comments/{id}.json`, `/by_id/t3_{id}.json` | `403`, *"You've been blocked by network security"* | — |
+| `old.reddit.com` listing or post page | `200` **after redirecting to `/login/?reason=lor2`** — a login wall | no |
+| `www.reddit.com/comments/{id}/` | `200`, 8 KB script shell with no post data | no |
+| `/oembed?url=…` | `400` | — |
+
+Two things to take from it:
+
+* **A `200` is not data.** The `old.reddit.com` row returns `200` with a page that
+  matches `nsfw` (a CSS class name). Check the final URL and the body, not the
+  status.
+* **`/comments/{id}.rss` is the one new capability**: comment text without a login,
+  at one request per post. Not confirmed to be the *whole* thread — no
+  unauthenticated endpoint gives the real comment count to compare against, and
+  collapsed "load more" replies may be missing. Nothing uses it yet.
+
+Not tried: a full headless browser. It might get past the block, but it
+would be deliberately working around a block Reddit put up on purpose, for
+fields (an NSFW flag, scores) that nothing here currently needs.
 
 ---
 
@@ -301,6 +341,6 @@ curl -sS -H "Authorization: Bearer $APIFY_API_TOKEN" \
 | `published_at` is `null` | The feed served a date in neither ISO 8601 nor RFC 2822. Check the raw feed; the parse is deliberately strict. |
 | `Insufficient permissions` | Actor reverted to `LIMITED_PERMISSIONS`. |
 | `unexpected keyword argument 'proxies'` | The httpx pin was dropped from `requirements.txt`. |
-| `403 Blocked` on every strategy | Reddit extended fingerprinting to the Atom feeds. Nothing short of browser impersonation will help — decide deliberately. |
+| `403 Blocked` on every strategy | Reddit extended the block to the Atom feeds. Chrome TLS impersonation did not help on the JSON endpoints (2026-09-24); only a logged-in session or a full browser might — decide deliberately. |
 | `STRATEGY EMPTY` | Feed still served but the Atom shape changed; check `_parse_atom`. |
 | API calls return 404 for a known-good Actor | Almost always a bad or wrong-account token — Apify returns 404 rather than 403 for Actors a token cannot see. Check `users/me` first. |

@@ -27,7 +27,9 @@ Each blocker was hidden behind the previous one.
    reddit.com/prefs/apps redirects to Devvit (confirmed 2026-08-11), so no
    new client_id/secret can be issued. The OAuth path is retained and
    activates by itself if credentials ever exist; nothing depends on it.
-5. **The JSON 403 is fingerprint-based, not IP-based.** RESIDENTIAL,
+5. **The JSON 403 is not IP-based** (and, per a 2026-09-24 test with a
+   Chrome-impersonating client, not TLS-fingerprint-based either; see
+   README history #5). RESIDENTIAL,
    StaticUS3 and BUYPROXIES94952 all got identical 403s against both
    www.reddit.com/*.json and api.reddit.com. Residential proxy is confirmed
    *working* (real responses, ~7s latency; `maxMonthlyResidentialProxyGbytes:

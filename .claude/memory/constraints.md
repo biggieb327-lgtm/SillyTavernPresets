@@ -1255,6 +1255,13 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-24 — Wrote a README correction quoting Reddit's JSON `403` page as saying "Please try
+  to login with your Reddit account", from memory of the `old.reddit.com` login page. The JSON
+  page says only "You've been blocked by network security". Also reported "the per-post `.rss`
+  returns the whole comment thread" with no count to check it against (theory-guard caught
+  that one). Both caught before commit. -> **quote a response body only from the response you
+  are describing, re-fetched; two endpoints on one site are two sources.**
+
 - 2026-09-23 — Committed `render_prompt.py --check` with a determinism check (render nora
   twice, compare) and described it as proving "the clock and RNG are pinned". Two renders
   seconds apart agree with a live clock too, because `environment_note` shows minutes, so the
