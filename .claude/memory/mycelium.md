@@ -141,6 +141,13 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-24 | from: claude/fleet-pause-sunday-05r1zq | to: — | status: open
+at `fcac5cf` — [decision] Owner asked to stop the fleet until Sunday 2026-09-27. This
+session has no VPS shell access, so it handed the owner a `systemctl stop bot@*` loop
+to run as root rather than executing it. If a session between now and 2026-09-27 sees
+all seven `bot@*` units down, that is this intentional pause, not an incident — check
+`systemctl list-unit-files 'bot@*'` (still enabled) before running `repo-debugging-playbook`.
+
 ### 2026-09-07 | from: claude/bots-selfies-improvement-dc8cvv | to: bot.py selfie work | status: open
 `build_selfie_prompt` hardcodes "She's" / "her" pronouns in the scene prompt string,
 which produces wrong-gendered selfie descriptions for Marcus (male character). Pre-existing,
