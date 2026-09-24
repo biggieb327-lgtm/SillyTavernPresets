@@ -78,6 +78,19 @@ Newest first.
 
 ## Rows
 
+### 2026-09-24 | intervention: `session-deps.sh` SessionStart hook | class: verification skipped or red because the cloud container lacks the 3.12 deps | status: pending
+The cloud container's default `python3` is 3.11 with no bot packages, so `verify.sh` fails on
+`import bot.py` and `pytest` before checking anything. Sessions either verified with
+`run-evals.sh` alone (main red 6 days, 2026-09-22) or built a venv by hand (2026-09-24). The
+hook now builds a 3.12 venv from `requirements.lock` + the CI pytest pin, keyed on the lock's
+sha256, and puts it first on PATH via `CLAUDE_ENV_FILE`.
+**Holds when:** the next few cloud sessions run `verify.sh` green on the first try with no
+hand-built venv. **Recurrence shape to expect:** the hook's one-line WARNING at startup (uv
+missing, a wheel not available for 3.12, install past the 300 s timeout) goes unread and a
+session is back to 3.11 — or `CLAUDE_ENV_FILE` stops being honored and PATH silently
+reverts. The pytest pin is duplicated from `evals.yml` and can drift.
+Refs: oplog 2026-09-22 (main red, "Local trap" note), debrief-log 2026-09-24.
+
 ### 2026-09-04 | intervention: `probe-context.py` + "measure, don't look up" in `.env.example` | class: external-system limits adopted as fact without measurement (C5's uncovered half) | status: pending
 The failure this targets is not a wrong belief but an *unmeasurable-feeling* question: what
 context window a provider actually serves. Every readable source was wrong or absent —

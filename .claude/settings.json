@@ -8,6 +8,12 @@
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-audit.sh\"",
             "timeout": 10,
             "statusMessage": "Session state audit"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-deps.sh\"",
+            "timeout": 300,
+            "statusMessage": "Installing Python 3.12 deps"
           }
         ]
       }
