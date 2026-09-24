@@ -138,6 +138,9 @@ direction, not this number.
 "past the point of being read" size that triggered the last trim), or the count/review lines
 start pushing the operational lines out of what gets read first — then consolidate to
 counting-plus-top-N.
+**Data point 2026-09-24:** `session-audit.sh` 1,840 bytes; the new `session-deps.sh`
+SessionStart hook adds 165 (one status line plus the 40-byte async JSON the harness consumes).
+Combined ~2,005, under the ~2,436 trigger. Async hook output may not reach context at all.
 
 ### 2026-08-23 — debrief-nudge cadence is still unmeasured | status: open
 `debrief-nudge.sh` (built 2026-08-11) is meant to produce roughly one `debrief-log.md` row per

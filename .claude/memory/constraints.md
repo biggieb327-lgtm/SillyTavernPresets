@@ -253,7 +253,13 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 9** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04)
+**seen: 10** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24)
+- 2026-09-24 — Reported that Reddit's per-post `.rss` "returns the whole comment thread"
+  without a login. Measured: 106 comment entries, unchanged by `?limit=500`; "whole" had no
+  count to check against (the real count is only on the blocked JSON endpoints).
+  `theory-guard.sh` caught it at Stop, inside its graduation scope. The same guard later
+  flagged "the old.reddit login wall returns 200", which HAD been run and printed; the
+  answer was to cite the output, not hedge. A guard hit is a question, not a verdict.
 - 2026-09-04 — Wrote "a rejected call bills nothing" into `probe-context.py`'s docstring as a
   statement of fact about NanoGPT's metering. I had never checked it, and no source says it.
   The script was then designed around it — binary-searching DOWN from a 140,000-token ceiling,
@@ -656,8 +662,17 @@ evals; this is the operator-instruction half. Recorded in `group-chat-changes` u
 same reasoning as C1's split between the agent's half and the operator's half.
 
 ### C13 — A verification command that cannot fail is not verification
-**seen: 9** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21 ×2)
+**seen: 10** (2026-07-27, 2026-07-28, 2026-07-29 ×2, 2026-08-03 ×2, 2026-08-10, 2026-08-21 ×2, 2026-09-24)
 — *promoted from the Minor log on the third occurrence, as that entry said it should be.*
+
+- 2026-09-24 — Tested `session-deps.sh`'s "skip outside the cloud" branch by omitting
+  `CLAUDE_CODE_REMOTE=true` from the command line. The session shell already exported
+  `CLAUDE_CODE_REMOTE=true`, so the hook ran the cloud path and the "test" could not have
+  exercised the skip. Caught by reading the output (it printed where nothing was expected);
+  redone with `env -u CLAUDE_CODE_REMOTE`. Outside both graduations' scope — they cover
+  `run-evals.sh` parsers and `verify.sh` steps, not ad-hoc tests of an env-gated script —
+  so prose is the defence here. -> **when testing that a variable being unset changes
+  behavior, unset it explicitly (`env -u`); inheriting is not omitting.**
 
 **Ninth (2026-08-21, same session as the eighth): the shape was not mine, it was the
 suite's.** Having written it three times in one day — once shipped, twice caught while

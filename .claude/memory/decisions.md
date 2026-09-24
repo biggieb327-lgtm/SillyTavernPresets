@@ -82,6 +82,33 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-24 | Cloud sessions get the 3.12 deps from an async SessionStart hook via a symlinked venv | status: current
+**Decided:** `.claude/hooks/session-deps.sh` runs async in cloud sessions, builds a venv from
+`requirements.lock` + the CI pytest pin in a lock-keyed directory outside the repo, and switches the
+`~/.venvs/sillytavernpresets-py312` symlink to it only when the install is complete.
+**Over:** (a) synchronous, which was shipped first and is safe but makes every session start wait;
+rejected by the owner in favour of faster startup; (b) async installing straight into the PATH
+directory, rejected because `python3` would resolve to a half-built venv during the install.
+**Why:** the default container Python is 3.11 with no bot packages, so `verify.sh` went red before
+checking anything and sessions skipped it. Async plus the symlink swap means the first seconds run the
+old 3.11 at worst, never a broken environment.
+**By:** owner (async), session `claude/svipall-review-g3s2fy` (symlink design), 2026-09-24.
+Confirmed live: a fresh session's `python3` is the venv's 3.12.3.
+**Detail:** the hook's header comment; `skill-impact.md` 2026-09-24.
+
+### 2026-09-24 | Reddit stays on Atom/RSS; no browser-based access, no Svipall | status: current
+**Decided:** `idea-scraper-actor` keeps reading Reddit through `/r/{sub}/top.rss`; the NSFW flag,
+sticky flag and scores lost with the JSON path stay lost.
+**Over:** (a) Chrome TLS impersonation (`curl_cffi`, or Svipall's http tier); tested and it gets
+the same `403`; (b) a full headless browser (Svipall's heavier tiers, or Playwright); not tried,
+because it would deliberately work around a block Reddit put up on purpose, for fields nothing
+here currently needs; (c) adopting `ilien-dev/svipall` generally; reviewed, and it fits
+nothing the fleet runs.
+**Why:** every endpoint tried that carries those fields is blocked without a login, and the Routines that
+consumed the Actor are retired.
+**By:** owner + session `claude/svipall-review-g3s2fy`, 2026-09-24 (evidence-backed).
+**Detail:** `idea-scraper-actor/README.md` "Every other Reddit endpoint"; oplog 2026-09-24.
+
 ### 2026-09-23 | Hook and eval blocks are counted by a wrapper plus a debrief harvest | status: current
 **Decided:** blocking hooks run through `.claude/hooks/count-block.sh`, and `run-evals.sh`'s
 `bad()` writes a row per FAIL outside CI. Rows go to `.claude/.runtime/blocks.log` and are folded
