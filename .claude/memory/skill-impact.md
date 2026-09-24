@@ -83,10 +83,13 @@ The cloud container's default `python3` is 3.11 with no bot packages, so `verify
 `import bot.py` and `pytest` before checking anything. Sessions either verified with
 `run-evals.sh` alone (main red 6 days, 2026-09-22) or built a venv by hand (2026-09-24). The
 hook now builds a 3.12 venv from `requirements.lock` + the CI pytest pin, keyed on the lock's
-sha256, and puts it first on PATH via `CLAUDE_ENV_FILE`.
+sha256, and puts it first on PATH via `CLAUDE_ENV_FILE`. Async (owner's choice, same day): PATH
+points at a symlink that is swapped in only after a complete install, so the first seconds of
+a session run the default 3.11 rather than a half-built venv.
 **Holds when:** the next few cloud sessions run `verify.sh` green on the first try with no
 hand-built venv. **Recurrence shape to expect:** the hook's one-line WARNING at startup (uv
-missing, a wheel not available for 3.12, install past the 300 s timeout) goes unread and a
+missing, a wheel not available for 3.12, install past the 300 s timeout) goes unread (async
+output may never reach the session; the outcome is also in `~/.venvs/sillytavernpresets-py312.status`) and a
 session is back to 3.11 — or `CLAUDE_ENV_FILE` stops being honored and PATH silently
 reverts. The pytest pin is duplicated from `evals.yml` and can drift.
 Refs: oplog 2026-09-22 (main red, "Local trap" note), debrief-log 2026-09-24.

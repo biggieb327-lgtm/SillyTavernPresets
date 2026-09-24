@@ -11,26 +11,49 @@
 # same pytest pin. The venv lives outside the repo and is keyed on the lock's sha256, so a
 # resumed or cached container reuses it and a lock change rebuilds it.
 #
-# Never blocks the session: any failure prints one warning line and exits 0, leaving the
+# Runs async: the session starts while this installs (~2 s cold, ~0 s reused). Two things
+# keep that race safe:
+#   * PATH is exported FIRST, pointing at a stable symlink ($LINK). Until an install
+#     finishes, the symlink does not exist and `python3` falls through to the default.
+#   * Each install goes into its own lock-keyed directory; the symlink is flipped to it with
+#     one rename only after every package is in. `python3` is never a half-built venv.
+# Async output may not reach the session, so the outcome is also written to $STATUS.
+#
+# Never blocks the session: any failure writes one WARNING and exits 0, leaving the
 # default python3 on PATH exactly as before.
 set -u
 
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
+echo '{"async": true, "asyncTimeout": 300000}'
 
 LOCK=telegram-companion-bot/requirements.lock
 PYTEST_PIN="pytest==8.4.2"   # keep in step with evals.yml "Install dependencies"
-VENV="${HOME}/.venvs/sillytavernpresets-py312"
-STAMP="${VENV}/.lock-sha256"
+LINK="${HOME}/.venvs/sillytavernpresets-py312"     # what PATH points at
+STATUS="${HOME}/.venvs/sillytavernpresets-py312.status"
+mkdir -p "${HOME}/.venvs"
 
-warn() { echo "[session-deps] WARNING: $* — verify.sh will use the default python3 and go red on import/pytest"; exit 0; }
+report() { echo "$1" | tee "$STATUS"; }
+warn() { report "[session-deps] WARNING: $* — verify.sh will use the default python3 and go red on import/pytest"; exit 0; }
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+  {
+    echo "export VIRTUAL_ENV=\"${LINK}\""
+    echo "export PATH=\"${LINK}/bin:\$PATH\""
+  } >> "$CLAUDE_ENV_FILE"
+  where="on PATH for this session"
+else
+  where="NOT on PATH (no CLAUDE_ENV_FILE) — prefix commands with PATH=${LINK}/bin:\$PATH"
+fi
 
 [ -f "$LOCK" ] || warn "$LOCK not found"
 command -v uv >/dev/null 2>&1 || warn "uv not on PATH"
 
-want=$(printf '%s %s' "$(sha256sum "$LOCK" | cut -d' ' -f1)" "$PYTEST_PIN")
+key=$(printf '%s %s' "$(sha256sum "$LOCK" | cut -d' ' -f1)" "$PYTEST_PIN" | sha256sum | cut -c1-16)
+VENV="${LINK}-${key}"
+STAMP="${VENV}/.complete"
 
-if [ -x "${VENV}/bin/python" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ]; then
+if [ -x "${VENV}/bin/python" ] && [ -f "$STAMP" ]; then
   status="reused"
 else
   rm -rf "$VENV"
@@ -39,19 +62,16 @@ else
     || warn "lock install failed: $(printf '%s' "$log" | tail -1)"
   log=$(VIRTUAL_ENV="$VENV" uv pip install -q "$PYTEST_PIN" 2>&1) \
     || warn "pytest install failed: $(printf '%s' "$log" | tail -1)"
-  printf '%s' "$want" > "$STAMP"
+  : > "$STAMP"
   status="installed"
 fi
 
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  {
-    echo "export VIRTUAL_ENV=\"${VENV}\""
-    echo "export PATH=\"${VENV}/bin:\$PATH\""
-  } >> "$CLAUDE_ENV_FILE"
-  where="on PATH for this session"
-else
-  where="NOT on PATH (no CLAUDE_ENV_FILE) — prefix commands with PATH=${VENV}/bin:\$PATH"
-fi
+# A pre-async install left a real directory at $LINK; a rename cannot replace a directory.
+[ -L "$LINK" ] || rm -rf "$LINK"
+# Create-then-rename: `ln -sfn` unlinks before it links, leaving a moment with no $LINK.
+ln -sfn "$VENV" "${LINK}.new" && mv -Tf "${LINK}.new" "$LINK" || warn "could not point $LINK at $VENV"
+# Drop older lock-keyed venvs; the symlink now points at the only one in use.
+for old in "${LINK}"-*; do [ "$old" = "$VENV" ] || rm -rf "$old"; done
 
-echo "[session-deps] $("${VENV}/bin/python" --version 2>&1) venv ${status} at ${VENV}, ${where}"
+report "[session-deps] $("${LINK}/bin/python" --version 2>&1) venv ${status} at ${VENV}, ${where}"
 exit 0
