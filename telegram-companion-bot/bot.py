@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-23.1"
+BOT_VERSION = "2026-09-24.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -748,6 +748,18 @@ REASONING_LEAK_GUARD = _env_bool("REASONING_LEAK_GUARD", True)
 LEAK_SAMPLES = _env_bool("LEAK_SAMPLES", True)
 LEAK_SAMPLES_MAX = _env_int("LEAK_SAMPLES_MAX", "50")
 LEAK_SAMPLES_DIR = BASE_DIR / "leak_samples"
+# Banned-phrase guard (v2026-09-24.1). A deterministic scan of every persona reply for
+# the house banned list (stock prose phrases: "breath hitched", "something shifted",
+# "barely above a whisper", ...). Costs no tokens: a hit logs [slop] at WARNING, counts
+# under `slop` in /errors, and adds a one-turn positive note to that chat's NEXT prompt,
+# the same shape as the feedback-miss note. Default ON with a kill switch.
+# SLOP_REROLL is the higher-cost half and defaults OFF (rule 16's rationale clause): it
+# re-samples a flagged reply once, which re-pays the full ~17k-token prompt, so turning it
+# on is an owner cost decision (invariant #3). SLOP_PHRASES_FILE, when it exists in the
+# instance dir, replaces the built-in list (one phrase per line, `#` comments).
+SLOP_GUARD = _env_bool("SLOP_GUARD", True)
+SLOP_REROLL = _env_bool("SLOP_REROLL", False)
+SLOP_PHRASES_FILE = BASE_DIR / os.getenv("SLOP_PHRASES_FILE", "slop_phrases.txt")
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -7347,6 +7359,13 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
             f"[That last message didn't land — recalibrate, don't apologize.]"
         )})
 
+    # Banned-phrase guard: one-turn fresh-wording note after a flagged reply
+    # (SLOP_GUARD, v2026-09-24.1). Same shape and slot as the feedback-miss note above;
+    # rides this reply's own call, no extra model call.
+    _slop_note = _take_slop_nudge(chat_id)
+    if _slop_note:
+        messages.append({"role": "system", "content": _slop_note})
+
     # Open threads (replaces single next_goal when enabled)
     if THREADS_ENABLED:
         threads = open_threads.get(chat_id, [])
@@ -8046,12 +8065,132 @@ async def _keep_typing(bot, chat_id: int):
         pass
 
 
+# --- Banned-phrase guard (SLOP_GUARD, v2026-09-24.1) ---
+# Built-in list: the house banned list (card-methodology / Writers' Room ps-banned-list),
+# trimmed to entries that stay wrong in a TEXTING voice. Single words that are ordinary
+# in a text message ("deep", "electric", "slick", "velvet", "the weight of") are left
+# out: a false hit costs a nudge on a reply that was fine. In an entry, `*` inside a
+# word matches any word ending ("hitch*" = hitch/hitches/hitched), and a bare `*` token
+# matches exactly one word ("down * spine" = "down her spine").
+_SLOP_PHRASES_DEFAULT = (
+    "fills the room", "fills every room", "commands the room", "owns the room",
+    "dominates the space", "breath hitch*", "breath catching", "shiver* down * spine",
+    "pupils blown", "pupils dilat*", "barely above a whisper", "something shifted",
+    "something primal", "heart hammer*", "warmth bloom*", "liquid heat", "liquid fire",
+    "jaw clench*", "nails biting", "husky voice", "voice husky", "throaty", "guttural",
+    "visceral", "luminous", "ozone", "unadulterated", "sensory overload",
+    "a physical blow", "like a physical", "structural integrity", "a weight lifts",
+    "predatory", "fresh meat",
+)
+_slop_cache: dict = {"mtime": None, "rx": None, "src": None}
+_slop_nudge: set = set()   # chat_ids owed a one-turn fresh-wording note
+
+
+def _compile_slop_phrases(phrases) -> list:
+    """(phrase, compiled regex) per entry: case-insensitive, word-bounded, any run of
+    whitespace between words."""
+    out = []
+    for raw in phrases:
+        phrase = raw.strip()
+        if not phrase or phrase.startswith("#"):
+            continue
+        parts = []
+        for tok in phrase.split():
+            if tok == "*":
+                parts.append(r"\S+")
+            else:
+                parts.append(r"\w*".join(re.escape(p) for p in tok.split("*")))
+        out.append((phrase, re.compile(r"(?i)(?<!\w)" + r"\s+".join(parts) + r"(?!\w)")))
+    return out
+
+
+def _slop_patterns() -> list:
+    """The active list: SLOP_PHRASES_FILE when it exists (re-read when its mtime
+    changes, so the list is editable without a restart), else the built-in list. A
+    file that cannot be read falls back to the built-in list — the guard never breaks
+    a reply."""
+    try:
+        mtime = SLOP_PHRASES_FILE.stat().st_mtime if SLOP_PHRASES_FILE.exists() else None
+    except OSError:
+        mtime = None
+    if _slop_cache["rx"] is not None and _slop_cache["mtime"] == mtime:
+        return _slop_cache["rx"]
+    phrases = _SLOP_PHRASES_DEFAULT
+    if mtime is not None:
+        try:
+            phrases = SLOP_PHRASES_FILE.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            log.warning("[slop] could not read %s (%s); using built-in list",
+                        SLOP_PHRASES_FILE, e)
+            phrases = _SLOP_PHRASES_DEFAULT
+    _slop_cache.update(mtime=mtime, rx=_compile_slop_phrases(phrases))
+    return _slop_cache["rx"]
+
+
+def _slop_hits(text: str) -> list:
+    """Banned-list entries found in `text` (each entry at most once). Pure scan, no I/O
+    beyond the cached list, no model call."""
+    if not text:
+        return []
+    return [phrase for phrase, rx in _slop_patterns() if rx.search(text)]
+
+
+_SLOP_NUDGE_NOTE = (
+    "# Fresh wording\nThis reply: plain, specific words. Name the actual thing, action, "
+    "or feeling the way you would say it out loud to a friend, in words that are yours."
+)
+_SLOP_REROLL_NOTE = (
+    "# Fresh wording\nWrite this reply in plain, specific words: the actual thing, "
+    "action, or feeling, said the way you would say it out loud to a friend."
+)
+
+
+async def _apply_slop_guard(chat_id: int, out: str, messages: list, model, fallback,
+                            leak_guard: bool) -> str:
+    """Scan a persona reply for the banned list. Log + count + queue the next-turn note
+    on a hit; with SLOP_REROLL on, re-sample once and keep whichever candidate has fewer
+    hits. Never raises: a guard failure delivers the original reply."""
+    if not (SLOP_GUARD and leak_guard):
+        return out
+    try:
+        hits = _slop_hits(out)
+        if not hits:
+            return out
+        log.warning("[slop] %d banned phrase(s) in reply: %s", len(hits), ", ".join(hits[:5]))
+        _count_error("slop")
+        _slop_nudge.add(chat_id)
+        if not SLOP_REROLL:
+            return out
+        retry = await generate_reply(
+            messages + [{"role": "system", "content": _SLOP_REROLL_NOTE}],
+            model, fallback, leak_guard=leak_guard)
+        retry_hits = _slop_hits(retry)
+        _count_error("slop_reroll")
+        if retry.strip() and len(retry_hits) < len(hits):
+            log.info("[slop] re-roll kept (%d -> %d hit(s))", len(hits), len(retry_hits))
+            return retry
+        log.info("[slop] re-roll discarded (%d -> %d hit(s))", len(hits), len(retry_hits))
+        return out
+    except Exception as e:
+        log.warning("[slop] guard error (%s); delivering the reply unchanged", e)
+        return out
+
+
+def _take_slop_nudge(chat_id: int) -> str:
+    """The one-turn note owed to this chat after a flagged reply, or "" (consumed)."""
+    if SLOP_GUARD and chat_id in _slop_nudge:
+        _slop_nudge.discard(chat_id)
+        return _SLOP_NUDGE_NOTE
+    return ""
+
+
 async def reply_with_typing(context, chat_id: int, messages: list,
                             model: str = None, fallback: str = None,
                             leak_guard: bool = True) -> str:
     typing = asyncio.create_task(_keep_typing(context.bot, chat_id))
     try:
-        return await generate_reply(messages, model, fallback, leak_guard=leak_guard)
+        out = await generate_reply(messages, model, fallback, leak_guard=leak_guard)
+        return await _apply_slop_guard(chat_id, out, messages, model, fallback, leak_guard)
     finally:
         typing.cancel()
 

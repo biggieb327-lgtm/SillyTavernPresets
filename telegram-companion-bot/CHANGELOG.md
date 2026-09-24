@@ -7,6 +7,44 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-24.1 — Banned-phrase guard on persona replies (`SLOP_GUARD`, `SLOP_REROLL`)
+
+**Root cause: the house banned list existed only as prompt text, and nothing in the bot
+checked the output against it.** The card-building rules and the Writers' Room
+`ps-banned-list` block both carry the list ("breath hitches", "something shifted",
+"barely above a whisper", ...). The bot enforced none of it after generation. The
+existing output guards (`_strip_slop`, `_strip_directive_lines`,
+`_looks_like_reasoning_leak`) cover assistant-speak openers and leaked planning, not stock
+prose phrases. A prompt-only rule drifts as models change, and a thinking model that is
+shown the list is also shown the phrases.
+
+**Fix:** `reply_with_typing` now passes each persona reply (`leak_guard=True`) to
+`_apply_slop_guard`. `_slop_hits` scans the reply with word-bounded, case-insensitive
+patterns built from `_SLOP_PHRASES_DEFAULT`. That list is the house list with the words
+that are ordinary in a text message removed (deep, electric, slick, velvet, the weight of).
+If `SLOP_PHRASES_FILE` (default `slop_phrases.txt` in the instance dir) exists, it
+replaces the built-in list and is re-read when its mtime changes. When a reply has a hit,
+the guard logs `[slop]` at WARNING, counts it under `slop`, and adds the chat to
+`_slop_nudge`. `assemble_messages` then adds one positive-only `# Fresh wording` note to
+that chat's next prompt, in the same slot as the feedback-miss note. By default the guard
+adds no model call and no tokens except that one note (invariant #3).
+`SLOP_REROLL` (default **off**) samples a flagged reply once more with the note added and
+keeps whichever version has fewer hits. Its counter is `slop_reroll`. It ships off because
+each re-roll re-pays the whole prompt (~17k tokens), which makes it an owner cost decision
+(rule 16's rationale clause). Any error inside the guard delivers the original reply.
+`SLOP_GUARD=0` turns off the scan and the note. The guard does not scan the proactive and
+caption paths, which call `generate_reply` directly. That is a possible follow-up.
+
+**Tests (`tests/test_slop_guard.py`, 20):** matching (suffix and one-word wildcards, word
+boundaries, whitespace runs, one report per entry, ordinary texting words not flagged);
+the phrase file (it replaces the list, an edit is picked up, an unreadable file falls back
+to the built-in list); the guard (a clean reply passes; a hit counts and queues the note
+with no model call; non-persona paths and the kill switch are skipped; the re-roll keeps a
+cleaner candidate, discards a worse or empty one, and a re-roll failure delivers the
+original); the note (it appears once in `assemble_messages` and then clears, and both notes
+contain no negations). Break-tested: disabling the queue or the note turns 2 tests red.
+`SLOP_GUARD` and `SLOP_REROLL` added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+
 ## v2026-09-23.1 — Save the full text of every reply the reasoning-leak guard refuses
 
 **Root cause: the only record of a rejected leak was 120 characters.** When

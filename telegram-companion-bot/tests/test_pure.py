@@ -9041,6 +9041,10 @@ class TestEveryBooleanFlagDefault:
         "JOKE_CANDIDATES": False,
         # v2026-09-23.1: saves each guard rejection to leak_samples/ (ROADMAP 2.7 Phase 1).
         "LEAK_SAMPLES": True,
+        # v2026-09-24.1. The scan costs nothing; the re-roll re-pays the whole prompt, so it
+        # ships off (invariant #3 cost decision, rule 16 rationale clause).
+        "SLOP_GUARD": True,
+        "SLOP_REROLL": False,
         "LIFE_GROUNDING": True,
         "LIFE_PROJECT": False,
         "LIFE_ROTATE": True,
@@ -9152,7 +9156,11 @@ class TestEveryBooleanFlagDefault:
                        # the fixture is. Added v2026-08-12.2 when it stopped being
                        # hand-rolled; its default was pinned by nothing before that.
                        "PAYMENTS_ENABLED",
-                       "SELFIE_NSFW", "THREADS_ENABLED", "WORLD_GENERATOR"], off
+                       "SELFIE_NSFW",
+                       # v2026-09-24.1: deliberate widening. A re-roll re-pays the whole
+                       # ~17k-token prompt, so turning it on is an owner cost decision.
+                       "SLOP_REROLL",
+                       "THREADS_ENABLED", "WORLD_GENERATOR"], off
 
 
 class TestEnvBoolVocabulary:
