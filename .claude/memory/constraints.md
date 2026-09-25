@@ -1295,6 +1295,14 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-25 — Merged v2026-09-25.1 green locally (`verify.sh` 4/4) and main went **red**:
+  the new archive test runs the real `vps-backup.sh`, which exits at `id -u -ne 0`. This cloud
+  session runs as root; the CI runner does not. The test also passed `check=True` with
+  `capture_output`, so the FATAL line was swallowed and the log showed only
+  `CalledProcessError`. Fixed with `id`/`systemctl` shims on the test's PATH and an assert
+  that prints stdout+stderr; reproduced both states as `nobody` before re-pushing. -> **a test
+  that runs a real script inherits that script's host preconditions (root, systemd, /etc
+  config); read its guards before trusting a green from a root session.**
 - 2026-09-25 — Wrote `test_backup_archive_never_contains_the_message_log` asserting no archived
   *path* contained "msglog". `break-test.sh` (widen the backup's `find -maxdepth 1`) stayed green:
   the script's `cp -- "$f" "$STAGE/$name/"` flattens subfolders, so a leaked day file would be

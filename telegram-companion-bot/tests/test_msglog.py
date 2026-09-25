@@ -192,9 +192,20 @@ def test_backup_archive_never_contains_the_message_log(tmp_path):
     (inst / "state.json").write_text("{}")
     (base / "audits").mkdir()
     (base / "audits" / "2026-09-27.md").write_text(marker)
+    if Path("/etc/bot-backup.conf").exists():
+        pytest.skip("a real /etc/bot-backup.conf would be sourced over this test's BACKUP_DIR")
     script = Path(__file__).resolve().parent.parent / "deploy" / "vps-backup.sh"
-    env = {"PATH": "/usr/bin:/bin", "BOT_BASE": str(base), "BACKUP_DIR": str(tmp_path / "out")}
-    subprocess.run(["bash", str(script)], env=env, check=True, capture_output=True, timeout=60)
+    # Hermetic harness, not a weakened check: the script refuses non-root (CI runs as a normal
+    # user) and asks systemd for bot@ units (a real host would list real instances). Shim
+    # both so it backs up exactly the fake tree; what it archives is untouched.
+    shims = tmp_path / "bin"
+    shims.mkdir()
+    for name, body in (("id", "echo 0"), ("systemctl", "exit 0")):
+        (shims / name).write_text(f"#!/bin/sh\n{body}\n")
+        (shims / name).chmod(0o755)
+    env = {"PATH": f"{shims}:/usr/bin:/bin", "BOT_BASE": str(base), "BACKUP_DIR": str(tmp_path / "out")}
+    run = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
     (archive,) = (tmp_path / "out").glob("bot-state-*.tar.gz")
     with tarfile.open(archive) as tar:
         names = tar.getnames()
