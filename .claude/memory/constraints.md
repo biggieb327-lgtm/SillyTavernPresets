@@ -253,7 +253,16 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 11** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24, 2026-09-25)
+**seen: 12** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24, 2026-09-25 ×2)
+- 2026-09-25 (second) — Proposing audit rules, told the owner an assistant-voice check "needs
+  the raw model output" because the log "can't see what `_strip_persona_breaks` removed" —
+  assuming that function strips phrases like "let me know if" / "I'm here to help". Never read
+  it. `theory-guard.sh` caught it at Stop. Running it: it strips only AI self-reference
+  sentences; `_strip_slop` strips assistant openers only at the start (`^`-anchored); neither
+  touches "let me know if". So the rule works on post-filter text, and the filter count
+  already exists (`_count_error("persona_break")` → `state.json["error_counts"]`). Unlike the
+  first entry today, this claim was *wrong*, not just unevidenced — and the wrong version
+  argued for a design dependency (raw logging) that wasn't needed. Guard working as designed.
 - 2026-09-25 — Told the owner "The banned-scan flags itself" — a claim about what a new
   `rpzlib.py preset` subcommand's scan produced, inside a paragraph that also asserted why
   (a `Bad:`/`Good:` example, not a live instruction) — without pasting the command output in
