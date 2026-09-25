@@ -40,7 +40,22 @@ the owner what could be improved. No model call. Results are FLAG / OK / BASELIN
 NOT CHECKED, counted separately; thresholded rules only show values until three earlier
 reports exist. `tools/rpzlib.py` is the owner's standalone tool, copied in unchanged.
 
-**Tests (`tests/test_msglog.py` 12, `tests/test_weekly_audit.py` 10):** a remembered turn is
+**Found by `/code-review` before merge, fixed:** `/msglog purge` ran `rmtree` in a thread
+while `remember()` kept writing, so it could fail partway with no reply — it now renames the
+folder first and replies on failure; `_msglog_summary` could raise if the prune deleted a
+file between listing and stat, breaking `/audit`; the audit window ended *today*, so the
+part of each run day after the cron fired fell into no week's window — it is now the seven
+full days ending yesterday, with the cron at Sunday 12:17 so Saturday has ended in the bots'
+`BOT_TIMEZONE` on a UTC server; the audit's `.env` reader kept `export ` prefixes and inline
+comments that python-dotenv drops; it checked the `.env` preset stack even when a saved
+`/preset` override is what the bot loads; and its echo rule omitted the lorebook and
+`first_mes` sources `rpzlib.py echo` uses, while its docstring said it matched. The review's
+mojibake finding was checked and is not real: the class starts at U+00A0, not a space
+(`'Âme'` does not match). `/clear` still leaves the log (documented; owner's call).
+`remember()`'s common path is one `open` + one append; the folders are made only when that
+open fails.
+
+**Tests (`tests/test_msglog.py` 14, `tests/test_weekly_audit.py` 14):** a remembered turn is
 one line that rpzlib's own `load_log` parses; kinds; toggle off and `MESSAGE_LOG=0` write
 nothing and the kill switch beats a saved toggle; a failed write leaves `remember()` intact;
 prune keeps day 30 and deletes day 31; `/msglog` status/on/off/purge and its admin gate,

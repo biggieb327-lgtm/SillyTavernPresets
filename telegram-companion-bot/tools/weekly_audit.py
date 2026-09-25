@@ -120,13 +120,21 @@ CONTRACTS = {
 # --- loading ----------------------------------------------------------------------------
 
 def read_env(path):
+    """KEY=VALUE lines the way python-dotenv (bot.py's loader) reads the common shapes:
+    an optional `export ` prefix, a quoted value, or an unquoted value whose ` # comment`
+    is dropped."""
     env = {}
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip()
+            q = re.match(r"""(["'])(.*?)\1""", v)
+            env[k.strip()] = q.group(2) if q else re.split(r"\s+#", v, maxsplit=1)[0].strip()
     except OSError:
         pass
     return env
@@ -136,8 +144,10 @@ def instances(base):
     return sorted(d for d in base.iterdir() if d.is_dir() and (d / "state.json").is_file())
 
 
-def load_chats(inst, since):
-    """{chat_id: [record, ...]} from day files dated >= since; plus unreadable-line count."""
+def load_chats(inst, since, until):
+    """{chat_id: [record, ...]} from day files dated since..until inclusive; plus the count of
+    unreadable lines. `until` is yesterday: today's file is still being written, and a
+    window ending today would leave the rest of today in no week's audit."""
     chats, bad = {}, 0
     root = inst / "msglog"
     if not root.is_dir():
@@ -148,7 +158,7 @@ def load_chats(inst, since):
         for f in sorted(folder.iterdir()):
             m = DAY_RE.match(f.name)
             try:
-                if not m or date.fromisoformat(m.group(1)) < since:
+                if not m or not since <= date.fromisoformat(m.group(1)) <= until:
                     continue
             except ValueError:  # e.g. 2026-13-40.jsonl -- not a day file
                 continue
@@ -247,8 +257,13 @@ def echo_rule(card, clean, ready):
         return res("card-echo", NOT_CHECKED, "card not found or unreadable")
     if len(clean) < MIN_REPLIES:
         return res("card-echo", NOT_CHECKED, f"only {len(clean)} replies (need {MIN_REPLIES})")
+    # The same three sources `rpzlib.py echo` uses: card body (description, personality,
+    # scenario and every lorebook entry's content), first_mes, mes_example.
+    body = [card.get(f) or "" for f in ("description", "personality", "scenario")]
+    body += [e.get("content") or "" for e in rpzlib.entries_of(card)]
     worst = []
-    for name, src in (("card body", "\n".join(card.get(f) or "" for f in ("description", "personality", "scenario"))),
+    for name, src in (("card body", "\n".join(p for p in body if p)),
+                      ("first_mes", card.get("first_mes") or ""),
                       ("mes_example", card.get("mes_example") or "")):
         if src.strip():
             worst.append((max(echo_scores(src, clean)), name))
@@ -284,9 +299,15 @@ def proactive_rule(recs, clean_chat, ready):
                  "or give her day more to report.", ready)
 
 
-def static_rules(inst, env, prior_card, ready):
+def static_rules(inst, env, prior_card, ready, preset_override=None):
+    """Preset and card checks. The layers checked are the ones the bot loads: a saved
+    /preset override (state.json) wins over the .env stack unless PRESET_COMMAND=0, the
+    same order bot.py's apply_overrides uses."""
     out, metrics = [], {}
-    layers = [p.strip() for p in (env.get("PRESET_FILES") or env.get("PRESET_FILE") or "preset.txt").split(",") if p.strip()]
+    if preset_override and env.get("PRESET_COMMAND", "1").lower() not in ("0", "false", "off", "no"):
+        layers = [str(p) for p in preset_override]
+    else:
+        layers = [p.strip() for p in (env.get("PRESET_FILES") or env.get("PRESET_FILE") or "preset.txt").split(",") if p.strip()]
     neg, missing = [], []
     for layer in layers:
         p = inst / layer
@@ -368,17 +389,23 @@ def run_audit(base, today, days=7, baseline_weeks=3, banned_path=None):
         except (OSError, ValueError):
             last = {}
     banned = rpzlib.load_banned(banned_path)
-    since = today - timedelta(days=days - 1)
+    until = today - timedelta(days=1)
+    since = today - timedelta(days=days)
     sections, skipped, data, texts = [], [], {}, {}
     for inst in instances(base):
-        chats, bad = load_chats(inst, since)
+        chats, bad = load_chats(inst, since, until)
         if not chats:
-            skipped.append(f"{inst.name}: no message-log files since {since} (logging off, or nobody talked to it)")
+            skipped.append(f"{inst.name}: no message-log files dated {since} to {until} (logging off, or nobody talked to it)")
             continue
         env = read_env(inst / ".env")
-        results, metrics, card = [], {}, None
-        st, metrics, card = static_rules(inst, env, (last.get(inst.name) or {}).get("card"), ready)
-        all_raw = []
+        try:
+            state = json.loads((inst / "state.json").read_text(encoding="utf-8"))
+            state = state if isinstance(state, dict) else {}
+        except (OSError, ValueError):
+            state = None
+        st, metrics, card = static_rules(inst, env, (last.get(inst.name) or {}).get("card"), ready,
+                                         (state or {}).get("preset_override"))
+        results, all_raw = [], []
         for cid, recs in sorted(chats.items()):
             raw = replies_of(recs)
             all_raw += raw
@@ -396,14 +423,13 @@ def run_audit(base, today, days=7, baseline_weeks=3, banned_path=None):
         for r in st:
             r["where"] = inst.name
         results = st + results
-        persona = 0
-        try:
-            state = json.loads((inst / "state.json").read_text(encoding="utf-8"))
-            cutoff = (today - timedelta(days=days)).toordinal()
-            persona = sum(1 for ts in state.get("error_counts", {}).get("persona_break", [])
-                          if date.fromtimestamp(ts).toordinal() > cutoff)
-        except (OSError, ValueError, TypeError):
-            persona = None
+        persona = None
+        if state is not None:
+            try:
+                persona = sum(1 for ts in state.get("error_counts", {}).get("persona_break", [])
+                              if since <= date.fromtimestamp(ts) <= until)
+            except (ValueError, TypeError, OSError, AttributeError):
+                persona = None
         data[inst.name] = {"card": metrics, "replies": len(all_raw), "persona_break": persona}
         sections.append((inst.name, results, len(all_raw), bad, persona))
 
@@ -413,7 +439,7 @@ def run_audit(base, today, days=7, baseline_weeks=3, banned_path=None):
     counts = {s: sum(1 for r in all_results if r["status"] == s) for s in STATUS_ORDER}
 
     lines = [f"# Weekly message audit -- {today}", "",
-             f"Window: {since} to {today} ({days} days). "
+             f"Window: {since} to {until} ({days} full days; today's file is still being written). "
              + ("Thresholds active." if ready else
                 f"Baseline mode: {len(prior)} of {baseline_weeks} earlier reports, so threshold rules are shown, not judged."),
              "", "Totals: " + ", ".join(f"{counts[s]} {s}" for s in STATUS_ORDER), ""]
@@ -455,7 +481,7 @@ def run_audit(base, today, days=7, baseline_weeks=3, banned_path=None):
         text = text[:TELEGRAM_LIMIT - 60] + "\n... (truncated; see the full report)"
     payload = {"date": today.isoformat(), "instances": data}
     if not sections:
-        text = (f"Weekly audit {today}: NOTHING AUDITED -- no bot has message-log files since {since}. "
+        text = (f"Weekly audit {today}: NOTHING AUDITED -- no bot has message-log files dated {since} to {until}. "
                 f"If logging is meant to be on, check /msglog on each bot.\n" + text)
         return report, text, payload, 2
     return report, text, payload, 1 if flagged else 0

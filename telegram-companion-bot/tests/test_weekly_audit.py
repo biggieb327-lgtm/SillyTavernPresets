@@ -153,6 +153,42 @@ def test_main_writes_report_and_json(tmp_path):
     assert json.loads((tmp_path / "audits" / f"{TODAY}.json").read_text())["instances"]["priya"]["replies"] == 10
 
 
+def test_window_is_seven_full_days_ending_yesterday(tmp_path):
+    d = _instance(tmp_path, "priya", _varied(10))
+    chat = d / "msglog" / "5550001"
+    (chat / f"{(TODAY - timedelta(days=1)).isoformat()}.jsonl").rename(chat / f"{TODAY.isoformat()}.jsonl")
+    _, summary, _, code = _results(tmp_path)
+    assert code == 2 and "NOTHING AUDITED" in summary, "today's file is still being written"
+    (chat / f"{TODAY.isoformat()}.jsonl").rename(chat / f"{(TODAY - timedelta(days=7)).isoformat()}.jsonl")
+    _, _, payload, _ = _results(tmp_path)
+    assert payload["instances"]["priya"]["replies"] == 10, "day -7 is the window's first day"
+
+
+def test_read_env_matches_dotenv_on_export_and_inline_comments(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text('export CHARACTER_CARD=nora.json  # card\nTOKEN="a#b"  # quoted\nX=plain\n')
+    assert wa.read_env(p) == {"CHARACTER_CARD": "nora.json", "TOKEN": "a#b", "X": "plain"}
+
+
+def test_a_saved_preset_override_is_what_gets_checked(tmp_path):
+    d = _instance(tmp_path, "cass", _varied(10),
+                  presets={"preset-core.txt": "fine\n", "preset-rp.txt": "Never narrate.\n"},
+                  env={"PRESET_FILES": "preset-core.txt"})
+    (d / "state.json").write_text(json.dumps({"preset_override": ["preset-core.txt", "preset-rp.txt"]}))
+    _, summary, _, _ = _results(tmp_path)
+    assert "preset-rp.txt:1" in summary
+    (d / ".env").write_text((d / ".env").read_text() + "PRESET_COMMAND=0\n")
+    _, summary, _, _ = _results(tmp_path)
+    assert "preset-rp.txt" not in summary, "PRESET_COMMAND=0 strands the override, as in bot.py"
+
+
+def test_echo_reads_first_mes_like_rpzlib_echo(tmp_path):
+    first = wa.rpzlib.load_card(str(HERE.parent / "priya.json"))["first_mes"]
+    _instance(tmp_path, "priya", [first] * 10)
+    report, *_ = _results(tmp_path)
+    assert "card-echo (priya chat 5550001) -- highest echo" in report and "from first_mes" in report
+
+
 def test_notify_without_credentials_reports_instead_of_raising(tmp_path):
     _instance(tmp_path, "priya", _varied(10))
     assert wa.notify(tmp_path, "priya", "hi") == "no TELEGRAM_BOT_TOKEN or owner chat for priya"

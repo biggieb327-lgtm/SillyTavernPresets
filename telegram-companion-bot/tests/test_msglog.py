@@ -206,6 +206,22 @@ def test_backup_archive_never_contains_the_message_log(tmp_path):
     assert leaked == [], leaked
 
 
+def test_summary_survives_a_file_vanishing_mid_walk(logdir):
+    _remember(880012, ("assistant", "a"))
+    # a dangling symlink stats as FileNotFoundError, like a day file the prune job just deleted
+    (logdir / "880012" / "2026-01-01.jsonl").symlink_to(logdir / "gone.jsonl")
+    assert "chat(s)" in bot._msglog_status_line()
+
+
+def test_logging_resumes_into_a_fresh_tree_after_purge(logdir):
+    _remember(880013, ("assistant", "before"))
+    assert bot._purge_msglog() == 1
+    assert not logdir.exists() and not list(logdir.parent.glob("msglog.purge-*"))
+    _remember(880013, ("assistant", "after"))
+    (f,) = (logdir / "880013").glob("*.jsonl")
+    assert [r["mes"] for r in _lines(f)] == ["after"]
+
+
 def test_status_line_counts_files_on_disk(logdir):
     _remember(880011, ("assistant", "a"), ("user", "b"))
     line = bot._msglog_status_line()

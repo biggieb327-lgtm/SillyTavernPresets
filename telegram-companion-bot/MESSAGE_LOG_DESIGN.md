@@ -128,8 +128,10 @@ be able to break a reply.
 
 ## Weekly audit (`tools/weekly_audit.py`)
 
-Root crontab, Sundays 05:17 (install line in `OPS_MANUAL.md` § "Weekly message audit").
-Audits every instance whose `msglog/` has day files from the last 7 days, i.e. the bots with
+Root crontab, Sundays 12:17 server time (install line in `OPS_MANUAL.md` § "Weekly message
+audit"). The window is the seven full days ending yesterday — today's file is still being
+written, and a window ending today would leave the rest of today in no week. Audits every
+instance whose `msglog/` has day files in that window, i.e. the bots with
 logging on that were talked to; the rest are listed as skipped. Fixed rules over
 `tools/rpzlib.py` metrics (a copy of the owner's standalone tool, standard library only) —
 no model call, no NanoGPT spend. Report to `/opt/telegram-bots/audits/<date>.md`, metrics
@@ -211,5 +213,8 @@ and `preset-explicit.txt:97` ("No soft erotic landing…") are negative directiv
    What raw logging would add is visibility into `_strip_slop`, which records no count.
 2. **Group chats include other people's messages.** Logged by default like everything
    else; a `MESSAGE_LOG_GROUPS=0` switch is cheap to add if wanted.
-3. **Per-instance or fleet-wide `/msglog`.** Per-instance (each bot's own command),
+3. **`/clear` leaves the log alone.** It wipes `conversation_history`; the log is the audit
+   record, and deleting it on every `/clear` would erase the week that shows why a chat
+   went wrong. A non-admin allowed user cannot purge it. Owner's call if that should change.
+4. **Per-instance or fleet-wide `/msglog`.** Per-instance (each bot's own command),
    matching `/preset`. Fleet-wide toggling is the `.env` + `vps-sync.sh` path.

@@ -1295,6 +1295,12 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-25 — Wrote `test_backup_archive_never_contains_the_message_log` asserting no archived
+  *path* contained "msglog". `break-test.sh` (widen the backup's `find -maxdepth 1`) stayed green:
+  the script's `cp -- "$f" "$STAGE/$name/"` flattens subfolders, so a leaked day file would be
+  archived as `nora/2026-09-25.jsonl`. Switched to a content marker searched inside every member;
+  break-test then went red. C18's shape, caught by the tool before commit. -> **assert on what
+  would leak (the bytes), not on where you expect it to land.**
 - 2026-09-25 — Told the owner "No instance writes a structured conversation record anywhere —
   I checked." The check was a grep for logging-shaped names (`transcript`, `chat_log`,
   `OWNER_CHAT_ID`, `logging.basicConfig`). It missed `remember()` → `save_state()` →

@@ -9693,14 +9693,20 @@ def _msglog_record(chat_id: int, role: str, content: str, kind: str, now: float 
     try:
         now = time.time() if now is None else now
         dt = datetime.fromtimestamp(now, TZ) if TZ else datetime.fromtimestamp(now).astimezone()
-        MSGLOG_DIR.mkdir(mode=0o700, exist_ok=True)
         folder = MSGLOG_DIR / str(chat_id)
-        folder.mkdir(mode=0o700, exist_ok=True)
         path = folder / f"{dt.strftime('%Y-%m-%d')}.jsonl"
         rec = {"ts": dt.isoformat(timespec="seconds"), "chat_id": chat_id,
                "is_user": role == "user", "is_system": kind == "synthetic",
                "kind": kind, "mes": content or "", "ver": BOT_VERSION}
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileNotFoundError:
+            # First turn of a chat, or the tree was purged/pruned: make the folders only then,
+            # so the common path on the event loop is one open and one write.
+            MSGLOG_DIR.mkdir(mode=0o700, exist_ok=True)
+            folder.mkdir(mode=0o700, exist_ok=True)
+            fd = os.open(path, flags, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=True) + "\n")
         return path
@@ -9747,15 +9753,20 @@ def _msglog_summary() -> dict:
     days = []
     if MSGLOG_DIR.is_dir():
         for folder in MSGLOG_DIR.iterdir():
-            if not folder.is_dir():
-                continue
             n = 0
-            for f in folder.iterdir():
-                m = _MSGLOG_DAY_RE.match(f.name)
-                if m:
-                    n += 1
-                    size += f.stat().st_size
-                    days.append(m.group(1))
+            try:
+                if not folder.is_dir():
+                    continue
+                for f in folder.iterdir():
+                    m = _MSGLOG_DAY_RE.match(f.name)
+                    if m:
+                        size += f.stat().st_size
+                        n += 1
+                        days.append(m.group(1))
+            except OSError:
+                # The prune job or a purge (worker threads) can delete a file or folder
+                # between listing and stat; a count must never break /audit.
+                pass
             if n:
                 chats += 1
                 files += n
@@ -10782,8 +10793,13 @@ def _purge_msglog() -> int:
     """Delete this instance's whole msglog/ tree; return how many day files it held."""
     if not MSGLOG_DIR.is_dir():
         return 0
-    n = sum(1 for f in MSGLOG_DIR.rglob("*.jsonl") if _MSGLOG_DAY_RE.match(f.name))
-    shutil.rmtree(MSGLOG_DIR)
+    # Rename first, then delete: remember() keeps appending on the event loop while this
+    # runs in a thread, and rmtree over a tree being written to can fail partway. After the
+    # rename, new turns start a fresh msglog/.
+    doomed = MSGLOG_DIR.with_name(f"msglog.purge-{time.time_ns()}")
+    MSGLOG_DIR.rename(doomed)
+    n = sum(1 for f in doomed.rglob("*.jsonl") if _MSGLOG_DAY_RE.match(f.name))
+    shutil.rmtree(doomed, ignore_errors=True)
     return n
 
 
@@ -10804,7 +10820,7 @@ async def msglog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sub in ("on", "off"):
         msglog_toggle["on"] = sub == "on"
         save_state()
-        await update.message.reply_text("Message log: " + _msglog_status_line())
+        await update.message.reply_text("Message log: " + await asyncio.to_thread(_msglog_status_line))
         return
     if sub == "purge":
         if args[1:2] != ["confirm"]:
@@ -10812,10 +10828,15 @@ async def msglog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "This deletes every message-log file for this bot. "
                 "Send /msglog purge confirm to go ahead.")
             return
-        n = await asyncio.to_thread(_purge_msglog)
+        try:
+            n = await asyncio.to_thread(_purge_msglog)
+        except OSError as e:
+            log.warning("[msglog] purge failed: %s", e)
+            await update.message.reply_text("Purge failed — the log was not deleted. See /errors or the journal.")
+            return
         await update.message.reply_text(f"Deleted {n} message-log day file(s).")
         return
-    lines = ["Message log: " + _msglog_status_line()]
+    lines = ["Message log: " + await asyncio.to_thread(_msglog_status_line)]
     if sub and sub not in ("status", "show"):
         lines.insert(0, f"Unknown option: {sub}")
     lines += ["", "Usage:",

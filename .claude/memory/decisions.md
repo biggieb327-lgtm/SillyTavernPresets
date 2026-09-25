@@ -82,6 +82,25 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-25 | Message log hooks remember(), stays on the VPS, and a weekly audit judges it with fixed rules | status: current
+**Decided:** every turn `remember()` records is also appended to
+`<instance>/msglog/<chat_id>/<date>.jsonl` (default on, `MESSAGE_LOG=0` kill switch, 30-day
+retention by filename date, admin `/msglog`). `tools/weekly_audit.py` runs from root's crontab on
+Sundays and reports FLAG / OK / BASELINE / NOT CHECKED over `tools/rpzlib.py` metrics, with no model call.
+**Over:** (a) logging at each send path (`_deliver`, `_group_deliver`, `send_triggered`): three
+sites to keep in sync, where `remember()` is the one function all of them already call;
+(b) the proactive-receipt pipe (journald → observer unit → jsonl): the text would also sit in
+journald under journald's retention, so "gone after 30 days" would not be true; (c) the
+suggestions written by a model: `rpzlib.py`'s thresholds have never been checked against real
+bot output, so a model would present guesses as verdicts, and it would spend NanoGPT quota weekly.
+**Why:** the owner wanted the fleet's output analyzable and audited, with 30-day retention and
+the data kept on the VPS. The log sits in a subfolder because `vps-backup.sh` copies top-level
+instance files only (pinned by a test that runs the real script). Threshold rules show values without
+judging them until three weekly reports exist.
+**By:** owner (log, `/msglog`, 30 days, VPS-only, weekly audit, rule set); session
+`claude/bot-database-schema-qllz12` (hook point, storage layout, fixed rules over a model), 2026-09-25.
+**Detail:** `telegram-companion-bot/MESSAGE_LOG_DESIGN.md`; CHANGELOG v2026-09-25.1.
+
 ### 2026-09-24 | Cloud sessions get the 3.12 deps from an async SessionStart hook via a symlinked venv | status: current
 **Decided:** `.claude/hooks/session-deps.sh` runs async in cloud sessions, builds a venv from
 `requirements.lock` + the CI pytest pin in a lock-keyed directory outside the repo, and switches the
