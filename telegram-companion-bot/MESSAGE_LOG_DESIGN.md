@@ -1,9 +1,10 @@
 # Message log — design sketch
 
-Status: **proposed, not built** (2026-09-25). Owner asked for a way to send the bots'
-messages somewhere they can be analyzed and audited, with a slash command to toggle it
-and 30-day retention. Owner is comfortable with the data at rest as long as it stays on
-the VPS.
+Status: **built in v2026-09-25.1** (message log + `/msglog` in bot.py; weekly audit in
+`tools/weekly_audit.py`). Owner asked for a way to send the bots' messages somewhere they
+can be analyzed and audited, with a slash command to toggle it and 30-day retention, then
+for a weekly job that runs rpzlib.py on the bots that have it on and says what could be
+improved. Owner is comfortable with the data at rest as long as it stays on the VPS.
 
 ## What exists today (read from source, not observed on the VPS)
 
@@ -71,8 +72,10 @@ One JSON object per line, shaped so `rpzlib.py` reads it unchanged (`mes`, `is_u
  "is_system": false, "kind": "reply", "mes": "...", "ver": "2026-09-25.1"}
 ```
 
-- `kind`: `reply` | `group` | `proactive` | `user`. Synthetic lines from
-  `send_triggered` ("[you reached out to ... first]") get `is_system: true`.
+- `kind`: `chat` (a DM turn, either side) | `group` (chat_id < 0) | `proactive` (the
+  message `send_triggered` sends) | `synthetic` (the "[you reached out to ... first]" user
+  line `send_triggered` stores first; also `is_system: true`, so rpzlib skips it).
+  `remember()` takes an optional `kind`; only `send_triggered` passes one.
 - `ver` = `BOT_VERSION`, so an audit can split a window by release.
 - `ensure_ascii=True` on write (house rule for JSON; also keeps one line per record).
 
@@ -123,36 +126,89 @@ Default-on follows invariant 16 (new features default on, mandatory kill switch)
 A failed write logs one warning and never raises out of `remember()` — logging must not
 be able to break a reply.
 
-## Analysis workflow
+## Weekly audit (`tools/weekly_audit.py`)
 
-On the VPS:
+Root crontab, Sundays 05:17 (install line in `OPS_MANUAL.md` § "Weekly message audit").
+Audits every instance whose `msglog/` has day files from the last 7 days, i.e. the bots with
+logging on that were talked to; the rest are listed as skipped. Fixed rules over
+`tools/rpzlib.py` metrics (a copy of the owner's standalone tool, standard library only) —
+no model call, no NanoGPT spend. Report to `/opt/telegram-bots/audits/<date>.md`, metrics
+to `<date>.json` for next week's comparison, summary to the owner through `--notify`'s bot.
+`audits/` is outside every instance folder, so `vps-backup.sh` never archives it.
 
-```bash
-cat /opt/telegram-bots/nora/msglog/<chat_id>/2026-09-*.jsonl > /tmp/nora-sept.jsonl
-python3 rpzlib.py chat /tmp/nora-sept.jsonl
-python3 rpzlib.py echo /opt/telegram-bots/nora/nora.json /tmp/nora-sept.jsonl
-```
+Every rule result is exactly one of: **FLAG** (condition observed), **OK**, **BASELINE**
+(a numeric-threshold rule, shown but not judged until 3 earlier reports exist — the
+thresholds have never been checked against real bot output), **NOT CHECKED** (could not
+tell: too few replies, card missing). Counted separately; NOT CHECKED never reads as OK.
+Identical flags from several bots (a shared preset layer) are reported once, naming each bot.
 
-This is the first real bot output `rpzlib.py`'s `chat`/`echo` commands would ever see
-(HANDOFF open item: "first run on real data").
+**Tier 1 — bugs, flag from week one**
 
-## Verification (when built)
+| rule | observes | fix it points at |
+|---|---|---|
+| `reasoning-leak` | think tags / "Thinking Process:" in the **raw** line (rpzlib's `clean()` deletes them, so this cannot run on cleaned text) | `leak_samples/` → `tests/leak_corpus/`, `_looks_like_reasoning_leak` |
+| `mojibake` | `â€`, `Ã`+byte, `Â`+byte sequences | `_fix_mojibake`'s table |
+| `assistant-voice` | "let me know if", "I'm here to help", "feel free to", ... in logged text | `_SLOP_OPENER_RE` for openers; a positively worded closing rule in `preset-<name>.txt` |
+| `banned-phrases` | rpzlib's banned list (noisy patterns marked "often literal") | positive substitutes in `preset-<name>.txt` |
+| `preset-negative-directives` | preset-layer lines starting Never / Don't / Do not / Avoid / No | rewrite as the behavior wanted |
 
-- Test that **calls** `msglog_cmd` for status/on/off (delivery gate + `handlers-exercised`).
-- Test: `remember()` with logging on writes one well-formed line; with it off writes none;
-  a write error does not raise.
-- Test: prune deletes day 31, keeps day 30, uses filename date.
-- Test or eval: `vps-backup.sh`'s `find` stays `-maxdepth 1` (or explicitly excludes
-  `msglog`), so the log cannot start leaving the VPS unnoticed.
-- `/audit` reports msglog status — `audit-keys-rendered` requires every key to render.
-- `.env.example` documents both vars (`env-vars-documented`).
-- BOT_VERSION bump + CHANGELOG entry; OPS_MANUAL command reference gets `/msglog`.
+Measured before building rule 3 (not assumed): `_strip_persona_breaks` removes only AI
+self-reference sentences, and `_strip_slop` removes assistant openers only at the start of
+a reply; neither touches "let me know if" or a mid-reply "I'm here to help". So the logged
+(post-filter) text is where those show up. How often `_strip_persona_breaks` fires is
+already counted — `_count_error("persona_break")` → `state.json["error_counts"]` — and the
+report prints the week's count (a floor: 200 timestamps kept per category).
+
+**Tier 2 — each character's format rule, from its `preset-<name>.txt` (BASELINE first)**
+
+| rule | measures | limit |
+|---|---|---|
+| `priya-lowercase` / `priya-no-markdown` | replies opening with a capital / with markdown or asterisks | 20% / 5% |
+| `emily-third-person`, `marcus-third-person` | first-person words in narration (outside quotes) | 25% |
+| `cass-no-narration` | replies with `*action beats*` | 5% |
+| `bonnie-length` | replies of 1–2 paragraphs (her card says 3–6) | 50% |
+| `nora-questions` | replies ending on "?" | 50% |
+
+Jules has none: "softening her is a character bug" has no fixed-rule signal; that stays with
+the `character-reviewer` agent.
+
+**Tier 3 — drift (BASELINE first)**
+
+| rule | measures |
+|---|---|
+| `loops` | replies whose novelty vs the last 5 is under 65% of the chat's 75th percentile; flag above 15% |
+| `openers` | one first word starting ≥30% of replies |
+| `card-echo` | rpzlib echo vs card body and `mes_example`; flag at ≥0.15 (copied lines) |
+| `proactive-staleness` | proactive messages' median novelty vs the chat's; flag under 65% |
+| `voice-blending` | rpzlib `rooms` gap between two bots' replies; flag under 0.02 |
+| `card-regression` | non-ASCII count, permanent tokens, lorebook entries missing any of the 15 fields — flag any rise since last week |
+
+**First smoke run (2026-09-25, real cards and documented preset stacks, generated logs)**
+already found three real things, left as follow-ups rather than widened into this release:
+`preset-core.txt:122` ("Never reference {{user}}'s internal thoughts…", loaded by all seven)
+and `preset-explicit.txt:97` ("No soft erotic landing…") are negative directives, and
+`emily_harper.json` has 5 lorebook entries carrying only 3 of the 15 fields.
+
+## Verification (shipped)
+
+- `tests/test_msglog.py`: `remember()` writes one line per turn that rpzlib's own
+  `load_log` parses; group/proactive/synthetic kinds; toggle off and `MESSAGE_LOG=0` write
+  nothing (the kill switch beats a saved toggle); a failed write never breaks `remember()`;
+  prune keeps day 30, deletes day 31, goes by filename; `/msglog` status/on/off/purge and
+  its admin gate, driven with fake Telegram objects; **the real `vps-backup.sh` run against
+  a fake tree archives no message-log content** (searched by content: the script's `cp`
+  flattens subfolders, so a path check could not see a leak — found by break-test).
+- `tests/test_weekly_audit.py`: tier 1 flags from week one on raw text; threshold rules wait
+  for the baseline; too few replies is NOT CHECKED, never OK; a week with nothing audited
+  is loud and does not advance the baseline; negative directives; card regression vs last
+  week; missing card; report + json written; notify without credentials reports, not raises.
+- Each branch above break-tested red with `.claude/tools/break-test.sh`.
 
 ## Open choices (defaulted here, easy to change)
 
-1. **Log the raw model output too?** v1 logs what the user saw. Logging the pre-filter
-   text alongside it would show how often `_strip_slop` / `_strip_persona_breaks`
-   rewrite a reply, but needs the raw text passed from `_deliver` into the log call.
+1. **Log the raw model output too?** Still open, but narrower than first thought: the
+   assistant-voice rule works on logged text and the persona-break count already exists.
+   What raw logging would add is visibility into `_strip_slop`, which records no count.
 2. **Group chats include other people's messages.** Logged by default like everything
    else; a `MESSAGE_LOG_GROUPS=0` switch is cheap to add if wanted.
 3. **Per-instance or fleet-wide `/msglog`.** Per-instance (each bot's own command),

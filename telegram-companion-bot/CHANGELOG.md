@@ -7,6 +7,49 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-25.1 — Message log + `/msglog`, and a weekly audit of what the bots actually say
+
+**Root cause: there was no record of the fleet's output that could be analyzed.** Every
+reply passes through `remember()`, which keeps a rolling window in `state.json`
+(`conversation_history`), but `maintain_memory` summarizes it away and `remember()` caps it
+at `MAX_HISTORY * 4`, so no week of real replies ever survived to be measured. The owner's
+analysis tool (`rpzlib.py`: loops, ruts, banned phrases, card echo) had only ever run on
+synthetic text, its thresholds unchecked, and quality problems surfaced only when the owner
+happened to notice one in a chat.
+
+**Fix (MESSAGE_LOG_DESIGN.md):** `remember()` also calls `_msglog_record()`, appending the
+turn to `<instance>/msglog/<chat_id>/<YYYY-MM-DD>.jsonl` in the fields rpzlib's `load_log`
+reads (`mes`, `is_user`, `is_system`) plus `kind` (`chat`/`group`/`proactive`/`synthetic` —
+`send_triggered` passes the last two), `ts`, `ver`. One hook covers DM replies, group
+replies and proactive sends, the three paths that call `remember()` for the assistant side;
+`fire_reminder` sends literal reminder text without `remember()` and is not logged. Nothing in
+bot.py reads the log back into a prompt, so a group's turns sit in the group's own chat_id
+folder (GROUP_CHAT_DESIGN §5: the pollution risk is flat files injected into prompts).
+Best-effort: a failed write logs a WARNING and `remember()` carries on. Day files older than
+`MESSAGE_LOG_DAYS` (default 30, minimum 1) are deleted by the date in their filename, daily
+at 04:17 and ~90 s after startup; the prune runs even with logging off. New admin command
+`/msglog` (status / on / off / purge confirm), persisted in `state.json` as `msglog_toggle`;
+`/audit` gains a `Message log:` line. Kill switch `MESSAGE_LOG=0` (default on) stops the
+logging, unregisters `/msglog` and ignores a saved toggle — the `/preset` pairing. The log
+stays on the VPS: `vps-backup.sh` copies top-level instance files only; `msglog/` is also
+gitignored.
+
+New `tools/weekly_audit.py` (root crontab, Sundays; `OPS_MANUAL.md` § "Weekly message
+audit") runs rpzlib metrics plus fixed rules on each bot with log files that week and sends
+the owner what could be improved. No model call. Results are FLAG / OK / BASELINE /
+NOT CHECKED, counted separately; thresholded rules only show values until three earlier
+reports exist. `tools/rpzlib.py` is the owner's standalone tool, copied in unchanged.
+
+**Tests (`tests/test_msglog.py` 12, `tests/test_weekly_audit.py` 10):** a remembered turn is
+one line that rpzlib's own `load_log` parses; kinds; toggle off and `MESSAGE_LOG=0` write
+nothing and the kill switch beats a saved toggle; a failed write leaves `remember()` intact;
+prune keeps day 30 and deletes day 31; `/msglog` status/on/off/purge and its admin gate,
+called with fake Telegram objects; the real `vps-backup.sh`, run on a fake tree, archives no
+log content. Audit: tier 1 flags on raw text in week one, threshold rules wait for the
+baseline, too few replies is NOT CHECKED rather than OK, a week with nothing audited is
+reported and does not count toward the baseline. Each break-tested red.
+`MESSAGE_LOG` added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+
 ## v2026-09-23.1 — Save the full text of every reply the reasoning-leak guard refuses
 
 **Root cause: the only record of a rejected leak was 120 characters.** When

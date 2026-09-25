@@ -297,6 +297,7 @@ These files shape what the character knows and references. All are editable from
 |---|---|
 | `/preset` | Show this instance's preset (voice) layers, per-layer and total token cost, and which layer files are on disk |
 | `/preset <names>` | Swap the layer stack live — `/preset core,rp`. Also `add <name>`, `drop <name>`, `reset` (back to `.env`). Effective on the next message, no restart; persists across restarts. Reports the token delta. Kill switch `PRESET_COMMAND=0` (also makes startup ignore a saved override — the recovery path for a stack that ruins a character's voice) |
+| `/msglog` | Message log status: on/off, retention, chats and day files on disk. `/msglog on` / `/msglog off` persist across restarts; `/msglog purge confirm` deletes every log file for this bot. Admin-only. Logs live in `<instance>/msglog/<chat_id>/<date>.jsonl`, VPS-only (the backup copies top-level files only), deleted after `MESSAGE_LOG_DAYS` (30). Kill switch `MESSAGE_LOG=0` (also unregisters the command and ignores a saved toggle). Feeds the weekly audit — see "Weekly message audit" below |
 | `/audit` | Self-audit: `BOT_VERSION`, uptime, error counts, state/disk health. Marks the preset line `(via /preset)` when an override is active |
 | `/fleet` | Fleet console (designated instance): probes every peer's admin API — up/down, version, uptime, err/1h. Needs `FLEET_PEERS` in that instance's `.env`; peers need `ADMIN_API_ENABLED=1`. Kill switch `FLEET_CMD=0` |
 | `/errors [N]` | Show last N lines of errors.log (default 20, max 50) — check this first for anything odd |
@@ -448,6 +449,37 @@ deploy/vps-backup.sh --list /opt/telegram-bots/backups/bot-state-20260916-0330.t
 deploy/vps-backup.sh --restore /opt/telegram-bots/backups/bot-state-20260916-0330.tar.gz /tmp/drill
 # Then copy individual files to /opt/telegram-bots/<instance>/ as needed.
 ```
+
+The backup copies top-level instance files only (`find -maxdepth 1`), so the message log
+(`<instance>/msglog/`) and the weekly audit reports (`/opt/telegram-bots/audits/`) are never
+archived or sent off-box. `state.json` is, and it holds each chat's recent history.
+
+### Weekly message audit
+
+`tools/weekly_audit.py` reads the last 7 days of every bot's message log (`/msglog`) and
+reports what could be improved: reasoning leaks, mojibake and assistant phrases that got
+past the filters, banned phrases, repetitive replies and openers, each character's format
+rules from its `preset-<name>.txt`, lines copied from the card, stale proactive messages,
+two bots converging on one voice, negative directives in preset layers, and card
+regressions since last week. Fixed rules over `tools/rpzlib.py` metrics — no model calls,
+no NanoGPT spend. Standard library only, so system `python3` runs it.
+
+Rules with a numeric threshold are shown but not judged (`BASELINE`) until three earlier
+weekly reports exist; bug-shaped rules (leaks, mojibake, assistant phrases, negative
+directives) flag from week one. `NOT CHECKED` means the audit could not tell (too few
+replies, card missing) and is counted separately from findings. Bots with no log files that
+week are listed as skipped. Full rule list: `MESSAGE_LOG_DESIGN.md`.
+
+**Install (one-time, as root)** — Sundays 05:17, summary sent through nora's bot:
+```bash
+crontab -e
+# 17 5 * * 0 /usr/bin/python3 /opt/telegram-bots/.repo/telegram-companion-bot/tools/weekly_audit.py --notify nora >> /var/log/weekly-audit.log 2>&1
+```
+The script runs from the repo checkout, which every `vps-sync.sh` run refreshes. Full
+reports: `/opt/telegram-bots/audits/<date>.md`. Try it without writing or sending anything:
+`python3 /opt/telegram-bots/.repo/telegram-companion-bot/tools/weekly_audit.py --dry-run`.
+Exit codes: 0 nothing flagged, 1 findings, 2 nothing could be audited (the summary is still
+sent, so a broken log is not a silent week).
 
 **Restore drill:** run `--restore`, verify the staging directory contains the expected
 state files for all instances, diff one instance's `state.json` against the live copy,

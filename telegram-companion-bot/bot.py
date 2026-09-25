@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-23.1"
+BOT_VERSION = "2026-09-25.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -748,6 +748,16 @@ REASONING_LEAK_GUARD = _env_bool("REASONING_LEAK_GUARD", True)
 LEAK_SAMPLES = _env_bool("LEAK_SAMPLES", True)
 LEAK_SAMPLES_MAX = _env_int("LEAK_SAMPLES_MAX", "50")
 LEAK_SAMPLES_DIR = BASE_DIR / "leak_samples"
+# Message log (v2026-09-25.1, MESSAGE_LOG_DESIGN.md). remember() also appends each turn to
+# <instance>/msglog/<chat_id>/<YYYY-MM-DD>.jsonl so tools/weekly_audit.py can analyze real
+# output. Write-only: nothing here reads it back into a prompt, so a group's turns sit in
+# the group's own chat_id folder and never reach DM state (GROUP_CHAT_DESIGN §5). A
+# subfolder on purpose: vps-backup.sh copies top-level files only, so the log stays on the
+# VPS. Default ON with a kill switch (owner policy 2026-07-18); MESSAGE_LOG=0 also
+# unregisters /msglog and ignores a saved /msglog on|off, the /preset pairing.
+MESSAGE_LOG = _env_bool("MESSAGE_LOG", True)
+MESSAGE_LOG_DAYS = _env_int("MESSAGE_LOG_DAYS", "30")
+MSGLOG_DIR = BASE_DIR / "msglog"
 _STEP_INTENT_TTL = _env_float("STEP_INTENT_TTL_SEC", "21600")  # 6h: a stale intent never resurfaces
 # Social battery (ROADMAP 3.7): arithmetic-only fatigue 0-100 — mood tracks what she
 # feels about things, fatigue tracks remaining capacity. No LLM call anywhere in it.
@@ -4348,6 +4358,7 @@ _SUMMARIZE_SEM = asyncio.Semaphore(1)
 model_overrides = {}    # global var name (e.g. "NANOGPT_MODEL") -> model id, set via /setmodel
 setting_overrides = {}  # global var name (e.g. "SEARCH_ENABLED") -> value, set via /settings
 preset_override: list = []  # preset layer filenames set via /preset; empty = use the .env stack
+msglog_toggle: dict = {}    # {"on": bool} set via /msglog; empty = logging on (MESSAGE_LOG decides)
 user_location: dict = {}   # chat_id -> {lat, lon, ts, live_until}  (traffic feature)
 seen_incidents: dict = {}  # chat_id -> set of AlertID strings already alerted on
 _fire_seen: dict = {}      # chat_id -> set of Seattle-fire incident_number strings alerted on
@@ -4453,6 +4464,9 @@ def load_state():
     model_overrides.update(data.get("model_overrides", {}))
     setting_overrides.update(data.get("setting_overrides", {}))
     preset_override[:] = [str(n) for n in (data.get("preset_override") or [])]
+    _mt = data.get("msglog_toggle")
+    if isinstance(_mt, dict) and isinstance(_mt.get("on"), bool):
+        msglog_toggle["on"] = _mt["on"]
     _tc = data.get("token_calibration")
     if isinstance(_tc, dict):
         # Validate rather than trust: a hand-edited or truncated state.json must not be
@@ -4546,6 +4560,7 @@ def _serialize_state() -> str:
         "model_overrides": model_overrides,
         "setting_overrides": setting_overrides,
         "preset_override": list(preset_override),
+        "msglog_toggle": dict(msglog_toggle),
         "token_calibration": dict(token_calibration),
         "user_location": {str(k): v for k, v in user_location.items()},
         "seen_incidents": {str(k): list(v) for k, v in seen_incidents.items()},
@@ -9659,9 +9674,118 @@ async def send_meme(context, chat_id: int, hint: str = "", top: str = None, bott
         uploading.cancel()
 
 
-def remember(chat_id: int, role: str, content: str):
+_MSGLOG_DAY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+
+
+def _msglog_active() -> bool:
+    """MESSAGE_LOG=0 wins over a saved /msglog on — that pairing is the kill switch's job."""
+    return MESSAGE_LOG and msglog_toggle.get("on", True)
+
+
+def _msglog_record(chat_id: int, role: str, content: str, kind: str, now: float = None):
+    """Append one turn to msglog/<chat_id>/<local date>.jsonl; return the path, or None.
+
+    The line carries the fields rpzlib.py's load_log reads (mes, is_user, is_system), so a
+    day file is a chat log that tool accepts unchanged. Best-effort: any failure logs a
+    WARNING and returns None — a reply must never depend on this write."""
+    if not _msglog_active():
+        return None
+    try:
+        now = time.time() if now is None else now
+        dt = datetime.fromtimestamp(now, TZ) if TZ else datetime.fromtimestamp(now).astimezone()
+        MSGLOG_DIR.mkdir(mode=0o700, exist_ok=True)
+        folder = MSGLOG_DIR / str(chat_id)
+        folder.mkdir(mode=0o700, exist_ok=True)
+        path = folder / f"{dt.strftime('%Y-%m-%d')}.jsonl"
+        rec = {"ts": dt.isoformat(timespec="seconds"), "chat_id": chat_id,
+               "is_user": role == "user", "is_system": kind == "synthetic",
+               "kind": kind, "mes": content or "", "ver": BOT_VERSION}
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=True) + "\n")
+        return path
+    except Exception as e:
+        log.warning("[msglog] could not write the message log: %s", e)
+        return None
+
+
+def _prune_msglog(today: date = None, keep_days: int = None) -> int:
+    """Delete msglog day files dated more than MESSAGE_LOG_DAYS before today; return how many.
+
+    Goes by the date in the filename, not mtime — a restore or a copy resets mtime. Emptied
+    chat folders are removed. Runs whether or not logging is on, so turning the log off
+    never strands old files past retention. Minimum retention is one day."""
+    keep = max(1, MESSAGE_LOG_DAYS if keep_days is None else keep_days)
+    if not MSGLOG_DIR.is_dir():
+        return 0
+    cutoff = (today or _today()) - timedelta(days=keep)
+    removed = 0
+    for folder in MSGLOG_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        for f in folder.iterdir():
+            m = _MSGLOG_DAY_RE.match(f.name)
+            if not m:
+                continue
+            try:
+                day = date.fromisoformat(m.group(1))
+            except ValueError:
+                continue
+            if day < cutoff:
+                f.unlink(missing_ok=True)
+                removed += 1
+        try:
+            folder.rmdir()  # succeeds only when the folder is now empty
+        except OSError:
+            pass
+    return removed
+
+
+def _msglog_summary() -> dict:
+    """Counts for /msglog and /audit: chats with logs, day files, bytes, oldest/newest day."""
+    chats = files = size = 0
+    days = []
+    if MSGLOG_DIR.is_dir():
+        for folder in MSGLOG_DIR.iterdir():
+            if not folder.is_dir():
+                continue
+            n = 0
+            for f in folder.iterdir():
+                m = _MSGLOG_DAY_RE.match(f.name)
+                if m:
+                    n += 1
+                    size += f.stat().st_size
+                    days.append(m.group(1))
+            if n:
+                chats += 1
+                files += n
+    return {"chats": chats, "files": files, "bytes": size,
+            "oldest": min(days) if days else None, "newest": max(days) if days else None}
+
+
+def _msglog_status_line() -> str:
+    """One line for /msglog and /audit. Reports files on disk even when logging is off,
+    because retention still applies to them."""
+    if not MESSAGE_LOG:
+        state = "off (MESSAGE_LOG=0)"
+    else:
+        state = ("on" if _msglog_active() else "off") + (" via /msglog" if "on" in msglog_toggle else "")
+    s = _msglog_summary()
+    line = (f"{state}, keeps {max(1, MESSAGE_LOG_DAYS)}d — {s['chats']} chat(s), "
+            f"{s['files']} day file(s), {s['bytes'] // 1024} KB")
+    if s["oldest"]:
+        line += f", {s['oldest']} to {s['newest']}"
+    return line
+
+
+def remember(chat_id: int, role: str, content: str, kind: str = ""):
+    """Append one turn to the chat's history (persisted in state.json) and the message log.
+
+    `kind` labels the message-log line only: "synthetic" and "proactive" from
+    send_triggered; empty means "group" for a group chat_id, else "chat"."""
     hist = conversation_history.setdefault(chat_id, [])
     hist.append({"role": role, "content": content, "ts": time.time()})
+    _msglog_record(chat_id, role, content, kind or ("group" if chat_id < 0 else "chat"))
     # Summarization (maintain_memory) is the normal trimmer; this is just a safety
     # cap so the window can't grow without bound if summarizing keeps failing.
     hard_cap = MAX_HISTORY * 4
@@ -10191,6 +10315,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Settings*",
         "/preset — show her active preset (voice) layers and what they cost",
         "/preset <names> — swap the stack live, e.g. /preset core,rp (also: add/drop/reset)",
+        "/msglog — message log for the weekly audit: status, on, off, purge confirm",
         "/model — show current model",
         "/setmodel <field> <value> — change a model setting",
         "/settings — show current settings",
@@ -10651,6 +10776,62 @@ async def preset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 CONFIGURABLE_MODELS = list(MODEL_ROLES.values())
 CONFIGURABLE_SETTINGS = [var for var, _ in SETTINGS_INFO.values()]
+
+
+def _purge_msglog() -> int:
+    """Delete this instance's whole msglog/ tree; return how many day files it held."""
+    if not MSGLOG_DIR.is_dir():
+        return 0
+    n = sum(1 for f in MSGLOG_DIR.rglob("*.jsonl") if _MSGLOG_DAY_RE.match(f.name))
+    shutil.rmtree(MSGLOG_DIR)
+    return n
+
+
+async def msglog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show or switch the message log (MESSAGE_LOG_DESIGN.md).
+
+    /msglog                 — on/off, retention, what's on disk
+    /msglog on | off        — start or stop logging (persists across restarts)
+    /msglog purge confirm   — delete every log file for this bot now
+
+    Admin-gated like /preset: the log holds every chat this instance serves. Refused in
+    groups by group_guard like every command but /chatid. Plain text for the same reason
+    /preset uses it — arbitrary text can break Telegram's legacy Markdown parser."""
+    if not _is_admin(update.effective_user.id):
+        return
+    args = [a.lower() for a in (context.args or [])]
+    sub = args[0] if args else ""
+    if sub in ("on", "off"):
+        msglog_toggle["on"] = sub == "on"
+        save_state()
+        await update.message.reply_text("Message log: " + _msglog_status_line())
+        return
+    if sub == "purge":
+        if args[1:2] != ["confirm"]:
+            await update.message.reply_text(
+                "This deletes every message-log file for this bot. "
+                "Send /msglog purge confirm to go ahead.")
+            return
+        n = await asyncio.to_thread(_purge_msglog)
+        await update.message.reply_text(f"Deleted {n} message-log day file(s).")
+        return
+    lines = ["Message log: " + _msglog_status_line()]
+    if sub and sub not in ("status", "show"):
+        lines.insert(0, f"Unknown option: {sub}")
+    lines += ["", "Usage:",
+              "  /msglog on | off        start or stop logging",
+              "  /msglog purge confirm   delete all log files now"]
+    await update.message.reply_text("\n".join(lines))
+
+
+async def _msglog_prune_job(context: ContextTypes.DEFAULT_TYPE):
+    """Daily retention pass for msglog/ (and once shortly after startup)."""
+    try:
+        n = await asyncio.to_thread(_prune_msglog)
+        if n:
+            log.info("[msglog] pruned %d day file(s) older than %d days", n, max(1, MESSAGE_LOG_DAYS))
+    except Exception as e:
+        log.warning("[msglog] prune failed: %s", e)
 
 
 def apply_overrides():
@@ -14568,12 +14749,13 @@ async def send_triggered(context: ContextTypes.DEFAULT_TYPE, chat_id: int, trigg
     # Store a synthetic user entry so conversation history maintains proper user/assistant
     # alternation. Without it, two consecutive assistant turns confuse some models when
     # the user replies and the history is dumped into the next request.
-    remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]")
+    remember(chat_id, "user", f"[you reached out to {uname} first — no incoming message]",
+             kind="synthetic")
     remember(chat_id, "assistant", clean or (
         "[sent a selfie]" if selfie_hint is not None else
         "[sent a meme]" if meme_caption is not None else
         "[sent a gif]" if gif_query else ""
-    ))
+    ), kind="proactive")
     if clean:
         await send_bubbles(context, chat_id, clean)
     if selfie_hint is not None:
@@ -18559,6 +18741,7 @@ def gather_audit_data() -> dict:
                         for k, v in _card_field_tokens.items()},
         "preset_layers": [(n, _tokens(t)) for n, t in PRESET_LAYERS],
         "preset_override": list(preset_override),
+        "message_log": _msglog_status_line(),
         "token_calibration": _token_confidence(),
         "intent_stats": dict(_intent_stats),
         "life_project": (_read_project() if LIFE_PROJECT else None),
@@ -18673,6 +18856,8 @@ async def audit_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         # hint they came from /preset, sends the next reader to the wrong file.
         src = " (via /preset)" if d.get("preset_override") else ""
         lines.append("Preset layers" + src + ": " + ", ".join(f"{n} ~{t}t" for n, t in pl))
+    if d.get("message_log"):
+        lines.append("Message log: " + d["message_log"])
     cf = d.get("card_fields") or {}
     if cf:
         # Unconditional card fields vs the lorebook, which only costs on a trigger.
@@ -19754,6 +19939,8 @@ def main():
     app.add_handler(CommandHandler("settings", settings_cmd))
     if PRESET_COMMAND:
         app.add_handler(CommandHandler("preset", preset_cmd))
+    if MESSAGE_LOG:
+        app.add_handler(CommandHandler("msglog", msglog_cmd))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(CommandHandler("usage", check_usage))
     app.add_handler(CommandHandler("chatid", chatid))
@@ -19941,6 +20128,10 @@ def main():
         midnight = dtime(0, 1, tzinfo=TZ) if TZ else dtime(0, 1)  # 12:01 AM
         app.job_queue.run_daily(_rotate_day_context, time=midnight)
         log.info("Day context rotation scheduled at midnight.")
+        # Registered even when MESSAGE_LOG=0: retention must still clear what was written.
+        app.job_queue.run_daily(_msglog_prune_job,
+                                time=dtime(4, 17, tzinfo=TZ) if TZ else dtime(4, 17))
+        app.job_queue.run_once(_msglog_prune_job, when=90)
         for r in reminders:
             try:
                 schedule_reminder(app.job_queue, r)

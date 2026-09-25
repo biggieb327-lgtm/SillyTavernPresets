@@ -10,6 +10,7 @@ owner_chat.txt
 bot.log
 errors.log*
 leak_samples/
+msglog/
 *.tmp
 *.png
 *.jpg

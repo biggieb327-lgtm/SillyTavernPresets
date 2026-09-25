@@ -6549,6 +6549,8 @@ class TestCommandMenuMirrorsHandlers:
         "pinned", "unpin", "boundaries",
         "remindme", "setreminder", "reminders", "delreminder",
         "crons", "crondel",
+        # v2026-09-25.1: admin-only, like errors/restart — kept out of autocomplete.
+        "msglog",
     }
 
     def test_every_registered_command_is_in_menu_or_hidden(self):
@@ -9051,6 +9053,8 @@ class TestEveryBooleanFlagDefault:
         "MORNING_BRIEFING": True,
         "MORNING_NEWS": True,
         "MEME_ENABLED": True,
+        # v2026-09-25.1: appends each remembered turn to msglog/ (MESSAGE_LOG_DESIGN.md).
+        "MESSAGE_LOG": True,
         "MEMORY_AUDIT": True,
         "MEMORY_AUDIT_UNSUPPORTED": True,
         "MEMORY_AUTO": True,
@@ -9445,7 +9449,7 @@ class TestTriggeredMessageDeliversTheGif:
         monkeypatch.setattr(bot, "send_gif", _gif)
         monkeypatch.setattr(bot, "maintain_memory", _async_ret(None))
         monkeypatch.setattr(bot, "remember",
-                            lambda cid, role, text: seen["remember"].append((role, text)))
+                            lambda cid, role, text, kind="": seen["remember"].append((role, text)))
         asyncio.run(bot.send_triggered(None, 7788, "[SYSTEM: say hi]"))
         return seen
 
