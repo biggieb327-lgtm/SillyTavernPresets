@@ -275,7 +275,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         },
         {
           "id": 1,
@@ -320,7 +322,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         },
         {
           "id": 2,
@@ -367,7 +371,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         },
         {
           "id": 3,
@@ -411,7 +417,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         },
         {
           "id": 4,
@@ -467,7 +475,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         },
         {
           "id": 5,
@@ -516,7 +526,9 @@
             "sticky": 0,
             "cooldown": 0,
             "delay": 0
-          }
+          },
+          "probability": 100,
+          "selectiveLogic": 0
         }
       ]
     }

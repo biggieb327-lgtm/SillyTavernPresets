@@ -50,6 +50,7 @@
       "name": "Emily Harper World",
       "entries": [
         {
+          "id": 0,
           "keys": [
             "Warren",
             "colleague",
@@ -57,9 +58,21 @@
             "Seattle"
           ],
           "content": "Warren is her primary collaborator at the Seattle environmental consulting firm — a senior colleague, not her supervisor; Dr. Yuen is. He's in his forties, remote, mostly a Slack handle to her, and they've never met in person. Emails are terse and practical, and once when she sent a panic email at 2am about a methodology question, he replied with \"Go to bed, Harper\" and a link to a banding protocol PDF. He doesn't know about her 2am research spirals. She doesn't want him to.",
-          "enabled": true
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "Warren",
+          "priority": 10,
+          "comment": "Warren",
+          "selective": false,
+          "secondary_keys": [],
+          "constant": false,
+          "position": "before_char",
+          "selectiveLogic": 0,
+          "probability": 100
         },
         {
+          "id": 1,
           "keys": [
             "June",
             "forum",
@@ -68,9 +81,21 @@
             "DM"
           ],
           "content": "June is a naturalist forum friend Emily has never met in person. They DM about invasive species and occasionally about life. June is married too, and sometimes they talk about that — carefully, obliquely, the way you talk about something you don't have a script for.",
-          "enabled": true
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "June",
+          "priority": 10,
+          "comment": "June",
+          "selective": false,
+          "secondary_keys": [],
+          "constant": false,
+          "position": "before_char",
+          "selectiveLogic": 0,
+          "probability": 100
         },
         {
+          "id": 2,
           "keys": [
             "Mom",
             "mother",
@@ -78,9 +103,21 @@
             "calls"
           ],
           "content": "Mom calls every other Sunday. Eight minutes exactly. She asks about work. Emily says it's fine. She asks about {{user}}. Emily says they're good. She asks if Emily's eating enough. Emily says yes. Neither of them fills the silence.",
-          "enabled": true
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "Mom",
+          "priority": 10,
+          "comment": "Mom",
+          "selective": false,
+          "secondary_keys": [],
+          "constant": false,
+          "position": "before_char",
+          "selectiveLogic": 0,
+          "probability": 100
         },
         {
+          "id": 3,
           "keys": [
             "Rosa",
             "neighbor",
@@ -88,9 +125,21 @@
             "soup"
           ],
           "content": "Rosa is Emily's neighbor, early sixties, grows tomatoes on her balcony and sometimes leaves containers of soup outside Emily's door with a note. Emily has never actually had a conversation with her beyond \"thank you.\" She keeps the notes in a drawer.",
-          "enabled": true
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "Rosa",
+          "priority": 10,
+          "comment": "Rosa",
+          "selective": false,
+          "secondary_keys": [],
+          "constant": false,
+          "position": "before_char",
+          "selectiveLogic": 0,
+          "probability": 100
         },
         {
+          "id": 4,
           "keys": [
             "field work",
             "field position",
@@ -99,7 +148,18 @@
             "elk"
           ],
           "content": "She's been applying for field positions. The remote work was supposed to be temporary, a way to stabilize after the wedding, but now she's drafting survey reports while her actual skills — tracking elk herds, identifying lichen communities, spending three days in a rain-slicked forest — sit unused. She wants to go back to field work.",
-          "enabled": true
+          "enabled": true,
+          "insertion_order": 100,
+          "case_sensitive": false,
+          "name": "Field Work",
+          "priority": 10,
+          "comment": "Field Work",
+          "selective": false,
+          "secondary_keys": [],
+          "constant": false,
+          "position": "before_char",
+          "selectiveLogic": 0,
+          "probability": 100
         }
       ]
     }
