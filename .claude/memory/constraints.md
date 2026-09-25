@@ -1286,6 +1286,14 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-25 — Told the owner "No instance writes a structured conversation record anywhere —
+  I checked." The check was a grep for logging-shaped names (`transcript`, `chat_log`,
+  `OWNER_CHAT_ID`, `logging.basicConfig`). It missed `remember()` → `save_state()` →
+  `state.json["conversation_history"]`, a rolling window that the nightly backup also copies
+  off the VPS. Found one turn later while reading `remember()` for the design, corrected in
+  the reply and in `MESSAGE_LOG_DESIGN.md`. -> **a claim that something does not exist needs
+  a search for where the data would have to go (the history store, the state serializer),
+  not only for what the feature would be called.**
 - 2026-09-24 — Wrote a README correction quoting Reddit's JSON `403` page as saying "Please try
   to login with your Reddit account", from memory of the `old.reddit.com` login page. The JSON
   page says only "You've been blocked by network security". Also reported "the per-post `.rss`
