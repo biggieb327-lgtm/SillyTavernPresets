@@ -253,7 +253,12 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 12** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24, 2026-09-25 ×2)
+**seen: 13** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24, 2026-09-25 ×3)
+- 2026-09-25 (third) — Proposing a C5 prevention tool, wrote that today's true claims "would
+  have passed on their own, and the wrong one would have been caught" — the outcome of a tool
+  that does not exist, stated as a result. `theory-guard.sh` caught it at Stop. Restated as
+  `[hypothesis]` with what would test it (replaying this session through the tool). Same shape
+  as 2026-09-01: a prediction written in the voice of an observation.
 - 2026-09-25 (second) — Proposing audit rules, told the owner an assistant-voice check "needs
   the raw model output" because the log "can't see what `_strip_persona_breaks` removed" —
   assuming that function strips phrases like "let me know if" / "I'm here to help". Never read
