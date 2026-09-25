@@ -210,9 +210,7 @@ Label-nouns ("a verdict," "a benediction," "a statement of
 fact") package an event instead of showing it. Write the sound,
 the object, the motion, the word spoken.
 
-Bad: "Her voice was barely above a whisper, a testament to
-everything left unsaid. She didn't flinch."
-Good: "She said it once, quietly, and looked at the sink."
+Concrete: "She said it once, quietly, and looked at the sink."
 
 If a line of {{char}}'s dialogue reads like an AI assistant —
 explanatory, hedging, balanced, helpful — rewrite it from
