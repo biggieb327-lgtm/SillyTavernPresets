@@ -141,6 +141,18 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-25 | from: claude/bot-database-schema-qllz12 | to: bot-config-reference, edit-cards-and-presets | status: open
+at `1229570` — [observed] `.env.example`'s "Recommended stacks" preset-token table
+(around line 626) is stale well past the "~60 raw low" caveat it already carries.
+Re-measured chars//4 per layer file today: `preset-rp.txt` +702, `preset-explicit.txt`
++647, `preset-core.txt` +484 over the documented figures; every scene-instance row
+(nora/bonnie/emily/jules/marcus) is ~1,000-1,360 raw tokens over what's shown. Left a
+caveat with the numbers directly in `.env.example` next to the table (permanent home,
+not just this entry). Not fixed: the table itself still shows the old numbers, and the
+0.92 calibration ratio next to "cal" wasn't re-checked, only the raw side. Next session
+touching preset budgets: re-measure and update the table for real, or confirm with the
+owner whether the calibration ratio also drifted.
+
 ### 2026-09-24 | from: claude/fleet-pause-sunday-05r1zq | to: — | status: open
 at `fcac5cf` — [decision] Owner asked to stop the fleet until Sunday 2026-09-27. This
 session has no VPS shell access, so it handed the owner a `systemctl stop bot@*` loop

@@ -253,7 +253,16 @@ genuine zero. This constraint's real output is the `sweep.py` scanners it keeps 
 each of those is mechanical, the habit of writing them is not.
 
 ### C5 — Label a theory as a theory until evidence arrives
-**seen: 10** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24)
+**seen: 11** (2026-07-26, 2026-08-21, 2026-08-25, 2026-08-25, 2026-08-29, 2026-08-31, 2026-09-01, 2026-09-04, 2026-09-04, 2026-09-24, 2026-09-25)
+- 2026-09-25 — Told the owner "The banned-scan flags itself" — a claim about what a new
+  `rpzlib.py preset` subcommand's scan produced, inside a paragraph that also asserted why
+  (a `Bad:`/`Good:` example, not a live instruction) — without pasting the command output in
+  that message, though both had been run and captured earlier in the same turn.
+  `theory-guard.sh` caught it at Stop, inside its graduation scope (a claim about what a named
+  function produces, stated without hedging). Re-ran the command and re-grepped the source
+  context before replying; both halves of the claim held exactly as stated. Mechanism working
+  as designed, not a gap — same tell as every other entry here: confidence carried the claim
+  past the point where the evidence for it had actually been pasted.
 - 2026-09-24 — Reported that Reddit's per-post `.rss` "returns the whole comment thread"
   without a login. Measured: 106 comment entries, unchanged by `?limit=500`; "whole" had no
   count to check against (the real count is only on the blocked JSON endpoints).
@@ -1193,8 +1202,8 @@ mechanisation for the reason rule 4 allows prose: nothing in the diff distinguis
 that would have made the difference leaves no trace in the repo.
 
 ### C23 — The shell evaluated something the command text does not show
-**seen: 4** (2026-08-10 ×2, 2026-08-11, 2026-08-21) — *promoted from the Minor log
-2026-08-11; all three entries deleted.*
+**seen: 5** (2026-08-10 ×2, 2026-08-11, 2026-08-21, 2026-09-25 — mechanism caught it, zero
+damage) — *promoted from the Minor log 2026-08-11; all three entries deleted.*
 Three failures in one session, three different constructs, one cause: **what the shell
 actually did depended on something the written command does not display.**
 
@@ -1222,6 +1231,13 @@ and I had written the corrected form and explained the binding to the owner hour
 the `-m` quoting had already killed an earlier commit and `-F` was adopted as the fix four
 commits before; the cwd shape is named three times inside C13, which I had re-read in full
 about an hour earlier while graduating it.
+
+- 2026-09-25 — Wrote `git commit -m "$(cat <<'EOF' ... EOF)"` for a multi-line message.
+  `.claude/hooks/shell-semantics-guard.sh` blocked it at PreToolUse before the command ran,
+  citing this constraint by name. Switched to `git commit -F - <<'MSG'`. No bad commit
+  landed — the graduated hook caught the exact `-m` shape this constraint names, on the
+  first attempt, with nothing to clean up after. Recorded as evidence the mechanism holds,
+  not as a new failure shape.
 
 **Constraint:** in any command whose result you will act on or hand over —
 - put a test on the command you mean, never on the tail of a pipeline
