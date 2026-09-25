@@ -78,6 +78,20 @@ Newest first.
 
 ## Rows
 
+### 2026-09-25 | intervention: evidence-aware `theory_guard.py` + `.claude/tools/probe.py` | class: behavioral claim about named code stated without running it (C5, covered half) | status: pending
+C5 reached seen 13, three in one session: two claims true but unevidenced, one wrong
+(`_strip_persona_breaks`, never run, argued for a design dependency). The old guard matched
+wording, so it blocked verified claims and fired on "model output"/"with output". Now a
+code-shaped claim passes only if that name ran earlier in the session (read from the transcript
+the Stop hook already gets), and probe.py makes running it one command.
+**Holds when:** over the next several sessions, C5 entries in `constraints.md` are either
+guard catches with the right evidence reason, or noun-phrase / names-nothing claims (the stated
+uncovered half), and no entry shows a wrong claim about a *code-shaped* name that got through.
+**Recurrence shape to expect:** a wrong claim about a function that *was* run this session for a
+different behavior ("run" is per name, not per behavior); or a session that stops using probe.py
+and hedges everything instead, which passes the guard and verifies nothing.
+Refs: constraints C5 (Widened 2026-09-25), eval `theory-guard-evidence`, decisions 2026-09-25.
+
 ### 2026-09-24 | intervention: `session-deps.sh` SessionStart hook | class: verification skipped or red because the cloud container lacks the 3.12 deps | status: pending
 The cloud container's default `python3` is 3.11 with no bot packages, so `verify.sh` fails on
 `import bot.py` and `pytest` before checking anything. Sessions either verified with

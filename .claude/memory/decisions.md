@@ -82,6 +82,20 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-25 | theory-guard reads the session transcript for evidence; no new ledger hook | status: current
+**Decided:** C5's Stop hook checks a code-shaped claim against the transcript it already receives
+(`transcript_path`): the name ran in a non-search Bash command that did not error → pass; only
+read, or never seen → block. `.claude/tools/probe.py` makes running a function one command.
+**Over:** a PostToolUse hook appending every tool call to `.claude/.runtime/evidence.jsonl`
+(proposed first, to the owner). The transcript already records every tool call and result, so
+the ledger would have been a second copy that runs on every tool call, can drift from the
+transcript, and adds latency — for no information the transcript lacks.
+**Why:** C5 hit seen 13; the wording-only guard blocked verified claims and missed the one wrong
+claim's shape. Replaying the day's transcript through the new guard blocked the wrong claim with
+"read but never run" and passed the corrected one.
+**By:** owner (build both), session `claude/bot-database-schema-qllz12` (transcript over ledger),
+2026-09-25. **Detail:** `theory_guard.py` docstring; constraints C5 "Widened" note.
+
 ### 2026-09-25 | Message log hooks remember(), stays on the VPS, and a weekly audit judges it with fixed rules | status: current
 **Decided:** every turn `remember()` records is also appended to
 `<instance>/msglog/<chat_id>/<date>.jsonl` (default on, `MESSAGE_LOG=0` kill switch, 30-day

@@ -259,6 +259,10 @@ each of those is mechanical, the habit of writing them is not.
   that does not exist, stated as a result. `theory-guard.sh` caught it at Stop. Restated as
   `[hypothesis]` with what would test it (replaying this session through the tool). Same shape
   as 2026-09-01: a prediction written in the voice of an observation.
+  > Correction, same day: the guard did NOT catch the prediction. It quoted "run with output
+  > → pass", a false positive (the preposition "with" read as a function name before
+  > "output"); the prediction itself never matched. I found the real problem re-reading the
+  > message. Both halves fed the redesign that same day (see the "Widened" note below).
 - 2026-09-25 (second) — Proposing audit rules, told the owner an assistant-voice check "needs
   the raw model output" because the log "can't see what `_strip_persona_breaks` removed" —
   assuming that function strips phrases like "let me know if" / "I'm here to help". Never read
@@ -380,6 +384,18 @@ hook that catches one slice: asserting what a named function returns/produces/ca
 hedging. The general case (diagnosing an incident and stating a cause as fact) still has no
 mechanical signature, same as C8's uncovered half. Escape hatch: `# theory-ok` or any hedge
 word ("probably", "I think", "[hypothesis]").
+
+**Widened 2026-09-25 (seen 13, three the same day):** the guard now reads the session
+transcript it was always handed. A claim about a code-shaped name (backticked, snake_case,
+`fn()`), with a wider verb list (removed, strips, catches…), passes only if that name ran in
+a non-search Bash command that did not error; "read but never run" and "never seen" each
+block with that reason. Plain-word claims keep the old rule, narrowed to third-person verbs
+("model output" is a noun — it had been firing on correct sentences). The cheap half:
+`.claude/tools/probe.py 'bot.<fn>(...)'` runs a function against the test fixture in one
+command. Replayed on the day's transcript: the wrong `_strip_persona_breaks` claim blocks
+("read but never run"), the corrected one written after probing passes. Still uncovered: claims
+that name nothing, and noun-phrase claims ("the bot output ends on a question"). Pinned by the
+`theory-guard-evidence` eval (runs `--selftest`).
 
 ### C6 — A migration invalidates assertions, not just docs
 **seen: 1** (2026-07-26)

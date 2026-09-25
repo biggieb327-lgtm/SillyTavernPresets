@@ -310,6 +310,21 @@ if [ -f .claude/hooks/prompt-rewrite.py ]; then
   fi
 fi
 
+# --- theory-guard-evidence -------------------------------------------------------------
+# theory_guard.py (C5) checks a code-shaped claim against the session transcript: a name
+# that was run passes, one only read or never seen blocks. stop-guards-behavioral below
+# feeds it a one-message transcript, which cannot reach the evidence path at all; its
+# --selftest builds multi-record transcripts (grepped only, ran but errored, run via
+# probe.py, written into a heredoc) and exits nonzero on any miss. Added 2026-09-25 with
+# the evidence check; before this, nothing ran the selftest.
+if [ -f .claude/hooks/theory_guard.py ]; then
+  if tg_out=$(python3 .claude/hooks/theory_guard.py --selftest 2>&1); then
+    ok "theory-guard-evidence: claim classifier and transcript evidence check behave per fixtures"
+  else
+    bad "theory-guard-evidence" "$(printf '%s\n' "$tg_out" | grep -E 'FAIL|selftest:' | head -5)"
+  fi
+fi
+
 # --- stop-guards-behavioral ------------------------------------------------------------
 # hook-python-compiles proves the four Python Stop-guards COMPILE; nothing exercised them.
 # All four fail OPEN (a broken guard returns 0/allow), so a gutted regex passes every other
