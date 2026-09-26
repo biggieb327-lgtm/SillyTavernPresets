@@ -3260,6 +3260,110 @@ class TestMemoryReinforce:
         assert "Used:" not in msg.sent[-1]
 
 
+class TestConfidenceDecay:
+    """v2026-09-26.2, ROADMAP 7.8: every line decayed on one half-life, so a memory rated
+    "clearly important" (memory_confidence 10) faded as fast as a trivial one. Confidence
+    10 now doubles the half-life, 9 gives 1.5x, an /addmem line counts as 10, and nothing
+    is ever shortened. MEMORY_CONFIDENCE_DECAY=0 puts every line back on the base."""
+    HIGH = "the lighthouse keeper lost his brother at sea"
+    LOW = "the lighthouse keeper likes rye bread"
+    MANUAL = "the lighthouse keeper owes the harbor master money"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig = {k: getattr(bot, k) for k in (
+            "MEMORY_TOKEN_BUDGET", "MEMORY_URGENCY_FLOOR", "MEMORY_WHY", "MEMORY_TEMPORAL",
+            "MEMORY_DECAY_HALFLIFE_DAYS", "MEMORY_REINFORCE", "MEMORY_CONFIDENCE_DECAY")}
+        bot.MEMORIES_FILE.write_text(
+            "\n".join([self.HIGH, self.LOW, self.MANUAL]) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        for l in (self.HIGH, self.LOW, self.MANUAL):
+            bot._embeddings_cache[l] = [1.0, 0.0]
+        age = time.time() - 180 * 86400
+        bot._memory_meta.clear()
+        bot._memory_meta[self.HIGH] = {"ts": age, "origin": "auto", "confidence": 10}
+        bot._memory_meta[self.LOW] = {"ts": age, "origin": "auto", "confidence": 7}
+        bot._memory_meta[self.MANUAL] = {"ts": age, "origin": "manual"}
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+        bot.MEMORY_URGENCY_FLOOR = False
+        bot.MEMORY_TOKEN_BUDGET = 10_000
+        bot.MEMORY_WHY = True
+        bot.MEMORY_TEMPORAL = False
+        bot.MEMORY_DECAY_HALFLIFE_DAYS = 90
+        bot.MEMORY_REINFORCE = False   # keep last_used out of these numbers
+        bot.MEMORY_CONFIDENCE_DECAY = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        for k, v in self._orig.items():
+            setattr(bot, k, v)
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+
+    def _terms(self):
+        bot.triggered_memories("tell me about the lighthouse keeper", query_vec=[1.0, 0.0],
+                               chat_id=1)
+        bd = bot._mem_last_breakdown[1]
+        return {l: t for _, l, t in bd["picked"] + bd["cut"]}
+
+    def test_factor_table(self):
+        f = bot._halflife_factor
+        assert f({"confidence": 10}, True) == 2.0
+        assert f({"confidence": 9}, True) == 1.5
+        for c in (8, 7, 5, 1):
+            assert f({"confidence": c}, True) == 1.0
+        assert f(None, True) == 1.0                                  # legacy, no meta
+        assert f({"origin": "manual"}, True) == 2.0                  # /addmem
+        assert f({"origin": "manual", "confidence": 6}, True) == 1.0  # recorded value wins
+        assert f({"origin": "manual-edit"}, True) == 1.0
+        assert f({"confidence": True}, True) == 1.0                  # bool is not a score
+        assert f({"confidence": "10"}, True) == 1.0
+        assert f({"confidence": 10}, False) == 1.0
+
+    def test_high_confidence_line_decays_slower_at_same_age(self):
+        t = self._terms()
+        # 180 days: base half-life 90 -> 0.25; doubled -> 0.5.
+        assert abs(t[self.LOW]["recency"] - 0.25) < 0.01
+        assert abs(t[self.HIGH]["recency"] - 0.5) < 0.01
+        assert t[self.HIGH]["halflife_x"] == 2.0 and t[self.LOW]["halflife_x"] == 1.0
+
+    def test_addmem_line_counts_as_ten(self):
+        t = self._terms()
+        assert abs(t[self.MANUAL]["recency"] - 0.5) < 0.01
+
+    def test_kill_switch_puts_every_line_on_the_base(self):
+        bot.MEMORY_CONFIDENCE_DECAY = False
+        t = self._terms()
+        assert t[self.HIGH]["recency"] == t[self.LOW]["recency"] == t[self.MANUAL]["recency"]
+        assert t[self.HIGH]["halflife_x"] == 1.0
+
+    def test_decay_off_stays_off(self):
+        bot.MEMORY_DECAY_HALFLIFE_DAYS = 0
+        t = self._terms()
+        assert t[self.HIGH]["recency"] == 1.0 and t[self.LOW]["recency"] == 1.0
+
+    def test_floor_unchanged(self):
+        bot._memory_meta[self.HIGH]["ts"] = time.time() - 5000 * 86400
+        assert self._terms()[self.HIGH]["recency"] == 0.1
+
+    def test_whymem_marks_the_factor(self):
+        self._terms()
+        text = bot._format_whymem(bot._mem_last_breakdown[1], bot._read_memories(),
+                                  time.time())
+        assert "[half-life x2]" in text
+        low_line = next(l for l in text.splitlines() if "rye bread" in l)
+        assert "half-life" not in low_line
+
+
 class TestBM25HybridRetrieval:
     """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
     keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
@@ -9344,6 +9448,8 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_DATE_FALLBACK_DECAY": True,
         # v2026-09-26.1: a memory's use resets its decay clock and ranks it in eviction.
         "MEMORY_REINFORCE": True,
+        # v2026-09-26.2, ROADMAP 7.8: confidence 9/10 lengthen the decay half-life.
+        "MEMORY_CONFIDENCE_DECAY": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         # Sprint 2 (c76b11f). Default-on per the kill-switch policy.

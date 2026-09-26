@@ -1391,6 +1391,16 @@ MEMORY_REINFORCE = _env_bool("MEMORY_REINFORCE", True)
 # just mentioned would match again and keep itself fresh. A heuristic, not a measurement.
 _REINFORCE_MIN_SEM = 1.5
 
+# Confidence-scaled half-life (v2026-09-26.2, ROADMAP 7.8): every archival line decayed on
+# the same MEMORY_DECAY_HALFLIFE_DAYS, so a memory the extractor rated "clearly important"
+# faded as fast as a trivial one. The extraction prompt's memory_confidence asks "how
+# confident you are this is worth remembering long-term", so it is the importance signal
+# already stored. Only ever lengthens the half-life: confidence 9 = 1.5x, 10 = 2x, anything
+# else (and no confidence) = 1x. An owner-added line (/addmem, origin "manual", no
+# confidence) counts as 10: the owner saying "remember this" is the strongest importance
+# signal there is. Default ON; 0 = every line on the base half-life again.
+MEMORY_CONFIDENCE_DECAY = _env_bool("MEMORY_CONFIDENCE_DECAY", True)
+
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
@@ -5656,6 +5666,20 @@ def _reinforced_ts(base_ts, meta_entry: dict | None, enabled: bool):
     return base_ts
 
 
+def _halflife_factor(meta_entry: dict | None, enabled: bool) -> float:
+    """Multiplier on MEMORY_DECAY_HALFLIFE_DAYS for one memory line: 2.0 at confidence 10,
+    1.5 at 9, 1.0 otherwise. An owner-added line (/addmem: origin "manual", no
+    confidence) counts as 10. 1.0 when disabled, for legacy lines with no meta, and for
+    any bad value — it never shortens a half-life."""
+    if not enabled:
+        return 1.0
+    m = meta_entry or {}
+    conf = m.get("confidence")
+    if not isinstance(conf, int) or isinstance(conf, bool):
+        conf = 10 if m.get("origin") == "manual" else None
+    return {10: 2.0, 9: 1.5}.get(conf, 1.0)
+
+
 def _local_day(ts: float) -> date:
     return (datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)).date()
 
@@ -6067,11 +6091,12 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                    else None)
         decay_base = ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK_DECAY else None)
         decay_ts = _reinforced_ts(decay_base, m, MEMORY_REINFORCE)
+        hl_factor = _halflife_factor(m, MEMORY_CONFIDENCE_DECAY)
         terms = {
             "kw": keyword_scored.get(l, 0),
             "sem": sem_scored.get(l, 0),
             "bm25": bm25_scored.get(l, 0),
-            "recency": _recency_weight(decay_ts, now, MEMORY_DECAY_HALFLIFE_DAYS),
+            "recency": _recency_weight(decay_ts, now, MEMORY_DECAY_HALFLIFE_DAYS * hl_factor),
             "repeat": _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY),
             "urgency": _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING,
                                       MEMORY_URGENCY_BOOST),
@@ -6080,6 +6105,7 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                 time_anchor, MEMORY_TEMPORAL_BOOST),
             "date_from_text": text_ts is not None,
             "reinforced": decay_ts != decay_base,
+            "halflife_x": hl_factor,
         }
         score = ((terms["kw"] + terms["sem"] + terms["bm25"])
                  * terms["recency"] * terms["repeat"] * terms["urgency"] * terms["time"])
@@ -12121,6 +12147,8 @@ def _format_why_line(num, score: float, line: str, terms: dict) -> str:
     dated = " [date read from text]" if terms.get("date_from_text") else ""
     if terms.get("reinforced"):
         dated += " [recency from last use]"
+    if terms.get("halflife_x", 1.0) != 1.0:
+        dated += f" [half-life x{terms['halflife_x']:g}]"
     return (f"#{num if num else '?'} {text}{dated}\n"
             f"  final {score:.2f} = (kw {terms['kw']:.2f} + sem {terms['sem']:.2f}"
             f" + bm25 {terms['bm25']:.2f}) x recency {terms['recency']:.2f}"
