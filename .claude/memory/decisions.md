@@ -82,6 +82,32 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-26 | A memory's use resets its decay clock; a use is a private reply the user's message is close to | status: current
+**Decided:** ship `MEMORY_REINFORCE` (default on, v2026-09-26.1, ROADMAP 7.7). A use is an
+archival line injected in a private chat, on the reply path (query vector present), with a
+semantic term of at least `_REINFORCE_MIN_SEM` (1.5 of 3.0), counted once per calendar day.
+A use fully resets the recency clock (`last_used` replaces the write date when later), and
+`uses` ranks after `confidence` in `_evict_by_value`. Emotional weight slowing decay is
+planned separately as ROADMAP 7.8, not built.
+**Over:** (1) counting a use only when the reply actually references the memory: needs a
+model call per reply, which bot-code-invariants #3 rules out. (2) counting every injected
+line: code review showed a line can keep itself fresh, because `scan_text` holds the bot's
+own recent replies and re-matches on keywords; proactive sends would also count with no
+user present. (3) a partial reset (e.g. halving the age per use): harder to read in
+`/whymem` and no evidence it ranks better; recency is capped at 1.0, so a full reset can
+only undo decay, never boost a line above a fresh one, and relevance still gates every
+line. (4) letting `uses` outrank `confidence` in eviction: confidence measures whether the
+fact is true, and a hand-corrected conf-10 line must still outlive a busy conf-5 one.
+(5) the rest of the counterparts.ai/ecosystem mechanisms: power-law decay (ranking-only,
+no evidence it helps) and recall rewriting a memory (works against the audit's quote
+grounding) were rejected; everything else was already built.
+**Why:** before this, recency and eviction read only the write date, so the memories the
+relationship keeps coming back to faded exactly like ones it never touched.
+**By:** owner asked to build it and to plan 7.8 (2026-09-26); the use definition was
+narrowed by a pre-merge `/code-review`, and group chats were excluded by
+GROUP_CHAT_DESIGN.md §5 (no writes to per-instance files from a group).
+**Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-26.1; ROADMAP 7.7, 7.8.
+
 ### 2026-09-25 | theory-guard reads the session transcript for evidence; no new ledger hook | status: current
 **Decided:** C5's Stop hook checks a code-shaped claim against the transcript it already receives
 (`transcript_path`): the name ran in a non-search Bash command that did not error → pass; only

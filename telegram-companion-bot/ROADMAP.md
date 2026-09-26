@@ -1875,13 +1875,17 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   eviction ties to any newer unused line. Source: the "retrieval & strengthening" mechanism
   on counterparts.ai/ecosystem (reviewed 2026-09-26); the rest of that page was already
   covered here or rejected (power-law decay, recall rewriting memories).
-- **As built:** `MEMORY_REINFORCE` (default on). Injection on the live reply path records
-  `last_used` and `uses` in `memory_meta.json`, at most once per line per day. Recency
-  decays from the later of the write date and `last_used`; eviction ranks
-  `(confidence, uses, later of ts and last_used)`. Undated lines stay neutral; core lines
-  are not stamped. `/whymem` marks `[recency from last use]`; `/sourcemem` shows the count.
-- **Known limit:** "used" means injected into the prompt, not referenced in the reply.
-  Checking the reply would need a model call per reply (invariant #3); not planned.
+- **As built:** `MEMORY_REINFORCE` (default on). A use is an injection of an archival line
+  in a private chat, on the reply path (with a query vector), with a semantic term of at
+  least `_REINFORCE_MIN_SEM` (1.5 of 3.0). Each use stamps `last_used` and `uses` in
+  `memory_meta.json`, at most once per calendar day. Recency decays from the later of the
+  write date and `last_used`; eviction ranks `(confidence, uses, later of ts and
+  last_used)`. Undated lines stay neutral; core lines are not stamped. The weekly audit
+  sees `last used: Nd ago`, and audit merges keep use history. `/whymem` marks
+  `[recency from last use]`; `/sourcemem` shows the count.
+- **Known limit:** "used" means injected and close to the user's message, not referenced in
+  the reply. Checking the reply would need a model call per reply (invariant #3); not
+  planned. The 1.5 threshold is a heuristic.
 - **Done when:** after deploy, `/sourcemem` on a memory that came up in conversation shows
   a `Used:` row, and `/whymem` on a later reply shows `[recency from last use]` on an old
   line. Code side met (`TestMemoryReinforce`); the live check is pending deploy.

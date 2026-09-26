@@ -19,45 +19,87 @@ been used. `_repeat_penalty` and `_urgency_boost` track injection, but only in m
 only across a few turns; neither reaches decay or eviction. Found while reviewing
 counterparts.ai/ecosystem (the "retrieval & strengthening" mechanism).
 
-**Fix:** new kill switch `MEMORY_REINFORCE` (default on). When `triggered_memories` injects
-archival lines on a call with a `chat_id`, `_record_memory_uses` stamps `last_used` and
-`uses` into `memory_meta.json` through the pure `_record_use`, at most once per line per day
-(`_REINFORCE_GAP_S`), so one long conversation on one theme counts as one use. The recency
-term now decays from `_reinforced_ts`: the later of the write date and `last_used`. Lines with
-no date anywhere stay neutral (1.0), because a use date would make them decay, which would
-punish use. `_evict_by_value` ranks `(confidence, uses, later of ts and last_used)`, so
-confidence still ranks first. Core lines are not stamped. `/whymem` marks such lines
-`[recency from last use]`. `/sourcemem` shows `Used: on N separate day(s), last YYYY-MM-DD`,
-and still says "no source recorded" for a pre-2026-07 line whose meta entry now holds only
-use fields.
+**Fix:** new kill switch `MEMORY_REINFORCE` (default on).
+- **What counts as a use.** `triggered_memories` records one when it injects an archival
+  line and all of these hold: a private chat (`chat_id > 0`); a query vector (only the
+  reply path has one, since `assemble_messages_async` embeds the user's message); and a
+  semantic term of at least `_REINFORCE_MIN_SEM` (1.5 of 3.0, i.e. at least half as close
+  to the user's message as the best match).
+- **Stamping.** `_record_memory_uses` stamps `last_used` and `uses` into
+  `memory_meta.json` through the pure `_record_use`, at most once per line per local
+  calendar day.
+- **Recency.** The recency term decays from `_reinforced_ts`: the later of the write date
+  and `last_used`. Lines with no date anywhere stay neutral (1.0), because a use date would
+  make them decay, which would punish use.
+- **Eviction.** `_evict_by_value` ranks `(confidence, uses, later of ts and last_used)`, so
+  confidence still ranks first.
+- **Core lines** are not stamped.
+- **Commands.** `/whymem` marks a line whose recency came from its last use with
+  `[recency from last use]`. `/sourcemem` shows
+  `Used: on N separate day(s), last YYYY-MM-DD`. It still says "no source recorded" for a
+  pre-2026-07 line whose meta entry now holds only use fields.
+
+**Found by `/code-review` before merge, fixed in the same release:**
+1. Counting every injected line let a memory keep itself fresh. `scan_text` includes the
+   bot's own recent replies, so a line it had just mentioned matched again on keywords, was
+   stamped, and rose further. Fixed by the semantic threshold and the query-vector check.
+2. Proactive sends (`send_triggered`) counted as uses with no user taking part. Fixed by
+   the query-vector check.
+3. Group replies, including `_maybe_reply_to_bot`, wrote to a per-instance file, which
+   GROUP_CHAT_DESIGN.md §5 forbids ("Writes: never from a group"). Fixed by the private-chat
+   check.
+4. The weekly audit saw a memory used yesterday as "age: 200d" and could propose deleting
+   it as stale. `_audit_prompt_payload` now adds `last used: Nd ago`.
+5. Audit merges dropped the targets' use history, while `/editmem` kept it. They now keep
+   the max of `uses` and of `last_used`.
+6. `_save_memory_meta` wrote non-atomically. It now runs from the reply path, and a write
+   cut short by a restart would have loaded as `{}` and dropped all provenance. It now uses
+   `_atomic_write_text`.
+7. A rolling 24-hour gap did not match the "separate days" label. The count is now per
+   calendar day.
+
+One finding was not taken: that the save blocks the event loop. The write happens at most
+once per line per day, on a file of at most `MEMORIES_MAX` (200) entries. Moving it to a
+thread would let an older snapshot overwrite a newer `_memory_replace` write.
 
 **Concurrency:** `assemble_messages` runs on the event loop, and `_memory_replace` holds
 `_memory_lock` while it may make an embedding request. So `_record_memory_uses` never waits
 for the lock: if the lock is busy, it skips that turn's stamps. Under the lock it stamps only
-lines still in `memories.txt`, so a line deleted between scoring and stamping never gets an
-orphaned meta entry. No model call is added. The only new I/O is one `memory_meta.json` write,
-on a reply whose injected lines contain at least one not stamped in the last 24 hours.
+lines still in `memories.txt`, so a deleted line never gets an orphaned meta entry. No model
+call is added.
 
-**Known limit:** "used" means injected into the prompt, not referenced by the reply.
-Checking the reply would need a model call per reply (invariant #3).
+**Known limit:** "used" means injected and semantically close to the user's message, not
+referenced by the reply. Checking the reply would need a model call per reply (invariant
+#3). `_REINFORCE_MIN_SEM` is a heuristic, not a measured threshold.
 
-**Tests (`TestMemoryReinforce`, 20; the `/sourcemem` handler is called directly):**
-- `_record_use` counts once per gap and repairs a bad `uses` value; `_reinforced_ts` cases.
-- Injection stamps and saves the file with provenance kept, and same-day re-injection
-  counts once. A call without a `chat_id` stamps nothing.
-- A 200-day-old line reads recency < 0.3 before its first use and > 0.99 after it. A
+**Tests (`TestMemoryReinforce`, 26; `/sourcemem` called directly):**
+- Calendar-day counting, and `_reinforced_ts` cases.
+- Stamping: the file is saved with provenance kept, and a same-day re-injection counts once.
+- Nothing is stamped with no `chat_id`, in a group chat, without a query vector (with a
+  faked strong semantic score), or on a keyword-only match.
+- Recency: a 200-day-old line reads < 0.3 before its first use and > 0.99 after it. A
   text-dated line is reinforced too, and an undated line stays at 1.0.
 - The kill switch records nothing and ignores recorded fields.
 - Core lines are not stamped, a deleted line gets no entry, and a busy lock skips without
   blocking. `/whymem` shows the marker.
-- Eviction keeps the used line at equal confidence, confidence still ranks first, and the
+- Eviction: the used line wins at equal confidence, confidence still ranks first, and the
   kill switch restores ts order.
+- The audit payload shows the last use, and hides it under the kill switch. An audit merge
+  keeps use history. The atomic save leaves no `.tmp` file.
 - `/sourcemem` covers a legacy line, a line with provenance, and an unused line.
 
-Break-tested: with `_reinforced_ts` made the identity, 4 fail; with
-`_record_memory_uses` made a no-op, 6 fail. The existing ranking tests (`TestWhyMem`,
-`TestMemoryDateFallback`, eviction) pass unedited. `MEMORY_REINFORCE` was added to
-`TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
+**Break-tested, each check alone:**
+
+| Removed | Failing tests |
+|---|---|
+| `_reinforced_ts` made the identity | 4 |
+| `_record_memory_uses` made a no-op | 6 |
+| group check | 1 |
+| semantic threshold | 1 |
+| query-vector check | 1 |
+
+The existing ranking tests (`TestWhyMem`, `TestMemoryDateFallback`, eviction) pass
+unedited. `MEMORY_REINFORCE` was added to `TestEveryBooleanFlagDefault.DEFAULTS`.
 
 ## v2026-09-25.1 — Message log + `/msglog`, and a weekly audit of what the bots actually say
 
