@@ -3045,18 +3045,26 @@ class TestMemoryReinforce:
         return {l: t for _, l, t in bd["picked"] + bd["cut"]}
 
     # ── pure helpers ──
-    def test_record_use_counts_once_per_gap(self):
+    @staticmethod
+    def _local_ts(y, mo, d, h, mi=0):
+        dt = datetime(y, mo, d, h, mi, tzinfo=bot.TZ) if bot.TZ else datetime(y, mo, d, h, mi)
+        return dt.timestamp()
+
+    def test_record_use_counts_separate_calendar_days(self):
         m = {}
-        assert bot._record_use(m, 1000.0, gap_s=100) is True
-        assert m == {"uses": 1, "last_used": 1000.0}
-        assert bot._record_use(m, 1050.0, gap_s=100) is False
-        assert m == {"uses": 1, "last_used": 1000.0}
-        assert bot._record_use(m, 1100.0, gap_s=100) is True
-        assert m == {"uses": 2, "last_used": 1100.0}
+        mon_0010 = self._local_ts(2026, 9, 21, 0, 10)
+        mon_2350 = self._local_ts(2026, 9, 21, 23, 50)
+        tue_0020 = self._local_ts(2026, 9, 22, 0, 20)
+        assert bot._record_use(m, mon_0010) is True
+        assert m == {"uses": 1, "last_used": mon_0010}
+        assert bot._record_use(m, mon_2350) is False      # same day, however far apart
+        assert m == {"uses": 1, "last_used": mon_0010}
+        assert bot._record_use(m, tue_0020) is True       # next day, however close
+        assert m == {"uses": 2, "last_used": tue_0020}
 
     def test_record_use_repairs_bad_uses_value(self):
         m = {"uses": "three"}
-        bot._record_use(m, 5.0, gap_s=1)
+        bot._record_use(m, 5.0)
         assert m["uses"] == 1
 
     def test_reinforced_ts(self):
@@ -3085,6 +3093,52 @@ class TestMemoryReinforce:
                                chat_id=None)
         assert "uses" not in bot._memory_meta[self.OLD]
         assert self.PLAIN not in bot._memory_meta
+
+    def test_group_chat_records_nothing(self):
+        # GROUP_CHAT_DESIGN.md §5: no writes to per-instance files from a group.
+        t = self._terms(chat_id=-100123)
+        assert self.OLD in t                      # still scored and injected
+        assert "uses" not in bot._memory_meta[self.OLD]
+        assert self.PLAIN not in bot._memory_meta
+
+    def test_no_query_vector_records_nothing(self):
+        # send_triggered (proactive/heartbeat) calls assemble_messages with no vector.
+        bot.triggered_memories("tell me about the fire tower", query_vec=None, chat_id=1)
+        assert "uses" not in bot._memory_meta[self.OLD]
+
+    def test_keyword_only_match_is_not_a_use(self):
+        # Orthogonal vector: semantic term 0, still picked on the "fire tower" keywords.
+        bot._embeddings_cache[self.UNDATED] = [0.0, 1.0]
+        t = self._terms()
+        assert t[self.UNDATED]["sem"] == 0 and t[self.UNDATED]["kw"] > 0
+        assert self.UNDATED not in bot._memory_meta
+        assert bot._memory_meta[self.OLD]["uses"] == 1
+
+    def test_audit_payload_shows_last_use(self):
+        now = time.time()
+        bot._memory_meta[self.OLD]["last_used"] = now - 2 * 86400
+        payload = bot._audit_prompt_payload([self.OLD], bot._memory_meta, now)
+        assert "age: 200d" in payload and "last used: 2d ago" in payload
+        bot.MEMORY_REINFORCE = False
+        payload = bot._audit_prompt_payload([self.OLD], bot._memory_meta, now)
+        assert "last used" not in payload
+
+    def test_audit_merge_keeps_use_history(self):
+        now = time.time()
+        bot._memory_meta[self.OLD].update({"uses": 4, "last_used": now - 86400})
+        bot._memory_meta[self.PLAIN] = {"uses": 7, "last_used": now - 5 * 86400}
+        ok, _ = bot._apply_audit_item({"action": "merge", "targets": [self.OLD, self.PLAIN],
+                                       "merged_text": "the fire tower trip at dawn"})
+        assert ok
+        m = bot._memory_meta["the fire tower trip at dawn"]
+        assert m["origin"] == "audit-merge"
+        assert m["uses"] == 7 and m["last_used"] == now - 86400
+
+    def test_meta_save_is_atomic_and_leaves_no_tmp(self):
+        bot._memory_meta[self.OLD]["uses"] = 2
+        bot._save_memory_meta()
+        assert json.loads(bot.MEMORY_META_FILE.read_text(encoding="utf-8"))[self.OLD]["uses"] == 2
+        assert not bot.MEMORY_META_FILE.with_name(bot.MEMORY_META_FILE.name + ".tmp").exists()
 
     def test_used_old_memory_decays_from_last_use(self):
         before = self._terms()

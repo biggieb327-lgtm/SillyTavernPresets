@@ -1379,13 +1379,17 @@ _AUTO_DATE_RE = re.compile(r"^\[auto (\d{4})-(\d{2})-(\d{2})\]")
 
 # Use-based strengthening (v2026-09-26.1): recency decay and eviction read only when a
 # memory was written, so a line the bot keeps bringing up decays exactly like one it never
-# uses. When triggered_memories injects an archival line on the live reply path, it records
-# `last_used` and `uses` in memory_meta.json (at most once per line per day, so one long
-# conversation on one theme counts as one use). Recency then decays from the later of the
+# uses. When triggered_memories injects an archival line on the live reply path (a user
+# message with a query vector), it records `last_used` and `uses` in memory_meta.json (at
+# most once per line per calendar day). Recency then decays from the later of the
 # write date and last_used, and eviction ranks `uses` after confidence. Default ON;
 # 0 = record nothing and ignore the recorded fields (the old ranking).
 MEMORY_REINFORCE = _env_bool("MEMORY_REINFORCE", True)
-_REINFORCE_GAP_S = 86400
+# Only a line close to the user's own message counts as used: its semantic term (0-3,
+# scaled so the best match this turn is 3.0) must reach this. Keyword and BM25 hits
+# alone never count: scan_text includes the bot's own recent replies, so a line the bot
+# just mentioned would match again and keep itself fresh. A heuristic, not a measurement.
+_REINFORCE_MIN_SEM = 1.5
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
@@ -1432,9 +1436,10 @@ def _load_memory_meta():
 
 
 def _save_memory_meta():
+    # Atomic since v2026-09-26.1: MEMORY_REINFORCE writes this file from the reply path,
+    # and a write cut short by a restart would load as {} and drop all provenance.
     try:
-        MEMORY_META_FILE.write_text(
-            json.dumps(_memory_meta, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(MEMORY_META_FILE, json.dumps(_memory_meta, ensure_ascii=False))
     except Exception as e:
         log.warning("[memory-meta] save failed: %s", e)
 
@@ -1621,6 +1626,10 @@ def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float,
         conf = m.get("confidence")
         if isinstance(conf, int):
             notes.append(f"conf={conf}")
+        last = m.get("last_used")
+        if MEMORY_REINFORCE and isinstance(last, (int, float)) and last > 0:
+            # Without this the audit sees a memory used yesterday as N days old, stale.
+            notes.append(f"last used: {max(0, int((now - last) / 86400))}d ago")
         tag = f" ({', '.join(notes)})" if notes else ""
         src = _audit_source_quote(m) if with_source else ""
         suffix = f'\n    src: "{src[:300]}"' if src else ""
@@ -1758,6 +1767,15 @@ def _apply_audit_item(item: dict) -> tuple[bool, str]:
             "confidence": min(confs) if confs else 5,
             "source": "merged: " + " | ".join(t.strip()[:80] for t in targets),
         }
+        # Keep use history, as /editmem does via {**old_meta}. max, not sum: two targets
+        # used on the same day would otherwise count that day twice.
+        uses = [(_memory_meta.get(t.strip(), {}) or {}).get("uses") for t in targets]
+        uses = [u for u in uses if isinstance(u, int) and u > 0]
+        lasts = [(_memory_meta.get(t.strip(), {}) or {}).get("last_used") for t in targets]
+        lasts = [x for x in lasts if isinstance(x, (int, float)) and x > 0]
+        if uses and lasts:
+            meta["uses"] = max(uses)
+            meta["last_used"] = max(lasts)
         if not _memory_replace(targets[0], merged, meta=meta):
             return False, "memory changed since proposed"
         for t in targets[1:]:
@@ -5638,12 +5656,17 @@ def _reinforced_ts(base_ts, meta_entry: dict | None, enabled: bool):
     return base_ts
 
 
-def _record_use(meta_entry: dict, now: float, gap_s: float = _REINFORCE_GAP_S) -> bool:
+def _local_day(ts: float) -> date:
+    return (datetime.fromtimestamp(ts, tz=TZ) if TZ else datetime.fromtimestamp(ts)).date()
+
+
+def _record_use(meta_entry: dict, now: float) -> bool:
     """Stamp one use onto a memory_meta entry, in place: `last_used` = now, `uses` + 1.
-    At most once per `gap_s`, so repeated injection within a day counts once. Returns
-    True when it changed the entry (the caller then saves memory_meta.json)."""
+    At most once per local calendar day, so `uses` counts separate days and a long
+    conversation on one theme counts once. Returns True when it changed the entry
+    (the caller then saves memory_meta.json)."""
     last = meta_entry.get("last_used")
-    if isinstance(last, (int, float)) and now - last < gap_s:
+    if isinstance(last, (int, float)) and _local_day(last) == _local_day(now):
         return False
     uses = meta_entry.get("uses")
     meta_entry["uses"] = (uses if isinstance(uses, int) and uses > 0 else 0) + 1
@@ -6087,8 +6110,14 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
         for line in out:
             if line not in core_set:
                 seen[line] = turn
-    if MEMORY_REINFORCE and chat_id is not None and picked:
-        _record_memory_uses([line for _, line, _ in picked], now)
+    # query_vec is set only on the reply path (assemble_messages_async embeds the user's
+    # message); proactive sends pass none, so they never count as a use. Private chats
+    # only: memory_meta.json is a per-instance file, and GROUP_CHAT_DESIGN.md §5 allows
+    # no writes to those from a group (this also covers _maybe_reply_to_bot).
+    if MEMORY_REINFORCE and chat_id is not None and chat_id > 0 and query_vec:
+        used = [line for _, line, tm in picked if tm["sem"] >= _REINFORCE_MIN_SEM]
+        if used:
+            _record_memory_uses(used, now)
     if urg is not None and chat_id is not None and MEMORY_URGENCY_FLOOR:
         out_set = set(out)
         for l in all_lines:
