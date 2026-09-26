@@ -7,6 +7,58 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-26.1 — A memory's use resets its decay clock (ROADMAP 7.7)
+
+**Root cause: recency decay and eviction read only when a memory was written.**
+`_recency_weight` took the line's `ts` (or its `[auto YYYY-MM-DD]` text date since
+v2026-09-22.2), and `_evict_by_value` ranked `(confidence, ts)`. Nothing recorded when a
+memory was used. So a line the bot brought up every week decayed exactly like one it never
+used: at the 90-day half-life a 200-day-old line scores about 0.21x however often it comes
+up. It also lost eviction ties to any newer line of the same confidence that had never
+been used. `_repeat_penalty` and `_urgency_boost` track injection, but only in memory and
+only across a few turns; neither reaches decay or eviction. Found while reviewing
+counterparts.ai/ecosystem (the "retrieval & strengthening" mechanism).
+
+**Fix:** new kill switch `MEMORY_REINFORCE` (default on). When `triggered_memories` injects
+archival lines on a call with a `chat_id`, `_record_memory_uses` stamps `last_used` and
+`uses` into `memory_meta.json` through the pure `_record_use`, at most once per line per day
+(`_REINFORCE_GAP_S`), so one long conversation on one theme counts as one use. The recency
+term now decays from `_reinforced_ts`: the later of the write date and `last_used`. Lines with
+no date anywhere stay neutral (1.0), because a use date would make them decay, which would
+punish use. `_evict_by_value` ranks `(confidence, uses, later of ts and last_used)`, so
+confidence still ranks first. Core lines are not stamped. `/whymem` marks such lines
+`[recency from last use]`. `/sourcemem` shows `Used: on N separate day(s), last YYYY-MM-DD`,
+and still says "no source recorded" for a pre-2026-07 line whose meta entry now holds only
+use fields.
+
+**Concurrency:** `assemble_messages` runs on the event loop, and `_memory_replace` holds
+`_memory_lock` while it may make an embedding request. So `_record_memory_uses` never waits
+for the lock: if the lock is busy, it skips that turn's stamps. Under the lock it stamps only
+lines still in `memories.txt`, so a line deleted between scoring and stamping never gets an
+orphaned meta entry. No model call is added. The only new I/O is one `memory_meta.json` write,
+on a reply whose injected lines contain at least one not stamped in the last 24 hours.
+
+**Known limit:** "used" means injected into the prompt, not referenced by the reply.
+Checking the reply would need a model call per reply (invariant #3).
+
+**Tests (`TestMemoryReinforce`, 20; the `/sourcemem` handler is called directly):**
+- `_record_use` counts once per gap and repairs a bad `uses` value; `_reinforced_ts` cases.
+- Injection stamps and saves the file with provenance kept, and same-day re-injection
+  counts once. A call without a `chat_id` stamps nothing.
+- A 200-day-old line reads recency < 0.3 before its first use and > 0.99 after it. A
+  text-dated line is reinforced too, and an undated line stays at 1.0.
+- The kill switch records nothing and ignores recorded fields.
+- Core lines are not stamped, a deleted line gets no entry, and a busy lock skips without
+  blocking. `/whymem` shows the marker.
+- Eviction keeps the used line at equal confidence, confidence still ranks first, and the
+  kill switch restores ts order.
+- `/sourcemem` covers a legacy line, a line with provenance, and an unused line.
+
+Break-tested: with `_reinforced_ts` made the identity, 4 fail; with
+`_record_memory_uses` made a no-op, 6 fail. The existing ranking tests (`TestWhyMem`,
+`TestMemoryDateFallback`, eviction) pass unedited. `MEMORY_REINFORCE` was added to
+`TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
+
 ## v2026-09-25.1 — Message log + `/msglog`, and a weekly audit of what the bots actually say
 
 **Root cause: there was no record of the fleet's output that could be analyzed.** Every

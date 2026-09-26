@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-25.1"
+BOT_VERSION = "2026-09-26.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1377,6 +1377,16 @@ MEMORY_DATE_FALLBACK = _env_bool("MEMORY_DATE_FALLBACK", True)        # time boo
 MEMORY_DATE_FALLBACK_DECAY = _env_bool("MEMORY_DATE_FALLBACK_DECAY", True)  # recency decay
 _AUTO_DATE_RE = re.compile(r"^\[auto (\d{4})-(\d{2})-(\d{2})\]")
 
+# Use-based strengthening (v2026-09-26.1): recency decay and eviction read only when a
+# memory was written, so a line the bot keeps bringing up decays exactly like one it never
+# uses. When triggered_memories injects an archival line on the live reply path, it records
+# `last_used` and `uses` in memory_meta.json (at most once per line per day, so one long
+# conversation on one theme counts as one use). Recency then decays from the later of the
+# write date and last_used, and eviction ranks `uses` after confidence. Default ON;
+# 0 = record nothing and ignore the recorded fields (the old ranking).
+MEMORY_REINFORCE = _env_bool("MEMORY_REINFORCE", True)
+_REINFORCE_GAP_S = 86400
+
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
@@ -2562,7 +2572,9 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
     = recorded confidence (default 5 for legacy/no-meta), ties broken by oldest ts.
     Returns (kept_lines_in_original_order, dropped_keys). A hand-corrected conf-10
     fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO.
-    Core lines (above the # CORE marker) and the marker itself are never evicted."""
+    Core lines (above the # CORE marker) and the marker itself are never evicted.
+    With MEMORY_REINFORCE, ties on confidence go to the line used on more days, then
+    to the later of ts and last_used; confidence still ranks first."""
     if len(lines) <= cap:
         return lines, []
 
@@ -2579,7 +2591,14 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
         conf = conf if isinstance(conf, int) else 5
         ts = m.get("ts")
         ts = ts if isinstance(ts, (int, float)) else 0.0
-        return (conf, ts, idx)
+        if not MEMORY_REINFORCE:
+            return (conf, 0, ts, idx)
+        uses = m.get("uses")
+        uses = uses if isinstance(uses, int) and uses > 0 else 0
+        last = m.get("last_used")
+        if isinstance(last, (int, float)) and last > ts:
+            ts = last
+        return (conf, uses, ts, idx)
 
     evictable = [i for i in range(len(lines)) if i not in protected]
     ranked = sorted(evictable, key=lambda i: _score(lines[i], i))
@@ -5606,6 +5625,61 @@ def _recency_weight(ts, now: float, halflife_days: float) -> float:
     return max(0.1, 0.5 ** (age_days / halflife_days))
 
 
+def _reinforced_ts(base_ts, meta_entry: dict | None, enabled: bool):
+    """The timestamp recency decay runs from: the later of `base_ts` (write date) and the
+    entry's recorded `last_used`. Returns `base_ts` unchanged when disabled, when nothing
+    was recorded, or when `base_ts` is None — an undated line is neutral (1.0) in
+    _recency_weight, and giving it a use date would make it decay, i.e. punish use."""
+    if not enabled or not isinstance(base_ts, (int, float)) or base_ts <= 0:
+        return base_ts
+    last = (meta_entry or {}).get("last_used")
+    if isinstance(last, (int, float)) and last > base_ts:
+        return last
+    return base_ts
+
+
+def _record_use(meta_entry: dict, now: float, gap_s: float = _REINFORCE_GAP_S) -> bool:
+    """Stamp one use onto a memory_meta entry, in place: `last_used` = now, `uses` + 1.
+    At most once per `gap_s`, so repeated injection within a day counts once. Returns
+    True when it changed the entry (the caller then saves memory_meta.json)."""
+    last = meta_entry.get("last_used")
+    if isinstance(last, (int, float)) and now - last < gap_s:
+        return False
+    uses = meta_entry.get("uses")
+    meta_entry["uses"] = (uses if isinstance(uses, int) and uses > 0 else 0) + 1
+    meta_entry["last_used"] = now
+    return True
+
+
+def _record_memory_uses(lines: list[str], now: float) -> int:
+    """Record one use for each injected archival line and save memory_meta.json if any
+    entry changed. Runs on the event loop (assemble_messages), so it never waits for
+    _memory_lock: _memory_replace can hold it across an embedding request, and a busy
+    lock just skips this turn's stamps. Stamps only lines still in memories.txt (read
+    under the lock), so a line deleted since the scoring never gets an orphan meta
+    entry. Returns the number of entries changed."""
+    if not _memory_lock.acquire(blocking=False):
+        return 0
+    try:
+        current = set(_read_memories())
+        changed = 0
+        for line in lines:
+            key = line.strip()
+            if key not in current:
+                continue
+            entry = _memory_meta.get(key)
+            if not isinstance(entry, dict):
+                entry = {}
+            if _record_use(entry, now):
+                _memory_meta[key] = entry
+                changed += 1
+        if changed:
+            _save_memory_meta()
+        return changed
+    finally:
+        _memory_lock.release()
+
+
 def _repeat_penalty(last_turn, current_turn: int, window: int, floor: float) -> float:
     """Down-weight a memory injected on a recent turn, so one theme can't win the recall
     budget every turn. Neutral (1.0) when disabled (window <= 0) or the line was never
@@ -5963,17 +6037,18 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
     # the same as before this was split out (pinned by TestWhyMem ranking tests).
     merged = []
     for l in all_lines:
-        ts = _memory_meta.get(l.strip(), {}).get("ts")
+        m = _memory_meta.get(l.strip(), {}) or {}
+        ts = m.get("ts")
         text_ts = (_memory_text_date(l)
                    if ts is None and (MEMORY_DATE_FALLBACK or MEMORY_DATE_FALLBACK_DECAY)
                    else None)
+        decay_base = ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK_DECAY else None)
+        decay_ts = _reinforced_ts(decay_base, m, MEMORY_REINFORCE)
         terms = {
             "kw": keyword_scored.get(l, 0),
             "sem": sem_scored.get(l, 0),
             "bm25": bm25_scored.get(l, 0),
-            "recency": _recency_weight(
-                ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK_DECAY else None),
-                now, MEMORY_DECAY_HALFLIFE_DAYS),
+            "recency": _recency_weight(decay_ts, now, MEMORY_DECAY_HALFLIFE_DAYS),
             "repeat": _repeat_penalty(seen.get(l), turn, win, MEMORY_REPEAT_PENALTY),
             "urgency": _urgency_boost(urg.get(l, 0), MEMORY_URGENCY_CEILING,
                                       MEMORY_URGENCY_BOOST),
@@ -5981,6 +6056,7 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                 ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK else None),
                 time_anchor, MEMORY_TEMPORAL_BOOST),
             "date_from_text": text_ts is not None,
+            "reinforced": decay_ts != decay_base,
         }
         score = ((terms["kw"] + terms["sem"] + terms["bm25"])
                  * terms["recency"] * terms["repeat"] * terms["urgency"] * terms["time"])
@@ -6011,6 +6087,8 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
         for line in out:
             if line not in core_set:
                 seen[line] = turn
+    if MEMORY_REINFORCE and chat_id is not None and picked:
+        _record_memory_uses([line for _, line, _ in picked], now)
     if urg is not None and chat_id is not None and MEMORY_URGENCY_FLOOR:
         out_set = set(out)
         for l in all_lines:
@@ -11978,10 +12056,18 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No memory at that number.")
         return
     entry = entries[idx]
-    meta = _memory_meta.get(entry.strip())
-    if not meta:
+    meta = _memory_meta.get(entry.strip()) or {}
+    used = ""
+    if isinstance(meta.get("uses"), int) and isinstance(meta.get("last_used"), (int, float)):
+        lu = meta["last_used"]
+        lu_str = (datetime.fromtimestamp(lu, tz=TZ) if TZ
+                  else datetime.fromtimestamp(lu)).strftime("%Y-%m-%d")
+        used = f"Used: on {meta['uses']} separate day(s), last {lu_str}"
+    # MEMORY_REINFORCE gives a pre-2026-07 line a meta entry holding only use fields.
+    if not (meta.get("ts") or meta.get("origin")):
         await update.message.reply_text(
-            f"#{int(arg)}: {entry}\n\n(no source recorded — pre-2026-07)")
+            f"#{int(arg)}: {entry}\n\n(no source recorded — pre-2026-07)"
+            + (f"\n{used}" if used else ""))
         return
     ts = meta.get("ts")
     ts_str = datetime.fromtimestamp(ts, tz=TZ).strftime("%Y-%m-%d %H:%M") if ts and TZ else (
@@ -11995,6 +12081,8 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"Confidence: {meta['confidence']}/10")
     if meta.get("source"):
         lines.append(f'Source: "{meta["source"]}"')
+    if used:
+        lines.append(used)
     await update.message.reply_text("\n".join(lines))
 
 
@@ -12002,6 +12090,8 @@ def _format_why_line(num, score: float, line: str, terms: dict) -> str:
     """One /whymem block: the memory, then its score as the formula that produced it."""
     text = line if len(line) <= 120 else line[:117] + "..."
     dated = " [date read from text]" if terms.get("date_from_text") else ""
+    if terms.get("reinforced"):
+        dated += " [recency from last use]"
     return (f"#{num if num else '?'} {text}{dated}\n"
             f"  final {score:.2f} = (kw {terms['kw']:.2f} + sem {terms['sem']:.2f}"
             f" + bm25 {terms['bm25']:.2f}) x recency {terms['recency']:.2f}"

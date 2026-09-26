@@ -2987,6 +2987,213 @@ class TestMemoryDateFallback:
         assert "[date read from text]" in text
 
 
+class TestMemoryReinforce:
+    """v2026-09-26.1: recency and eviction read only the write date, so a memory the bot
+    keeps using decayed like one it never used. Injection on the live reply path now
+    records last_used/uses (once per line per day); recency decays from the later of the
+    write date and last_used; eviction ranks uses after confidence. MEMORY_REINFORCE=0
+    records nothing and ignores what was recorded."""
+    OLD = "they climbed the fire tower at dawn"
+    PLAIN = "[auto 2026-07-04] the fire tower trip, dated only in text"
+    UNDATED = "fire tower with no date anywhere"
+
+    def setup_method(self):
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig = {k: getattr(bot, k) for k in (
+            "MEMORY_TOKEN_BUDGET", "MEMORY_URGENCY_FLOOR", "MEMORY_WHY", "MEMORY_TEMPORAL",
+            "MEMORY_DATE_FALLBACK", "MEMORY_DATE_FALLBACK_DECAY",
+            "MEMORY_DECAY_HALFLIFE_DAYS", "MEMORY_REINFORCE", "MEMORY_CORE")}
+        bot.MEMORIES_FILE.write_text(
+            "\n".join([self.OLD, self.PLAIN, self.UNDATED]) + "\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._embeddings_cache.clear()
+        for l in (self.OLD, self.PLAIN, self.UNDATED):
+            bot._embeddings_cache[l] = [1.0, 0.0]
+        bot._memory_meta.clear()
+        self.old_ts = time.time() - 200 * 86400
+        bot._memory_meta[self.OLD] = {"ts": self.old_ts, "origin": "auto", "confidence": 8}
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+        bot.MEMORY_URGENCY_FLOOR = False
+        bot.MEMORY_TOKEN_BUDGET = 10_000
+        bot.MEMORY_WHY = True
+        bot.MEMORY_TEMPORAL = False
+        bot.MEMORY_DATE_FALLBACK = True
+        bot.MEMORY_DATE_FALLBACK_DECAY = True
+        bot.MEMORY_DECAY_HALFLIFE_DAYS = 90
+        bot.MEMORY_REINFORCE = True
+        bot.MEMORY_CORE = True
+
+    def teardown_method(self):
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        for k, v in self._orig.items():
+            setattr(bot, k, v)
+        for d in (bot._mem_inject_turn, bot._mem_last_injected, bot._mem_urgency,
+                  bot._mem_last_breakdown):
+            d.clear()
+
+    def _terms(self, chat_id=1):
+        bot.triggered_memories("tell me about the fire tower", query_vec=[1.0, 0.0],
+                               chat_id=chat_id)
+        bd = bot._mem_last_breakdown.get(chat_id) or {"picked": [], "cut": []}
+        return {l: t for _, l, t in bd["picked"] + bd["cut"]}
+
+    # ── pure helpers ──
+    def test_record_use_counts_once_per_gap(self):
+        m = {}
+        assert bot._record_use(m, 1000.0, gap_s=100) is True
+        assert m == {"uses": 1, "last_used": 1000.0}
+        assert bot._record_use(m, 1050.0, gap_s=100) is False
+        assert m == {"uses": 1, "last_used": 1000.0}
+        assert bot._record_use(m, 1100.0, gap_s=100) is True
+        assert m == {"uses": 2, "last_used": 1100.0}
+
+    def test_record_use_repairs_bad_uses_value(self):
+        m = {"uses": "three"}
+        bot._record_use(m, 5.0, gap_s=1)
+        assert m["uses"] == 1
+
+    def test_reinforced_ts(self):
+        assert bot._reinforced_ts(100.0, {"last_used": 500.0}, True) == 500.0
+        assert bot._reinforced_ts(100.0, {"last_used": 50.0}, True) == 100.0
+        assert bot._reinforced_ts(100.0, {"last_used": 500.0}, False) == 100.0
+        assert bot._reinforced_ts(None, {"last_used": 500.0}, True) is None
+        assert bot._reinforced_ts(100.0, None, True) == 100.0
+
+    # ── live path ──
+    def test_injection_records_use_and_saves_file(self):
+        self._terms()
+        for l in (self.OLD, self.PLAIN, self.UNDATED):
+            assert bot._memory_meta[l]["uses"] == 1
+        saved = json.loads(bot.MEMORY_META_FILE.read_text(encoding="utf-8"))
+        assert saved[self.OLD]["uses"] == 1
+        assert saved[self.OLD]["origin"] == "auto"   # provenance kept
+
+    def test_same_day_reinjection_counts_once(self):
+        self._terms()
+        self._terms()
+        assert bot._memory_meta[self.OLD]["uses"] == 1
+
+    def test_no_chat_id_records_nothing(self):
+        bot.triggered_memories("tell me about the fire tower", query_vec=[1.0, 0.0],
+                               chat_id=None)
+        assert "uses" not in bot._memory_meta[self.OLD]
+        assert self.PLAIN not in bot._memory_meta
+
+    def test_used_old_memory_decays_from_last_use(self):
+        before = self._terms()
+        assert before[self.OLD]["recency"] < 0.3
+        assert before[self.OLD]["reinforced"] is False
+        after = self._terms()   # the first call recorded a use just now
+        assert after[self.OLD]["recency"] > 0.99
+        assert after[self.OLD]["reinforced"] is True
+
+    def test_text_dated_line_is_reinforced_too(self):
+        self._terms()
+        t = self._terms()
+        assert t[self.PLAIN]["date_from_text"] is True
+        assert t[self.PLAIN]["reinforced"] is True
+        assert t[self.PLAIN]["recency"] > 0.99
+
+    def test_undated_line_stays_neutral_after_use(self):
+        bot._memory_meta[self.UNDATED] = {"uses": 3, "last_used": time.time() - 300 * 86400}
+        t = self._terms()
+        assert t[self.UNDATED]["recency"] == 1.0
+        assert t[self.UNDATED]["reinforced"] is False
+
+    def test_kill_switch_records_nothing_and_ignores_recorded_use(self):
+        bot.MEMORY_REINFORCE = False
+        bot._memory_meta[self.OLD]["last_used"] = time.time()
+        bot._memory_meta[self.OLD]["uses"] = 4
+        t = self._terms()
+        assert t[self.OLD]["recency"] < 0.3
+        assert t[self.OLD]["reinforced"] is False
+        assert bot._memory_meta[self.OLD]["uses"] == 4
+        assert self.PLAIN not in bot._memory_meta
+
+    def test_core_lines_are_not_stamped(self):
+        bot.MEMORIES_FILE.write_text(
+            f"{self.UNDATED}\n# CORE\n{self.OLD}\n{self.PLAIN}\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        self._terms()
+        assert self.UNDATED not in bot._memory_meta
+        assert bot._memory_meta[self.OLD]["uses"] == 1
+
+    def test_deleted_line_gets_no_orphan_entry(self):
+        assert bot._record_memory_uses(["a line that is not in memories.txt"],
+                                       time.time()) == 0
+        assert "a line that is not in memories.txt" not in bot._memory_meta
+
+    def test_busy_lock_skips_without_blocking(self):
+        assert bot._memory_lock.acquire(blocking=False)
+        try:
+            assert bot._record_memory_uses([self.OLD], time.time()) == 0
+        finally:
+            bot._memory_lock.release()
+        assert "uses" not in bot._memory_meta[self.OLD]
+
+    def test_whymem_marks_reinforced_lines(self):
+        self._terms()
+        self._terms()
+        text = bot._format_whymem(bot._mem_last_breakdown[1], bot._read_memories(),
+                                  time.time())
+        assert "[recency from last use]" in text
+
+    # ── eviction ──
+    def test_eviction_keeps_the_used_line_at_equal_confidence(self):
+        now = time.time()
+        meta = {"used old": {"confidence": 7, "ts": now - 100 * 86400, "uses": 5,
+                             "last_used": now - 86400},
+                "unused new": {"confidence": 7, "ts": now - 3600}}
+        kept, dropped = bot._evict_by_value(["used old", "unused new"], meta, 1)
+        assert kept == ["used old"] and dropped == ["unused new"]
+
+    def test_eviction_confidence_still_ranks_first(self):
+        now = time.time()
+        meta = {"used low": {"confidence": 5, "uses": 30, "last_used": now},
+                "unused high": {"confidence": 6, "ts": now - 86400}}
+        kept, _ = bot._evict_by_value(["used low", "unused high"], meta, 1)
+        assert kept == ["unused high"]
+
+    def test_eviction_kill_switch_restores_ts_order(self):
+        bot.MEMORY_REINFORCE = False
+        now = time.time()
+        meta = {"used old": {"confidence": 7, "ts": now - 100 * 86400, "uses": 5,
+                             "last_used": now - 86400},
+                "unused new": {"confidence": 7, "ts": now - 3600}}
+        kept, _ = bot._evict_by_value(["used old", "unused new"], meta, 1)
+        assert kept == ["unused new"]
+
+    # ── /sourcemem ──
+    def test_sourcemem_legacy_line_with_only_use_fields(self):
+        bot._memory_meta[self.UNDATED] = {"uses": 2, "last_used": time.time()}
+        update, msg = _cmd_update()
+        asyncio.run(bot.sourcemem_cmd(update, _cmd_ctx("3")))
+        text = msg.sent[-1]
+        assert "no source recorded" in text
+        assert "Used: on 2 separate day(s)" in text
+
+    def test_sourcemem_shows_use_under_provenance(self):
+        bot._memory_meta[self.OLD]["uses"] = 3
+        bot._memory_meta[self.OLD]["last_used"] = time.time()
+        update, msg = _cmd_update()
+        asyncio.run(bot.sourcemem_cmd(update, _cmd_ctx("1")))
+        text = msg.sent[-1]
+        assert "Origin: auto" in text and "Confidence: 8/10" in text
+        assert "Used: on 3 separate day(s)" in text
+
+    def test_sourcemem_unused_line_has_no_used_row(self):
+        update, msg = _cmd_update()
+        asyncio.run(bot.sourcemem_cmd(update, _cmd_ctx("1")))
+        assert "Used:" not in msg.sent[-1]
+
+
 class TestBM25HybridRetrieval:
     """MEMORY_BM25: BM25 scoring adds a term-frequency + IDF path alongside
     keyword intersection and semantic cosine.  Three tests: BM25 surfaces a
@@ -9069,6 +9276,8 @@ class TestEveryBooleanFlagDefault:
         # v2026-09-22.2: read "[auto YYYY-MM-DD]" as a fallback timestamp.
         "MEMORY_DATE_FALLBACK": True,
         "MEMORY_DATE_FALLBACK_DECAY": True,
+        # v2026-09-26.1: a memory's use resets its decay clock and ranks it in eviction.
+        "MEMORY_REINFORCE": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         # Sprint 2 (c76b11f). Default-on per the kill-switch policy.

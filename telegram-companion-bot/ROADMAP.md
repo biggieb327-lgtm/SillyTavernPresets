@@ -1867,3 +1867,43 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **As built:** `time_anchor` is `_extract_time_anchor`'s (center, radius), shown as
   `YYYY-MM-DD +/- N days`. No handler-level group branch was needed: `group_guard`
   already stops every group command except `/chatid`.
+
+### 7.7 ~~Use-based strengthening~~ ✅ (shipped v2026-09-26.1)
+- **Evidence:** `_recency_weight` and `_evict_by_value` read only the write timestamp
+  (`ts`, or the `[auto YYYY-MM-DD]` text date). Nothing recorded when a memory was used, so
+  a line the bot brought up every week decayed exactly like one it never used, and lost
+  eviction ties to any newer unused line. Source: the "retrieval & strengthening" mechanism
+  on counterparts.ai/ecosystem (reviewed 2026-09-26); the rest of that page was already
+  covered here or rejected (power-law decay, recall rewriting memories).
+- **As built:** `MEMORY_REINFORCE` (default on). Injection on the live reply path records
+  `last_used` and `uses` in `memory_meta.json`, at most once per line per day. Recency
+  decays from the later of the write date and `last_used`; eviction ranks
+  `(confidence, uses, later of ts and last_used)`. Undated lines stay neutral; core lines
+  are not stamped. `/whymem` marks `[recency from last use]`; `/sourcemem` shows the count.
+- **Known limit:** "used" means injected into the prompt, not referenced in the reply.
+  Checking the reply would need a model call per reply (invariant #3); not planned.
+- **Done when:** after deploy, `/sourcemem` on a memory that came up in conversation shows
+  a `Used:` row, and `/whymem` on a later reply shows `[recency from last use]` on an old
+  line. Code side met (`TestMemoryReinforce`); the live check is pending deploy.
+
+### 7.8 Emotional weight slows decay — S
+- **Evidence:** every archival memory decays on the same `MEMORY_DECAY_HALFLIFE_DAYS`
+  (90). Emotional weight and importance only affect whether a memory is written
+  (`MEMORY_AUTOCONF`) and which line eviction drops (`confidence`), never how fast it fades.
+  A memory of a bereavement and a memory of a lunch order fade from the ranking at the same
+  rate. Source: the "emotional modulation" mechanism on counterparts.ai/ecosystem
+  (2026-09-26), which notes almost no system lets emotion change the decay rate.
+- **Idea:** a per-line half-life. `_recency_weight` takes a multiplier derived from data
+  already in `memory_meta.json`, e.g. `confidence` 9-10 doubles the half-life. A separate
+  emotional score would need a new key in the existing extraction JSON (no new model
+  call, invariant #3) and only covers memories written after the change.
+- **Open question for the owner before building:** is `confidence` a good enough stand-in?
+  It measures how sure the extraction was that the fact is true, not how much it matters.
+  If not, the extraction prompt gains a `weight` field (1-10) and legacy lines stay at 1x.
+- **What changes:** `_recency_weight(ts, now, halflife)` gains a factor; the
+  `triggered_memories` recency term passes it; `/whymem` shows the effective half-life.
+  Kill switch `MEMORY_EMOTIONAL_DECAY` (default on, invariant #16), added to
+  `TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
+- **Risk:** low; ranking only, floor 0.1 unchanged, nothing is deleted.
+- **Done when:** a high-weight line 180 days old scores a higher `recency` in `/whymem`
+  than a low-weight line of the same age, and `MEMORY_EMOTIONAL_DECAY=0` makes them equal.
