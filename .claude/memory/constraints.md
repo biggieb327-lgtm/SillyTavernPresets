@@ -1316,6 +1316,16 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-26 — Wrote an `/addmem`-counts-as-10 rule into `_halflife_factor` only, reasoning
+  about decay alone. The same line is read as confidence 5 by `_evict_by_value` and audit
+  merge, and `/editmem` rewrites its origin, so one line ranked three ways; `/code-review`
+  caught it and the rule was dropped pre-merge. Also first wrote the rule citing `/remember`,
+  which writes per-chat `facts`, not `memories.txt`; found by grepping `_append_memory(`
+  callers, which missed `asyncio.to_thread(_append_memory, text)` in `addmem_cmd` (a
+  reference, not a call). -> **a rule about what a stored field means belongs to every reader
+  of that field; grep the field's readers, not just the function you are editing, and grep a
+  function's name without the `(` to catch callers that pass it by reference.**
+
 - 2026-09-26 — Wrote the first `MEMORY_REINFORCE` stamp in `triggered_memories` counting
   every injected line on any call with a `chat_id`, reasoning only about the private reply
   path. `assemble_messages_async` also serves `_handle_group_message` and
