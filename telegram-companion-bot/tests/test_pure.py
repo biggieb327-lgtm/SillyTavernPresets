@@ -3263,8 +3263,8 @@ class TestMemoryReinforce:
 class TestConfidenceDecay:
     """v2026-09-26.2, ROADMAP 7.8: every line decayed on one half-life, so a memory rated
     "clearly important" (memory_confidence 10) faded as fast as a trivial one. Confidence
-    10 now doubles the half-life, 9 gives 1.5x, an /addmem line counts as 10, and nothing
-    is ever shortened. MEMORY_CONFIDENCE_DECAY=0 puts every line back on the base."""
+    10 now doubles the half-life, 9 gives 1.5x, nothing else changes and nothing is ever
+    shortened. MEMORY_CONFIDENCE_DECAY=0 puts every line back on the base."""
     HIGH = "the lighthouse keeper lost his brother at sea"
     LOW = "the lighthouse keeper likes rye bread"
     MANUAL = "the lighthouse keeper owes the harbor master money"
@@ -3321,11 +3321,10 @@ class TestConfidenceDecay:
         assert f({"confidence": 9}, True) == 1.5
         for c in (8, 7, 5, 1):
             assert f({"confidence": c}, True) == 1.0
-        assert f(None, True) == 1.0                                  # legacy, no meta
-        assert f({"origin": "manual"}, True) == 2.0                  # /addmem
-        assert f({"origin": "manual", "confidence": 6}, True) == 1.0  # recorded value wins
+        assert f(None, True) == 1.0                        # legacy, no meta
+        assert f({"origin": "manual"}, True) == 1.0        # /addmem stores no confidence
         assert f({"origin": "manual-edit"}, True) == 1.0
-        assert f({"confidence": True}, True) == 1.0                  # bool is not a score
+        assert f({"origin": "auto-reviewed", "confidence": 6}, True) == 1.0
         assert f({"confidence": "10"}, True) == 1.0
         assert f({"confidence": 10}, False) == 1.0
 
@@ -3336,9 +3335,10 @@ class TestConfidenceDecay:
         assert abs(t[self.HIGH]["recency"] - 0.5) < 0.01
         assert t[self.HIGH]["halflife_x"] == 2.0 and t[self.LOW]["halflife_x"] == 1.0
 
-    def test_addmem_line_counts_as_ten(self):
+    def test_addmem_line_stays_on_the_base(self):
         t = self._terms()
-        assert abs(t[self.MANUAL]["recency"] - 0.5) < 0.01
+        assert abs(t[self.MANUAL]["recency"] - 0.25) < 0.01
+        assert t[self.MANUAL]["halflife_x"] == 1.0
 
     def test_kill_switch_puts_every_line_on_the_base(self):
         bot.MEMORY_CONFIDENCE_DECAY = False
@@ -3346,10 +3346,19 @@ class TestConfidenceDecay:
         assert t[self.HIGH]["recency"] == t[self.LOW]["recency"] == t[self.MANUAL]["recency"]
         assert t[self.HIGH]["halflife_x"] == 1.0
 
-    def test_decay_off_stays_off(self):
+    def test_decay_off_stays_off_and_is_not_marked(self):
         bot.MEMORY_DECAY_HALFLIFE_DAYS = 0
         t = self._terms()
         assert t[self.HIGH]["recency"] == 1.0 and t[self.LOW]["recency"] == 1.0
+        assert t[self.HIGH]["halflife_x"] == 1.0
+        text = bot._format_whymem(bot._mem_last_breakdown[1], bot._read_memories(),
+                                  time.time())
+        assert "half-life" not in text
+
+    def test_undated_line_is_not_marked(self):
+        del bot._memory_meta[self.HIGH]["ts"]   # confidence 10, no date anywhere
+        t = self._terms()
+        assert t[self.HIGH]["recency"] == 1.0 and t[self.HIGH]["halflife_x"] == 1.0
 
     def test_floor_unchanged(self):
         bot._memory_meta[self.HIGH]["ts"] = time.time() - 5000 * 86400

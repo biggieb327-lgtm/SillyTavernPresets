@@ -1396,9 +1396,7 @@ _REINFORCE_MIN_SEM = 1.5
 # faded as fast as a trivial one. The extraction prompt's memory_confidence asks "how
 # confident you are this is worth remembering long-term", so it is the importance signal
 # already stored. Only ever lengthens the half-life: confidence 9 = 1.5x, 10 = 2x, anything
-# else (and no confidence) = 1x. An owner-added line (/addmem, origin "manual", no
-# confidence) counts as 10: the owner saying "remember this" is the strongest importance
-# signal there is. Default ON; 0 = every line on the base half-life again.
+# else (and no confidence) = 1x. Default ON; 0 = every line on the base half-life again.
 MEMORY_CONFIDENCE_DECAY = _env_bool("MEMORY_CONFIDENCE_DECAY", True)
 
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
@@ -5666,18 +5664,17 @@ def _reinforced_ts(base_ts, meta_entry: dict | None, enabled: bool):
     return base_ts
 
 
+_HALFLIFE_X = {10: 2.0, 9: 1.5}
+
+
 def _halflife_factor(meta_entry: dict | None, enabled: bool) -> float:
-    """Multiplier on MEMORY_DECAY_HALFLIFE_DAYS for one memory line: 2.0 at confidence 10,
-    1.5 at 9, 1.0 otherwise. An owner-added line (/addmem: origin "manual", no
-    confidence) counts as 10. 1.0 when disabled, for legacy lines with no meta, and for
-    any bad value — it never shortens a half-life."""
+    """Multiplier on MEMORY_DECAY_HALFLIFE_DAYS for one memory line, read from its stored
+    memory_confidence: 2.0 at 10, 1.5 at 9, 1.0 otherwise. 1.0 when disabled and for any
+    line without an integer confidence (legacy, /addmem) — it never shortens a half-life."""
     if not enabled:
         return 1.0
-    m = meta_entry or {}
-    conf = m.get("confidence")
-    if not isinstance(conf, int) or isinstance(conf, bool):
-        conf = 10 if m.get("origin") == "manual" else None
-    return {10: 2.0, 9: 1.5}.get(conf, 1.0)
+    conf = (meta_entry or {}).get("confidence")
+    return _HALFLIFE_X.get(conf, 1.0) if isinstance(conf, int) else 1.0
 
 
 def _local_day(ts: float) -> date:
@@ -6091,7 +6088,9 @@ def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                    else None)
         decay_base = ts if ts is not None else (text_ts if MEMORY_DATE_FALLBACK_DECAY else None)
         decay_ts = _reinforced_ts(decay_base, m, MEMORY_REINFORCE)
-        hl_factor = _halflife_factor(m, MEMORY_CONFIDENCE_DECAY)
+        # 1.0 where no decay applies, so /whymem never marks a half-life that did nothing.
+        hl_factor = (_halflife_factor(m, MEMORY_CONFIDENCE_DECAY)
+                     if decay_ts is not None and MEMORY_DECAY_HALFLIFE_DAYS > 0 else 1.0)
         terms = {
             "kw": keyword_scored.get(l, 0),
             "sem": sem_scored.get(l, 0),
