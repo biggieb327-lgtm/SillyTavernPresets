@@ -1399,6 +1399,18 @@ _REINFORCE_MIN_SEM = 1.5
 # else (and no confidence) = 1x. Default ON; 0 = every line on the base half-life again.
 MEMORY_CONFIDENCE_DECAY = _env_bool("MEMORY_CONFIDENCE_DECAY", True)
 
+# Owner-vetted lines count as confidence 10 (v2026-09-26.3, ROADMAP 7.9). /addmem stores no
+# confidence, so eviction read it as 5 and dropped the owner's lines before auto lines rated
+# 7; an approved audit merge of owner lines stored 5 and was hedged "(unsure)"; a line approved
+# with /reviewmem ok kept its sub-7 score, so it stayed hedged and was evicted early. Every
+# reader of the confidence field now goes through _effective_confidence. These origins only
+# ever reach memories.txt through an owner action: /addmem (manual), /editmem (manual-edit),
+# /reviewmem ok (auto-reviewed, joke-candidate, and audit-merge, whose proposal showed the
+# merged text). Default ON; 0 = stored scores only, as before.
+MEMORY_OWNER_CONF = _env_bool("MEMORY_OWNER_CONF", True)
+_OWNER_ORIGINS = frozenset({"manual", "manual-edit", "auto-reviewed", "joke-candidate",
+                            "audit-merge"})
+
 TRANSITION_MARK = _env_bool("TRANSITION_MARK", True)
 TRANSITION_CHECKIN_DAYS = _env_int("TRANSITION_CHECKIN_DAYS", "3")
 
@@ -1441,6 +1453,17 @@ def _load_memory_meta():
             _memory_meta = json.loads(MEMORY_META_FILE.read_text(encoding="utf-8"))
     except Exception:
         _memory_meta = {}
+
+
+def _effective_confidence(meta_entry: dict | None) -> int | None:
+    """The confidence every ranking path reads for one memory line: 10 for a line whose
+    origin shows the owner added, edited or approved it (MEMORY_OWNER_CONF), else the stored
+    integer confidence, else None (legacy line; each caller keeps its own default)."""
+    m = meta_entry or {}
+    if MEMORY_OWNER_CONF and m.get("origin") in _OWNER_ORIGINS:
+        return 10
+    conf = m.get("confidence")
+    return conf if isinstance(conf, int) else None
 
 
 def _save_memory_meta():
@@ -1631,8 +1654,8 @@ def _audit_prompt_payload(entries: list[str], meta: dict[str, dict], now: float,
         ts = m.get("ts")
         if isinstance(ts, (int, float)) and ts > 0:
             notes.append(f"age: {max(0, int((now - ts) / 86400))}d")
-        conf = m.get("confidence")
-        if isinstance(conf, int):
+        conf = _effective_confidence(m)
+        if conf is not None:
             notes.append(f"conf={conf}")
         last = m.get("last_used")
         if MEMORY_REINFORCE and isinstance(last, (int, float)) and last > 0:
@@ -1766,9 +1789,8 @@ def _apply_audit_item(item: dict) -> tuple[bool, str]:
         merged = (item.get("merged_text") or "").strip()
         if not merged:
             return False, "merge item without merged text"
-        confs = [(_memory_meta.get(t.strip(), {}) or {}).get("confidence")
-                 for t in targets]
-        confs = [c for c in confs if isinstance(c, int)]
+        confs = [_effective_confidence(_memory_meta.get(t.strip())) for t in targets]
+        confs = [c for c in confs if c is not None]
         meta = {
             "ts": time.time(),
             "origin": "audit-merge",
@@ -2613,8 +2635,8 @@ def _evict_by_value(lines: list[str], meta: dict[str, dict],
 
     def _score(line: str, idx: int) -> tuple:
         m = meta.get(line.strip(), {}) or {}
-        conf = m.get("confidence")
-        conf = conf if isinstance(conf, int) else 5
+        conf = _effective_confidence(m)
+        conf = conf if conf is not None else 5
         ts = m.get("ts")
         ts = ts if isinstance(ts, (int, float)) else 0.0
         if not MEMORY_REINFORCE:
@@ -5668,13 +5690,13 @@ _HALFLIFE_X = {10: 2.0, 9: 1.5}
 
 
 def _halflife_factor(meta_entry: dict | None, enabled: bool) -> float:
-    """Multiplier on MEMORY_DECAY_HALFLIFE_DAYS for one memory line, read from its stored
-    memory_confidence: 2.0 at 10, 1.5 at 9, 1.0 otherwise. 1.0 when disabled and for any
-    line without an integer confidence (legacy, /addmem) — it never shortens a half-life."""
+    """Multiplier on MEMORY_DECAY_HALFLIFE_DAYS for one memory line, read through
+    _effective_confidence: 2.0 at 10 (including owner-vetted lines), 1.5 at 9, 1.0
+    otherwise. 1.0 when disabled and for a legacy line with no confidence — it never
+    shortens a half-life."""
     if not enabled:
         return 1.0
-    conf = (meta_entry or {}).get("confidence")
-    return _HALFLIFE_X.get(conf, 1.0) if isinstance(conf, int) else 1.0
+    return _HALFLIFE_X.get(_effective_confidence(meta_entry), 1.0)
 
 
 def _local_day(ts: float) -> date:
@@ -5973,8 +5995,8 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     hedged = False
     for line in lines:
         m = meta.get(line.strip(), {}) or {}
-        conf = m.get("confidence")
-        if isinstance(conf, int) and conf < autoconf:
+        conf = _effective_confidence(m)
+        if conf is not None and conf < autoconf:
             marked = "(unsure) " + line
             src = m.get("source")
             if isinstance(src, str) and src.strip():
@@ -12131,8 +12153,14 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Origin: {meta.get('origin', '?')}",
         f"Recorded: {ts_str}",
     ]
-    if meta.get("confidence") is not None:
-        lines.append(f"Confidence: {meta['confidence']}/10")
+    eff = _effective_confidence(meta)
+    stored = meta.get("confidence")
+    if eff is not None and eff != stored:
+        # Owner-vetted (MEMORY_OWNER_CONF): say why the number differs from what was stored.
+        lines.append(f"Confidence: {eff}/10 (you added, edited or approved this line"
+                     + (f"; stored {stored}/10)" if stored is not None else ")"))
+    elif stored is not None:
+        lines.append(f"Confidence: {stored}/10")
     if meta.get("source"):
         lines.append(f'Source: "{meta["source"]}"')
     if used:

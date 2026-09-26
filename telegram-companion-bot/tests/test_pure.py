@@ -3274,7 +3274,8 @@ class TestConfidenceDecay:
         self._orig_meta = dict(bot._memory_meta)
         self._orig = {k: getattr(bot, k) for k in (
             "MEMORY_TOKEN_BUDGET", "MEMORY_URGENCY_FLOOR", "MEMORY_WHY", "MEMORY_TEMPORAL",
-            "MEMORY_DECAY_HALFLIFE_DAYS", "MEMORY_REINFORCE", "MEMORY_CONFIDENCE_DECAY")}
+            "MEMORY_DECAY_HALFLIFE_DAYS", "MEMORY_REINFORCE", "MEMORY_CONFIDENCE_DECAY",
+            "MEMORY_OWNER_CONF")}
         bot.MEMORIES_FILE.write_text(
             "\n".join([self.HIGH, self.LOW, self.MANUAL]) + "\n", encoding="utf-8")
         bot._memories_cache["text"] = None
@@ -3297,6 +3298,7 @@ class TestConfidenceDecay:
         bot.MEMORY_DECAY_HALFLIFE_DAYS = 90
         bot.MEMORY_REINFORCE = False   # keep last_used out of these numbers
         bot.MEMORY_CONFIDENCE_DECAY = True
+        bot.MEMORY_OWNER_CONF = True
 
     def teardown_method(self):
         bot._embeddings_cache.clear()
@@ -3322,10 +3324,16 @@ class TestConfidenceDecay:
         for c in (8, 7, 5, 1):
             assert f({"confidence": c}, True) == 1.0
         assert f(None, True) == 1.0                        # legacy, no meta
-        assert f({"origin": "manual"}, True) == 1.0        # /addmem stores no confidence
+        assert f({"confidence": "10"}, True) == 1.0
+        # v2026-09-26.3 (7.9, owner decision): owner-vetted origins count as 10.
+        assert f({"origin": "manual"}, True) == 2.0        # /addmem
+        assert f({"origin": "manual-edit"}, True) == 2.0   # /editmem
+        assert f({"origin": "auto-reviewed", "confidence": 6}, True) == 2.0
+        # MEMORY_OWNER_CONF=0 restores the 7.8 reading: stored score only.
+        bot.MEMORY_OWNER_CONF = False
+        assert f({"origin": "manual"}, True) == 1.0
         assert f({"origin": "manual-edit"}, True) == 1.0
         assert f({"origin": "auto-reviewed", "confidence": 6}, True) == 1.0
-        assert f({"confidence": "10"}, True) == 1.0
         assert f({"confidence": 10}, False) == 1.0
 
     def test_high_confidence_line_decays_slower_at_same_age(self):
@@ -3335,7 +3343,14 @@ class TestConfidenceDecay:
         assert abs(t[self.HIGH]["recency"] - 0.5) < 0.01
         assert t[self.HIGH]["halflife_x"] == 2.0 and t[self.LOW]["halflife_x"] == 1.0
 
-    def test_addmem_line_stays_on_the_base(self):
+    def test_addmem_line_counts_as_ten(self):
+        # 7.8 shipped this line at 1x; the owner chose 10 for owner-added lines (7.9).
+        t = self._terms()
+        assert abs(t[self.MANUAL]["recency"] - 0.5) < 0.01
+        assert t[self.MANUAL]["halflife_x"] == 2.0
+
+    def test_addmem_line_on_the_base_with_owner_conf_off(self):
+        bot.MEMORY_OWNER_CONF = False
         t = self._terms()
         assert abs(t[self.MANUAL]["recency"] - 0.25) < 0.01
         assert t[self.MANUAL]["halflife_x"] == 1.0
@@ -3371,6 +3386,102 @@ class TestConfidenceDecay:
         assert "[half-life x2]" in text
         low_line = next(l for l in text.splitlines() if "rye bread" in l)
         assert "half-life" not in low_line
+
+
+class TestOwnerConfidence:
+    """v2026-09-26.3, ROADMAP 7.9: /addmem stores no confidence, so eviction read it as 5
+    and dropped owner lines before auto lines rated 7; an approved merge of owner lines was
+    hedged "(unsure)"; an approved low-score line stayed hedged. Owner-vetted origins now
+    count as 10 in every reader. MEMORY_OWNER_CONF=0 restores stored scores only."""
+
+    def setup_method(self):
+        self._orig_meta = dict(bot._memory_meta)
+        self._orig = {k: getattr(bot, k) for k in ("MEMORY_OWNER_CONF", "MEMORY_CORE")}
+        bot.MEMORY_OWNER_CONF = True
+        bot.MEMORY_CORE = True
+        bot._memory_meta.clear()
+
+    def teardown_method(self):
+        bot._memory_meta.clear()
+        bot._memory_meta.update(self._orig_meta)
+        for k, v in self._orig.items():
+            setattr(bot, k, v)
+
+    def test_effective_confidence_table(self):
+        for origin in ("manual", "manual-edit", "auto-reviewed", "joke-candidate",
+                       "audit-merge"):
+            assert bot._effective_confidence({"origin": origin, "confidence": 5}) == 10
+            assert bot._effective_confidence({"origin": origin}) == 10, origin
+        assert bot._effective_confidence({"origin": "auto", "confidence": 7}) == 7
+        assert bot._effective_confidence({"origin": "auto"}) is None
+        assert bot._effective_confidence({"confidence": "9"}) is None
+        assert bot._effective_confidence(None) is None
+        bot.MEMORY_OWNER_CONF = False
+        assert bot._effective_confidence({"origin": "manual"}) is None
+        assert bot._effective_confidence({"origin": "auto-reviewed", "confidence": 5}) == 5
+
+    def test_eviction_keeps_owner_line_over_older_auto_line(self):
+        meta = {"owner line": {"origin": "manual", "ts": 2e9},
+                "auto line": {"origin": "auto", "confidence": 7, "ts": 1.0}}
+        kept, dropped = bot._evict_by_value(["owner line", "auto line"], meta, 1)
+        assert kept == ["owner line"] and dropped == ["auto line"]
+        bot.MEMORY_OWNER_CONF = False    # the pre-7.9 result, proven by probe.py
+        kept, _ = bot._evict_by_value(["owner line", "auto line"], meta, 1)
+        assert kept == ["auto line"]
+
+    def test_approved_low_score_line_is_not_hedged(self):
+        meta = {"approved": {"origin": "auto-reviewed", "confidence": 5, "source": "q"},
+                "unreviewed": {"origin": "auto", "confidence": 5, "source": "q"}}
+        out, _ = bot._hedge_memory_lines(["approved", "unreviewed"], meta, 7, True)
+        assert out[0] == "approved"
+        assert out[1].startswith("(unsure) unreviewed")
+        bot.MEMORY_OWNER_CONF = False
+        out, _ = bot._hedge_memory_lines(["approved"], meta, 7, True)
+        assert out[0].startswith("(unsure) ")
+
+    def test_merged_owner_lines_are_not_hedged(self):
+        bot.MEMORIES_FILE.write_text("owner fact one\nowner fact two\n", encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memory_meta["owner fact one"] = {"origin": "manual", "ts": 1.0}
+        bot._memory_meta["owner fact two"] = {"origin": "manual", "ts": 2.0}
+        orig = bot._embed_memory_line
+        bot._embed_memory_line = lambda line, precomputed_vec=None: None
+        try:
+            ok, _ = bot._apply_audit_item({"action": "merge",
+                                           "targets": ["owner fact one", "owner fact two"],
+                                           "merged_text": "owner facts, merged"})
+        finally:
+            bot._embed_memory_line = orig
+        assert ok
+        m = bot._memory_meta["owner facts, merged"]
+        assert m["origin"] == "audit-merge" and m["confidence"] == 10
+        out, hedged = bot._hedge_memory_lines(["owner facts, merged"], bot._memory_meta, 7,
+                                              True)
+        assert out == ["owner facts, merged"] and hedged is False
+
+    def test_audit_payload_reports_owner_lines_as_ten(self):
+        payload = bot._audit_prompt_payload(["owner line"],
+                                            {"owner line": {"origin": "manual"}}, 0.0)
+        assert "conf=10" in payload
+
+    def test_sourcemem_explains_the_owner_score(self):
+        bot.MEMORIES_FILE.write_text("added line\napproved line\nauto line\n",
+                                     encoding="utf-8")
+        bot._memories_cache["text"] = None
+        now = time.time()
+        bot._memory_meta["added line"] = {"origin": "manual", "ts": now}
+        bot._memory_meta["approved line"] = {"origin": "auto-reviewed", "ts": now,
+                                             "confidence": 6}
+        bot._memory_meta["auto line"] = {"origin": "auto", "ts": now, "confidence": 8}
+        replies = []
+        for n in ("1", "2", "3"):
+            update, msg = _cmd_update()
+            asyncio.run(bot.sourcemem_cmd(update, _cmd_ctx(n)))
+            replies.append(msg.sent[-1])
+        assert "Confidence: 10/10 (you added, edited or approved this line)" in replies[0]
+        assert "Confidence: 10/10 (you added, edited or approved this line; stored 6/10)" \
+            in replies[1]
+        assert "Confidence: 8/10" in replies[2] and "you added" not in replies[2]
 
 
 class TestBM25HybridRetrieval:
@@ -9459,6 +9570,8 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_REINFORCE": True,
         # v2026-09-26.2, ROADMAP 7.8: confidence 9/10 lengthen the decay half-life.
         "MEMORY_CONFIDENCE_DECAY": True,
+        # v2026-09-26.3, ROADMAP 7.9: owner-added/edited/approved lines count as 10.
+        "MEMORY_OWNER_CONF": True,
         "MOOD_AUTO": True,
         "NIGHTLY_PREDRAFT": True,
         # Sprint 2 (c76b11f). Default-on per the kill-switch policy.
