@@ -1316,6 +1316,21 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-26 — Wrote the first `MEMORY_REINFORCE` stamp in `triggered_memories` counting
+  every injected line on any call with a `chat_id`, reasoning only about the private reply
+  path. `assemble_messages_async` also serves `_handle_group_message` and
+  `_maybe_reply_to_bot`, so group replies would have written `memory_meta.json` (a
+  per-instance file), which GROUP_CHAT_DESIGN.md §5 forbids. `send_triggered` would have
+  counted proactive sends. `/code-review` flagged the proactive path; the group half surfaced
+  only when I listed the callers of `assemble_messages_async` while fixing it, and I loaded
+  `group-chat-changes` after the code existed, not before. Fixed pre-merge with a
+  `chat_id > 0` gate plus a test. C19's shape. -> **a write added inside a shared helper
+  inherits every caller of that helper: list the callers (and their chat type) before
+  writing it, not after review.**
+- 2026-09-26 — Stated "`_memory_replace` deletes the old line and its metadata" from reading
+  the source; theory-guard (C5) blocked the turn. Answered with `probe.py` output
+  (`'Brian likes coffee\n', False`). -> the claim held, but the evidence came after it.
+
 - 2026-09-25 — Merged v2026-09-25.1 green locally (`verify.sh` 4/4) and main went **red**:
   the new archive test runs the real `vps-backup.sh`, which exits at `id -u -ne 0`. This cloud
   session runs as root; the CI runner does not. The test also passed `check=True` with
