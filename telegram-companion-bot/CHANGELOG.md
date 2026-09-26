@@ -29,9 +29,9 @@ read that raw score.** Confirmed by running the code (`probe.py`) before this ch
 - `_audit_prompt_payload`
 - `/sourcemem`
 
-It returns 10 when the line's origin is in `_OWNER_ORIGINS`. Otherwise it returns the stored
-integer, or None for a legacy line, and each caller keeps its own default for None. Those
-origins reach `memories.txt` only through an owner action:
+It returns 10 when `_owner_vetted` is true. Otherwise it returns the stored integer, or None
+for a legacy line, and each caller keeps its own default for None. `_owner_vetted` is true
+for origins in `_OWNER_ORIGINS`, which reach `memories.txt` only through an owner action:
 
 | Origin | Owner action |
 |---|---|
@@ -40,9 +40,22 @@ origins reach `memories.txt` only through an owner action:
 | `auto-reviewed`, `joke-candidate` | `/reviewmem ok` |
 | `audit-merge` | `/reviewmem ok` on a merge proposal, which shows the merged text |
 
-The only remaining raw read is the write-time `_memory_log` line, which logs what the
-extractor said. New kill switch `MEMORY_OWNER_CONF` (default on); 0 restores stored scores
-only.
+`_owner_vetted` is also true for an `auto` line scored below `MEMORY_AUTOCONF`. Before
+v2026-08-15.1, `/reviewmem ok` stored approved lines as plain `auto`, and the auto path only
+stores lines at or above the threshold. So such a line got in by approval. This holds while
+the instance's `MEMORY_AUTOCONF` has never changed; nothing in the repo shows one did.
+
+Two raw reads remain, both on purpose:
+- The write-time `_memory_log` line logs what the extractor said.
+- The audit merge stores the raw minimum, so data written with the switch on stays neutral
+  when it is turned off. The merged line is `audit-merge` and counts as 10 anyway.
+
+New kill switch `MEMORY_OWNER_CONF` (default on); 0 restores stored scores only.
+
+**What this does to `MEMORY_HEDGE`:** the hedge was built to mark review-approved
+low-confidence lines `(unsure)`. The owner chose to count those lines as 10. Every line in
+`memories.txt` below `MEMORY_AUTOCONF` got there by approval, so with `MEMORY_OWNER_CONF` on,
+the hedge marks nothing in normal flow. It still works with the switch off.
 
 **Effects:**
 - Owner lines now outrank every auto line in eviction.
@@ -58,6 +71,18 @@ the inconsistency that caused the reversal. Two 7.8 tests pinned "an `/addmem` l
 1x". Each now asserts that value under `MEMORY_OWNER_CONF=0` and the new value under the
 default. No assertion was dropped.
 
+**Found by `/code-review` before merge, fixed:**
+1. Approvals from before v2026-08-15.1 were missed. Fixed with the `auto`-below-threshold
+   rule above.
+2. The merge stored the effective 10, which leaked past the kill switch. It now stores the
+   raw minimum.
+3. The audit prompt still labelled `conf` "extraction confidence". It now says owner lines
+   count as 10.
+4. `/sourcemem` explained only when the numbers differed. It now explains every
+   owner-vetted line.
+5. The `_evict_by_value` and `_hedge_memory_lines` docstrings described the old reading.
+6. The test class left `memories.txt` changed. It now restores the file.
+
 **Tests (`TestOwnerConfidence`, 6; `/sourcemem` called directly):**
 - The origin table, with and without the switch.
 - The probe's eviction case, flipped, with the old result under the switch.
@@ -67,8 +92,15 @@ default. No assertion was dropped.
 - `/sourcemem` covers an added line, an approved line and an auto line.
 
 `MEMORY_OWNER_CONF` was added to `TestEveryBooleanFlagDefault.DEFAULTS`. Break-tested:
-removing the owner branch fails 8 tests; eviction reading the raw field fails 1; the hedge
-reading the raw field fails 1.
+each change below was injected alone, with a single-match replacement, and reverted after.
+
+| Change injected | Failing tests |
+|---|---|
+| owner branch removed | 8 |
+| eviction reading the raw field | 1 |
+| hedge reading the raw field | 1 |
+| older-approval rule removed | 2 |
+| merge storing the effective score | 1 |
 
 ## v2026-09-26.2 — Important memories fade slower (ROADMAP 7.8)
 

@@ -92,9 +92,12 @@ approved line would stay `(unsure)` and be evicted early despite the owner check
 (2) added = 10, others keep their score but lose the hedge: eviction would still drop an
 approved line before an unreviewed auto line rated 7. (3) the v2026-09-26.2 state (stored
 scores only, `/addmem` = 5 in eviction): the probe showed owner lines evicted first. (4) a
-new explicit `owner: true` meta field: covers only lines written after the change; the
-origins already identify every existing owner-vetted line, and each of them reaches
-`memories.txt` only through an owner action.
+new explicit `owner: true` meta field: covers only lines written after the change, while
+existing meta already identifies owner-vetted lines. That is the origins, plus an `auto` line
+below `MEMORY_AUTOCONF`, which is how `/reviewmem ok` stored approvals before
+v2026-08-15.1 (found by code review; this holds while an instance's `MEMORY_AUTOCONF` never
+changed). Accepted cost: `MEMORY_HEDGE` now marks nothing in normal flow, because every line
+it targeted was an approved one.
 **Why:** the owner's action on a line (typing it, correcting it, or approving it with its
 quote in view) is stronger evidence than the extractor's score, and a rule read by only
 some paths ranks one line several ways (the reason `/addmem` = 10 was dropped from 7.8).

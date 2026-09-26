@@ -1316,6 +1316,18 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-26 — Break-tested with a shell `brk()` that reverted by running `sed "s/$new/$old/"`.
+  The injected text was `return False`, so the revert rewrote the first `return False` on
+  33 unrelated lines of bot.py, and the next break-test ("merge stores effective: 4
+  failed") ran on that damaged file. The revert `sed` for that run also failed to parse,
+  so the injection stayed in. Caught by `git diff --stat` (40 lines changed, not 1).
+  risk-guard (C15) blocked `git checkout -- bot.py`. Reversed by re-editing (every injected
+  expression back to `return False`, then the one real occurrence restored). Proven identical
+  to HEAD by an empty diff, and the break-test was redone. -> **a break-test revert must
+  restore the saved original text, not reverse the substitution: write the file back from a
+  copy taken before injecting, and assert the pattern matches exactly once.** (The
+  scratchpad `brk.py` does both.)
+
 - 2026-09-26 — Wrote an `/addmem`-counts-as-10 rule into `_halflife_factor` only, reasoning
   about decay alone. The same line is read as confidence 5 by `_evict_by_value` and audit
   merge, and `/editmem` rewrites its origin, so one line ranked three ways; `/code-review`

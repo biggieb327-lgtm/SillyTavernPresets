@@ -1919,8 +1919,10 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
 - **Owner decision (2026-09-26):** lines the owner added, edited, or approved all count as 10.
 - **As built:** `_effective_confidence` returns 10 for origins in `_OWNER_ORIGINS`
   (`manual`, `manual-edit`, `auto-reviewed`, `joke-candidate`, `audit-merge`), else the
-  stored integer. Eviction, decay, hedging, audit merge, the audit prompt and `/sourcemem`
-  all read it. Kill switch `MEMORY_OWNER_CONF` (default on).
+  stored integer; an `auto` line below `MEMORY_AUTOCONF` also counts (an approval stored
+  before v2026-08-15.1). Eviction, decay, hedging, the audit prompt and `/sourcemem` all read
+  it. The audit merge stores the raw score. Kill switch `MEMORY_OWNER_CONF` (default on).
+  Consequence: `MEMORY_HEDGE` marks nothing in normal flow while the switch is on.
 - **Done when:** `/sourcemem` on an `/addmem` line shows `Confidence: 10/10 (you added,
   edited or approved this line)`, and an approved line no longer shows as `(unsure)`. Code
   side met (`TestOwnerConfidence`); live check pending deploy.
