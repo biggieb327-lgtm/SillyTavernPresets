@@ -1901,24 +1901,26 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   long-term (10 = clearly important fact, 1 = trivial/ambiguous)", an importance score. Not
   checkable here: how live scores spread (auto lines are all 7-10 by `MEMORY_AUTOCONF`).
 - **As built:** `MEMORY_CONFIDENCE_DECAY` (default on). `_halflife_factor`: confidence 10
-  = 2x, 9 = 1.5x, else 1x (legacy and `/addmem` lines have no confidence, so 1x). Never
-  shortens a half-life. `/whymem` marks `[half-life x2]` where decay applies.
+  = 2x, 9 = 1.5x, else 1x. It reads `_effective_confidence`, so since 7.9 owner-vetted lines
+  count as 10 (2x); a legacy line with no confidence stays 1x. Never shortens a half-life.
+  `/whymem` marks `[half-life x2]` where decay applies.
 - **Done when:** a high-confidence line 180 days old scores a higher `recency` in `/whymem`
   than a low-confidence line of the same age, and `MEMORY_CONFIDENCE_DECAY=0` makes them
   equal. Code side met (`TestConfidenceDecay`). Live: owner checks the confidence spread in
   `memory_meta.json` on one instance after deploy (command in CHANGELOG v2026-09-26.2).
 
-### 7.9 Owner-added and owner-approved memories rank as low confidence — S (not started)
+### 7.9 ~~Owner-added, -edited and -approved lines count as confidence 10~~ ✅ (shipped v2026-09-26.3)
 - **Evidence (probe.py, 2026-09-26):** `/addmem` stores `origin: "manual"` with no
-  `confidence`, so `_evict_by_value` scores it 5: when the file is full, an owner line is
-  evicted before an older auto line rated 7. An audit merge of owner lines records
-  `confidence: 5` (`min(confs) if confs else 5`), and `_hedge_memory_lines` then marks the
-  merged line `(unsure)`. A `/reviewmem ok` line keeps its sub-7 score, so it is hedged and
-  evicted early even though the owner approved it. Predates 7.7 and 7.8; found by the 7.8
-  code review.
-- **Idea:** one helper that returns a line's effective confidence, used by eviction, decay
-  (`_halflife_factor`), audit merge and hedging, so every path ranks a line the same way.
-- **Open question for the owner:** what should owner-added (`/addmem`), owner-edited
-  (`/editmem`) and owner-approved (`/reviewmem ok`) lines count as: 10, or their stored
-  score with the hedge removed? This changes which lines survive eviction, so it is the
-  owner's call.
+  `confidence`, so `_evict_by_value` scored it 5: when the file is full, an owner line was
+  evicted before an older auto line rated 7. An approved audit merge of owner lines recorded
+  `confidence: 5` and `_hedge_memory_lines` marked it `(unsure)`. A `/reviewmem ok` line
+  kept its sub-7 score, so it stayed hedged and was evicted early. Predated 7.7 and 7.8;
+  found by the 7.8 code review.
+- **Owner decision (2026-09-26):** lines the owner added, edited, or approved all count as 10.
+- **As built:** `_effective_confidence` returns 10 for origins in `_OWNER_ORIGINS`
+  (`manual`, `manual-edit`, `auto-reviewed`, `joke-candidate`, `audit-merge`), else the
+  stored integer. Eviction, decay, hedging, audit merge, the audit prompt and `/sourcemem`
+  all read it. Kill switch `MEMORY_OWNER_CONF` (default on).
+- **Done when:** `/sourcemem` on an `/addmem` line shows `Confidence: 10/10 (you added,
+  edited or approved this line)`, and an approved line no longer shows as `(unsure)`. Code
+  side met (`TestOwnerConfidence`); live check pending deploy.

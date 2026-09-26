@@ -7,6 +7,69 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-26.3 — Lines you added, edited or approved count as confidence 10 (ROADMAP 7.9)
+
+**Root cause: owner-vetted memory lines carried no score, or a low one, and every ranking path
+read that raw score.** Confirmed by running the code (`probe.py`) before this change:
+- `/addmem` stores `origin: "manual"` with no `confidence`, so `_evict_by_value` scored it
+  5. When `memories.txt` was full, an owner line was evicted before an older auto line
+  rated 7.
+- An approved audit merge of owner lines stored `confidence: 5` (`min(confs) if confs else
+  5`), and `_hedge_memory_lines` then showed the merged line to the model as `(unsure)`.
+- A line approved with `/reviewmem ok` kept its sub-7 score, so it stayed hedged and was
+  evicted early, even though the owner had checked it against its quote.
+- v2026-09-26.2 added a fourth reader (`_halflife_factor`) with the same blind spot.
+
+**Fix (owner decision: all three kinds count as 10):** new
+`_effective_confidence(meta)`, and every reader of the confidence field now goes through it:
+- `_evict_by_value`
+- `_halflife_factor`
+- `_hedge_memory_lines`
+- the audit merge in `_apply_audit_item`
+- `_audit_prompt_payload`
+- `/sourcemem`
+
+It returns 10 when the line's origin is in `_OWNER_ORIGINS`. Otherwise it returns the stored
+integer, or None for a legacy line, and each caller keeps its own default for None. Those
+origins reach `memories.txt` only through an owner action:
+
+| Origin | Owner action |
+|---|---|
+| `manual` | `/addmem` |
+| `manual-edit` | `/editmem` |
+| `auto-reviewed`, `joke-candidate` | `/reviewmem ok` |
+| `audit-merge` | `/reviewmem ok` on a merge proposal, which shows the merged text |
+
+The only remaining raw read is the write-time `_memory_log` line, which logs what the
+extractor said. New kill switch `MEMORY_OWNER_CONF` (default on); 0 restores stored scores
+only.
+
+**Effects:**
+- Owner lines now outrank every auto line in eviction.
+- They get the 2x half-life from `MEMORY_CONFIDENCE_DECAY`.
+- They are never hedged.
+- The weekly audit sees them as `conf=10`.
+- `/sourcemem` explains the number: `Confidence: 10/10 (you added, edited or approved this
+  line; stored 6/10)`.
+
+**This reverses one v2026-09-26.2 behavior on purpose.** That release kept `/addmem` lines
+at 1x because only decay would have read them as 10. Now every reader does, which removes
+the inconsistency that caused the reversal. Two 7.8 tests pinned "an `/addmem` line stays at
+1x". Each now asserts that value under `MEMORY_OWNER_CONF=0` and the new value under the
+default. No assertion was dropped.
+
+**Tests (`TestOwnerConfidence`, 6; `/sourcemem` called directly):**
+- The origin table, with and without the switch.
+- The probe's eviction case, flipped, with the old result under the switch.
+- An approved low-score line is not hedged, while an unreviewed one is.
+- A merge of two `/addmem` lines stores 10 and is not hedged.
+- The audit payload shows `conf=10`.
+- `/sourcemem` covers an added line, an approved line and an auto line.
+
+`MEMORY_OWNER_CONF` was added to `TestEveryBooleanFlagDefault.DEFAULTS`. Break-tested:
+removing the owner branch fails 8 tests; eviction reading the raw field fails 1; the hedge
+reading the raw field fails 1.
+
 ## v2026-09-26.2 — Important memories fade slower (ROADMAP 7.8)
 
 **Root cause: every archival memory decayed on one half-life.** `_recency_weight` took

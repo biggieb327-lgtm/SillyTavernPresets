@@ -82,6 +82,26 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-26 | Lines the owner added, edited or approved count as confidence 10 in every reader | status: current
+**Decided:** `_effective_confidence` returns 10 for origins in `_OWNER_ORIGINS` (`manual`,
+`manual-edit`, `auto-reviewed`, `joke-candidate`, `audit-merge`), and eviction, decay,
+hedging, audit merge, the audit prompt and `/sourcemem` all read it (v2026-09-26.3, ROADMAP
+7.9, kill switch `MEMORY_OWNER_CONF`).
+**Over:** (1) owner-added lines only, edited and approved keeping their stored score: an
+approved line would stay `(unsure)` and be evicted early despite the owner checking it.
+(2) added = 10, others keep their score but lose the hedge: eviction would still drop an
+approved line before an unreviewed auto line rated 7. (3) the v2026-09-26.2 state (stored
+scores only, `/addmem` = 5 in eviction): the probe showed owner lines evicted first. (4) a
+new explicit `owner: true` meta field: covers only lines written after the change; the
+origins already identify every existing owner-vetted line, and each of them reaches
+`memories.txt` only through an owner action.
+**Why:** the owner's action on a line (typing it, correcting it, or approving it with its
+quote in view) is stronger evidence than the extractor's score, and a rule read by only
+some paths ranks one line several ways (the reason `/addmem` = 10 was dropped from 7.8).
+**By:** owner, choosing "all three count as 10" when asked (2026-09-26).
+**Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-26.3; ROADMAP 7.9. Amends
+option (3) of the 7.8 entry below: `/addmem` = 10 now applies in every reader.
+
 ### 2026-09-26 | Important memories fade slower, using stored memory_confidence alone; only ever lengthens | status: current
 **Decided:** `MEMORY_CONFIDENCE_DECAY` (default on, v2026-09-26.2, ROADMAP 7.8) scales the
 decay half-life per line by `_halflife_factor`: `memory_confidence` 10 = 2x, 9 = 1.5x,
