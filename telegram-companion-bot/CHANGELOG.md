@@ -29,31 +29,38 @@ session:
 `_halflife_factor` multiplies the half-life in the `triggered_memories` recency term:
 - confidence 10: 2x (180 days)
 - confidence 9: 1.5x
-- anything else, or no confidence: 1x
-- an `/addmem` line (origin `manual`, no confidence): counts as 10
+- anything else, including lines with no confidence (legacy lines, `/addmem` lines): 1x
 
 It only ever lengthens the half-life, so if the scores spread badly, the worst cases are:
 the feature does nothing (everything scored 8), or auto memories fade half as fast
 (everything scored 10). The floor (0.1) and `MEMORY_DECAY_HALFLIFE_DAYS=0` (no decay) are
-unchanged. `/whymem` marks such lines `[half-life x2]` or `[half-life x1.5]`.
+unchanged. `/whymem` marks `[half-life x2]` or `[half-life x1.5]`, and only on lines where
+decay applies.
 
-**The `/addmem` rule is a judgment call, not the owner's instruction.** Without it, a line
-the owner typed with `/addmem` would sit at 1x while auto lines rated 10 got 2x. That
-demotes owner-entered memories relative to extracted ones, which nobody chose. An
-`/editmem` line keeps its recorded confidence (`origin: manual-edit`); if it has none, it
-stays at 1x. `/remember` is not affected: it writes to the per-chat `facts`, not
-`memories.txt`.
+**Found by `/code-review` before merge:**
+1. The first build counted an `/addmem` line (origin `manual`, no confidence) as 10. That
+   rule lived only in decay: `/editmem` rewrites the origin to `manual-edit` and silently
+   dropped the line back to 1x. A line approved with `/reviewmem ok` stayed at 1x. And
+   `_evict_by_value` and audit merges already score the same `/addmem` lines as confidence
+   5, so different code paths ranked one line differently. Dropped: confidence alone decides,
+   which is what the owner asked for. The older eviction and merge problem is ROADMAP 7.9.
+2. `/whymem` printed `[half-life x2]` where the half-life changed nothing (decay off, or an
+   undated line). Now `halflife_x` is 1.0 unless decay applies.
+3. The first owner check read `memory_log.txt`. That log is trimmed, holds rows for queued
+   and deleted lines, and is not what the code reads. The check below reads
+   `memory_meta.json`.
+4. The expected effect at 360 days ignored the 0.1 floor. Corrected below.
 
 **Expected effect (from the formula, not measured live):** at 180 days, a confidence-10 line
-scores 0.5x its relevance instead of 0.25x. At 360 days it scores 0.25x instead of 0.0625x.
+scores 0.5x its relevance instead of 0.25x. At 360 days it scores 0.25x instead of 0.1x (the
+floor).
 
-**Tests (`TestConfidenceDecay`, 7):**
-- The factor table, including an `/addmem` line, a recorded value beating the `/addmem`
-  rule, `manual-edit`, and bool or string values.
-- At 180 days: 0.25 at confidence 7, 0.5 at 10, and 0.5 for an `/addmem` line.
+**Tests (`TestConfidenceDecay`, 8):**
+- The factor table: `/addmem`, `manual-edit`, `auto-reviewed` and string values all give 1x.
+- At 180 days: 0.25 at confidence 7 and for an `/addmem` line, 0.5 at confidence 10.
 - The kill switch makes all three equal.
-- `MEMORY_DECAY_HALFLIFE_DAYS=0` stays 1.0, and the 0.1 floor is unchanged.
-- `/whymem` marks only the lines with a longer half-life.
+- With decay off: recency stays 1.0 and there is no marker. An undated line gets no marker.
+- The 0.1 floor is unchanged, and `/whymem` marks only the lines with a longer half-life.
 
 `MEMORY_CONFIDENCE_DECAY` was added to `TestEveryBooleanFlagDefault.DEFAULTS`.
 
@@ -62,12 +69,13 @@ scores 0.5x its relevance instead of 0.25x. At 360 days it scores 0.25x instead 
 | Removed | Failing tests |
 |---|---|
 | the multiplier in the recency term | 2 |
-| the `/addmem` rule | 2 |
 | `_halflife_factor` returning 1.0 | 4 |
+| the "only where decay applies" check | 2 |
 
-**Owner check after deploy:** on the VPS, show the spread of scores the rule reads:
-`grep -o 'conf=[0-9]*' /opt/telegram-bots/<instance>/memory_log.txt | sort | uniq -c`.
-If nearly every line is 10, the rule is too generous and the thresholds should move.
+**Owner check after deploy** (on the VPS). This shows the spread of scores the rule reads:
+`python3 -c "import json,collections; m=json.load(open('/opt/telegram-bots/<instance>/memory_meta.json')); print(collections.Counter(v.get('confidence') for v in m.values() if isinstance(v, dict)))"`.
+`None` counts lines with no score (legacy, `/addmem`, or use-only entries). If nearly every
+scored line is 10, the rule is too generous and the thresholds should move.
 
 ## v2026-09-26.1 — A memory's use resets its decay clock (ROADMAP 7.7)
 
