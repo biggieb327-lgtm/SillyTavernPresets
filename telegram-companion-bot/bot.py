@@ -1455,14 +1455,29 @@ def _load_memory_meta():
         _memory_meta = {}
 
 
-def _effective_confidence(meta_entry: dict | None) -> int | None:
-    """The confidence every ranking path reads for one memory line: 10 for a line whose
-    origin shows the owner added, edited or approved it (MEMORY_OWNER_CONF), else the stored
-    integer confidence, else None (legacy line; each caller keeps its own default)."""
+def _owner_vetted(meta_entry: dict | None) -> bool:
+    """True when a memory line's meta shows the owner added, edited or approved it
+    (MEMORY_OWNER_CONF). Besides _OWNER_ORIGINS: before v2026-08-15.1, /reviewmem ok stored
+    an approved line as plain origin "auto". The auto path stores only lines scored at or
+    above MEMORY_AUTOCONF, so an "auto" line below it reached memories.txt through an
+    approval. That holds while the instance's MEMORY_AUTOCONF has never changed."""
+    if not MEMORY_OWNER_CONF:
+        return False
     m = meta_entry or {}
-    if MEMORY_OWNER_CONF and m.get("origin") in _OWNER_ORIGINS:
-        return 10
+    origin = m.get("origin")
+    if origin in _OWNER_ORIGINS:
+        return True
     conf = m.get("confidence")
+    return origin == "auto" and isinstance(conf, int) and conf < MEMORY_AUTOCONF
+
+
+def _effective_confidence(meta_entry: dict | None) -> int | None:
+    """The confidence every ranking path reads for one memory line: 10 for an owner-vetted
+    line (_owner_vetted), else the stored integer confidence, else None (legacy line; each
+    caller keeps its own default)."""
+    if _owner_vetted(meta_entry):
+        return 10
+    conf = (meta_entry or {}).get("confidence")
     return conf if isinstance(conf, int) else None
 
 
@@ -1789,8 +1804,12 @@ def _apply_audit_item(item: dict) -> tuple[bool, str]:
         merged = (item.get("merged_text") or "").strip()
         if not merged:
             return False, "merge item without merged text"
-        confs = [_effective_confidence(_memory_meta.get(t.strip())) for t in targets]
-        confs = [c for c in confs if c is not None]
+        # The raw stored score, not _effective_confidence: the merged line is "audit-merge"
+        # and counts as 10 while MEMORY_OWNER_CONF is on; storing 10 here would keep that
+        # effect after the switch is turned off.
+        confs = [(_memory_meta.get(t.strip(), {}) or {}).get("confidence")
+                 for t in targets]
+        confs = [c for c in confs if isinstance(c, int)]
         meta = {
             "ts": time.time(),
             "origin": "audit-merge",
@@ -2617,7 +2636,8 @@ def _append_user_note(note: str, due: str = "", every: str = ""):
 def _evict_by_value(lines: list[str], meta: dict[str, dict],
                     cap: int) -> tuple[list[str], list[str]]:
     """Trim `lines` to `cap` by dropping the lowest-value entries first, where value
-    = recorded confidence (default 5 for legacy/no-meta), ties broken by oldest ts.
+    = _effective_confidence (10 for an owner-vetted line, else the recorded confidence,
+    default 5 for legacy/no-meta), ties broken by oldest ts.
     Returns (kept_lines_in_original_order, dropped_keys). A hand-corrected conf-10
     fact thus outlives a trivial conf-3 one added yesterday — unlike pure FIFO.
     Core lines (above the # CORE marker) and the marker itself are never evicted.
@@ -5981,9 +6001,11 @@ def _vigil_hint(notes_text: str, name: str) -> str:
 
 def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
                         enabled: bool) -> tuple[list[str], bool]:
-    """Prefix '(unsure) ' onto memory lines whose recorded confidence is below
-    autoconf (review-approved low-confidence entries), so the character hedges
-    instead of asserting. Legacy entries with no meta/confidence stay unmarked.
+    """Prefix '(unsure) ' onto memory lines whose _effective_confidence is below
+    autoconf, so the character hedges instead of asserting. Legacy entries with no
+    meta/confidence stay unmarked. Since v2026-09-26.3 (MEMORY_OWNER_CONF) a
+    review-approved line counts as 10, so with that switch on this marks nothing in
+    normal flow: every sub-autoconf line in memories.txt got there by approval.
     Display-time only — never written back to memories.txt.
 
     For a hedged line that has a recorded source snippet, the snippet is appended
@@ -10287,7 +10309,8 @@ def _memory_audit_scan(entries: list[str], meta_snapshot: dict[str, dict]) -> li
     unsupported = MEMORY_AUDIT_UNSUPPORTED
     payload = _audit_prompt_payload(entries, meta_snapshot, time.time(),
                                     with_source=unsupported)
-    header = ("Memories (age = days since recorded, conf = extraction confidence 1-10"
+    header = ("Memories (age = days since recorded, conf = extraction confidence 1-10, "
+              "or 10 for a line the owner added, edited or approved"
               + (', src = the user\'s own words the memory was drawn from):\n\n'
                  if unsupported else "):\n\n"))
     kinds = ("Find entries that CONTRADICT each other, are SUPERSEDED by a newer entry, "
@@ -12155,10 +12178,11 @@ async def sourcemem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     eff = _effective_confidence(meta)
     stored = meta.get("confidence")
-    if eff is not None and eff != stored:
-        # Owner-vetted (MEMORY_OWNER_CONF): say why the number differs from what was stored.
+    if _owner_vetted(meta):
+        # Owner-vetted (MEMORY_OWNER_CONF): say why it counts as 10, and the stored score
+        # when that differs.
         lines.append(f"Confidence: {eff}/10 (you added, edited or approved this line"
-                     + (f"; stored {stored}/10)" if stored is not None else ")"))
+                     + (f"; stored {stored}/10)" if stored not in (None, eff) else ")"))
     elif stored is not None:
         lines.append(f"Confidence: {stored}/10")
     if meta.get("source"):

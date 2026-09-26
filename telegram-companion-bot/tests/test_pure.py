@@ -3396,14 +3396,28 @@ class TestOwnerConfidence:
 
     def setup_method(self):
         self._orig_meta = dict(bot._memory_meta)
-        self._orig = {k: getattr(bot, k) for k in ("MEMORY_OWNER_CONF", "MEMORY_CORE")}
+        self._orig_cache = dict(bot._embeddings_cache)
+        self._orig_file = (bot.MEMORIES_FILE.read_text(encoding="utf-8")
+                           if bot.MEMORIES_FILE.exists() else None)
+        self._orig = {k: getattr(bot, k) for k in ("MEMORY_OWNER_CONF", "MEMORY_CORE",
+                                                   "MEMORY_AUTOCONF")}
         bot.MEMORY_OWNER_CONF = True
         bot.MEMORY_CORE = True
+        bot.MEMORY_AUTOCONF = 7
         bot._memory_meta.clear()
 
     def teardown_method(self):
         bot._memory_meta.clear()
         bot._memory_meta.update(self._orig_meta)
+        bot._embeddings_cache.clear()
+        bot._embeddings_cache.update(self._orig_cache)
+        if self._orig_file is None:
+            bot.MEMORIES_FILE.unlink(missing_ok=True)
+        else:
+            bot.MEMORIES_FILE.write_text(self._orig_file, encoding="utf-8")
+        bot._memories_cache["text"] = None
+        bot._memories_cache["ts"] = 0.0
+        bot._save_memory_meta()
         for k, v in self._orig.items():
             setattr(bot, k, v)
 
@@ -3414,6 +3428,11 @@ class TestOwnerConfidence:
             assert bot._effective_confidence({"origin": origin}) == 10, origin
         assert bot._effective_confidence({"origin": "auto", "confidence": 7}) == 7
         assert bot._effective_confidence({"origin": "auto"}) is None
+        # Approved before v2026-08-15.1: stored as plain "auto" below MEMORY_AUTOCONF.
+        assert bot._effective_confidence({"origin": "auto", "confidence": 5}) == 10
+        bot.MEMORY_AUTOCONF = 8    # the rule follows the instance's threshold
+        assert bot._effective_confidence({"origin": "auto", "confidence": 7}) == 10
+        bot.MEMORY_AUTOCONF = 7
         assert bot._effective_confidence({"confidence": "9"}) is None
         assert bot._effective_confidence(None) is None
         bot.MEMORY_OWNER_CONF = False
@@ -3429,15 +3448,15 @@ class TestOwnerConfidence:
         kept, _ = bot._evict_by_value(["owner line", "auto line"], meta, 1)
         assert kept == ["auto line"]
 
-    def test_approved_low_score_line_is_not_hedged(self):
+    def test_approved_low_score_lines_are_not_hedged(self):
+        # "old approval" is how /reviewmem ok stored a line before v2026-08-15.1.
         meta = {"approved": {"origin": "auto-reviewed", "confidence": 5, "source": "q"},
-                "unreviewed": {"origin": "auto", "confidence": 5, "source": "q"}}
-        out, _ = bot._hedge_memory_lines(["approved", "unreviewed"], meta, 7, True)
-        assert out[0] == "approved"
-        assert out[1].startswith("(unsure) unreviewed")
+                "old approval": {"origin": "auto", "confidence": 5, "source": "q"}}
+        out, hedged = bot._hedge_memory_lines(["approved", "old approval"], meta, 7, True)
+        assert out == ["approved", "old approval"] and hedged is False
         bot.MEMORY_OWNER_CONF = False
-        out, _ = bot._hedge_memory_lines(["approved"], meta, 7, True)
-        assert out[0].startswith("(unsure) ")
+        out, _ = bot._hedge_memory_lines(["approved", "old approval"], meta, 7, True)
+        assert out[0].startswith("(unsure) ") and out[1].startswith("(unsure) ")
 
     def test_merged_owner_lines_are_not_hedged(self):
         bot.MEMORIES_FILE.write_text("owner fact one\nowner fact two\n", encoding="utf-8")
@@ -3454,10 +3473,15 @@ class TestOwnerConfidence:
             bot._embed_memory_line = orig
         assert ok
         m = bot._memory_meta["owner facts, merged"]
-        assert m["origin"] == "audit-merge" and m["confidence"] == 10
+        # Stored score stays raw (5: neither target had one); the origin makes it 10.
+        assert m["origin"] == "audit-merge" and m["confidence"] == 5
+        assert bot._effective_confidence(m) == 10
         out, hedged = bot._hedge_memory_lines(["owner facts, merged"], bot._memory_meta, 7,
                                               True)
         assert out == ["owner facts, merged"] and hedged is False
+        # The switch fully restores the old reading: nothing written under it leaks.
+        bot.MEMORY_OWNER_CONF = False
+        assert bot._effective_confidence(m) == 5
 
     def test_audit_payload_reports_owner_lines_as_ten(self):
         payload = bot._audit_prompt_payload(["owner line"],
@@ -3465,7 +3489,7 @@ class TestOwnerConfidence:
         assert "conf=10" in payload
 
     def test_sourcemem_explains_the_owner_score(self):
-        bot.MEMORIES_FILE.write_text("added line\napproved line\nauto line\n",
+        bot.MEMORIES_FILE.write_text("added line\napproved line\nauto line\nedited line\n",
                                      encoding="utf-8")
         bot._memories_cache["text"] = None
         now = time.time()
@@ -3473,8 +3497,10 @@ class TestOwnerConfidence:
         bot._memory_meta["approved line"] = {"origin": "auto-reviewed", "ts": now,
                                              "confidence": 6}
         bot._memory_meta["auto line"] = {"origin": "auto", "ts": now, "confidence": 8}
+        bot._memory_meta["edited line"] = {"origin": "manual-edit", "ts": now,
+                                           "confidence": 10}
         replies = []
-        for n in ("1", "2", "3"):
+        for n in ("1", "2", "3", "4"):
             update, msg = _cmd_update()
             asyncio.run(bot.sourcemem_cmd(update, _cmd_ctx(n)))
             replies.append(msg.sent[-1])
@@ -3482,6 +3508,8 @@ class TestOwnerConfidence:
         assert "Confidence: 10/10 (you added, edited or approved this line; stored 6/10)" \
             in replies[1]
         assert "Confidence: 8/10" in replies[2] and "you added" not in replies[2]
+        # Stored 10 already: still says why, without a redundant "stored" note.
+        assert "Confidence: 10/10 (you added, edited or approved this line)" in replies[3]
 
 
 class TestBM25HybridRetrieval:
