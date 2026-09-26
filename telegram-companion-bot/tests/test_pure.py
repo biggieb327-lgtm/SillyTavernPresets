@@ -3103,8 +3103,20 @@ class TestMemoryReinforce:
 
     def test_no_query_vector_records_nothing(self):
         # send_triggered (proactive/heartbeat) calls assemble_messages with no vector.
-        bot.triggered_memories("tell me about the fire tower", query_vec=None, chat_id=1)
+        # Fake a strong semantic score so only the vector check can stop the stamp.
+        orig = bot.semantic_recall
+        bot.semantic_recall = lambda q, entries, top_k=5: [(0.9, e) for e in entries]
+        try:
+            t = self._terms_novec()
+        finally:
+            bot.semantic_recall = orig
+        assert t[self.OLD]["sem"] >= bot._REINFORCE_MIN_SEM
         assert "uses" not in bot._memory_meta[self.OLD]
+
+    def _terms_novec(self):
+        bot.triggered_memories("tell me about the fire tower", query_vec=None, chat_id=1)
+        bd = bot._mem_last_breakdown[1]
+        return {l: t for _, l, t in bd["picked"] + bd["cut"]}
 
     def test_keyword_only_match_is_not_a_use(self):
         # Orthogonal vector: semantic term 0, still picked on the "fire tower" keywords.
