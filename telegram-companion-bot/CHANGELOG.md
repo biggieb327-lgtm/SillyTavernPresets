@@ -7,6 +7,68 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-26.2 — Important memories fade slower (ROADMAP 7.8)
+
+**Root cause: every archival memory decayed on one half-life.** `_recency_weight` took
+`MEMORY_DECAY_HALFLIFE_DAYS` (90) for every line, so a memory the extractor rated "clearly
+important" dropped out of the ranking exactly as fast as a trivial one. Importance already
+reached two other places, but neither of them was decay: `MEMORY_AUTOCONF` decides whether a
+line is stored at all, and `_evict_by_value` decides which stored line is dropped when the
+file is full.
+
+**What the stand-in measures.** The owner chose `memory_confidence` as the importance signal.
+The extraction prompt defines it as *"how confident you are this is worth remembering
+long-term (10 = clearly important fact, 1 = trivial/ambiguous)"*, so it is an importance
+score with ambiguity mixed in, not a truth score. Two limits could not be checked from this
+session:
+- Auto-stored memories are all 7-10, because `MEMORY_AUTOCONF=7` gates them, so any
+  distinction happens inside that band.
+- How the live scores spread across the fleet is unknown. No real memory data is committed.
+
+**Fix:** new kill switch `MEMORY_CONFIDENCE_DECAY` (default on). The pure
+`_halflife_factor` multiplies the half-life in the `triggered_memories` recency term:
+- confidence 10: 2x (180 days)
+- confidence 9: 1.5x
+- anything else, or no confidence: 1x
+- an `/addmem` line (origin `manual`, no confidence): counts as 10
+
+It only ever lengthens the half-life, so if the scores spread badly, the worst cases are:
+the feature does nothing (everything scored 8), or auto memories fade half as fast
+(everything scored 10). The floor (0.1) and `MEMORY_DECAY_HALFLIFE_DAYS=0` (no decay) are
+unchanged. `/whymem` marks such lines `[half-life x2]` or `[half-life x1.5]`.
+
+**The `/addmem` rule is a judgment call, not the owner's instruction.** Without it, a line
+the owner typed with `/addmem` would sit at 1x while auto lines rated 10 got 2x. That
+demotes owner-entered memories relative to extracted ones, which nobody chose. An
+`/editmem` line keeps its recorded confidence (`origin: manual-edit`); if it has none, it
+stays at 1x. `/remember` is not affected: it writes to the per-chat `facts`, not
+`memories.txt`.
+
+**Expected effect (from the formula, not measured live):** at 180 days, a confidence-10 line
+scores 0.5x its relevance instead of 0.25x. At 360 days it scores 0.25x instead of 0.0625x.
+
+**Tests (`TestConfidenceDecay`, 7):**
+- The factor table, including an `/addmem` line, a recorded value beating the `/addmem`
+  rule, `manual-edit`, and bool or string values.
+- At 180 days: 0.25 at confidence 7, 0.5 at 10, and 0.5 for an `/addmem` line.
+- The kill switch makes all three equal.
+- `MEMORY_DECAY_HALFLIFE_DAYS=0` stays 1.0, and the 0.1 floor is unchanged.
+- `/whymem` marks only the lines with a longer half-life.
+
+`MEMORY_CONFIDENCE_DECAY` was added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+
+**Break-tested:**
+
+| Removed | Failing tests |
+|---|---|
+| the multiplier in the recency term | 2 |
+| the `/addmem` rule | 2 |
+| `_halflife_factor` returning 1.0 | 4 |
+
+**Owner check after deploy:** on the VPS, show the spread of scores the rule reads:
+`grep -o 'conf=[0-9]*' /opt/telegram-bots/<instance>/memory_log.txt | sort | uniq -c`.
+If nearly every line is 10, the rule is too generous and the thresholds should move.
+
 ## v2026-09-26.1 — A memory's use resets its decay clock (ROADMAP 7.7)
 
 **Root cause: recency decay and eviction read only when a memory was written.**

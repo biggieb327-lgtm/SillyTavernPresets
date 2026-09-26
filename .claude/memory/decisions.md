@@ -82,6 +82,26 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-26 | Important memories fade slower, using stored memory_confidence; only ever lengthens | status: current
+**Decided:** `MEMORY_CONFIDENCE_DECAY` (default on, v2026-09-26.2, ROADMAP 7.8) scales the
+decay half-life per line by `_halflife_factor`: `memory_confidence` 10 = 2x, 9 = 1.5x,
+everything else 1x; an `/addmem` line (origin `manual`, no confidence) counts as 10.
+**Over:** (1) a new `weight` field in the `post_reply_analysis` extraction JSON: a truer
+emotional signal, but it covers only memories written after the change and changes the
+extraction prompt; the owner chose confidence. (2) a graded factor across the whole 1-10
+range (e.g. shortening low-confidence half-lives): auto-stored lines are all 7-10
+(`MEMORY_AUTOCONF`), the live spread is unverified, and shortening would punish legacy and
+review-approved lines on a signal nobody has measured; boost-only makes the worst case
+"does nothing" or "auto lines fade half as fast". (3) leaving `/addmem` lines at 1x: they
+would be demoted relative to auto lines rated 10, which nobody chose; this `/addmem` rule
+is the session's call, stated to the owner, not the owner's instruction.
+**Why:** the extraction prompt already defines `memory_confidence` as "worth remembering
+long-term (10 = clearly important fact)", so the importance signal was stored and unused.
+**By:** owner ("use confidence as the stand-in and build 7.8 if you're confident"); the
+session checked the prompt's definition before building and could not check the live
+spread, which the owner can with one grep (CHANGELOG v2026-09-26.2).
+**Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-26.2; ROADMAP 7.8.
+
 ### 2026-09-26 | A memory's use resets its decay clock; a use is a private reply the user's message is close to | status: current
 **Decided:** ship `MEMORY_REINFORCE` (default on, v2026-09-26.1, ROADMAP 7.7). A use is an
 archival line injected in a private chat, on the reply path (query vector present), with a

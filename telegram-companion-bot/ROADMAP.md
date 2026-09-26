@@ -1890,24 +1890,20 @@ infrastructure or heavy dependencies. Ordered by effort-to-payoff ratio.
   a `Used:` row, and `/whymem` on a later reply shows `[recency from last use]` on an old
   line. Code side met (`TestMemoryReinforce`); the live check is pending deploy.
 
-### 7.8 Emotional weight slows decay — S
-- **Evidence:** every archival memory decays on the same `MEMORY_DECAY_HALFLIFE_DAYS`
-  (90). Emotional weight and importance only affect whether a memory is written
-  (`MEMORY_AUTOCONF`) and which line eviction drops (`confidence`), never how fast it fades.
-  A memory of a bereavement and a memory of a lunch order fade from the ranking at the same
-  rate. Source: the "emotional modulation" mechanism on counterparts.ai/ecosystem
-  (2026-09-26), which notes almost no system lets emotion change the decay rate.
-- **Idea:** a per-line half-life. `_recency_weight` takes a multiplier derived from data
-  already in `memory_meta.json`, e.g. `confidence` 9-10 doubles the half-life. A separate
-  emotional score would need a new key in the existing extraction JSON (no new model
-  call, invariant #3) and only covers memories written after the change.
-- **Open question for the owner before building:** is `confidence` a good enough stand-in?
-  It measures how sure the extraction was that the fact is true, not how much it matters.
-  If not, the extraction prompt gains a `weight` field (1-10) and legacy lines stay at 1x.
-- **What changes:** `_recency_weight(ts, now, halflife)` gains a factor; the
-  `triggered_memories` recency term passes it; `/whymem` shows the effective half-life.
-  Kill switch `MEMORY_EMOTIONAL_DECAY` (default on, invariant #16), added to
-  `TestEveryBooleanFlagDefault.DEFAULTS` in the same edit.
-- **Risk:** low; ranking only, floor 0.1 unchanged, nothing is deleted.
-- **Done when:** a high-weight line 180 days old scores a higher `recency` in `/whymem`
-  than a low-weight line of the same age, and `MEMORY_EMOTIONAL_DECAY=0` makes them equal.
+### 7.8 ~~Important memories fade slower~~ ✅ (shipped v2026-09-26.2)
+- **Evidence:** every archival memory decayed on the same `MEMORY_DECAY_HALFLIFE_DAYS`
+  (90). Importance only affected whether a memory was written (`MEMORY_AUTOCONF`) and which
+  line eviction drops (`confidence`), never how fast it fades. Source: the "emotional
+  modulation" mechanism on counterparts.ai/ecosystem (2026-09-26), which notes almost no
+  system lets importance change the decay rate.
+- **Owner decision (2026-09-26):** use the stored `memory_confidence` as the stand-in, if
+  it is good enough. Checked: the extraction prompt defines it as "worth remembering
+  long-term (10 = clearly important fact, 1 = trivial/ambiguous)", an importance score. Not
+  checkable here: how live scores spread (auto lines are all 7-10 by `MEMORY_AUTOCONF`).
+- **As built:** `MEMORY_CONFIDENCE_DECAY` (default on). `_halflife_factor`: confidence 10
+  = 2x, 9 = 1.5x, else 1x; an `/addmem` line (origin `manual`, no confidence) counts as 10.
+  Never shortens a half-life. `/whymem` marks `[half-life x2]`.
+- **Done when:** a high-confidence line 180 days old scores a higher `recency` in `/whymem`
+  than a low-confidence line of the same age, and `MEMORY_CONFIDENCE_DECAY=0` makes them
+  equal. Code side met (`TestConfidenceDecay`). Live: owner checks the confidence spread
+  (`grep -o 'conf=[0-9]*' memory_log.txt | sort | uniq -c`) on one instance after deploy.
