@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-26.4"
+BOT_VERSION = "2026-09-26.5"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -397,7 +397,7 @@ def _usage_cached_tokens(usage) -> int:
     return 0
 
 
-def _track_llm_usage(messages: list, reply: str):
+def _track_llm_usage(messages: list, reply: str, model: str = ""):
     today = time.strftime("%Y-%m-%d")
     if _llm_stats["date"] != today:
         _llm_stats["date"] = today
@@ -407,6 +407,7 @@ def _track_llm_usage(messages: list, reply: str):
         _llm_stats["measured"] = 0
         _llm_stats["estimated"] = 0
         _llm_stats["tok_cached"] = 0
+        _llm_stats["by_model"] = {}
     _llm_stats["calls"] += 1
     # Prefer the provider's own count. It is produced by the real tokenizer for the real
     # model and includes the chat-template overhead we cannot see, so it is the actual
@@ -416,8 +417,9 @@ def _track_llm_usage(messages: list, reply: str):
     real_in = _usage_tokens(usage, "prompt_tokens")
     real_out = _usage_tokens(usage, "completion_tokens")
     if real_in:
-        _llm_stats["tok_in"] += real_in
-        _llm_stats["tok_out"] += real_out or _est_tokens(reply)
+        add_in, add_out = real_in, real_out or _est_tokens(reply)
+        _llm_stats["tok_in"] += add_in
+        _llm_stats["tok_out"] += add_out
         # Cache-hit tokens ride the same measured usage block (ROADMAP 6.1 step 1).
         _llm_stats["tok_cached"] += _usage_cached_tokens(usage)
         _llm_stats["measured"] += 1
@@ -427,9 +429,26 @@ def _track_llm_usage(messages: list, reply: str):
         # rendered as-is, never re-scaled, so each addition should be the best available
         # estimate of the REAL count at the time it is made. (The opposite rule applies
         # to _prompt_stats, which IS re-rendered later — see _record_prompt_size.)
-        _llm_stats["tok_in"] += sum(_tokens(m.get("content", "") or "") for m in messages)
-        _llm_stats["tok_out"] += _tokens(reply)
+        add_in = sum(_tokens(m.get("content", "") or "") for m in messages)
+        add_out = _tokens(reply)
+        _llm_stats["tok_in"] += add_in
+        _llm_stats["tok_out"] += add_out
         _llm_stats["estimated"] += 1
+    # Per-model split (v2026-09-26.5): the daily totals above cannot say which call type
+    # spends the quota, and the model is the one label every call already carries — the
+    # chat model is the replies, the cheap model is analysis/Recast/safety. This runs on
+    # worker threads while save_state serializes _llm_stats on the loop, so the nested
+    # dict is copy-on-write: a new dict is bound on every call and the one a reader holds
+    # never changes size mid-iteration (json.dumps would raise on that). Two threads
+    # racing can drop one call's increment here, the same race the flat counters above
+    # already accept.
+    by = dict(_llm_stats.get("by_model") or {})
+    row = dict(by.get(model or "?") or {"calls": 0, "tok_in": 0, "tok_out": 0})
+    row["calls"] += 1
+    row["tok_in"] += add_in
+    row["tok_out"] += add_out
+    by[model or "?"] = row
+    _llm_stats["by_model"] = by
 
 # --- Env parsing that can't brick the fleet ---
 # A non-numeric value in an instance .env used to raise at import and crash-loop
@@ -8144,7 +8163,7 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                     # A rejected completion still cost real tokens — up to a full
                     # thinking-budget's worth for a leak — so it must reach the
                     # usage stats even though it never reaches the user.
-                    _track_llm_usage(call_messages, result)
+                    _track_llm_usage(call_messages, result, m)
                     _count_error("api")
                     last_err = last_err or RuntimeError(f"{reject} completion")
                     if attempt < _CHAT_RETRIES - 1:
@@ -8158,7 +8177,7 @@ def _call_nanogpt_with_retries(messages: list, model: str = None, fallback: str 
                                    m, reject, _CHAT_RETRIES, models[i + 1])
                         _count_error("fallback")
                     break
-                _track_llm_usage(call_messages, result)
+                _track_llm_usage(call_messages, result, m)
                 return result
             except (requests.exceptions.HTTPError, requests.exceptions.Timeout,
                     requests.exceptions.ConnectionError) as e:
@@ -19031,6 +19050,15 @@ def _llm_stats_line(llm: dict) -> str:
     # exists to report — the raw count answers step 1 on its own.
     if measured:
         line += f"; {llm.get('tok_cached', 0):,} cached"
+    # Per-model split, biggest input first, provider prefix dropped for width. Output is
+    # shown per model because a :thinking model's reasoning is billed as output.
+    by = llm.get("by_model")
+    if isinstance(by, dict) and by:
+        rows = sorted(by.items(), key=lambda kv: -int((kv[1] or {}).get("tok_in", 0)))
+        line += "\n  by model: " + "; ".join(
+            f"{name.rsplit('/', 1)[-1]} {r.get('calls', 0)} calls "
+            f"~{r.get('tok_in', 0) // 1000}k in / ~{r.get('tok_out', 0) // 1000}k out"
+            for name, r in rows if isinstance(r, dict))
     return line
 
 

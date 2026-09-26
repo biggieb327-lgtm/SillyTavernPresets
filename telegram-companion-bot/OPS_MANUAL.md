@@ -568,6 +568,14 @@ conversation. The ratio is model-specific: expect it to move after `/setmodel`. 
 switch `TOKEN_CALIBRATION=0` reverts to the raw `len//4` unit that every pre-.2 number in
 the docs was measured in.
 
+**Which model spends the tokens.** Since v2026-09-26.5 `/audit` prints a second LLM line,
+`  by model: glm-5:thinking 40 calls ~380k in / ~60k out; glm-4.7-flash 210 calls ...`,
+biggest input first. The chat model's row is the replies (plus search follow-ups, captions
+and document/vision replies that use it). The cheap model's row is `post_reply_analysis`,
+Recast, safety, and the background passes that default to it. Output on a `:thinking` row
+includes the hidden reasoning, since the provider bills it as completion tokens. Resets
+at local midnight with the other daily totals.
+
 Change the **voice** at runtime (no restart): `/preset core,rp` — see `PRESET_FILES` in
 `.env.example` for what each layer contains. `/preset` can only pick layers present in
 that instance's directory — `vps-sync.sh` pulls only what `PRESET_FILES` names, so an

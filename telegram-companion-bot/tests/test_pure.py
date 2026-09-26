@@ -15681,3 +15681,71 @@ class TestAutoReactFoldedIntoAnalysis:
         assert not hasattr(bot, "_decide_reaction")
         assert not hasattr(bot, "maybe_auto_react")
         assert "reaction" not in bot.MODEL_ROLES
+
+
+class TestLlmStatsByModel:
+    """v2026-09-26.5: /audit splits the day's tokens per model."""
+
+    def _fresh(self, monkeypatch):
+        stats = {"date": time.strftime("%Y-%m-%d"), "calls": 0, "tok_in": 0, "tok_out": 0,
+                 "measured": 0, "estimated": 0, "tok_cached": 0}
+        monkeypatch.setattr(bot, "_llm_stats", stats)
+        return stats
+
+    def test_estimated_calls_split_per_model(self, monkeypatch):
+        stats = self._fresh(monkeypatch)
+        bot._track_llm_usage([{"content": "a" * 400}], "b" * 40, "zai-org/big:thinking")
+        bot._track_llm_usage([{"content": "a" * 40}], "b" * 4, "zai-org/flash")
+        bot._track_llm_usage([{"content": "a" * 40}], "b" * 4, "zai-org/flash")
+        by = stats["by_model"]
+        assert by["zai-org/big:thinking"]["calls"] == 1
+        assert by["zai-org/flash"]["calls"] == 2
+        assert sum(r["tok_in"] for r in by.values()) == stats["tok_in"]
+        assert sum(r["tok_out"] for r in by.values()) == stats["tok_out"]
+
+    def test_measured_call_uses_provider_counts(self, monkeypatch):
+        stats = self._fresh(monkeypatch)
+        monkeypatch.setattr(bot, "_take_call_usage",
+                            lambda: {"prompt_tokens": 9000, "completion_tokens": 1500})
+        bot._track_llm_usage([{"content": "x"}], "y", "m1")
+        assert stats["by_model"]["m1"] == {"calls": 1, "tok_in": 9000, "tok_out": 1500}
+
+    def test_unlabelled_call_and_day_reset(self, monkeypatch):
+        stats = self._fresh(monkeypatch)
+        bot._track_llm_usage([{"content": "x"}], "y")
+        assert "?" in stats["by_model"]
+        stats["date"] = "1999-01-01"
+        bot._track_llm_usage([{"content": "x"}], "y", "m2")
+        assert list(stats["by_model"]) == ["m2"]
+
+    def test_copy_on_write_keeps_a_held_reference_stable(self, monkeypatch):
+        stats = self._fresh(monkeypatch)
+        bot._track_llm_usage([{"content": "x"}], "y", "m1")
+        held = stats["by_model"]
+        bot._track_llm_usage([{"content": "x"}], "y", "m2")
+        assert list(held) == ["m1"]            # what a serializer was iterating is unchanged
+        assert set(stats["by_model"]) == {"m1", "m2"}
+        json.dumps(dict(stats))                # the save_state shape round-trips
+
+    def test_call_nanogpt_labels_the_model_it_used(self, monkeypatch):
+        stats = self._fresh(monkeypatch)
+        monkeypatch.setattr(bot, "_one_call", lambda messages, model: "hello there")
+        bot.call_nanogpt([{"role": "user", "content": "hi"}], "prov/model-x")
+        assert stats["by_model"]["prov/model-x"]["calls"] == 1
+
+    def test_audit_line_renders_split_biggest_first(self):
+        line = bot._llm_stats_line({
+            "calls": 3, "tok_in": 21000, "tok_out": 3000, "measured": 3, "estimated": 0,
+            "tok_cached": 0,
+            "by_model": {"zai-org/flash": {"calls": 2, "tok_in": 3000, "tok_out": 1000},
+                         "zai-org/glm-5:thinking": {"calls": 1, "tok_in": 18000,
+                                                     "tok_out": 2000}}})
+        head, split = line.split("\n")
+        assert head.startswith("LLM today: 3 calls")
+        assert split == ("  by model: glm-5:thinking 1 calls ~18k in / ~2k out; "
+                         "flash 2 calls ~3k in / ~1k out")
+
+    def test_audit_line_without_split_is_unchanged(self):
+        line = bot._llm_stats_line({"calls": 1, "tok_in": 1000, "tok_out": 0,
+                                    "measured": 0, "estimated": 1})
+        assert "\n" not in line

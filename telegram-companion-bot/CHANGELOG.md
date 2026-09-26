@@ -7,6 +7,36 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-26.5 — `/audit` splits the day's tokens per model
+
+**Root cause: `_llm_stats` kept one daily total across every call type, so nobody could say
+which calls spend the quota.** `/audit`'s `LLM today:` line summed the main reply, the
+`:thinking` model's hidden reasoning, `post_reply_analysis`, both Recast passes, safety,
+and every background pass into one number. The 2026-09-26 token review could only estimate
+where the tokens go. Every candidate saving (Recast, reasoning output, prompt size) was a
+guess until this exists.
+
+**Fix:**
+- `_track_llm_usage(messages, reply, model="")` also adds each call's tokens to
+  `_llm_stats["by_model"][model]` (`calls`, `tok_in`, `tok_out`). Both call sites in
+  `_call_nanogpt_with_retries` pass the model that actually served the call, so fallbacks
+  and rejected leak completions land on the right row. A call with no label goes under `?`.
+- This call's tokens are computed once and added to both the daily totals and the model's
+  row, so the rows always sum to the totals (`TestLlmStatsByModel`).
+- `_llm_stats_line` appends `  by model: <name> N calls ~Xk in / ~Yk out; ...`, biggest
+  input first, provider prefix dropped. With no split recorded yet (state saved by the
+  previous version), the line is byte-identical to before.
+- Resets with the other daily counters, and persists through `save_state` like them.
+
+**Thread safety:** `_track_llm_usage` runs on worker threads while `save_state` serializes
+`_llm_stats` on the event loop. The nested dict is copy-on-write: each call binds a new
+dict, so the one `json.dumps` may be iterating never changes size (a test holds a
+reference across a second call and checks it is unchanged). Two threads racing can drop
+one increment, which is the same race the flat counters already accept.
+
+**No kill switch:** this adds a line to an existing `/audit` instrument and changes no bot
+behavior. The same was true of the `; N cached` addition in v2026-08-24.9.
+
 ## v2026-09-26.4 — Auto-react rides the post-reply analysis call (one fewer call per message)
 
 **Root cause: auto-react was a separate LLM call on almost every private message.**
