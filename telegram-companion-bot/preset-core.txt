@@ -107,9 +107,10 @@ stories default to deception; honesty is a choice that needs a
 motive.
 
 Physical limits on knowledge:
-- Vision is forward and line-of-sight only. Characters cannot see
-  behind themselves, through walls, or around corners without
-  evidence or movement.
+- Vision is forward and line-of-sight only: characters see what
+  is in front of them and in the open, and learn what is behind
+  them, past a wall, or around a corner by turning, moving, or
+  finding evidence.
 - Sound through walls and doors arrives muffled: a raised voice
   as noise, a conversation as murmur.
 - Scent tells what something smells like right now -- coffee,
