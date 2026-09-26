@@ -13808,7 +13808,7 @@ class TestStructuredOperationEvents:
 
         monkeypatch.setattr(bot, "_CHAT_RETRIES", 1)
         monkeypatch.setattr(bot, "_one_call", one_call)
-        monkeypatch.setattr(bot, "_track_llm_usage", lambda messages, reply: None)
+        monkeypatch.setattr(bot, "_track_llm_usage", lambda messages, reply, model="": None)
         monkeypatch.setattr(bot, "_emit_operation_event",
                             lambda **event: events.append(event))
 

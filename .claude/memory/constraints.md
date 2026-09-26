@@ -1316,6 +1316,15 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-26 — Changed `_track_llm_usage`'s signature (added `model`), then committed
+  v2026-09-26.5 after running only the `-k LlmStatsByModel or TrackLlmUsage` subset.
+  `verify.sh` then failed: a stub in `TestStructuredOperationEvents`
+  (`lambda messages, reply: None`) still had the old two-argument shape, and the new
+  three-argument call raised `TypeError`. Found by `verify.sh` before merge; fixed by giving
+  the stub the new signature (no assertion changed). -> **after changing a function's
+  signature, grep the tests for `setattr(bot, "<name>"` stubs before committing, and run the
+  full suite, not a `-k` subset.**
+
 - 2026-09-26 — Break-tested with a shell `brk()` that reverted by running `sed "s/$new/$old/"`.
   The injected text was `return False`, so the revert rewrote the first `return False` on
   33 unrelated lines of bot.py, and the next break-test ("merge stores effective: 4
