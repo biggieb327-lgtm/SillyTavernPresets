@@ -304,7 +304,7 @@ either. Every other side call is off in groups:
 | `post_reply_analysis` (mood + user note + NPC memory) | **Skipped** — also the flat-file write path, see §5 |
 | Inner voice | Skipped |
 | `maybe_search` / link reading | Skipped in v1 |
-| `maybe_auto_react` (REACTION_MODEL call) | Skipped — the in-completion `[react: …]` tag still works and is free |
+| Auto-react (the `react` key of `post_reply_analysis`, private `_deliver` only) | Skipped — the in-completion `[react: …]` tag still works and is free |
 | TTS / selfie / meme generation | Skipped (v1 is text + reactions only) |
 | Rolling summarization (`maintain_memory`) | Kept, but trigger threshold doubled for group chats (`SUMMARY_EVERY × 2`) — group banter is lower-density than DM conversation |
 | Embeddings on memory write | N/A — groups never write memories |

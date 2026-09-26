@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-26.3"
+BOT_VERSION = "2026-09-26.4"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -716,7 +716,7 @@ ENGAGEMENT_TREND = _env_bool("ENGAGEMENT_TREND", True)
 _prompt_stats: dict = {"n": 0, "sum": 0, "max": 0, "max_ts": 0.0,
                        "max_chat": None, "max_blocks": [], "buckets": {}}
 TEMPERATURE = _env_float("TEMPERATURE")  # None = use the model default
-REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # fast/cheap for emoji pick
+REACTION_MODEL = os.getenv("REACTION_MODEL", "zai-org/glm-4.7-flash")  # cheap-model default for MOOD_MODEL/RECAST_MODEL
 REACTIONS_AUTO = _env_bool("REACTIONS_AUTO", True)
 MOOD_AUTO = _env_bool("MOOD_AUTO", True)
 MOOD_MODEL = os.getenv("MOOD_MODEL", REACTION_MODEL)  # cheap appraiser
@@ -6407,10 +6407,12 @@ async def update_mood(chat_id: int):
 
 
 def _post_reply_analysis(chat_id: int, hist_tail: list,
-                         want_mood: bool, want_note: bool, want_memory: bool):
-    """Sync worker: one LLM call covering mood + user note + NPC memory.
+                         want_mood: bool, want_note: bool, want_memory: bool,
+                         want_react: bool = False):
+    """Sync worker: one LLM call covering mood + user note + NPC memory (+ auto-react).
     hist_tail is snapshotted by the caller on the event loop — never read the live
-    conversation_history from this thread."""
+    conversation_history from this thread. Returns the auto-react emoji (or None);
+    the caller applies it on the loop."""
     uname = user_names.get(chat_id, "you")
     cur = moods.get(chat_id) or {}
     gap_hours = cur.pop("_gap_hours", 0)
@@ -6487,6 +6489,13 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             f"argument', 'still stung, keeping her guard up', 'curious where this is "
             f"going, leaning in'). One short present-tense clause about {NAME} herself, "
             f"never a plan for {uname}. null if nothing notable."
+        )
+    if want_react:
+        sys_prompt += (
+            f'\n"react": would {NAME} tap a single emoji reaction onto {uname}\'s latest '
+            f"message, like reacting to a text? Only when it genuinely warrants one (funny, "
+            f"sweet, hot, shocking, sad, infuriating, impressive); most messages get null. "
+            f"Exactly one emoji from this set, or null: {' '.join(sorted(ALLOWED_REACTIONS))}"
         )
     proj = _read_project() if LIFE_PROJECT else None
     if proj:
@@ -6692,27 +6701,40 @@ def _post_reply_analysis(chat_id: int, hist_tail: list,
             _save_project(boosted)
         print(f"[project] engagement detected, momentum {proj.get('momentum', 0):.2f} -> {boosted['momentum']:.2f}")
 
+    return _match_reaction(data.get("react")) if want_react else None
 
-async def post_reply_analysis(chat_id: int, user_msg: str):
+
+async def post_reply_analysis(chat_id: int, user_msg: str, react_to=None):
     """One combined background pass per exchange: mood + user note + NPC memory.
 
     Replaces three separate LLM calls — on a phone connection the side calls
     compete with the user-facing reply for bandwidth, so fewer round-trips
     matter more than prompt purity.
+
+    react_to: the user's Telegram message when she emitted no [react:] tag and
+    REACTIONS_AUTO is on — the pass also picks an auto-react emoji for it (this
+    replaced the separate per-message _decide_reaction call, v2026-09-26.4).
     """
     is_text = bool(user_msg) and not user_msg.startswith("[sent ")
     want_mood = MOOD_AUTO and bool(conversation_history.get(chat_id))
     want_note = is_text and len(user_msg.split()) >= 4
     want_memory = MEMORY_AUTO and is_text and any(
         w not in _MEMORY_STOPWORDS for w in re.findall(r"\b[a-z]{4,}\b", user_msg.lower()))
-    if not (want_mood or want_note or want_memory):
+    want_react = react_to is not None
+    if not (want_mood or want_note or want_memory or want_react):
         return
     try:
         # Snapshot the history tail ON the loop — the worker must not slice the live
         # list while handlers keep appending to it.
         hist_tail = list(conversation_history.get(chat_id, [])[-4:])
-        await asyncio.to_thread(_post_reply_analysis, chat_id, hist_tail,
-                                want_mood, want_note, want_memory)
+        emoji = await asyncio.to_thread(_post_reply_analysis, chat_id, hist_tail,
+                                        want_mood, want_note, want_memory, want_react)
+        if emoji:
+            try:
+                await react_to.set_reaction(emoji)
+                print("[react-auto] applied", emoji)
+            except Exception as e:
+                log.warning("[react-auto] failed: %s", e)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -8190,7 +8212,7 @@ def call_nanogpt(messages: list, model: str = None, fallback: str = None,
         )
 
 
-_replies_in_flight = 0  # gates optional side calls (auto-react) off active replies
+_replies_in_flight = 0  # replies currently generating; read by optional background work
 
 async def generate_reply(messages: list, model: str = None, fallback: str = None,
                          leak_guard: bool = True) -> str:
@@ -8548,20 +8570,14 @@ async def _recast_pipeline(chat_id: int, clean: str) -> str:
     return working
 
 
-def _decide_reaction(user_message: str) -> str:
-    """Cheap second pass: would she tap an emoji on this message? Returns emoji or None."""
-    allowed = " ".join(sorted(ALLOWED_REACTIONS))
-    sys = (
-        f"You decide whether {NAME} would tap a single emoji reaction onto a message — like "
-        f"reacting to a text. React only when the message genuinely warrants it (funny, sweet, "
-        f"hot, shocking, sad, infuriating, impressive). MOST messages get nothing. Reply with "
-        f"ONLY one emoji from this set, or the single word none.\nSet: {allowed}"
-    )
-    raw = call_nanogpt(
-        [{"role": "system", "content": sys}, {"role": "user", "content": user_message}],
-        model=REACTION_MODEL,
-    ).strip()
-    if not raw or "none" in raw.lower():
+def _match_reaction(raw) -> str | None:
+    """Map the analysis pass's "react" value to an allowed emoji, or None.
+    Auto-react used to be its own per-message call (_decide_reaction); since
+    v2026-09-26.4 it is a key of the combined post-reply analysis."""
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or re.match(r"^(none|null|no)\b", raw.lower()):
         return None
     n = norm_emoji(raw)
     if n in ALLOWED_REACTIONS:
@@ -8570,18 +8586,6 @@ def _decide_reaction(user_message: str) -> str:
         if e in n:
             return e
     return None
-
-
-async def maybe_auto_react(update, user_message: str):
-    if _replies_in_flight:
-        return  # never compete with an active reply for bandwidth
-    try:
-        emoji = await asyncio.to_thread(_decide_reaction, user_message)
-        if emoji and emoji in ALLOWED_REACTIONS:
-            await update.message.set_reaction(emoji)
-            print("[react-auto] applied", emoji)
-    except Exception as e:
-        log.warning("[react-auto] failed: %s", e)
 
 
 def _typing_delay_secs(text: str) -> float:
@@ -10590,7 +10594,6 @@ MODEL_ROLES = {
     "chat": "NANOGPT_MODEL",
     "summary": "SUMMARY_MODEL",
     "caption": "CAPTION_MODEL",
-    "reaction": "REACTION_MODEL",
     "mood": "MOOD_MODEL",
     "vision": "VISION_MODEL",
     "fallback": "FALLBACK_MODEL",
@@ -14112,8 +14115,10 @@ async def _handle_memcheck(context, chat_id: int, query: str):
 
 
 async def _deliver(update, context, chat_id, user_memory_text, ai_response,
-                   voice_input=False):
-    """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory."""
+                   voice_input=False, auto_react=False):
+    """Shared tail for text and photo handlers: tags, reaction, bubbles, selfie, memory.
+    auto_react: when she emitted no [react:] tag, let the post-reply analysis pass pick
+    one (REACTIONS_AUTO). Only the text and sticker handlers opt in."""
     memcheck_m = _MEMCHECK_RE.search(ai_response)
     if memcheck_m:
         ai_response = _MEMCHECK_RE.sub("", ai_response).strip()
@@ -14167,8 +14172,9 @@ async def _deliver(update, context, chat_id, user_memory_text, ai_response,
             if len(buf) > QUESTION_MEMORY_SIZE:
                 buf.pop(0)
     asyncio.create_task(maintain_memory(chat_id))  # background, doesn't delay reply
-    # One combined background pass: mood + user note + NPC memory (was 3 separate calls)
-    asyncio.create_task(post_reply_analysis(chat_id, user_memory_text))
+    # One combined background pass: mood + user note + NPC memory + auto-react
+    react_to = update.message if (auto_react and REACTIONS_AUTO and not reacted) else None
+    asyncio.create_task(post_reply_analysis(chat_id, user_memory_text, react_to=react_to))
     if FOLLOWUP_ENABLED and clean and context.job_queue and active_vibe(chat_id) != "in-person" and _FOLLOWUP_RE.search(clean):
         existing = _pending_followup.pop(chat_id, None)
         if existing:
@@ -14719,9 +14725,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                  distress=distress, peer_context=peer_ctx)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         ai_response = await maybe_search(context, chat_id, messages, ai_response, user_names[chat_id])
-        reacted = await _deliver(update, context, chat_id, user_message, ai_response)
-        if REACTIONS_AUTO and not reacted:  # she didn't emit a tag — decide one cheaply
-            asyncio.create_task(maybe_auto_react(update, user_message))
+        await _deliver(update, context, chat_id, user_message, ai_response, auto_react=True)
     except requests.exceptions.HTTPError as e:
         await update.message.reply_text(
             f"⚠️ API Error: {e.response.status_code} — {e.response.text}"
@@ -14847,9 +14851,7 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = await assemble_messages_async(chat_id, prompt)
         ai_response = await reply_with_typing(context, chat_id, messages, fallback=FALLBACK_MODEL)
         user_mem = f"[sent a sticker: {desc}]"
-        reacted = await _deliver(update, context, chat_id, user_mem, ai_response)
-        if REACTIONS_AUTO and not reacted:
-            asyncio.create_task(maybe_auto_react(update, emoji or "sticker"))
+        await _deliver(update, context, chat_id, user_mem, ai_response, auto_react=True)
     except Exception as e:
         log.error("[sticker] error: %s", e)
         _count_error("media")

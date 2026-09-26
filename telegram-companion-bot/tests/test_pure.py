@@ -15560,3 +15560,124 @@ class TestOvernightCmd:
         asyncio.run(bot.overnight_cmd(update, SimpleNamespace(args=[])))
         assert msg.sent
         assert "disabled" in msg.sent[0].lower()
+
+
+class TestAutoReactFoldedIntoAnalysis:
+    """v2026-09-26.4: auto-react is a key of the one post-reply analysis call,
+    not a separate per-message _decide_reaction call."""
+
+    def test_match_reaction(self):
+        e = sorted(bot.ALLOWED_REACTIONS)[0]
+        assert bot._match_reaction(e) == e
+        assert bot._match_reaction(f"  {e} ") == e
+        assert bot._match_reaction(f"I'd go with {e}") == e
+        assert bot._match_reaction("none") is None
+        assert bot._match_reaction("null") is None
+        assert bot._match_reaction("") is None
+        assert bot._match_reaction(None) is None
+        assert bot._match_reaction("\U0001F9C0") is None     # cheese: not in the set
+
+    def _run(self, monkeypatch, want_react, reply):
+        seen = {}
+
+        def fake_call(messages, model=None, **kw):
+            seen["sys"] = messages[0]["content"]
+            seen["calls"] = seen.get("calls", 0) + 1
+            return reply
+
+        monkeypatch.setattr(bot, "call_nanogpt", fake_call)
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        monkeypatch.setattr(bot, "_MAIN_LOOP", None)
+        monkeypatch.setattr(bot, "moods", {})
+        monkeypatch.setattr(bot, "user_names", {1: "sam"})
+        tail = [{"role": "user", "content": "lol"}, {"role": "assistant", "content": "ha"}]
+        out = bot._post_reply_analysis(1, tail, False, False, False, want_react)
+        return out, seen
+
+    def test_analysis_returns_reaction_when_asked(self, monkeypatch):
+        e = sorted(bot.ALLOWED_REACTIONS)[0]
+        out, seen = self._run(monkeypatch, True, json.dumps({"react": e}))
+        assert out == e
+        assert seen["calls"] == 1
+        assert '"react"' in seen["sys"]
+
+    def test_analysis_omits_reaction_when_not_asked(self, monkeypatch):
+        e = sorted(bot.ALLOWED_REACTIONS)[0]
+        out, seen = self._run(monkeypatch, False, json.dumps({"react": e}))
+        assert out is None
+        assert '"react"' not in seen["sys"]
+
+    def test_async_pass_applies_reaction_to_message(self, monkeypatch):
+        e = sorted(bot.ALLOWED_REACTIONS)[0]
+        applied = []
+
+        class Msg:
+            async def set_reaction(self, emoji):
+                applied.append(emoji)
+
+        monkeypatch.setattr(bot, "MOOD_AUTO", False)
+        monkeypatch.setattr(bot, "MEMORY_AUTO", False)
+        monkeypatch.setattr(bot, "_post_reply_analysis", lambda *a: e if a[-1] else None)
+        # "[sent ..." is not text, so only want_react can open the gate
+        asyncio.run(bot.post_reply_analysis(1, "[sent a sticker: cat]", react_to=Msg()))
+        assert applied == [e]
+        applied.clear()
+        asyncio.run(bot.post_reply_analysis(1, "[sent a sticker: cat]", react_to=None))
+        assert applied == []
+
+    def _deliver(self, monkeypatch, ai_response, auto_react, reactions_auto=True):
+        from types import SimpleNamespace
+        captured = {}
+
+        async def fake_pra(chat_id, user_msg, react_to=None):
+            captured["react_to"] = react_to
+
+        async def noop(*a, **k):
+            return None
+
+        monkeypatch.setattr(bot, "post_reply_analysis", fake_pra)
+        monkeypatch.setattr(bot, "maintain_memory", noop)
+        monkeypatch.setattr(bot, "send_bubbles", noop)
+        monkeypatch.setattr(bot, "RECAST_ENABLED", False)
+        monkeypatch.setattr(bot, "FOLLOWUP_ENABLED", False)
+        monkeypatch.setattr(bot, "REACTIONS_AUTO", reactions_auto)
+        monkeypatch.setattr(bot, "_typing_delay_secs", lambda t: 0.0)
+        monkeypatch.setattr(bot, "remember", lambda *a, **k: None)
+        monkeypatch.setattr(bot, "voice_reply", {})
+
+        async def set_reaction(emoji):
+            return None
+
+        msg = SimpleNamespace(set_reaction=set_reaction)
+        update = SimpleNamespace(message=msg)
+        context = SimpleNamespace(job_queue=None, bot=None)
+
+        async def go():
+            await bot._deliver(update, context, 1, "hey", ai_response, auto_react=auto_react)
+            await asyncio.sleep(0)  # let the create_task'd analysis run
+
+        asyncio.run(go())
+        return captured["react_to"], msg
+
+    def test_deliver_hands_message_to_analysis_when_untagged(self, monkeypatch):
+        react_to, msg = self._deliver(monkeypatch, "hello there", auto_react=True)
+        assert react_to is msg
+
+    def test_deliver_skips_when_she_tagged_a_reaction(self, monkeypatch):
+        e = sorted(bot.ALLOWED_REACTIONS)[0]
+        react_to, _ = self._deliver(monkeypatch, f"hello [react: {e}]", auto_react=True)
+        assert react_to is None
+
+    def test_deliver_skips_when_caller_did_not_opt_in(self, monkeypatch):
+        react_to, _ = self._deliver(monkeypatch, "hello there", auto_react=False)
+        assert react_to is None
+
+    def test_deliver_skips_when_kill_switch_off(self, monkeypatch):
+        react_to, _ = self._deliver(monkeypatch, "hello there", auto_react=True,
+                                    reactions_auto=False)
+        assert react_to is None
+
+    def test_no_separate_reaction_call_remains(self):
+        assert not hasattr(bot, "_decide_reaction")
+        assert not hasattr(bot, "maybe_auto_react")
+        assert "reaction" not in bot.MODEL_ROLES

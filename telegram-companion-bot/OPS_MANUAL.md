@@ -286,7 +286,7 @@ These files shape what the character knows and references. All are editable from
 | Command | What it does |
 |---|---|
 | `/model` | Show every model role and its current value (chat, summary, caption, reaction, mood, vision, fallback, visionfallback) — read-only, no API call |
-| `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `vision`, `reaction`, `mood`, `fallback`) |
+| `/setmodel <field> <value>` | Change a model (fields: `chat`, `summary`, `caption`, `mood`, `vision`, `fallback`, `visionfallback`) |
 | `/settings` | Show current settings |
 | `/usage` | Token usage stats (subscription limits from NanoGPT) |
 | `/chatid` | Show your Telegram user ID |
@@ -551,7 +551,7 @@ The bot uses different models for different tasks — cheap/fast for background 
 |---|---|---|
 | `NANOGPT_MODEL` | Main chat model | required |
 | `SUMMARY_MODEL` | Memory summarization | falls back to chat model |
-| `REACTION_MODEL` | Auto-reactions, quick calls | falls back to chat model |
+| `REACTION_MODEL` | Default for `MOOD_MODEL` and `RECAST_MODEL` (auto-react runs on `MOOD_MODEL` since v2026-09-26.4) | `zai-org/glm-4.7-flash` |
 | `MOOD_MODEL` | Mood scoring, note extraction, proactive hooks | falls back to reaction model |
 | `VISION_MODEL` | Photo descriptions | falls back to chat model |
 | `FALLBACK_MODEL` | Retry on error | optional |

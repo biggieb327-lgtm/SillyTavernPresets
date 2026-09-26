@@ -7,6 +7,45 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-26.4 — Auto-react rides the post-reply analysis call (one fewer call per message)
+
+**Root cause: auto-react was a separate LLM call on almost every private message.**
+`maybe_auto_react` -> `_decide_reaction` ran from `handle_message` and `handle_sticker`
+whenever her reply carried no `[react:]` tag, which is most turns. It predates
+`bot-code-invariants` #3 ("no new per-message side calls; add JSON keys to
+`post_reply_analysis`"), and it was the one per-message completion call left outside that
+rule apart from the approved `_assess_safety` carve-out. `post_reply_analysis` already runs
+after every delivered exchange, on the same cheap model by default (`MOOD_MODEL` defaults to
+`REACTION_MODEL`), and at the same point in `_deliver` that auto-react fired from.
+
+**Fix:**
+- `_post_reply_analysis` takes `want_react`. When it is true, the prompt asks for a `"react"`
+  key (one emoji from `ALLOWED_REACTIONS`, or null) and the function returns the matched emoji.
+- `post_reply_analysis(chat_id, user_msg, react_to=None)`: `react_to` is the user's message.
+  The pass opens when `react_to` is set, even for a `[sent ...]` sticker turn, and applies
+  the emoji with `set_reaction` on the event loop.
+- `_deliver(..., auto_react=False)`: sets `react_to` only when the caller opts in,
+  `REACTIONS_AUTO` is on, and she did not tag a reaction herself. Only `handle_message` and
+  `handle_sticker` opt in, the same two paths that called `maybe_auto_react`. The group path
+  never reaches `_deliver`, so groups still get no auto-react.
+- New pure `_match_reaction` keeps the old parsing (strip `U+FE0F`, accept an emoji wrapped
+  in text, `none`/`null` -> None).
+- Removed `_decide_reaction`, `maybe_auto_react`, and the `/setmodel reaction` role. That
+  role would now change nothing, because `MOOD_MODEL`/`RECAST_MODEL` read `REACTION_MODEL`
+  once at import. `REACTION_MODEL` stays as the env default for those two.
+
+**Behavior changes to know:**
+- The reaction now arrives when the analysis call finishes. That call returns a longer JSON
+  object than the old one-word call, so the reaction can land a few seconds later.
+- The reaction model is now `MOOD_MODEL`. An instance whose `.env` set `REACTION_MODEL`
+  and `MOOD_MODEL` to different models now reacts on `MOOD_MODEL`.
+- The model sees the last 4 messages, including her reply, instead of only the user's line.
+- The old skip while `_replies_in_flight` > 0 is gone, because there is no separate call
+  to hold back any more.
+
+**Kill switch:** `REACTIONS_AUTO=0` (or `/features reactions off`) sets `react_to` to None,
+so the prompt carries no `"react"` key (`TestAutoReactFoldedIntoAnalysis`).
+
 ## v2026-09-26.3 — Lines you added, edited or approved count as confidence 10 (ROADMAP 7.9)
 
 **Root cause: owner-vetted memory lines carried no score, or a low one, and every ranking path
