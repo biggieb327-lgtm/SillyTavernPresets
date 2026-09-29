@@ -153,8 +153,9 @@ not just this entry). Not fixed: the table itself still shows the old numbers, a
 touching preset budgets: re-measure and update the table for real, or confirm with the
 owner whether the calibration ratio also drifted.
 
-### 2026-09-24 | from: claude/fleet-pause-sunday-05r1zq | to: — | status: open
-at `fcac5cf` — [decision] Owner asked to stop the fleet until Sunday 2026-09-27. This
+### 2026-09-24 | from: claude/fleet-pause-sunday-05r1zq | to: — | status: done
+at `fcac5cf` — [observed 2026-09-29] owner confirmed all seven bots are up; the pause is over.
+[decision] Owner asked to stop the fleet until Sunday 2026-09-27. This
 session has no VPS shell access, so it handed the owner a `systemctl stop bot@*` loop
 to run as root rather than executing it. If a session between now and 2026-09-27 sees
 all seven `bot@*` units down, that is this intentional pause, not an incident — check
@@ -190,7 +191,7 @@ non-size failure (404 = NanoGPT does not carry the ID) means drop the candidate 
 `.env.example`, which still recommends it. Do not re-run the probe on a hunch — it spends
 the same quota the fleet needs.
 
-### 2026-09-03 | from: claude/recast-post-processing-fleet-t2bnod | to: bot.py command work | status: open
+### 2026-09-03 | from: claude/recast-post-processing-fleet-t2bnod | to: bot.py command work | status: done
 
 Telegram's `set_my_commands` API hard-rejects more than 100 commands with
 `BadRequest: Bot_commands_too_much` — the bot crashes on startup, no fallback.
@@ -202,6 +203,12 @@ Current count after v2026-09-03.6 prune: 75 base, 95 all-features-on. The cap in
 but any session adding a new `/command` should check the math: 5 slots remain before
 the cap truncates again. CRUD consolidation (jokes, wardrobe, pins, reminders, crons
 into single commands with subargs) is the next structural fix if slots run out.
+
+at `fa4da73` — [observed] recounted 2026-09-29 by calling `_build_command_menu` under the
+test fixture: **84 with traffic, payments, garmin and preset all on, 71 with all off**, against
+`_TG_COMMAND_LIMIT` = 100. So 16 slots free in the worst case, not 5; the count fell after
+the 09-03 prune. The cap and the `_register_commands` try/except are still in place. Recount
+the same way before adding a command; the test at `tests/test_pure.py:7229` covers the cap.
 
 ---
 

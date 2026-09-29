@@ -90,6 +90,12 @@ observed, and the event prompt is strongly scoped to her own-world domain. Owner
 it's an operational-log incident, and the fix is to gate `life.txt`/`life_events.txt` injection to the
 owner chat (`get_owner()`), which needs `group-chat-changes`. Immediate mitigation meanwhile:
 `LIFE_GROUNDING=0`.
+Traced 2026-09-29 at `fa4da73` `[read]`: `assemble_messages` injects the life arc and the last three
+life events with no group check (`bot.py` "current life arc" and "What's been happening" blocks, both
+unconditional), and `GROUP_CHAT_DESIGN.md` §5 keeps `life.txt` readable in groups on purpose. So the
+channel is open by design, and only the generator prompts (`_generate_life_event` scopes to an event
+in her own day; `_maybe_rotate_life_arc` says do not copy grounding in) stand in the way. Not observed
+in live files: the VPS `life.txt`/`life_events.txt` were not readable from the cloud session.
 
 ### 2026-08-29 — risk-guard.sh matches `git checkout <dirty-file>` inside heredoc/quoted bodies, not just executable positions | status: open
 While committing the debrief, `risk-guard.sh` blocked `git commit -F - <<EOF … EOF` because
