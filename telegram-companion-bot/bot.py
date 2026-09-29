@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-26.5"
+BOT_VERSION = "2026-09-29.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -9014,6 +9014,40 @@ SELFIE_FACE_LOCK = _env_bool("SELFIE_FACE_LOCK", True)
 # Default off so existing characters stay SFW until explicitly enabled per instance.
 SELFIE_NSFW = _env_bool("SELFIE_NSFW", False)
 
+# Which pronouns the selfie prompt uses for this instance's character: "she" (default,
+# the wording every pool and rule above is written in) or "he". Anything else warns and
+# falls back to "she". "he" rewrites the assembled prompt (see _selfie_gender) and drops
+# pool entries that are feminine-coded, so Marcus is not described to the image model as
+# "this exact woman". Set in the instance's .env; unset = unchanged output.
+SELFIE_PRONOUNS = os.getenv("SELFIE_PRONOUNS", "she").strip().lower() or "she"
+if SELFIE_PRONOUNS not in ("she", "he"):
+    log.warning("SELFIE_PRONOUNS=%r not recognised (use she or he); using she", SELFIE_PRONOUNS)
+    SELFIE_PRONOUNS = "she"
+_SELFIE_FEMININE_ENTRIES = {
+    "a sundress", "a cropped sweatshirt", "doing hair or makeup in the bathroom mirror",
+    "blowing a kiss at the camera",
+}
+if SELFIE_PRONOUNS == "he":
+    for _pool in (SELFIE_OUTFITS, SELFIE_ACTIVITIES, SELFIE_EXPRESSIONS):
+        _pool[:] = [x for x in _pool if x not in _SELFIE_FEMININE_ENTRIES]
+
+_GENDER_WORDS_HE = (
+    (re.compile(r"\bshe's\b", re.IGNORECASE), "he's"), (re.compile(r"\bherself\b", re.IGNORECASE), "himself"),
+    (re.compile(r"\bhers\b", re.IGNORECASE), "his"), (re.compile(r"\bshe\b", re.IGNORECASE), "he"),
+    (re.compile(r"\bwoman\b", re.IGNORECASE), "man"),
+    # Object "her" ends its phrase ("behind her.", "restyle her:"); anything else is possessive.
+    (re.compile(r"\bher(?=\s*(?:[.,:;)!?]|$))", re.IGNORECASE), "him"), (re.compile(r"\bher\b", re.IGNORECASE), "his"),
+)
+
+
+def _selfie_gender(text: str) -> str:
+    """Rewrite she-worded selfie text for SELFIE_PRONOUNS=he; identity for "she"."""
+    if SELFIE_PRONOUNS != "he":
+        return text
+    for pat, rep in _GENDER_WORDS_HE:
+        text = pat.sub(lambda m, r=rep: r.capitalize() if m.group(0)[0].isupper() else r, text)
+    return text
+
 
 def _weather_outdoor_ok() -> bool:
     """Return False if current weather makes outdoor selfie shots implausible."""
@@ -9236,7 +9270,7 @@ def build_selfie_prompt(hint: str, chat_id: int = None, clothing_override: str =
         bits.append(_SELFIE_FACE_CLARITY_RULE)
     if SELFIE_IDENTITY_GUARD and _has_base_image():
         bits.append(_SELFIE_IDENTITY_TAIL)
-    return " ".join(bits)
+    return _selfie_gender(" ".join(bits))
 
 
 # Mobile connections (Termux/cellular/wifi handoffs) sometimes drop mid-request with a low-level
@@ -9571,7 +9605,7 @@ async def send_selfie(context, chat_id: int, hint: str = "",
         await context.bot.send_photo(chat_id=chat_id, photo=BytesIO(img),
                                      caption=caption or None)
         # Log the scene to the dedup buffer so it isn't repeated soon
-        scene_note = (hint.strip() if hint else prompt[prompt.find("She's "):prompt.find("She's ")+60]).strip()
+        scene_note = (hint.strip() if hint else prompt[prompt.find(_selfie_gender("She's ")):prompt.find(_selfie_gender("She's "))+60]).strip()
         if not scene_note:
             scene_note = prompt[:80]
         buf = _recent_selfie_hints.setdefault(chat_id, [])

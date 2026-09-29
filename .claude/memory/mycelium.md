@@ -160,7 +160,7 @@ to run as root rather than executing it. If a session between now and 2026-09-27
 all seven `bot@*` units down, that is this intentional pause, not an incident — check
 `systemctl list-unit-files 'bot@*'` (still enabled) before running `repo-debugging-playbook`.
 
-### 2026-09-07 | from: claude/bots-selfies-improvement-dc8cvv | to: bot.py selfie work | status: open
+### 2026-09-07 | from: claude/bots-selfies-improvement-dc8cvv | to: bot.py selfie work | status: done
 `build_selfie_prompt` hardcodes "She's" / "her" pronouns in the scene prompt string,
 which produces wrong-gendered selfie descriptions for Marcus (male character). Pre-existing,
 not introduced by the pool expansion. A fix would read the character's pronouns from the

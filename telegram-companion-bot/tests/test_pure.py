@@ -15749,3 +15749,43 @@ class TestLlmStatsByModel:
         line = bot._llm_stats_line({"calls": 1, "tok_in": 1000, "tok_out": 0,
                                     "measured": 0, "estimated": 1})
         assert "\n" not in line
+
+
+class TestSelfiePronouns:
+    """SELFIE_PRONOUNS=he: the image prompt called Marcus "this exact woman" and used
+    she/her throughout because every pool and rule is written in she-wording."""
+
+    def test_default_she_leaves_prompt_untouched(self, monkeypatch):
+        monkeypatch.setattr(bot, "SELFIE_PRONOUNS", "she")
+        text = "She's out. Behind her, her desk. This woman herself."
+        assert bot._selfie_gender(text) == text
+
+    def test_he_rewrites_subject_object_possessive_and_woman(self, monkeypatch):
+        monkeypatch.setattr(bot, "SELFIE_PRONOUNS", "he")
+        assert bot._selfie_gender("She's at her desk, clutter behind her.") == \
+            "He's at his desk, clutter behind him."
+        assert bot._selfie_gender("this exact woman; None of it changes her.") == \
+            "this exact man; None of it changes him."
+        assert bot._selfie_gender("She dresses herself; the choice is hers") == \
+            "He dresses himself; the choice is his"
+
+    def test_he_full_prompt_has_no_feminine_words(self, monkeypatch):
+        import re
+        import random
+        monkeypatch.setattr(bot, "SELFIE_PRONOUNS", "he")
+        monkeypatch.setattr(bot, "_has_base_image", lambda: True)
+        for seed in range(50):
+            random.seed(seed)
+            prompt = bot.build_selfie_prompt("", 1)
+            assert not re.search(r"\b(she|she's|her|hers|herself|woman)\b", prompt, re.I), seed
+        assert "same man as the attached reference photo" in prompt
+
+    def test_she_full_prompt_still_says_woman(self, monkeypatch):
+        monkeypatch.setattr(bot, "SELFIE_PRONOUNS", "she")
+        monkeypatch.setattr(bot, "_has_base_image", lambda: True)
+        assert "same woman as the attached reference photo" in bot.build_selfie_prompt("x", None)
+
+    def test_feminine_entries_exist_in_the_pools(self):
+        """A renamed pool entry would silently stop being filtered for "he"."""
+        pooled = set(bot.SELFIE_OUTFITS) | set(bot.SELFIE_ACTIVITIES) | set(bot.SELFIE_EXPRESSIONS)
+        assert bot._SELFIE_FEMININE_ENTRIES <= pooled

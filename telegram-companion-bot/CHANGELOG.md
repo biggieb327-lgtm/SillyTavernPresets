@@ -7,6 +7,30 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-09-29.1 — `SELFIE_PRONOUNS`: Marcus's selfie prompt no longer says "woman"
+
+**Root cause: every selfie pool and rule is written in she-wording and nothing let an
+instance change it.** `build_selfie_prompt` told the image model "Edit the attached photo of
+this exact woman", "same woman as the attached reference photo", and used she/her throughout
+(`_SELFIE_PRESERVE_RULE`, `SELFIE_ACTIVITIES`, `_SELFIE_CLOTHING_SFW`, ...). The mycelium
+note (2026-09-07) recorded only the pronouns; the "woman" wording contradicts Marcus's
+`appearance.txt` ("a Black man in his 40s") more directly. Pool entries like `a sundress`
+could also be drawn for him.
+
+**Fix:**
+- `SELFIE_PRONOUNS` (`she` default, `he`; anything else warns and uses `she`).
+- `_selfie_gender(text)` rewrites the assembled prompt for `he`: she's/she/hers/herself/woman
+  and her (object `him` when it ends a phrase, else `his`). Identity for `she`, so every
+  other instance's prompt is byte-identical (`TestSelfiePronouns`).
+- For `he`, `_SELFIE_FEMININE_ENTRIES` are dropped from `SELFIE_OUTFITS`, `SELFIE_ACTIVITIES`
+  and `SELFIE_EXPRESSIONS` at load. A test checks each entry still exists in a pool.
+- `send_selfie` finds the "She's <activity>" fragment for the dedup buffer with the
+  rewritten word, so it still matches under `he`.
+
+**Not covered:** owner-authored wardrobe outfits and `[clothing:]` text are used as written.
+The card-side selfie caption and other prompts are outside `build_selfie_prompt`. Marcus's
+`.env` needs `SELFIE_PRONOUNS=he` after deploy. No kill switch: unset is the old behavior.
+
 ## v2026-09-26.5 — `/audit` splits the day's tokens per model
 
 **Root cause: `_llm_stats` kept one daily total across every call type, so nobody could say
