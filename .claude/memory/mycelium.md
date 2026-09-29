@@ -141,7 +141,7 @@ Newest first, same as the operational log.
 
 ## Entries
 
-### 2026-09-25 | from: claude/bot-database-schema-qllz12 | to: bot-config-reference, edit-cards-and-presets | status: open
+### 2026-09-25 | from: claude/bot-database-schema-qllz12 | to: bot-config-reference, edit-cards-and-presets | status: done
 at `1229570` — [observed] `.env.example`'s "Recommended stacks" preset-token table
 (around line 626) is stale well past the "~60 raw low" caveat it already carries.
 Re-measured chars//4 per layer file today: `preset-rp.txt` +702, `preset-explicit.txt`
