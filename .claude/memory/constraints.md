@@ -415,7 +415,7 @@ arrives; the right mechanism is probably a one-off sweep written as part of that
 not a permanent eval.
 
 ### C7 — Anchor edits on content, not position
-**seen: 6** (2026-07-26, 2026-07-27, 2026-08-02 ×3, 2026-09-29) — *promoted from the Minor log by
+**seen: 7** (2026-07-26, 2026-07-27, 2026-08-02 ×3, 2026-09-29 ×2) — *promoted from the Minor log by
 `sweep.py constraints-drift`, its first real find.*
 Two edits went wrong the same way: **the surrounding structure was not confirmed before
 writing.** A paragraph was added to a function anchored on `n = 0` — a content anchor,
@@ -437,6 +437,14 @@ which matches on a unique surrounding string and cannot drift.
 line address against anything outside `/tmp`/scratchpad. Nine-case matrix; the four
 must-not-fire cases (content-anchored substitution, read-only `sed -n`, throwaway
 paths, `# anchor-ok`) all pass.
+**Occurrence 7 (2026-09-29, second of the day) — two line-addressed seds in one session.**
+An in-place sed with an `a` (append-after-line-1) address on `tests/passage.test.ts`
+(Author-Profile-Tool) was blocked by `anchor-guard.sh`. Earlier the same session, an in-place
+sed substitution addressed to line 21 of `voicekit-starter/tests/test_core.py` (inside this
+repo) ran **unblocked**, and landed correctly only because the line had just been read.
+Unreviewed: whether the guard misses the line-number-plus-`s` shape, or the `cd … &&` chain.
+Also: the guard blocks a command whose *text* merely quotes such a sed (a heredoc writing
+this note tripped it), a false positive. Check both at debrief.
 **Occurrences 3-5 (2026-08-02) — the docstring failure again, three times in one hour.**
 Rewriting three `sweep.py` scanners, each edit anchored on the first line of the function
 BODY and prepended explanatory prose. In all three the docstring had already closed above

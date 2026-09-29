@@ -585,3 +585,21 @@ command.
 **By:** owner, 2026-09-29 ("pick the voicekit starter repo").
 **Detail:** `voicekit-starter/README.md` → Canonical source; `voicekit-starter/CHANGELOG.md` → 0.2.2;
 Author-Profile-Tool `scripts/sync-voicekit.mjs`.
+
+### 2026-09-29 | voicekit judge: separate judge model, rewrite as its own call | status: current
+**Chose:** the judge scores, diagnoses and lists priorities only. The rewrite is a separate
+reviser call (`REVISER_SYSTEM`/`REVISER_USER`, temperature 0.7, on the writer's `OPENAI_MODEL`).
+`VOICEKIT_JUDGE_MODEL` puts the judge on a different model (falls back to `OPENAI_MODEL`).
+Defaults differ by tool on purpose: Author-Profile-Tool revises by default (`--no-revise` opts out;
+its output has shown a rewrite since PR #8); voicekit-starter revises only with `judge --revise`,
+because `batch_judge` and the API call `judge()` and would silently double their calls.
+**Over:** (a) keeping `revised_draft` in the judge's JSON and prompting harder: the one-shot
+rewrite of an 8.7/10 essay applied almost none of its own three priorities; (b) revising on the
+judge model: the judge's job is an independent score, and the writer is the model being improved;
+(c) a second API key / base URL for the judge: NanoGPT serves many models, so a model name is enough.
+**Why:** a model grading its own drafts tends to score them high, and one reply that both scores
+and rewrites tends to copy the draft back. The revise output reports the share of words changed,
+so a copy-back stays visible.
+**By:** owner request, 2026-09-29 ("wire it up to use a different model to judge ... fix the
+revised draft issue").
+**Detail:** `voicekit-starter/CHANGELOG.md` → 0.3.0; Author-Profile-Tool PR #10.
