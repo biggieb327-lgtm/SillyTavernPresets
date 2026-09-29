@@ -35,14 +35,20 @@ Modules, all under `voicekit-starter/src/voicekit/`: `cli.py`, `core.py`, `schem
 3. Make the change. Keep the structured-output contract: profiles must validate
    against `schemas.py`; if you change the schema, change the template AND the
    repair-guidance prompts together — they are one contract in three files.
-4. There is currently NO test suite here (verified 2026-07-11). Verification is:
+4. Run the test suite (`tests/`, 119 tests as of 0.2.2 — the "no test suite" note this
+   skill carried until 2026-09-29 was stale). The session's default venv has no `pip`, so
+   install into a scratch venv:
    ```bash
-   python -m py_compile voicekit-starter/src/voicekit/*.py
-   voicekit --help          # and the changed subcommand's --help
-   python3 -m json.tool voicekit-starter/src/voicekit/templates/voice_profile_template.json
+   python3 -m venv <scratchpad>/vk-venv && <scratchpad>/vk-venv/bin/pip install -e "voicekit-starter[dev]"
+   cd voicekit-starter && <scratchpad>/vk-venv/bin/python -m pytest -q
+   python3 -m json.tool src/voicekit/templates/voice_profile_template.json
    ```
    End-to-end runs need an API key; if none is configured, say exactly what was
    NOT exercised rather than implying it was.
+   **Cross-repo contract:** `prompts.py`, `templates/voice_profile_template.json` and
+   `templates/voice_profile_schema.json` are canonical for Author-Profile-Tool too (decision
+   2026-09-29, README "Canonical source"). After changing any of them, say that
+   Author-Profile-Tool needs `npm run sync:voicekit` to pick the change up.
 5. Bump `version` in `pyproject.toml` for behavior changes; add a CHANGELOG.md
    entry (voicekit's own).
 6. Repo-wide gates still apply — it's the same public repo:
@@ -61,7 +67,7 @@ Modules, all under `voicekit-starter/src/voicekit/`: `cli.py`, `core.py`, `schem
 ## Verification checklist
 
 - [ ] `pip install -e .` succeeds; `voicekit --help` runs
-- [ ] py_compile clean on all touched modules; template JSON valid
+- [ ] pytest green; template and schema JSON valid
 - [ ] Schema, template, and prompts consistent after any schema change
 - [ ] voicekit's own CHANGELOG + pyproject version updated
 - [ ] run-evals.sh green (secret-scan)
@@ -73,7 +79,7 @@ Modules, all under `voicekit-starter/src/voicekit/`: `cli.py`, `core.py`, `schem
 - Editing the schema without the template/prompts, breaking the repair loop.
 - Committing writing samples or generated profiles containing real personal data
   into a public repo.
-- Assuming pytest exists here because the bot has one.
+- Skipping the test suite because an older copy of this skill said there was none.
 
 ## What to report back
 

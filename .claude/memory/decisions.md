@@ -564,3 +564,24 @@ never-rolled-back wiki, audit trail, early stop), NOT that "skill evolution work
 is the paper's and needs a real model via `skillforge evolve`.
 **By:** owner (this session), 2026-08-31.
 **Detail:** `skillforge/README.md`; `CLAUDE.md` → Repo layout; branch `claude/arxiv-2608-27454-build-b1epe6`.
+
+### 2026-09-29 | voicekit-starter is the canonical voicekit contract; Author-Profile-Tool vendors it pinned to a commit | status: current
+**Decided:** `voicekit-starter/src/voicekit/prompts.py`, `templates/voice_profile_template.json`
+and `templates/voice_profile_schema.json` are the single source of truth for voicekit's model
+contract. Author-Profile-Tool (TypeScript) keeps generated copies, pinned to one commit of this
+repo; `npm run sync:voicekit` regenerates them and its CI fails when the copies stop matching the
+pinned commit. The schema moved from a Python dict to JSON (voicekit 0.2.2) so Node can read it.
+**Over:** (a) Author-Profile-Tool as the canonical copy — the owner chose voicekit-starter;
+(b) fetching the prompts from this repo's `main` at build or run time — unpinned, so an unrelated
+Author-Profile-Tool PR would go red whenever voicekit-starter changed, and runtime would need the
+network; (c) a git submodule — pulls this whole repo (bot included) into the other one and is
+fragile in cloud sessions; (d) publishing voicekit as a PyPI/npm package — a release pipeline for
+three files; (e) keeping two hand-maintained copies — they had already drifted within a day
+(the missing-`label` fix and the `JUDGE_SYSTEM` braces existed in only one of them).
+**Why:** the two copies are one contract (schema + template + repair prompt must change together,
+per `voicekit-work`), and the port had already diverged in ways that hid a live failure in the
+other copy. Pinning keeps each repo's CI deterministic; the sync script makes an update one
+command.
+**By:** owner, 2026-09-29 ("pick the voicekit starter repo").
+**Detail:** `voicekit-starter/README.md` → Canonical source; `voicekit-starter/CHANGELOG.md` → 0.2.2;
+Author-Profile-Tool `scripts/sync-voicekit.mjs`.

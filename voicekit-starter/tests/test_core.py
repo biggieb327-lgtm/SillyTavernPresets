@@ -1,5 +1,6 @@
 """Unit tests for voicekit.core."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from voicekit.core import (
     strip_markdown_fences,
     get_model,
     get_client,
+    build_profile,
 )
 
 
@@ -212,3 +214,56 @@ class TestValidateProfile:
     def test_invalid_profile_raises(self):
         with pytest.raises(Exception):
             validate_profile({"invalid": "data"})
+
+
+class TestBuildProfileKnownFields:
+    """build_profile writes meta and corpus itself instead of trusting the model."""
+
+    def _run(self, tmp_path, reply):
+        sample = tmp_path / "sample.txt"
+        sample.write_text("The river was high. We ran the boat hard all night.")
+        calls = []
+
+        def fake_call_llm(client, model, system, prompt, json_mode=False):
+            calls.append(prompt)
+            return json.dumps(reply)
+
+        with patch("voicekit.core.get_client", return_value=MagicMock()), \
+             patch("voicekit.core.call_llm", side_effect=fake_call_llm):
+            out = build_profile("Test Author", [str(sample)], None, out=str(tmp_path / "p.json"))
+        return json.loads(out.read_text()), calls
+
+    def test_model_output_missing_source_label_still_passes(self, tmp_path, valid_profile):
+        # The failure seen live in Author-Profile-Tool on 2026-09-29
+        reply = json.loads(json.dumps(valid_profile))
+        reply["meta"]["author"] = "Wrong Name"
+        reply["corpus"] = {"file_count": 99, "total_words": 5, "sources": [{"word_count": 5}]}
+
+        profile, calls = self._run(tmp_path, reply)
+
+        assert len(calls) == 1
+        assert profile["meta"]["author"] == "Test Author"
+        assert profile["corpus"]["file_count"] == 1
+        assert profile["corpus"]["sources"][0]["label"] == "sample"
+        assert profile["corpus"]["total_words"] == profile["corpus"]["sources"][0]["word_count"]
+
+    def test_template_sent_to_model_carries_known_fields(self, tmp_path, valid_profile):
+        _, calls = self._run(tmp_path, valid_profile)
+        assert '"author": "Test Author"' in calls[0]
+        assert '"label":' in calls[0]
+
+
+class TestCanonicalFiles:
+    """The files Author-Profile-Tool vendors must stay readable by a non-Python tool."""
+
+    def test_schema_json_matches_loaded_schema(self):
+        import importlib.resources
+        from voicekit.schemas import VOICE_PROFILE_SCHEMA
+        raw = importlib.resources.files("voicekit").joinpath("templates/voice_profile_schema.json")
+        assert json.loads(raw.read_text()) == VOICE_PROFILE_SCHEMA
+
+    def test_unformatted_prompts_have_no_doubled_braces(self):
+        # JUDGE_SYSTEM and GENERATOR_SYSTEM are sent as-is, never through str.format
+        from voicekit.prompts import JUDGE_SYSTEM, GENERATOR_SYSTEM
+        for prompt in (JUDGE_SYSTEM, GENERATOR_SYSTEM):
+            assert "{{" not in prompt and "}}" not in prompt

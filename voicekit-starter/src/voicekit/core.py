@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -197,7 +198,21 @@ def build_profile(
         f"Read {len(paths)} sample file(s), {total_words:,} words total.",
         file=sys.stderr,
     )
-    template = load_template()
+    # Fields the code already knows are written by the code, never by the model:
+    # pre-filled in the template it sees, and overwritten on whatever it returns.
+    known_meta = {
+        "author": author,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    known_corpus = {"file_count": len(paths), "total_words": total_words, "sources": sources}
+
+    def with_known_fields(profile: dict) -> dict:
+        if not isinstance(profile, dict):
+            return profile
+        meta = profile.get("meta") if isinstance(profile.get("meta"), dict) else {}
+        return {**profile, "meta": {**meta, **known_meta}, "corpus": known_corpus}
+
+    template = with_known_fields(load_template())
     template_json = json.dumps(template, indent=2)
 
     meta_parts = []
@@ -232,7 +247,7 @@ def build_profile(
         raw = strip_markdown_fences(raw)
 
         try:
-            profile = json.loads(raw)
+            profile = with_known_fields(json.loads(raw))
         except json.JSONDecodeError as e:
             last_error = f"Invalid JSON: {e}"
             if attempt == retries:

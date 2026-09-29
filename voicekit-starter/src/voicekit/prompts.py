@@ -1,4 +1,9 @@
-"""System and wrapper prompts for voicekit commands."""
+"""System and wrapper prompts for voicekit commands.
+
+These strings are the canonical copy: Author-Profile-Tool vendors them (see
+README "Canonical source"). JUDGE_SYSTEM and GENERATOR_SYSTEM are sent as-is,
+never through str.format, so they use single braces.
+"""
 
 PROFILE_BUILDER_SYSTEM = """\
 You are a voice-profile extraction engine. Your job is to analyze a labeled writing \
@@ -27,6 +32,9 @@ Corpus ({file_count} files, {total_words} total words):
 
 Template (fill every field based on corpus evidence):
 {template_json}
+
+Keep "meta" and "corpus" exactly as given. exemplars.signature_sentences needs at \
+least 3 sentences quoted from the corpus; exemplars.signature_paragraphs needs at least 1.
 """
 
 PROFILE_REPAIR_ADDENDUM = """\
@@ -69,19 +77,19 @@ You are a voice-fidelity judge. You evaluate whether a draft matches an author's
 profile and provide actionable revision guidance.
 
 Output format (JSON):
-{{
-  "scores": {{
+{
+  "scores": {
     "rhythm": <0-10>,
     "lexicon": <0-10>,
     "stance": <0-10>,
     "rhetoric": <0-10>,
     "constraints": <0-10>,
     "overall": <0-10>
-  }},
+  },
   "diagnosis": "<what's off and why>",
   "revision_priorities": ["<most impactful fix first>", ...],
   "revised_draft": "<full rewrite incorporating all fixes>"
-}}
+}
 
 Rules:
 - Score based on the evaluation weights in the profile.

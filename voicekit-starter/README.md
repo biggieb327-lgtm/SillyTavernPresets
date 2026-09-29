@@ -149,6 +149,20 @@ voicekit-starter/
         voice_profile_template.json
 ```
 
+## Canonical source
+
+These three files are the single source of truth for voicekit's model contract:
+
+- `src/voicekit/prompts.py` — every system and user prompt
+- `src/voicekit/templates/voice_profile_template.json` — the template the model fills
+- `src/voicekit/templates/voice_profile_schema.json` — the schema a profile must pass
+
+[Author-Profile-Tool](https://github.com/biggieb327-lgtm/Author-Profile-Tool) (TypeScript)
+vendors all three, pinned to a commit of this repo, and its CI fails if its copies stop
+matching that commit. Change the contract here, then run `npm run sync:voicekit` there.
+The schema is JSON rather than a Python dict so a non-Python tool can read it; the
+schema, the template and the repair prompt are one contract, so change them together.
+
 ## License
 
 MIT

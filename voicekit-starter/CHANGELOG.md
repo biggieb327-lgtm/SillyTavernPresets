@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 — Code writes the profile fields it knows; this repo becomes the canonical contract
+
+- `build_profile` computed each file's label and word count but never used them: the
+  model was asked to write `corpus` and `meta` itself, and the template showed
+  `corpus.sources` as an empty list, so a model could omit `label` and fail validation
+  on every retry (seen live in Author-Profile-Tool's port on 2026-09-29). The code now
+  pre-fills `meta.author`, `meta.generated_at` and all of `corpus` in the template it
+  sends, and overwrites them on the model's reply before validation.
+- The profile prompt now states the exemplar minimums the schema enforces (3 signature
+  sentences, 1 signature paragraph), which the empty template lists hid.
+- `JUDGE_SYSTEM` used `{{ }}` although it is never passed through `str.format`, so the
+  model saw doubled braces in its output format. Now single braces.
+- The schema moved from a Python dict to `templates/voice_profile_schema.json` (loaded
+  by `schemas.py`, same `VOICE_PROFILE_SCHEMA` object) so other tools can read it.
+- README "Canonical source": prompts, template and schema here are the source of truth;
+  Author-Profile-Tool vendors them.
+
 ## 0.2.1 — Clean API error reporting
 
 - API connection failures, HTTP error statuses, and other OpenAI client errors
