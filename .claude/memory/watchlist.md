@@ -54,6 +54,21 @@ Newest first. The header shape is what `session-audit.sh` counts — keep it exa
 
 ## Items
 
+### 2026-09-29 — memory recall `top_k=8` was never compared against a retrieval-depth sweep | status: open
+arXiv 2604.04853 (MemMachine, vendor paper, self-reported numbers) found that retrieval depth mattered
+most on LongMemEvalS: k=30 beat k=20 (+4.2 points) and k=50 was worse for GPT-5. Traced by reading, not
+run: `triggered_memories()` calls `_semantic_recall_vec(..., top_k=8)` (`bot.py:6100`, `:6108`) over
+`archival` lines, so the recalled unit is one extracted fact line, not a conversation turn. That paper's
+main idea, adding the neighbouring turns around a hit, therefore does not apply here. Their `user:` query
+prefix is unchecked: it would only help if extracted lines carry assistant-role text, and that was not
+looked at. Not a problem yet: different store, different task (question answering, not companionship),
+and no recall complaint has come from this.
+**Graduates when:** the owner reports a bot missing a fact its store holds (a `/whymem` reading shows the
+right line ranked below the cut), twice. Then it is a ROADMAP Track 7 item: try `top_k` 8 vs 12 behind a
+kill switch and compare on `/whymem` readings. **Dismissed if** no such report appears by the second
+debrief after this entry.
+Related: watchlist 2026-09-22 (keyword score, same function), decisions 2026-09-22 (GraphRAG).
+
 ### 2026-09-22 — keyword score may crowd out semantic and BM25 in memory ranking | status: open
 at `a530c62` — In `triggered_memories()`, `sem_scored` tops out at 3.0 and `bm25_scored` at 2.0, but
 `keyword_scored` is a raw count of shared 4+-letter words with no cap, and the scan text is the
