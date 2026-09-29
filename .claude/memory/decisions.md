@@ -82,6 +82,13 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-09-29 | Selfie pronouns are an explicit per-instance setting that rewrites the prompt, not detected from the card | status: current
+**Decided:** `SELFIE_PRONOUNS` (`she` default, `he`; v2026-09-29.1) makes `_selfie_gender` rewrite the assembled `build_selfie_prompt` text and drops feminine-coded pool entries at load. Marcus's `.env` sets `he`; every other instance is unchanged.
+**Over:** (1) detect gender from `appearance.txt` or the card: a guess in prompt-building code, wrong silently for an ambiguous or non-binary character, and unlike every other per-instance setting, which is explicit in `.env`. (2) per-gender copies of every pool and rule: a second copy of about 15 constants that drifts from the first. (3) `they`: needs verb agreement ("they are", "they're"), so the regex rewrite would produce broken grammar; not supported until a character needs it. (4) do nothing and rely on the image model reading the appearance text: the prompt said "this exact woman" outright, which contradicts it.
+**Why:** one rewrite function over the existing she-worded text keeps a single source for the pools, and the default `she` returns the text unchanged so six instances are byte-identical (`TestSelfiePronouns`). Known cost: a scene hint typed by the user is rewritten too.
+**By:** Claude, at the owner's request to fix the Marcus selfie pronouns (2026-09-29); owner deployed it.
+**Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-29.1.
+
 ### 2026-09-26 | Lines the owner added, edited or approved count as confidence 10 in every reader | status: current
 **Decided:** `_effective_confidence` returns 10 for origins in `_OWNER_ORIGINS` (`manual`,
 `manual-edit`, `auto-reviewed`, `joke-candidate`, `audit-merge`), and eviction, decay,

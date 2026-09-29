@@ -47,4 +47,3 @@ Newest first.
 ## Items
 
 
-- 2026-09-26: egress proxy denied counterparts.ai (connect_rejected), but the Nimble connector (`nimble_extract`, driver vx8) fetched the full page text. Untested whether Nimble reaches docs.python-telegram-bot.org or nano-gpt.com, the two hosts CLAUDE.md calls unreadable; worth one try before reporting "host blocked".

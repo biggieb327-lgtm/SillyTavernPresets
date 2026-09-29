@@ -415,7 +415,7 @@ arrives; the right mechanism is probably a one-off sweep written as part of that
 not a permanent eval.
 
 ### C7 — Anchor edits on content, not position
-**seen: 5** (2026-07-26, 2026-07-27, 2026-08-02 ×3) — *promoted from the Minor log by
+**seen: 6** (2026-07-26, 2026-07-27, 2026-08-02 ×3, 2026-09-29) — *promoted from the Minor log by
 `sweep.py constraints-drift`, its first real find.*
 Two edits went wrong the same way: **the surrounding structure was not confirmed before
 writing.** A paragraph was added to a function anchored on `n = 0` — a content anchor,
@@ -450,6 +450,7 @@ docstring's closing `\"\"\"`, not the code line after it.**
 unparseable version now fails CI and the corpus run alike — the first mechanism that can
 see this failure mode at all. It catches the *consequence*, not the edit; the edit itself
 still needs the rule above.
+**Occurrence 6 (2026-09-29) — the hook fired.** Closing a mycelium entry, addressed an in-place stream edit of a tracked file by line number. `anchor-guard.sh` blocked it before anything was written; redone with the Edit tool matching on the entry's own header. No damage. Recorded because it is the first occurrence the graduated hook has stopped rather than `py_compile` finding afterward, which is evidence the partial graduation covers the line-number shape. Side note: the same hook also blocked a later command that only *quoted* that edit inside a heredoc string, the false-positive shape already logged for `risk-guard.sh` (watchlist 2026-08-29).
 
 **What it does NOT cover:** the docstring failure. That was an Edit-tool call whose
 anchor matched correctly — no hook can see that the *assumption above the anchor* was
@@ -1316,6 +1317,9 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-29 — Ranked "gate the life arc/events to the owner chat" as the top next task without first reading the watchlist item and `decisions.md` 2026-09-01, where the owner had already accepted that residual and named the trigger for revisiting it. Caught while tracing, before any code; corrected to the user in the same turn. Read the decision log for any "should we change X" proposal before ranking it.
+- 2026-09-29 — Wrote `_GENDER_WORDS_HE` with case-sensitive patterns, so "She's" (capital) would have slipped through `SELFIE_PRONOUNS=he`. Caught by re-reading the patterns before the first test run, not by a test; the full-prompt test would have caught it too.
+- 2026-09-29 — Skipped the `/code-review` pass that `repo-change-control` step 7 requires for the `SELFIE_PRONOUNS` release (small diff, tests green) and said so in the report. Disclosed, not hidden, but it is the step whose whole point is defects a green suite ships.
 - 2026-09-29 — Drafting the model handoff, wrote "Emily's glm-4.7 pin is superseded" from a
   `decisions.md` heading reading `status: superseded`, and "update_cmd still says 'expected if
   the repo is private'" from CLAUDE.md's Deployment paragraph. Both wrong: the Emily entry was
