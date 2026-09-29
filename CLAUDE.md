@@ -224,10 +224,12 @@ The authoritative instance list is the set of `bot@<instance>` systemd units.
   egress policy to `curl` and `WebFetch` alike (verified 2026-08-09) — for those two,
   the pins here and the code are the only sources a session can actually read, and
   "unverified — host blocked" is the correct thing to report. **Exception, verified
-  2026-09-29:** when the Nimble connector is attached, `nimble_extract` returned real page
-  text from both hosts (the PTB `stable` docs root, which is v22.8 while this repo pins
-  `<22`; the `nano-gpt.com` chat page). Use it only when that connector is present, and check
-  the version on any PTB page against the pin. Without it the rule above stands.
+  2026-09-29 with the owner's go-ahead:** when the Nimble connector is attached,
+  `nimble_extract` returned real page text from `docs.python-telegram-bot.org`,
+  `nano-gpt.com` and `arxiv.org`. PTB's `stable` docs are v22.8 while this repo pins `<22`;
+  the pinned version's docs are at `https://docs.python-telegram-bot.org/en/v21.11.1/<page>.html`
+  (e.g. `telegram.ext.application.html`; a bare `/en/v21.11/` is a 404). Use Nimble only when
+  the connector is attached, and only for those three hosts. Without it the rule above stands.
 
 ## Deployment
 

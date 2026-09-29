@@ -153,7 +153,10 @@ answered 200; `arxiv.org`, `nano-gpt.com`, and `docs.python-telegram-bot.org` ar
 refused to **both** (proxy `403`, WebFetch `EGRESS_BLOCKED`). When the host is
 blocked, the honest report is "not verified — host blocked by egress policy," not a
 WebFetch summary quietly promoted to a fact. Do not retry or route around a policy
-denial; report the blocked host (`/root/.ccr/README.md`).
+denial; report the blocked host (`/root/.ccr/README.md`). **One owner-approved exception
+(2026-09-29):** the Nimble connector, when attached, fetched all three refused hosts above
+(`CLAUDE.md` Stack has the detail). It covers those three hosts only; any other denied host
+is still reported, not routed around.
 
 **Example.** Checking whether PTB's changelog mentions `get_event_loop`:
 `curl` returned `http=404 bytes=14`, and the grep over that 14-byte error page printed
