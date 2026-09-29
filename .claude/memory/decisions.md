@@ -219,6 +219,7 @@ nothing the fleet runs.
 consumed the Actor are retired.
 **By:** owner + session `claude/svipall-review-g3s2fy`, 2026-09-24 (evidence-backed).
 **Detail:** `idea-scraper-actor/README.md` "Every other Reddit endpoint"; oplog 2026-09-24.
+**Update 2026-09-29 (owner asked to try Nimble):** `nimble_extract` with the plain `vx6` tier on `www.reddit.com/r/SillyTavernAI/top/?t=week` returned Reddit's JavaScript proof-of-work challenge page (a script that computes an answer and resubmits a form), no listing. Getting past it needs a JS-rendering or stealth tier, which is the browser-style workaround ruled out above, so it was not tried. Tavily is not connected to this repo's sessions. The decision stands: Atom/RSS only.
 
 ### 2026-09-23 | Hook and eval blocks are counted by a wrapper plus a debrief harvest | status: current
 **Decided:** blocking hooks run through `.claude/hooks/count-block.sh`, and `run-evals.sh`'s
