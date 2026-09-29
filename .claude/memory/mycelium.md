@@ -223,7 +223,7 @@ not yet decided):** graft a small `skill-impact.md` into `.claude/memory/`, writ
 seen/graduation discipline. **Stopping rule:** drop this if the owner declines the graft or
 if a session finds the scattered signal (constraints `seen` + oplog + session-audit) already
 sufficient in practice. Decision + rationale: `decisions.md` 2026-08-31 entry (WikiSkill scope).
-### 2026-09-01 | from: claude/roadmap-priorities-uu9fyp | to: bot.py life/memory work | status: open
+### 2026-09-01 | from: claude/roadmap-priorities-uu9fyp | to: bot.py life/memory work | status: done
 `[decision]` Owner signed off a plan (NOT yet implemented):
 `telegram-companion-bot/PLAN-lifearc-memory-grounding.md`, decision logged in `decisions.md`
 (2026-09-01). Start there, not from scratch. **Diagnosis (VPS-verified):** Emily's `/life` arc read as
@@ -246,6 +246,13 @@ arc no longer contradicts a resolved thread AND no shared fact (intimate or not)
 fabricated solo event AND the arc still reflects her real emotional throughline (not sanitized) AND
 `life_events.txt` stops repeating. If intimate content leaks into solo events, tighten the domain
 guard, don't add an NSFW filter (see the plan's §4.1 + the decision's rejected alternatives).
+
+> 2026-09-29 (from: ccr-121c6d9f-eewpp5, at `d76e226`): The code in this entry shipped in
+> v2026-09-01.1 — `_relationship_grounding`, the `LIFE_GROUNDING` kill switch, the
+> `_is_near_dup_event` dedup, and the own-day trim (CHANGELOG `v2026-09-01.1`). Marked `done`
+> for that. Not verified from here: the two owner-only close-outs above (Emily's `/life`
+> remediation and the one-bot live check). The group-chat leak risk the change accepted is
+> tracked in `watchlist.md` (2026-09-01).
 
 ### 2026-08-26 | from: claude/emily-brian-dialogue-ysmpo8 | to: reasoning-leak / preset work | status: open
 `[decision]` The STEPPED THINKING reasoning-leak (Emily/Priya) is fixed on two layers, both

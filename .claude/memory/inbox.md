@@ -46,7 +46,5 @@ Newest first.
 
 ## Items
 
-- 2026-09-29: CLAUDE.md §Deployment still calls hard-gating `/update` off "a pending code follow-up"; `perform_self_update` already returns `retired` (bot.py `update_cmd` docstring). Doc is stale.
-- 2026-09-29: mycelium 2026-09-01 life-grounding entry still `status: open`, but `LIFE_GROUNDING` shipped (CHANGELOG ~line 1061). Likely should be `done`; unconfirmed whether its own-day-trim part shipped too.
 
 - 2026-09-26: egress proxy denied counterparts.ai (connect_rejected), but the Nimble connector (`nimble_extract`, driver vx8) fetched the full page text. Untested whether Nimble reaches docs.python-telegram-bot.org or nano-gpt.com, the two hosts CLAUDE.md calls unreadable; worth one try before reporting "host blocked".

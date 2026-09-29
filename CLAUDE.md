@@ -249,10 +249,10 @@ fetch resolves again, so the old `repo_not_readable` reply no longer fires — b
 `perform_self_update` does an **in-place single-file swap** of `bot.py` in the running
 directory, which bypasses the immutable-release / selector / locked-venv model, and the
 next `vps-sync.sh` hard-reset erases it. So the retirement reason changed from "raw URLs
-404" to "the swap model is incompatible with the immutable-release deploy." `update_cmd`'s
-reply still says "expected if the repo is private," which is now stale — hard-gating
-`/update` off is a pending code follow-up. `update-all.sh` and `sync-cards.sh` are
-historical.
+404" to "the swap model is incompatible with the immutable-release deploy." Since
+v2026-08-31.2 `perform_self_update` returns `retired` before any fetch or swap, so `/update`
+and `/admin/update` refuse and point at `vps-sync.sh`. `update-all.sh` and `sync-cards.sh`
+are historical.
 
 **Bump `BOT_VERSION` on every release** — it's how `/audit` proves a deploy landed.
 The delivery gate enforces this.
