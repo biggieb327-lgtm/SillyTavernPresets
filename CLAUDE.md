@@ -223,7 +223,11 @@ The authoritative instance list is the set of `bot@<instance>` systemd units.
   changelog are. `docs.python-telegram-bot.org` and `nano-gpt.com` are blocked by
   egress policy to `curl` and `WebFetch` alike (verified 2026-08-09) — for those two,
   the pins here and the code are the only sources a session can actually read, and
-  "unverified — host blocked" is the correct thing to report.
+  "unverified — host blocked" is the correct thing to report. **Exception, verified
+  2026-09-29:** when the Nimble connector is attached, `nimble_extract` returned real page
+  text from both hosts (the PTB `stable` docs root, which is v22.8 while this repo pins
+  `<22`; the `nano-gpt.com` chat page). Use it only when that connector is present, and check
+  the version on any PTB page against the pin. Without it the rule above stands.
 
 ## Deployment
 

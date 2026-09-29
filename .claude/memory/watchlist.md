@@ -78,9 +78,9 @@ Then build the `doc-identifiers-resolve` eval; the full design, prototype, and a
 item 1 of `.claude/memory/improvement-proposals/2026-09-mex-ideas.md`.
 Related: decisions 2026-09-22 (MEX not adopted).
 
-### 2026-09-26 — the Nimble connector fetched a page the egress proxy denied | status: open
+### 2026-09-26 — the Nimble connector fetched a page the egress proxy denied | status: graduated
 A session saw the egress proxy refuse counterparts.ai (`connect_rejected`) while `nimble_extract` returned the full page. Untried: whether Nimble also reaches `docs.python-telegram-bot.org` or `nano-gpt.com`, which `CLAUDE.md` records as blocked by egress policy. Moved here from the inbox 2026-09-29. Not tried this session: the block is an owner-set policy, so whether a connector may route around it is the owner's call, not a convenience to use quietly.
-**Graduates when:** the owner says whether connector access to blocked hosts is allowed. If yes, add one line to `CLAUDE.md` Stack and try the two hosts; if no, dismiss this.
+**Graduated 2026-09-29:** owner said to try it. `nimble_extract` (driver `vx6`) returned real content from `docs.python-telegram-bot.org` (the `stable` root, v22.8; a guessed `/en/v21.11/` path 404ed on the host's own Read the Docs page, so that 404 was my URL, not a block) and from `nano-gpt.com` (redirected to `/chat`, 83,276 characters, page script text). `CLAUDE.md` Stack now records the exception. Still unknown: whether other blocked hosts are reachable, and whether the versioned PTB docs for 21.x exist at a URL Nimble can fetch.
 
 ### 2026-09-01 — grounded offline life can carry owner-private memory into group/non-owner chats | status: open
 `v2026-09-01.1` made `_generate_life_event` / `_maybe_rotate_life_arc` read the owner's relationship
