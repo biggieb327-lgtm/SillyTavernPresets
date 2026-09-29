@@ -228,7 +228,7 @@ The authoritative instance list is the set of `bot@<instance>` systemd units.
   `nimble_extract` returned real page text from `docs.python-telegram-bot.org`,
   `nano-gpt.com` and `arxiv.org`. PTB's `stable` docs are v22.8 while this repo pins `<22`;
   the pinned version's docs are at `https://docs.python-telegram-bot.org/en/v21.11.1/<page>.html`
-  (e.g. `telegram.ext.application.html`; a bare `/en/v21.11/` is a 404). Use Nimble only when
+  (the page name is the module's dotted path plus `.html`; a bare `/en/v21.11/` is a 404). Use Nimble only when
   the connector is attached, and only for those three hosts. Without it the rule above stands.
 
 ## Deployment
