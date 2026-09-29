@@ -95,7 +95,10 @@ life events with no group check (`bot.py` "current life arc" and "What's been ha
 unconditional), and `GROUP_CHAT_DESIGN.md` §5 keeps `life.txt` readable in groups on purpose. So the
 channel is open by design, and only the generator prompts (`_generate_life_event` scopes to an event
 in her own day; `_maybe_rotate_life_arc` says do not copy grounding in) stand in the way. Not observed
-in live files: the VPS `life.txt`/`life_events.txt` were not readable from the cloud session.
+in live files by this session: the VPS `life.txt`/`life_events.txt` were not readable from the cloud session.
+Owner checked the live files on 2026-09-29 (`life_events.txt` tail and the head of `life.txt`, all seven
+instances) and saw no private relationship detail. That is one look at the newest lines, so the item
+stays open and the graduation trigger is unchanged; the 2026-09-01 decision stands.
 
 ### 2026-08-29 — risk-guard.sh matches `git checkout <dirty-file>` inside heredoc/quoted bodies, not just executable positions | status: open
 While committing the debrief, `risk-guard.sh` blocked `git commit -F - <<EOF … EOF` because
