@@ -19,6 +19,8 @@ from voicekit.core import (
     validate_profile,
     strip_markdown_fences,
     get_model,
+    get_judge_model,
+    judge,
     get_client,
     build_profile,
 )
@@ -263,7 +265,82 @@ class TestCanonicalFiles:
         assert json.loads(raw.read_text()) == VOICE_PROFILE_SCHEMA
 
     def test_unformatted_prompts_have_no_doubled_braces(self):
-        # JUDGE_SYSTEM and GENERATOR_SYSTEM are sent as-is, never through str.format
-        from voicekit.prompts import JUDGE_SYSTEM, GENERATOR_SYSTEM
-        for prompt in (JUDGE_SYSTEM, GENERATOR_SYSTEM):
+        # The *_SYSTEM prompts are sent as-is, never through str.format
+        from voicekit.prompts import JUDGE_SYSTEM, GENERATOR_SYSTEM, REVISER_SYSTEM
+        for prompt in (JUDGE_SYSTEM, GENERATOR_SYSTEM, REVISER_SYSTEM):
             assert "{{" not in prompt and "}}" not in prompt
+
+    def test_judge_prompt_no_longer_asks_for_a_rewrite(self):
+        # The rewrite is a separate call (revise); asked for in the same JSON reply,
+        # models returned the draft almost unchanged (seen live 2026-09-29)
+        from voicekit.prompts import JUDGE_SYSTEM
+        assert "revised_draft" not in JUDGE_SYSTEM
+
+
+class TestJudgeModel:
+    """The judge can run on a different model from the writer."""
+
+    def test_override_wins(self, monkeypatch):
+        monkeypatch.setenv("VOICEKIT_JUDGE_MODEL", "judge-env")
+        assert get_judge_model("judge-flag") == "judge-flag"
+
+    def test_env_beats_main_model(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MODEL", "writer")
+        monkeypatch.setenv("VOICEKIT_JUDGE_MODEL", "judge-env")
+        assert get_judge_model(None) == "judge-env"
+
+    def test_falls_back_to_main_model(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MODEL", "writer")
+        monkeypatch.delenv("VOICEKIT_JUDGE_MODEL", raising=False)
+        assert get_judge_model(None) == "writer"
+
+
+class TestJudgeRevise:
+    """judge(revise_draft=True) rewrites the draft in a second call on the writer's model."""
+
+    EVALUATION = {
+        "scores": {"rhythm": 6, "lexicon": 7, "stance": 7, "rhetoric": 6, "constraints": 9, "overall": 7},
+        "diagnosis": "Sentences are too even.",
+        "revision_priorities": ["Chain clauses with 'and'", "Add an aside"],
+    }
+
+    def _run(self, tmp_path, monkeypatch, evaluation, revise_draft):
+        monkeypatch.setenv("OPENAI_MODEL", "writer")
+        monkeypatch.setenv("VOICEKIT_JUDGE_MODEL", "judge")
+        profile = tmp_path / "p.json"
+        profile.write_text("{}")
+        draft = tmp_path / "d.txt"
+        draft.write_text("The river was high.")
+        calls = []
+
+        def fake_call_llm(client, model, system, prompt, json_mode=False, temperature=0.4):
+            calls.append({"model": model, "system": system, "prompt": prompt})
+            return json.dumps(evaluation) if json_mode else "The river was high, and rising."
+
+        with patch("voicekit.core.get_client", return_value=MagicMock()), \
+             patch("voicekit.core.call_llm", side_effect=fake_call_llm):
+            result, out_path = judge(str(profile), str(draft), "essay", revise_draft=revise_draft)
+        return result, out_path, calls
+
+    def test_revise_is_a_second_call_on_the_writer_model(self, tmp_path, monkeypatch):
+        from voicekit.prompts import REVISER_SYSTEM
+        result, out_path, calls = self._run(tmp_path, monkeypatch, self.EVALUATION, True)
+
+        assert [c["model"] for c in calls] == ["judge", "writer"]
+        assert calls[1]["system"] == REVISER_SYSTEM
+        assert "1. Chain clauses with 'and'\n2. Add an aside" in calls[1]["prompt"]
+        assert "The river was high." in calls[1]["prompt"]
+        assert result["revised_draft"] == "The river was high, and rising."
+        assert result["judge_model"] == "judge"
+        assert json.loads(out_path.read_text())["revised_draft"] == result["revised_draft"]
+
+    def test_no_revise_by_default(self, tmp_path, monkeypatch):
+        result, _, calls = self._run(tmp_path, monkeypatch, self.EVALUATION, False)
+        assert len(calls) == 1
+        assert "revised_draft" not in result
+
+    def test_no_revise_without_priorities(self, tmp_path, monkeypatch):
+        evaluation = dict(self.EVALUATION, revision_priorities=[])
+        result, _, calls = self._run(tmp_path, monkeypatch, evaluation, True)
+        assert len(calls) == 1
+        assert "revised_draft" not in result

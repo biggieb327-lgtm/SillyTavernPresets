@@ -21,6 +21,8 @@ REGISTER_EXAMPLES = "essay, email, dialogue, sales"
 
 def _print_judge_summary(evaluation: dict) -> None:
     """Print a human-readable summary of a judge evaluation to the terminal."""
+    if evaluation.get("judge_model"):
+        print(f"Judged by {evaluation['judge_model']}")
     scores = evaluation.get("scores")
     if isinstance(scores, dict) and scores:
         print("Scores:")
@@ -120,7 +122,15 @@ def main() -> None:
         "--out",
         help="Output path for the evaluation (default: <draft>-eval.json next to the draft)",
     )
-    jdg.add_argument("--model", help="Override the LLM model")
+    jdg.add_argument(
+        "--model",
+        help="Override the judge model (default: VOICEKIT_JUDGE_MODEL, else OPENAI_MODEL)",
+    )
+    jdg.add_argument(
+        "--revise",
+        action="store_true",
+        help="Also rewrite the draft from the revision priorities (one more call, on OPENAI_MODEL)",
+    )
 
     # list-profiles
     lp = subparsers.add_parser(
@@ -271,9 +281,13 @@ def main() -> None:
                 register=args.register,
                 out=args.out,
                 model=args.model,
+                revise_draft=args.revise,
             )
             if evaluation:
                 _print_judge_summary(evaluation)
+                if evaluation.get("revised_draft"):
+                    print("Revised draft:")
+                    print(evaluation["revised_draft"])
             print(f"Evaluation saved to {out_path}")
 
         elif args.command == "list-profiles":

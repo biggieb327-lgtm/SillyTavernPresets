@@ -23,6 +23,8 @@ from voicekit.prompts import (
     PROFILE_BUILDER_SYSTEM,
     PROFILE_BUILDER_USER,
     PROFILE_REPAIR_ADDENDUM,
+    REVISER_SYSTEM,
+    REVISER_USER,
 )
 from voicekit.schemas import VOICE_PROFILE_SCHEMA
 
@@ -34,6 +36,15 @@ def get_model(override: str | None = None) -> str:
     if override:
         return override
     return os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+
+def get_judge_model(override: str | None = None) -> str:
+    """The judge's model: the override, else VOICEKIT_JUDGE_MODEL, else the main model.
+
+    A judge on the same model as the writer tends to rate that model's drafts
+    highly, so a separate judge model gives a more independent score.
+    """
+    return override or os.environ.get("VOICEKIT_JUDGE_MODEL") or get_model(None)
 
 
 def get_client() -> OpenAI:
@@ -322,6 +333,34 @@ def generate(
     raise RuntimeError(f"Generation failed after {retries} attempts: {last_error}")
 
 
+def revise(
+    client: OpenAI,
+    profile_json: str,
+    register: str,
+    draft_text: str,
+    evaluation: dict,
+    model: str | None = None,
+    temperature: float = 0.7,
+) -> str:
+    """Rewrite a draft by applying a judge evaluation's revision priorities.
+
+    A separate call from the judge: asked to score and rewrite in one JSON reply,
+    models tended to return the draft almost unchanged. Uses the writer's model
+    (OPENAI_MODEL or `model`), not the judge's.
+    """
+    priorities = evaluation.get("revision_priorities") or []
+    user_prompt = REVISER_USER.format(
+        profile_json=profile_json,
+        register=register,
+        draft_text=draft_text,
+        diagnosis=evaluation.get("diagnosis", ""),
+        priorities="\n".join(f"{i}. {p}" for i, p in enumerate(priorities, start=1)),
+    )
+    resolved_model = get_model(model)
+    print(f"Revising draft with {resolved_model}...", file=sys.stderr)
+    return call_llm(client, resolved_model, REVISER_SYSTEM, user_prompt, temperature=temperature)
+
+
 def judge(
     profile_path: str,
     draft_file: str,
@@ -329,8 +368,13 @@ def judge(
     out: str | None = None,
     model: str | None = None,
     retries: int = 2,
+    revise_draft: bool = False,
 ) -> tuple[Optional[dict], Path]:
     """Judge a draft against a voice profile.
+
+    The judge runs on get_judge_model(model). With revise_draft, a second call
+    (on the writer's model) rewrites the draft from the revision priorities and
+    the result is stored as "revised_draft" in the evaluation.
 
     Returns the parsed evaluation (None if the model returned unparseable
     JSON) and the path the evaluation was written to.
@@ -339,7 +383,7 @@ def judge(
     profile_json = Path(profile_path).read_text(encoding="utf-8")
     draft_text = draft_path.read_text(encoding="utf-8")
     client = get_client()
-    resolved_model = get_model(model)
+    resolved_model = get_judge_model(model)
 
     user_prompt = JUDGE_USER.format(
         profile_json=profile_json,
@@ -357,6 +401,9 @@ def judge(
             loaded = json.loads(raw)
             if not isinstance(loaded, dict):
                 raise ValueError("Expected JSON object")
+            loaded["judge_model"] = resolved_model
+            if revise_draft and loaded.get("revision_priorities"):
+                loaded["revised_draft"] = revise(client, profile_json, register, draft_text, loaded)
             result = json.dumps(loaded, indent=2, ensure_ascii=False)
             out_path = Path(out) if out else draft_path.with_name(f"{draft_path.stem}-eval.json")
             out_path.parent.mkdir(parents=True, exist_ok=True)

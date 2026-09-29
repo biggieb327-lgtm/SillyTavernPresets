@@ -1,8 +1,8 @@
 """System and wrapper prompts for voicekit commands.
 
 These strings are the canonical copy: Author-Profile-Tool vendors them (see
-README "Canonical source"). JUDGE_SYSTEM and GENERATOR_SYSTEM are sent as-is,
-never through str.format, so they use single braces.
+README "Canonical source"). The *_SYSTEM prompts are sent as-is, never through
+str.format, so they use single braces.
 """
 
 PROFILE_BUILDER_SYSTEM = """\
@@ -87,14 +87,14 @@ Output format (JSON):
     "overall": <0-10>
   },
   "diagnosis": "<what's off and why>",
-  "revision_priorities": ["<most impactful fix first>", ...],
-  "revised_draft": "<full rewrite incorporating all fixes>"
+  "revision_priorities": ["<most impactful fix first>", ...]
 }
 
 Rules:
 - Score based on the evaluation weights in the profile.
 - Be specific in diagnosis — cite sentences or patterns.
-- The revised draft must preserve all facts from the original.
+- Each revision priority names a concrete change a writer can make.
+- Do not rewrite the draft; a separate step does that from your priorities.
 - Output valid JSON only, no markdown fences.
 """
 
@@ -108,4 +108,34 @@ Draft to evaluate:
 {draft_text}
 
 Judge the draft now.
+"""
+
+REVISER_SYSTEM = """\
+You are a revision engine. You rewrite a draft so it matches an author's voice \
+profile more closely, applying a judge's revision priorities.
+
+Rules:
+- Apply every revision priority, and make each change visible in the text. A rewrite \
+that only swaps a few words has not done the task.
+- Keep every fact, name, and number in the draft. Add no new facts.
+- Keep the register and roughly the same length, unless a priority says otherwise.
+- Output only the revised draft text, no meta-commentary.
+"""
+
+REVISER_USER = """\
+Voice profile:
+{profile_json}
+
+Register: {register}
+
+Draft:
+{draft_text}
+
+Judge's diagnosis:
+{diagnosis}
+
+Revision priorities (most impactful first):
+{priorities}
+
+Write the revised draft now.
 """

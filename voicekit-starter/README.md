@@ -32,6 +32,14 @@ Optionally set a default model (falls back to `gpt-4.1-mini`):
 export OPENAI_MODEL="gpt-4.1"
 ```
 
+Optionally judge on a different model from the one that writes. A model grading its
+own drafts tends to score them high, so a second model gives a more independent score
+(falls back to `OPENAI_MODEL`; `judge --model` overrides both):
+
+```bash
+export VOICEKIT_JUDGE_MODEL="another-model"
+```
+
 For local/alternative OpenAI-compatible servers (ollama, vLLM, LM Studio), set the base URL:
 
 ```bash
@@ -117,8 +125,12 @@ voicekit judge \
   --register email
 ```
 
-Prints a score summary and top revision priorities, and saves the full
-evaluation to `<draft>-eval.json` next to the draft (override with `--out`).
+Prints the judge model, a score summary and top revision priorities, and saves the
+full evaluation to `<draft>-eval.json` next to the draft (override with `--out`).
+
+Add `--revise` to also rewrite the draft from the revision priorities. That is a
+second call, on `OPENAI_MODEL` (the writer), not the judge model; the rewrite is
+printed and saved as `revised_draft` in the evaluation.
 
 ## How it works
 
@@ -126,7 +138,7 @@ evaluation to `<draft>-eval.json` next to the draft (override with `--out`).
 
 2. **generate** takes a profile, a task brief, a facts file, and a target register, then produces a voice-matched draft that prioritizes factual accuracy and deep voice traits over surface quirks.
 
-3. **judge** scores a draft on rhythm, lexicon, stance, rhetoric, and constraint compliance, then produces a diagnosis, revision priorities, and a full revised draft.
+3. **judge** scores a draft on rhythm, lexicon, stance, rhetoric, and constraint compliance, then produces a diagnosis and revision priorities. With `--revise`, a separate call rewrites the draft by applying those priorities.
 
 ## Supported file types
 

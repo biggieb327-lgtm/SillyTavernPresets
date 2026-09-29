@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 — Separate judge model; the rewrite is its own step
+
+- `JUDGE_SYSTEM` asked for scores, a diagnosis, priorities and a full rewrite in one
+  JSON reply. Live (Author-Profile-Tool, 2026-09-29) the rewrite of an 8.7/10 essay
+  applied almost none of the judge's own three priorities: it added two "and"s and a
+  dash. The judge no longer writes a rewrite. `REVISER_SYSTEM` / `REVISER_USER` are a
+  separate call that takes the diagnosis and numbered priorities and must apply each
+  one visibly. `judge --revise` runs it (temperature 0.7, on `OPENAI_MODEL`) and stores
+  the result as `revised_draft`. **Behavior change:** without `--revise` the
+  evaluation has no `revised_draft`.
+- The judge ran on the same model as the writer, which tends to rate its own drafts
+  high. `VOICEKIT_JUDGE_MODEL` (via `get_judge_model`) sets a separate judge model;
+  `judge --model` still overrides it. The evaluation records `judge_model`, and the
+  CLI prints it.
+
 ## 0.2.2 — Code writes the profile fields it knows; this repo becomes the canonical contract
 
 - `build_profile` computed each file's label and word count but never used them: the
