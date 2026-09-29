@@ -1316,6 +1316,13 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-29 — Drafting the model handoff, wrote "Emily's glm-4.7 pin is superseded" from a
+  `decisions.md` heading reading `status: superseded`, and "update_cmd still says 'expected if
+  the repo is private'" from CLAUDE.md's Deployment paragraph. Both wrong: the Emily entry was
+  a log cleanup, config unchanged; `update_cmd` is already retired in code. Caught by reading
+  the entry body and grepping bot.py before commit. -> **a status field or a doc's summary is
+  a claim about the thing; read the entry body or the code before restating it in a handoff.**
+
 - 2026-09-26 — Changed `_track_llm_usage`'s signature (added `model`), then committed
   v2026-09-26.5 after running only the `-k LlmStatsByModel or TrackLlmUsage` subset.
   `verify.sh` then failed: a stub in `TestStructuredOperationEvents`
