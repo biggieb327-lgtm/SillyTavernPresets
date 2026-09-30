@@ -85,5 +85,29 @@ bash "$BT" --file "$WORK/mod.py" --old 'VALUE = "LIVE"' --new 'VALUE = "DEAD"' \
      -- bash -c 'kill -TERM $$' >/dev/null 2>&1
 intact "command killed mid-run"
 
+# 7. --expect matches the red output: the run failed on the assertion under test.
+setup
+printf '#!/usr/bin/env bash\ngrep -q %s "$1/mod.py" || { echo "FAIL: VALUE is not LIVE"; exit 1; }\n' \
+  "'VALUE = \"LIVE\"'" > "$WORK/check2.sh"
+chmod +x "$WORK/check2.sh"
+bash "$BT" --file "$WORK/mod.py" --old 'VALUE = "LIVE"' --new 'VALUE = "DEAD"' --expect 'VALUE is not LIVE' \
+     -- "$WORK/check2.sh" "$WORK" >/dev/null 2>&1
+expect_rc 0 "$?" "--expect matching the red output passes"
+intact "--expect match"
+
+# 8. --expect does not match: red for a different reason (C18 occ. 7-8: a crash or a
+# compile error, not the assertion). Must refuse, and still restore the target. The check
+# fails ONLY while the defect is injected, so without --expect this run would pass; a
+# check that always fails would be refused at the green step and prove nothing about
+# --expect (the first version of this case did exactly that).
+setup
+printf '#!/usr/bin/env bash\ngrep -q %s "$1/mod.py" || { echo "SyntaxError: unexpected token"; exit 1; }\n' \
+  "'VALUE = \"LIVE\"'" > "$WORK/check3.sh"
+chmod +x "$WORK/check3.sh"
+bash "$BT" --file "$WORK/mod.py" --old 'VALUE = "LIVE"' --new 'VALUE = "DEAD"' --expect 'VALUE is not LIVE' \
+     -- "$WORK/check3.sh" "$WORK" >/dev/null 2>&1
+expect_rc 1 "$?" "--expect not matching the red output refuses"
+intact "--expect mismatch"
+
 echo "selftest: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]

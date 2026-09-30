@@ -325,6 +325,40 @@ if [ -f .claude/hooks/theory_guard.py ]; then
   fi
 fi
 
+# --- anchor-guard-cases ----------------------------------------------------------------
+# anchor-guard.sh (C7) blocks an in-place sed addressed by line number. Its case matrix was
+# only ever run by hand, and on 2026-09-29 a line-addressed sed on a repo file ran unblocked
+# because a /tmp path elsewhere in the same && chain triggered the throwaway-dir exemption
+# (C7 occurrence 7). This feeds the real hook each fixture as a PreToolUse payload and
+# asserts block (exit 2) or allow (exit 0). Fixture text is built from parts so no line of
+# this file is itself a line-addressed sed.
+if [ -f .claude/hooks/anchor-guard.sh ]; then
+  ag_fail=""
+  ag_case() {  # $1 = expected exit, $2 = command
+    local got
+    got=$(python3 -c 'import json,sys; print(json.dumps({"tool_input":{"command":sys.argv[1]}}))' "$2" \
+          | bash .claude/hooks/anchor-guard.sh >/dev/null 2>&1; echo $?)
+    [ "$got" = "$1" ] || ag_fail="$ag_fail | want $1 got $got: $2"
+  }
+  SI="sed -i"
+  ag_case 2 "$SI '5d' telegram-companion-bot/bot.py"
+  ag_case 2 "$SI '1,3s/a/b/' README.md"
+  ag_case 2 "$SI \"3i\\\\x\" notes.md"
+  ag_case 2 "cd repo && $SI '21s/a/b/' tests/t.py && V=/tmp/claude-0/venv; ls \$V"
+  ag_case 2 "echo /tmp/x; $SI '4d' docs/a.md"
+  ag_case 0 "$SI 's/old/new/' telegram-companion-bot/bot.py"
+  ag_case 0 "sed -n 14,30p telegram-companion-bot/bot.py"
+  ag_case 0 "$SI '5d' /tmp/x.txt"
+  ag_case 0 "$SI '5d' /tmp/claude-0/scratchpad/x.txt && cat README.md"
+  ag_case 0 "$SI '5d' notes.md # anchor-ok"
+  ag_case 0 "grep -n foo bot.py | sed -n 5p"
+  if [ -z "$ag_fail" ]; then
+    ok "anchor-guard-cases: line-addressed in-place sed blocked per segment; content-anchored, read-only, throwaway and anchor-ok allowed"
+  else
+    bad "anchor-guard-cases" "${ag_fail# | }"
+  fi
+fi
+
 # --- stop-guards-behavioral ------------------------------------------------------------
 # hook-python-compiles proves the four Python Stop-guards COMPILE; nothing exercised them.
 # All four fail OPEN (a broken guard returns 0/allow), so a gutted regex passes every other

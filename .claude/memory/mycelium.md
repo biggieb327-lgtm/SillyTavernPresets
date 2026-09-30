@@ -141,6 +141,22 @@ Newest first, same as the operational log.
 
 ## Entries
 
+### 2026-09-30 | from: voicekit judge calibration (Author-Profile-Tool) | to: voicekit work | status: open
+at `5e0ae40` — Live calibration of the voicekit judge against the Mark Twain profile
+(built from Life on the Mississippi, Tom Sawyer, Huckleberry Finn), judge
+`deepseek/deepseek-latest`, register essay, one run each: real Twain *Roughing It* 9.0,
+generated river-pilot essay 9.0 (glm-4.7 had judged it 8.7), real Twain *Connecticut Yankee*
+3.6, Bret Harte "Luck of Roaring Camp" 3.3, Joel Chandler Harris *Uncle Remus* 3.5. So the
+judge separates Twain from other period dialect writers by 5+ points (run-to-run spread seen
+earlier: ~1 point), and self-grading did not inflate the essay. Limits: it scores fit to the
+PROFILE, not authorship: mock-medieval Yankee Twain scores like another author, and the
+generator's output ties real Twain, so the scale tops out there. The profile's hard dialect
+rule made the judge ask real *Roughing It* narration for "warn't"/"reckon"; rebuild from
+narration-heavy books if a plain-essay Twain voice is wanted. Do not re-run these controls to
+"check the judge" without a new question: the passages and commands are in
+Author-Profile-Tool README "Calibrating the judge".
+Related: oplog 2026-09-29 (judge rewrite), decisions 2026-09-29 (judge model / revise step).
+
 ### 2026-09-25 | from: claude/bot-database-schema-qllz12 | to: bot-config-reference, edit-cards-and-presets | status: done
 at `1229570` — [observed] `.env.example`'s "Recommended stacks" preset-token table
 (around line 626) is stale well past the "~60 raw low" caveat it already carries.

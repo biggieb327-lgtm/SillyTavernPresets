@@ -5,7 +5,11 @@
 #        --file telegram-companion-bot/bot.py \
 #        --old 'MAP_INTENT = _env_bool("MAP_INTENT", True)' \
 #        --new 'MAP_INTENT = _env_bool("MAP_INTENT", False)' \
+#        --expect 'TestMapIntent' \
 #        -- python3 -m pytest telegram-companion-bot/tests/test_pure.py -q -k MapIntent
+#
+# --expect is optional but recommended: the red run's output must match it, which proves
+# the run failed on the assertion under test and not on a crash or compile error.
 #
 # WHY THIS EXISTS (2026-08-10 session autopsy, .claude/SESSION-AUTOPSY-2026-08-10.md):
 # break-testing is what this repo relies on to trust every check it has, and it was
@@ -38,12 +42,13 @@ set -u
 # Defects injected here are not catches: keep them out of the block tally (mechanism-tally.py).
 export MECHANISM_TALLY=0
 
-FILE=""; OLD=""; NEW=""
+FILE=""; OLD=""; NEW=""; EXPECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --file) FILE="${2:-}"; shift 2 ;;
     --old)  OLD="${2:-}";  shift 2 ;;
     --new)  NEW="${2:-}";  shift 2 ;;
+    --expect) EXPECT="${2:-}"; shift 2 ;;
     --)     shift; break ;;
     *) echo "break-test: unknown argument '$1'" >&2; exit 2 ;;
   esac
@@ -121,7 +126,17 @@ if [ "$rc" -eq 0 ]; then
   printf '%s\n' "$out" | tail -15 | sed 's/^/            /'
   exit 1
 fi
-echo "✓ red:      command exited ${rc} with the defect injected"
+# --expect <regex>: the red output must also say WHY it is red. A nonzero exit proves the
+# command failed, not that the assertion under test failed: an injection that stops the
+# code compiling, or crashes a parser, goes red for the wrong reason (C18 occurrences 7
+# and 8, 2026-08-23 and 2026-09-29). Pass the failing test's name or message.
+if [ -n "$EXPECT" ] && ! printf '%s\n' "$out" | grep -qE -- "$EXPECT"; then
+  echo "✗ red:      command exited ${rc}, but its output never matches --expect '${EXPECT}'."
+  echo "  It went red for a different reason (a crash, a compile error, another check) (C18)."
+  printf '%s\n' "$out" | tail -15 | sed 's/^/            /'
+  exit 1
+fi
+echo "✓ red:      command exited ${rc} with the defect injected${EXPECT:+, output matches '${EXPECT}'}"
 
 # --- 5. restore, and prove it is byte-identical ----------------------------------------
 cp "$SNAP" "$FILE"

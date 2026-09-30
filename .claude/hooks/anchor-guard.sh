@@ -22,12 +22,21 @@ cmd=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{
 
 case "$cmd" in *anchor-ok*) exit 0 ;; esac
 
-# Must be an in-place sed…
-echo "$cmd" | grep -qE '\bsed\b[^|;&]*(-i([^ ]*)?|--in-place)' || exit 0
-# …whose script begins with a line number (5d / 5,10d / 115p / 3i\ / 1,3s/…).
-echo "$cmd" | grep -qE "['\"][[:space:]]*[0-9]+[[:space:]]*(,[[:space:]]*[0-9\$]+)?[[:space:]]*[acdipsr]" || exit 0
-# …targeting something outside the throwaway dirs.
-echo "$cmd" | grep -qE '(/tmp/|scratchpad)' && exit 0
+# Checked one command segment at a time (split on && || ; | and newlines). Until
+# 2026-09-30 the throwaway-dir exemption was tested against the WHOLE command, so
+# `sed -i '21s/…/' tests/x.py && V=/tmp/…/venv` passed: the /tmp path belonged to a
+# different segment (C7 occurrence 7).
+blocked=0
+while IFS= read -r seg; do
+  # An in-place sed…
+  echo "$seg" | grep -qE '\bsed\b.*(-i([^ ]*)?|--in-place)' || continue
+  # …whose script begins with a line number (5d / 5,10d / 115p / 3i\ / 1,3s/…)…
+  echo "$seg" | grep -qE "['\"][[:space:]]*[0-9]+[[:space:]]*(,[[:space:]]*[0-9\$]+)?[[:space:]]*[acdipsr]" || continue
+  # …targeting something outside the throwaway dirs, in this same segment.
+  echo "$seg" | grep -qE '(/tmp/|scratchpad)' && continue
+  blocked=1
+done < <(printf '%s\n' "$cmd" | sed -E 's/(&&|\|\||;|\|)/\n/g')
+[ "$blocked" = 1 ] || exit 0
 
 cat >&2 <<'MSG'
 [anchor-guard] BLOCKED: constraint C7 — in-place sed addressed by line number.

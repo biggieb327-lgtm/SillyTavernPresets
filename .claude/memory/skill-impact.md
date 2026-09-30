@@ -78,6 +78,24 @@ Newest first.
 
 ## Rows
 
+### 2026-09-30 | intervention: `break-test.sh --expect` + selftest cases 7-8 | class: break-test red for the wrong reason (C18) | status: pending
+A nonzero exit was all `break-test.sh` checked, so an injection that crashed a parser (C18
+occ. 7) or stopped a file compiling (occ. 9) counted as proof. `--expect` makes the red
+output name the assertion under test.
+**Holds when:** later break-tests that pass `--expect` show no C18 wrong-reason entries.
+**Recurrence shape to expect:** `--expect` not passed (it is optional), or the tool not used
+at all outside this repo, which is where occurrences 8-9 came from.
+Refs: constraints C18 (Occurrences 8-9), `.claude/tools/break-test-selftest.sh`.
+
+### 2026-09-30 | intervention: `anchor-guard.sh` per-segment exemption + `anchor-guard-cases` eval | class: line-number-addressed in-place edit (C7, covered half) | status: pending
+The `/tmp`/scratchpad exemption applied to the whole command, so a `/tmp` path anywhere in an
+`&&` chain let a line-addressed sed on a repo file through (C7 occ. 7). Now each segment is
+judged alone, and 11 fixture cases run in CI (the hook had none before).
+**Holds when:** no C7 entry shows a line-addressed sed that the hook let through.
+**Recurrence shape to expect:** a separator the split misses (a subshell, `$( … )`, a newline
+inside quotes), or line-index splicing in a Python heredoc, which stays prose by design.
+Refs: constraints C7 (Occurrence 7, reviewed 2026-09-30), eval `anchor-guard-cases`.
+
 ### 2026-09-25 | intervention: evidence-aware `theory_guard.py` + `.claude/tools/probe.py` | class: behavioral claim about named code stated without running it (C5, covered half) | status: pending
 C5 reached seen 13, three in one session: two claims true but unevidenced, one wrong
 (`_strip_persona_breaks`, never run, argued for a design dependency). The old guard matched

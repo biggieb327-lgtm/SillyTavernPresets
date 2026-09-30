@@ -442,9 +442,13 @@ An in-place sed with an `a` (append-after-line-1) address on `tests/passage.test
 (Author-Profile-Tool) was blocked by `anchor-guard.sh`. Earlier the same session, an in-place
 sed substitution addressed to line 21 of `voicekit-starter/tests/test_core.py` (inside this
 repo) ran **unblocked**, and landed correctly only because the line had just been read.
-Unreviewed: whether the guard misses the line-number-plus-`s` shape, or the `cd … &&` chain.
-Also: the guard blocks a command whose *text* merely quotes such a sed (a heredoc writing
-this note tripped it), a false positive. Check both at debrief.
+**Reviewed at debrief (2026-09-30):** neither shape. The throwaway-dir exemption grepped the
+WHOLE command for `/tmp/`, and the unblocked command set `V=/tmp/…/vk-venv` later in the same
+`&&` chain. Fixed: `anchor-guard.sh` now checks each segment (split on `&&` `||` `;` `|`) on
+its own, and the new `anchor-guard-cases` eval pins 11 cases, including this one
+(break-tested with `break-test.sh`: whole-command exemption restored -> RED). Still open, by
+design: a command whose *text* quotes such a sed (a heredoc body) is blocked; the escape hatch
+is `# anchor-ok`, or write the text with the Edit tool.
 **Occurrences 3-5 (2026-08-02) — the docstring failure again, three times in one hour.**
 Rewriting three `sweep.py` scanners, each edit anchored on the first line of the function
 BODY and prepended explanatory prose. In all three the docstring had already closed above
@@ -1001,7 +1005,7 @@ guessed would fire on every legitimate `replace_all` and get disabled. What is m
 is the assertion inside the script, now the documented shape in `add-regression-eval`.
 
 ### C18 — A break-test proves one assertion, not the check
-**seen: 7** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2, 2026-08-23) — *promoted
+**seen: 9** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2, 2026-08-23, 2026-09-29 ×2) — *promoted
 from the Minor log; all entries deleted.*
 Four checks passed their break-test and were still dead in ways the break-test could not
 see. Three faults injected **at once**: two tests failed correctly, the third passed for
@@ -1053,6 +1057,21 @@ The other mechanical descendants stand: `sweep.py`'s `SWEEP_BOT` / `SWEEP_TESTS`
 `SWEEP_CONSTRAINTS` overrides exist so a scanner can be pointed at a deliberately broken
 corpus, and the `source-assertion` scanner was itself break-tested by running it against the
 test suite as it stood *before* the bug it describes shipped.
+
+**Occurrences 8-9 (2026-09-29, Author-Profile-Tool, hand-run break-tests).** (8) An
+injected `throw` in `queryGutendex` landed inside the function's own `catch`, which falls back
+anyway, so the suite stayed green: the injection could not change behavior. `break-test.sh`
+fact 4 would have refused it. (9) Injecting `if (false && from)` made ts-jest fail to COMPILE
+the file ("Tests: 0 total"); red, but not on the `--from` assertion. Same shape as occurrence
+7 (`if False and` crashed). Both caught by reading the output, and both redone correctly.
+Re-read against the graduation scope: `break-test.sh` proves the injection landed and the
+command went red, but a nonzero exit does not say WHY. **Graduated further (2026-09-30):
+`break-test.sh --expect <regex>`** requires the red output to match (the failing test's name
+or message), else it refuses. Pinned by `break-test-selftest.sh` cases 7-8. The tool caught
+its own first case-8 fixture: that command failed on every run, so it was refused at the green
+step whatever `--expect` did, and the case passed with `--expect` disabled. Uncovered, stated:
+the tool is only used when a session reaches for it; in another repo (TypeScript here) it was
+not, and both slips came from the hand-run path.
 
 **Occurrence 7 (2026-08-23) — an injection that went red for the wrong reason.** Break-testing
 the new `mechanism-recurrence-surfaced` eval's undated-detector branch, the first injection was
@@ -1324,6 +1343,17 @@ interpreter. A blanket hook against root pip would false-positive legitimate iso
 root-owned venvs, so the enforceable boundary is the explicit venv path, not uid alone.
 
 ## Minor — running log
+
+- 2026-09-30 — Told the owner the `--from` commit's push "failed" because `git branch -r
+  --contains` printed nothing. `git ls-remote` then showed the commit on the remote: the push
+  had worked, it only landed after the owner merged #12. Corrected in the same session. ->
+  **ask the remote (`git ls-remote origin <branch>`) before stating what a push did.**
+- 2026-09-30 — Shipped Author-Profile-Tool PR #12 (Gutenberg marker patterns) on a guessed
+  cause for the Harris control returning license text. The real cause was that Gutendex's
+  first match was a LibriVox audiobook edition (fixed in #13). The PR text hedged the guess,
+  and the marker change is sound, but one diagnostic command before coding would have found
+  it; the one I gave also lacked `curl -L`, so it printed nothing. -> **when a cheap
+  diagnostic on the owner's side can confirm the cause, ask for it before writing the fix.**
 
 - 2026-09-29 — Chained `run-evals.sh | tail -1 && git commit ... && git push origin HEAD:main`. `tail` returns 0, so an eval failure (`claude-md-refs-resolve`, tripped by a docs filename I put in backticks in CLAUDE.md) did not stop the chain and red went to `main` at `83a0bce`. Caught by reading the "61 passed, 1 failed" line in the same command's output; fixed by rewording the doc, eval untouched, at `86bd3dd`. -> **never gate a push on a piped eval run; run the evals, read the result, then push in a separate step, or use `set -o pipefail` and `grep -q 'failed, 0'`.** Second occurrence of the same push-after-unread-result shape would need a hook.
 - 2026-09-29 — Ranked "gate the life arc/events to the owner chat" as the top next task without first reading the watchlist item and `decisions.md` 2026-09-01, where the owner had already accepted that residual and named the trigger for revisiting it. Caught while tracing, before any code; corrected to the user in the same turn. Read the decision log for any "should we change X" proposal before ranking it.
