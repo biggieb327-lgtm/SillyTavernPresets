@@ -1344,6 +1344,11 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-30 — The owner's key check printed "key captured (395 chars)" and I let it pass; a
+  NanoGPT key is far shorter, so the paste had captured other text. The next call failed with
+  Node's "invalid header value" error, which printed the key. Fixed in Author-Profile-Tool
+  (key validated and redacted from errors). -> **when a check prints a value, compare it with
+  what it should be before moving on; a length check that isn't read proves nothing.**
 - 2026-09-30 — Gave the owner `ssh root@<vps> ls ~/maren-vale` to run from Termux; the
   unquoted `~` expanded on the phone (`/data/data/com.termux/files/home/...`), so the check
   reported the copied files missing. -> **quote remote paths in ssh commands handed to the
