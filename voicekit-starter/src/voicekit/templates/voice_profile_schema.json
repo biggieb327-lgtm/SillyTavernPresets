@@ -317,6 +317,25 @@
         }
       }
     },
+    "subject_matter": {
+      "type": "object",
+      "description": "What the samples are about (themes, recurring situations), kept apart from the voice. Optional so profiles built before 0.4.0 still validate.",
+      "required": [
+        "themes",
+        "notes"
+      ],
+      "properties": {
+        "themes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
     "evaluation": {
       "type": "object",
       "required": [

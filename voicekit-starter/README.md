@@ -116,6 +116,12 @@ task/brief. `--out` is optional too; omit it to print the draft to stdout:
 voicekit generate --profile profiles/jane.json --task-file briefs/announcement.md --register email
 ```
 
+A profile keeps the author's voice apart from what the samples were about: themes and
+recurring situations go in `subject_matter`, which the generator does not see by
+default, so the draft's subject comes from the task. Add `--themes` to let the draft
+draw on the author's usual themes. The judge never sees `subject_matter`: it scores the
+voice, not the topic.
+
 ### Judge a draft
 
 ```bash

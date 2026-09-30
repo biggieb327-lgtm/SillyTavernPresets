@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — Voice kept apart from subject matter
+
+- A profile built from two short stories (Author-Profile-Tool, 2026-09-30) put the
+  stories' theme into `constraints.hard_rules` ("Focus on the psychological interplay
+  between jealousy and arousal"). Nothing in the builder told the model to separate
+  how an author writes from what the samples were about, so the generator would pull
+  every draft back to that theme and the judge would mark down an on-voice draft about
+  something else.
+- New optional `subject_matter` block (`themes`, `notes`) in the template and schema.
+  `PROFILE_BUILDER_SYSTEM` now says the voice sections must hold for any topic and that
+  themes, recurring situations, settings and character types go only in
+  `subject_matter`. Optional in the schema, so profiles built before 0.4.0 still
+  validate.
+- `voice_only()` drops `subject_matter` from the profile sent to the judge and the
+  reviser (always), and to the generator unless `generate --themes`
+  (`use_subject_matter=True`). `JUDGE_SYSTEM` adds: judge the voice, not the topic.
+
 ## 0.3.0 — Separate judge model; the rewrite is its own step
 
 - `JUDGE_SYSTEM` asked for scores, a diagnosis, priorities and a full rewrite in one

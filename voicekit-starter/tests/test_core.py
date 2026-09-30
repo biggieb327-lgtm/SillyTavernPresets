@@ -344,3 +344,64 @@ class TestJudgeRevise:
         result, _, calls = self._run(tmp_path, monkeypatch, evaluation, True)
         assert len(calls) == 1
         assert "revised_draft" not in result
+
+
+class TestSubjectMatter:
+    """subject_matter records what the samples are about; only the generator, and only
+    when asked, ever sees it."""
+
+    PROFILE = {"core_voice": {"rhythm": "short"}, "subject_matter": {"themes": ["THEMEWORD"], "notes": ""}}
+
+    def _profile(self, tmp_path):
+        p = tmp_path / "p.json"
+        p.write_text(json.dumps(self.PROFILE))
+        return p
+
+    def _calls(self, reply):
+        calls = []
+
+        def fake_call_llm(client, model, system, prompt, json_mode=False, temperature=0.4):
+            calls.append(prompt)
+            return reply(json_mode)
+        return calls, fake_call_llm
+
+    def test_voice_only_drops_subject_matter_and_leaves_other_text_alone(self):
+        from voicekit.core import voice_only
+        out = json.loads(voice_only(json.dumps(self.PROFILE)))
+        assert out == {"core_voice": {"rhythm": "short"}}
+        assert voice_only("not json") == "not json"
+        assert voice_only('{"a": 1}') == '{"a": 1}'
+
+    def test_generate_leaves_it_out_unless_asked(self, tmp_path):
+        from voicekit.core import generate
+        task = tmp_path / "t.txt"
+        task.write_text("Write about a lighthouse.")
+        calls, fake = self._calls(lambda json_mode: "Draft.")
+        with patch("voicekit.core.get_client", return_value=MagicMock()), \
+             patch("voicekit.core.call_llm", side_effect=fake):
+            generate(str(self._profile(tmp_path)), str(task), None, "essay")
+            generate(str(self._profile(tmp_path)), str(task), None, "essay", use_subject_matter=True)
+        assert "THEMEWORD" not in calls[0]
+        assert "THEMEWORD" in calls[1]
+
+    def test_judge_and_reviser_never_see_it(self, tmp_path):
+        draft = tmp_path / "d.txt"
+        draft.write_text("A draft.")
+        evaluation = {"scores": {}, "diagnosis": "d", "revision_priorities": ["p"]}
+        calls, fake = self._calls(lambda json_mode: json.dumps(evaluation) if json_mode else "Revised.")
+        with patch("voicekit.core.get_client", return_value=MagicMock()), \
+             patch("voicekit.core.call_llm", side_effect=fake):
+            judge(str(self._profile(tmp_path)), str(draft), "essay", revise_draft=True)
+        assert len(calls) == 2
+        assert all("THEMEWORD" not in c for c in calls)
+
+    def test_template_has_it_and_old_profiles_without_it_still_validate(self):
+        from voicekit.core import load_template
+        from voicekit.schemas import VOICE_PROFILE_SCHEMA
+        assert load_template()["subject_matter"] == {"themes": [], "notes": ""}
+        assert "subject_matter" not in VOICE_PROFILE_SCHEMA["required"]
+
+    def test_builder_prompt_separates_voice_from_subject(self):
+        from voicekit.prompts import PROFILE_BUILDER_SYSTEM, JUDGE_SYSTEM
+        assert "subject_matter" in PROFILE_BUILDER_SYSTEM
+        assert "Judge the voice, not the topic" in JUDGE_SYSTEM

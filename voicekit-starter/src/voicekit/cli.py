@@ -100,6 +100,12 @@ def main() -> None:
         help="Output path for the draft (default: print the draft to stdout)",
     )
     gen.add_argument("--model", help="Override the LLM model")
+    gen.add_argument(
+        "--themes",
+        action="store_true",
+        help="Also send the profile's subject_matter, so the draft may draw on the "
+        "author's usual themes (default: the subject comes from the task only)",
+    )
 
     # judge
     jdg = subparsers.add_parser(
@@ -268,6 +274,7 @@ def main() -> None:
                 register=args.register,
                 out=args.out,
                 model=args.model,
+                use_subject_matter=args.themes,
             )
             if out_path:
                 print(f"Draft saved to {out_path}")

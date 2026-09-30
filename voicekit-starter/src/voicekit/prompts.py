@@ -15,6 +15,12 @@ public persona, or anything outside the supplied corpus.
 - Base every claim on patterns observable in the provided text samples.
 - If the corpus is too short to confidently fill a field, write "insufficient data" \
 rather than guessing.
+- Separate voice from subject. core_voice, registers, constraints, evaluation and \
+generation_recipes describe HOW the author writes (sentence shape, point of view, \
+diction, pacing, stance) and must hold for a piece on any topic. WHAT the samples are \
+about (themes, recurring situations, settings, character types) goes only in \
+subject_matter. A rule like "focus on jealousy" is subject; "first person, past tense, \
+short declarative sentences at emotional peaks" is voice.
 - Output valid JSON matching the provided template structure exactly.
 - Do not add keys not present in the template.
 - Do not wrap the JSON in markdown fences or commentary.
@@ -54,6 +60,8 @@ Rules:
 sentence structure) over surface-level catchphrases or quirks.
 - Never invent facts not present in the provided facts/brief.
 - Match the requested register exactly.
+- Take the subject from the task. Only when the profile includes subject_matter, \
+draw on its themes as well.
 - Output only the draft text, no meta-commentary.
 """
 
@@ -92,6 +100,8 @@ Output format (JSON):
 
 Rules:
 - Score based on the evaluation weights in the profile.
+- Judge the voice, not the topic: never raise or lower a score because of what the \
+draft is about.
 - Be specific in diagnosis — cite sentences or patterns.
 - Each revision priority names a concrete change a writer can make.
 - Do not rewrite the draft; a separate step does that from your priorities.

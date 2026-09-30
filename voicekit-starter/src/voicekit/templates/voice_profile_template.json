@@ -90,6 +90,10 @@
     "anti_rules": [],
     "safety_notes": []
   },
+  "subject_matter": {
+    "themes": [],
+    "notes": ""
+  },
   "evaluation": {
     "weights": {
       "rhythm": 0.2,

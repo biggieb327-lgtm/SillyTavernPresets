@@ -284,6 +284,21 @@ def build_profile(
     raise RuntimeError("Unreachable: retry loop exited without return or raise")
 
 
+def voice_only(profile_json: str) -> str:
+    """The profile without subject_matter, as sent to the judge, the reviser and
+    (unless asked) the generator: what the samples were about must not pull a draft
+    back to those themes, or mark down an on-voice draft about something else.
+    Text that is not a JSON object is returned unchanged."""
+    try:
+        profile = json.loads(profile_json)
+    except json.JSONDecodeError:
+        return profile_json
+    if not isinstance(profile, dict) or "subject_matter" not in profile:
+        return profile_json
+    profile.pop("subject_matter")
+    return json.dumps(profile, indent=2, ensure_ascii=False)
+
+
 def generate(
     profile_path: str,
     task_file: str,
@@ -293,13 +308,19 @@ def generate(
     model: str | None = None,
     retries: int = 2,
     temperature: float = 0.7,
+    use_subject_matter: bool = False,
 ) -> tuple[str, Optional[Path]]:
     """Generate a draft using a voice profile.
+
+    The profile's subject_matter is left out unless use_subject_matter is set,
+    so the draft's subject comes from the task.
 
     Returns the draft text and the path it was written to (None when no
     output path was given).
     """
     profile_json = Path(profile_path).read_text(encoding="utf-8")
+    if not use_subject_matter:
+        profile_json = voice_only(profile_json)
     task_text = Path(task_file).read_text(encoding="utf-8")
     if facts_file:
         facts_text = Path(facts_file).read_text(encoding="utf-8")
@@ -380,7 +401,8 @@ def judge(
     JSON) and the path the evaluation was written to.
     """
     draft_path = Path(draft_file)
-    profile_json = Path(profile_path).read_text(encoding="utf-8")
+    # The judge and the reviser see the voice only (see voice_only)
+    profile_json = voice_only(Path(profile_path).read_text(encoding="utf-8"))
     draft_text = draft_path.read_text(encoding="utf-8")
     client = get_client()
     resolved_model = get_judge_model(model)
