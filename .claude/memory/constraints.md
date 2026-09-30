@@ -1344,6 +1344,12 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-30 — Gave the owner a pasteable block that began with `read -rsp ... K`. Pasted as a
+  block, `read` takes the NEXT LINE OF THE PASTE as its input, so the key never reached `K`;
+  three attempts failed, the settings file was corrupted, and one full key reached the chat.
+  I blamed the owner's pasting twice before seeing it. -> **never put `read` (or any command
+  that reads stdin) in a block meant to be pasted whole; for a secret, use an editor
+  (`nano <file>`) on a file written with a placeholder.**
 - 2026-09-30 — The owner's key check printed "key captured (395 chars)" and I let it pass; a
   NanoGPT key is far shorter, so the paste had captured other text. The next call failed with
   Node's "invalid header value" error, which printed the key. Fixed in Author-Profile-Tool
