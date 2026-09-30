@@ -1344,6 +1344,10 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-09-30 — Gave the owner `ssh root@<vps> ls ~/maren-vale` to run from Termux; the
+  unquoted `~` expanded on the phone (`/data/data/com.termux/files/home/...`), so the check
+  reported the copied files missing. -> **quote remote paths in ssh commands handed to the
+  owner: `ssh host 'ls ~/dir'`.**
 - 2026-09-30 — Told the owner the `--from` commit's push "failed" because `git branch -r
   --contains` printed nothing. `git ls-remote` then showed the commit on the remote: the push
   had worked, it only landed after the owner merged #12. Corrected in the same session. ->
