@@ -145,6 +145,104 @@ def check(text: str) -> list:
     return found
 
 
+# --- second classifier: claims about an EXTERNAL or runtime property ------------------------
+# C5's uncovered half had a repeat shape with no code name in it (2026-09-04, twice): a vendor's
+# billing ("a rejected call bills nothing") and a resource ceiling ("can't fit a 16k fallback,
+# ~1,800 over") stated as fact. The first was never checked; the second came from an "e.g." in
+# the changelog and the measured window turned out to be ~19,859. Two shapes are checked:
+#   billing  a metering verb (bills, billed, charged, metered, counts against ...)
+#   capacity a token quantity ("16k", "1,800 tokens", "19,859-token") or a request rate
+#            ("60 requests/min", RPM) next to a ceiling word (window, limit, fit, over ...)
+# Such a line passes only if it is hedged, cites a source (a URL or a repo file path), or at
+# least one of its numbers appears in the output of a command that EXECUTED this session and
+# did not error. A number seen only in a file read or a grep does not count: that is the 16k
+# case exactly. Limits: "one number was printed" is not "the claim was measured" (an
+# arithmetic line passes on one measured operand); vendor-behavior claims with neither a
+# billing verb nor a number ("NanoGPT returns 400 on oversize") are not seen.
+EXT_BILLING = re.compile(
+    r"\b(?:bills?|billed|charged|charges|metered|meters|unmetered|free\s+of\s+charge|"
+    r"costs?\s+nothing)\b"
+    r"|\b(?:counts?|counted|deducted)\s+(?:against|toward|from)\s+(?:the\s+|your\s+|our\s+|its\s+)?"
+    r"(?:weekly\s+|daily\s+|monthly\s+|account\s+)?(?:quota|allowance|balance|bill|credits?)\b", re.I)
+EXT_QUANTITY = re.compile(
+    r"\b\d[\d,]*(?:\.\d+)?\s*(?:k\b|-?\s*tokens?\b)"
+    r"|\b\d[\d,]*\s*(?:requests?|calls?|messages?)\s*(?:/|\s+per\s+)\s*(?:s|sec|second|min|minute|hour|day)\b"
+    r"|\b\d[\d,]*\s*(?:RPM|TPM|RPD)\b", re.I)
+EXT_CEILING = re.compile(
+    r"\b(?:window|context|limit|limits|ceiling|cap|capped|max|maximum|fits?|fitting|over|under|"
+    r"exceeds?|exceeded|exceeding|allowance|quota|serves?|served|accepts?|accepted|rejects?|"
+    r"rejected|throttled?|rate)\b", re.I)
+EXT_HEDGE = re.compile(r"\b(?:unknown|unmeasured|unconfirmed|not\s+(?:yet\s+)?(?:measured|"
+                       r"verified|confirmed|checked)|guess(?:ed)?|assum(?:e|ed|ing|ption))\b", re.I)
+EXT_SOURCE = re.compile(r"https?://\S+|\b[\w-]+\.(?:md|py|sh|json|example|txt|lock|toml|ya?ml)\b")
+NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?k?", re.I)
+
+
+def check_external(text: str) -> list:
+    """Unhedged, unsourced claims about a billing or capacity property, as (quoted line,
+    [numbers on the line]). Independent of check(): it looks for no code name."""
+    if ESCAPE.search(text):
+        return []
+    found = []
+    in_fence = False
+    for line in text.splitlines():
+        s = line.strip()
+        if CODE_FENCE.match(s):
+            in_fence = not in_fence
+            continue
+        if in_fence or len(s) < 20 or s.startswith(("$", "|", "#", ">")):
+            continue
+        if HEDGE.search(s) or EXT_HEDGE.search(s) or DOCDESC.search(s) or EXT_SOURCE.search(s):
+            continue
+        billing = EXT_BILLING.search(s)
+        capacity = EXT_QUANTITY.search(s) and EXT_CEILING.search(s)
+        if billing or capacity:
+            nums = [m.group(0) for m in NUMBER.finditer(s)]
+            found.append(("  " + (s[:150] + ("…" if len(s) > 150 else "")), nums))
+    return found
+
+
+def _number_forms(num: str) -> set:
+    """Spellings a printed value could take: "19,859" -> {19,859, 19859}; "16k" -> {16k,
+    16000, 16384}."""
+    bare = num.replace(",", "").lower()
+    forms = {num, bare}
+    if bare.endswith("k"):
+        try:
+            v = float(bare[:-1])
+            forms |= {str(int(v * 1000)), str(int(v * 1024))}
+        except ValueError:
+            pass
+    return {f for f in forms if f}
+
+
+def measured(path: str, nums: list) -> bool:
+    """True if any of `nums` appears in the output of a Bash command that executed (not
+    only searched or printed files) and did not error, before the final message."""
+    if not nums:
+        return False
+    uses, outputs = {}, []
+    for r in _prior_records(path):
+        content = (r.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("name") == "Bash":
+                uses[b.get("id")] = str((b.get("input") or {}).get("command", ""))
+            elif b.get("type") == "tool_result" and not b.get("is_error"):
+                cmd = uses.get(b.get("tool_use_id"))
+                if cmd is not None and not _look_only(cmd):
+                    outputs.append(_text_of(b.get("content")).replace(",", ""))
+    blob = "\n".join(outputs)
+    for n in nums:
+        for f in _number_forms(n):
+            if re.search(r"(?<![\d.])" + re.escape(f.replace(",", "")) + r"(?![\d])", blob):
+                return True
+    return False
+
+
 def _look_only(cmd: str) -> bool:
     """True when every command in `cmd` only reads or searches (heredoc bodies ignored)."""
     body = HEREDOC.sub("\n", cmd)
@@ -168,25 +266,30 @@ def _text_of(content) -> str:
     return ""
 
 
-def evidence(path: str, names: list) -> dict:
-    """{name: "run" | "read" | "none"} from every tool call and result in the transcript
-    before the final assistant message."""
-    level = {n: "none" for n in names}
-    if not names:
-        return level
+def _prior_records(path: str) -> list:
+    """Transcript records before the final assistant text message ([] if unreadable)."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             recs = [json.loads(l) for l in fh if l.strip()]
     except (OSError, ValueError):
-        return level
+        return []
     last_text = max((i for i, r in enumerate(recs)
                      if (r.get("message") or {}).get("role") == "assistant"
                      and any(isinstance(c, dict) and c.get("type") == "text"
                              for c in ((r.get("message") or {}).get("content") or [])
                              if isinstance((r.get("message") or {}).get("content"), list))),
                     default=len(recs))
+    return recs[:last_text]
+
+
+def evidence(path: str, names: list) -> dict:
+    """{name: "run" | "read" | "none"} from every tool call and result in the transcript
+    before the final assistant message."""
+    level = {n: "none" for n in names}
+    if not names:
+        return level
     uses, errored = {}, set()
-    for r in recs[:last_text]:
+    for r in _prior_records(path):
         content = (r.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
@@ -228,7 +331,10 @@ def main() -> int:
     if not text:
         return 0
     found = check(text)
-    if not found:
+    external = [line + "\n    evidence: no source cited and none of its numbers came from a "
+                "command run this session" for line, nums in check_external(text)
+                if not measured(path, nums)]
+    if not found and not external:
         return 0
     ev = evidence(path, sorted({n for _, names in found for n in names}))
     blocking = []
@@ -241,8 +347,15 @@ def main() -> int:
                                          "run": "run"}[ev.get(n, "none")] for n in names)
             line += f"\n    evidence: {why}"
         blocking.append(line)
+    if external:
+        sys.stderr.write(
+            "[theory-guard] C5 (.claude/memory/constraints.md) — a claim about an external or "
+            "runtime property (billing, a limit, a window) was stated as fact:\n"
+            + "\n".join(external[:3])
+            + "\n Measure it and paste the number, cite the source (URL or file), or say it is "
+              "unverified. An \"e.g.\" in a doc is an illustration, not a measurement.\n")
     if not blocking:
-        return 0
+        return 2 if external else 0
     sys.stderr.write(
         "[theory-guard] C5 (.claude/memory/constraints.md) — a behavioral claim was stated "
         "without hedging:\n" + "\n".join(blocking[:3])

@@ -325,6 +325,98 @@ if [ -f .claude/hooks/theory_guard.py ]; then
   fi
 fi
 
+# --- theory-guard-external-evidence -----------------------------------------------------
+# theory_guard.py's second classifier (check_external) covers C5's uncovered half: a claim
+# about an external or runtime property with no code name in it. Pinned on the two
+# 2026-09-04 occurrences: "a rejected call bills nothing" (never checked) and Jules "can't
+# fit a 16k fallback, ~1,800 over" (16k from a changelog "e.g."; measured window ~19,859).
+# Each must BLOCK as written, PASS once a command run this session printed its number or a
+# source is cited, and still BLOCK when the number was only read from a file. Ordinary
+# prose and the named-code path must not change. Break-test built in: with check_external
+# stubbed out, the historical fixtures must pass — proving they are red only because of
+# the new check, not by accident of the old one.
+if [ -f .claude/hooks/theory_guard.py ]; then
+  if tge_out=$(python3 - 2>&1 <<'PYEOF'
+import io, json, os, subprocess, sys, tempfile
+sys.path.insert(0, ".claude/hooks")
+import theory_guard as tg
+
+def say(t):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}}
+
+def bash(uid, cmd, out):
+    return [{"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": uid, "name": "Bash", "input": {"command": cmd}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": uid, "content": out, "is_error": False}]}}]
+
+def hook(recs):
+    """The real Stop-hook path: a transcript file, the payload on stdin, the exit code."""
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as tf:
+        tf.write("\n".join(json.dumps(r) for r in recs) + "\n")
+    try:
+        return subprocess.run([sys.executable, ".claude/hooks/theory_guard.py"],
+                              input=json.dumps({"transcript_path": tf.name}),
+                              capture_output=True, text=True, timeout=20).returncode
+    finally:
+        os.unlink(tf.name)
+
+BILLS = "A rejected call bills nothing, so the probe can start at the 140,000 ceiling."
+JULES = "Jules can't fit a 16k fallback at all: she's ~1,800 tokens over before a single word of history."
+WINDOW = "The fallback serves a ~19,859-token window, so Jules fits with room to spare."
+PROBE = bash("p", "python3 .claude/tools/probe-context.py --model magnum --budget 150000",
+             "accepted 19859  rejected 20375  -> window ~19859")
+HIST = [("bills nothing", [say(BILLS)]), ("16k fallback", [say(JULES)])]
+CASES = [
+    # (want exit, label, transcript)
+    *[(2, "historical, as written: " + l, r) for l, r in HIST],
+    (2, "16k only read from the changelog",
+     bash("g", "grep -n 'e.g. 16k' telegram-companion-bot/CHANGELOG.md", "719: (e.g. 16k vs 128k)") + [say(JULES)]),
+    (2, "window only read from a file", bash("c", "cat .env.example", "~19,859") + [say(WINDOW)]),
+    (0, "billing claim with a measurement",
+     bash("b", "python3 balance.py --before --call oversize --after", "before 4.20 after 4.20")
+     + [say("The rejected call billed nothing: the balance read 4.20 before and after.")]),
+    (0, "window claim with a measurement", PROBE + [say(WINDOW)]),
+    (0, "16k claim citing its source", [say("The changelog's illustration puts a fallback at 16k tokens "
+                                            "(CHANGELOG.md), which would leave Jules ~1,800 over.")]),
+    (0, "billing claim hedged", [say("Whether a rejected call bills anything is unknown; nobody measured it.")]),
+    (0, "ordinary prose", [say("The root cause was a stale checkout on the VPS, fixed by a re-sync.")]),
+    (0, "ordinary counts", [say("Ran 1598 tests and 59 evals; everything came back green.")]),
+    (0, "named-code claim, run", bash("r", "python3 .claude/tools/probe.py 'bot._strip_slop(\"x\")'", "-> 'x'")
+     + [say("Result: `_strip_slop` left the reply unchanged.")]),
+    (2, "named-code claim, never run (old path)", [say("Result: `_strip_slop` stripped the opener.")]),
+]
+bad = []
+for want, label, recs in CASES:
+    got = hook(recs)
+    if got != want:
+        bad.append(f"{label}: exit {got}, want {want}")
+
+# Break-test: stub out the new classifier; the historical fixtures must then PASS.
+tg.check_external = lambda text: []
+for label, recs in HIST:
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as tf:
+        tf.write("\n".join(json.dumps(r) for r in recs) + "\n")
+    old_in, old_err = sys.stdin, sys.stderr
+    sys.stdin, sys.stderr = io.StringIO(json.dumps({"transcript_path": tf.name})), io.StringIO()
+    try:
+        got = tg.main()
+    finally:
+        sys.stdin, sys.stderr = old_in, old_err
+        os.unlink(tf.name)
+    if got != 0:
+        bad.append(f"break-test: '{label}' still blocks with check_external removed (exit {got}) "
+                   "— the fixture is red for some other reason, so it does not pin the new check")
+print("\n".join(bad) if bad else f"{len(CASES)} cases + {len(HIST)} break-tests")
+sys.exit(1 if bad else 0)
+PYEOF
+  ); then
+    ok "theory-guard-external-evidence: billing/capacity claims block unless measured, sourced or hedged (${tge_out})"
+  else
+    bad "theory-guard-external-evidence" "$(printf '%s\n' "$tge_out" | head -5)"
+  fi
+fi
+
 # --- anchor-guard-cases ----------------------------------------------------------------
 # anchor-guard.sh (C7) blocks an in-place sed addressed by line number. Its case matrix was
 # only ever run by hand, and on 2026-09-29 a line-addressed sed on a repo file ran unblocked
