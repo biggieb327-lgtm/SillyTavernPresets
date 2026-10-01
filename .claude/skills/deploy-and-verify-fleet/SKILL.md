@@ -39,6 +39,23 @@ and manage nothing now** — do not hand them to the user.
 
 ## Procedure
 
+**Owner preference (2026-10-01): always hand over ONE paste that deploys the whole fleet,**
+not seven separate lines. Pick the block that fits the release:
+
+```bash
+# bot.py / code-only release: deploy nora as the canary, and promote its tested release
+# to every active bot only if the canary deploy succeeded.
+S=/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh; $S nora && $S --promote nora
+```
+```bash
+# Cards or preset layers changed too: a full deploy of each instance, stopping at the
+# first failure so a broken release does not spread.
+S=/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh; for i in nora bonnie cass emily priya jules marcus; do $S "$i" || { echo "STOPPED at $i"; break; }; done
+```
+`--promote` only reaches units that are currently active (`active_instances`); a stopped
+bot needs its own `vps-sync.sh <instance>`. The sections below explain each step.
+
+
 **Start with one canary** — this covers code, card, and preset layers for that instance:
 ```bash
 # host: VPS (as root). NOT curl-piped: the deploy reads the whole locked release from

@@ -48,8 +48,9 @@ deliberate — go to the owner.
    red main is a fleet-wide deploy blocker. Report the head SHA and the conclusion, not
    "CI is green" — an unpolled claim is an assumption wearing a fact's clothes.
 
-6. **Hand off the deploy.** All seven instances, one `vps-sync.sh` invocation each, run
-   sequentially on the VPS as root. Then `/audit` per instance showing the new
+6. **Hand off the deploy.** One paste for all seven instances, run on the VPS as root
+   (owner preference, 2026-10-01; the exact one-liners are in `deploy-and-verify-fleet`
+   § Procedure). Then `/audit` per instance showing the new
    BOT_VERSION — the only proof a running process picked the change up. Owner:
    `deploy-and-verify-fleet`, which has the exact block and the rollback.
 

@@ -82,6 +82,13 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-10-01 | Fleet deploys are handed over as one paste built on the existing --promote, not a new vps-sync.sh --all mode | status: current
+**Decided:** sessions hand the owner one paste for the whole fleet: `$S nora && $S --promote nora` for a code-only release, or a stop-at-first-failure loop of `vps-sync.sh <instance>` when cards or preset layers changed. Both live in `deploy-and-verify-fleet` § Procedure.
+**Over:** (a) a `vps-sync.sh --all` mode that full-deploys every instance — lost because `--promote` already moves every active bot onto the canary's tested release in one locked step, and an `--all` would skip the canary and restart all seven on an untested release at once; (b) seven separate lines per handoff, as before — lost because the owner asked for one command.
+**Why:** the one-liners give one paste while keeping the canary: `&&` stops the promote when nora's deploy fails, and the loop stops at the first failing instance.
+**By:** owner asked for one command (or a standing note); a session chose the note over a script change.
+**Detail:** —
+
 ### 2026-09-29 | Selfie pronouns are an explicit per-instance setting that rewrites the prompt, not detected from the card | status: current
 **Decided:** `SELFIE_PRONOUNS` (`she` default, `he`; v2026-09-29.1) makes `_selfie_gender` rewrite the assembled `build_selfie_prompt` text and drops feminine-coded pool entries at load. Marcus's `.env` sets `he`; every other instance is unchanged.
 **Over:** (1) detect gender from `appearance.txt` or the card: a guess in prompt-building code, wrong silently for an ambiguous or non-binary character, and unlike every other per-instance setting, which is explicit in `.env`. (2) per-gender copies of every pool and rule: a second copy of about 15 constants that drifts from the first. (3) `they`: needs verb agreement ("they are", "they're"), so the regex rewrite would produce broken grammar; not supported until a character needs it. (4) do nothing and rely on the image model reading the appearance text: the prompt said "this exact woman" outright, which contradicts it.

@@ -121,10 +121,11 @@ Your job ends at "merged, green, deploy instructions given."
    closed an operational-log "Next" item, note it there.
 
 10. **Hand off the deploy.** Tell the user exactly:
-   - `/opt/telegram-bots/.repo/telegram-companion-bot/deploy/vps-sync.sh <instance>`,
-     once per instance (nora, bonnie, cass, emily, priya, jules, marcus) — it fetches
-     and hard-resets the checkout to `origin/main`, so it's correct even if the
-     on-disk checkout is stale.
+   - ONE paste that deploys the whole fleet (owner preference, 2026-10-01) — the
+     code-only one-liner (`$S nora && $S --promote nora`) or the card/preset loop,
+     both in `deploy-and-verify-fleet` § Procedure. `vps-sync.sh` fetches and
+     hard-resets the checkout to `origin/main`, so it's correct even if the on-disk
+     checkout is stale.
    - `/audit` on each instance afterward — MUST show the new BOT_VERSION.
    - Full command block, verification, and rollback: `deploy-and-verify-fleet`.
 
