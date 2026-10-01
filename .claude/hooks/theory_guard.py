@@ -15,11 +15,16 @@ without hedging. Two kinds of line are checked:
      none  the name appears in no tool call or output this session  -> BLOCK: never looked
 2. A claim whose subject is a plain word ("the bot output ...") — no name to look up, so the
    original rule applies: BLOCK unless hedged.
+3. Since 2026-10-01, `check_external`: a claim about a billing or capacity property of an
+   external service or the runtime ("bills nothing", "a 16k window", "~1,800 tokens over").
+   No name to look up, so the evidence is a NUMBER: it passes if hedged, sourced (URL or
+   file), or one of its numbers was printed by a command executed this session. Rules and
+   limits are at `check_external`.
 
 Limits, stated so nobody reads more into a pass than it holds: "run" means the name was
 executed in some command this session, not that the command tested the exact behavior now
 claimed. A claim that names nothing ("never checked", "nothing like that exists") is C5's
-uncovered half; this guard cannot see it. Nor, since 2026-09-25, a claim built on a noun
+uncovered half; this guard cannot see it, except the billing/capacity slice (3). Nor, since 2026-09-25, a claim built on a noun
 phrase ("the bot output always ends on a question"): matching "<word> output" as a verb
 blocked correct sentences ("raw model output") far more often than it caught one.
 

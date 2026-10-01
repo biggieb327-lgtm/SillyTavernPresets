@@ -397,6 +397,20 @@ command. Replayed on the day's transcript: the wrong `_strip_persona_breaks` cla
 that name nothing, and noun-phrase claims ("the bot output ends on a question"). Pinned by the
 `theory-guard-evidence` eval (runs `--selftest`).
 
+**Widened again 2026-10-01 (monthly improvement review):** the two 2026-09-04 entries shared
+a shape the guard could not see — a billing or capacity property of an external service,
+stated with no code name in it. `check_external` in `theory_guard.py` now blocks a line with
+a metering verb ("bills", "charged", "counts against the quota") or a token quantity/rate
+next to a ceiling word ("16k ... fit", "~1,800 tokens over"), unless it is hedged, cites a
+URL or file, or one of its numbers was printed by a command executed this session. A number
+seen only in a Read or grep does not count — that is the 16k case exactly. Pinned by the
+`theory-guard-external-evidence` eval (both historical lines red as written, green with a
+measurement or source, still red when only read; built-in break-test). Still uncovered:
+vendor-behavior claims with neither a billing verb nor a number, and planning-risk labels
+(2026-08-31). On 9,941 doc lines from six repo files it fired 17 times; several hits were
+the C5 shape itself (the changelog's "e.g. 16k" line, "the provider bills it as completion
+tokens").
+
 ### C6 — A migration invalidates assertions, not just docs
 **seen: 1** (2026-07-26)
 After the VPS cutover, a *test* still asserted phone-era behaviour as correct

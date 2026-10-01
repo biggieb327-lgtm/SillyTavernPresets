@@ -167,6 +167,18 @@ narrowed by a pre-merge `/code-review`, and group chats were excluded by
 GROUP_CHAT_DESIGN.md §5 (no writes to per-instance files from a group).
 **Detail:** `telegram-companion-bot/CHANGELOG.md` v2026-09-26.1; ROADMAP 7.7, 7.8.
 
+### 2026-10-01 | External-property claims need a printed number or a cited source, not a self-applied tag | status: current
+**Decided:** `check_external` accepts a billing/capacity claim when it is hedged, cites a URL or
+file, or one of its numbers appears in the output of a Bash command that executed (not a
+Read, grep or cat) and did not error this session.
+**Over:** the monthly review's proposal to accept an `[external]`/`[observed]` marker "plus
+supporting evidence". A tag is self-applied and the guard cannot check the evidence behind it,
+so it would pass the exact 2026-09-04 failure with a tag added. A number in executed output is
+checkable from the transcript the hook already gets, the same evidence model C5's code half uses.
+**Why:** the 16k figure was read from a file; "read only" must block, and only the source of the
+number separates it from the measured ~19,859.
+**By:** session `ccr-b9ac7c03-albfqt`, 2026-10-01. **Detail:** `theory_guard.py` `check_external`.
+
 ### 2026-09-25 | theory-guard reads the session transcript for evidence; no new ledger hook | status: current
 **Decided:** C5's Stop hook checks a code-shaped claim against the transcript it already receives
 (`transcript_path`): the name ran in a non-search Bash command that did not error → pass; only

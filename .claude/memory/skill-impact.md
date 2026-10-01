@@ -96,6 +96,19 @@ judged alone, and 11 fixture cases run in CI (the hook had none before).
 inside quotes), or line-index splicing in a Python heredoc, which stays prose by design.
 Refs: constraints C7 (Occurrence 7, reviewed 2026-09-30), eval `anchor-guard-cases`.
 
+### 2026-10-01 | intervention: `check_external` in `theory_guard.py` | class: external billing/capacity property stated as fact (C5, formerly uncovered half) | status: pending
+Two 2026-09-04 C5 entries — "a rejected call bills nothing" and Jules "can't fit a 16k
+fallback, ~1,800 over" (16k from a changelog "e.g."; measured ~19,859) — had no code name, so
+the guard could not see them. A metering claim, or a token quantity/rate next to a ceiling word,
+now passes only if hedged, sourced, or one of its numbers was printed by an executed command.
+**Holds when:** the next C5 entries about a vendor limit, quota or price are guard catches,
+and no entry shows a wrong external number stated to the owner that got through.
+**Recurrence shape to expect:** a wrong claim whose number happened to be printed by an
+unrelated command; a claim with no number ("NanoGPT rejects oversize with 400"); or false
+positives on internal token budgets that train sessions to hedge everything — watch for
+`# theory-ok` showing up on token-count lines.
+Refs: constraints C5 (Widened again 2026-10-01), eval `theory-guard-external-evidence`.
+
 ### 2026-09-25 | intervention: evidence-aware `theory_guard.py` + `.claude/tools/probe.py` | class: behavioral claim about named code stated without running it (C5, covered half) | status: pending
 C5 reached seen 13, three in one session: two claims true but unevidenced, one wrong
 (`_strip_persona_breaks`, never run, argued for a design dependency). The old guard matched

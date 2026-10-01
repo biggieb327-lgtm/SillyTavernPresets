@@ -4,8 +4,10 @@
 # SCOPE: catches one slice — asserting what a named function does without hedging.
 # Since 2026-09-25 a code-shaped claim is checked against the session transcript:
 # run earlier this session -> pass; only read, or never seen -> block (theory_guard.py
-# docstring has the rules and limits). The general case (diagnosing an incident and
-# stating a cause as fact) has no mechanical signature.
+# docstring has the rules and limits). Since 2026-10-01 it also blocks a claim about an
+# external billing or capacity property (a quota, a window, "bills nothing") unless hedged,
+# sourced, or one of its numbers came from a command run this session. The general case
+# (diagnosing an incident and stating a cause as fact) has no mechanical signature.
 #
 # Verify cheaply: python3 .claude/tools/probe.py 'bot.<fn>(...)'
 # Escape hatch: `# theory-ok` anywhere in the message. Hedging language
