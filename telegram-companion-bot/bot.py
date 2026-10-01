@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-09-29.1"
+BOT_VERSION = "2026-10-01.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -8025,6 +8025,32 @@ _REASONING_LEAK_MIN_MARKERS = _env_int("REASONING_LEAK_MIN_MARKERS", "3")
 _OUTLINE_HEADER_RE = re.compile(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*\*\*[^*\n]{1,80}:\*\*")
 _OUTLINE_HEADER_MIN = _env_int("REASONING_LEAK_OUTLINE_HEADERS", "4")
 _OUTLINE_HEADER_MIN_CHARS = _env_int("REASONING_LEAK_OUTLINE_MIN_CHARS", "600")
+# Draft-then-final leak (nora, 2026-10-01). A thinking model wrote a draft of her
+# proactive message, then a short note to itself in plain prose ("...the prompt
+# instructions emphasize reaching out *first*... I will break the loop by sending a brief
+# text.)"), then the final message, all in `content`. About 700 chars, so both length
+# floors above passed it, and it has no outline headers. What it does have: the final
+# message repeats whole sentences of the draft verbatim. A real texting reply does not
+# say the same long sentence twice, so one repeated sentence of at least this many
+# characters is enough on its own. 0 turns this check off.
+_REPEAT_SENTENCE_MIN_CHARS = _env_int("REASONING_LEAK_REPEAT_MIN_CHARS", "40")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _has_repeated_sentence(text: str, min_chars: int) -> bool:
+    """True when one sentence of at least min_chars appears twice (case and spacing
+    ignored) — the shape of a draft followed by its final version."""
+    if min_chars <= 0:
+        return False
+    seen = set()
+    for raw in _SENTENCE_SPLIT_RE.split(text):
+        sent = " ".join(raw.split()).lower()
+        if len(sent) < min_chars:
+            continue
+        if sent in seen:
+            return True
+        seen.add(sent)
+    return False
 
 
 def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
@@ -8058,6 +8084,8 @@ def _looks_like_reasoning_leak(text: str, name: str = "") -> bool:
     # (emily, 2026-08-27).
     if len(text) >= _OUTLINE_HEADER_MIN_CHARS and \
             len(_OUTLINE_HEADER_RE.findall(text)) >= _OUTLINE_HEADER_MIN:
+        return True
+    if _has_repeated_sentence(text, _REPEAT_SENTENCE_MIN_CHARS):
         return True
     if len(text) < _REASONING_LEAK_MIN_CHARS:
         return False

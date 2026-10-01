@@ -148,7 +148,17 @@ prose-in-code, so a future tool that spends a shared quota gets no help from thi
 Refs: oplog 2026-09-04 (weekly-quota fallback storm); constraints C5 (seen 9, both
 2026-09-04 occurrences); commits 26facec, 8e74cc2, 157b447.
 
-### 2026-08-27 | intervention: v2026-08-27.1 structural short-circuit in `_looks_like_reasoning_leak` | class: reasoning-leak (model deliberation delivered as the reply) | status: pending
+### 2026-10-01 | intervention: v2026-10-01.1 repeated-sentence check in `_looks_like_reasoning_leak` | class: reasoning-leak | status: pending
+A completion that says the same sentence of 40+ characters twice (draft, then final) is
+re-rolled, with no length floor. Added after nora's ~860-char proactive leak passed both
+length-floored checks.
+**Holds when:** no reasoning-leak recurrence across a fleet-wide window after deploy (watch
+`/errors` and `leak_samples/`). Residual → recurrence shape to expect: a short leak whose
+draft and final share no sentence word for word. The cure is still the model-family
+decision noted in the 2026-08-27 entry.
+Refs: oplog 2026-10-01; changelog v2026-10-01.1; `tests/leak_corpus/leak/nora-2026-10-01-draft-then-final.txt`.
+
+### 2026-08-27 | intervention: v2026-08-27.1 structural short-circuit in `_looks_like_reasoning_leak` | class: reasoning-leak (model deliberation delivered as the reply) | status: recurred
 Replaced vocabulary-matching with a structural rule: ≥4 line-anchored markdown bold-colon
 headers (`**Goal:**`, `1. **State:**`) over a 600-char floor → re-roll, whatever words fill
 the outline. Vocabulary- and name-independent, so it should catch a *novel* self-invented
@@ -160,6 +170,8 @@ whose headers all wrap across lines (rare) still evades. Separately open and NOT
 this guard: the *cure* is a model-family decision — every thinking model tried (glm-4.7/5/5.1
 `:thinking`) leaks — raised with the owner, not made.
 Refs: oplog 2026-08-27; changelog v2026-08-27.1; `TestReasoningLeakGuard` (`OUTLINE_LEAK`).
+**Recurred 2026-10-01:** nora leaked a short draft + note + final (~860 chars, no headers),
+under this rule's floor and shape. See the 2026-10-01 entry.
 
 ### 2026-08-25 | intervention: v2026-08-25.1 widened `_REASONING_MARKERS` with preset planning vocabulary | class: reasoning-leak | status: recurred
 Added the preset's private-planning labels (`epistemic check`, `rule priority`, …) as a

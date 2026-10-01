@@ -10654,6 +10654,48 @@ Action beat: reaching out or observing.
         assert len(bot._OUTLINE_HEADER_RE.findall(txt)) == 3
         assert not bot._looks_like_reasoning_leak(txt, "Emily Harper")
 
+    # -- v2026-10-01.1: draft, note to itself, final — short, no headers, repeated sentence --
+
+    DRAFT_LEAK = (
+        "Ballard run is suspiciously peaceful. I'm convinced the city is lulling me into a "
+        "false sense of security before dumping a monsoon on me during the next drop.\n\n"
+        "Also my knees have officially filed a grievance against the Seneca gravel alley must "
+        "be deferring if it keeps resulting in Nora shouting into the void. But the prompt "
+        "instructions emphasize reaching out *first* with a short, natural message. I will "
+        "break the loop by sending a brief text.)\n\n"
+        "Ballard run is suspiciously peaceful. I'm convinced the city is lulling me into a "
+        "false sense of security before dumping a monsoon on me during the next drop.\n\n"
+        "Also my knees have officially filed a grievance against that gravel shortcut.")
+
+    def test_draft_then_final_leak_trips_it(self):
+        assert len(self.DRAFT_LEAK) < bot._OUTLINE_HEADER_MIN_CHARS + 200
+        assert bot._looks_like_reasoning_leak(self.DRAFT_LEAK, "Nora Ashford")
+
+    def test_final_message_alone_passes(self):
+        final = self.DRAFT_LEAK.split(".)\n\n", 1)[1]
+        assert not bot._looks_like_reasoning_leak(final, "Nora Ashford")
+
+    def test_short_repeats_do_not_trip(self):
+        """Repeating a short line ("no. no. no.", "i miss you. i miss you.") is ordinary
+        texting; only a sentence at or over the floor counts."""
+        txt = "i miss you. i miss you. come home soon okay?\nno. no. no."
+        assert not bot._looks_like_reasoning_leak(txt, "Nora Ashford")
+
+    def test_repeat_match_ignores_case_and_spacing(self):
+        s = "I'm convinced the city is lulling me into a false sense of security."
+        assert bot._has_repeated_sentence(s + "\n\n" + s.lower().replace(" ", "  "), 40)
+
+    def test_repeat_floor_zero_turns_it_off(self, monkeypatch):
+        monkeypatch.setattr(bot, "_REPEAT_SENTENCE_MIN_CHARS", 0)
+        assert not bot._looks_like_reasoning_leak(self.DRAFT_LEAK, "Nora Ashford")
+
+    def test_draft_leak_rerolls_through_call_nanogpt(self, monkeypatch):
+        calls = self._patch_calls(monkeypatch, [self.DRAFT_LEAK, "ballard was quiet. too quiet."])
+        out = bot.call_nanogpt([{"role": "user", "content": "hi"}],
+                               model="thinker", fallback="plain", leak_guard=True)
+        assert out == "ballard was quiet. too quiet."
+        assert calls == ["thinker", "thinker"]
+
     # -- wiring: rejection inside call_nanogpt, exactly like an empty completion --
 
     def _patch_calls(self, monkeypatch, outputs):

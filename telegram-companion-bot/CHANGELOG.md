@@ -7,6 +7,35 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-10-01.1 — Reasoning-leak guard catches a draft followed by its final version
+
+**Root cause: both checks in `_looks_like_reasoning_leak` have a length floor, and this leak
+was short.** Nora's proactive message (`send_triggered`) went out as: a draft of the
+message, a plain-prose note to itself ("...the prompt instructions emphasize reaching out
+*first*... I will break the loop by sending a brief text.)"), then the final message, all
+in `content`, with no `<think>` tags. It was about 860 characters. The vocabulary check
+only runs at 2000+ (`REASONING_LEAK_MIN_CHARS`), and the outline check needs markdown
+`**Label:**` headers, which this had none of. So the guard passed it and Telegram got it.
+
+**Fix:** new `_has_repeated_sentence(text, min_chars)`. A completion that contains the
+same sentence of at least `REASONING_LEAK_REPEAT_MIN_CHARS` (default 40) characters twice
+(case and spacing ignored) is rejected and re-rolled, the same as the other two checks.
+That is the shape of a draft followed by its final version: the final copies whole
+sentences of the draft. It has no length floor. Short repeats ("i miss you. i miss you.")
+are under 40 characters and do not count. It never salvages the final half, same policy
+as before: there is no reliable boundary.
+
+**Tests:** the delivered text is in `tests/leak_corpus/leak/nora-2026-10-01-draft-then-final.txt`.
+With `REASONING_LEAK_REPEAT_MIN_CHARS=0` that corpus case fails (break-test), and every
+card greeting and clean sample still passes with the check on. `TestReasoningLeakGuard`
+adds the final message alone passing, short repeats passing, the floor of 0 turning it off,
+and a re-roll through `call_nanogpt`.
+
+**Not covered:** a leak whose draft and final share no sentence word for word. The guard
+is still the backstop; the model writing notes into `content` is the cause.
+**Kill switch:** `REASONING_LEAK_REPEAT_MIN_CHARS=0` turns off this check only;
+`REASONING_LEAK_GUARD=0` still turns off the whole guard.
+
 ## v2026-09-29.1 — `SELFIE_PRONOUNS`: Marcus's selfie prompt no longer says "woman"
 
 **Root cause: every selfie pool and rule is written in she-wording and nothing let an
