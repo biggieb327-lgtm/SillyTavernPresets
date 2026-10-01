@@ -5,7 +5,7 @@
 kind	name	firings	days	first	last
 hook	anchor-guard.sh	4	1	2026-09-29	2026-09-29
 hook	budget-governor.sh	2	2	2026-09-29	2026-09-30
-hook	debrief-nudge.sh	4	4	2026-09-24	2026-09-29
+hook	debrief-nudge.sh	5	5	2026-09-24	2026-10-01
 hook	risk-guard.sh	2	1	2026-09-29	2026-09-29
 hook	shell-semantics-guard.sh	1	1	2026-09-25	2026-09-25
 hook	theory-guard.sh	5	4	2026-09-24	2026-09-30
