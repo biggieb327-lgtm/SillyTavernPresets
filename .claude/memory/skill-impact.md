@@ -96,6 +96,18 @@ judged alone, and 11 fixture cases run in CI (the hook had none before).
 inside quotes), or line-index splicing in a Python heredoc, which stays prose by design.
 Refs: constraints C7 (Occurrence 7, reviewed 2026-09-30), eval `anchor-guard-cases`.
 
+### 2026-10-08 | intervention: 38 source-reading tests rewritten to call the code (TEST-AUDIT-2026-10-08) | class: a test that reads source cannot fail for the reason the code exists (the `/features` ValueError family, C8) | status: pending
+`sweep.py source-assertion` already forced one call per `*_cmd`; this replaced per-behavior
+source checks (admin gates, failure replies, /audit rendering, parse_mode, life-arc rotation,
+log redaction) with calling tests, each break-tested. 99 source tests remain, all on the audit's
+keep list.
+**Holds when:** the next defect in a gate, failure reply or /audit line is caught by a test
+before deploy, and no new test added after 2026-10-08 asserts a behavior via `inspect.getsource`
+where a call was possible.
+**Recurrence shape to expect:** a new feature's tests written as `getsource` greps again
+(the cheap path); watch `grep -c inspect.getsource tests/test_pure.py` (79 today).
+Refs: `telegram-companion-bot/TEST-AUDIT-2026-10-08.md`, decisions 2026-10-08.
+
 ### 2026-10-08 | intervention: `repo-debugging-playbook` measure-first + 3-strike + >5-file rules (`cdf492d`) | class: speculative fixes before a root cause (playbook's "three rounds of speculative fixes" lesson) | status: pending
 Prose only, no mechanism. A timing symptom now needs a measured `duration_ms` of the named step
 before a limit changes; three failed hypotheses stop the session and put three options to the

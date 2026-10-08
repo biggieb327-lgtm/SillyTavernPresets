@@ -1,5 +1,26 @@
 # Test audit — `inspect.getsource` tests in `tests/test_pure.py` (2026-10-08)
 
+**Status (2026-10-08, same day): all batches applied** after the owner's go-ahead. 137 → 99
+tests read source; the 99 are this report's "keep" list minus one. Every rewrite was
+break-tested with `.claude/tools/break-test.sh` (red with the defect, byte-identical restore).
+Changes from the plan, found while doing it:
+
+- `test_ordering_is_explicit_in_source` was **retired**, not rewritten:
+  `TestBadRequestNotNetwork.test_bad_request_counted_separately` already calls `on_error` and
+  proves the ordering. Its error-level sibling became a `caplog` test in that class.
+- `test_header_has_no_markdown_emphasis` (batch A) landed in batch B, beside the `parse_mode`
+  check in `test_audit_cmd_answers`.
+- `TestLifeArcRotation.test_cache_is_invalidated_so_it_takes_effect` (listed under keep) is
+  covered by `TestBatchDBehaviours.test_rotation_archives_the_old_arc_and_takes_effect`, which
+  calls the rotation, so it was removed too.
+- `TestLifeProject.test_project_registered_as_command` became a menu assertion
+  (`test_project_is_in_the_menu`) rather than being dropped outright.
+
+New classes: `TestGatesAndFailureReplies`, `TestAuditRendersWhatItGathers`,
+`TestBatchDBehaviours`. `_CmdMsg` now records reply kwargs; `_plain(msg)` checks them.
+
+The original report follows unchanged.
+
 **Report only. No test was changed.** Each batch below waits for owner approval.
 
 Method borrowed from gstack's `/test-audit` skill (garrytan/gstack, MIT): a mechanical

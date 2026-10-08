@@ -1358,6 +1358,15 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-10-08 — Added `test_bad_request_surfaces_at_error_level` to a class that already had a
+  method of that name further down. Python kept the later (old, source-reading) one, so the
+  green run tested the old test, not mine. Caught only because the deleter targeted it by name
+  and the count of deletions looked wrong. -> **before adding a test method to an existing
+  class, grep the class for the name.**
+- 2026-10-08 — Break-tested `/update`'s every-reason test by renaming one `elif` branch; it
+  stayed green, correctly, because `else` replies too. The injection did not model the defect
+  the test guards (a reason with NO reply). Re-ran with the `else` reply removed: red. ->
+  **inject the failure the test is named for, not a nearby edit.**
 - 2026-10-08 — Wrote two identifiers into `repo-debugging-playbook` from memory: `LLM_TIMEOUT`
   (the real vars are `REQUEST_TIMEOUT` / `STREAM_TIMEOUT`) and "the latency `/errors` already
   records" (timings are the `duration_ms` field of `OP_EVENT ` journal lines, `OP_EVENTS`).
