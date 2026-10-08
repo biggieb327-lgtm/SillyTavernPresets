@@ -52,6 +52,11 @@ Your job ends at "merged, green, deploy instructions given."
    policy (2026-07-18) new features default **ON** with a mandatory env kill switch —
    *unset = feature active*, `0`/off disables without a redeploy (see
    `bot-code-invariants` #16).
+   **Before changing what a shared helper does or what a stored field means, list every
+   caller and every reader first** — grep the bare name without `(` (a callback passed by
+   reference is a caller too), and note each caller's chat type (private, group, proactive).
+   A write added inside a helper inherits every caller, and a rule about a field belongs to
+   every reader of it (constraints C26).
 
 4. **Tests.** Every new pure function gets pytest coverage in
    `telegram-companion-bot/tests/test_pure.py` (the `conftest.py` fixture stands up a

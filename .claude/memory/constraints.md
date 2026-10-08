@@ -97,7 +97,8 @@ matrix: the mislabelled block RED, the `other` label green, and a mixed fleet bl
 contradicting `# host: vps`, and an unlabelled fleet block all still RED.
 
 ### C16 — A handed-over command block must work on someone else's machine
-**seen: 2** (2026-08-02 ×2) — *promoted straight to a mechanism the day both occurred;
+**seen: 11** (2026-08-02 ×4, 2026-08-03 ×2, 2026-08-10 ×2, 2026-09-22, 2026-09-30 ×2) — *the
+count was left at 2 while occurrences 3-7 were appended; corrected 2026-10-08. Originally promoted straight to a mechanism the day both occurred;
 rule 4's bar is two, and both had already cost a round trip.*
 Two shapes, one session, both in the **handoff** rather than the work:
 - A "full sequence" block did `cd /opt/telegram-bots` and then used relative paths. The
@@ -201,6 +202,17 @@ that repairs shell config and then exercises the repaired command must `unalias`
 re-`export` in the same breath, or tell the operator to open a fresh shell. Verified with
 `type <cmd>`, which names an alias outright and is the one-line check worth handing over
 alongside the fix.
+
+**Occurrences 8-9 (2026-09-30, promoted from Minor 2026-10-08), in the Author-Profile-Tool
+work, so this repo's handoff-guard never saw the blocks.** (a) A pasteable block began with
+`read -rsp ... K` — occurrence 4's exact shape. `read` took the next line of the paste, three
+attempts failed, the settings file was corrupted and one full key reached the chat; I blamed
+the owner's pasting twice first. For a secret: an editor on a file written with a placeholder.
+(b) `ssh root@<vps> ls ~/maren-vale`, run from Termux: the unquoted `~` expanded on the phone,
+so the check reported the copied files missing. Quote remote paths: `ssh host 'ls ~/dir'`.
+**Mechanism note:** (a) is a shape handoff-guard already blocks *here*; the recurrence was in
+another repo's session. (b) is a new shape — an unquoted `~` or `$VAR` in an ssh remote
+command — and is mechanical enough to add to handoff-guard.
 
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
@@ -486,8 +498,15 @@ that misfires gets disabled. Both halves stay prose here. The existing backstop 
 first is the compile check, which caught it on the next call.
 
 ### C8 — Ask what a reading actually measures before concluding from it
-**seen: 11** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27 ×2, 2026-09-01) — *promoted by check 6 of the
+**seen: 12** (2026-07-26 ×2, 2026-07-27, 2026-08-03 ×2, 2026-08-09, 2026-08-10, 2026-08-21, 2026-08-27 ×2, 2026-09-01, 2026-10-08) — *promoted by check 6 of the
 weekly hygiene Routine, from three Minor entries sharing one cause.*
+
+**Twelfth (2026-10-08), self-caught before it shipped** (promoted from Minor 2026-10-08). Reported
+an `inspect.getsource` audit as "101 tests" from a grep over function bodies; 10 of the 101 were
+`_src`-style helpers, and 46 tests reach `getsource` through them, so the real count was 137.
+Caught by a script that checked every test line against the report. The reading counted
+*functions containing a string*, not *tests that depend on it*. Before reporting a count from a
+grep, say what each match is.
 
 **Eleventh (2026-09-01), self-caught before it shipped.** Diagnosing why Emily's `/life` arc read as
 foreign, I grepped `memories.txt`, found only two faint art/photo traces, and told the owner "the
@@ -1019,7 +1038,7 @@ guessed would fire on every legitimate `replace_all` and get disabled. What is m
 is the assertion inside the script, now the documented shape in `add-regression-eval`.
 
 ### C18 — A break-test proves one assertion, not the check
-**seen: 9** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2, 2026-08-23, 2026-09-29 ×2) — *promoted
+**seen: 12** (2026-07-27, 2026-07-29, 2026-07-31, 2026-08-01, 2026-08-10 ×2, 2026-08-11, 2026-08-23, 2026-09-23, 2026-09-29 ×2, 2026-10-08) — *promoted
 from the Minor log; all entries deleted.*
 Four checks passed their break-test and were still dead in ways the break-test could not
 see. Three faults injected **at once**: two tests failed correctly, the third passed for
@@ -1099,6 +1118,19 @@ note's scope: `break-test.sh` guards bot.py anchor injections; eval-suite self-t
 one are hand-run and outside its reach, so the "one fault, isolate the assertion under test"
 discipline is still manual there — which is exactly where this slip lived. Self-caught; both
 break-tests ultimately proved RED for the right reason before the eval shipped.
+
+**Occurrences 10-12 (promoted from Minor 2026-10-08) — the injection, not the check, was
+wrong.** (2026-08-11) a break-test wrapper `run-evals.sh | grep -q '^FAIL x' && exit 0 || exit 1`
+had its polarity inverted, so a caught defect read as "did not go red". (2026-09-23) the
+`block-tally` eval inherited `MECHANISM_TALLY` from the environment while `break-test.sh`
+exports it as 0, so the first six red results were red for the wrong reason; break-test's
+green-after-restore step exposed it. (2026-10-08) `/update`'s every-reason test was
+break-tested by renaming one `elif`; it stayed green, correctly, because `else` replies too —
+the injection did not model a reason with no reply. **Inject the failure the test is named
+for, set any env the check depends on inside the check, and prefer the check's own exit status
+over a grep of its output.** `break-test.sh --expect` caught the second; the other two were
+caught by reading the result.
+
 
 ### C19 — Verifying "not reachable outside dispatch" proves reachability, not which jurisdiction covers the call
 **seen: 1** (2026-08-07)
@@ -1274,8 +1306,8 @@ mechanisation for the reason rule 4 allows prose: nothing in the diff distinguis
 that would have made the difference leaves no trace in the repo.
 
 ### C23 — The shell evaluated something the command text does not show
-**seen: 5** (2026-08-10 ×2, 2026-08-11, 2026-08-21, 2026-09-25 — mechanism caught it, zero
-damage) — *promoted from the Minor log 2026-08-11; all three entries deleted.*
+**seen: 8** (2026-08-10 ×2, 2026-08-11, 2026-08-21, 2026-08-24, 2026-08-31, 2026-09-25 —
+mechanism caught it, zero damage; 2026-09-29) — *promoted from the Minor log 2026-08-11; all three entries deleted.*
 Three failures in one session, three different constructs, one cause: **what the shell
 actually did depended on something the written command does not display.**
 
@@ -1329,6 +1361,17 @@ a backtick or `$(`. The cwd shape is **deliberately not** guarded — a relative
 correct far more often than not, and a hook that fired on every one of them would be
 turned off within a day; that half stays prose and stays inside C13.
 
+**Occurrences 6-8 (promoted from Minor 2026-10-08) — a pipeline's status is its LAST
+command's.** (2026-08-24) a shell function called inside an `&&` chain lost its inherited
+`set -e`, so later moves ran after a failed directory creation. (2026-08-31)
+`pip install … | tail -5; echo "EXIT=$?"` printed `tail`'s 0 over a hard install failure.
+(2026-09-29) `run-evals.sh | tail -1 && git commit … && git push origin HEAD:main` — `tail`
+returned 0, so a failing eval did not stop the chain and red reached `main` at `83a0bce`.
+**Mechanism gap:** `shell-semantics-guard.sh` blocks a `||` fallback after a pipe, not an `&&`
+continuation after one; the 2026-09-29 shape is mechanical and is the candidate to add. Until
+then: `set -o pipefail`, `${PIPESTATUS[0]}`, or run the command without the trailing pipe, and
+never gate a push on a piped check.
+
 **What this is NOT:** a constraint about re-offending. Four entries this session shared
 "I had already written the correction down", and that is a property of the *timing*, not a
 cause — grouping by it would have produced an unactionable entry and left these three
@@ -1356,6 +1399,57 @@ CI/VPS release contract installs the same hashed runtime set without mutating th
 interpreter. A blanket hook against root pip would false-positive legitimate isolated
 root-owned venvs, so the enforceable boundary is the explicit venv path, not uid alone.
 
+### C25 — A push to `main` is not done until the check result for that SHA has been read
+**seen: 2** (2026-09-22 ×2) — *promoted from the Minor log 2026-10-08; the 2026-09-22 Minor entry
+deleted, the second occurrence is the 2026-09-22 note under the archived 2026-09-02 DEFAULTS entry.*
+(1) A memory-layer change was reported verified with `run-evals.sh` alone ("58 passed") and
+merged to `main` without `verify.sh` or reading CI; `main` had been red for 6 days and
+`debrief-check.sh` surfaced it, not me. (2) `NIGHTLY_RECEIPTS` (c76b11f) missed the DEFAULTS
+census row; pytest caught it only in CI, and nobody read CI. Related: C23 occurrence 8
+(2026-09-29), where red reached `main` because the push was gated on a piped eval.
+**Constraint:** before `git push … :main`, run `verify.sh` in full (not a `-k` subset, not
+`run-evals.sh` alone) and read its output; after the push, poll the `evals` run for the pushed
+SHA and report `<sha> | completed | <conclusion>`. Red on `main` is a deploy blocker
+(`vps-sync.sh` hard-resets to it), so a Markdown-only diff is not exempt.
+**Not graduated — mechanism owed.** `repo-change-control`'s checklist already said "CI polled"
+before both occurrences, so prose has failed twice. `debrief-check.sh` prints "ci NOT CHECKED",
+but only at debrief. Candidate: a PostToolUse hook on a push to `main` that records the SHA and
+blocks the turn's end until an `evals` run for it has been read.
+
+### C26 — A change to a shared helper or stored field is a change for every caller and reader
+**seen: 2** (2026-09-26 ×2) — *promoted from the Minor log 2026-10-08; both entries deleted.*
+Same session, two shapes. (1) Wrote an `/addmem`-counts-as-10 rule into `_halflife_factor`
+only, reasoning about decay alone; `_evict_by_value` and the audit merge read the same line as
+confidence 5, and `/editmem` rewrites its origin, so one line ranked three ways (`/code-review`
+caught it). Grepping `_append_memory(` missed `asyncio.to_thread(_append_memory, text)` — a
+reference, not a call. (2) Added the first `MEMORY_REINFORCE` stamp inside
+`triggered_memories`, reasoning about the private reply path; `assemble_messages_async` also
+serves `_handle_group_message` and `_maybe_reply_to_bot`, so group replies would have written
+per-instance `memory_meta.json` (GROUP_CHAT_DESIGN.md §5 forbids it). Related: C19 (which
+jurisdiction covers a call), C20 (a reused pattern at a new call site).
+**Constraint:** before changing what a shared helper does or what a stored field means, list
+every caller of the helper (grep the bare name, without `(`, to catch references) and every
+reader of the field, with each one's chat type, and check the change against each.
+**Graduated 2026-10-08 → `repo-change-control` step 3** (prose: no scanner can know which
+callers matter for a given change, so the list has to be made by the session).
+
+### C27 — A behavioral or numeric claim in a changelog is a claim about the diff
+**seen: 5** (2026-08-12 ×2, 2026-08-24, 2026-08-25 ×2) — *promoted from the Minor log
+2026-10-08; all four entries deleted.*
+Written from the design's intent or from memory, then measured. (2026-08-12) "24 new tests …
+Total: 1,269" — measured 16 and 1,261; the same session, "10 new tests … Total: 1,273" — real
+4. (2026-08-24) "redistributes an existing call, adds none / zero-net" — the nightly job
+generates a fixed count regardless of gating, so on a quiet day it is a net increase.
+(2026-08-25) "REVIEWLIFE=0 stops the drafting" — the switch gated only the enqueue; and a
+cached-token percentage that exceeded 100% for the flat usage shape. `/code-review` caught the
+last three; a measurement caught the first two.
+**Constraint:** every count is pasted from the command that measured it (leave `TOTAL` in the
+draft until `verify.sh` prints it), and every behavioral sentence is checked against the final
+diff — a test, a runtime observation, or a full code-path trace — before review, not by it.
+**Graduated 2026-09-26 → `repo-change-control` step 5** ("Prove every behavioral claim against
+the final diff…"), which names these occurrences. No scanner can tell a true sentence from a
+false one; step 7's `/code-review` is the backstop.
+
 ## Minor — running log
 
 - 2026-10-08 — Added `test_bad_request_surfaces_at_error_level` to a class that already had a
@@ -1363,40 +1457,25 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   green run tested the old test, not mine. Caught only because the deleter targeted it by name
   and the count of deletions looked wrong. -> **before adding a test method to an existing
   class, grep the class for the name.**
-- 2026-10-08 — Break-tested `/update`'s every-reason test by renaming one `elif` branch; it
-  stayed green, correctly, because `else` replies too. The injection did not model the defect
-  the test guards (a reason with NO reply). Re-ran with the `else` reply removed: red. ->
-  **inject the failure the test is named for, not a nearby edit.**
+
 - 2026-10-08 — Wrote two identifiers into `repo-debugging-playbook` from memory: `LLM_TIMEOUT`
   (the real vars are `REQUEST_TIMEOUT` / `STREAM_TIMEOUT`) and "the latency `/errors` already
   records" (timings are the `duration_ms` field of `OP_EVENT ` journal lines, `OP_EVENTS`).
   Caught by grepping bot.py before committing. Same shape as watchlist 2026-09-22 (a doc naming
   an identifier that does not exist), but at write time, not after a rename. -> **grep every
   backticked identifier against the code before it goes into a skill or doc.**
-- 2026-10-08 — Reported the `inspect.getsource` audit as "101 tests"; 10 of the 101 were
-  `_src`-style helper functions, and 46 tests reach `getsource` through those helpers. The
-  real count was 137. Caught by a script that cross-checked every test line against the
-  report. -> **when a count comes from a grep over function bodies, check whether the
-  matches are tests or helpers the tests call.**
-- 2026-09-30 — Gave the owner a pasteable block that began with `read -rsp ... K`. Pasted as a
-  block, `read` takes the NEXT LINE OF THE PASTE as its input, so the key never reached `K`;
-  three attempts failed, the settings file was corrupted, and one full key reached the chat.
-  I blamed the owner's pasting twice before seeing it. -> **never put `read` (or any command
-  that reads stdin) in a block meant to be pasted whole; for a secret, use an editor
-  (`nano <file>`) on a file written with a placeholder.**
+
 - 2026-09-30 — The owner's key check printed "key captured (395 chars)" and I let it pass; a
   NanoGPT key is far shorter, so the paste had captured other text. The next call failed with
   Node's "invalid header value" error, which printed the key. Fixed in Author-Profile-Tool
   (key validated and redacted from errors). -> **when a check prints a value, compare it with
   what it should be before moving on; a length check that isn't read proves nothing.**
-- 2026-09-30 — Gave the owner `ssh root@<vps> ls ~/maren-vale` to run from Termux; the
-  unquoted `~` expanded on the phone (`/data/data/com.termux/files/home/...`), so the check
-  reported the copied files missing. -> **quote remote paths in ssh commands handed to the
-  owner: `ssh host 'ls ~/dir'`.**
+
 - 2026-09-30 — Told the owner the `--from` commit's push "failed" because `git branch -r
   --contains` printed nothing. `git ls-remote` then showed the commit on the remote: the push
   had worked, it only landed after the owner merged #12. Corrected in the same session. ->
   **ask the remote (`git ls-remote origin <branch>`) before stating what a push did.**
+
 - 2026-09-30 — Shipped Author-Profile-Tool PR #12 (Gutenberg marker patterns) on a guessed
   cause for the Harris control returning license text. The real cause was that Gutendex's
   first match was a LibriVox audiobook edition (fixed in #13). The PR text hedged the guess,
@@ -1404,10 +1483,12 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   it; the one I gave also lacked `curl -L`, so it printed nothing. -> **when a cheap
   diagnostic on the owner's side can confirm the cause, ask for it before writing the fix.**
 
-- 2026-09-29 — Chained `run-evals.sh | tail -1 && git commit ... && git push origin HEAD:main`. `tail` returns 0, so an eval failure (`claude-md-refs-resolve`, tripped by a docs filename I put in backticks in CLAUDE.md) did not stop the chain and red went to `main` at `83a0bce`. Caught by reading the "61 passed, 1 failed" line in the same command's output; fixed by rewording the doc, eval untouched, at `86bd3dd`. -> **never gate a push on a piped eval run; run the evals, read the result, then push in a separate step, or use `set -o pipefail` and `grep -q 'failed, 0'`.** Second occurrence of the same push-after-unread-result shape would need a hook.
 - 2026-09-29 — Ranked "gate the life arc/events to the owner chat" as the top next task without first reading the watchlist item and `decisions.md` 2026-09-01, where the owner had already accepted that residual and named the trigger for revisiting it. Caught while tracing, before any code; corrected to the user in the same turn. Read the decision log for any "should we change X" proposal before ranking it.
+
 - 2026-09-29 — Wrote `_GENDER_WORDS_HE` with case-sensitive patterns, so "She's" (capital) would have slipped through `SELFIE_PRONOUNS=he`. Caught by re-reading the patterns before the first test run, not by a test; the full-prompt test would have caught it too.
+
 - 2026-09-29 — Skipped the `/code-review` pass that `repo-change-control` step 7 requires for the `SELFIE_PRONOUNS` release (small diff, tests green) and said so in the report. Disclosed, not hidden, but it is the step whose whole point is defects a green suite ships.
+
 - 2026-09-29 — Drafting the model handoff, wrote "Emily's glm-4.7 pin is superseded" from a
   `decisions.md` heading reading `status: superseded`, and "update_cmd still says 'expected if
   the repo is private'" from CLAUDE.md's Deployment paragraph. Both wrong: the Emily entry was
@@ -1436,27 +1517,6 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   copy taken before injecting, and assert the pattern matches exactly once.** (The
   scratchpad `brk.py` does both.)
 
-- 2026-09-26 — Wrote an `/addmem`-counts-as-10 rule into `_halflife_factor` only, reasoning
-  about decay alone. The same line is read as confidence 5 by `_evict_by_value` and audit
-  merge, and `/editmem` rewrites its origin, so one line ranked three ways; `/code-review`
-  caught it and the rule was dropped pre-merge. Also first wrote the rule citing `/remember`,
-  which writes per-chat `facts`, not `memories.txt`; found by grepping `_append_memory(`
-  callers, which missed `asyncio.to_thread(_append_memory, text)` in `addmem_cmd` (a
-  reference, not a call). -> **a rule about what a stored field means belongs to every reader
-  of that field; grep the field's readers, not just the function you are editing, and grep a
-  function's name without the `(` to catch callers that pass it by reference.**
-
-- 2026-09-26 — Wrote the first `MEMORY_REINFORCE` stamp in `triggered_memories` counting
-  every injected line on any call with a `chat_id`, reasoning only about the private reply
-  path. `assemble_messages_async` also serves `_handle_group_message` and
-  `_maybe_reply_to_bot`, so group replies would have written `memory_meta.json` (a
-  per-instance file), which GROUP_CHAT_DESIGN.md §5 forbids. `send_triggered` would have
-  counted proactive sends. `/code-review` flagged the proactive path; the group half surfaced
-  only when I listed the callers of `assemble_messages_async` while fixing it, and I loaded
-  `group-chat-changes` after the code existed, not before. Fixed pre-merge with a
-  `chat_id > 0` gate plus a test. C19's shape. -> **a write added inside a shared helper
-  inherits every caller of that helper: list the callers (and their chat type) before
-  writing it, not after review.**
 - 2026-09-26 — Stated "`_memory_replace` deletes the old line and its metadata" from reading
   the source; theory-guard (C5) blocked the turn. Answered with `probe.py` output
   (`'Brian likes coffee\n', False`). -> the claim held, but the evidence came after it.
@@ -1469,12 +1529,14 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   that prints stdout+stderr; reproduced both states as `nobody` before re-pushing. -> **a test
   that runs a real script inherits that script's host preconditions (root, systemd, /etc
   config); read its guards before trusting a green from a root session.**
+
 - 2026-09-25 — Wrote `test_backup_archive_never_contains_the_message_log` asserting no archived
   *path* contained "msglog". `break-test.sh` (widen the backup's `find -maxdepth 1`) stayed green:
   the script's `cp -- "$f" "$STAGE/$name/"` flattens subfolders, so a leaked day file would be
   archived as `nora/2026-09-25.jsonl`. Switched to a content marker searched inside every member;
   break-test then went red. C18's shape, caught by the tool before commit. -> **assert on what
   would leak (the bytes), not on where you expect it to land.**
+
 - 2026-09-25 — Told the owner "No instance writes a structured conversation record anywhere —
   I checked." The check was a grep for logging-shaped names (`transcript`, `chat_log`,
   `OWNER_CHAT_ID`, `logging.basicConfig`). It missed `remember()` → `save_state()` →
@@ -1483,6 +1545,7 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   the reply and in `MESSAGE_LOG_DESIGN.md`. -> **a claim that something does not exist needs
   a search for where the data would have to go (the history store, the state serializer),
   not only for what the feature would be called.**
+
 - 2026-09-24 — Wrote a README correction quoting Reddit's JSON `403` page as saying "Please try
   to login with your Reddit account", from memory of the `old.reddit.com` login page. The JSON
   page says only "You've been blocked by network security". Also reported "the per-post `.rss`
@@ -1498,12 +1561,6 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   nothing, so it was deleted. -> **before claiming a check covers a property, name the
   injection that would turn it red; if none comes to mind, it doesn't cover it.**
 
-- 2026-09-23 — Wrote the `block-tally` eval so it inherited `MECHANISM_TALLY` from the
-  environment, while `break-test.sh` (edited in the same change) exports `MECHANISM_TALLY=0`.
-  Under break-test the eval went red for the wrong reason, so the first six red results proved
-  nothing; `break-test.sh`'s green-after-restore step exposed it. Fixed by setting the variable
-  inside the eval. -> **an eval that tests an env-gated path sets the variable itself; never
-  let it inherit a value a harness may have changed.**
 - 2026-09-22 — Gave `rm -rf ~/*-bot` to clean phone leftovers (`~/nora-bot` etc.). The glob
   also matches `~/telegram-companion-bot`, and the owner ran the checking step on the VPS by
   mistake, where `ls` showed `/root/telegram-companion-bot` matching. Caught before the `rm`
@@ -1511,158 +1568,16 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
   target, and a check/delete pair split so the check could run on one host and the delete on
   another. -> **a delete names every path explicitly (never a suffix glob); give the `rm` only
   after the owner pastes the listing from the same host.**
+
 - 2026-09-22 — Gave VPS-only commands (`crontab -l`, `ls /opt/telegram-bots/backups`, a
   root crontab line) with no host label. `host-guard.sh` caught it on the stop hook (C1);
   restated with `# host: vps`. The prose said "on the VPS" only in the previous message, not
   this one. -> **label every command block with its host, even mid-thread.**
-- 2026-09-22 — Reported a memory-layer change as verified with `run-evals.sh` alone ("58 passed")
-  and merged it to `main` without running `verify.sh` or reading CI. `main` had been red for
-  6 days; `debrief-check.sh` surfaced it, not me. CLAUDE.md says to run `verify.sh`, not the
-  pieces of it. -> **before pushing to `main`, run `verify.sh` in full and read the CI result
-  for the pushed SHA, even for a Markdown-only diff; the check is what's red on `main`, not only
-  what my diff could break.**
+
 - 2026-09-16 — Wrote "all checks green on the dashboard" as a flat statement about
   expected VPS outcomes after owner-side setup, alongside a hedged "should return 7."
   `theory-guard.sh` caught it on the stop hook. Self-corrected to hedge both clauses.
   C5's shape: confidence followed fluency in a report about what the owner would see.
-- 2026-09-04 — A probe that spends a shared, exhaustible resource searched DOWN from its
-  maximum, so its most expensive calls came first. → **ramp UP from small and stop at the
-  first rejection; carry a cumulative spend cap.** (Root cause folded into C5 — the design
-  followed from an unverified billing assumption; kept here for the design rule itself.)
-- 2026-09-04 — Assumed a deploy landed because the user said "I deployed" and launched a
-  thorough code sweep for a "second crash" that didn't exist. The VPS journal still showed
-  the SAME `_ENGAGEMENT_DAYS` NameError — the fix wasn't deployed. The code analysis (no
-  other forward references) was correct but not the bottleneck; the bottleneck was verifying
-  the deploy. -> **when a fix is deployed and the problem persists, verify the deploy landed
-  before looking for a second bug. Ask for the journal output or suggest checking the
-  release hash.**
-- 2026-09-02 — Wrote `TestTruncateAtWord.test_truncates_at_word_boundary` with a logically
-  wrong assertion: `" " not in result or result == result.rsplit(" ", 1)[0]` — this is always
-  False for any multi-word truncation result, because the first clause fails and the second
-  compares to a shorter prefix. The assertion tested the wrong invariant (it tried to say
-  "the result ends at a word boundary" but actually said "the result contains no spaces OR
-  equals itself minus its last word"). Caught by pytest on first run; fixed to
-  `text.startswith(result.rstrip(...))`. Cost: one edit cycle. -> **when testing a truncation
-  function, the invariant is "the output is a prefix of the input", not an assertion about
-  internal structure.**
-- 2026-09-02 — Added three `_env_bool` flags (GROUP_COMPING, GROUP_TRADING_FOURS, CROSS_QUERY)
-  without updating the `TestEveryBooleanFlagDefault.DEFAULTS` census table in the same edit.
-  The test caught it immediately (designed to). Cost: one pytest round-trip. ->
-  **update the DEFAULTS census table in the same edit that adds a new `_env_bool` flag, not
-  as a separate step — the test exists because this slip is the norm, not the exception.**
-  - 2026-09-03 — Same slip with MIXTAPE_ENABLED. Caught by pytest on first run, one edit
-    to fix. The existing test is the mechanism; the slip is the norm.
-  - 2026-09-22 — Same slip with NIGHTLY_RECEIPTS (c76b11f), but this time it **reached
-    `main`**: pytest caught it only in CI, and nobody read CI. The test works; what failed is
-    the step of running it before merging. See operational-log 2026-09-22.
-- 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
-  `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
-  existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
-  uses `_cmd_update()` / `_cmd_ctx()` / `asyncio.run()`. Caught by reading the existing
-  tests before running; rewrote before any failure. Cost: one wasted edit cycle. ->
-  **check the test file's existing patterns before writing new tests; the same file may
-  use a non-standard async harness.**
-- 2026-09-01 — Implementing the near-duplicate event guard, picked the similarity metric/threshold
-  by feel and it was wrong into a test twice before it was right: first word-set Jaccard ≥ 0.8 (the
-  real near-dup scored 0.71, missed), then `SequenceMatcher` ≥ 0.75 which over-triggered on short
-  templated strings (`event 12` vs `event 11` = 0.88, breaking the existing cap test). It came right
-  only after I computed the metric in a scratch script against the actual positive AND negative cases
-  (real Warren near-dup, role-reversal, short strings) — which is what should have preceded the first
-  threshold. → **a similarity/threshold heuristic gets computed against the real positive and negative
-  examples before it is written, not after a test fails; a number chosen by feel passes the case you
-  imagined and fails the two you didn't.** Caught by my own tests pre-merge; no bad code shipped.
-- 2026-09-01 — Merged the release with `git push origin HEAD:main` (correct), but `main` had advanced
-  mid-session (another session's `skillforge/`), so the push had already required a fetch + rebase of
-  the branch onto the new `main`. That rewrote the branch's two earlier (pushed) plan-doc commits, so
-  updating the remote branch ref then needed a force-push — which a repo ruleset blocks ("declined due
-  to repository rule violations"). Reconciled without force by recording a `git merge -s ours
-  origin/<branch>` (keeps HEAD's tree exactly, adds the stale tip as a parent → branch fast-forwards).
-  Cost ~5 extra git ops and a confusing debrief-check "not merged" (HEAD ends up ahead of main by
-  content-free commits). → **before rebasing an already-pushed branch, remember this repo blocks
-  force-push; if main only advanced, prefer merging main INTO the branch over rebasing, or accept that
-  the branch ref reconciles via a `-s ours` merge, not a force-push.** Main was correct throughout; no
-  deploy impact.
-- 2026-09-01 — Drafting the life-arc→memory grounding plan, wrote a guardrail "exclude NSFW
-  specifics from the grounding block" and put it in the signed-off-track plan. The owner asked *why*,
-  and answering forced the check I'd skipped: Emily is an NSFW companion whose intimate dynamic is the
-  **core emotional throughline** of her long-term summary — filtering it out would have flattened her
-  and re-created the exact disconnect the plan fixes. The real axis was never NSFW; it is provenance
-  (don't re-narrate grounding as invented events) + domain (solo events stay in her own world), both
-  content-neutral. Rewrote the guard. → **a guardrail written into a plan is a claim to check against
-  the actual subject before it ships, not a safe default; "filter out the sensitive stuff" is
-  especially suspect on a character whose sensitive material is the point.** Self/owner-corrected at
-  the plan stage, no code shipped. Adjacent to C8 (didn't ask what the filter would actually remove)
-  but the cause is distinct — a reflexive-caution guard, not a misread reading — so logged here.
-- 2026-08-31 — Building the verify venv, wrote `pip install … | tail -5` then `echo "EXIT=$?"`
-  and read the pipeline's status as pip's — it is `tail`'s (exit 0). A hard install failure
-  (`garminconnect==0.3.11` absent from the proxy index, `--require-hashes` aborting the whole
-  install) reported "EXIT=0", so I briefly believed the venv was built; caught one step later
-  when `import telegram` raised `ModuleNotFoundError`. → **`$?` after a pipeline is the LAST
-  command's status; to check an earlier stage use `set -o pipefail`, `${PIPESTATUS[0]}`, or run
-  the command without the trailing pipe.** Cost a few minutes and one wrong belief; no damage.
-  Same family as C23 (a shell semantic the command text does not show) but a distinct idiom, so
-  logged here rather than folded into it.
-- 2026-08-26 — Reshaping the `[STEPPED THINKING]` preset block, nearly edited only `preset.txt` —
-  the file the `character-reviewer` agent had reviewed and cited by line number. The
-  `edit-cards-and-presets` skill's "check `PRESET_FILES` before assuming `preset.txt` is live" note
-  caught it: the live layer every instance loads is `preset-stepped.txt`, and `preset.txt` is only
-  the fallback when no layer resolves — so editing just `preset.txt` would have shipped a no-op to
-  all seven bots. Grepped, found the block in both, edited both. → **for any preset-content edit or
-  review, the live text is the `preset-*.txt` layer named in `PRESET_FILES`, not `preset.txt`;
-  point the `character-reviewer` at the layer, and when a block lives in both keep them in sync.**
-  An agent citing `preset.txt:657` is citing the fallback, not what the fleet reads.
-- 2026-08-26 — The exact-lock verify venv could not be built in the cloud container: the agent
-  proxy's package index lags `requirements.lock` (`garminconnect==0.3.11` and `numpy==2.5.2` both
-  absent — index tops out at 0.3.2 / 2.4.6), and `--require-hashes` aborts the whole install on one
-  missing pin. Both are optional deps (`try/except → None` in bot.py), so filtered their blocks from
-  the lock and installed `numpy==2.4.6` to get a working suite (1393 pytest green). → **when the
-  proxy index can't serve the exact lock, a functional near-lock venv (optional deps filtered,
-  nearest-available substituted) is the right fallback for a content/pure-function change — CI runs
-  the true lock and is the authoritative gate; say "near-lock, index lag" rather than claiming the
-  exact environment.** Distinct from the 2026-08-24 venv slip (that was bare python3 + relative
-  path; this is the index itself lagging the pins).
-- 2026-08-25 — Both releases this session shipped a first-draft changelog claim that overreached
-  the diff, and `/code-review` (repo-change-control step 7) caught both before merge. 5.9: the
-  changelog said "REVIEWLIFE=0 stops the drafting" when the kill switch gated only the *enqueue*
-  — the model was still asked for suggestions every night; fixed by gating the prompt too. 6.1:
-  the `/audit` line showed "N cached, X% of in", but cached tokens are a subset of `tok_in` only
-  for the nested OpenAI usage shape, not the flat `cache_read_input_tokens` one, so the ratio
-  could exceed 100%; dropped the percentage. → **a behavioral sentence in the changelog is a
-  claim about the diff, verify it against the diff — not against what the feature was meant to
-  do.** Same shape as the 2026-08-24 "adds no call / net-neutral" cost overclaim below (now 2nd
-  occurrence). Not minting a constraint: the guard that catches it — running `/code-review` on the
-  diff before merge — already exists and fired both times; the lesson is to read the changelog
-  adversarially *before* review, not to add machinery.
-- 2026-08-24 — Building 5.9 `/reviewlife`, the `repo-change-control` fresh-container venv
-  failed twice before it worked, wasting a verify cycle. First: created it with bare
-  `python3` (3.11 here) — the repo pins 3.12 and the hashed `requirements.lock` holds only
-  cp312 wheels, so `--require-hashes --only-binary=:all:` matched nothing and silently
-  installed only pytest, then pytest died at collection on `No module named 'requests'`.
-  Second: the `-r telegram-companion-bot/requirements.lock` path was relative and the
-  background shell's cwd wasn't the repo root, so pip reported "Could not open requirements
-  file" — which I only saw after grepping the pip log, because the `&&` chain had masked it.
-  → **build the verify venv with `python3.12` explicitly and pass the lock by absolute
-  path**, and when a pip install "succeeds" but imports fail, read the install log before
-  blaming the code — a hash/interpreter mismatch fails the lock install without failing the
-  command.
-- 2026-08-24 — Shipping the ROADMAP 6.2 hook pre-draft, wrote "redistributes an existing
-  call, adds none / zero-net" into the changelog, ROADMAP, code comment and `.env.example`
-  before checking it against the call sites. `/code-review` caught it: the old hook call
-  fired only *inside* `send_proactive`, so its count equalled proactives actually sent,
-  while the nightly job generates a fixed count regardless — so on a heavily-gated
-  low-activity day it is a net *increase* in cheap calls, not a redistribution. Corrected
-  all four before merge. → **Before claiming a change "adds no call / is net-neutral,"
-  count the call at each site under the actual gating, don't assert the accounting from
-  the design's intent** — the C8 shape (ask what the number actually measures) applied to
-  a cost claim rather than a reading.
-- 2026-08-24 — Sent a 432,082-byte changelog through a command-output bridge as one
-  base64 string. The tool truncated the output, but the partial bytes still formed a
-  valid Git blob, so `main` moved and CI failed only when the missing release heading
-  made `version-changelog-sync` go red. Restored the file from fixed-size, 3-byte-aligned
-  chunks and verified the returned blob SHA against `git hash-object`. → **When publishing
-  a local tree through a content API, compare every returned blob SHA to the local Git
-  blob SHA before moving a ref; transport success is not content identity.** The CI gate
-  caught this occurrence, and the item-2 publish checklist now includes the hash comparison.
 
 **Mistakes made and fixed mid-task** — the ones that never reach the owner because
 they were caught a minute later: a wrong path, a grep for the wrong variable name, a
@@ -1681,7 +1596,7 @@ show up first. A section with nothing in it means under-reporting, not a clean r
 numbered constraint. That is the whole reason to log them; a minor entry nobody ever
 promotes was still worth ten seconds to write.
 
-**Last promotion pass: 2026-08-24** — `sweep.py constraints-drift` reads this line and
+**Last promotion pass: 2026-10-08** — `sweep.py constraints-drift` reads this line and
 counts only what has arrived *since* it, which is what "is another pass worth running"
 actually asks. **Update the date whenever you run a pass**, including one that promotes
 nothing. Counting the *total* instead is what made the check useless: the 2026-08-02 pass
@@ -1695,23 +1610,145 @@ that are due. Archiving is not deletion and needs no judgement call; promotion d
 
 Format: `date — what happened → what to do instead`. One line. Newest first.
 
-- 2026-08-24 — Tested the writable-state migration with `nobody:nobody`, but this
-  container's `nobody` primary group is `nogroup` and the sandbox also rejects that
-  ownership change. Worse, invoking the function inside an `&&` chain suppressed its
-  inherited `set -e`, so later moves ran after the failed directory creation. → Derive a
-  service account's primary group with `id -gn`, make critical function commands return
-  explicitly instead of borrowing caller `set -e`, and use root for ownership mechanics
-  in a sandbox that cannot chown to the production uid.
+## Minor — archived
+
+Entries that sat 30 days without pairing with anything. Kept verbatim — they are still
+searchable evidence, and a shape that reappears after two months is worth finding — but
+out of the promotion count, per the archiving rule above. Newest first.
+
+*Archived 2026-10-08 (promotion pass): 53 entries dated before 2026-09-08 that paired with nothing.*
+
+- 2026-09-04 — A probe that spends a shared, exhaustible resource searched DOWN from its
+  maximum, so its most expensive calls came first. → **ramp UP from small and stop at the
+  first rejection; carry a cumulative spend cap.** (Root cause folded into C5 — the design
+  followed from an unverified billing assumption; kept here for the design rule itself.)
+
+- 2026-09-04 — Assumed a deploy landed because the user said "I deployed" and launched a
+  thorough code sweep for a "second crash" that didn't exist. The VPS journal still showed
+  the SAME `_ENGAGEMENT_DAYS` NameError — the fix wasn't deployed. The code analysis (no
+  other forward references) was correct but not the bottleneck; the bottleneck was verifying
+  the deploy. -> **when a fix is deployed and the problem persists, verify the deploy landed
+  before looking for a second bug. Ask for the journal output or suggest checking the
+  release hash.**
+
+- 2026-09-02 — Wrote `TestTruncateAtWord.test_truncates_at_word_boundary` with a logically
+  wrong assertion: `" " not in result or result == result.rsplit(" ", 1)[0]` — this is always
+  False for any multi-word truncation result, because the first clause fails and the second
+  compares to a shorter prefix. The assertion tested the wrong invariant (it tried to say
+  "the result ends at a word boundary" but actually said "the result contains no spaces OR
+  equals itself minus its last word"). Caught by pytest on first run; fixed to
+  `text.startswith(result.rstrip(...))`. Cost: one edit cycle. -> **when testing a truncation
+  function, the invariant is "the output is a prefix of the input", not an assertion about
+  internal structure.**
+
+- 2026-09-02 — Added three `_env_bool` flags (GROUP_COMPING, GROUP_TRADING_FOURS, CROSS_QUERY)
+  without updating the `TestEveryBooleanFlagDefault.DEFAULTS` census table in the same edit.
+  The test caught it immediately (designed to). Cost: one pytest round-trip. ->
+  **update the DEFAULTS census table in the same edit that adds a new `_env_bool` flag, not
+  as a separate step — the test exists because this slip is the norm, not the exception.**
+  - 2026-09-03 — Same slip with MIXTAPE_ENABLED. Caught by pytest on first run, one edit
+    to fix. The existing test is the mechanism; the slip is the norm.
+  - 2026-09-22 — Same slip with NIGHTLY_RECEIPTS (c76b11f), but this time it **reached
+    `main`**: pytest caught it only in CI, and nobody read CI. The test works; what failed is
+    the step of running it before merging. See operational-log 2026-09-22.
+
+- 2026-09-02 — Wrote `TestReflectCmd` using `make_cmd_update` (invented) and
+  `@pytest.mark.asyncio` (wrong async pattern for this test file) before checking how
+  existing command tests in `TestEveryCommandHandlerActuallyRuns` actually work. The file
+  uses `_cmd_update()` / `_cmd_ctx()` / `asyncio.run()`. Caught by reading the existing
+  tests before running; rewrote before any failure. Cost: one wasted edit cycle. ->
+  **check the test file's existing patterns before writing new tests; the same file may
+  use a non-standard async harness.**
+
+- 2026-09-01 — Implementing the near-duplicate event guard, picked the similarity metric/threshold
+  by feel and it was wrong into a test twice before it was right: first word-set Jaccard ≥ 0.8 (the
+  real near-dup scored 0.71, missed), then `SequenceMatcher` ≥ 0.75 which over-triggered on short
+  templated strings (`event 12` vs `event 11` = 0.88, breaking the existing cap test). It came right
+  only after I computed the metric in a scratch script against the actual positive AND negative cases
+  (real Warren near-dup, role-reversal, short strings) — which is what should have preceded the first
+  threshold. → **a similarity/threshold heuristic gets computed against the real positive and negative
+  examples before it is written, not after a test fails; a number chosen by feel passes the case you
+  imagined and fails the two you didn't.** Caught by my own tests pre-merge; no bad code shipped.
+
+- 2026-09-01 — Merged the release with `git push origin HEAD:main` (correct), but `main` had advanced
+  mid-session (another session's `skillforge/`), so the push had already required a fetch + rebase of
+  the branch onto the new `main`. That rewrote the branch's two earlier (pushed) plan-doc commits, so
+  updating the remote branch ref then needed a force-push — which a repo ruleset blocks ("declined due
+  to repository rule violations"). Reconciled without force by recording a `git merge -s ours
+  origin/<branch>` (keeps HEAD's tree exactly, adds the stale tip as a parent → branch fast-forwards).
+  Cost ~5 extra git ops and a confusing debrief-check "not merged" (HEAD ends up ahead of main by
+  content-free commits). → **before rebasing an already-pushed branch, remember this repo blocks
+  force-push; if main only advanced, prefer merging main INTO the branch over rebasing, or accept that
+  the branch ref reconciles via a `-s ours` merge, not a force-push.** Main was correct throughout; no
+  deploy impact.
+
+- 2026-09-01 — Drafting the life-arc→memory grounding plan, wrote a guardrail "exclude NSFW
+  specifics from the grounding block" and put it in the signed-off-track plan. The owner asked *why*,
+  and answering forced the check I'd skipped: Emily is an NSFW companion whose intimate dynamic is the
+  **core emotional throughline** of her long-term summary — filtering it out would have flattened her
+  and re-created the exact disconnect the plan fixes. The real axis was never NSFW; it is provenance
+  (don't re-narrate grounding as invented events) + domain (solo events stay in her own world), both
+  content-neutral. Rewrote the guard. → **a guardrail written into a plan is a claim to check against
+  the actual subject before it ships, not a safe default; "filter out the sensitive stuff" is
+  especially suspect on a character whose sensitive material is the point.** Self/owner-corrected at
+  the plan stage, no code shipped. Adjacent to C8 (didn't ask what the filter would actually remove)
+  but the cause is distinct — a reflexive-caution guard, not a misread reading — so logged here.
+
+- 2026-08-26 — Reshaping the `[STEPPED THINKING]` preset block, nearly edited only `preset.txt` —
+  the file the `character-reviewer` agent had reviewed and cited by line number. The
+  `edit-cards-and-presets` skill's "check `PRESET_FILES` before assuming `preset.txt` is live" note
+  caught it: the live layer every instance loads is `preset-stepped.txt`, and `preset.txt` is only
+  the fallback when no layer resolves — so editing just `preset.txt` would have shipped a no-op to
+  all seven bots. Grepped, found the block in both, edited both. → **for any preset-content edit or
+  review, the live text is the `preset-*.txt` layer named in `PRESET_FILES`, not `preset.txt`;
+  point the `character-reviewer` at the layer, and when a block lives in both keep them in sync.**
+  An agent citing `preset.txt:657` is citing the fallback, not what the fleet reads.
+
+- 2026-08-26 — The exact-lock verify venv could not be built in the cloud container: the agent
+  proxy's package index lags `requirements.lock` (`garminconnect==0.3.11` and `numpy==2.5.2` both
+  absent — index tops out at 0.3.2 / 2.4.6), and `--require-hashes` aborts the whole install on one
+  missing pin. Both are optional deps (`try/except → None` in bot.py), so filtered their blocks from
+  the lock and installed `numpy==2.4.6` to get a working suite (1393 pytest green). → **when the
+  proxy index can't serve the exact lock, a functional near-lock venv (optional deps filtered,
+  nearest-available substituted) is the right fallback for a content/pure-function change — CI runs
+  the true lock and is the authoritative gate; say "near-lock, index lag" rather than claiming the
+  exact environment.** Distinct from the 2026-08-24 venv slip (that was bare python3 + relative
+  path; this is the index itself lagging the pins).
+
+- 2026-08-24 — Building 5.9 `/reviewlife`, the `repo-change-control` fresh-container venv
+  failed twice before it worked, wasting a verify cycle. First: created it with bare
+  `python3` (3.11 here) — the repo pins 3.12 and the hashed `requirements.lock` holds only
+  cp312 wheels, so `--require-hashes --only-binary=:all:` matched nothing and silently
+  installed only pytest, then pytest died at collection on `No module named 'requests'`.
+  Second: the `-r telegram-companion-bot/requirements.lock` path was relative and the
+  background shell's cwd wasn't the repo root, so pip reported "Could not open requirements
+  file" — which I only saw after grepping the pip log, because the `&&` chain had masked it.
+  → **build the verify venv with `python3.12` explicitly and pass the lock by absolute
+  path**, and when a pip install "succeeds" but imports fail, read the install log before
+  blaming the code — a hash/interpreter mismatch fails the lock install without failing the
+  command.
+
+- 2026-08-24 — Sent a 432,082-byte changelog through a command-output bridge as one
+  base64 string. The tool truncated the output, but the partial bytes still formed a
+  valid Git blob, so `main` moved and CI failed only when the missing release heading
+  made `version-changelog-sync` go red. Restored the file from fixed-size, 3-byte-aligned
+  chunks and verified the returned blob SHA against `git hash-object`. → **When publishing
+  a local tree through a content API, compare every returned blob SHA to the local Git
+  blob SHA before moving a ref; transport success is not content identity.** The CI gate
+  caught this occurrence, and the item-2 publish checklist now includes the hash comparison.
+
 - 2026-08-24 — Added `immutable-release-contract` before loading the repo's
   `add-regression-eval` skill; its first rule is to commit all real work before any
   break-test injection. Caught before injecting, finished the artifact, and moved the
   commit ahead of RED/GREEN work. → Load the named regression skill before writing the
   check, not merely before break-testing it; its ordering constraint changes the work
   sequence even when the checker itself is sound.
+
 - 2026-08-24 — First `uv pip compile` failed because uv defaulted to the read-only
   `/root/.cache/uv`; the resolver never started. Re-ran with a task-specific cache under
   `/tmp`. → In this managed workspace, set `UV_CACHE_DIR` to a writable task directory
   before the first uv invocation instead of treating tool availability as cache access.
+
 - 2026-08-24 — Wrote the `reviewer-stance-present` eval's error message as
   `f"...(\"{'\" / \"'.join(missing)}\")..."` — a backslash inside an f-string expression,
   which only parses on Python 3.12+ (PEP 701). The fleet runs 3.12 and CI pins it, so it
@@ -1721,6 +1758,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   of f-string expression parts** — build the joined string in a plain variable first
   (`joined = " / ".join(missing)`), then interpolate the name. A heredoc check that must
   run under an older interpreter than the one you are typing on cannot assume 3.12 syntax.
+
 - 2026-08-23 — **Nearly dated six graduation lines from `git log --diff-filter=A`, which
   reported 2026-08-11 for atlas_suggest.py, the C3 skills, and the session-audit merge-base
   feature alike.** Checked before using them: that commit added 327 files — a bulk import, so
@@ -1729,12 +1767,14 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   post-import commit, entry prose). → git creation date is a *copy's* timestamp; for a "when did
   this ship" question read the source that records it (C22), and ask what the reading actually
   measures before concluding from it (C8). Caught before any wrong date shipped.
+
 - 2026-08-23 — **Almost added "settings.json `.py` hooks aren't existence-checked" to the
   watchlist, using `agent-authorization.py` (the one guard `.py` no `.sh` invokes) as the
   example.** Grepped `hooks-wired` first: it already checks every `.sh` OR `.py` registered in
   settings.json exists. Not a gap. → a finding you generate is not exempt from your own
   verification protocol (C10); grep the machinery before naming a gap in it, especially while
   scanning *for* gaps. Caught before it reached the file.
+
 - 2026-08-23 — **Shipped a stateful dedup loop (`fire_poll_job`) whose green 1300-test suite
   covered only the happy path and cold-start; the mandated step-7 `/code-review` then found
   four real correctness bugs — id-less records re-alerting forever, backlog dump on
@@ -1746,6 +1786,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   mechanism (repo-change-control step 7) worked exactly as intended; this is about not
   making it do the unit tests' job. Same family as the 2026-08-02 `/features` ValueError
   that green source-reading tests shipped.
+
 - 2026-08-23 — **Reconstructed the merged CHANGELOG by concatenating my prefix + `origin/main`
   verbatim, assuming main was well-formed; it wasn't (main had its newest entry above the
   `# Changelog` preamble), so the result had a duplicated preamble.** Caught one step later
@@ -1753,6 +1794,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   objects, don't assume either side is structurally clean — verify the *result* (grep
   headings, count sentinel lines) before trusting it, the same way a merge needs its output
   checked, not just its inputs.
+
 - 2026-08-22 — **Read a deliberate owner action as a system fault, and led with it.** Every
   Routine's `next_run_at` was in the past and `ops-brief-daily` had not fired in a week, so
   I reported the scheduled layer as stopped and "more urgent than dormancy". The owner had
@@ -1773,6 +1815,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   wrong object with full confidence. → **An identifier either came from a result you read
   this turn, or you do not have it.** Never pattern-match one into existence; pay for the
   listing call.
+
 - 2026-08-21 — **Applied a text transformation file-wide whose correctness depended on a
   per-line property I had not checked.** Escaping pipes inside backticks across all 67
   operational-log rows fixed the three intended rows and silently damaged a fourth: that
@@ -1782,23 +1825,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   rule rather than by hand, state the rule's precondition and test it per item** — here,
   an even backtick count. The verification that caught it was already written, which is
   the only reason this was a minute and not a corrupted record.
-- 2026-08-12 (**second occurrence, same session**) — Did it again in the very next
-  release: wrote "10 new tests … Total: 1,273" into the v2026-08-12.2 changelog while
-  drafting; `verify.sh` said 1267, and the real count was 4 (I had counted six DEFAULTS
-  table rows as tests). Wrote the sentence, then measured — the exact sequence the entry
-  below says to invert, hours after writing it. → **Promote on the next occurrence.** The
-  rule is not "remember to check", it is mechanical: leave the number as `TOTAL` in the
-  draft and fill it from the `verify.sh` line, so an unfilled placeholder is visible and
-  a wrong number is not.
-- 2026-08-12 — Wrote "24 new tests … Total: 1,269" into a changelog entry from memory
-  while writing it, then measured 16 and 1,261. Two wrong numbers in a shipped-facing
-  document, both of the kind a reader has no way to check. `grep -c 'def test_'` was one
-  command and I ran it *after* writing the claim rather than before. → **A count in a
-  changelog is a measurement, not a recollection — run the command first and paste the
-  number into the sentence, never write the sentence and verify later.** (Caught again
-  the same session: the corrected wording, "16 new tests … plus one pinning
-  `_quote_grounded`'s limit", implied 17 when the pin was one of the 16. `/code-review`
-  found that one, not me.)
+
 - 2026-08-12 — Created a one-shot probe Routine to measure egress from a *fired* session
   and wrote its report path as "commit and push to a branch", without checking that
   `create_trigger` stores no `sources` unless given them. Every working Routine in
@@ -1809,18 +1836,19 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   report channel, diff your new trigger's `session_context` against a Routine known to
   work — the channel is part of the experiment, and an unreported result is
   indistinguishable from a blocked one.**
-- 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
-  over a file containing a ``` fence. Three-backtick delimiters pair against each other,
-  so the tokenizer desynchronized and the check was blind to everything below the fence —
-  it reported PASS on a clean tree and on an injected bad reference alike. Found only
-  because break-test mode 5 refused to go red. → **Strip fenced blocks before pairing
-  inline backticks, and treat a break-test that won't go red as a bug in the check, never
-  as proof the tree is clean.**
-- 2026-07-31 — Used `Edit` with `replace_all` on the fragment `principle 8` across the
-  scaffolding audit, and it landed mid-sentence in two different grammatical positions
-  ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
-  had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
-  match sits inside a sentence, edit each site individually.**
+
+- 2026-08-11 — Wrote `minor=$(grep -c "^- $today —" file || echo 0)` inside `debrief-check.sh` — the tool built to enforce C23. `grep -c` prints `0` **and** exits 1 when nothing matches, so the fallback appended a second line and `$((minor + oplog))` died with "syntax error in expression". Same family as C23's first shape: a `||` fallback firing on a command that had already succeeded at printing. **Written into the C23 enforcement tool, minutes after minting C23.** → **`|| echo <default>` is wrong after any command that prints on failure** — `grep -c`, `wc`, `find`. Capture, then default with `${var:-0}`. The wrong form reads perfectly well, which is why the corrected line now carries the explanation as a comment rather than just being right.
+
+- 2026-08-10 — Handed over a prune of `error_counts` inside each instance's `state.json` as *prune all six, then restart all six*. `bot.py` holds `_error_counts` in memory and rewrites the whole file on `save_state()`, so every second between a file being edited and its owner being restarted is a window where the running bot writes its full in-memory copy back over the edit. I **named the race in the same message** — "a running instance rewrites state.json on its own schedule and could overwrite the prune" — and then talked past it: "restarting after is enough in practice, but stopping first is strictly safer." It is not enough in practice. Emily, the busiest instance and therefore the likeliest to save state mid-window, came back at exactly her pre-prune 425. → **to edit a file a live process owns, stop the process first — prune second, start third.** Naming a race and then recommending the racy order is worse than not noticing it: the caveat makes it look considered. If a hazard is real enough to write down, it is real enough to change the command.
+
+- 2026-08-10 — Proposed that the fleet's ~8.7/day `network` errors were Termux phone-era residue aging out of the 200-cap, then **withdrew the hypothesis in the same message** because every instance's newest entry was today. That reading cannot discriminate: "newest is today" is equally true of "8.7/day, ongoing" and of "1/day now, 26.7/day historically". The daily histogram settled it in one command — 93.5% of nora's retained entries predate the cutover, and her VPS-era rate (1.08/day) matches VPS-native marcus (0.93/day). The first hypothesis was right and I talked myself out of it with a non-discriminating reading. → **withdrawing a hypothesis needs a discriminating reading exactly as much as asserting one does.** C8's own question — what would this reading look like under the *other* hypothesis? — applies symmetrically, and I applied it only to the claim I was making, not to the claim I was retracting. Same session that took C8 to seen 7.
+
+- 2026-08-10 — Wrote `break-test.sh` with `trap restore EXIT` and guarded the restore on `[ -f "$SNAP" ]`. `mktemp` **creates** the file, so that guard was true before the snapshot had been taken, and the first early exit — a 0-match anchor, the exact failure the tool exists to catch — copied zero bytes over the target. **`bot.py` was truncated to nothing by the run that was checking the tool's own failure modes.** Restored from `git show HEAD:` (not `git checkout`, C15) and fixed with an explicit `SNAPPED` flag plus a non-empty check. → **a cleanup trap must prove the thing it restores was ever captured**; `mktemp` existing is not the resource existing. Found only because the tool's failure modes were exercised rather than assumed — the same discipline the tool exists to enforce, applied to the tool.
+
+- 2026-08-10 — Declared `python3 -m py_compile bot.py` clean and moved on, having placed `_ERROR_LOG_THROTTLE_S = _env_int(...)` about 120 lines ABOVE `_env_int`'s definition. Compiling checks syntax; it does not execute module level, so a NameError that makes the module unimportable passes it silently. Found only when pytest failed at collection with `NameError: name '_env_int' is not defined`. I had even predicted this ordering hazard earlier in the same session and then placed the constant without checking. → **`py_compile` is not an import.** For any module-level statement that CALLS something, prove it by importing the module, not by compiling it — `python3 -c "import bot"` under the test fixture is the check, and it is what `verify.sh` runs pytest for anyway.
+
+- 2026-08-09 — Added a cross-reference to `.claude/OPERATING_MANUAL.md` §9 from CLAUDE.md but wrote the bare filename, `OPERATING_MANUAL.md`. `claude-md-refs-resolve` failed: CLAUDE.md's paths resolve from the repo root, where that file does not exist. The surrounding lines all use the `.claude/` prefix, so the wrong form was written next to four correct ones. → **a path written into a doc is a claim that resolves from that doc's stated root, not from the file you were just editing.** Caught by the eval, not by rereading — which is the argument for running the suite on doc-only changes too.
+
 - 2026-08-02 — Handed over seed-placement blocks written as skip-if-exists (`[ -f x ] || cat > x`),
   then reported the Portland→Olympia relocation shipped. Every instance that already had the file
   silently no-op'd, and Emily kept saying Burnside for a further two rounds. → **a placement block
@@ -1829,6 +1857,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   verification must read the file back, not check that the command exited 0. Skip-if-exists is
   correct only for *seeding something absent*, and then the report must say "seeded where missing",
   never "updated". C13 family — the exit status could not fail.
+
 - 2026-08-02 — Read seven `/audit` outputs and reported "life.txt missing on priya, marcus,
   jules". Nora's line said `MISSING: life.txt, setting.txt` too, so it was four. Then handed over
   `cat /opt/telegram-bots/nora/life.txt` as the way to see the file format — naming the one bot in
@@ -1836,6 +1865,15 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   the field from each into a list and read the list, rather than forming an impression while
   scrolling. Seven near-identical blocks is exactly where the eye fills in what it expects.
   C8 family: the reading was there, I just did not actually perform it.
+
+- 2026-08-02 — `risk-guard.sh` blocked a script because the script *quoted* a constraint's title, which contains the command pattern the guard forbids. Nothing was being run; the words were an anchor string. C14 exactly, in a hook rather than a scanner, and the second time this week a guard fired on prose about the thing it guards → when a helper script must mention a forbidden pattern, put the script in a file and run the file; do not inline it where a PreToolUse hook reads the command text.
+
+- 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
+
+- 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
+
+- 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
+
 - 2026-08-01 — Wrote a source-scanning test that failed twice before it was right: first it
   flagged its own explanatory comment (the block describes the wording it forbids — C14 exactly,
   and I wrote the C14 shape into a fresh test the same day I had it in front of me), then the
@@ -1843,6 +1881,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   needs BOTH: strip comments (describing a defect is not committing it) and match on word
   boundaries, never bare substrings. Two failed runs is cheap; a scanner that greens on the wrong
   thing is not.
+
 - 2026-08-01 — Wrote a conditional as `if X and not f.__wrapped__() if False else (X and f())`
   — leftover scaffolding from two half-finished versions of the same line, committed to the file
   in one Edit. Syntactically valid, semantically nonsense, and it would have compiled. Caught on
@@ -1850,6 +1889,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   claims separated. The cause was editing *while* still deciding the logic → settle the condition
   in full before writing the Edit; an `if` that needs a ternary escape hatch to express is a sign
   the branch isn't decided yet, not a sign it needs clever syntax.
+
 - 2026-08-01 — Recommended a durable guardrail (a `bot-code-invariants` rule) for an
   external commit's lesson *before* reading how the target code was organised. One grep
   later — `SELFIE_EXPRESSIONS/FRAMINGS/OUTFITS/ACTIVITIES/CAMERA` are all already hoisted
@@ -1860,24 +1900,30 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   code's existing organisation before proposing machinery to protect it; "is this already
   solved structurally?" comes before "what rule would prevent this?" (C2 family: name the
   class — and check it exists — before building for it).
+
+- 2026-07-31 — Wrote a scanner that pairs inline backticks with `` `([^`]+)` `` and ran it
+  over a file containing a ``` fence. Three-backtick delimiters pair against each other,
+  so the tokenizer desynchronized and the check was blind to everything below the fence —
+  it reported PASS on a clean tree and on an injected bad reference alike. Found only
+  because break-test mode 5 refused to go red. → **Strip fenced blocks before pairing
+  inline backticks, and treat a break-test that won't go red as a bug in the check, never
+  as proof the tree is clean.**
+
+- 2026-07-31 — Used `Edit` with `replace_all` on the fragment `principle 8` across the
+  scaffolding audit, and it landed mid-sentence in two different grammatical positions
+  ("working the subagent-authorization principle"). Two follow-up edits to repair prose I
+  had just broken → **`replace_all` is for whole tokens, not phrase fragments; when the
+  match sits inside a sentence, edit each site individually.**
+
 - 2026-07-31 — Grepped `routines.md` for Routine headings with `| head -20`, saw no
   `character-pass-monthly`, and started writing it up as doc drift; the heading was at
   line 242, past the cut. → **A `head`-truncated grep proves presence, never absence.
   Re-run unbounded before reporting anything missing.**
+
 - 2026-07-31 — Ran a second Bash call assuming a fresh working directory after the first
   had `cd`'d into `telegram-companion-bot/`; four path checks failed as "No such file".
   → **The Bash working directory persists between calls: use absolute paths, or `cd` in
   every call that depends on one.**
-- 2026-07-29 — Asked why the ops brief can't reach GitHub, I investigated from this
-  container's working tree without fetching first, concluded "routines.md is out of sync
-  with the live Routines, that's why it halts", and rewrote the file. All of it was
-  already fixed on `origin/main` — six commits ahead of me, one of them the same routines
-  sync with a *better* root cause. Wasted ~10 calls and told the owner a wrong diagnosis.
-  Caught only because `git push origin main` was refused as non-fast-forward → **another
-  session may be pushing to this repo right now: `git fetch origin main` and compare
-  before diagnosing anything, not just before merging.** Distinct from C13's fourth
-  occurrence — my local `main` was a true ancestor, merely 6 commits behind, so nothing
-  looked wrong and the eval count was correct.
 
 - 2026-07-30 — Shipped a written recommendation to "move the standing-authorization text
   into CLAUDE.md and delete the per-turn hook" **without having read the hook.** Its
@@ -1890,6 +1936,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   says so in a comment. (C9 family: an inherited or inferred prediction is a hypothesis.
   This one reached the owner in a delivered audit before I caught it, so it is a near-miss,
   not a clean self-correction.)
+
 - 2026-07-30 — Wrote `skill-index-integrity` to catch indexes that describe a reality that
   isn't there, then made the check a file-wide grep for "preloaded always" — and the same
   commit added a sentence to `skill-router` *explaining* the removed claim. The new eval
@@ -1899,6 +1946,7 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   documentation in one pass.** Write the check, then re-read the same commit's prose as if
   the scanner wrote it. (C14, `seen` unchanged — caught by the check itself, which is the
   system working.)
+
 - 2026-07-30 — Ghost-token audit: reported card↔preset-layer duplication as "emily 38
   shared 8-grams", a number I was one sentence away from putting in a findings table. It
   measures nothing an owner can act on — consecutive shingles overlap, so 38 of them were
@@ -1908,18 +1956,32 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   (tokens, files, dollars) before it reaches a report. (C8 family: ask what the reading
   measures — here the proxy inflated the finding ~9x in the direction that made it look
   more important.)
+
+- 2026-07-29 — Asked why the ops brief can't reach GitHub, I investigated from this
+  container's working tree without fetching first, concluded "routines.md is out of sync
+  with the live Routines, that's why it halts", and rewrote the file. All of it was
+  already fixed on `origin/main` — six commits ahead of me, one of them the same routines
+  sync with a *better* root cause. Wasted ~10 calls and told the owner a wrong diagnosis.
+  Caught only because `git push origin main` was refused as non-fast-forward → **another
+  session may be pushing to this repo right now: `git fetch origin main` and compare
+  before diagnosing anything, not just before merging.** Distinct from C13's fourth
+  occurrence — my local `main` was a true ancestor, merely 6 commits behind, so nothing
+  looked wrong and the eval count was correct.
+
 - 2026-07-29 — Quoted a `for … ; do` loop as a two-line fragment to *illustrate* a change,
   with no body and no `done`. The owner pasted it and bash sat at a `>` continuation
   prompt — "didn't return to the command prompt" → **a fenced bash block is read as
   runnable, whatever it was meant to illustrate.** Show partial shell as prose or with an
   explicit `# fragment, not runnable` marker, or show the complete construct. (C12 family:
   the first case was a command that could not authenticate, this one cannot even parse.)
+
 - 2026-07-29 — Told the owner `grep -c Warren emily_harper.json` should "expect 1". It is
   2 — the lorebook key *and* the content line, in a file I had written myself an hour
   earlier. The deploy was correct; my predicted value was wrong, and a wrong expectation
   handed to an operator reads as a failed deploy → when stating the expected output of a
   verification command, **measure it against the repo copy first**, don't recall it. (C3's
   neighbour: a check with a wrong expected value is as misleading as one that cannot fire.)
+
 - 2026-07-28 — Wrote two full drafts of `preset-marcus.txt` arbitrating a paragraph-length
   conflict, because the handoff predicted his card would fight `preset-core.txt` "the way
   Bonnie's did". It doesn't: Bonnie's card states a numeric contract, his states no length
@@ -1929,12 +1991,14 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   a per-character layer arbitrates against the WHOLE stack. Read every layer the instance
   will load before writing the one that resolves them. An inherited prediction is a
   hypothesis, not a finding (C9 family — this one was caught before shipping).
+
 - 2026-07-28 — Filled the `.env.example` stack row for marcus by doing arithmetic off the
   table's own published numbers (8501 − emily's layer + marcus's) instead of measuring.
   The table is stale: `preset-core.txt` and `preset-explicit.txt` have grown since those
   rows were written, so every row reads ~60 raw low and my derived figure inherited the
   error → measure, don't derive from a published figure whose measurement date you did not
   check (C8 family). Fixed by measuring and annotating the staleness in the table.
+
 - 2026-07-28 — `anchor-guard.sh` blocked a *content-anchored* `sed -i 's/^Layer is …/'`.
   Not my mistake and not a guard bug in the dangerous direction, but worth recording: line
   28 scans the entire command string for a line-address shape, and the `grep -n "434 raw
@@ -1943,30 +2007,13 @@ Format: `date — what happened → what to do instead`. One line. Newest first.
   compound command the address-shaped text belongs to. Fail-safe direction, but "a guard
   that misfires gets disabled" is this file's own rule (C7), so it needs either
   per-segment matching or a note in the skill.
+
 - 2026-07-27 — Break-tested the C1 hook through a bash heredoc; backtick escaping meant
   the code fences never reached the transcript, so all three cases "passed" and the
   guard looked dead. The *test* was broken, not the code → when a break-test shows
   nothing firing, suspect the harness before the check. Build fixtures in Python, not
   shell quoting.
+
 - 2026-07-26 — `paste -sd '; '` in session-audit.sh produced `C1;C2 C3`: `-d` takes a
   *cycling list* of delimiter characters, not a delimiter string → join with one
   character, then substitute.
-- 2026-08-02 — `risk-guard.sh` blocked a script because the script *quoted* a constraint's title, which contains the command pattern the guard forbids. Nothing was being run; the words were an anchor string. C14 exactly, in a hook rather than a scanner, and the second time this week a guard fired on prose about the thing it guards → when a helper script must mention a forbidden pattern, put the script in a file and run the file; do not inline it where a PreToolUse hook reads the command text.
-- 2026-08-02 — Wrote the archiving rule into the Minor header, naming the archive heading mid-sentence, and the scanner's own section-splitter matched that mention and truncated the active log to zero entries. `constraints-drift` then reported a confident **0 candidates** — the all-clear and the blind failure are the same output. Caught only by printing the parsed entry count instead of trusting the summary line. → **a heading used as a parse marker must be matched line-anchored**, because the document will eventually describe its own structure. C14's third appearance this session (test, hook, parser) and the one that actually produced a wrong answer.
-- 2026-08-02 — Cleared the source-assertion backlog by driving all 12 handlers through a helper, `self._run(bot.vibe_cmd)`. The scanner still reported every one of them, and it was right: passing a function REFERENCE is not calling it, and a reference proves nothing ran — which is the entire property the check exists to measure. Rewrote as direct `asyncio.run(bot.vibe_cmd(u, ctx))` calls. → **when a check reports something you believe you fixed, read what it actually measures before assuming it is wrong.** The convenience wrapper was the defect; the scanner was the only thing that noticed.
-- 2026-08-02 — Wrote a "non-admin gets silence" assertion using a hardcoded id (999999) that an earlier test in the same file claims as OWNER when none is set. The test passed alone and failed in the full suite, as an admin-gate failure rather than as test pollution. → **a fixture identity asserted to lack a privilege must be derived, not literal** — compute an id that is provably not the owner and not in ALLOWED_USERS, because another test may have claimed yours.
-- 2026-08-11 — Wrote `minor=$(grep -c "^- $today —" file || echo 0)` inside `debrief-check.sh` — the tool built to enforce C23. `grep -c` prints `0` **and** exits 1 when nothing matches, so the fallback appended a second line and `$((minor + oplog))` died with "syntax error in expression". Same family as C23's first shape: a `||` fallback firing on a command that had already succeeded at printing. **Written into the C23 enforcement tool, minutes after minting C23.** → **`|| echo <default>` is wrong after any command that prints on failure** — `grep -c`, `wc`, `find`. Capture, then default with `${var:-0}`. The wrong form reads perfectly well, which is why the corrected line now carries the explanation as a comment rather than just being right.
-- 2026-08-11 — Wrote a break-test whose command was `run-evals.sh | grep -q '^FAIL <name>' && exit 0 || exit 1` — inverted. `break-test.sh` requires the command to exit NON-ZERO with the defect present, so a correctly-caught defect produced exit 0 and the tool reported "did not go red". The eval was fine; my wrapper was backwards, and the extra grep was pointless anyway since `run-evals.sh` already exits non-zero on any failure. → **a break-test's command must FAIL when the defect is present — check the polarity before reading the result**, and prefer the check's own exit status over a grep for its output. Caught only because the tool is strict about the red step; a hand-run break-test would have shown a passing eval and a confusing message and been waved through.
-- 2026-08-10 — Handed over a prune of `error_counts` inside each instance's `state.json` as *prune all six, then restart all six*. `bot.py` holds `_error_counts` in memory and rewrites the whole file on `save_state()`, so every second between a file being edited and its owner being restarted is a window where the running bot writes its full in-memory copy back over the edit. I **named the race in the same message** — "a running instance rewrites state.json on its own schedule and could overwrite the prune" — and then talked past it: "restarting after is enough in practice, but stopping first is strictly safer." It is not enough in practice. Emily, the busiest instance and therefore the likeliest to save state mid-window, came back at exactly her pre-prune 425. → **to edit a file a live process owns, stop the process first — prune second, start third.** Naming a race and then recommending the racy order is worse than not noticing it: the caveat makes it look considered. If a hazard is real enough to write down, it is real enough to change the command.
-- 2026-08-10 — Proposed that the fleet's ~8.7/day `network` errors were Termux phone-era residue aging out of the 200-cap, then **withdrew the hypothesis in the same message** because every instance's newest entry was today. That reading cannot discriminate: "newest is today" is equally true of "8.7/day, ongoing" and of "1/day now, 26.7/day historically". The daily histogram settled it in one command — 93.5% of nora's retained entries predate the cutover, and her VPS-era rate (1.08/day) matches VPS-native marcus (0.93/day). The first hypothesis was right and I talked myself out of it with a non-discriminating reading. → **withdrawing a hypothesis needs a discriminating reading exactly as much as asserting one does.** C8's own question — what would this reading look like under the *other* hypothesis? — applies symmetrically, and I applied it only to the claim I was making, not to the claim I was retracting. Same session that took C8 to seen 7.
-- 2026-08-10 — Wrote `break-test.sh` with `trap restore EXIT` and guarded the restore on `[ -f "$SNAP" ]`. `mktemp` **creates** the file, so that guard was true before the snapshot had been taken, and the first early exit — a 0-match anchor, the exact failure the tool exists to catch — copied zero bytes over the target. **`bot.py` was truncated to nothing by the run that was checking the tool's own failure modes.** Restored from `git show HEAD:` (not `git checkout`, C15) and fixed with an explicit `SNAPPED` flag plus a non-empty check. → **a cleanup trap must prove the thing it restores was ever captured**; `mktemp` existing is not the resource existing. Found only because the tool's failure modes were exercised rather than assumed — the same discipline the tool exists to enforce, applied to the tool.
-- 2026-08-10 — Declared `python3 -m py_compile bot.py` clean and moved on, having placed `_ERROR_LOG_THROTTLE_S = _env_int(...)` about 120 lines ABOVE `_env_int`'s definition. Compiling checks syntax; it does not execute module level, so a NameError that makes the module unimportable passes it silently. Found only when pytest failed at collection with `NameError: name '_env_int' is not defined`. I had even predicted this ordering hazard earlier in the same session and then placed the constant without checking. → **`py_compile` is not an import.** For any module-level statement that CALLS something, prove it by importing the module, not by compiling it — `python3 -c "import bot"` under the test fixture is the check, and it is what `verify.sh` runs pytest for anyway.
-- 2026-08-09 — Added a cross-reference to `.claude/OPERATING_MANUAL.md` §9 from CLAUDE.md but wrote the bare filename, `OPERATING_MANUAL.md`. `claude-md-refs-resolve` failed: CLAUDE.md's paths resolve from the repo root, where that file does not exist. The surrounding lines all use the `.claude/` prefix, so the wrong form was written next to four correct ones. → **a path written into a doc is a claim that resolves from that doc's stated root, not from the file you were just editing.** Caught by the eval, not by rereading — which is the argument for running the suite on doc-only changes too.
-
-## Minor — archived
-
-Entries that sat 30 days without pairing with anything. Kept verbatim — they are still
-searchable evidence, and a shape that reappears after two months is worth finding — but
-out of the promotion count, per the archiving rule above. Newest first.
-
-*(empty as of 2026-08-02: the whole active log is 8 days old, so nothing is due yet.)*
