@@ -68,7 +68,30 @@ below are marked **historical** and cannot recur on what is running now.
    release) that makes the failure self-describing, have the user reproduce, then
    fix.
 
-5. **Fix** via `repo-change-control` if it's code; via the user's hands on the VPS if
+   **"Slow", "timed out", "late", "stale" → measure the step before changing it.**
+   These symptoms invite a structural fix (raise `REQUEST_TIMEOUT` / `STREAM_TIMEOUT`,
+   move a job, split a step). Get one measured duration of the *specific* step the
+   symptom names first — the `duration_ms` field on its `OP_EVENT ` journal lines
+   (`OP_EVENTS`, on by default: `journalctl -u bot@<instance> --since -2h --no-pager |
+   grep 'OP_EVENT '`), filtered to the one `feature`/`model` named, not an average
+   across all of them. Then
+   say which it is: **needs more time** (it finishes, just past the limit → a limit
+   change can be right) or **stuck** (it never finishes → a bigger limit only delays
+   the same failure). Those two need opposite fixes. No measured duration = no root
+   cause yet. (Borrowed from gbrain's `measure-before-you-fix`, garrytan/gbrain, MIT.)
+
+   **Three wrong hypotheses → stop.** Count the hypotheses you have tested against
+   evidence. When the third one fails, stop proposing fixes and tell the user, with
+   three options: (a) a new hypothesis, named, with the evidence that would confirm it;
+   (b) treat it as a design problem, not a bug, and say which design; (c) ship logging
+   per the paragraph above and wait for the next occurrence. Each failed fix that
+   uncovers a new problem somewhere else means you are working at the wrong layer.
+   (Borrowed from gstack's `/investigate`, garrytan/gstack, MIT.)
+
+5. **Fix** via `repo-change-control` if it's code. **If the fix touches more than 5
+   files, tell the user the count before making it** and offer the narrower option (fix
+   the failing path now, the rest as a follow-up) — a bug fix that wide usually means the
+   root cause is not the one named. Via the user's hands on the VPS if
    it's host state (a damaged release pointer, a stuck systemd unit, disk full). Exact live
    commands live in `OPS_MANUAL.md`; the phone-era device layer in `termux-device-ops`
    is historical (the phone runs nothing) — read it only for the reasoning behind a
@@ -88,6 +111,8 @@ were unaffected and why. "Restart it and see" is not a diagnosis.
 
 - [ ] Saw actual pasted evidence (journal lines / command output) before proposing a fix
 - [ ] Signature table consulted; if matched, the cheap check ran before anything else
+- [ ] A timing symptom has a measured duration of the named step before any limit changed
+- [ ] Stopped and asked after the third failed hypothesis; asked before a fix touching >5 files
 - [ ] Fix verified on the VPS (`/audit`, `/errors` clean, or reproduced-then-gone)
 - [ ] Operational log updated if the system learned something
 

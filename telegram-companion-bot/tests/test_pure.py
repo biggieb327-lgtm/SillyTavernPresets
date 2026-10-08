@@ -9598,6 +9598,8 @@ class TestEveryBooleanFlagDefault:
         "MEMORY_REINFORCE": True,
         # v2026-09-26.2, ROADMAP 7.8: confidence 9/10 lengthen the decay half-life.
         "MEMORY_CONFIDENCE_DECAY": True,
+        # v2026-10-08.1: old recalled memories carry "(noted about N months ago)".
+        "MEMORY_AGE_NOTE": True,
         # v2026-09-26.3, ROADMAP 7.9: owner-added/edited/approved lines count as 10.
         "MEMORY_OWNER_CONF": True,
         "MOOD_AUTO": True,
@@ -15831,3 +15833,100 @@ class TestSelfiePronouns:
         """A renamed pool entry would silently stop being filtered for "he"."""
         pooled = set(bot.SELFIE_OUTFITS) | set(bot.SELFIE_ACTIVITIES) | set(bot.SELFIE_EXPRESSIONS)
         assert bot._SELFIE_FEMININE_ENTRIES <= pooled
+
+
+# ── v2026-10-08.1: memory age note ─────────────────────────────────────────────────────
+# An old recalled memory reads exactly as current as yesterday's. These pin the pure
+# suffix rules, then CALL assemble_messages and read the rendered memory block.
+
+class TestMemoryAgeNote:
+    NOW = 1_800_000_000.0
+    DAY = 86400.0
+
+    def _sfx(self, lines, meta=None, min_days=60, enabled=True, core=frozenset()):
+        return bot._memory_age_suffixes(lines, meta or {}, self.NOW, min_days, enabled, core)
+
+    def _meta(self, line, days, **extra):
+        return {line: {"ts": self.NOW - days * self.DAY, **extra}}
+
+    def test_recent_line_gets_nothing(self):
+        assert self._sfx(["a"], self._meta("a", 10)) == [""]
+
+    def test_months_branch(self):
+        assert self._sfx(["a"], self._meta("a", 100)) == [" (noted about 3 months ago)"]
+
+    def test_weeks_branch(self):
+        assert self._sfx(["a"], self._meta("a", 45), min_days=30) == \
+            [" (noted about 6 weeks ago)"]
+
+    def test_days_branch_never_says_zero_weeks(self):
+        assert self._sfx(["a"], self._meta("a", 3), min_days=2) == [" (noted 3 days ago)"]
+
+    def test_over_a_year(self):
+        assert self._sfx(["a"], self._meta("a", 400)) == [" (noted over a year ago)"]
+
+    def test_threshold_is_inclusive(self):
+        assert self._sfx(["a"], self._meta("a", 60)) != [""]
+        assert self._sfx(["a"], self._meta("a", 59)) == [""]
+
+    def test_text_date_is_the_fallback(self):
+        d = datetime.fromtimestamp(self.NOW - 200 * self.DAY, tz=bot.TZ).date()
+        line = f"[auto {d.isoformat()}] she was job hunting"
+        assert self._sfx([line]) == [" (noted about 7 months ago)"]
+
+    def test_recorded_ts_wins_over_text_date(self):
+        line = "[auto 2001-01-01] she was job hunting"
+        assert self._sfx([line], self._meta(line, 5)) == [""]
+
+    def test_last_used_does_not_refresh_the_age(self):
+        meta = self._meta("a", 100, last_used=self.NOW - self.DAY)
+        assert self._sfx(["a"], meta) == [" (noted about 3 months ago)"]
+
+    def test_undated_line_gets_nothing(self):
+        assert self._sfx(["no date anywhere"]) == [""]
+
+    def test_core_line_gets_nothing(self):
+        assert self._sfx(["a"], self._meta("a", 400), core={"a"}) == [""]
+
+    def test_kill_switch(self):
+        assert self._sfx(["a"], self._meta("a", 400), enabled=False) == [""]
+
+    def test_one_suffix_per_line_in_order(self):
+        meta = {**self._meta("old", 100), **self._meta("new", 1)}
+        assert self._sfx(["new", "old", "x"], meta) == \
+            ["", " (noted about 3 months ago)", ""]
+
+    # ── rendered through assemble_messages ──────────────────────────────────────────
+    def _render(self, monkeypatch, lines, meta, enabled=True):
+        monkeypatch.setattr(bot, "triggered_memories", lambda *a, **k: list(lines))
+        monkeypatch.setattr(bot, "_memory_meta", meta)
+        monkeypatch.setattr(bot, "MEMORY_AGE_NOTE", enabled)
+        monkeypatch.setattr(bot.time, "time", lambda: self.NOW)
+        bot.conversation_history[9701] = []
+        bot.user_names[9701] = "Tester"
+        msgs = bot.assemble_messages(9701, "hello")
+        blocks = [m["content"] for m in msgs
+                  if m["role"] == "system" and m["content"].startswith("# Relevant memories")]
+        assert len(blocks) == 1
+        return blocks[0]
+
+    def test_old_memory_is_marked_and_explained(self, monkeypatch):
+        block = self._render(monkeypatch, ["she was job hunting"],
+                             self._meta("she was job hunting", 100))
+        assert "- she was job hunting (noted about 3 months ago)" in block
+        assert "may no longer be true" in block and "Tester" in block
+
+    def test_no_explanation_when_nothing_is_old(self, monkeypatch):
+        block = self._render(monkeypatch, ["fresh"], self._meta("fresh", 2))
+        assert "(noted" not in block and "may no longer be true" not in block
+
+    def test_kill_switch_renders_the_old_block(self, monkeypatch):
+        block = self._render(monkeypatch, ["old"], self._meta("old", 300), enabled=False)
+        assert "(noted" not in block and "may no longer be true" not in block
+
+    def test_hedged_line_keeps_both_markers(self, monkeypatch):
+        """The age is looked up on the unmodified line, before _hedge_memory_lines
+        prefixes "(unsure)" — applied after, the meta lookup would miss."""
+        meta = self._meta("shaky", 100, confidence=2)
+        block = self._render(monkeypatch, ["shaky"], meta)
+        assert "- (unsure) shaky (noted about 3 months ago)" in block

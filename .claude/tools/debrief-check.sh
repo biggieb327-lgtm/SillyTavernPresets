@@ -132,6 +132,57 @@ else
   note "          decisions.md logged today: $((dec_logged + dec_entry_today)))."
 fi
 
+# --- 6. do open memory entries still point at files that exist? (advisory) ----------------
+# An open watchlist item or an active constraint that names a file which no longer exists is
+# either stale or now points the next session at nothing. Same token rule as the
+# `skill-refs-resolve` eval (backticked, contains "/", known extension), same candidate roots.
+# Advisory, not a FAIL: these files are partly history, and a renamed path may be cited on
+# purpose — so this says "not found", never "wrong". Borrowed from gstack's `/learn prune`
+# (garrytan/gstack, MIT). 24 paths across 31 entries on 2026-10-08, 0 missing.
+memrefs=$(python3 - 2>&1 <<'PYEOF'
+import re
+from pathlib import Path
+ROOTS = ["", "telegram-companion-bot", ".claude", "voicekit-starter"]
+EXTS = "md|sh|py|json|txt|yml|yaml|html|service|example|jsonl"
+def entries():
+    w = Path(".claude/memory/watchlist.md").read_text(encoding="utf-8")
+    for blk in re.split(r"(?m)^(?=### )", w.split("\n## Items", 1)[1]):
+        if blk.startswith("### ") and "| status: open" in blk.splitlines()[0]:
+            yield "watchlist", blk
+    c = Path(".claude/memory/constraints.md").read_text(encoding="utf-8")
+    act = c.split("\n## Active constraints", 1)[1].split("\n## Minor", 1)[0]
+    for blk in re.split(r"(?m)^(?=### )", act):
+        if blk.startswith("### "):
+            yield "constraints", blk
+n = checked = 0
+for src, blk in entries():
+    n += 1
+    title = blk.splitlines()[0][4:64]
+    text = re.sub(r"^```.*?^```", "", blk, flags=re.S | re.M)
+    for tok in sorted(set(re.findall(r"`([^`]+)`", text))):
+        if tok.startswith(("/", "~", "http")) or "/" not in tok:
+            continue
+        if not re.fullmatch(rf"[.A-Za-z0-9_@][A-Za-z0-9_./@-]*\.({EXTS})", tok):
+            continue
+        checked += 1
+        if not any((Path(r) / tok).exists() for r in ROOTS):
+            print(f"MISSING {src}: {title} -> {tok}")
+print(f"SCANNED {n} {checked}")
+PYEOF
+)
+if ! printf '%s' "$memrefs" | grep -q '^SCANNED '; then
+  note "memrefs   could not scan the memory files (parser error) — not checked:"
+  printf '%s\n' "$memrefs" | tail -2 | sed 's/^/          /'
+elif printf '%s' "$memrefs" | grep -q '^SCANNED 0 '; then
+  note "memrefs   found 0 open entries — the file format changed; not checked"
+elif printf '%s' "$memrefs" | grep -q '^MISSING '; then
+  note "memrefs   open entries name files not found in the repo — stale, or renamed?"
+  printf '%s\n' "$memrefs" | grep '^MISSING ' | sed 's/^MISSING /          /'
+else
+  set -- $(printf '%s' "$memrefs" | grep '^SCANNED ')
+  note "memrefs   every file path in ${2} open entries still exists (${3} checked)"
+fi
+
 # --- the one thing this cannot check ------------------------------------------------------
 note "ci        NOT CHECKED — confirm ${head_sha:0:7} is 'completed | success' on main by hand."
 note "          This script has no GitHub access and will not guess; an unearned green here"

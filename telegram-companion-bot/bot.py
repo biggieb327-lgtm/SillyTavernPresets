@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-10-01.1"
+BOT_VERSION = "2026-10-08.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -1340,6 +1340,13 @@ _memory_meta: dict[str, dict] = {}
 # Each keeps its kill switch: 0 restores the old behavior without a redeploy.
 MEMORY_DECAY_HALFLIFE_DAYS = _env_float("MEMORY_DECAY_HALFLIFE_DAYS", "90")
 MEMORY_HEDGE = _env_bool("MEMORY_HEDGE", True)
+# Age note (v2026-10-08.1): a recalled archival memory written MEMORY_AGE_NOTE_DAYS or more
+# ago carries "(noted about N months ago)", and the block says things may have changed.
+# Without it a six-month-old "she's job hunting" reads exactly as current as yesterday's.
+# Display-time only, core lines excluded. Idea from gbrain's "what the brain doesn't know
+# yet" note (garrytan/gbrain, MIT). Default ON; 0 = no age shown.
+MEMORY_AGE_NOTE = _env_bool("MEMORY_AGE_NOTE", True)
+MEMORY_AGE_NOTE_DAYS = _env_int("MEMORY_AGE_NOTE_DAYS", "60")
 MEMORY_AUDIT = _env_bool("MEMORY_AUDIT", True)
 MEMORY_AUDIT_WEEKDAY = _env_int("MEMORY_AUDIT_WEEKDAY", "6")  # 0=Mon .. 6=Sun
 MEMORY_AUDIT_MAX_PROPOSALS = _env_int("MEMORY_AUDIT_MAX_PROPOSALS", "3")
@@ -6049,6 +6056,39 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     return out, hedged
 
 
+def _memory_age_suffixes(lines: list[str], meta: dict[str, dict], now: float,
+                         min_days: int, enabled: bool,
+                         core: set[str] | frozenset = frozenset()) -> list[str]:
+    """One suffix per line, in order: " (noted about N weeks/months ago)" for a line whose
+    write date is `min_days` or more before `now`, else "". Pure.
+
+    The write date is the recorded memory_meta "ts", else the line's "[auto YYYY-MM-DD]"
+    stamp (_memory_text_date). Deliberately NOT `last_used`: the bot bringing a memory up
+    again does not mean the user confirmed it is still true. Undated lines and `core` lines
+    (permanent facts by design) get "". Returned as suffixes so the caller can apply them
+    after _hedge_memory_lines, which needs the unmodified line to find its meta."""
+    if not enabled or min_days <= 0:
+        return [""] * len(lines)
+    out = []
+    for line in lines:
+        key = line.strip()
+        ts = (meta.get(key, {}) or {}).get("ts")
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            ts = _memory_text_date(key)
+        days = int((now - ts) / 86400) if ts else -1
+        if key in core or days < min_days:
+            out.append("")
+        elif days < 14:
+            out.append(f" (noted {days} days ago)")
+        elif days < 63:
+            out.append(f" (noted about {round(days / 7)} weeks ago)")
+        elif days < 365:
+            out.append(f" (noted about {round(days / 30.4)} months ago)")
+        else:
+            out.append(" (noted over a year ago)")
+    return out
+
+
 def triggered_memories(scan_text: str, query_vec: list[float] | None = None,
                        chat_id: int | None = None) -> list[str]:
     entries = _read_memories()
@@ -7610,12 +7650,19 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
 
     mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
+        ages = _memory_age_suffixes(mems, _memory_meta, time.time(), MEMORY_AGE_NOTE_DAYS,
+                                    MEMORY_AGE_NOTE, set(_read_core_memories()))
         mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
                                                MEMORY_HEDGE)
-        block = "# Relevant memories\n" + "\n".join("- " + m for m in mems)
+        block = "# Relevant memories\n" + "\n".join(
+            "- " + m + a for m, a in zip(mems, ages))
         if any_hedged:
             block += ("\nEntries marked (unsure) are things you only half-remember"
                       " — hedge or ask rather than assert them as fact.")
+        if any(ages):
+            block += (f"\nEntries marked (noted ... ago) are from a while back and may no"
+                      f" longer be true — don't treat them as current; if one matters"
+                      f" now, check in with {uname} naturally instead of assuming.")
         if MEMORY_REPEAT_SUPPRESS_TURNS > 0:
             block += (f"\nThese are context, not conversation topics — don't bring one"
                       f" up again if you've referenced it recently; let it go unless"

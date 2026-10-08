@@ -7,6 +7,40 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-10-08.1 — Old recalled memories say how old they are
+
+**Root cause: the `# Relevant memories` block gives the model no age for any line.** A
+memory written six months ago ("she's job hunting") is shown exactly like one written
+yesterday, so the character asserts it as current. Recency decay (`MEMORY_DECAY_HALFLIFE_DAYS`)
+only changes *which* memories surface; once a line is in the prompt, nothing says it is
+old. Not a reported incident — an idea taken from gbrain (garrytan/gbrain, MIT), whose
+answers end with a note on what may be out of date ("nothing new about Alice in six weeks").
+
+**Fix:** new pure `_memory_age_suffixes(lines, meta, now, min_days, enabled, core)` returns
+one suffix per recalled line: `" (noted about N weeks/months ago)"` (or days / "over a year")
+when the line's write date is `MEMORY_AGE_NOTE_DAYS` (default 60) or more days old, else
+`""`. Write date = memory_meta `"ts"`, else the `[auto YYYY-MM-DD]` stamp
+(`_memory_text_date`). **Not** `last_used`: the bot bringing a memory up again does not
+mean the user confirmed it. `# CORE` lines and undated lines get no note. In
+`assemble_messages` the suffixes are computed on the unmodified lines *before*
+`_hedge_memory_lines` (which prefixes "(unsure)", after which the meta lookup would miss),
+then appended. When any line is marked, the block adds one sentence: such entries may no
+longer be true; check in with the user naturally rather than assume.
+
+Display-time only: memories.txt and memory_meta.json are not written. No model call is
+added. The memory block grows by about 6 tokens per marked line plus about 40 for the
+sentence, outside `MEMORY_TOKEN_BUDGET` (same as the existing "(unsure)" marker and its
+sentence). Kill switch `MEMORY_AGE_NOTE=0`. **Expected effect, not measured live:** the
+character should hedge on or ask about old state-like memories; whether it over-mentions
+"a while ago" is the thing to watch on the first bots after deploy.
+
+**Tests (`TestMemoryAgeNote`, 17):** each wording branch; the threshold is inclusive; text
+date as fallback; a recorded `ts` wins; `last_used` does not refresh the age; core and
+undated lines; the kill switch; order kept. Four of them call `assemble_messages` and read
+the rendered block: the old line is marked and explained, nothing is added when every line
+is recent, the kill switch restores the old block, and a hedged old line carries both
+markers. `MEMORY_AGE_NOTE` added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+
 ## v2026-10-01.1 — Reasoning-leak guard catches a draft followed by its final version
 
 **Root cause: both checks in `_looks_like_reasoning_leak` have a length floor, and this leak
