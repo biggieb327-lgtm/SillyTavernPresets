@@ -1358,6 +1358,17 @@ root-owned venvs, so the enforceable boundary is the explicit venv path, not uid
 
 ## Minor — running log
 
+- 2026-10-08 — Wrote two identifiers into `repo-debugging-playbook` from memory: `LLM_TIMEOUT`
+  (the real vars are `REQUEST_TIMEOUT` / `STREAM_TIMEOUT`) and "the latency `/errors` already
+  records" (timings are the `duration_ms` field of `OP_EVENT ` journal lines, `OP_EVENTS`).
+  Caught by grepping bot.py before committing. Same shape as watchlist 2026-09-22 (a doc naming
+  an identifier that does not exist), but at write time, not after a rename. -> **grep every
+  backticked identifier against the code before it goes into a skill or doc.**
+- 2026-10-08 — Reported the `inspect.getsource` audit as "101 tests"; 10 of the 101 were
+  `_src`-style helper functions, and 46 tests reach `getsource` through those helpers. The
+  real count was 137. Caught by a script that cross-checked every test line against the
+  report. -> **when a count comes from a grep over function bodies, check whether the
+  matches are tests or helpers the tests call.**
 - 2026-09-30 — Gave the owner a pasteable block that began with `read -rsp ... K`. Pasted as a
   block, `read` takes the NEXT LINE OF THE PASTE as its input, so the key never reached `K`;
   three attempts failed, the settings file was corrupted, and one full key reached the chat.

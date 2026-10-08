@@ -92,6 +92,8 @@ such names on 2026-09-22 and found 0 unresolved, and no incident has come from t
 Then build the `doc-identifiers-resolve` eval; the full design, prototype, and acceptance steps are
 item 1 of `.claude/memory/improvement-proposals/2026-09-mex-ideas.md`.
 Related: decisions 2026-09-22 (MEX not adopted).
+Near-miss 2026-10-08 (not the trigger — caught before commit): a session wrote `LLM_TIMEOUT`, which
+never existed, into `repo-debugging-playbook`. See constraints Minor 2026-10-08.
 
 ### 2026-09-26 — the Nimble connector fetched a page the egress proxy denied | status: graduated
 A session saw the egress proxy refuse counterparts.ai (`connect_rejected`) while `nimble_extract` returned the full page. Untried: whether Nimble also reaches `docs.python-telegram-bot.org` or `nano-gpt.com`, which `CLAUDE.md` records as blocked by egress policy. Moved here from the inbox 2026-09-29. Not tried this session: the block is an owner-set policy, so whether a connector may route around it is the owner's call, not a convenience to use quietly.

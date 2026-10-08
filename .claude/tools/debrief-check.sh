@@ -135,7 +135,8 @@ fi
 # --- 6. do open memory entries still point at files that exist? (advisory) ----------------
 # An open watchlist item or an active constraint that names a file which no longer exists is
 # either stale or now points the next session at nothing. Same token rule as the
-# `skill-refs-resolve` eval (backticked, contains "/", known extension), same candidate roots.
+# `skill-refs-resolve` eval (backticked, contains "/", known extension), same candidate roots —
+# copied, not shared: a change to ROOTS or EXTS there belongs here too.
 # Advisory, not a FAIL: these files are partly history, and a renamed path may be cited on
 # purpose — so this says "not found", never "wrong". Borrowed from gstack's `/learn prune`
 # (garrytan/gstack, MIT). 24 paths across 31 entries on 2026-10-08, 0 missing.
@@ -147,7 +148,9 @@ EXTS = "md|sh|py|json|txt|yml|yaml|html|service|example|jsonl"
 def entries():
     w = Path(".claude/memory/watchlist.md").read_text(encoding="utf-8")
     for blk in re.split(r"(?m)^(?=### )", w.split("\n## Items", 1)[1]):
-        if blk.startswith("### ") and "| status: open" in blk.splitlines()[0]:
+        # "watching" = seen again, still sub-threshold (watchlist.md's own status list).
+        if blk.startswith("### ") and re.search(r"\| status: (open|watching)\b",
+                                                 blk.splitlines()[0]):
             yield "watchlist", blk
     c = Path(".claude/memory/constraints.md").read_text(encoding="utf-8")
     act = c.split("\n## Active constraints", 1)[1].split("\n## Minor", 1)[0]

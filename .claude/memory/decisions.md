@@ -82,6 +82,13 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-10-08 | Borrowed four method ideas and one bot feature from gstack/gbrain; "Boil the Ocean" and gbrain itself not adopted | status: current
+**Decided:** adopt gstack's test-audit method (report `TEST-AUDIT-2026-10-08.md`, batches await approval), `/investigate`'s 3-strike and >5-file rules and gbrain's measure-before-you-fix (all in `repo-debugging-playbook`), `/learn prune`'s missing-file check (`debrief-check.sh`, advisory), and ship `MEMORY_AGE_NOTE` default ON (v2026-10-08.1).
+**Over:** gstack's ETHOS "Boil the Ocean" (always build the complete version) — contradicts `ponytail` and this repo's record of over-building; gstack `/careful`/`/freeze` — `risk-guard.sh` already covers them; gstack `/ship`/`/land-and-deploy`/`/canary` — web-app and PR shaped, `ship` + `vps-sync.sh` already cover it; gbrain itself (Postgres + pgvector daemon) — memory files + Notion already do the job at this size. For the age note: writing the age into memories.txt (rejected: display-time only, like `_hedge_memory_lines`, keeps the file clean) and using `last_used` as the date (rejected: the bot mentioning a memory is not the user confirming it).
+**Why:** each adopted idea fills a gap the repo did not cover (per-behavior test coverage beyond `sweep.py source-assertion`; no stop rule in the playbook; no age in the prompt), at the cost of a skill paragraph or a display-time suffix.
+**By:** owner asked for all five ("Do 1 through 5") after the session's comparison; details settled by the session.
+**Detail:** `telegram-companion-bot/TEST-AUDIT-2026-10-08.md`; CHANGELOG v2026-10-08.1.
+
 ### 2026-10-01 | Fleet deploys are handed over as one paste built on the existing --promote, not a new vps-sync.sh --all mode | status: current
 **Decided:** sessions hand the owner one paste for the whole fleet: `$S nora && $S --promote nora` for a code-only release, or a stop-at-first-failure loop of `vps-sync.sh <instance>` when cards or preset layers changed. Both live in `deploy-and-verify-fleet` § Procedure.
 **Over:** (a) a `vps-sync.sh --all` mode that full-deploys every instance — lost because `--promote` already moves every active bot onto the canary's tested release in one locked step, and an `--all` would skip the canary and restart all seven on an untested release at once; (b) seven separate lines per handoff, as before — lost because the owner asked for one command.

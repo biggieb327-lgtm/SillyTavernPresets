@@ -15902,8 +15902,8 @@ class TestMemoryAgeNote:
         monkeypatch.setattr(bot, "_memory_meta", meta)
         monkeypatch.setattr(bot, "MEMORY_AGE_NOTE", enabled)
         monkeypatch.setattr(bot.time, "time", lambda: self.NOW)
-        bot.conversation_history[9701] = []
-        bot.user_names[9701] = "Tester"
+        monkeypatch.setitem(bot.conversation_history, 9701, [])
+        monkeypatch.setitem(bot.user_names, 9701, "Tester")
         msgs = bot.assemble_messages(9701, "hello")
         blocks = [m["content"] for m in msgs
                   if m["role"] == "system" and m["content"].startswith("# Relevant memories")]
@@ -15930,3 +15930,89 @@ class TestMemoryAgeNote:
         meta = self._meta("shaky", 100, confidence=2)
         block = self._render(monkeypatch, ["shaky"], meta)
         assert "- (unsure) shaky (noted about 3 months ago)" in block
+
+    def test_hedge_source_quote_comes_after_the_age(self, monkeypatch):
+        """Placed after the quote, the age would read as the quote's age."""
+        meta = self._meta("shaky", 100, confidence=2, source="I think I might move")
+        block = self._render(monkeypatch, ["shaky"], meta)
+        assert ('- (unsure) shaky (noted about 3 months ago) '
+                '[you recall this from: "I think I might move"]') in block
+
+    # ── the date the age is measured from ──────────────────────────────────────────
+    def test_one_day_is_singular(self):
+        assert self._sfx(["a"], self._meta("a", 1), min_days=1) == [" (noted 1 day ago)"]
+
+    def test_never_says_twelve_months(self):
+        assert self._sfx(["a"], self._meta("a", 360)) == [" (noted about 11 months ago)"]
+
+    def test_reconfirmed_resets_the_age(self):
+        meta = self._meta("a", 200, reconfirmed=self.NOW - 2 * self.DAY)
+        assert self._sfx(["a"], meta) == [""]
+
+    def test_age_ts_wins_over_ts(self):
+        """An audit merge stamps ts=now; age_ts carries its oldest part's date."""
+        meta = self._meta("a", 0, age_ts=self.NOW - 100 * self.DAY)
+        assert self._sfx(["a"], meta) == [" (noted about 3 months ago)"]
+
+    def test_text_date_needs_a_fallback_switch(self):
+        d = datetime.fromtimestamp(self.NOW - 200 * self.DAY, tz=bot.TZ).date()
+        line = f"[auto {d.isoformat()}] x"
+        assert bot._memory_age_suffixes([line], {}, self.NOW, 60, True,
+                                        text_fallback=False) == [""]
+
+    def test_unusable_ts_is_undated_like_the_ranking(self):
+        """triggered_memories falls back to the text date only when ts is absent."""
+        line = "[auto 2001-01-01] x"
+        assert self._sfx([line], {line: {"ts": 0}}) == [""]
+
+
+class TestMemoryAgeNoteWrites:
+    """The two write paths that move the date the age note reads: a re-stated fact
+    (dropped as a duplicate) and an owner-approved audit merge."""
+    LINE = "she is job hunting in austin"
+
+    def _setup(self, monkeypatch, tmp_path, lines, meta):
+        monkeypatch.setattr(bot, "MEMORIES_FILE", tmp_path / "memories.txt")
+        monkeypatch.setattr(bot, "MEMORY_META_FILE", tmp_path / "memory_meta.json")
+        monkeypatch.setattr(bot, "EMBEDDINGS_FILE", tmp_path / "embeddings.json")
+        monkeypatch.setattr(bot, "_memory_meta", meta)
+        monkeypatch.setattr(bot, "_embeddings_cache", {})
+        monkeypatch.setitem(bot._memories_cache, "text", None)
+        monkeypatch.setitem(bot._memories_cache, "ts", 0.0)
+        monkeypatch.setattr(bot, "_embed_text", lambda t: None)
+        (tmp_path / "memories.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_lexical_duplicate_marks_the_stored_line(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path, [self.LINE], {self.LINE: {"ts": 1.0}})
+        bot._append_memory("still job hunting in austin", auto=True)
+        assert bot._memory_meta[self.LINE]["reconfirmed"] > 1.0
+        assert bot._memory_meta[self.LINE]["ts"] == 1.0   # decay's date is untouched
+        assert "reconfirmed" in (tmp_path / "memory_meta.json").read_text()
+
+    def test_semantic_duplicate_marks_the_closest_line(self, monkeypatch, tmp_path):
+        other = "they own a grey cat"
+        self._setup(monkeypatch, tmp_path, [other, self.LINE], {})
+        monkeypatch.setattr(bot, "MEMORY_DEDUP_SIM", 0.9)
+        bot._embeddings_cache.update({other: [0.0, 1.0], self.LINE: [1.0, 0.0]})
+        monkeypatch.setattr(bot, "_embed_text", lambda t: [1.0, 0.05])
+        bot._append_memory("searching for work around texas", auto=True)
+        assert "reconfirmed" in bot._memory_meta[self.LINE]
+        assert other not in bot._memory_meta
+
+    def test_kill_switch_records_nothing(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path, [self.LINE], {self.LINE: {"ts": 1.0}})
+        monkeypatch.setattr(bot, "MEMORY_AGE_NOTE", False)
+        bot._append_memory("still job hunting in austin", auto=True)
+        assert bot._memory_meta[self.LINE] == {"ts": 1.0}
+
+    def test_audit_merge_keeps_the_oldest_age(self, monkeypatch, tmp_path):
+        a, b = "job hunting since spring", "[auto 2001-01-01] applied at the library"
+        now = time.time()
+        self._setup(monkeypatch, tmp_path, [a, b], {a: {"ts": now - 100 * 86400}})
+        ok, _ = bot._apply_audit_item({"action": "merge", "targets": [a, b],
+                                       "merged_text": "job hunting, applied at the library"})
+        assert ok
+        m = bot._memory_meta["job hunting, applied at the library"]
+        assert m["ts"] >= now                              # decay still reads merge time
+        assert m["age_ts"] == bot._memory_text_date(b)     # the oldest part wins
+

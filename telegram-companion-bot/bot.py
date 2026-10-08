@@ -1842,6 +1842,14 @@ def _apply_audit_item(item: dict) -> tuple[bool, str]:
             "confidence": min(confs) if confs else 5,
             "source": "merged: " + " | ".join(t.strip()[:80] for t in targets),
         }
+        # The merged fact is as old as its oldest part. "ts" stays the merge time (recency
+        # decay reads it); the age note reads "age_ts" (v2026-10-08.1).
+        ages = [_memory_age_ts(t.strip(), _memory_meta.get(t.strip()),
+                               MEMORY_DATE_FALLBACK or MEMORY_DATE_FALLBACK_DECAY)
+                for t in targets]
+        ages = [a for a in ages if a]
+        if ages:
+            meta["age_ts"] = min(ages)
         # Keep use history, as /editmem does via {**old_meta}. max, not sum: two targets
         # used on the same day would otherwise count that day twice.
         uses = [(_memory_meta.get(t.strip(), {}) or {}).get("uses") for t in targets]
@@ -2744,6 +2752,18 @@ def _memory_replace(old_line: str | None, new_line: str | None, meta: dict | Non
     return True
 
 
+def _mark_reconfirmed(line: str):
+    """The user stated an already-stored fact again (the add was dropped as a duplicate):
+    stamp memory_meta "reconfirmed" on the stored line so the age note (MEMORY_AGE_NOTE)
+    measures from now, not from when it was first written. Caller holds _memory_lock.
+    Writes nothing with the age note off, so the kill switch restores the old behavior."""
+    if not MEMORY_AGE_NOTE:
+        return
+    key = line.strip()
+    _memory_meta.setdefault(key, {})["reconfirmed"] = time.time()
+    _save_memory_meta()
+
+
 def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
     text = text.strip()
     if not text:
@@ -2761,6 +2781,7 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
             ex_words = {w for w in re.findall(r"\b[a-z]{4,}\b", line.lower())
                         if w not in stopwords}
             if len(new_words & ex_words) >= threshold:
+                _mark_reconfirmed(line)
                 return
     entry = (f"[auto {date.today()}] {text}" if auto else text)
     if meta is None:
@@ -2774,12 +2795,16 @@ def _append_memory(text: str, auto: bool = False, meta: dict | None = None):
     if auto and MEMORY_DEDUP_SIM > 0:
         vec = _embed_text(entry)
         if vec:
-            existing_vecs = [_embeddings_cache.get(l.strip())
-                             for l in existing.splitlines()
-                             if l.strip() and not l.startswith("#")]
-            existing_vecs = [v for v in existing_vecs if v]
+            pairs = [(l, _embeddings_cache.get(l.strip()))
+                     for l in existing.splitlines()
+                     if l.strip() and not l.startswith("#")]
+            pairs = [(l, v) for l, v in pairs if v]
+            existing_vecs = [v for _, v in pairs]
             if _is_semantic_dup(vec, existing_vecs, MEMORY_DEDUP_SIM):
                 _memory_log("DEDUP-SEM", text)
+                best = max(pairs, key=lambda p: _cosine_sim(vec, p[1]))[0]
+                with _memory_lock:
+                    _mark_reconfirmed(best)
                 return
             precomputed = vec
     _memory_replace(None, entry, meta=meta, precomputed_vec=precomputed)
@@ -6056,34 +6081,53 @@ def _hedge_memory_lines(lines: list[str], meta: dict[str, dict], autoconf: int,
     return out, hedged
 
 
+def _memory_age_ts(line: str, entry: dict | None, text_fallback: bool) -> float | None:
+    """The date a memory's age note is measured from, or None (no note). Pure.
+
+    Base date: memory_meta "age_ts" (set by an audit merge to its oldest target, so a
+    merge does not make old facts look new), else "ts", else — only when "ts" is absent,
+    the same rule triggered_memories uses — the "[auto YYYY-MM-DD]" stamp if
+    `text_fallback`. Then the later of that and "reconfirmed" (set when the user states
+    the fact again and _append_memory drops it as a duplicate). Deliberately NOT
+    `last_used`: the bot bringing a memory up is not the user confirming it."""
+    entry = entry or {}
+    base = entry.get("age_ts")
+    if not isinstance(base, (int, float)) or base <= 0:
+        base = entry.get("ts")
+        if base is None:
+            base = _memory_text_date(line) if text_fallback else None
+        elif not isinstance(base, (int, float)) or base <= 0:
+            base = None
+    rc = entry.get("reconfirmed")
+    if isinstance(rc, (int, float)) and rc > 0 and (base is None or rc > base):
+        return rc
+    return base
+
+
 def _memory_age_suffixes(lines: list[str], meta: dict[str, dict], now: float,
                          min_days: int, enabled: bool,
-                         core: set[str] | frozenset = frozenset()) -> list[str]:
+                         core: set[str] | frozenset = frozenset(),
+                         text_fallback: bool = True) -> list[str]:
     """One suffix per line, in order: " (noted about N weeks/months ago)" for a line whose
-    write date is `min_days` or more before `now`, else "". Pure.
-
-    The write date is the recorded memory_meta "ts", else the line's "[auto YYYY-MM-DD]"
-    stamp (_memory_text_date). Deliberately NOT `last_used`: the bot bringing a memory up
-    again does not mean the user confirmed it is still true. Undated lines and `core` lines
-    (permanent facts by design) get "". Returned as suffixes so the caller can apply them
-    after _hedge_memory_lines, which needs the unmodified line to find its meta."""
+    _memory_age_ts is `min_days` or more before `now`, else "". Pure. Undated lines and
+    `core` lines (permanent facts by design) get "". Returned as suffixes so the caller
+    can place them after _hedge_memory_lines, which needs the unmodified line to find
+    its meta."""
     if not enabled or min_days <= 0:
         return [""] * len(lines)
     out = []
     for line in lines:
         key = line.strip()
-        ts = (meta.get(key, {}) or {}).get("ts")
-        if not isinstance(ts, (int, float)) or ts <= 0:
-            ts = _memory_text_date(key)
+        ts = _memory_age_ts(key, meta.get(key), text_fallback)
         days = int((now - ts) / 86400) if ts else -1
         if key in core or days < min_days:
             out.append("")
         elif days < 14:
-            out.append(f" (noted {days} days ago)")
+            out.append(" (noted 1 day ago)" if days == 1 else f" (noted {days} days ago)")
         elif days < 63:
             out.append(f" (noted about {round(days / 7)} weeks ago)")
         elif days < 365:
-            out.append(f" (noted about {round(days / 30.4)} months ago)")
+            out.append(f" (noted about {min(11, round(days / 30.4))} months ago)")
         else:
             out.append(" (noted over a year ago)")
     return out
@@ -7651,11 +7695,16 @@ def assemble_messages(chat_id: int, latest_user_content: str, image_data_url: st
     mems = triggered_memories(scan_text, query_vec=query_vec, chat_id=chat_id)
     if mems:
         ages = _memory_age_suffixes(mems, _memory_meta, time.time(), MEMORY_AGE_NOTE_DAYS,
-                                    MEMORY_AGE_NOTE, set(_read_core_memories()))
+                                    MEMORY_AGE_NOTE, set(_read_core_memories()),
+                                    MEMORY_DATE_FALLBACK or MEMORY_DATE_FALLBACK_DECAY)
+        raw = mems
         mems, any_hedged = _hedge_memory_lines(mems, _memory_meta, MEMORY_AUTOCONF,
                                                MEMORY_HEDGE)
+        # The age goes right after the memory text, before any hedge source quote, so it
+        # cannot be read as the age of the quote.
         block = "# Relevant memories\n" + "\n".join(
-            "- " + m + a for m, a in zip(mems, ages))
+            "- " + (h.replace(r, r + a, 1) if a else h)
+            for r, h, a in zip(raw, mems, ages))
         if any_hedged:
             block += ("\nEntries marked (unsure) are things you only half-remember"
                       " — hedge or ask rather than assert them as fact.")
