@@ -96,6 +96,17 @@ judged alone, and 11 fixture cases run in CI (the hook had none before).
 inside quotes), or line-index splicing in a Python heredoc, which stays prose by design.
 Refs: constraints C7 (Occurrence 7, reviewed 2026-09-30), eval `anchor-guard-cases`.
 
+### 2026-10-08 | intervention: `repo-debugging-playbook` measure-first + 3-strike + >5-file rules (`cdf492d`) | class: speculative fixes before a root cause (playbook's "three rounds of speculative fixes" lesson) | status: pending
+Prose only, no mechanism. A timing symptom now needs a measured `duration_ms` of the named step
+before a limit changes; three failed hypotheses stop the session and put three options to the
+user; a bug fix touching more than 5 files is announced first. Borrowed from gstack/gbrain.
+**Holds when:** the next two fleet incidents that went past one hypothesis show the stop (or a
+timing incident shows a measurement before a `REQUEST_TIMEOUT`/`STREAM_TIMEOUT` change), with no
+operational-log row describing a fourth speculative fix or an unmeasured timeout raise.
+**Recurrence shape to expect:** a timeout raised "to be safe" with no `OP_EVENT ` reading; or
+hypotheses counted loosely so the third never arrives.
+Refs: decisions 2026-10-08, `.claude/skills/repo-debugging-playbook/SKILL.md` step 4.
+
 ### 2026-10-01 | intervention: `check_external` in `theory_guard.py` | class: external billing/capacity property stated as fact (C5, formerly uncovered half) | status: pending
 Two 2026-09-04 C5 entries — "a rejected call bills nothing" and Jules "can't fit a 16k
 fallback, ~1,800 over" (16k from a changelog "e.g."; measured ~19,859) — had no code name, so
