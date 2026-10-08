@@ -7,6 +7,28 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-10-08.2 — `/coremem`: exhaustive dispatch, no reply awaited under `_memory_lock`
+
+**Root cause 1: `coremem_cmd` dispatched with `if action == "promote" … elif action ==
+"demote"` and no `else`** (`sweep.py silent-return` candidate). Not a live bug: the usage check
+above it admits only those two actions. But the shape is the one that check exists for — a
+third action added to the guard and not the dispatch would return with no reply. Now `else:`,
+commented as the demote branch.
+
+**Root cause 2, found while reading it: both branches awaited `reply_text("Memory not found in
+file.")` inside `with _memory_lock`**, a `threading.Lock`. The path runs when memories.txt
+changed between the cached read and the locked read. While that await is pending, any thread
+needing the lock waits on a Telegram round trip, and anything on the event loop that takes the
+lock synchronously would block the loop the reply needs to finish — a hang. Not seen live.
+Fix: look up the line with `next(..., None)` inside the lock, edit only if found, and send
+the "not found" reply after the block.
+
+**Tests (`TestCorememCommand`, 6 — the first that call `coremem_cmd`; it had none):** list
+empty; promote puts the line above `# CORE`; demote puts it below; unknown action gets usage;
+for both actions, the "not found" reply is sent with `_memory_lock` not held (the stub reply
+records `_memory_lock.locked()`). Break-tested: moving the reply back inside the lock turns
+that test red.
+
 ## v2026-10-08.1 — Old recalled memories say how old they are
 
 **Root cause: the `# Relevant memories` block gives the model no age for any line.** A

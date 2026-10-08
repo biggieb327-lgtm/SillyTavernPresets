@@ -16139,3 +16139,67 @@ class TestBatchDBehaviours:
         logs = self._gif_logs(monkeypatch, caplog, lambda *a: ("https://g/x.gif", "gid", ""),
                               fail_send=True)
         assert logs and all(self.KEY not in m for m in logs)
+
+
+class TestCorememCommand:
+    """v2026-10-08.2: the first tests that CALL coremem_cmd. Also pins that the
+    "not found" reply is sent after _memory_lock is released — it used to be awaited
+    inside `with _memory_lock` (a threading.Lock)."""
+    UID = 7004
+
+    def _setup(self, monkeypatch, tmp_path, text):
+        f = tmp_path / "memories.txt"
+        f.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(bot, "MEMORIES_FILE", f)
+        monkeypatch.setattr(bot, "MEMORY_LOG_FILE", tmp_path / "memory_log.txt")
+        monkeypatch.setattr(bot, "MEMORY_CORE", True)
+        monkeypatch.setitem(bot._memories_cache, "text", None)
+        monkeypatch.setitem(bot._memories_cache, "ts", 0.0)
+        monkeypatch.setitem(bot.__dict__, "ALLOWED_USERS", bot.ALLOWED_USERS | {self.UID})
+        return f
+
+    def _run(self, *args):
+        u, m = _cmd_update(self.UID)
+        lock_held = []
+        orig = m.reply_text
+
+        async def reply_text(text, **k):
+            lock_held.append(bot._memory_lock.locked())
+            return await orig(text, **k)
+
+        m.reply_text = reply_text
+        asyncio.run(bot.coremem_cmd(u, _cmd_ctx(*args)))
+        return m.sent, lock_held
+
+    def test_lists_nothing_yet(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path, "a fact\n")
+        sent, _ = self._run()
+        assert "No core memories yet" in sent[0]
+
+    def test_promote_moves_the_line_above_the_marker(self, monkeypatch, tmp_path):
+        f = self._setup(monkeypatch, tmp_path, "first fact\nsecond fact\n")
+        sent, _ = self._run("promote", "2")
+        assert sent == ["Promoted to core: second fact"]
+        assert f.read_text().splitlines() == ["second fact", "# CORE", "first fact"]
+
+    def test_demote_moves_it_back_below_the_marker(self, monkeypatch, tmp_path):
+        f = self._setup(monkeypatch, tmp_path, "core fact\n# CORE\nother fact\n")
+        sent, _ = self._run("demote", "1")
+        assert sent == ["Demoted from core: core fact"]
+        assert f.read_text().splitlines() == ["# CORE", "core fact", "other fact"]
+
+    def test_unknown_action_gets_usage(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path, "a fact\n")
+        sent, _ = self._run("frobnicate", "1")
+        assert sent[0].startswith("Usage:")
+
+    @pytest.mark.parametrize("action", ["promote", "demote"])
+    def test_not_found_reply_is_sent_after_the_lock(self, monkeypatch, tmp_path, action):
+        """The file changed between the cached read and the locked read."""
+        f = self._setup(monkeypatch, tmp_path, "stale\n# CORE\n")
+        monkeypatch.setattr(bot, "_read_memories", lambda: ["stale"])
+        monkeypatch.setattr(bot, "_read_core_memories", lambda: ["stale"] if action == "demote" else [])
+        f.write_text("something else\n# CORE\n", encoding="utf-8")
+        sent, lock_held = self._run(action, "1")
+        assert sent == ["Memory not found in file."]
+        assert lock_held == [False], "a reply awaited inside _memory_lock"

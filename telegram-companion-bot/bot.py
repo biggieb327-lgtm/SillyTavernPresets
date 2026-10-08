@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-10-08.1"
+BOT_VERSION = "2026-10-08.2"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -12488,28 +12488,30 @@ async def coremem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
             raw_lines = raw.splitlines()
             stripped_lines = [l.strip() for l in raw_lines]
-            try:
-                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
-            except StopIteration:
-                await update.message.reply_text("Memory not found in file.")
-                return
-            raw_lines.pop(file_idx)
-            try:
-                marker_idx = next(i for i, l in enumerate(raw_lines)
-                                  if l.strip() == _CORE_MARKER)
-                raw_lines.insert(marker_idx, target)
-            except StopIteration:
-                raw_lines.insert(0, target)
-                raw_lines.insert(1, _CORE_MARKER)
-            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
-            _memories_cache["text"] = None
-            _memories_cache["ts"] = 0.0
-            _bm25_index["retriever"] = None
-            _bm25_index["corpus"] = None
+            # Never await while holding _memory_lock (a threading.Lock): the reply is sent
+            # after the block, so a slow Telegram call cannot hold the lock.
+            file_idx = next((i for i, l in enumerate(stripped_lines) if l == target), None)
+            if file_idx is not None:
+                raw_lines.pop(file_idx)
+                try:
+                    marker_idx = next(i for i, l in enumerate(raw_lines)
+                                      if l.strip() == _CORE_MARKER)
+                    raw_lines.insert(marker_idx, target)
+                except StopIteration:
+                    raw_lines.insert(0, target)
+                    raw_lines.insert(1, _CORE_MARKER)
+                MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+                _memories_cache["text"] = None
+                _memories_cache["ts"] = 0.0
+                _bm25_index["retriever"] = None
+                _bm25_index["corpus"] = None
+        if file_idx is None:
+            await update.message.reply_text("Memory not found in file.")
+            return
         _memory_log("CORE-PROMOTE", target)
         await update.message.reply_text(f"Promoted to core: {target}")
 
-    elif action == "demote":
+    else:  # "demote" -- the usage check above admits only promote/demote
         core = _read_core_memories()
         if not (0 <= idx < len(core)):
             await update.message.reply_text(
@@ -12520,23 +12522,23 @@ async def coremem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw = MEMORIES_FILE.read_text(encoding="utf-8") if MEMORIES_FILE.exists() else ""
             raw_lines = raw.splitlines()
             stripped_lines = [l.strip() for l in raw_lines]
-            try:
-                file_idx = next(i for i, l in enumerate(stripped_lines) if l == target)
-            except StopIteration:
-                await update.message.reply_text("Memory not found in file.")
-                return
-            raw_lines.pop(file_idx)
-            try:
-                marker_idx = next(i for i, l in enumerate(raw_lines)
-                                  if l.strip() == _CORE_MARKER)
-                raw_lines.insert(marker_idx + 1, target)
-            except StopIteration:
-                raw_lines.append(target)
-            MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
-            _memories_cache["text"] = None
-            _memories_cache["ts"] = 0.0
-            _bm25_index["retriever"] = None
-            _bm25_index["corpus"] = None
+            file_idx = next((i for i, l in enumerate(stripped_lines) if l == target), None)
+            if file_idx is not None:
+                raw_lines.pop(file_idx)
+                try:
+                    marker_idx = next(i for i, l in enumerate(raw_lines)
+                                      if l.strip() == _CORE_MARKER)
+                    raw_lines.insert(marker_idx + 1, target)
+                except StopIteration:
+                    raw_lines.append(target)
+                MEMORIES_FILE.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+                _memories_cache["text"] = None
+                _memories_cache["ts"] = 0.0
+                _bm25_index["retriever"] = None
+                _bm25_index["corpus"] = None
+        if file_idx is None:
+            await update.message.reply_text("Memory not found in file.")
+            return
         _memory_log("CORE-DEMOTE", target)
         await update.message.reply_text(f"Demoted from core: {target}")
 
