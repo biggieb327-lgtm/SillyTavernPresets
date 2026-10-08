@@ -1116,11 +1116,6 @@ class TestGatherAuditData:
         for k in ("generated", "consumed", "expired"):
             assert k in d["intent_stats"]
 
-    def test_intent_stats_rendered_in_audit(self):
-        import inspect
-        assert "intent_stats" in inspect.getsource(bot.audit_cmd)
-
-
 # ── R4: Prompt hygiene & safety ─────────────────────────────────────────────
 
 class TestTrimPromptToBudget:
@@ -8373,13 +8368,6 @@ class TestAuditReportsSelfieBase:
     def test_gathered_data_carries_the_field(self):
         assert "selfie_base" in bot.gather_audit_data()
 
-    def test_it_reaches_the_rendered_audit_text(self):
-        """The HTTP API and /audit share gather_audit_data, but only /audit renders lines;
-        a key in the dict that no line prints is exactly the gap this closes."""
-        import inspect
-        src = inspect.getsource(bot.audit_cmd)
-        assert "selfie_base" in src and "Selfie base:" in src
-
     def test_field_matches_the_startup_audit_source(self):
         """Both surfaces must report the same thing, or they disagree under a real fault."""
         assert bot.gather_audit_data()["selfie_base"] == bot._base_image_status()
@@ -8492,7 +8480,7 @@ class TestAuditReportsSelfieProvider:
     def test_provider_is_gathered_and_rendered(self):
         import inspect
         assert "selfie_provider" in bot.gather_audit_data()
-        assert "selfie_provider" in inspect.getsource(bot.audit_cmd)
+        # Rendering: TestAuditRendersWhatItGathers (calls audit_cmd).
 
     def test_nanogpt_reports_the_model_too(self):
         """'nanogpt' alone doesn't say flux-kontext, which is the part that matters.
@@ -8694,7 +8682,7 @@ class TestMediaOfferChances:
         assert "features" in d
         for name in ("meme=", "gif=", "selfie=", "voice="):
             assert name in d["features"], name
-        assert "features" in inspect.getsource(bot.audit_cmd)
+        # Rendering: TestAuditRendersWhatItGathers (calls audit_cmd).
 
     def test_memes_are_fleet_wide_not_per_instance(self):
         """MEME_TEMPLATES_DIR resolves against bot.py, not the instance dir -- so meme
@@ -8851,7 +8839,7 @@ class TestFeatureDetailAndLocation:
         d = bot.gather_audit_data()
         assert d["location"].startswith(bot.WEATHER_LOCATION)
         assert bot.WEATHER_LAT in d["location"] and bot.WEATHER_LON in d["location"]
-        assert "location" in inspect.getsource(bot.audit_cmd)
+        # Rendering: TestAuditRendersWhatItGathers (calls audit_cmd).
 
 
 class TestLifeArcRotation:
@@ -16042,3 +16030,30 @@ class TestGatesAndFailureReplies:
             raise RuntimeError("SECRET-MARKER k-123 https://api.giphy.com/?api_key=k-123")
         said = self._gif(monkeypatch, boom)
         assert said and all("SECRET-MARKER" not in t and "k-123" not in t for t in said)
+
+
+class TestAuditRendersWhatItGathers:
+    """TEST-AUDIT-2026-10-08 batch A. gather_audit_data feeds both the HTTP API and /audit,
+    but only /audit renders lines — a key gathered and never printed is the gap five
+    separate tests guarded by grepping audit_cmd's source. This calls the handler."""
+
+    def test_each_gathered_key_reaches_the_rendered_text(self, monkeypatch):
+        real = bot.gather_audit_data
+        captured = {}
+
+        def gather(*a, **k):
+            d = real(*a, **k)
+            d["intent_stats"] = {"generated": 3, "consumed": 1, "expired": 0}
+            captured.update(d)
+            return d
+
+        monkeypatch.setattr(bot, "gather_audit_data", gather)
+        monkeypatch.setitem(bot.__dict__, "ALLOWED_USERS", bot.ALLOWED_USERS | {7003})
+        u, m = _cmd_update(7003)
+        asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
+        out = "\n".join(m.sent)
+        assert f"Selfie base: {captured['selfie_base']}" in out
+        assert f"via {captured['selfie_provider']}" in out
+        assert f"Features: {captured['features']}" in out
+        assert f"Location: {captured['location']}" in out
+        assert "Intent seed: 3 generated, 1 consumed, 0 expired" in out
