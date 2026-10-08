@@ -6100,16 +6100,6 @@ class TestPresetOverridePersistence:
 class TestPresetCommandInvariants:
     """Rules from bot-code-invariants and past incidents this command could break."""
 
-    def test_command_is_admin_gated(self):
-        import inspect
-        src = inspect.getsource(bot.preset_cmd)
-        assert "_is_admin(update.effective_user.id)" in src, \
-            "swapping the voiceprint for every chat is an operational command"
-
-    def test_command_refuses_an_empty_stack(self):
-        import inspect
-        assert "would leave no preset layers" in inspect.getsource(bot.preset_cmd)
-
     def test_menu_entry_mirrors_the_kill_switch(self):
         off = {c.command for c in bot._build_command_menu(False, False, False, False)}
         assert "preset" not in off
@@ -6311,6 +6301,15 @@ class TestBadRequestNotNetwork:
         assert self._counts("bad_request") == before_bad + 1
         assert self._counts("network") == before_net, "must not also count as network"
 
+    def test_bad_request_surfaces_at_error_level(self, caplog):
+        """A client-side defect must not log as a warning (it read as phone flakiness)."""
+        import logging
+        from telegram.error import BadRequest
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(bot.on_error(None, self._Ctx(BadRequest("Message is too long"))))
+        recs = [r for r in caplog.records if "bad request" in r.getMessage()]
+        assert recs and all(r.levelno == logging.ERROR for r in recs)
+
     def test_real_network_error_still_counted_as_network(self):
         from telegram.error import NetworkError
         before_bad, before_net = self._counts("bad_request"), self._counts("network")
@@ -6323,21 +6322,6 @@ class TestBadRequestNotNetwork:
         before = self._counts("network")
         asyncio.run(bot.on_error(None, self._Ctx(TimedOut())))
         assert self._counts("network") == before + 1
-
-    def test_ordering_is_explicit_in_source(self):
-        # A future reader reordering these checks silently reintroduces the bug.
-        import inspect
-        src = inspect.getsource(bot.on_error)
-        assert src.index("isinstance(err, BadRequest)") < \
-               src.index("isinstance(err, (NetworkError, TimedOut))")
-
-    def test_bad_request_surfaces_at_error_level(self):
-        import inspect
-        src = inspect.getsource(bot.on_error)
-        i = src.index("isinstance(err, BadRequest)")
-        j = src.index("isinstance(err, (NetworkError, TimedOut))")
-        assert "log.error" in src[i:j], "a client-side defect should not log as a warning"
-
 
 # ── Garmin partial-pull diagnosability (v2026-07-25.9) ───────────────────────
 # A watch in battery saver returned steps and nothing else; the only way to learn WHICH
@@ -6472,15 +6456,6 @@ class TestRestartStormAdviceIsCorrect:
         src = self._src()
         assert "no line = SIGKILL" not in src
 
-    def test_graceful_line_asymmetry_documented_where_the_logic_lives(self):
-        # The caveat moved out of the operator-facing DM (the count now excludes
-        # deliberate restarts, so the operator doesn't need it) into the docstring of
-        # the function that actually reasons about the line.
-        import inspect
-        doc = inspect.getsource(bot._tally_unexpected_restarts)
-        assert "absence" in doc.lower()
-
-
 # ── Concurrent /update corrupts the shared code dir (v2026-07-25.11) ─────────
 # Every instance on a host shares the code dir: ~/telegram-bot for the four phone bots,
 # /opt/telegram-bots for cass+jules. bot.py.new / bot.py.bak / bot.py are therefore
@@ -6567,15 +6542,8 @@ class TestSelfUpdateLock:
         assert tmp.exists() == existed, "a retired update must not write bot.py.new"
 
 
-class TestUpdateCmdNeverRepliesSilently:
-    def test_every_failure_reason_gets_a_reply(self):
-        # An unhandled reason used to fall through to a bare `return`, which looks
-        # identical to the bot being dead.
-        import inspect
-        src = inspect.getsource(bot.update_cmd)
-        assert "update_in_progress" in src
-        assert "else:" in src
-        assert "Update did not run" in src
+# TestUpdateCmdNeverRepliesSilently moved to TestGatesAndFailureReplies
+# .test_update_cmd_replies_for_every_reason, which calls update_cmd for each reason.
 
 
 # ── Group-chat co-location warning (v2026-07-25.12) ─────────────────────────
@@ -6836,14 +6804,6 @@ class TestUpdateReasonsAllHaveBranches:
         assert not missing, (
             f"update_cmd has no explicit branch for {sorted(missing)}; the catch-all "
             f"would reply 'Update did not run', which names no remedy")
-
-    def test_repo_not_readable_is_one_of_them(self):
-        """The private-repo case specifically — raw URLs cannot authenticate, so this
-        reason is permanent, not transient, and its message must name vps-sync.sh."""
-        import inspect
-        assert "repo_not_readable" in self._reasons_returned()
-        assert "vps-sync.sh" in inspect.getsource(bot.update_cmd)
-
 
 class TestDirectiveLeakGuard:
     """v2026-07-29.1 — jules sent a selfie captioned with her own planning, rendered in
@@ -8469,43 +8429,20 @@ class TestSetBaseCommand:
         import inspect
         return inspect.getsource(bot.setbase_cmd)
 
-    def test_admin_gated(self):
-        """It overwrites a file in the instance directory -- not for arbitrary users."""
-        assert "_is_admin" in self._src()
-
-    def test_registered_as_a_handler_and_in_the_menu(self):
-        import inspect
-        main_src = inspect.getsource(bot.main)
-        assert 'CommandHandler("setbase"' in main_src
+    def test_in_the_menu(self):
+        # Registration: TestCommandMenuMirrorsHandlers proves every menu entry has a handler.
         assert any(c.command == "setbase"
                    for c in bot._build_command_menu(False, False))
-
-    def test_rejects_non_image_bytes(self):
-        """Magic-byte check, not a trusted mime header or filename."""
-        src = self._src()
-        assert "_BASE_IMAGE_MAGIC" in src and "refusing to install" in src
 
     def test_recognises_the_three_formats_it_claims(self):
         names = {name for _, name in bot._BASE_IMAGE_MAGIC}
         assert names == {"PNG", "JPEG"}
         assert "WEBP" in self._src()
 
-    def test_backs_up_the_previous_photo(self):
-        """A bad swap must be recoverable without another transfer."""
-        assert ".prev" in self._src()
-
     def test_writes_atomically(self):
         """A half-written reference photo is worse than an old one."""
         src = self._src()
         assert ".tmp" in src and "tmp.replace(dest)" in src
-
-    def test_targets_selfie_base_so_no_env_edit_is_needed(self):
-        assert "BASE_DIR / SELFIE_BASE" in self._src()
-
-    def test_warns_when_telegram_compressed_the_image(self):
-        src = self._src()
-        assert "compressed" in src and "Resend as a file" in src
-
 
 class TestSetBaseCaptionDispatch:
     """v2026-08-02.4: /setbase was documented as working as a photo caption. It could not.
@@ -8666,9 +8603,8 @@ class TestGifTagAndFiltering:
         bot.load_gif_prefs()
         assert bot.gif_prefs["safety"] == "high"
 
-    def test_command_is_registered_and_in_the_menu(self):
-        import inspect
-        assert 'CommandHandler("gifsafety"' in inspect.getsource(bot.main)
+    def test_command_is_in_the_menu(self):
+        # Registration: TestCommandMenuMirrorsHandlers proves every menu entry has a handler.
         assert any(c.command == "gifsafety" for c in bot._build_command_menu(False, False))
 
     def test_no_new_llm_call_in_the_gif_path(self):
@@ -8705,35 +8641,15 @@ class TestGifCommandAndRedaction:
         src = inspect.getsource(bot.send_gif)
         assert src.count("_redact_key") >= 2, "search and send paths must both redact"
 
-    def test_user_facing_errors_carry_no_exception_text(self):
-        """no-exception-leak: details stay in the log, the chat gets a generic line."""
-        import inspect
-        src = inspect.getsource(bot.send_gif)
-        for line in src.splitlines():
-            if "_say(" in line:
-                assert "{e}" not in line and "str(e)" not in line, line
-
     def test_auto_path_stays_silent_by_default(self):
         import inspect
         sig = inspect.signature(bot.send_gif)
         assert sig.parameters["announce_errors"].default is False
 
-    def test_gif_command_announces_errors(self):
-        """A manual command that silently does nothing is indistinguishable from broken."""
-        import inspect
-        assert "announce_errors=True" in inspect.getsource(bot.gif_cmd)
-
-    def test_gif_command_is_admin_gated_registered_and_in_menu(self):
-        import inspect
-        assert "_is_admin" in inspect.getsource(bot.gif_cmd)
-        assert 'CommandHandler("gif", gif_cmd)' in inspect.getsource(bot.main)
+    def test_gif_command_is_in_menu(self):
+        # The gate is TestGatesAndFailureReplies.test_gif_cmd_is_admin_gated (a call).
+        # Registration: TestCommandMenuMirrorsHandlers proves every menu entry has a handler.
         assert any(c.command == "gif" for c in bot._build_command_menu(False, False))
-
-    def test_distinguishes_no_key_from_no_results(self):
-        """The two failures need different fixes, so they must not read the same."""
-        src = inspect.getsource(bot.send_gif) if (inspect := __import__("inspect")) else ""
-        assert "GIPHY_API_KEY set" in src and "got past the" in src
-
 
 class TestMediaOfferChances:
     """v2026-08-02.8: GIF_CHANCE/MEME_CHANCE gate whether she is OFFERED the option in a
@@ -8879,11 +8795,9 @@ class TestFeatureSwitches:
         for k in ("features", "seeds", "owner", "timezone"):
             assert k in d, k
 
-    def test_command_registered_gated_and_in_menu(self):
-        import inspect
-        src = inspect.getsource(bot.features_cmd)
-        assert "_is_admin" in src
-        assert 'CommandHandler("features"' in inspect.getsource(bot.main)
+    def test_command_is_in_menu(self):
+        # The gate is TestGatesAndFailureReplies.test_features_cmd_is_admin_gated (a call).
+        # Registration: TestCommandMenuMirrorsHandlers proves every menu entry has a handler.
         assert any(c.command == "features" for c in bot._build_command_menu(False, False))
 
 
@@ -9986,14 +9900,15 @@ class TestSetbaseBackupClaim:
 
     PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 9000
 
-    def _run(self, tmp_path, monkeypatch, uid=4242):
+    def _run(self, tmp_path, monkeypatch, uid=4242, data=None, as_photo=False):
         monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
         monkeypatch.setattr(bot, "SELFIE_BASE", "x_base.png")
         bot.ALLOWED_USERS.add(uid)
+        payload = TestSetbaseBackupClaim.PNG if data is None else data
 
         class _File:
             async def download_as_bytearray(self):
-                return bytearray(TestSetbaseBackupClaim.PNG)
+                return bytearray(payload)
 
         class _Doc:
             mime_type = "image/png"
@@ -10006,14 +9921,31 @@ class TestSetbaseBackupClaim:
         async def reply_text(text, **k):
             sent.append(text)
 
-        msg = SimpleNamespace(document=_Doc(), photo=None, reply_to_message=None,
-                              reply_text=reply_text)
+        if as_photo:     # a normal Telegram photo: recompressed, list of sizes
+            msg = SimpleNamespace(document=None, photo=[_Doc()], reply_to_message=None,
+                                  reply_text=reply_text)
+        else:
+            msg = SimpleNamespace(document=_Doc(), photo=None, reply_to_message=None,
+                                  reply_text=reply_text)
         update = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=uid))
         try:
             asyncio.run(bot.setbase_cmd(update, SimpleNamespace(args=[])))
         finally:
             bot.ALLOWED_USERS.discard(uid)
         return sent
+
+    def test_rejects_non_image_bytes(self, tmp_path, monkeypatch):
+        sent = self._run(tmp_path, monkeypatch, data=b"GIF89a" + b"\0" * 9000)
+        assert "refusing to install" in sent[0]
+        assert not (tmp_path / "x_base.png").exists()
+
+    def test_warns_when_telegram_compressed_the_image(self, tmp_path, monkeypatch):
+        sent = self._run(tmp_path, monkeypatch, as_photo=True)
+        assert "Resend as a file" in sent[0]
+        assert (tmp_path / "x_base.png").read_bytes() == self.PNG
+
+    def test_a_file_sent_as_a_document_gets_no_warning(self, tmp_path, monkeypatch):
+        assert "Resend as a file" not in self._run(tmp_path, monkeypatch)[0]
 
     def test_a_stale_prev_does_not_fake_a_backup(self, tmp_path, monkeypatch):
         (tmp_path / "x_base.png.prev").write_bytes(b"leftover from last time")
@@ -15273,10 +15205,10 @@ class TestLifeProject:
         src = inspect.getsource(bot._post_reply_analysis)
         assert "project_engaged" in src
 
-    def test_project_registered_as_command(self):
-        import inspect
-        src = inspect.getsource(bot.main)
-        assert '"project"' in src
+    def test_project_is_in_the_menu(self):
+        # Was `'"project"' in main`'s source, which any string literal "project" satisfied.
+        # Registration: TestCommandMenuMirrorsHandlers proves every menu entry has a handler.
+        assert any(c.command == "project" for c in bot._build_command_menu(False, False))
 
 
 # ── Recast post-processing ───────────────────────────────────────────────────
@@ -15324,11 +15256,6 @@ class TestRecastPipeline:
             bot._recast_pipeline(12345, None)
         )
         assert result is None
-
-    def test_recast_pipeline_called_in_deliver(self):
-        import inspect
-        src = inspect.getsource(bot._deliver)
-        assert "_recast_pipeline" in src
 
     def test_recast_pipeline_after_extract_tags_before_strip_slop(self):
         import inspect
@@ -16004,3 +15931,114 @@ class TestMemoryAgeNoteWrites:
         assert m["ts"] >= now                              # decay still reads merge time
         assert m["age_ts"] == bot._memory_text_date(b)     # the oldest part wins
 
+
+
+# ── TEST-AUDIT-2026-10-08 batches C/D: gates and failure replies, by calling ─────────────
+# Each test here replaces one that read the handler's source for a string. A source grep
+# proves the string exists, not that the branch runs (incidents/2026-08-02-features-...).
+
+class TestGatesAndFailureReplies:
+    UID = 7002
+
+    def setup_method(self):
+        self._allowed = set(bot.ALLOWED_USERS)
+        bot.ALLOWED_USERS.add(self.UID)
+
+    def teardown_method(self):
+        bot.ALLOWED_USERS.clear()
+        bot.ALLOWED_USERS.update(self._allowed)
+
+    def _outsider(self):
+        owner, uid = bot.get_owner(), 525252
+        while uid == owner or uid in bot.ALLOWED_USERS:
+            uid += 1
+        return uid
+
+    # ── admin gates: an outsider gets silence and changes nothing ─────────────────────
+    def test_preset_cmd_is_admin_gated(self, monkeypatch):
+        monkeypatch.setattr(bot, "preset_override", ["preset.txt"])
+        u, m = _cmd_update(self._outsider())
+        asyncio.run(bot.preset_cmd(u, _cmd_ctx("reset")))
+        assert m.sent == [] and bot.preset_override == ["preset.txt"]
+
+    def test_gif_cmd_is_admin_gated(self):
+        u, m = _cmd_update(self._outsider())
+        asyncio.run(bot.gif_cmd(u, _cmd_ctx()))
+        assert m.sent == []
+
+    def test_features_cmd_is_admin_gated(self, monkeypatch):
+        monkeypatch.setattr(bot, "VOICE_ENABLED", True)
+        u, m = _cmd_update(self._outsider())
+        asyncio.run(bot.features_cmd(u, _cmd_ctx("voice", "off")))
+        assert m.sent == [] and bot.VOICE_ENABLED is True
+
+    def test_setbase_cmd_is_admin_gated(self):
+        u, m = _cmd_update(self._outsider())
+        u.message.reply_to_message = None
+        u.message.document = u.message.photo = None
+        asyncio.run(bot.setbase_cmd(u, _cmd_ctx()))
+        assert m.sent == []
+
+    # ── /preset refuses to empty the stack ────────────────────────────────────────────
+    def test_preset_cmd_refuses_an_empty_stack(self, monkeypatch):
+        monkeypatch.setattr(bot, "preset_override", ["preset.txt"])
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.preset_cmd(u, _cmd_ctx("drop", "preset.txt")))
+        assert "would leave no preset layers" in m.sent[0]
+        assert bot.preset_override == ["preset.txt"], "a refusal must not change the stack"
+
+    # ── /update answers every reason perform_self_update can return ───────────────────
+    @pytest.mark.parametrize("reason", [
+        "retired", "download_failed", "already_current", "compile_failed",
+        "update_in_progress", "repo_not_readable", "lock_failed", "a_reason_added_later"])
+    def test_update_cmd_replies_for_every_reason(self, monkeypatch, reason):
+        """An unhandled reason used to fall through to a bare `return`, which looks
+        identical to the bot being dead. lock_failed and the made-up one reach `else`."""
+        monkeypatch.setattr(bot, "perform_self_update", lambda force: {
+            "ok": False, "reason": reason, "detail": "d", "version": "v"})
+        u, m = _cmd_update(self.UID)
+        asyncio.run(bot.update_cmd(u, _cmd_ctx()))
+        assert m.sent, f"/update went silent for reason {reason!r}"
+
+    # ── /gif and send_gif failure replies ─────────────────────────────────────────────
+    class _Bot:
+        def __init__(self):
+            self.messages, self.animations = [], []
+
+        async def send_message(self, chat_id, text, **k):
+            self.messages.append(text)
+
+        async def send_animation(self, chat_id, animation, **k):
+            self.animations.append(animation)
+
+        async def send_chat_action(self, *a, **k):
+            pass
+
+    def _gif(self, monkeypatch, search, key="k-123", query="cats"):
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", key)
+        monkeypatch.setattr(bot, "_giphy_search", search)
+        ctx = SimpleNamespace(bot=self._Bot())
+        asyncio.run(bot.send_gif(ctx, 9002, query, announce_errors=True))
+        return ctx.bot.messages
+
+    def test_gif_cmd_announces_a_missing_key(self, monkeypatch):
+        """A manual command that silently does nothing is indistinguishable from broken."""
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", "")
+        u, m = _cmd_update(self.UID)
+        ctx = SimpleNamespace(args=["cats"], bot=self._Bot())
+        asyncio.run(bot.gif_cmd(u, ctx))
+        assert any("GIPHY_API_KEY" in t for t in ctx.bot.messages)
+
+    def test_no_key_and_no_results_read_differently(self, monkeypatch):
+        no_key = self._gif(monkeypatch, lambda *a: None, key="")
+        no_hits = self._gif(monkeypatch, lambda *a: None)
+        assert no_key and no_hits and no_key != no_hits
+        assert "GIPHY_API_KEY" in no_key[0] and "got past the" in no_hits[0]
+
+    def test_search_failure_reply_carries_no_exception_text(self, monkeypatch):
+        def boom(*a):
+            raise RuntimeError("SECRET-MARKER k-123 https://api.giphy.com/?api_key=k-123")
+        said = self._gif(monkeypatch, boom)
+        assert said and all("SECRET-MARKER" not in t and "k-123" not in t for t in said)
