@@ -5829,13 +5829,6 @@ class TestUsageCaptureWiring:
         import inspect
         assert "_stash_call_usage(None)" in inspect.getsource(bot._do_request)
 
-    def test_saved_calibration_is_validated(self):
-        import inspect
-        src = inspect.getsource(bot.load_state)
-        assert "_TOKEN_CAL_MIN_RATIO" in src, \
-            "a hand-edited state.json must not set a nonsense multiplier"
-
-
 class TestPromptStatsUnits(object):
     """v2026-07-26.3: stats accumulate over time, so they must be stored in the unit that
     stays meaningful — raw — and calibrated at render. Storing calibrated numbers froze
@@ -8624,11 +8617,6 @@ class TestGifCommandAndRedaction:
     def test_redaction_handles_bare_key_param_too(self):
         assert "SECRET" not in bot._redact_key("https://x/api?key=SECRET&b=1")
 
-    def test_both_failure_paths_redact(self):
-        import inspect
-        src = inspect.getsource(bot.send_gif)
-        assert src.count("_redact_key") >= 2, "search and send paths must both redact"
-
     def test_auto_path_stays_silent_by_default(self):
         import inspect
         sig = inspect.signature(bot.send_gif)
@@ -8869,28 +8857,6 @@ class TestLifeArcRotation:
     def test_it_forbids_vague_filler(self):
         """'She has been reflecting on things' is the failure mode for this kind of prompt."""
         assert "reflecting" in self._src() and "concrete" in self._src().lower()
-
-    def test_cadence_uses_a_stamp_not_a_weekday(self):
-        """A weekday check skips the week entirely if the bot is down that night;
-        a stamp just delays it."""
-        src = self._src()
-        assert "LIFE_STAMP_FILE" in src and "LIFE_ROTATE_DAYS" in src
-
-    def test_first_run_stamps_and_waits(self):
-        """Otherwise a fresh instance rewrites its seeded arc on the very first midnight."""
-        assert "first run: stamp and wait" in self._src()
-
-    def test_a_short_or_empty_result_keeps_the_existing_arc(self):
-        """Never destroy a good arc because the model returned nothing useful."""
-        src = self._src()
-        assert "len(new) < 40" in src and "keeping the current arc" in src
-
-    def test_the_old_arc_is_archived(self):
-        assert 'life_{stamp}.txt' in self._src()
-
-    def test_cache_is_invalidated_so_it_takes_effect(self):
-        """_life_arc_cache has a 5-minute TTL; without this the new arc is invisible."""
-        assert "_life_arc_cache" in self._src()
 
     def test_kill_switch_and_missing_file_both_short_circuit(self):
         assert "LIFE_ROTATE and LIFE_ARC_FILE.exists()" in self._src()
@@ -9818,13 +9784,6 @@ class TestOffVersusNeverConfigured:
             assert "/features maps on" in out and "MISSING" not in out
         finally:
             bot.TOMTOM_API_KEY, bot.TOMTOM_ENABLED = saved
-
-    def test_selfie_and_meme_report_the_switch_not_a_missing_file(self):
-        import inspect
-        for fn, cap in ((bot.send_selfie, "selfie_capable"), (bot.send_meme, "meme_capable")):
-            src = inspect.getsource(fn)
-            assert f"not {cap}()" in src, fn.__name__
-            assert "switched off" in src, fn.__name__
 
     def test_no_command_still_hardcodes_the_credential_sentence(self):
         """The class check: every "isn't set up"/"aren't set up" string must now come from
@@ -16057,3 +16016,126 @@ class TestAuditRendersWhatItGathers:
         assert f"Features: {captured['features']}" in out
         assert f"Location: {captured['location']}" in out
         assert "Intent seed: 3 generated, 1 consumed, 0 expired" in out
+
+
+class TestBatchDBehaviours:
+    """TEST-AUDIT-2026-10-08 batch D: helper behaviours that tests used to infer from
+    source text. Every test here runs the code; the model call is stubbed (no tokens)."""
+
+    # ── life arc rotation ───────────────────────────────────────────────────────────
+    ARC = "She is learning to bake sourdough and keeps killing the starter; the landlord still owes her a deposit."
+    NEW = "She finally keeps a starter alive and bakes on Sundays; the landlord still owes her a deposit, which she brings up a lot."
+
+    def _arc(self, monkeypatch, tmp_path, stamp_age_days, reply):
+        calls = []
+        monkeypatch.setattr(bot, "LIFE_ROTATE", True)
+        monkeypatch.setattr(bot, "LIFE_ROTATE_DAYS", 7)
+        monkeypatch.setattr(bot, "BASE_DIR", tmp_path)
+        monkeypatch.setattr(bot, "LIFE_ARC_FILE", tmp_path / "life.txt")
+        monkeypatch.setattr(bot, "LIFE_STAMP_FILE", tmp_path / ".life_stamp")
+        monkeypatch.setattr(bot, "_read_projects", lambda: "")
+        monkeypatch.setattr(bot, "_relationship_grounding", lambda: "")
+        monkeypatch.setattr(bot, "call_nanogpt",
+                            lambda msgs, model: calls.append(msgs) or reply)
+        monkeypatch.setitem(bot._life_arc_cache, "text", "cached")
+        (tmp_path / "life.txt").write_text(self.ARC + "\n", encoding="utf-8")
+        if stamp_age_days is not None:
+            (tmp_path / ".life_stamp").write_text(
+                str(time.time() - stamp_age_days * 86400), encoding="utf-8")
+        asyncio.run(bot._maybe_rotate_life_arc())
+        return calls, (tmp_path / "life.txt").read_text(encoding="utf-8").strip()
+
+    def test_first_run_stamps_and_waits(self, monkeypatch, tmp_path):
+        calls, arc = self._arc(monkeypatch, tmp_path, None, self.NEW)
+        assert calls == [] and arc == self.ARC
+        assert float((tmp_path / ".life_stamp").read_text()) > 0
+
+    def test_cadence_follows_the_stamp(self, monkeypatch, tmp_path):
+        calls, arc = self._arc(monkeypatch, tmp_path, 3, self.NEW)
+        assert calls == [] and arc == self.ARC, "3 days into a 7-day period: no rotation"
+
+    def test_a_short_result_keeps_the_existing_arc(self, monkeypatch, tmp_path):
+        calls, arc = self._arc(monkeypatch, tmp_path, 8, "too short")
+        assert len(calls) == 1 and arc == self.ARC
+        assert not list(tmp_path.glob("life_*.txt")), "nothing archived when nothing changed"
+
+    def test_rotation_archives_the_old_arc_and_takes_effect(self, monkeypatch, tmp_path):
+        calls, arc = self._arc(monkeypatch, tmp_path, 8, self.NEW)
+        assert arc == self.NEW
+        archived = list(tmp_path.glob("life_*.txt"))
+        assert len(archived) == 1 and archived[0].read_text().strip() == self.ARC
+        assert time.time() - float((tmp_path / ".life_stamp").read_text()) < 60
+        assert bot._life_arc_cache["text"] is None, "the 5-min cache must not hide the new arc"
+
+    # ── off versus never configured ─────────────────────────────────────────────────
+    class _Bot:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, chat_id, text, **k):
+            self.messages.append(text)
+
+    @pytest.mark.parametrize("capable", [True, False])
+    def test_selfie_says_switched_off_only_when_it_is(self, monkeypatch, capable):
+        monkeypatch.setattr(bot, "SELFIE_ENABLED", False)
+        monkeypatch.setattr(bot, "selfie_capable", lambda: capable)
+        ctx = SimpleNamespace(bot=self._Bot())
+        asyncio.run(bot.send_selfie(ctx, 9003))
+        assert ("switched off" in ctx.bot.messages[0]) is capable
+
+    @pytest.mark.parametrize("capable", [True, False])
+    def test_meme_says_switched_off_only_when_it_is(self, monkeypatch, capable):
+        monkeypatch.setattr(bot, "MEME_ENABLED", False)
+        monkeypatch.setattr(bot, "meme_capable", lambda: capable)
+        ctx = SimpleNamespace(bot=self._Bot())
+        asyncio.run(bot.send_meme(ctx, 9003))
+        assert ("switched off" in ctx.bot.messages[0]) is capable
+
+    # ── saved token calibration is validated on load ────────────────────────────────
+    @pytest.mark.parametrize("ratio,kept", [(50.0, False), (0.01, False), (0.9, True)])
+    def test_saved_calibration_is_validated(self, monkeypatch, tmp_path, ratio, kept):
+        """A hand-edited state.json must not put a nonsense multiplier on every count."""
+        state = tmp_path / "state.json"
+        state.write_text(json.dumps({"token_calibration": {"ratio": ratio, "n": 4}}))
+        monkeypatch.setattr(bot, "STATE_FILE", state)
+        monkeypatch.setitem(bot.token_calibration, "ratio", 1.0)
+        monkeypatch.setitem(bot.token_calibration, "n", 0)
+        saved_override = list(bot.preset_override)
+        try:
+            bot.load_state()
+        finally:
+            bot.preset_override[:] = saved_override
+        assert bot.token_calibration["ratio"] == (ratio if kept else 1.0)
+
+    # ── /gif: the key never reaches the log ─────────────────────────────────────────
+    KEY = "k-SECRET-987"
+
+    def _gif_logs(self, monkeypatch, caplog, search, fail_send=False):
+        import logging
+
+        class _B:
+            async def send_message(self, *a, **k):
+                pass
+
+            async def send_animation(self, *a, **k):
+                if fail_send:
+                    raise RuntimeError(f"POST https://x/?api_key={TestBatchDBehaviours.KEY}")
+
+        monkeypatch.setattr(bot, "GIF_ENABLED", True)
+        monkeypatch.setattr(bot, "GIPHY_API_KEY", self.KEY)
+        monkeypatch.setattr(bot, "_giphy_search", search)
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(bot.send_gif(SimpleNamespace(bot=_B()), 9004, "cats",
+                                     announce_errors=True))
+        return [r.getMessage() for r in caplog.records if "[gif]" in r.getMessage()]
+
+    def test_search_failure_log_is_redacted(self, monkeypatch, caplog):
+        def boom(*a):
+            raise RuntimeError(f"GET https://api.giphy.com/?api_key={self.KEY}")
+        logs = self._gif_logs(monkeypatch, caplog, boom)
+        assert logs and all(self.KEY not in m for m in logs)
+
+    def test_send_failure_log_is_redacted(self, monkeypatch, caplog):
+        logs = self._gif_logs(monkeypatch, caplog, lambda *a: ("https://g/x.gif", "gid", ""),
+                              fail_send=True)
+        assert logs and all(self.KEY not in m for m in logs)
