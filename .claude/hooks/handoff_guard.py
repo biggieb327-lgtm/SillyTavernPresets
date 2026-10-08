@@ -19,8 +19,14 @@ commands specific to a host in this fleet. Illustrative snippets are left alone.
      Pasting buffers the whole block on the terminal's stdin, so `read` consumed the
      loop header as its input; the loop then ran with an empty variable.
 
+  D. An ssh remote command carrying an unquoted `~`, or a `$` outside single quotes.
+     The LOCAL shell expands both before ssh runs, so `ssh root@vps ls ~/maren-vale`
+     run from Termux listed the phone's home, and the check reported copied files
+     missing (2026-09-30, C16 occurrence 9). Checked in every fenced block, not only
+     operator-facing ones: an ssh remote command crosses machines by definition.
+
 Escape hatches, per block: `# handoff-ok: relative`, `# handoff-ok: hostname`,
-`# handoff-ok: interactive`.
+`# handoff-ok: interactive`, `# handoff-ok: remote-expansion`.
 
 Fails OPEN on anything unexpected, same as host_guard: a guard that breaks sessions
 gets disabled, which is worse than no guard.
@@ -41,6 +47,10 @@ PRAGMA_HOST = re.compile(r'#\s*host:\s*(?:vps|phone|both)\b', re.I)
 OK_RELATIVE = re.compile(r'#\s*handoff-ok:\s*relative\b', re.I)
 OK_HOSTNAME = re.compile(r'#\s*handoff-ok:\s*hostname\b', re.I)
 OK_INTERACTIVE = re.compile(r'#\s*handoff-ok:\s*interactive\b', re.I)
+OK_REMOTE = re.compile(r'#\s*handoff-ok:\s*remote-expansion\b', re.I)
+SSH_CMD = re.compile(r'(?:^|[;&|(]\s*)ssh\s+(.*)$')
+# ssh options that take an argument (the argument is local, e.g. -i ~/.ssh/key).
+SSH_ARG_OPTS = set("bcDEeFIiJLlmOoPpQRSWw")
 # Commands that consume stdin. In a pasted block the terminal has already buffered every
 # following line, so these swallow the next line of the block instead of prompting.
 STDIN_CMD = re.compile(r'(?:^|[;&|]\s*)(read|passwd|gpg|ssh-keygen)\b')
@@ -74,6 +84,37 @@ def _relative_paths(line: str) -> list:
     return out
 
 
+def _remote_expansions(line: str) -> list:
+    """What the LOCAL shell would expand in an ssh line's remote command: an unquoted `~`
+    at a word start, or a `$` outside single quotes (double quotes still expand `$`)."""
+    m = SSH_CMD.search(line.split(" #", 1)[0] if not line.lstrip().startswith("#") else "")
+    if not m:
+        return []
+    words, rest = m.group(1).split(), None
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-") and len(w) >= 2:
+            if w[-1] in SSH_ARG_OPTS and len(w) == 2:
+                i += 1                     # skip the option's argument too
+            i += 1
+            continue
+        # words[i] is the target; everything after it is the remote command
+        parts = m.group(1).split(None, i + 1)
+        rest = parts[i + 1] if len(parts) > i + 1 else ""
+        break
+    if not rest:
+        return []
+    found = []
+    no_single = re.sub(r"'[^']*'", " ", rest)                 # $ survives double quotes
+    if re.search(r'(?<!\\)\$[\w({]', no_single):
+        found.append("$")
+    unquoted = re.sub(r'"(?:\\.|[^"\\])*"', " ", no_single)
+    if re.search(r'(?:^|[\s=:])~', unquoted):
+        found.append("~")
+    return found
+
+
 def _operator_facing(block: str) -> bool:
     return bool(PRAGMA_HOST.search(block) or VPS.search(block) or PHONE.search(block))
 
@@ -81,9 +122,19 @@ def _operator_facing(block: str) -> bool:
 def check(text: str) -> list:
     problems = []
     for block in FENCE.findall(text):
+        first = next((l.strip() for l in block.splitlines() if l.strip()), "")[:60]
+        if not OK_REMOTE.search(block):
+            for line in block.splitlines():
+                exp = _remote_expansions(line)
+                if exp:
+                    problems.append(
+                        f"  block starting {first!r} has an ssh remote command whose "
+                        f"{' and '.join(repr(e) for e in exp)} the LOCAL shell will expand "
+                        f"before ssh runs — it names this machine's home/variables, not the "
+                        f"remote's. Single-quote the remote command: ssh host 'ls ~/dir'.")
+                    break
         if not _operator_facing(block):
             continue
-        first = next((l.strip() for l in block.splitlines() if l.strip()), "")[:60]
 
         if not OK_RELATIVE.search(block):
             seen_cd = False

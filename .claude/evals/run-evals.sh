@@ -325,6 +325,108 @@ if [ -f .claude/hooks/theory_guard.py ]; then
   fi
 fi
 
+# --- ci-read-guard-selftest ------------------------------------------------------------
+# C25 (2026-09-22 ×2): work reached main while CI on it went unread, after the skill text
+# already said "CI polled". ci_read_guard.py (Stop) blocks ending a turn after a push to
+# main until the SHA's CI result is read or a background poller is still waiting. Its
+# --selftest builds transcripts for each rule (read, poller armed, poller done but unread,
+# read before the push, rejected/errored push, a push named in quotes or a heredoc,
+# another SHA's result, the ci-ok escape, git unavailable). A missing guard is a failure.
+if ci_out=$(python3 .claude/hooks/ci_read_guard.py --selftest 2>&1); then
+  ok "ci-read-guard-selftest: $(printf '%s' "$ci_out" | tail -1)"
+else
+  bad "ci-read-guard-selftest" "$(printf '%s\n' "$ci_out" | grep -E 'FAIL|selftest|No such|Error' | head -5) — C25's guard is broken or gone; a push to main can again end unverified"
+fi
+
+# --- shell-semantics-cases --------------------------------------------------------------
+# shell-semantics-guard.sh (PreToolUse, C23) had no behavioural test. Shape 3 was added
+# 2026-10-08 after `run-evals.sh | tail -1 && git push origin HEAD:main` pushed a red run
+# to main (2026-09-29): the gate tested `tail`. Cases drive the real hook with a payload:
+# exit 2 = blocked, 0 = allowed. A final `grep` stage and `set -o pipefail` are honest.
+if ! ssg=$(python3 - 2>&1 <<'PY'
+import json, subprocess
+H = ".claude/hooks/shell-semantics-guard.sh"
+CASES = [
+    (2, "bash .claude/evals/run-evals.sh | tail -1 && git commit -qm x && git push origin HEAD:main"),
+    (2, "pytest -q 2>&1 | tail -3 && git push"),
+    (2, "bash run-evals.sh |\n  tail -1 && git push"),
+    (2, "for i in 1; do bash run-evals.sh | tail -1 && git push; done"),
+    (2, "git push -u origin b 2>&1 | tail -2 && git push origin b:main"),
+    (2, "cd /repo && bash run-evals.sh | tail -1 && git commit -F msg"),
+    (2, 'git commit -m "fix `x` here"'),
+    (0, "bash .claude/tools/verify.sh | grep -q green && git merge feature"),
+    (0, "bash run-evals.sh | grep -q 'failed, 0' && git push"),
+    (0, "bash run-evals.sh | tail -1 | grep green && git push"),
+    (0, "git commit -F - <<'MSG'\nsubject | with pipe && git push\nMSG"),
+    (0, "set -o pipefail; bash run-evals.sh | tail -1 && git push"),
+    (0, "git add -A && git commit -q -F msg && git push"),
+    (0, "git log --oneline | head -3 && git status"),
+    (0, "echo x | grep -q x && echo ok"),
+    (0, 'git commit -m "a | b" && git push'),
+    (0, "bash run-evals.sh | tail -1 && git push  # shell-ok"),
+    (0, "git push origin b:main 2>&1 | tail -2"),
+]
+bad = []
+for want, cmd in CASES:
+    p = subprocess.run(["bash", H], input=json.dumps({"tool_input": {"command": cmd}}),
+                       capture_output=True, text=True, timeout=20)
+    if p.returncode != want:
+        bad.append(f"want {want} got {p.returncode}: {cmd[:60]!r}")
+print(" | ".join(bad))
+PY
+); then
+  ssg="the harness itself exited non-zero: ${ssg:-(no output)}"
+fi
+if [ -z "$ssg" ]; then
+  ok "shell-semantics-cases: all 18 C23 cases block or pass as specified"
+else
+  bad "shell-semantics-cases" "$ssg"
+fi
+
+# --- handoff-remote-expansion -----------------------------------------------------------
+# handoff_guard.py shape D (C16 occurrence 9, 2026-09-30): `ssh root@vps ls ~/maren-vale`
+# run from Termux expanded `~` on the PHONE, so the check reported copied files missing.
+# An unquoted `~`, or a `$` outside single quotes, in an ssh remote command is expanded by
+# the local shell. Cases call handoff_guard.check() on fenced blocks.
+if ! hre=$(python3 - 2>&1 <<'PY'
+import sys
+sys.path.insert(0, ".claude/hooks")
+import handoff_guard as h
+F = "```\n{}\n```"
+CASES = [
+    (True,  "ssh root@203.0.113.5 ls ~/maren-vale"),
+    (True,  "ssh -p 2222 root@vps.example.com cat ~/notes.txt"),
+    (True,  'ssh root@vps.example.com "echo $HOME"'),
+    (True,  "ssh root@vps.example.com ls $DIR"),
+    (True,  "ssh root@vps.example.com ls -la ~"),
+    (True,  "ssh root@vps.example.com du -sh $(pwd)"),
+    (False, "ssh root@vps.example.com 'ls ~/maren-vale'"),
+    (False, 'ssh root@vps.example.com "ls ~/maren-vale"'),
+    (False, "ssh root@vps.example.com"),
+    (False, "ssh root@vps.example.com 'echo $HOME'"),
+    (False, "scp ~/file root@vps.example.com:/tmp/"),
+    (False, "ssh -i ~/.ssh/id_ed25519 root@vps.example.com 'uptime'"),
+    (False, "ssh root@vps.example.com ls /opt/telegram-bots"),
+    (False, "ssh root@vps.example.com echo \\$HOME"),
+    (False, "ssh root@vps.example.com ls ~/x  # handoff-ok: remote-expansion"),
+    (False, "echo ~/notes && ls $HOME"),
+]
+bad = []
+for want, body in CASES:
+    got = any("expand" in p.lower() for p in h.check(F.format(body)))
+    if got != want:
+        bad.append(f"flag={want} got {got}: {body!r}")
+print(" | ".join(bad))
+PY
+); then
+  hre="the harness itself exited non-zero: ${hre:-(no output)}"
+fi
+if [ -z "$hre" ]; then
+  ok "handoff-remote-expansion: all 16 ssh local-expansion cases flag or pass as specified"
+else
+  bad "handoff-remote-expansion" "$hre"
+fi
+
 # --- theory-guard-external-evidence -----------------------------------------------------
 # theory_guard.py's second classifier (check_external) covers C5's uncovered half: a claim
 # about an external or runtime property with no code name in it. Pinned on the two
