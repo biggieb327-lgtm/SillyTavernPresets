@@ -211,8 +211,11 @@ the owner's pasting twice first. For a secret: an editor on a file written with 
 (b) `ssh root@<vps> ls ~/maren-vale`, run from Termux: the unquoted `~` expanded on the phone,
 so the check reported the copied files missing. Quote remote paths: `ssh host 'ls ~/dir'`.
 **Mechanism note:** (a) is a shape handoff-guard already blocks *here*; the recurrence was in
-another repo's session. (b) is a new shape — an unquoted `~` or `$VAR` in an ssh remote
-command — and is mechanical enough to add to handoff-guard.
+another repo's session.
+**Graduated 2026-10-08 → `handoff_guard.py` shape D** for (b): an unquoted `~` at a word start,
+or a `$` outside single quotes, in an ssh remote command, checked in every fenced block (not
+only operator-facing ones). Option arguments (`-i ~/.ssh/key`) and `scp` are exempt; escape
+`# handoff-ok: remote-expansion`. Eval `handoff-remote-expansion` (16 cases).
 
 **Division of labour:** `host-guard` answers *which machine is this for?*; this answers
 *will it actually work there?* Neither can stop a paste into the wrong shell — that half
@@ -1367,10 +1370,13 @@ command's.** (2026-08-24) a shell function called inside an `&&` chain lost its 
 `pip install … | tail -5; echo "EXIT=$?"` printed `tail`'s 0 over a hard install failure.
 (2026-09-29) `run-evals.sh | tail -1 && git commit … && git push origin HEAD:main` — `tail`
 returned 0, so a failing eval did not stop the chain and red reached `main` at `83a0bce`.
-**Mechanism gap:** `shell-semantics-guard.sh` blocks a `||` fallback after a pipe, not an `&&`
-continuation after one; the 2026-09-29 shape is mechanical and is the candidate to add. Until
-then: `set -o pipefail`, `${PIPESTATUS[0]}`, or run the command without the trailing pipe, and
+Use `set -o pipefail`, `${PIPESTATUS[0]}`, or run the command without the trailing pipe, and
 never gate a push on a piped check.
+**Graduated 2026-10-08 → `shell-semantics-guard.sh` shape 3** (blocking): `git
+push|commit|merge` after `&&` on a pipeline whose last stage is not `grep`, unless `set -o
+pipefail` is in the command. Eval `shell-semantics-cases` (18 cases). The 2026-08-24 (`set -e`
+in an `&&` chain) and 2026-08-31 (`$?` after a pipe) shapes are not guarded: neither gates an
+action, and both read correctly far more often than not.
 
 **What this is NOT:** a constraint about re-offending. Four entries this session shared
 "I had already written the correction down", and that is a property of the *timing*, not a
@@ -1411,10 +1417,14 @@ census row; pytest caught it only in CI, and nobody read CI. Related: C23 occurr
 `run-evals.sh` alone) and read its output; after the push, poll the `evals` run for the pushed
 SHA and report `<sha> | completed | <conclusion>`. Red on `main` is a deploy blocker
 (`vps-sync.sh` hard-resets to it), so a Markdown-only diff is not exempt.
-**Not graduated — mechanism owed.** `repo-change-control`'s checklist already said "CI polled"
-before both occurrences, so prose has failed twice. `debrief-check.sh` prints "ci NOT CHECKED",
-but only at debrief. Candidate: a PostToolUse hook on a push to `main` that records the SHA and
-blocks the turn's end until an `evals` run for it has been read.
+**Graduated 2026-10-08 → `.claude/hooks/ci-read-guard.sh` + `ci_read_guard.py`** (Stop).
+After the last successful push to `main`, ending the turn needs a later tool result with the
+SHA and "completed", a background Actions poller whose notification has not arrived yet, or
+`ci-ok: <reason>` in the reply. It does not require a synchronous read: foreground `sleep` is
+blocked here, so waiting means a background poller, and the guard re-arms when its
+notification lands. Replayed on the session that built it: allow while waiting, block once the
+notice was in but unread, allow after the read — at both real pushes. Eval
+`ci-read-guard-selftest` (17 transcript cases).
 
 ### C26 — A change to a shared helper or stored field is a change for every caller and reader
 **seen: 2** (2026-09-26 ×2) — *promoted from the Minor log 2026-10-08; both entries deleted.*

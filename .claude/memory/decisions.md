@@ -82,6 +82,13 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-10-08 | Unread CI after a push to main now blocks the turn; waiting on a background poller counts | status: current
+**Decided:** a Stop guard (`ci-read-guard.sh`) blocks ending a turn after a push to `main` until that SHA's CI result is read, unless a background GitHub Actions poller is still waiting or the reply says `ci-ok: <reason>`.
+**Over:** requiring the read in the same turn (impossible here: foreground `sleep` is blocked, so a run that takes minutes can only be waited on in the background); a PostToolUse reminder after the push (advisory text had already failed twice — C25); making `debrief-check.sh`'s "ci NOT CHECKED" note blocking (fires only at debrief, after the turn that should have read CI is over).
+**Why:** both C25 occurrences were turns that pushed and ended. Counting an armed poller as "waiting", then re-requiring a read once its notification lands, matches how CI can actually be watched in this environment.
+**By:** owner asked for the three mechanisms ("build the three mechanism gaps"); design settled by the session and replayed against its own transcript.
+**Detail:** constraints C25; `.claude/hooks/ci_read_guard.py` docstring.
+
 ### 2026-10-08 | Borrowed four method ideas and one bot feature from gstack/gbrain; "Boil the Ocean" and gbrain itself not adopted | status: current
 **Decided:** adopt gstack's test-audit method (report `TEST-AUDIT-2026-10-08.md`, batches await approval), `/investigate`'s 3-strike and >5-file rules and gbrain's measure-before-you-fix (all in `repo-debugging-playbook`), `/learn prune`'s missing-file check (`debrief-check.sh`, advisory), and ship `MEMORY_AGE_NOTE` default ON (v2026-10-08.1).
 **Over:** gstack's ETHOS "Boil the Ocean" (always build the complete version) — contradicts `ponytail` and this repo's record of over-building; gstack `/careful`/`/freeze` — `risk-guard.sh` already covers them; gstack `/ship`/`/land-and-deploy`/`/canary` — web-app and PR shaped, `ship` + `vps-sync.sh` already cover it; gbrain itself (Postgres + pgvector daemon) — memory files + Notion already do the job at this size. For the age note: writing the age into memories.txt (rejected: display-time only, like `_hedge_memory_lines`, keeps the file clean) and using `last_used` as the date (rejected: the bot mentioning a memory is not the user confirming it).

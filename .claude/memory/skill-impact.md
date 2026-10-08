@@ -96,6 +96,25 @@ judged alone, and 11 fixture cases run in CI (the hook had none before).
 inside quotes), or line-index splicing in a Python heredoc, which stays prose by design.
 Refs: constraints C7 (Occurrence 7, reviewed 2026-09-30), eval `anchor-guard-cases`.
 
+### 2026-10-08 | intervention: `ci-read-guard.sh` Stop guard (C25) | class: a push to main ends the turn with CI on it unread | status: pending
+New Stop guard: after the last push to `main`, the turn cannot end until the SHA's CI result is
+read, a background poller is still waiting, or `ci-ok:` names why it can't be read.
+**Holds when:** the next operational-log or constraints entry about red reaching `main` shows it
+was read (and acted on) in the pushing session, and no `ci-ok:` appears without a real reason.
+**Recurrence shape to expect:** CI read through a path the guard doesn't see (a browser, a
+Monitor tool), producing a false block; or a reflexive `ci-ok:`.
+Refs: constraints C25, eval `ci-read-guard-selftest`, decisions 2026-10-08.
+
+### 2026-10-08 | intervention: `shell-semantics-guard.sh` shape 3 + `handoff_guard.py` shape D | class: a command whose effect depends on something its text doesn't show (C23 pipeline gate; C16 ssh local expansion) | status: pending
+Shape 3 blocks `… | tail && git push|commit|merge` without pipefail; shape D flags an ssh remote
+command whose `~`/`$` the local shell expands.
+**Holds when:** no new C23 entry about a pipeline-gated action and no new C16 entry about a
+remote path expanded locally; `# shell-ok` / `# handoff-ok: remote-expansion` stay rare.
+**Recurrence shape to expect:** the same mistake through a form the regexes miss (`xargs`, a
+function wrapping `git push`, `ssh host bash -c "…$X…"`).
+Refs: constraints C23 (occurrence 8), C16 (occurrence 9), evals `shell-semantics-cases`,
+`handoff-remote-expansion`.
+
 ### 2026-10-08 | intervention: 38 source-reading tests rewritten to call the code (TEST-AUDIT-2026-10-08) | class: a test that reads source cannot fail for the reason the code exists (the `/features` ValueError family, C8) | status: pending
 `sweep.py source-assertion` already forced one call per `*_cmd`; this replaced per-behavior
 source checks (admin gates, failure replies, /audit rendering, parse_mode, life-arc rotation,
