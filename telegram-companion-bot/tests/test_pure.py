@@ -6106,12 +6106,6 @@ class TestPresetCommandInvariants:
         assert "_is_admin(update.effective_user.id)" in src, \
             "swapping the voiceprint for every chat is an operational command"
 
-    def test_command_is_plain_text(self):
-        # v2026-07-25.7/.13: layer filenames and resolver warnings through Markdown
-        # would make Telegram reject the message and the command reply with silence.
-        import inspect
-        assert "parse_mode" not in inspect.getsource(bot.preset_cmd)
-
     def test_command_refuses_an_empty_stack(self):
         import inspect
         assert "would leave no preset layers" in inspect.getsource(bot.preset_cmd)
@@ -6266,21 +6260,8 @@ class TestResolvePresetLayers:
 # command whose job is diagnosing the bot became the thing that silently failed.
 
 class TestAuditIsPlainText:
-    def _src(self):
-        """audit_cmd's source with comment lines removed — the comments deliberately
-        mention parse_mode="Markdown" to explain why it must not be used."""
-        import inspect
-        return "\n".join(ln for ln in inspect.getsource(bot.audit_cmd).splitlines()
-                         if not ln.lstrip().startswith("#"))
-
-    def test_audit_does_not_use_parse_mode(self):
-        assert "parse_mode" not in self._src(), (
-            "/audit interpolates arbitrary diagnostic text (card fields, prompt headings, "
-            "config warnings naming env vars) — any parse_mode makes it un-sendable "
-            "depending on what it found")
-
-    def test_header_has_no_markdown_emphasis(self):
-        assert "*Self-Audit*" not in self._src()
+    # The parse_mode and "*Self-Audit*" checks moved to test_audit_cmd_answers, which
+    # calls the handler (TEST-AUDIT-2026-10-08 batch B); they used to read its source.
 
     def test_audit_output_survives_markdown_hostile_content(self):
         # The real payload that broke it: underscores and unmatched brackets.
@@ -6669,11 +6650,8 @@ class TestNoUnescapedMarkdownInterpolation:
         names = {o[0] for o in self._offenders()}
         assert names <= self.ALLOWED
 
-    def test_content_rendering_commands_are_plain_text(self):
-        import inspect
-        for fn in (bot.card_cmd, bot.notes_cmd, bot.status_cmd, bot.schedule_cmd,
-                   bot.setcard_cmd, bot.vibe_cmd, bot.energy_cmd):
-            assert "parse_mode" not in inspect.getsource(fn), fn.__name__
+    # The "these seven reply in plain text" check now runs on real replies: see `_plain`
+    # in TestEveryCommandHandlerActuallyRuns (TEST-AUDIT-2026-10-08 batch B).
 
 
 # ── BOT_TIMEZONE actually sets the clock (v2026-07-25.14) ───────────────────
@@ -10060,10 +10038,12 @@ class TestSetbaseBackupClaim:
 class _CmdMsg:
     def __init__(self):
         self.sent = []
+        self.kwargs = []        # one dict per reply_text call, so parse_mode is visible
         self.documents = []
 
     async def reply_text(self, text, **kwargs):
         self.sent.append(text)
+        self.kwargs.append(kwargs)
         return SimpleNamespace(message_id=1)
 
     async def reply_document(self, fh, **kwargs):
@@ -10080,6 +10060,13 @@ def _cmd_update(uid=7001, chat_id=9001):
         effective_chat=SimpleNamespace(id=chat_id),
         effective_user=SimpleNamespace(id=uid, first_name="Tester"),
     ), msg
+
+
+def _plain(msg):
+    """True when every reply was sent without parse_mode. These commands interpolate
+    user/card/diagnostic text; with Markdown, one stray '_' or '[' makes Telegram reject
+    the whole message and the command answers with silence (v2026-07-25.7/.13)."""
+    return msg.sent and all("parse_mode" not in k for k in msg.kwargs)
 
 
 def _cmd_ctx(*args):
@@ -10116,7 +10103,8 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_audit_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.audit_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m), "/audit interpolates diagnostic text; any parse_mode can silence it"
+        assert "*Self-Audit*" not in m.sent[0]
 
     def test_audit_cmd_is_admin_gated(self):
         u, m = _cmd_update(self._outsider())
@@ -10126,7 +10114,7 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_preset_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.preset_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m), "layer filenames through Markdown made /preset reply with silence"
 
     def test_gif_cmd_answers_without_a_query(self):
         u, m = _cmd_update(self.UID)
@@ -10180,12 +10168,12 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_card_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.card_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m)
 
     def test_setcard_cmd_usage(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.setcard_cmd(u, _cmd_ctx()))
-        assert "Usage" in m.sent[0]
+        assert "Usage" in m.sent[0] and _plain(m)
 
     def test_setcard_cmd_rejects_an_unknown_field(self):
         u, m = _cmd_update(self.UID)
@@ -10195,17 +10183,17 @@ class TestEveryCommandHandlerActuallyRuns:
     def test_status_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.status_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m)
 
     def test_vibe_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.vibe_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m)
 
     def test_energy_cmd_answers(self):
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.energy_cmd(u, _cmd_ctx()))
-        assert m.sent
+        assert _plain(m)
 
     def test_reflect_cmd_answers(self):
         u, m = _cmd_update(self.UID)
@@ -10240,13 +10228,13 @@ class TestEveryCommandHandlerActuallyRuns:
         monkeypatch.setattr(bot, "SCHEDULE_FILE", tmp_path / "schedule.txt")
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.schedule_cmd(u, _cmd_ctx()))
-        assert "Schedule" in m.sent[0]
+        assert "Schedule" in m.sent[0] and _plain(m)
 
     def test_notes_cmd_handles_an_empty_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(bot, "USER_NOTES_FILE", tmp_path / "user_notes.txt")
         u, m = _cmd_update(self.UID)
         asyncio.run(bot.notes_cmd(u, _cmd_ctx()))
-        assert "No notes yet" in m.sent[0]
+        assert "No notes yet" in m.sent[0] and _plain(m)
 
     def test_the_backlog_stays_empty(self):
         """The check that keeps it at zero: sweep's own coverage query must report no
