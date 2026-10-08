@@ -18,28 +18,43 @@ answers end with a note on what may be out of date ("nothing new about Alice in 
 
 **Fix:** new pure `_memory_age_suffixes(lines, meta, now, min_days, enabled, core)` returns
 one suffix per recalled line: `" (noted about N weeks/months ago)"` (or days / "over a year")
-when the line's write date is `MEMORY_AGE_NOTE_DAYS` (default 60) or more days old, else
-`""`. Write date = memory_meta `"ts"`, else the `[auto YYYY-MM-DD]` stamp
-(`_memory_text_date`). **Not** `last_used`: the bot bringing a memory up again does not
-mean the user confirmed it. `# CORE` lines and undated lines get no note. In
-`assemble_messages` the suffixes are computed on the unmodified lines *before*
-`_hedge_memory_lines` (which prefixes "(unsure)", after which the meta lookup would miss),
-then appended. When any line is marked, the block adds one sentence: such entries may no
-longer be true; check in with the user naturally rather than assume.
+when the line's date (`_memory_age_ts`) is `MEMORY_AGE_NOTE_DAYS` (default 60) or more days
+old, else `""`. That date is memory_meta `"age_ts"`, else `"ts"`, else — only when `"ts"` is
+absent and a `MEMORY_DATE_FALLBACK*` switch is on, the same rule the ranking uses — the
+`[auto YYYY-MM-DD]` stamp; then the later of that and `"reconfirmed"`. **Not** `last_used`:
+the bot bringing a memory up again does not mean the user confirmed it. `# CORE` lines and
+undated lines get no note. In `assemble_messages` the suffixes are computed on the
+unmodified lines *before* `_hedge_memory_lines` (after its "(unsure)" prefix the meta lookup
+would miss) and inserted right after the memory text, before any hedge source quote. When
+any line is marked, the block adds one sentence: such entries may no longer be true; check
+in with the user naturally rather than assume.
 
-Display-time only: memories.txt and memory_meta.json are not written. No model call is
-added. The memory block grows by about 6 tokens per marked line plus about 40 for the
+Two write paths keep the date honest (both found by `/code-review` before merge):
+- **A re-stated fact.** When `_append_memory` drops a new extraction as a lexical or semantic
+  duplicate, the user has just said it again; new `_mark_reconfirmed` stamps `"reconfirmed"`
+  on the stored line (the closest one, for a semantic match). Without this, a fact confirmed
+  yesterday kept "(noted about 6 months ago)". Nothing is recorded with `MEMORY_AGE_NOTE=0`.
+- **An audit merge.** `_apply_audit_item` writes `ts=now` on a merged line, so two old facts
+  merged looked new. It now also stores `"age_ts"` = the oldest part's date. `"ts"` is left
+  as the merge time, so recency decay is unchanged.
+
+memories.txt is not changed. memory_meta.json gains only the two fields above. No model
+call is added. The memory block grows by about 6 tokens per marked line plus about 40 for the
 sentence, outside `MEMORY_TOKEN_BUDGET` (same as the existing "(unsure)" marker and its
 sentence). Kill switch `MEMORY_AGE_NOTE=0`. **Expected effect, not measured live:** the
 character should hedge on or ask about old state-like memories; whether it over-mentions
 "a while ago" is the thing to watch on the first bots after deploy.
 
-**Tests (`TestMemoryAgeNote`, 17):** each wording branch; the threshold is inclusive; text
-date as fallback; a recorded `ts` wins; `last_used` does not refresh the age; core and
-undated lines; the kill switch; order kept. Four of them call `assemble_messages` and read
-the rendered block: the old line is marked and explained, nothing is added when every line
-is recent, the kill switch restores the old block, and a hedged old line carries both
-markers. `MEMORY_AGE_NOTE` added to `TestEveryBooleanFlagDefault.DEFAULTS`.
+**Tests (`TestMemoryAgeNote` 24, `TestMemoryAgeNoteWrites` 4):** each wording branch (incl.
+"1 day", never "12 months"); the threshold is inclusive; text date as fallback, only with a
+fallback switch on and only when `ts` is absent; `age_ts` and `reconfirmed` rules;
+`last_used` does not refresh the age; core and undated lines; the kill switch; order kept.
+Five call `assemble_messages` and read the rendered block (marked and explained; nothing
+added when all recent; kill switch; hedged line keeps both markers; age before the hedge
+quote). The write tests call `_append_memory` (lexical and semantic duplicate, kill switch)
+and `_apply_audit_item` (merge keeps the oldest age). Break-tested: dropping either
+`_mark_reconfirmed` call, the `age_ts` line, the lookup order, or the explanation sentence
+turns its test red. `MEMORY_AGE_NOTE` added to `TestEveryBooleanFlagDefault.DEFAULTS`.
 
 ## v2026-10-01.1 — Reasoning-leak guard catches a draft followed by its final version
 
