@@ -6895,7 +6895,11 @@ class TestDirectiveLeakGuard:
         clean, dropped = bot._strip_directive_lines("[VOICEPRINT: SINGLE SLOT]\nhey")
         assert len(dropped) == 1 and clean == "hey"
 
-    @pytest.mark.parametrize("name", bot._REPLY_TAG_NAMES)
+    # Written out, NOT bot._REPLY_TAG_NAMES: parametrizing over the list under test meant
+    # removing a name removed its test too (break-test caught it). Every tag a reply can
+    # carry that something downstream reads: extract_tags, _gif_query, _MEMCHECK_RE.
+    @pytest.mark.parametrize("name", ["react", "selfie", "clothing", "outfit", "meme",
+                                      "gif", "search", "memcheck", "mood"])
     def test_every_known_tag_on_its_own_line_survives(self, name):
         """The name list is load-bearing for this pattern (unlike _DIRECTIVE_LINE_RE):
         drop a name from _REPLY_TAG_NAMES and its tag is eaten before extract_tags."""
