@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-10-08.2"
+BOT_VERSION = "2026-10-11.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -4476,7 +4476,7 @@ boundaries = {}     # chat_id -> [str] hard behavioral constraints from the user
 current_vibe = {}   # chat_id -> {"name": str, "expires_at": float|None}
 vent_mode = {}      # chat_id -> bool
 user_energy = {}    # chat_id -> {"level": "low"|"medium"|"high", "ts": float}
-unsent_drafts = {}  # chat_id -> [{"reason": str, "ts": float}]
+unsent_drafts = {}  # chat_id -> [{"reason": str (owner-facing), "held": str (in-character), "ts": float}]
 engagement_trend = {}  # chat_id -> [{"d": "YYYY-MM-DD", "um": int, "uc": int, "bm": int}] (28-day rolling)
 _ENGAGEMENT_DAYS = 28
 _engagement_today = {}  # chat_id -> {"um": int, "uc": int, "bm": int}
@@ -5073,9 +5073,13 @@ def _consume_nudge(chat_id: int):
 
 
 # --- Unsent drafts ---
-def _save_draft(chat_id: int, reason: str):
+def _save_draft(chat_id: int, reason: str, held: str = ""):
+    """`reason` is for the owner (/nudges shows it) and may name a rule or setting.
+    `held` is the same reason in the character's own terms; it is the only one that
+    reaches the model (`_draft_side_note`). emily, 2026-10-11, told the user she
+    "remembered the quiet hours rule" because the prompt pasted `reason` verbatim."""
     drafts = unsent_drafts.setdefault(chat_id, [])
-    drafts.append({"reason": reason, "ts": time.time()})
+    drafts.append({"reason": reason, "held": held, "ts": time.time()})
     if len(drafts) > 3:
         drafts[:] = drafts[-3:]
     save_state()
@@ -5094,6 +5098,21 @@ def _pop_draft(chat_id: int) -> dict:
     unsent_drafts[chat_id] = fresh
     save_state()
     return draft
+
+
+def _draft_side_note(draft: dict, now: float) -> str:
+    """The proactive-prompt sentence for a held-back draft. Uses only `held`, never
+    `reason`. A draft saved before `held` existed gets no reason at all — its `reason`
+    is system wording ("it was quiet hours") and must not reach the model."""
+    hours_ago = max(1, round((now - draft["ts"]) / 3600))
+    held = (draft.get("held") or "").strip()
+    why = f" ({held})" if held else ""
+    return (
+        f" Side note: about {hours_ago}h ago you had the urge to reach out but held "
+        f"back{why}. If it fits, mention it in passing — the way you'd say 'I almost "
+        f"texted you earlier.' Don't make a thing of it, and don't name any rule, "
+        f"setting, or limit."
+    )
 
 
 def _collision_window_id(now: datetime | None = None) -> str:
@@ -8425,6 +8444,19 @@ _DIRECTIVE_LINE_RE = re.compile(r"(?m)^[ \t]*\[[A-Z][A-Z0-9 _/&'\-]{1,38}\][ \t]
 # guard keys on. An exemption list was written first, then break-tested and found inert;
 # removed rather than left as reassuring dead code. The tests pin the guarantee.
 
+# The tag names the bot reads out of a reply. One list: _RECAST_TAG_RE is built from it.
+_REPLY_TAG_NAMES = ("react", "selfie", "clothing", "outfit", "meme", "gif", "search",
+                    "memcheck", "mood")
+# A whole line that is only `[name: value]`, colon INSIDE — the tag shape. Unlike the
+# pattern above, this one DOES need the name list: a line here is a leak only when the
+# name is not a tag. emily, 2026-10-11, opened a proactive message with
+# `[voiceprint: telegram single slot]` — the heading of preset.txt
+# ("[VOICEPRINT PRESET — TELEGRAM SINGLE SLOT]") echoed back in lowercase. The pattern
+# above needs caps and the colon outside, so it passed; extract_tags strips known names
+# only, so it reached Telegram.
+_UNKNOWN_TAG_LINE_RE = re.compile(
+    r"(?im)^[ \t]*\[([a-z][a-z0-9 _/&'\-]{0,38}):[^\]\n]*\][ \t]*$")
+
 
 def _strip_directive_lines(text: str) -> tuple:
     """Drop leaked instruction-shaped lines from a reply. Returns (clean, dropped).
@@ -8443,9 +8475,17 @@ def _strip_directive_lines(text: str) -> tuple:
     if not DIRECTIVE_LEAK_GUARD or "[" not in text:
         return text, []
     dropped = _DIRECTIVE_LINE_RE.findall(text)
+    cleaned = _DIRECTIVE_LINE_RE.sub("", text)
+
+    def _unknown_tag(m):
+        if m.group(1).strip().lower() in _REPLY_TAG_NAMES:
+            return m.group(0)  # a real tag: extract_tags reads it later
+        dropped.append(m.group(0))
+        return ""
+
+    cleaned = _UNKNOWN_TAG_LINE_RE.sub(_unknown_tag, cleaned)
     if not dropped:
         return text, []
-    cleaned = _DIRECTIVE_LINE_RE.sub("", text)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip(), dropped
 
@@ -8627,7 +8667,7 @@ def _safety_prompt(uname: str) -> str:
     )
 
 
-_RECAST_TAG_RE = re.compile(r"\[(?:react|selfie|clothing|outfit|meme|gif|search|memcheck|mood):\s*[^\]]*\]", re.IGNORECASE)
+_RECAST_TAG_RE = re.compile(r"\[(?:" + "|".join(_REPLY_TAG_NAMES) + r"):\s*[^\]]*\]", re.IGNORECASE)
 
 
 async def _recast_pass(text: str, sys_prompt: str, scene: str) -> str:
@@ -15329,12 +15369,7 @@ async def send_proactive(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     if random.random() < 0.4:
         draft = _pop_draft(chat_id)
         if draft:
-            hours_ago = max(1, round((time.time() - draft["ts"]) / 3600))
-            trigger = trigger[:-1] + (
-                f" Side note: about {hours_ago}h ago you had the urge to reach out but held "
-                f"back ({draft['reason']}). If it fits, mention it in passing — the way "
-                f"you'd say 'I almost texted you earlier.' Don't make a thing of it.]"
-            )
+            trigger = trigger[:-1] + _draft_side_note(draft, time.time()) + "]"
     return source, await send_triggered(context, chat_id, trigger)
 
 
@@ -15679,7 +15714,8 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         print("[heartbeat] Owner recently active; skipping this tick.")
         return
     if in_quiet_hours():
-        _save_draft(owner, "wanted to check in but it was quiet hours")
+        _save_draft(owner, "wanted to check in but it was quiet hours",
+                    "it was the middle of the night")
         _emit_proactive_receipt(owner, "check_in", "drafted", "quiet hours", hard_veto="quiet_hours")
         print("[heartbeat] Quiet hours; saved draft.")
         return
@@ -15697,13 +15733,15 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
         print("[heartbeat] User /away active; skipping.")
         return
     if not _check_nudge_budget(owner):
-        _save_draft(owner, "had something to say but hit the daily nudge limit")
+        _save_draft(owner, "had something to say but hit the daily nudge limit",
+                    "you'd already reached out a few times today")
         _emit_proactive_receipt(owner, "check_in", "drafted", "daily nudge budget exhausted", hard_veto="budget_exhausted")
         print("[heartbeat] Nudge budget exhausted; saved draft.")
         return
     _triage_register(owner, "heartbeat")
     if _triage_should_yield(owner, "heartbeat"):
-        _save_draft(owner, "deferred to a higher-priority proactive send")
+        _save_draft(owner, "deferred to a higher-priority proactive send",
+                    "something else came up first")
         _emit_proactive_receipt(owner, "check_in", "drafted", "deferred to higher-priority proactive send")
         print("[heartbeat] Yielded to higher-priority queued candidate.")
         return
@@ -15711,7 +15749,8 @@ async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
     # Owner decision 2026-09-01: intended — low mood = withdrawn = fewer nudges.
     skip_chance = 0.6 if s <= -1.2 else 0.25 if s <= -0.4 else 0.0
     if skip_chance and random.random() < skip_chance:
-        _save_draft(owner, "wasn't quite feeling up to reaching out")
+        _save_draft(owner, "wasn't quite feeling up to reaching out",
+                    "you weren't quite feeling up to it")
         _emit_proactive_receipt(owner, "check_in", "drafted", "mood was low")
         print(f"[heartbeat] Mood is low ({s:+.1f}); saved draft.")
         return

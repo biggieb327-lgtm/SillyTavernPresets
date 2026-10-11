@@ -7,6 +7,55 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-10-11.1 — Two leaks in one emily proactive message: a preset heading, and "the quiet hours rule"
+
+Owner-reported, one message from emily's heartbeat:
+`[voiceprint: telegram single slot]` on its own line, then the message, which ended "I almost
+texted you at midnight ... but I remembered the quiet hours rule." The third-person prose
+with italic beats is emily's format (`preset-emily.txt` `[EMILY — FORMAT CONTRACT]`), not a
+defect.
+
+**Root cause 1: `_strip_directive_lines` only catches the all-caps, colon-outside shape.**
+The line is the heading of `preset.txt` / `preset-core.txt`, `[VOICEPRINT PRESET — TELEGRAM
+SINGLE SLOT]`, echoed back in lowercase with the colon inside the brackets — the shape of a
+real tag like `[selfie: ...]`. `_DIRECTIVE_LINE_RE` needs caps and `]` right after the label,
+so it passed; `extract_tags` strips known names only, so it reached Telegram. Nothing was
+logged, so `[directive-leak]` in the journal or errors.log shows no trace of it.
+
+**Fix 1:** new `_REPLY_TAG_NAMES` (react, selfie, clothing, outfit, meme, gif, search,
+memcheck, mood — the list `_RECAST_TAG_RE` already had; that regex is now built from it) and
+`_UNKNOWN_TAG_LINE_RE`. In `_strip_directive_lines`, a whole line that is only `[name: value]`
+is dropped when `name` (any case) is not in the list, and logged with the existing
+`[directive-leak]` warning in `generate_reply`. Mid-line brackets and real tags survive.
+Unlike the first pattern, this one needs the name list: removing a name means its tag is
+eaten before `extract_tags` reads it (a test per name pins this). Same kill switch,
+`DIRECTIVE_LEAK_GUARD=0`.
+
+**Root cause 2: the proactive prompt pasted the draft's owner-facing reason verbatim.**
+`heartbeat` saves a draft when it cannot send, with a reason written for `/nudges`:
+"wanted to check in but it was quiet hours", "...hit the daily nudge limit", "deferred to a
+higher-priority proactive send", "wasn't quite feeling up to reaching out". `send_proactive`
+then, 40% of the time within 48h, told the model "you ... held back (`reason`)". So emily
+named a rule. All four sites had the same shape.
+
+**Fix 2:** `_save_draft(chat_id, reason, held="")` stores `held`, the reason in the
+character's own terms ("it was the middle of the night", "you'd already reached out a few
+times today", "something else came up first", "you weren't quite feeling up to it"). New pure
+`_draft_side_note(draft, now)` builds the prompt sentence from `held` only, and adds "don't
+name any rule, setting, or limit." A draft saved before this release has no `held` and gets
+no reason at all. `/nudges` still shows `reason`. No model call added; no new env var.
+
+**Tests:** `TestDirectiveLeakGuard` +7 (the emily line, caps variant, every known tag in both
+cases survives, mid-line tag shape survives, kill switch, through `generate_reply`, recast
+regex built from the list). `TestDraftSideNote` 4 (uses `held` not `reason`; old draft gets no
+reason; calls `heartbeat` down the quiet-hours branch and checks the stored draft and the
+note; all four `_save_draft` sites pass `held`). Break-tested: removing the new pattern,
+removing a name from the list, or putting `reason` back into the note each turns a test red.
+
+**Not covered:** a leaked heading with no colon (`[voiceprint]` alone) still passes — it
+matches the "[laughs]" aside the guard must keep. The model echoing prompt text is the cause;
+the guard is the backstop.
+
 ## v2026-10-08.2 — `/coremem`: exhaustive dispatch, no reply awaited under `_memory_lock`
 
 **Root cause 1: `coremem_cmd` dispatched with `if action == "promote" … elif action ==

@@ -6879,6 +6879,97 @@ class TestDirectiveLeakGuard:
         assert "[SELFIE: at the rink]" in clean
         assert "PACE CONTROL" not in clean and "hey" in clean
 
+    # v2026-10-11.1 — emily opened a proactive message with the preset.txt heading in
+    # lowercase tag shape. Colon inside the brackets, so _DIRECTIVE_LINE_RE skipped it.
+    EMILY_LEAK = (
+        '[voiceprint: telegram single slot]\n\n'
+        '"The salmonberry sketch is finally in the mail," *she types.*'
+    )
+
+    def test_unknown_tag_shaped_line_is_stripped(self):
+        clean, dropped = bot._strip_directive_lines(self.EMILY_LEAK)
+        assert dropped == ["[voiceprint: telegram single slot]"]
+        assert clean == '"The salmonberry sketch is finally in the mail," *she types.*'
+
+    def test_unknown_tag_line_in_caps_is_stripped(self):
+        clean, dropped = bot._strip_directive_lines("[VOICEPRINT: SINGLE SLOT]\nhey")
+        assert len(dropped) == 1 and clean == "hey"
+
+    @pytest.mark.parametrize("name", bot._REPLY_TAG_NAMES)
+    def test_every_known_tag_on_its_own_line_survives(self, name):
+        """The name list is load-bearing for this pattern (unlike _DIRECTIVE_LINE_RE):
+        drop a name from _REPLY_TAG_NAMES and its tag is eaten before extract_tags."""
+        for text in (f"hey\n[{name}: something]", f"hey\n[{name.upper()}: something]"):
+            clean, dropped = bot._strip_directive_lines(text)
+            assert dropped == [] and clean == text
+
+    def test_tag_shape_mid_line_survives(self):
+        text = "she wrote [note: buy stamps] on her hand"
+        clean, dropped = bot._strip_directive_lines(text)
+        assert clean == text and dropped == []
+
+    def test_unknown_tag_line_kill_switch(self, monkeypatch):
+        monkeypatch.setattr(bot, "DIRECTIVE_LEAK_GUARD", False)
+        clean, dropped = bot._strip_directive_lines(self.EMILY_LEAK)
+        assert clean == self.EMILY_LEAK and dropped == []
+
+    def test_generate_reply_strips_the_emily_leak(self, monkeypatch):
+        """Through the real boundary, not just the helper."""
+        monkeypatch.setattr(bot, "call_nanogpt", lambda *a, **k: self.EMILY_LEAK)
+        out = asyncio.run(bot.generate_reply([{"role": "user", "content": "x"}]))
+        assert "voiceprint" not in out and out.startswith('"The salmonberry')
+
+    def test_recast_tag_re_built_from_the_same_list(self):
+        for name in bot._REPLY_TAG_NAMES:
+            assert bot._RECAST_TAG_RE.sub("", f"a[{name}: x]b") == "ab"
+
+
+class TestDraftSideNote:
+    """v2026-10-11.1 — emily said she "remembered the quiet hours rule": the proactive
+    prompt pasted the draft's owner-facing `reason` ("...it was quiet hours") verbatim."""
+
+    SYSTEM_WORDS = ("quiet hours", "nudge limit", "higher-priority", "proactive")
+
+    def test_uses_held_never_reason(self):
+        note = bot._draft_side_note(
+            {"reason": "wanted to check in but it was quiet hours",
+             "held": "it was the middle of the night", "ts": 0}, 3 * 3600)
+        assert "(it was the middle of the night)" in note
+        assert "quiet hours" not in note
+        assert "about 3h ago" in note
+
+    def test_old_draft_without_held_gets_no_reason(self):
+        """Drafts saved before this release are in state.json for up to 48h."""
+        note = bot._draft_side_note(
+            {"reason": "had something to say but hit the daily nudge limit", "ts": 0}, 60)
+        assert "nudge" not in note and "held back." in note and "about 1h ago" in note
+
+    def test_heartbeat_drafts_carry_in_character_held(self, monkeypatch):
+        """Calls heartbeat down the quiet-hours branch and reads what it stored."""
+        cid = 9002
+        monkeypatch.setattr(bot, "schedule_next_heartbeat", lambda jq: None)
+        monkeypatch.setattr(bot, "get_owner", lambda: cid)
+        monkeypatch.setattr(bot, "in_quiet_hours", lambda: True)
+        monkeypatch.setattr(bot, "_emit_proactive_receipt", lambda *a, **k: None)
+        monkeypatch.setattr(bot, "save_state", lambda: None)
+        monkeypatch.setitem(bot.last_seen, cid, 0)
+        monkeypatch.setitem(bot.unsent_drafts, cid, [])
+        asyncio.run(bot.heartbeat(SimpleNamespace(job_queue=None)))
+        (draft,) = bot.unsent_drafts[cid]
+        assert "quiet hours" in draft["reason"]          # /nudges still says why
+        note = bot._draft_side_note(draft, time.time())
+        assert draft["held"] and f"({draft['held']})" in note
+        for w in self.SYSTEM_WORDS:
+            assert w not in note.lower()
+
+    def test_every_heartbeat_draft_site_passes_held(self):
+        """The class: four _save_draft calls, each with system wording in `reason`."""
+        import inspect, re
+        calls = re.findall(r"_save_draft\(owner,[^)]*\)", inspect.getsource(bot.heartbeat))
+        assert len(calls) == 4
+        for c in calls:
+            assert c.count('"') == 4, c   # reason AND held
+
 
 class TestCaptionModelSlot:
     """v2026-07-29.3 — selfie and meme captions are the character talking, so they ride
