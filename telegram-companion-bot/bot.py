@@ -8397,7 +8397,7 @@ async def generate_reply(messages: list, model: str = None, fallback: str = None
     # send_photo(caption=...) and never touches extract_tags. The analysis and
     # extraction paths call call_nanogpt directly and are deliberately untouched, so a
     # line-eating regex still cannot reach the JSON.
-    out, _leaked = _strip_directive_lines(out)
+    out, _leaked = _strip_directive_lines(out, unknown_tags=leak_guard)
     if _leaked:
         # Loud on purpose: stripping makes the symptom invisible, and the underlying
         # cause is a model emitting its planning as output. A silent guard would turn a
@@ -8458,7 +8458,7 @@ _UNKNOWN_TAG_LINE_RE = re.compile(
     r"(?im)^[ \t]*\[([a-z][a-z0-9 _/&'\-]{0,38}):[^\]\n]*\][ \t]*$")
 
 
-def _strip_directive_lines(text: str) -> tuple:
+def _strip_directive_lines(text: str, unknown_tags: bool = True) -> tuple:
     """Drop leaked instruction-shaped lines from a reply. Returns (clean, dropped).
 
     Root cause it exists for (jules, 2026-07-29): the reply prompt hands the model a
@@ -8470,7 +8470,12 @@ def _strip_directive_lines(text: str) -> tuple:
 
     Deliberately not folded into `_do_request`: that choke point also carries the
     post-reply analysis JSON, and a line-eating regex has no business near it. This runs
-    on user-facing reply text only, after the known tags are removed.
+    on user-facing reply text only, BEFORE extract_tags — so real tags are still in
+    the text, which is why the `[name: value]` rule checks `_REPLY_TAG_NAMES`.
+
+    `unknown_tags=False` skips that rule: generate_reply passes its `leak_guard`, and
+    the callers that turn it off (PDF replies, card review) write analysis where a
+    `[system_prompt: ...]` line can be legitimate.
     """
     if not DIRECTIVE_LEAK_GUARD or "[" not in text:
         return text, []
@@ -8483,7 +8488,8 @@ def _strip_directive_lines(text: str) -> tuple:
         dropped.append(m.group(0))
         return ""
 
-    cleaned = _UNKNOWN_TAG_LINE_RE.sub(_unknown_tag, cleaned)
+    if unknown_tags:
+        cleaned = _UNKNOWN_TAG_LINE_RE.sub(_unknown_tag, cleaned)
     if not dropped:
         return text, []
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)

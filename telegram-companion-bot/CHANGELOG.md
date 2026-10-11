@@ -29,7 +29,9 @@ is dropped when `name` (any case) is not in the list, and logged with the existi
 `[directive-leak]` warning in `generate_reply`. Mid-line brackets and real tags survive.
 Unlike the first pattern, this one needs the name list: removing a name means its tag is
 eaten before `extract_tags` reads it (a test per name pins this). Same kill switch,
-`DIRECTIVE_LEAK_GUARD=0`.
+`DIRECTIVE_LEAK_GUARD=0`. Skipped when `generate_reply` runs with `leak_guard=False`
+(PDF replies and card review), where a `[system_prompt: ...]` line can be real analysis; the
+all-caps rule still applies there, as before.
 
 **Root cause 2: the proactive prompt pasted the draft's owner-facing reason verbatim.**
 `heartbeat` saves a draft when it cannot send, with a reason written for `/nudges`:
@@ -45,9 +47,9 @@ times today", "something else came up first", "you weren't quite feeling up to i
 name any rule, setting, or limit." A draft saved before this release has no `held` and gets
 no reason at all. `/nudges` still shows `reason`. No model call added; no new env var.
 
-**Tests:** `TestDirectiveLeakGuard` +7 (the emily line, caps variant, every known tag in both
-cases survives, mid-line tag shape survives, kill switch, through `generate_reply`, recast
-regex built from the list). `TestDraftSideNote` 4 (uses `held` not `reason`; old draft gets no
+**Tests:** `TestDirectiveLeakGuard` +8 (the emily line, caps variant, every known tag in both
+cases survives, mid-line tag shape survives, kill switch, through `generate_reply`, kept with
+`leak_guard=False`, recast regex built from the list). `TestDraftSideNote` 4 (uses `held` not `reason`; old draft gets no
 reason; calls `heartbeat` down the quiet-hours branch and checks the stored draft and the
 note; all four `_save_draft` sites pass `held`). Break-tested: removing the new pattern,
 removing a name from the list, or putting `reason` back into the note each turns a test red.

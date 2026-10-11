@@ -6923,6 +6923,16 @@ class TestDirectiveLeakGuard:
         out = asyncio.run(bot.generate_reply([{"role": "user", "content": "x"}]))
         assert "voiceprint" not in out and out.startswith('"The salmonberry')
 
+    def test_leak_guard_off_keeps_tag_shaped_lines(self, monkeypatch):
+        """PDF replies and card review call with leak_guard=False; a card review can
+        legitimately write `[system_prompt: ...]` on its own line. The caps rule
+        still applies there, as before this release."""
+        text = "[system_prompt: too long]\n[PACE CONTROL]: x\nok"
+        monkeypatch.setattr(bot, "call_nanogpt", lambda *a, **k: text)
+        out = asyncio.run(bot.generate_reply([{"role": "user", "content": "x"}],
+                                             leak_guard=False))
+        assert "[system_prompt: too long]" in out and "PACE CONTROL" not in out
+
     def test_recast_tag_re_built_from_the_same_list(self):
         for name in bot._REPLY_TAG_NAMES:
             assert bot._RECAST_TAG_RE.sub("", f"a[{name}: x]b") == "ab"
