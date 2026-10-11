@@ -89,3 +89,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | 2026-09-30 | 0962f26 | 13 | voicekit 0.2.2/0.3.0 + Author-Profile-Tool #2-#13 session. C7 occ. 7 root-caused (whole-command /tmp exemption) and fixed with an eval; C18 seen 9 -> break-test.sh --expect. Judge calibration in mycelium. |
 | 2026-10-01 | aeadd68 | 6 | |
 | 2026-10-08 | 1d91fa6 | 7 | Borrowed from gstack/gbrain: v2026-10-08.1 memory age note (review found 2 real gaps, fixed pre-merge), test audit report (137 tests), playbook rules, debrief memrefs. 2 Minor slips logged. |
+| 2026-10-11 | 20d51d7 | 14 | |

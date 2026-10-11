@@ -1462,6 +1462,16 @@ false one; step 7's `/code-review` is the backstop.
 
 ## Minor — running log
 
+- 2026-10-11 — Parametrized `test_every_known_tag_on_its_own_line_survives` over
+  `bot._REPLY_TAG_NAMES`, the list under test: removing a name removed its test case, so the
+  break-test stayed green. The CHANGELOG already claimed that break-test went red. Caught by
+  running the break-test before merge. Same class as C18 (a check that cannot fail). ->
+  **never derive a test's expected values from the object under test; write the oracle out.**
+
+- 2026-10-11 — First triage called emily's asterisk narration a defect before reading
+  `preset-emily.txt`, which makes third-person italic beats her format. Corrected in the next
+  reply. -> **read the instance's preset layer before calling a format a voice defect.**
+
 - 2026-10-08 — Added `test_bad_request_surfaces_at_error_level` to a class that already had a
   method of that name further down. Python kept the later (old, source-reading) one, so the
   green run tested the old test, not mine. Caught only because the deleter targeted it by name
