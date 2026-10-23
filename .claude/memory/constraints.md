@@ -1462,6 +1462,12 @@ false one; step 7's `/code-review` is the backstop.
 
 ## Minor — running log
 
+- 2026-10-23 — Stated `SUMMARY_MODEL`'s runtime behavior as fact from source reading alone;
+  theory-guard (C5) blocked the turn. Same session, the first fix recommendation assumed
+  instances ran a cheap memory model before any live value was read; `/model` showed 5 of 7
+  did not. -> **read the live `/model` output before proposing a per-instance model change,
+  and tag source-only claims `[source-traced]`.**
+
 - 2026-10-11 — Parametrized `test_every_known_tag_on_its_own_line_survives` over
   `bot._REPLY_TAG_NAMES`, the list under test: removing a name removed its test case, so the
   break-test stayed green. The CHANGELOG already claimed that break-test went red. Caught by
