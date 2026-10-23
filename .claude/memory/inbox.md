@@ -47,3 +47,6 @@ Newest first.
 ## Items
 
 
+- 2026-10-23: [source-traced] SUMMARY_MODEL/CAPTION_MODEL default to the .env NANOGPT_MODEL at import (bot.py:709,715); `/setmodel chat` later moves only chat, so captions stop following the chat model. Live /model shows caption=glm-5:thinking while chat differs on priya, emily, nora, bonnie, jules.
+- 2026-10-23: live /model snapshot -- SUMMARY_MODEL: jules zai-org/glm-4.7 (explicit, weaker than its 5.1 chat); cass deepseek/deepseek-v4-flash (all three slots); the other five zai-org/glm-5:thinking. Memory-writer upgrade trial (FrontierMemory article) proposed for jules first, then cass.
+- 2026-10-23: emily chat shows `z-ai/glm-4.7` (no :thinking, different prefix) vs bot-config-reference's owner-confirmed `zai-org/glm-4.7:thinking`; bonnie chat is the floating alias `zai-org/glm-latest`. Ask owner if deliberate.
