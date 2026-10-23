@@ -82,6 +82,13 @@ translated out of the agent's shorthand into repo terms first (CLAUDE.md §Vocab
 
 ## Entries
 
+### 2026-10-23 | Captions follow the live chat model; SUMMARY_MODEL does not | status: current
+**Decided:** unset `CAPTION_MODEL` resolves to the live `NANOGPT_MODEL` at call time (`_caption_model()`); `SUMMARY_MODEL` keeps its import-time default.
+**Over:** (a) both slots following live chat -- lost because it would move the memory writer on emily and nora from `glm-5:thinking` to `glm-4.7` and on bonnie to the floating `glm-latest` alias, a memory-quality downgrade nobody asked for; (b) leaving captions as they were -- lost because five instances' captions did not use the chat model v2026-07-29.3 promised.
+**Why:** captions are the character speaking and must match her chat voice; memory writing is background work where the stronger model is wanted even when chat is weaker (FrontierMemory article, 2026-10-23).
+**By:** a session, owner-requested fix; live `/model` output from all seven instances.
+**Detail:** `CHANGELOG.md` v2026-10-23.1.
+
 ### 2026-10-08 | Unread CI after a push to main now blocks the turn; waiting on a background poller counts | status: current
 **Decided:** a Stop guard (`ci-read-guard.sh`) blocks ending a turn after a push to `main` until that SHA's CI result is read, unless a background GitHub Actions poller is still waiting or the reply says `ci-ok: <reason>`.
 **Over:** requiring the read in the same turn (impossible here: foreground `sleep` is blocked, so a run that takes minutes can only be waited on in the background); a PostToolUse reminder after the push (advisory text had already failed twice — C25); making `debrief-check.sh`'s "ci NOT CHECKED" note blocking (fires only at debrief, after the turn that should have read CI is over).
