@@ -90,3 +90,4 @@ Append with: `bash .claude/tools/debrief-check.sh --record`
 | 2026-10-01 | aeadd68 | 6 | |
 | 2026-10-08 | 1d91fa6 | 7 | Borrowed from gstack/gbrain: v2026-10-08.1 memory age note (review found 2 real gaps, fixed pre-merge), test audit report (137 tests), playbook rules, debrief memrefs. 2 Minor slips logged. |
 | 2026-10-11 | 20d51d7 | 14 | |
+| 2026-10-23 | d36026e | 3 | FrontierMemory article review; live /model snapshot of all 7 SUMMARY_MODEL slots (jules glm-4.7, cass deepseek-v4-flash, rest glm-5:thinking) + caption-default drift, to inbox. 1 Minor slip logged. Jules memory-model trial awaits owner token approval. |
