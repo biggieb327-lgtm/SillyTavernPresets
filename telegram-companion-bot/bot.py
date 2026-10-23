@@ -10832,6 +10832,15 @@ MODEL_ROLES = {
 }
 
 
+def _unpin_caption_model() -> str:
+    """`/setmodel caption chat`: drop an explicit caption model so captions follow chat."""
+    global CAPTION_MODEL
+    CAPTION_MODEL = ""
+    model_overrides.pop("CAPTION_MODEL", None)
+    save_state()
+    return f"✅ caption model now follows chat ({NANOGPT_MODEL})"
+
+
 def _role_model_label(var: str) -> str:
     """What /model and /setmodel show for one role's slot."""
     if var == "CAPTION_MODEL" and not CAPTION_MODEL:
@@ -10935,10 +10944,7 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     choice = " ".join(args[1:])
     if role == "caption" and choice.lower() == "chat":
-        globals()["CAPTION_MODEL"] = ""
-        model_overrides.pop("CAPTION_MODEL", None)
-        save_state()
-        await update.message.reply_text(f"✅ caption model now follows chat ({NANOGPT_MODEL})")
+        await update.message.reply_text(_unpin_caption_model())
         return
     if choice.isdigit():
         models = _last_shown_models.get(chat_id)

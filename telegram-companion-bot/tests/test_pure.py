@@ -6999,8 +6999,13 @@ class TestCaptionModelSlot:
 
     def setup_method(self):
         self._saved = (bot.CAPTION_MODEL, bot.NANOGPT_MODEL, dict(bot.model_overrides))
+        # setmodel_cmd's save_state() would schedule a deferred write that asyncio.run
+        # cancels, leaving bot._save_scheduled stuck True for every later test.
+        self._orig_save_state = bot.save_state
+        bot.save_state = lambda: None
 
     def teardown_method(self):
+        bot.save_state = self._orig_save_state
         bot.CAPTION_MODEL, bot.NANOGPT_MODEL = self._saved[0], self._saved[1]
         bot.model_overrides.clear()
         bot.model_overrides.update(self._saved[2])
