@@ -6985,12 +6985,60 @@ class TestDraftSideNote:
             assert c.count('"') == 4, c   # reason AND held
 
 
+async def _async_append(sent, text):
+    sent.append(text)
+
+
 class TestCaptionModelSlot:
     """v2026-07-29.3 — selfie and meme captions are the character talking, so they ride
     the chat model, not the background summariser slot."""
 
-    def test_caption_model_defaults_to_the_chat_model(self):
-        assert bot.CAPTION_MODEL == bot.NANOGPT_MODEL
+    # v2026-10-23.1 replaced `assert bot.CAPTION_MODEL == bot.NANOGPT_MODEL`: that pinned
+    # the import-time copy, the defect itself. The contract is "unset follows the LIVE
+    # chat model", so the tests below move the chat slot after import and check again.
+
+    def setup_method(self):
+        self._saved = (bot.CAPTION_MODEL, bot.NANOGPT_MODEL, dict(bot.model_overrides))
+
+    def teardown_method(self):
+        bot.CAPTION_MODEL, bot.NANOGPT_MODEL = self._saved[0], self._saved[1]
+        bot.model_overrides.clear()
+        bot.model_overrides.update(self._saved[2])
+
+    def _setmodel(self, *args):
+        sent = []
+        msg = SimpleNamespace(reply_text=lambda text, **kw: _async_append(sent, text))
+        update = SimpleNamespace(message=msg, effective_chat=SimpleNamespace(id=1),
+                                 effective_user=SimpleNamespace(id=1))
+        asyncio.run(bot.setmodel_cmd(update, SimpleNamespace(args=list(args))))
+        return sent
+
+    def test_unset_caption_follows_a_live_chat_change(self):
+        """The bug: /setmodel chat moved chat, captions stayed on the .env model."""
+        bot.CAPTION_MODEL = ""
+        self._setmodel("chat", "test/new-chat-model")
+        assert bot._caption_model() == "test/new-chat-model"
+
+    def test_explicit_caption_model_wins_over_chat(self):
+        self._setmodel("caption", "test/pinned-caption")
+        self._setmodel("chat", "test/other-chat")
+        assert bot._caption_model() == "test/pinned-caption"
+
+    def test_setmodel_caption_chat_unpins(self):
+        self._setmodel("caption", "test/pinned-caption")
+        sent = self._setmodel("caption", "chat")
+        assert bot.CAPTION_MODEL == ""
+        assert "CAPTION_MODEL" not in bot.model_overrides
+        assert bot._caption_model() == bot.NANOGPT_MODEL
+        assert "follows chat" in sent[-1]
+
+    def test_model_info_names_the_followed_model(self):
+        bot.CAPTION_MODEL = ""
+        bot.NANOGPT_MODEL = "test/live-chat"
+        sent = []
+        msg = SimpleNamespace(reply_text=lambda text, **kw: _async_append(sent, text))
+        asyncio.run(bot.model_info(SimpleNamespace(message=msg), SimpleNamespace(args=[])))
+        assert "caption: test/live-chat (follows chat)" in sent[0]
 
     def test_caption_helpers_no_longer_use_the_summary_slot(self):
         """The bug: an instance pointing SUMMARY_MODEL at a small fast model for cheap
@@ -6999,7 +7047,7 @@ class TestCaptionModelSlot:
         for fn in (bot._selfie_caption, bot._generate_meme_captions):
             src = inspect.getsource(fn)
             assert "SUMMARY_MODEL" not in src, fn.__name__
-            assert "CAPTION_MODEL" in src, fn.__name__
+            assert "_caption_model()" in src, fn.__name__   # was "CAPTION_MODEL"; see above
 
     def test_caption_is_a_selectable_model_role(self):
         """/setmodel must be able to reach it, like every other slot."""

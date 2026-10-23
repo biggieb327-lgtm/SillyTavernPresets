@@ -550,13 +550,15 @@ The bot uses different models for different tasks — cheap/fast for background 
 | Env var | Purpose | Default |
 |---|---|---|
 | `NANOGPT_MODEL` | Main chat model | required |
-| `SUMMARY_MODEL` | Memory summarization | falls back to chat model |
+| `SUMMARY_MODEL` | Memory summarization | the `.env` chat model, fixed at startup |
+| `CAPTION_MODEL` | Selfie and meme captions (the character talking) | follows the live chat model, including `/setmodel chat` changes |
 | `REACTION_MODEL` | Default for `MOOD_MODEL` and `RECAST_MODEL` (auto-react runs on `MOOD_MODEL` since v2026-09-26.4) | `zai-org/glm-4.7-flash` |
 | `MOOD_MODEL` | Mood scoring, note extraction, proactive hooks | falls back to reaction model |
 | `VISION_MODEL` | Photo descriptions | falls back to chat model |
 | `FALLBACK_MODEL` | Retry on error | optional |
 
-Change a model at runtime (no restart): `/setmodel chat gpt-4o`
+Change a model at runtime (no restart): `/setmodel chat gpt-4o`. `/setmodel caption chat`
+puts captions back on the live chat model after a `/setmodel caption <model>` pinned them.
 
 **Reading the token numbers.** Since v2026-07-26.2 the daily `/audit` and `/usage` totals
 are the provider's own counts (labelled `measured`), not estimates. Figures that can only

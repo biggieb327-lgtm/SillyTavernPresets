@@ -7,6 +7,39 @@ Entries are newest first. Each one names the actual root cause, not just the cod
 that's the part worth reading twice, since re-diagnosing a solved problem from scratch is
 exactly what this file is meant to prevent.
 
+## v2026-10-23.1 — Captions follow the live chat model, not the startup one
+
+**Root cause: `CAPTION_MODEL`'s default was copied once, at import.**
+`CAPTION_MODEL = os.getenv("CAPTION_MODEL", NANOGPT_MODEL)` read the `.env` chat model when
+the module loaded. `/setmodel chat` (and its saved override, re-applied by
+`apply_overrides()`) moves only `NANOGPT_MODEL`, so captions stayed on the `.env` model.
+`[observed]` 2026-10-23 `/model` on all seven: caption was `zai-org/glm-5:thinking` while chat
+was something else on priya (glm-5.1:thinking), emily (z-ai/glm-4.7), nora (glm-4.7), bonnie
+(glm-latest) and jules (glm-5.1:thinking). v2026-07-29.3 meant captions to be "her own model on
+every instance"; on those five they were not.
+
+**Fix:** `CAPTION_MODEL` now defaults to `""`, and the new `_caption_model()` returns
+`CAPTION_MODEL or NANOGPT_MODEL` at call time. `_selfie_caption` and `_generate_meme_captions`
+call it. An explicit `CAPTION_MODEL` (env or `/setmodel caption <model>`) still pins captions.
+`/setmodel caption chat` clears that pin. `/model` and `/setmodel` show an unset slot as
+`<chat model> (follows chat)` via `_role_model_label`. Defect fix: no kill switch, no new LLM
+call (the same two calls, with a different model string).
+
+**Deliberately not changed: `SUMMARY_MODEL`** has the same import-time default. Making it
+follow chat would move the memory writer on emily and nora from `glm-5:thinking` to
+`glm-4.7`, a downgrade of the memory model, and on bonnie to the floating `glm-latest`
+alias. Captions are the character speaking and must match chat; memory writing is not.
+
+**Tests:** `TestCaptionModelSlot` call `setmodel_cmd` and `model_info`. The old
+`test_caption_model_defaults_to_the_chat_model` asserted the import-time copy, which was the
+defect, so it was replaced (rationale in the class). Break-test: restoring the import-time
+default turned `test_unset_caption_follows_a_live_chat_change` and
+`test_setmodel_caption_chat_unpins` red.
+
+**Deploy note:** an instance whose `.env` sets `CAPTION_MODEL` explicitly keeps it. After
+deploy, `/model` should read `caption: <chat model> (follows chat)`; anything else is an
+explicit setting.
+
 ## v2026-10-11.1 — Two leaks in one emily proactive message: a preset heading, and "the quiet hours rule"
 
 Owner-reported, one message from emily's heartbeat:

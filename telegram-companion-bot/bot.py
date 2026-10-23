@@ -145,7 +145,7 @@ from telegram.ext import (
 
 # Bump on every release — shown in /audit and the startup log so it's always
 # clear which build an instance is running.
-BOT_VERSION = "2026-10-11.1"
+BOT_VERSION = "2026-10-23.1"
 
 # --- Instance home: data dir for THIS bot (its own .env, card, memory, etc.) ---
 # Pass a folder as the first arg (or BOT_HOME env) to run a second character off the
@@ -712,7 +712,15 @@ SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", NANOGPT_MODEL)  # can point at a fast
 # SUMMARY_MODEL, which meant an instance that pointed that at a small fast model for
 # cheap summaries was silently having that model write her dialogue (jules,
 # glm-4.7-flash, 2026-07-29). Overridable per instance without a redeploy.
-CAPTION_MODEL = os.getenv("CAPTION_MODEL", NANOGPT_MODEL)
+# Empty = follow the LIVE chat model, read at call time through _caption_model(): a
+# default copied from NANOGPT_MODEL at import stays on the .env model after
+# `/setmodel chat` moves chat (five instances, 2026-10-23).
+CAPTION_MODEL = os.getenv("CAPTION_MODEL", "")
+
+
+def _caption_model() -> str:
+    """The model that writes captions: CAPTION_MODEL if set, else the live chat model."""
+    return CAPTION_MODEL or NANOGPT_MODEL
 VISION_MODEL = os.getenv("VISION_MODEL", "zai-org/glm-4.6v")    # must accept image input
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "")          # used if the chat model 5xx/times out
 VISION_FALLBACK = os.getenv("VISION_FALLBACK", "")        # must also accept image input
@@ -9693,7 +9701,7 @@ async def _selfie_caption(hint: str, chat_id: int) -> str:
         )}]
     )
     try:
-        return (await generate_reply(messages, model=CAPTION_MODEL)).strip()
+        return (await generate_reply(messages, model=_caption_model())).strip()
     except Exception:
         return ""
 
@@ -10039,7 +10047,7 @@ async def _generate_meme_captions(hint: str, chat_id: int) -> tuple:
         + [{"role": "user", "content": ask}]
     )
     try:
-        raw = await generate_reply(messages, model=CAPTION_MODEL)
+        raw = await generate_reply(messages, model=_caption_model())
         data = _extract_json(raw)
         return (data.get("top") or "").strip(), (data.get("bottom") or "").strip()
     except Exception:
@@ -10808,7 +10816,7 @@ async def model_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /setmodel's own list because it reads the same dict."""
     lines = [f"🤖 Character: {NAME}"]
     for role, var in MODEL_ROLES.items():
-        lines.append(f"{role}: {globals()[var] or '(unset)'}")
+        lines.append(f"{role}: {_role_model_label(var)}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -10822,6 +10830,13 @@ MODEL_ROLES = {
     "fallback": "FALLBACK_MODEL",
     "visionfallback": "VISION_FALLBACK",
 }
+
+
+def _role_model_label(var: str) -> str:
+    """What /model and /setmodel show for one role's slot."""
+    if var == "CAPTION_MODEL" and not CAPTION_MODEL:
+        return f"{NANOGPT_MODEL} (follows chat)"
+    return globals()[var] or "(unset)"
 
 _model_list_cache = {"value": None, "filtered": False, "ts": 0}
 _MODEL_LIST_TTL = 3600
@@ -10894,7 +10909,7 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         lines = ["🤖 *Model roles*"]
         for role, var in MODEL_ROLES.items():
-            lines.append(f"- {role}: `{globals()[var] or '(unset)'}`")
+            lines.append(f"- {role}: `{_role_model_label(var)}`")
         models, filtered = await asyncio.to_thread(_nanogpt_subscription_models)
         if models:
             _last_shown_models[chat_id] = models
@@ -10919,6 +10934,12 @@ async def setmodel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     choice = " ".join(args[1:])
+    if role == "caption" and choice.lower() == "chat":
+        globals()["CAPTION_MODEL"] = ""
+        model_overrides.pop("CAPTION_MODEL", None)
+        save_state()
+        await update.message.reply_text(f"✅ caption model now follows chat ({NANOGPT_MODEL})")
+        return
     if choice.isdigit():
         models = _last_shown_models.get(chat_id)
         if not models or not (1 <= int(choice) <= len(models)):
